@@ -629,23 +629,51 @@ def _parent_generation(database: sqlite3.Connection, identifier: str) -> str | N
 
 
 def _retained_generations(database: sqlite3.Connection, ancestors: int) -> tuple[str, ...]:
-    """The live set: the active generation plus the ancestors retention keeps.
+    """The live set: the active generation plus the spares retention keeps.
 
-    Reachability from the active pointer along `parent_generation_id`, bounded
-    by depth. A cycle or a dangling parent ends the walk rather than extending
-    it, so a damaged chain shrinks the live set to what it can still prove.
+    The spares are the first ones `_fallback_order` would try: the generations
+    activated before this one, newest first, then the active's ancestors along
+    `parent_generation_id`. Walking the parent chain alone kept no spare after a
+    full rebuild, which records no parent, and the prune then removed the one
+    generation the fallback would have used (audit C-27,
+    docs/research/2026-09-25-retention-keeps-the-fallbacks-first-choice.md). A
+    cycle or a dangling parent ends the walk rather than extending it.
     """
     active = _active_generation(database)
     if active is None:
         return ()
     retained = [active]
+    for identifier in _spare_candidates(database, active, ancestors):
+        if len(retained) > ancestors:
+            break
+        _append_unseen_identifier(retained, identifier)
+    return tuple(retained)
+
+
+def _append_unseen_identifier(retained: list[str], identifier: str) -> None:
+    if identifier not in retained:
+        retained.append(identifier)
+
+
+def _spare_candidates(database: sqlite3.Connection, active: str, ancestors: int) -> list[str]:
+    """Earlier activations newest first, then the parent chain, each bounded by `ancestors`."""
+    rows = database.execute(
+        "SELECT generation_id FROM activation_history WHERE generation_id != ? "
+        "GROUP BY generation_id ORDER BY MAX(sequence) DESC LIMIT ?",
+        (active, max(ancestors, 0)),
+    ).fetchall()
+    return [str(row[0]) for row in rows] + _parent_chain(database, active, ancestors)
+
+
+def _parent_chain(database: sqlite3.Connection, active: str, ancestors: int) -> list[str]:
+    chain: list[str] = []
     identifier: str | None = active
     for _ in range(ancestors):
         identifier = _parent_generation(database, identifier)
-        if identifier is None or identifier in retained:
+        if identifier is None or identifier in chain:
             break
-        retained.append(identifier)
-    return tuple(retained)
+        chain.append(identifier)
+    return chain
 
 
 def _require_active_root(retained: tuple[str, ...]) -> None:
@@ -2922,8 +2950,8 @@ class GenerationCatalog:
         never writes activation history and never repairs anything. The single
         pointer belongs to the vault. Were a foreign repository allowed to
         activate, indexing one would make the vault's own scope unresolvable and
-        every knowledge query would fall back to the legacy index -- NEW-65,
-        recreated deliberately.
+        every knowledge query would lose its generation and read Markdown
+        directly (`no_active_generation`) -- NEW-65, recreated deliberately.
 
         The pointer path answers memory questions, so a code generation is
         never its answer: a code reader asks `code_generations_for_repository`.

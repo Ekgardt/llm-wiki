@@ -10,8 +10,10 @@ regenerates the memory index, and appends to the private vault log (`vault_log`)
 from __future__ import annotations
 
 import argparse
+import contextvars
 import hashlib
 import json
+import math
 import os
 import queue
 import re
@@ -178,17 +180,27 @@ def _detached_provider(
     generator: Callable[[str, str, int], str | None],
     prompt: str,
     system_prompt: str,
+    ceiling_seconds: int,
 ) -> queue.Queue[tuple[bool, object]]:
-    """Start the provider on its own thread and answer where it will report."""
+    """Start the provider on its own thread, bounded by the time the caller has left.
+
+    The call runs under `call_ceiling`, so the provider process is ended at the
+    deadline instead of outliving the answer nobody waits for (audit A-17,
+    docs/research/2026-09-25-a-grounded-recall-has-the-time-it-needs-and-no-more.md).
+    """
+    from llm_client import call_ceiling
+
     outcome: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
 
     def invoke() -> None:
         try:
-            outcome.put((True, generator(prompt, system_prompt, QA_MAX_OUTPUT_TOKENS)))
+            with call_ceiling(ceiling_seconds):
+                outcome.put((True, generator(prompt, system_prompt, QA_MAX_OUTPUT_TOKENS)))
         except Exception as exc:  # noqa: BLE001 - preserve provider isolation
             outcome.put((False, exc))
 
-    threading.Thread(target=invoke, name="grounded-qa-provider", daemon=True).start()
+    context = contextvars.copy_context()
+    threading.Thread(target=context.run, args=(invoke,), name="grounded-qa-provider", daemon=True).start()
     return outcome
 
 
@@ -220,7 +232,7 @@ def _generate_before_deadline(
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError("grounded QA deadline exceeded")
-    outcome = _detached_provider(generator, prompt, system_prompt)
+    outcome = _detached_provider(generator, prompt, system_prompt, max(1, math.ceil(remaining)))
     return _as_optional_text(_awaited_value(outcome, remaining))
 
 

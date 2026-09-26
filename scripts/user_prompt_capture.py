@@ -49,17 +49,12 @@ from memory_state import spawn_detached, update_state  # noqa: E402
 ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(_MS_ROOT))).resolve()
 STATE_ROOT = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(_MS_STATE))).resolve()
 
+from capture_diagnostics import record_capture_failure  # noqa: E402
 from capture_operation import claim_operation, complete_operation  # noqa: E402
-
-try:
-    from capture_diagnostics import record_capture_failure  # noqa: E402
-except Exception:  # noqa: BLE001
-    def record_capture_failure(kind, reason, **fields):  # type: ignore[misc]
-        """No-op stub — diagnostics must never break the capture hook."""
-
 from event_envelope import build_event_envelope  # noqa: E402
 from memory_state import HOOK_STATE_LOCK_TIMEOUT  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
+from session_start_project_state import _compute_slug  # noqa: E402
 
 DAILY_DIR = ROOT / "knowledge" / "daily"
 
@@ -103,19 +98,11 @@ def _compute_slug_from_cwd(cwd: str) -> str:
     Reuses session_start_project_state._compute_slug so prompts are
     tagged with the SAME slug that state.md uses — no drift.
     """
-    projects_dir = ROOT / "knowledge" / "projects"
     try:
-        sys.path.insert(0, str(ROOT / "scripts"))
-        from session_start_project_state import _compute_slug  # type: ignore
-
-        return _compute_slug(Path(cwd).resolve(), projects_dir)
-    except Exception:  # noqa: BLE001
-        # Fall back to parent-dir name lowercased — same as the
-        # first step of the full slug algorithm.
-        try:
-            return Path(cwd).resolve().name.lower().replace(" ", "-")
-        except Exception:  # noqa: BLE001
-            return "unknown"
+        return _compute_slug(Path(cwd).resolve(), ROOT / "knowledge" / "projects")
+    except (OSError, ValueError):
+        # Only a path the system cannot resolve falls back to its own name.
+        return Path(cwd).name.lower().replace(" ", "-") or "unknown"
 
 
 def _claim_prompt_operation(
@@ -242,7 +229,9 @@ def _append_prompt_tag(
         )
 
         ts = datetime.now().strftime("%H:%M:%S")
-        safe = redact_secrets(preview)[:MAX_PROMPT_PREVIEW]
+        # One line: a newline in the prompt started a real daily-log entry
+        # (docs/research/2026-09-26-an-evidence-span-names-its-own-block.md).
+        safe = " ".join(redact_secrets(preview).split())[:MAX_PROMPT_PREVIEW]
         block = (
             f"- `[{ts}] prompt | {session_id[:8]} | {slug}` "
             f"{safe}"

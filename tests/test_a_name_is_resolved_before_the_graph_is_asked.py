@@ -163,3 +163,40 @@ def test_more_same_name_nodes_than_one_reader_call_takes_are_all_asked(indexed):
     callers = code_graph.find_callers("helper", indexed, with_report=True)
     counted = (len(callees["callees"]), len(callers["callers"]))
     assert counted == (SAME_NAME_METHODS, SAME_NAME_METHODS + 1)
+
+
+# Audit C-36: four more lookups passed their own bound as the reader's row limit.
+# docs/research/2026-09-25-a-common-name-is-asked-up-to-the-reader-ceiling.md
+
+
+def test_community_mode_answers_for_a_name_shared_by_hundreds(indexed):
+    import code_graph
+
+    answer = code_graph.detect_communities(indexed, symbol="close", with_report=True)
+    assert answer["community_count"] >= 1
+
+
+def test_provenance_cuts_a_common_name_and_says_so(indexed, tmp_path):
+    import time
+
+    from provenance_join import join_symbol_provenance
+
+    answer = join_symbol_provenance(tmp_path, indexed, "main", time.monotonic() + 60)
+    shown = (len(answer["locations"]), answer["location_count"], answer["locations_truncated"])
+    assert shown == (5, COMMON_NAME_FILES, True)
+
+
+def test_a_qualified_name_is_found_among_hundreds_of_same_name_methods(indexed):
+    import time
+
+    from symbol_snippet import snippet_for_symbol
+
+    answer = snippet_for_symbol(indexed, "Holder7.close", time.monotonic() + 60)
+    assert (answer.get("error"), answer["resolved_nodes"]) == (None, 1)
+
+
+def test_a_too_wide_trace_target_is_refused_by_name(indexed, tmp_path):
+    from trace_ingest import TraceRefused, trace_callers
+
+    with pytest.raises(TraceRefused, match="trace_target_filter_too_wide"):
+        trace_callers("close", indexed, state_root=tmp_path)

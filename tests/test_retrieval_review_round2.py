@@ -526,7 +526,7 @@ def test_optional_boundary_caps_concurrent_stragglers(monkeypatch):
         for _ in range(retrieval.MAX_OPTIONAL_STRAGGLERS + 1):
             with pytest.raises(retrieval.OptionalStageTimeout):
                 retrieval._run_optional_bounded(
-                    hanging, deadline=time.monotonic() + 1, cancelled=None
+                    hanging, deadline=time.monotonic() + SHORT_TIMEOUT, cancelled=None
                 )
         assert started == retrieval.MAX_OPTIONAL_STRAGGLERS
     finally:
@@ -559,11 +559,11 @@ def test_optional_boundary_releases_capacity_when_thread_start_fails(monkeypatch
     for _ in range(retrieval.MAX_OPTIONAL_STRAGGLERS):
         with pytest.raises(RuntimeError, match="thread startup failed"):
             retrieval._run_optional_bounded(
-                lambda: "unused", deadline=time.monotonic() + 1, cancelled=None
+                lambda: "unused", deadline=time.monotonic() + SHORT_TIMEOUT, cancelled=None
             )
 
     assert retrieval._run_optional_bounded(
-        lambda: "started", deadline=time.monotonic() + 1, cancelled=None
+        lambda: "started", deadline=time.monotonic() + SHORT_TIMEOUT, cancelled=None
     ) == "started"
 
 
@@ -586,7 +586,7 @@ def test_optional_boundary_releases_the_acquired_semaphore_after_rebind(monkeypa
 
         with pytest.raises(retrieval.OptionalStageTimeout):
             retrieval._run_optional_bounded(
-                straggler, deadline=time.monotonic() + 1, cancelled=None
+                straggler, deadline=time.monotonic() + SHORT_TIMEOUT, cancelled=None
             )
         monkeypatch.setattr(retrieval, "_OPTIONAL_STAGE_SLOTS", rebound_slots)
         release.set()
@@ -616,7 +616,7 @@ def test_optional_boundary_start_failure_releases_acquired_semaphore_after_rebin
 
     with pytest.raises(RuntimeError, match="thread startup failed"):
         retrieval._run_optional_bounded(
-            lambda: None, deadline=time.monotonic() + 1, cancelled=None
+            lambda: None, deadline=time.monotonic() + SHORT_TIMEOUT, cancelled=None
         )
     assert acquired_slots.acquire(blocking=False)
     assert rebound_slots.acquire(blocking=False)

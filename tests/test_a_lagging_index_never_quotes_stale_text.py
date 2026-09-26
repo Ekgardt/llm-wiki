@@ -121,13 +121,13 @@ def test_a_snapshot_can_be_taken_while_the_vault_is_written(tmp_path: Path) -> N
 
     original = corpus_snapshot._capture
 
-    def writing_capture(root, policy, deadline, cancelled):
+    def writing_capture(root, policy, deadline, cancelled, pruned=frozenset()):
         writes["n"] += 1
         if writes["n"] <= 2:
             with log.open("a", encoding="utf-8") as stream:
                 stream.write(f"line {writes['n']}\n")
             raise corpus_snapshot.CorpusChanged("corpus source changed during collection")
-        return original(root, policy, deadline, cancelled)
+        return original(root, policy, deadline, cancelled, pruned)
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(corpus_snapshot, "_capture", writing_capture)

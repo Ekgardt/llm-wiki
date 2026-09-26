@@ -196,7 +196,7 @@ def test_the_line_says_so_when_the_trail_is_missing(diagnostics):
     is not there wastes the one moment they are paying attention.
     """
     module, state = diagnostics
-    module.record_capture_failure("mcp_tool", "ValueError: bad path")
+    module.record_capture_failure("session_end", "ValueError: bad path")
     module.FAILURE_LOG.unlink()
 
     line = module.capture_failure_line(state)
@@ -207,7 +207,7 @@ def test_the_line_says_so_when_the_trail_is_missing(diagnostics):
 
 def test_the_line_points_at_the_trail_when_it_is_there(diagnostics):
     module, state = diagnostics
-    module.record_capture_failure("mcp_tool", "ValueError: bad path")
+    module.record_capture_failure("session_end", "ValueError: bad path")
 
     line = module.capture_failure_line(state)
 

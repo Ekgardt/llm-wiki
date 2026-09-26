@@ -79,6 +79,15 @@ _ALLOWED_RUNTIME_FINDINGS = frozenset(
         "capture_binding_projection_retained",
         "transaction_undo_retained",
         "transaction_artifact_retained",
+        # What every installed vault holds, and evidence the image carries whole:
+        # the install manifest, a retired pre-v3 database, and a transaction kept
+        # for the operator. Refusing them left an installed vault with no backup at
+        # all (audit 2026-09-26 A-11,
+        # docs/research/2026-09-26-a-backup-takes-what-any-installed-vault-holds.md).
+        "install_manifest_retained",
+        "retired_operational_database_retained",
+        "transaction_quarantined",
+        "transaction_conflicted",
     }
 )
 

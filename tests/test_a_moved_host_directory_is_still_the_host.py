@@ -38,17 +38,6 @@ def test_the_adapter_reads_a_transcript_from_the_moved_directory(
     )
 
 
-@pytest.mark.parametrize(("variable", "inner"), HOSTS)
-def test_the_flush_allows_a_transcript_from_the_moved_directory(
-    tmp_path, monkeypatch, variable, inner
-):
-    import flush_memory
-
-    transcript = _moved_transcript(tmp_path, monkeypatch, variable, inner)
-
-    assert flush_memory._transcript_path_allowed(transcript) is True
-
-
 def test_a_directory_nobody_configured_is_still_refused(tmp_path):
     import integration_adapter
 

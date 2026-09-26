@@ -12,13 +12,14 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any
 
+from daily_log_append import BREADCRUMB_APPEND_BUDGET_SECONDS
 from event_envelope import EventEnvelope, build_event_envelope
 from maybe_compile import spawn_compile_if_idle
 from memory_state import MAX_CAPTURE_INTENT_BYTES, ROOT, STATE_ROOT, spawn_detached, update_state
@@ -34,6 +35,19 @@ from session_start_project_state import _compute_slug
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 DELEGATE_TIMEOUT_SECONDS = 10
+# Delegates on the host's 5-second hooks stop before the host stops the hook, so
+# a hang is recorded here instead of vanishing with the process (audit B-11,
+# docs/research/2026-09-25-a-hook-stops-its-delegate-before-the-host-stops-it.md).
+# One rule for both: the append's own budget plus time to start the interpreter.
+# The prompt delegate was stopped at 2.5 s while its append could try for 3.0 s
+# (audit 2026-09-26 C-1, docs/research/2026-09-26-a-hook-budget-is-one-sum.md).
+HOST_HOOK_TIMEOUT_SECONDS = 5.0
+DELEGATE_STARTUP_SECONDS = 1.0
+_BREADCRUMB_DELEGATE_TIMEOUT = BREADCRUMB_APPEND_BUDGET_SECONDS + DELEGATE_STARTUP_SECONDS
+DELEGATE_TIMEOUTS = {
+    "user_prompt_capture.py": _BREADCRUMB_DELEGATE_TIMEOUT,
+    "post_tool_capture.py": _BREADCRUMB_DELEGATE_TIMEOUT,
+}
 MAINTENANCE_DRAIN_TIMEOUT_SECONDS = 600
 CAPTURE_DRAIN_MAX_TASKS = 20
 CAPTURE_DRAIN_SECONDS = 450
@@ -115,7 +129,6 @@ DELEGATES = frozenset(
         "user_prompt_capture.py",
         "post_tool_capture.py",
         "heartbeat_record.py",
-        "feedback_capture.py",
     }
 )
 # The two thin wrappers that used to spawn the detached flush. They were deleted on
@@ -126,6 +139,17 @@ DELEGATES = frozenset(
 CAPTURE_DELEGATES = {
     "pre_compact": "precompact_capture.py",
     "session_end": "session_end_capture.py",
+}
+# The delegate `ingest_event` itself runs for an event. Claude's hooks name it with
+# `--delegate`, and the event takes the same ingest path as on every other host
+# (audit B-7, docs/research/2026-09-25-a-claude-prompt-reaches-feedback-capture.md).
+# Feedback candidates were retired on 2026-09-25: corrections are learned by
+# compile from the daily log
+# (docs/research/2026-09-25-corrections-are-learned-by-compile-not-by-candidates.md).
+INGESTED_DELEGATES = {
+    **CAPTURE_DELEGATES,
+    "user_prompt": "user_prompt_capture.py",
+    "post_tool_use": "post_tool_capture.py",
 }
 
 
@@ -154,7 +178,8 @@ def _source_event_id(raw: Mapping[str, Any]) -> str | None:
 
 
 def _session(source: str, raw: Mapping[str, Any]) -> str | None:
-    info = raw.get("sessionInfo")
+    # OpenCode's `session.created` sends `{info: Session}` (SDK types, 2026-09-25).
+    info = raw.get("info", raw.get("sessionInfo"))
     nested = info.get("id") if isinstance(info, Mapping) else None
     if source == "opencode":
         return _first_string(nested, raw.get("sessionId"), raw.get("sessionID"))
@@ -189,7 +214,7 @@ _PATCHED_FILE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", re.MULT
 
 def _tool_payload(source: str, raw: Mapping[str, Any]) -> dict[str, str]:
     raw_name = _first_string(raw.get("tool_name"), raw.get("tool")) or ""
-    tool_input = raw.get("tool_input") if source != "opencode" else raw.get("input")
+    tool_input = raw.get("tool_input") if source != "opencode" else _opencode_arguments(raw)
     tool_input = tool_input if isinstance(tool_input, Mapping) else {}
     target = (
         _first_string(
@@ -204,6 +229,14 @@ def _tool_payload(source: str, raw: Mapping[str, Any]) -> dict[str, str]:
         "tool_name": _TOOL_NAMES.get(raw_name.lower(), raw_name),
         "target": _tool_target(raw_name, target),
     }
+
+
+def _opencode_arguments(raw: Mapping[str, Any]) -> object:
+    """`tool.execute.after` sends the call's arguments as `args` (SDK types, 2026-09-25)."""
+    arguments = raw.get("args")
+    if isinstance(arguments, Mapping):
+        return arguments
+    return raw.get("input")
 
 
 def _tool_target(raw_name: str, target: str) -> str:
@@ -498,7 +531,7 @@ def _run_delegate(
         encoding="utf-8",
         errors="replace",
         check=False,
-        timeout=DELEGATE_TIMEOUT_SECONDS,
+        timeout=DELEGATE_TIMEOUTS.get(name, DELEGATE_TIMEOUT_SECONDS),
     )
     _forward_delegate_stdout(result, forward_stdout)
     _record_failed_delegate(name, result)
@@ -1900,7 +1933,7 @@ def _log_checkpoint_error(error: BaseException) -> None:
         message = _bounded_checkpoint_error(error)
         log_path = STATE_ROOT / "logs" / "hook-errors.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().isoformat(timespec="seconds")
+        timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
         with log_path.open("a", encoding="utf-8") as stream:
             stream.write(f"[{timestamp}] {_checkpoint_log_kind(error)}: {message}\n")
     except Exception:  # noqa: BLE001
@@ -2572,16 +2605,6 @@ def _ingest_user_prompt(
         forward_stdout=True,
         project_dir=project_dir,
     )
-    _run_delegate(
-        "feedback_capture.py",
-        {
-            "text": payload["prompt"],
-            "session_id": envelope.session or "unknown",
-            "slug": slug or "unknown",
-            "trigger": f"{envelope.agent or 'unknown'}-user-message",
-        },
-        project_dir=project_dir,
-    )
 
 
 def _ingest_post_tool(
@@ -2646,18 +2669,57 @@ def _require_stable_transcript(before: os.stat_result, after: os.stat_result) ->
         raise ValueError("capture transcript changed while it was read")
 
 
+# How far past its window an edge of a long transcript is searched for turns. A
+# session's head can be all `file-history-snapshot` records; measured on this
+# machine on 2026-09-26, two of six transcripts over the capture bound held no
+# turn in their first 450 KiB, and filling the window with turns took up to 9.04
+# windows of reading (0.23 s for 16). See
+# `docs/research/2026-09-26-a-long-session-keeps-its-first-turns.md`.
+EDGE_SCAN_WINDOWS = 16
+
+
 def _read_transcript_edges(path: Path, side: int) -> tuple[bytes, bytes, int]:
-    """Head and tail of a transcript too large to hold whole."""
+    """Head and tail of a transcript too large to hold whole, each of its turns."""
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
     try:
         before = os.fstat(descriptor)
-        head = _read_transcript_edge(descriptor, 0, side)
-        tail = _read_transcript_edge(descriptor, before.st_size - side, side)
+        scan = min(side * EDGE_SCAN_WINDOWS, before.st_size // 2)
+        head = _read_transcript_edge(descriptor, 0, scan)
+        tail = _read_transcript_edge(descriptor, before.st_size - scan, scan)
         _require_stable_transcript(before, os.fstat(descriptor))
     finally:
         os.close(descriptor)
-    return head, tail, before.st_size
+    return _turns_head(head, side), _turns_tail(tail, side), before.st_size
+
+
+def _turn_lines(lines: Iterable[bytes], side: int) -> list[bytes]:
+    """Lines in the given order, service records skipped, until the window is full."""
+    from session_evidence import is_service_record
+
+    kept: list[bytes] = []
+    used = 0
+    for line in lines:
+        if is_service_record(line.decode("utf-8", errors="replace")):
+            continue
+        used += len(line) + 1
+        if used > side:
+            break
+        kept.append(line)
+    return kept
+
+
+def _turns_head(window: bytes, side: int) -> bytes:
+    """The first turns; the raw window when not one whole turn fits in it."""
+    kept = _turn_lines(window.split(b"\n")[:-1], side)
+    return b"".join(line + b"\n" for line in kept) or window[:side]
+
+
+def _turns_tail(window: bytes, side: int) -> bytes:
+    """The last turns; the raw window when not one whole turn fits in it."""
+    lines = [line for line in window.split(b"\n")[1:] if line]
+    kept = _turn_lines(reversed(lines), side)
+    return b"".join(line + b"\n" for line in reversed(kept)) or window[-side:]
 
 
 def _capture_excerpt_marker(dropped: int) -> str:
@@ -2667,25 +2729,9 @@ def _capture_excerpt_marker(dropped: int) -> str:
     return f"\n{capture_gap_line(dropped)}\n"
 
 
-def _whole_lines_head(head: bytes) -> bytes:
-    """Whole lines where the window holds one, the raw window otherwise.
-
-    One transcript line can be larger than the window -- a tool result arrives
-    as a single JSON line -- and trimming to a boundary that is not there would
-    drop the side entirely.
-    """
-    return head[: head.rfind(b"\n") + 1] or head
-
-
-def _whole_lines_tail(tail: bytes) -> bytes:
-    return tail[tail.find(b"\n") + 1 :] or tail
-
-
 def _capture_excerpt_text(path: Path, limit: int) -> str:
     """A bounded excerpt that says, in the evidence itself, what it dropped."""
-    raw_head, raw_tail, size = _read_transcript_edges(path, limit // 2)
-    head = _whole_lines_head(raw_head)
-    tail = _whole_lines_tail(raw_tail)
+    head, tail, size = _read_transcript_edges(path, limit // 2)
     dropped = size - len(head) - len(tail)
     return (
         _evidence_text(head) + _capture_excerpt_marker(dropped) + _evidence_text(tail)
@@ -3105,10 +3151,13 @@ def _materialize_event_transcript(
     return path
 
 
-def _cleanup_durable_transcript(path: Path | None, intent_id: str | None) -> None:
+def _cleanup_transient_transcript(path: Path | None) -> None:
+    """The copy ends with its event, published or not (audit C-5).
+
+    Nothing reads a kept copy since the flush command line was retired; see
+    `docs/research/2026-09-25-a-transient-transcript-never-outlives-its-event.md`.
+    """
     if path is None:
-        return
-    if intent_id is None:
         return
     _cleanup_runtime_transient(path)
 
@@ -3165,7 +3214,7 @@ def _ingest_precompact(
             envelope, payload, slug, project_dir, result, intent_id
         )
     finally:
-        _cleanup_durable_transcript(transient_path, intent_id)
+        _cleanup_transient_transcript(transient_path)
 
 
 def _session_end_trigger(trigger: str | None, payload: Mapping[str, Any]) -> Any:
@@ -3294,7 +3343,7 @@ def _ingest_session_end(
             envelope, payload, slug, project_dir, result, force_stub, intent_id
         )
     finally:
-        _cleanup_durable_transcript(transient_path, intent_id)
+        _cleanup_transient_transcript(transient_path)
 
 
 def ingest_event(
@@ -3459,7 +3508,7 @@ def _dispatch_cli_event(
 ) -> dict[str, object] | None:
     if envelope is None:
         return None
-    if args.delegate and args.delegate != CAPTURE_DELEGATES.get(envelope.event_type):
+    if args.delegate and args.delegate != INGESTED_DELEGATES.get(envelope.event_type):
         _run_own_delegate(args, envelope)
         return None
     result = ingest_event(envelope)

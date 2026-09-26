@@ -183,13 +183,25 @@ def expected_opencode_entry(vault_root: Path) -> dict[str, Any]:
 CRON_DEFAULT_PATH = "/usr/bin:/bin"
 
 
+def stable_uv_path(uv_path: Path | str) -> Path:
+    """uv as the operator's PATH names it: absolute, with its symbolic links kept.
+
+    Resolving the links pinned a package manager's versioned target, which an
+    upgrade removes: Homebrew's `/opt/homebrew/bin/uv` points into a
+    `Cellar/uv/<version>/` directory that `brew upgrade` deletes, and every
+    scheduled run then failed to start (audit B-30,
+    docs/research/2026-09-25-a-scheduled-run-keeps-the-uv-link.md).
+    """
+    return Path(os.path.abspath(uv_path))
+
+
 def scheduled_path(uv_path: Path, default_path: str) -> str:
     """A scheduled run's PATH: the directory of the uv it calls, then the scheduler's default.
 
     Provider CLIs live beside uv in a per-user directory no scheduler puts on PATH. See
     `docs/research/2026-09-14-every-scheduler-gets-the-providers-path.md`.
     """
-    return f"{Path(uv_path).resolve().parent}:{default_path}"
+    return f"{stable_uv_path(uv_path).parent}:{default_path}"
 
 
 def cron_quote(value: str) -> str:
@@ -264,6 +276,24 @@ def resolve_uv_project_environment(root: Path, override: str | None) -> Path:
     else:
         candidate = root / ".venv"
     return candidate.resolve()
+
+
+def _ignored_environment(root: Path, override: str | None) -> str | None:
+    """A `UV_PROJECT_ENVIRONMENT` the install does not use, so the installer can say so.
+
+    The vault runs from `<vault>/.venv`: timers, hooks and the MCP server call
+    `uv run` there and carry no `UV_PROJECT_ENVIRONMENT`, and persisting one
+    would hand every other uv project on the machine the vault's environment. An
+    install into a custom environment left all of them on an empty `.venv`
+    (audit 2026-09-26 B-26,
+    docs/research/2026-09-26-the-vault-runs-from-its-own-venv.md).
+    """
+    if not override:
+        return None
+    chosen = resolve_uv_project_environment(root, override)
+    if chosen == resolve_uv_project_environment(root, None):
+        return None
+    return str(chosen)
 
 
 def uv_sync_arguments(root: Path, override: str | None) -> tuple[Path, list[str]]:
@@ -828,10 +858,14 @@ def _cron_command(args: argparse.Namespace) -> int:
 
 
 def _sync_args_command(args: argparse.Namespace) -> int:
-    environment, arguments = uv_sync_arguments(args.root, args.environment)
+    environment, arguments = uv_sync_arguments(args.root, None)
     print(
         json.dumps(
-            {"environment": str(environment), "arguments": arguments},
+            {
+                "environment": str(environment),
+                "arguments": arguments,
+                "ignored_environment": _ignored_environment(args.root, args.environment),
+            },
             ensure_ascii=False,
             sort_keys=True,
         )

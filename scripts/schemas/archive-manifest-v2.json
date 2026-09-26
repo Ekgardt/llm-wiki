@@ -1,0 +1,260 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/archive-manifest-v2.json",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "logical_daily_id",
+    "original_path",
+    "source_hash",
+    "payload_hash",
+    "compile_parts",
+    "queue_preflight",
+    "operations",
+    "evidence",
+    "pins",
+    "retention_days"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "archive-manifest/v2"
+    },
+    "logical_daily_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "original_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "payload_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "queue_preflight": {
+      "type": "object",
+      "required": [
+        "checked_at",
+        "passed",
+        "blocking_task_ids"
+      ],
+      "properties": {
+        "checked_at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "blocking_task_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "operations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "operation_id",
+          "state"
+        ],
+        "properties": {
+          "operation_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "state": {
+            "enum": [
+              "succeeded",
+              "dead",
+              "cancelled"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "block_id",
+          "byte_start",
+          "byte_end",
+          "line_start",
+          "line_end",
+          "sha256"
+        ],
+        "properties": {
+          "block_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "byte_start": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "byte_end": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "line_start": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "line_end": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "pins": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "retention_days": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "compile_parts": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2049,
+      "items": {
+        "type": "object",
+        "required": [
+          "byte_start",
+          "byte_end",
+          "compile_receipt_ref",
+          "compile_authority"
+        ],
+        "properties": {
+          "byte_start": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "byte_end": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "compile_receipt_ref": {
+            "type": "object",
+            "required": [
+              "embedded_path",
+              "logical_path",
+              "path",
+              "receipt_file_hash",
+              "schema",
+              "source_digest",
+              "source_identity"
+            ],
+            "properties": {
+              "schema": {
+                "const": "compile-receipt-ref/v1"
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "logical_path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source_digest": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "source_identity": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "receipt_file_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "embedded_path": {
+                "type": "string",
+                "pattern": "^compile-receipt-[0-9]{1,4}\\.md$"
+              }
+            },
+            "additionalProperties": false
+          },
+          "compile_authority": {
+            "type": "object",
+            "required": [
+              "schema",
+              "transaction_id",
+              "state",
+              "committed_at",
+              "commit_sequence",
+              "operation_ids",
+              "coordinator_record",
+              "coordinator_record_digest"
+            ],
+            "properties": {
+              "schema": {
+                "const": "archive-compile-authority/v1"
+              },
+              "transaction_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "state": {
+                "const": "committed"
+              },
+              "committed_at": {
+                "type": "string",
+                "minLength": 20,
+                "maxLength": 40
+              },
+              "commit_sequence": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "operation_ids": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 100,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              },
+              "coordinator_record": {
+                "type": "object"
+              },
+              "coordinator_record_digest": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

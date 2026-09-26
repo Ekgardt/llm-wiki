@@ -26,6 +26,7 @@ See `docs/research/2026-08-30-a-backlog-that-prevents-its-own-drain.md`.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import time
 from pathlib import Path
@@ -81,7 +82,49 @@ def sweep_orphan_temporaries(directory: Path | None = None) -> dict[str, int]:
     return {"removed": sum(1 for size in reclaimed if size), "bytes": sum(reclaimed)}
 
 
-def prune_settled_transactions() -> dict[str, int]:
+# A write into `knowledge/` stages `.<name>.<nonce>.tmp` beside its target and
+# renames it over; a writer killed in between leaves the staged copy there. On
+# this vault (2026-09-26): three, the oldest from 08-26, two of them whole
+# project journals. Only this exact shape is swept — a dot, a name, a hex nonce
+# of at least 16 digits, `.tmp` — so a person's own file there is never taken;
+# `tests/test_a_killed_write_leaves_nothing_behind.py` holds every staging name
+# in `scripts/` to it. Research:
+# docs/research/2026-09-26-a-killed-write-leaves-nothing-behind.md
+STAGED_WRITE_NAME = re.compile(r"^\..+[.-][0-9a-f]{16,}\.tmp$")
+MAX_KNOWLEDGE_ENTRIES = 200_000
+
+
+def _staged_knowledge_writes(root: Path, now: float) -> list[Path]:
+    found: list[Path] = []
+    for count, path in enumerate(root.rglob(".*.tmp")):
+        if count >= MAX_KNOWLEDGE_ENTRIES:
+            break
+        if STAGED_WRITE_NAME.match(path.name) and _is_orphan(path, now):
+            found.append(path)
+    return found
+
+
+def _reclaimed(paths: list[Path]) -> dict[str, int]:
+    sizes = [_remove(path) for path in paths]
+    return {"removed": sum(1 for size in sizes if size), "bytes": sum(sizes)}
+
+
+def sweep_staged_knowledge_writes(root: Path | None = None) -> dict[str, int]:
+    """Staged copies a killed write left beside a Markdown target."""
+    base = root or ROOT / "knowledge"
+    if not base.is_dir():
+        return _reclaimed([])
+    return _reclaimed(_staged_knowledge_writes(base, time.time()))
+
+
+# The nightly kills this step after `RECLAIM_STEP_SECONDS`; the image prune stops
+# on its own a margin before that, so the kill never lands inside a prune and the
+# steps after it still run. What it did not reach is pruned the next night.
+RECLAIM_STEP_SECONDS = 180
+RECLAIM_MARGIN_SECONDS = 30
+
+
+def prune_settled_transactions(deadline: float = float("inf")) -> dict[str, object]:
     """Drop the before and after images of transactions that have settled.
 
     The machinery existed and nothing ever called it, so on this vault the trail
@@ -102,7 +145,9 @@ def prune_settled_transactions() -> dict[str, int]:
 
     try:
         coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT)
-        return {"pruned": int(coordinator.prune()), "failed": 0}
+        return {"pruned": int(coordinator.prune(deadline=deadline)), "failed": 0}
+    except TimeoutError:
+        return {"pruned": 0, "failed": 0, "unfinished": True}
     except Exception as error:  # noqa: BLE001
         return {"pruned": 0, "failed": 1, "reason": str(error)[:120]}
 
@@ -123,8 +168,17 @@ def prune_transaction_history() -> dict[str, int]:
 
 
 def remove_empty_intent_shards(directory: Path | None = None) -> int:
-    """Shard directories a capture intent left empty when it moved on."""
-    root = directory if directory is not None else STATE_ROOT / "run" / "capture-intents" / "pending"
+    """Shard directories a capture intent left empty when it moved on.
+
+    Intents move from `pending/` to `ready/` and on; both leave empty shards,
+    and only `pending/` was swept (136 empty under `ready/` on 2026-09-25, C-13).
+    """
+    intents = STATE_ROOT / "run" / "capture-intents"
+    roots = [directory] if directory is not None else [intents / "pending", intents / "ready"]
+    return sum(_empty_shards_removed(root) for root in roots)
+
+
+def _empty_shards_removed(root: Path) -> int:
     if not root.is_dir():
         return 0
     return sum(_removed_if_empty(shard) for shard in root.iterdir())
@@ -174,11 +228,13 @@ def rebuild_co_activation() -> dict[str, object]:
 
 
 def reclaim(budget_seconds: float) -> dict[str, object]:
+    deadline = time.monotonic() + RECLAIM_STEP_SECONDS - RECLAIM_MARGIN_SECONDS
     return {
         "backlog": drain_pending_backlog(budget_seconds),
-        "transactions": prune_settled_transactions(),
+        "transactions": prune_settled_transactions(deadline),
         "history": prune_transaction_history(),
         "temporaries": sweep_orphan_temporaries(),
+        "staged_writes": sweep_staged_knowledge_writes(),
         "empty_shards": remove_empty_intent_shards(),
         "snapshot": snapshot_memory(),
         "co_activation": rebuild_co_activation(),
@@ -193,15 +249,46 @@ def _report(result: dict[str, object]) -> str:
     snapshot = result["snapshot"]
     return (
         f"snapshot {snapshot['status']} ({snapshot['commit']}); "
-        f"pruned {transactions['pruned']} settled transaction(s); "
+        f"pruned {transactions['pruned']} settled transaction(s){_unfinished_note(transactions)}; "
         f"dropped {result['history']['transactions']} transaction row(s) and "
         f"{result['history']['attempts']} attempt row(s) past the history window; "
         f"drained {drained} checkpoint(s); "
         f"{len(backlog['remaining'])} project(s) still queued; "
         f"{len(backlog['failed'])} project(s) failed; "
         f"removed {temporaries['removed']} orphaned temporary file(s), "
-        f"{temporaries['bytes']} byte(s), and {result['empty_shards']} empty intent shard(s)"
+        f"{temporaries['bytes']} byte(s), {result['staged_writes']['removed']} staged "
+        f"knowledge write(s), and {result['empty_shards']} empty intent shard(s)"
+        f"{_failure_note(result)}"
     )
+
+
+def _unfinished_note(transactions: dict) -> str:
+    return " (stopped at its deadline; the next night continues)" if transactions.get("unfinished") else ""
+
+
+def _failures(result: dict[str, object]) -> list[str]:
+    """What this pass could not do; the report printed counts and hid these (audit 2026-09-26 B-23)."""
+    failed = [f"{key}: {result[key].get('reason', 'failed')}" for key in ("transactions", "history") if result[key].get("failed")]
+    failed.extend(_snapshot_failure(result["snapshot"]))
+    failed.extend(_backlog_failure(result["backlog"]))
+    return failed
+
+
+def _snapshot_failure(snapshot: dict) -> list[str]:
+    status = str(snapshot.get("status"))
+    return [f"snapshot: {status}"] if status.startswith("failed") else []
+
+
+def _backlog_failure(backlog: dict) -> list[str]:
+    count = len(backlog["failed"])
+    return [f"backlog: {count} project(s) failed"] if count else []
+
+
+def _failure_note(result: dict[str, object]) -> str:
+    failed = _failures(result)
+    derived = result["co_activation"].get("co_activation_error")
+    notes = [*failed, *([f"co-activation: {derived}"] if derived else [])]
+    return f"; FAILED: {'; '.join(notes)}" if notes else ""
 
 
 def main() -> int:
@@ -213,8 +300,11 @@ def main() -> int:
         help="how long the backlog drain may run before it stops",
     )
     args = parser.parse_args()
-    print(_report(reclaim(args.budget_seconds)))
-    return 0
+    result = reclaim(args.budget_seconds)
+    print(_report(result))
+    # A derived table that failed is named and costs nothing else; a real
+    # maintenance failure fails the step, so the night records it.
+    return 1 if _failures(result) else 0
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import importlib
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -155,3 +156,56 @@ def test_no_test_carries_a_literal_hang_bound() -> None:
         offenders.extend(_literal_hang_bounds(path))
 
     assert offenders == []
+
+
+# --- no test gives real work a literal deadline -------------------------------
+#
+# `deadline=time.monotonic() + 5` handed to a directory walk failed a clean full
+# run on 2026-09-26 (the walk did not finish in 5 s under load) while passing
+# alone. A deadline bounding work the test expects to finish names SHORT_TIMEOUT
+# or LONG_TIMEOUT; a literal one is allowed only where the test is about time
+# running out, which its function name says. Research:
+# docs/research/2026-09-26-no-test-gives-real-work-a-literal-deadline.md
+
+_ABOUT_TIME = re.compile(
+    r"deadline|timeout|timed|expire|late|elapse|budget|hang|slow|stall|stuck|overrun|past_due|in_time|cancel|interrupt",
+    re.IGNORECASE,
+)
+
+
+_LITERAL_DEADLINE = re.compile(r"^time\.monotonic\(\) \+ (\d+(?:\.\d+)?)$")
+
+
+def _is_literal_deadline(keyword: ast.keyword) -> bool:
+    """`deadline=time.monotonic() + N` with N of a second or more."""
+    match = _LITERAL_DEADLINE.match(ast.unparse(keyword.value))
+    return keyword.arg == "deadline" and match is not None and float(match.group(1)) >= 1
+
+
+def _speaks_of_time(node: ast.AST) -> bool:
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return False
+    return _ABOUT_TIME.search(node.name) is not None
+
+
+def _call_deadlines(node: ast.AST) -> list[int]:
+    if not isinstance(node, ast.Call):
+        return []
+    return [keyword.value.lineno for keyword in node.keywords if _is_literal_deadline(keyword)]
+
+
+def _literal_deadlines(node: ast.AST, about_time: bool) -> list[int]:
+    about_time = about_time or _speaks_of_time(node)
+    found = [] if about_time else _call_deadlines(node)
+    for child in ast.iter_child_nodes(node):
+        found += _literal_deadlines(child, about_time)
+    return found
+
+
+def test_no_test_gives_real_work_a_literal_deadline() -> None:
+    offenders = {
+        path.name: _literal_deadlines(ast.parse(path.read_text(encoding="utf-8")), False)
+        for path in sorted((ROOT / "tests").glob("*.py"))
+    }
+
+    assert {name: lines for name, lines in offenders.items() if lines} == {}

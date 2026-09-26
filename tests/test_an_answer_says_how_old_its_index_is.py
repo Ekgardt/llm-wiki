@@ -39,6 +39,8 @@ def _vault(tmp_path: Path, monkeypatch, *, page_after_build: bool) -> str:
     os.utime(manifest, (built, built))
     page_time = built + 30 if page_after_build else built - 30
     os.utime(page, (page_time, page_time))
+    # The directory counts too since a removed page moves only it (audit B-19).
+    os.utime(notes, (page_time, page_time))
     monkeypatch.setattr(memory_state, "ROOT", root)
     monkeypatch.setattr(memory_state, "STATE_ROOT", state)
     return generation

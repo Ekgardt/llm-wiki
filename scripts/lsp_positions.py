@@ -206,13 +206,18 @@ class SourceDocument:
         return tuple(spans)
 
     def validate_anchor(self, *, line: int, character: int) -> SourceAnchor:
+        """The anchor at `line` (1-based) and UTF-8 byte `character` (0-based).
+
+        A character past the end of the line means the line end, as the LSP
+        specification defines for `Position.character` (audit 2026-09-26 C-9).
+        One inside a multi-byte code point is refused.
+        """
         _require_coordinate(line, "line", minimum=1)
         _require_coordinate(character, "character")
         if line > len(self.line_spans):
             raise ValueError("line is outside the document")
         start, end = self.line_spans[line - 1]
-        if character > end - start:
-            raise ValueError("character is outside the line")
+        character = min(character, end - start)
         self.content[start : start + character].decode("utf-8", errors="strict")
         return SourceAnchor(self.path, line, character, start + character)
 

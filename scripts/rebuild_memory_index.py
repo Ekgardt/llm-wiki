@@ -72,7 +72,6 @@ INDEX_FOOTER = (
 )
 
 NOTES_PREFIX = "knowledge/notes/"
-NOTES_DENIAL = f"{NOTES_PREFIX}*"
 
 
 def build_index_bytes(
@@ -143,21 +142,6 @@ def _published_only(root: Path, virtual: dict[str, bytes]) -> dict[str, bytes]:
     named, _hidden = published_paths(root, sorted(virtual))
     keep = set(named)
     return {path: content for path, content in virtual.items() if path in keep}
-
-
-def _published_notes(root: Path) -> set[str] | None:
-    """The notes .gitignore un-ignores, or None when it denies none of them.
-
-    Read rather than asked of git: the index rebuild is an automatic writer, and
-    no automatic writer here runs git. This repository publishes by an exact `!`
-    line per page — its own comment forbids a broad `!*.md` — so the file says
-    exactly what is public. A vault whose .gitignore does not deny the notes
-    directory is not a public repository, and nothing is filtered.
-    """
-    lines = _gitignore_lines(root)
-    if NOTES_DENIAL not in lines:
-        return None
-    return {line[1:] for line in lines if line.startswith(f"!{NOTES_PREFIX}")}
 
 
 def published_paths(root: Path, paths: Sequence[str]) -> tuple[list[str], int]:

@@ -7,7 +7,9 @@ whole checkout for it. Research:
 Since `docs/research/2026-09-17-a-revision-walks-what-the-corpus-walks.md` the
 walk prunes hidden directories, so `.venv` is no longer reached at all; the rule
 these tests pin is the general one, and the directory here is an ordinary
-vendored tree.
+vendored tree. Since 2026-09-25 a top-level directory git ignores whole is not
+walked at all (audit A-16): the ignored environment is skipped, and the link that
+leaves the checkout is tested in a tracked tree, where the walk still meets it.
 """
 
 from __future__ import annotations
@@ -35,11 +37,11 @@ def _directory_link_or_skip(link: Path, target: Path | str) -> None:
         pytest.skip("directory symlinks are unavailable")
 
 
-def _checkout_with_environment(path: Path) -> Path:
-    return _repository(
-        path,
-        {"pkg/alpha.py": "def alpha():\n    return 1\n", ".gitignore": "vendor/\n", ENVIRONMENT_MODULE: "X = 1\n"},
-    )
+def _checkout_with_environment(path: Path, *, ignored: bool = False) -> Path:
+    files = {"pkg/alpha.py": "def alpha():\n    return 1\n", ENVIRONMENT_MODULE: "X = 1\n"}
+    if ignored:
+        files[".gitignore"] = "vendor/\n"
+    return _repository(path, files)
 
 
 def _revision(root: Path):
@@ -53,15 +55,14 @@ def test_a_checkout_with_a_virtual_environment_link_has_a_revision_that_verifies
     from repository_scope import resolve_repository_scope
     from workspace_revision import verify_workspace_revision_unchanged
 
-    root = _checkout_with_environment(tmp_path / "repo")
+    root = _checkout_with_environment(tmp_path / "repo", ignored=True)
     before = _revision(root)
     _directory_link_or_skip(root / "vendor" / "lib64", "lib")
 
     after = _revision(root)
 
     paths = [entry.path for entry in after.entries]
-    assert (after.revision_sha256, ENVIRONMENT_MODULE in paths) == (before.revision_sha256, True)
-    assert not [path for path in paths if path.startswith("vendor/lib64")]
+    assert (after.revision_sha256, [path for path in paths if path.startswith("vendor/")]) == (before.revision_sha256, [])
     assert verify_workspace_revision_unchanged(resolve_repository_scope(root), after) is True
 
 

@@ -5,9 +5,9 @@ Research: `docs/research/2026-09-17-one-checkout-does-not-end-the-pass.md`.
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
-import threading
 from contextlib import closing
 from pathlib import Path
 
@@ -21,33 +21,56 @@ for directory in (TESTS.parent / "scripts", TESTS):
 from test_repository_index import ALPHA, _repository  # noqa: E402
 from test_repository_refresh import _isolated_reader_cache, adopted_vault  # noqa: E402,F401
 
-from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
-
 BUSY_FILES = 40
 
 
-class _Writer:
-    """An agent that never stops writing in its checkout."""
+def _append(path: Path) -> None:
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write("# written while read\n")
 
-    def __init__(self, repository: Path) -> None:
-        self._targets = [repository / "pkg" / f"busy_{number}.py" for number in range(BUSY_FILES)]
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._write, daemon=True)
 
-    def _write(self) -> None:
-        turn = 0
-        while not self._stop.is_set():
-            turn += 1
-            target = self._targets[turn % BUSY_FILES]
-            target.write_text(f"def busy():\n    return {turn}\n", encoding="utf-8")
+def _write_while_read(monkeypatch, repository: Path) -> None:
+    """Append to a file of `repository` exactly while the capture reads it.
 
-    def __enter__(self) -> _Writer:
-        self._thread.start()
-        return self
+    A writer thread wrote only when the reader yielded, so on a fast machine the
+    capture found a consistent tree (docs/research/2026-09-26-a-busy-checkout-is-changed-during-its-own-read.md).
+    POSIX reads through a descriptor walk, Windows by path through `bounded_io`,
+    so the write is placed inside whichever read this platform performs.
+    """
+    if os.name == "posix":
+        _write_during_descriptor_read(monkeypatch, repository)
+        return
+    _write_during_path_read(monkeypatch, repository)
 
-    def __exit__(self, *_exc: object) -> None:
-        self._stop.set()
-        self._thread.join(timeout=SHORT_TIMEOUT)
+
+def _write_during_descriptor_read(monkeypatch, repository: Path) -> None:
+    import corpus_snapshot
+
+    busy = {(info.st_dev, info.st_ino): path for path in repository.rglob("*.py") for info in [path.stat()]}
+    real_read = corpus_snapshot._read_chunks
+
+    def read_while_written(descriptor: int, max_bytes: int) -> bytes:
+        opened = os.fstat(descriptor)
+        path = busy.get((opened.st_dev, opened.st_ino))
+        if path is not None:
+            _append(path)
+        return real_read(descriptor, max_bytes)
+
+    monkeypatch.setattr(corpus_snapshot, "_read_chunks", read_while_written)
+
+
+def _write_during_path_read(monkeypatch, repository: Path) -> None:
+    import bounded_io
+
+    busy = {path.resolve() for path in repository.rglob("*.py")}
+    real_read = bounded_io._read_open_descriptor
+
+    def read_while_written(descriptor, path, identity, *rest):
+        if Path(path).resolve() in busy:
+            _append(Path(path))
+        return real_read(descriptor, path, identity, *rest)
+
+    monkeypatch.setattr(bounded_io, "_read_open_descriptor", read_while_written)
 
 
 def _busy_repository(path: Path) -> Path:
@@ -64,7 +87,9 @@ def _rows_by_name(answer: dict) -> dict[str, tuple]:
     return {_checkout_name(row): (row.get("status"), row.get("reason")) for row in answer["repositories"]}
 
 
-def test_a_checkout_being_written_is_refused_by_name_and_the_others_are_refreshed(adopted_vault, tmp_path):  # noqa: F811
+def test_a_checkout_being_written_is_refused_by_name_and_the_others_are_refreshed(
+    adopted_vault, tmp_path, monkeypatch  # noqa: F811
+):
     import repository_index
 
     _root, state = adopted_vault
@@ -73,9 +98,11 @@ def test_a_checkout_being_written_is_refused_by_name_and_the_others_are_refreshe
     for repository in (busy, quiet):
         repository_index.index_repository(repository, state_root=state)
     (quiet / "pkg" / "beta.py").write_text("def beta():\n    return 1\n", encoding="utf-8")
+    # A change the refresh must capture; an unchanged checkout is never read.
+    (busy / "pkg" / "new_work.py").write_text("def new_work():\n    return 1\n", encoding="utf-8")
 
-    with _Writer(busy):
-        answer = repository_index.refresh_all_repositories(state_root=state, budget_seconds=120)
+    _write_while_read(monkeypatch, busy)
+    answer = repository_index.refresh_all_repositories(state_root=state, budget_seconds=120)
 
     assert _rows_by_name(answer) == {
         "busy": ("refused", "repository_changed_during_capture"),

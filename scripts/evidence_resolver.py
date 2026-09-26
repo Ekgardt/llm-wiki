@@ -21,6 +21,12 @@ MAX_TAG_FILE_BYTES = 1024 * 1024
 MAX_BAGS_PER_MONTH = 10_000
 MAX_DIRECTORY_ENTRIES = 10_000
 ARCHIVE_SCHEMA = Path(__file__).with_name("schemas") / "archive-manifest-v1.json"
+# A day split into compile parts carries one receipt per part (audit 2026-09-26 B-1,
+# docs/research/2026-09-26-a-split-day-is-archived-with-every-part.md).
+ARCHIVE_SCHEMAS = {
+    "archive-manifest/v1": ARCHIVE_SCHEMA,
+    "archive-manifest/v2": Path(__file__).with_name("schemas") / "archive-manifest-v2.json",
+}
 _DAILY_ID_PATTERN = r"\d{4}-\d{2}-\d{2}"
 _SHA256_PATTERN = r"[0-9a-f]{64}"
 _BLOCK_ID_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}"
@@ -569,16 +575,10 @@ def _validated_bag(
     daily_id = _bag_daily_id(manifest)
     payload_name = f"data/{daily_id}.md"
     payload = _bag_payload(path, daily_id, payload_name, manifest)
-    payload_hash = sha256_bytes(payload)
-    receipt_path, self_contained = _bag_receipt_path(
-        path, manifest, daily_id, payload_hash, coordinator, vault, expected
-    )
+    receipts, receipt_names = _bag_receipts(path, manifest, daily_id, payload, coordinator, vault, expected)
     _require_bag_members(members, expected)
-    receipt = _bag_receipt(
-        manifest, receipt_path, daily_id, payload_hash, coordinator, vault, self_contained
-    )
-    _require_manifest_operations(manifest, receipt)
-    _require_bag_tags(path, self_contained)
+    _require_manifest_operations(manifest, receipts)
+    _require_bag_tags(path, receipt_names)
     _require_bag_info(path, payload, daily_id)
     _require_payload_evidence(manifest, payload)
     _require_bag_immutable(path, payload_name, expected)
@@ -597,7 +597,7 @@ def _bag_members(path: Path, expected: set[str]) -> set[str]:
     members = {
         item.name
         for item in bounded_directory_entries(
-            path, len(expected) + 1, label="archive bag"
+            path, len(expected) + 1 + MAX_COMPILE_PARTS, label="archive bag"
         )
     }
     _regular_directory(path / "data", label="archive payload directory")
@@ -617,7 +617,10 @@ def _bag_manifest(path: Path) -> dict[str, object]:
         label="archive manifest",
     )
     manifest = json.loads(raw.decode("utf-8", errors="strict"))
-    validate_schema(manifest, ARCHIVE_SCHEMA)
+    schema = ARCHIVE_SCHEMAS.get(manifest.get("schema_version")) if isinstance(manifest, dict) else None
+    if schema is None:
+        raise EvidenceResolutionError("archive manifest version is unknown")
+    validate_schema(manifest, schema)
     if canonical_json_bytes(manifest) != raw:
         raise EvidenceResolutionError("archive manifest is not canonical")
     return manifest
@@ -661,6 +664,56 @@ def _require_payload_hash(
         manifest[field] != payload_hash for field in ("source_hash", "payload_hash")
     ):
         raise EvidenceResolutionError("archive payload hash mismatch")
+
+
+def _bag_receipts(
+    path: Path,
+    manifest: Mapping[str, object],
+    daily_id: str,
+    payload: bytes,
+    coordinator: object | None,
+    vault: Path | None,
+    expected: set[str],
+) -> tuple[list[dict[str, object] | None], list[str]]:
+    """Each receipt the bag stands on, and the embedded receipt files it carries."""
+    if manifest["schema_version"] == "archive-manifest/v2":
+        return _part_receipts(path, manifest, daily_id, payload, coordinator, expected)
+    payload_hash = sha256_bytes(payload)
+    receipt_path, self_contained = _bag_receipt_path(
+        path, manifest, daily_id, payload_hash, coordinator, vault, expected
+    )
+    receipt = _bag_receipt(manifest, receipt_path, daily_id, payload_hash, coordinator, vault, self_contained)
+    return [receipt], ["compile-receipt.md"] if self_contained else []
+
+
+def _part_receipts(
+    path: Path,
+    manifest: Mapping[str, object],
+    daily_id: str,
+    payload: bytes,
+    coordinator: object | None,
+    expected: set[str],
+) -> tuple[list[dict[str, object] | None], list[str]]:
+    """A split day: its parts must be the day's own compile parts, each with its receipt."""
+    parts = manifest["compile_parts"]
+    spans = [(part["byte_start"], part["byte_end"]) for part in parts]
+    if spans != _daily_part_bounds(payload):
+        raise EvidenceResolutionError("archive compile parts are not the day's parts")
+    names = [str(part["compile_receipt_ref"]["embedded_path"]) for part in parts]
+    expected.update(names)
+    receipts = [_part_receipt(path, part, daily_id, payload, coordinator) for part in parts]
+    return receipts, names
+
+
+def _part_receipt(
+    path: Path, part: Mapping[str, object], daily_id: str, payload: bytes, coordinator: object | None
+) -> dict[str, object] | None:
+    digest = sha256_bytes(payload[part["byte_start"] : part["byte_end"]])
+    receipt_ref = part["compile_receipt_ref"]
+    _require_receipt_reference(receipt_ref, daily_id, digest)
+    view = {"compile_receipt_ref": receipt_ref, "compile_authority": part["compile_authority"]}
+    receipt_path = path / str(receipt_ref["embedded_path"])
+    return _bag_receipt(view, receipt_path, daily_id, digest, coordinator, None, True)
 
 
 def _bag_receipt_path(
@@ -786,10 +839,10 @@ def _authoritative_receipt(
 
 
 def _require_manifest_operations(
-    manifest: Mapping[str, object], receipt: Mapping[str, object] | None
+    manifest: Mapping[str, object], receipts: list[dict[str, object] | None]
 ) -> None:
-    if receipt is None or manifest["operations"] != [
-        {"operation_id": receipt["operation_id"], "state": "succeeded"}
+    if None in receipts or manifest["operations"] != [
+        {"operation_id": receipt["operation_id"], "state": "succeeded"} for receipt in receipts
     ]:
         raise EvidenceResolutionError("archive compile receipt operation mismatch")
     _require_terminal_operations(manifest["operations"])
@@ -813,14 +866,14 @@ def _require_manifest_preflight(manifest: Mapping[str, object]) -> None:
         raise EvidenceResolutionError("archive manifest contains active pins")
 
 
-def _require_bag_tags(path: Path, self_contained: bool) -> None:
+def _require_bag_tags(path: Path, receipt_names: list[str]) -> None:
     expected_tags = {
         name: sha256_bytes(
             read_stable_bytes(
                 path / name, MAX_TAG_FILE_BYTES, label=f"archive tag {name}"
             )
         )
-        for name in _bag_tag_names(self_contained)
+        for name in _bag_tag_names(receipt_names)
     }
     tag_manifest = read_stable_bytes(
         path / "tagmanifest-sha256.txt", MAX_TAG_FILE_BYTES, label="tag manifest"
@@ -831,15 +884,8 @@ def _require_bag_tags(path: Path, self_contained: bool) -> None:
         raise EvidenceResolutionError("archive tag manifest is not canonical")
 
 
-def _bag_tag_names(self_contained: bool) -> tuple[str, ...]:
-    embedded = ("compile-receipt.md",) if self_contained else ()
-    return (
-        "archive-manifest.json",
-        "bag-info.txt",
-        "bagit.txt",
-        *embedded,
-        "manifest-sha256.txt",
-    )
+def _bag_tag_names(receipt_names: list[str]) -> tuple[str, ...]:
+    return ("archive-manifest.json", "bag-info.txt", "bagit.txt", *receipt_names, "manifest-sha256.txt")
 
 
 def _canonical_tag_manifest(expected_tags: Mapping[str, str]) -> bytes:
@@ -929,6 +975,12 @@ def _require_bag_immutable(
 # 2026-08-24, and that is why every page compiled from a split day carried
 # evidence no reader could resolve.
 MAX_DAILY_PART_BYTES = 16 * 1024
+
+# How many parts a bounded day can split into. A part may be one short entry cut
+# off by a long one, but two neighbours always hold more than one part's bytes,
+# so the count stays under two per MAX_DAILY_PART_BYTES of the day. The archive
+# manifest v2 schema carries the same number as its `maxItems`.
+MAX_COMPILE_PARTS = 2 * (MAX_DAILY_BYTES // MAX_DAILY_PART_BYTES) + 1
 
 # What separates one captured entry from the next in a daily log.
 _DAILY_ENTRY_MARKER = b"<!-- llm-wiki-operation:"
@@ -1105,7 +1157,9 @@ class EvidenceResolver:
             reason = "not found" if not matches else "ambiguous"
             raise EvidenceResolutionError(f"archive evidence source is {reason}")
         bag = matches[0]
-        return self._slice(ref, bag.payload, bag.payload_path, "archive")
+        source = _referenced_source(bag.payload, ref)
+        assert source is not None
+        return self._slice(ref, source, bag.payload_path, "archive")
 
     def _archive_matches(self, month: Path, ref: EvidenceRef) -> list[ValidatedBag]:
         """Every sealed bag in the month that carries the day this reference names."""
@@ -1190,26 +1244,40 @@ def _require_utf8(content: bytes, message: str) -> None:
 
 
 def _sole_block_span(content: bytes, ref: EvidenceRef) -> tuple[int, int]:
-    """The one entry this reference names, and proof the span sits inside it."""
-    matching = [item for item in daily_entries(content) if item[0] == ref.block_id]
+    """The one entry with this id that holds the reference's span.
+
+    Two entries written in one second share an id; entries never overlap, so the
+    span picks exactly one of them, as the compiler's quote did. Refusing every
+    repeated id stopped the compile of a whole day and every day after it
+    (docs/research/2026-09-26-an-evidence-span-names-its-own-block.md).
+    """
+    matching = [
+        (start, end)
+        for block_id, start, end in daily_entries(content)
+        if block_id == ref.block_id and _span_inside(ref, start, end)
+    ]
     if len(matching) != 1:
         raise EvidenceResolutionError("evidence block is ambiguous or missing")
-    _block_id, block_start, block_end = matching[0]
-    _require_span_inside_block(ref, block_start, block_end)
-    return block_start, block_end
+    return matching[0]
 
 
-def _require_span_inside_block(ref: EvidenceRef, start: int, end: int) -> None:
-    if ref.byte_start < start or ref.byte_end > end:
-        raise EvidenceResolutionError("evidence span is outside its block")
+def _span_inside(ref: EvidenceRef, start: int, end: int) -> bool:
+    return start <= ref.byte_start and ref.byte_end <= end
 
 
 def _bag_matches(bag: ValidatedBag, ref: EvidenceRef) -> bool:
     if bag.manifest["logical_daily_id"] != ref.daily_id:
         return False
-    if bag.manifest["source_hash"] != ref.source_sha256:
+    if _referenced_source(bag.payload, ref) is None:
         raise EvidenceResolutionError("archive daily source hash mismatch")
     return True
+
+
+def _referenced_source(payload: bytes, ref: EvidenceRef) -> bytes | None:
+    """The whole day, or the compile part a page quoted from (audit 2026-09-26 B-1)."""
+    if sha256_bytes(payload) == ref.source_sha256:
+        return payload
+    return compile_part_slice(payload, ref.source_sha256)
 
 
 def extract_evidence_references(text: str) -> list[EvidenceRef]:
@@ -1234,16 +1302,60 @@ def _line_references(line: str) -> list[EvidenceRef]:
         references.append(_parsed_reference(candidate))
 
 
+def evidence_candidates(text: str) -> list[EvidenceRef | str]:
+    """Every reference a reader can resolve, and a named reason for each it cannot.
+
+    `extract_evidence_references` refuses the whole text on the first malformed
+    candidate, which is right for a writer; a page that mentions `daily:` in prose
+    lost all its evidence and was refused as a whole (audit 2026-09-26 B-17,
+    docs/research/2026-09-26-a-page-is-read-past-one-bad-reference.md).
+    """
+    if not isinstance(text, str):
+        raise TypeError("evidence source text must be a string")
+    candidates: list[EvidenceRef | str] = []
+    for line in text.splitlines():
+        candidates.extend(_line_candidates(line))
+    return candidates
+
+
+def _line_candidates(line: str) -> list[EvidenceRef | str]:
+    candidates: list[EvidenceRef | str] = []
+    cursor = line.find("daily:")
+    while cursor >= 0:
+        candidate, cursor = _one_candidate(line, cursor)
+        candidates.extend(candidate)
+        cursor = line.find("daily:", cursor)
+    return candidates
+
+
+def _one_candidate(line: str, start: int) -> tuple[list[EvidenceRef | str], int]:
+    """The candidate at `start` and where to look next; a word that only ends in `daily:` is none."""
+    if start and (line[start - 1].isalnum() or line[start - 1] == "_"):
+        return [], start + len("daily:")
+    try:
+        candidate, cursor = _reference_candidate(line, start)
+        return [_parsed_reference(candidate)], cursor
+    except ValueError as exc:
+        return [str(exc)[:200]], start + len("daily:")
+
+
 def _require_reference_prefix(line: str, start: int) -> None:
     if start and (line[start - 1].isalnum() or line[start - 1] == "_"):
         raise ValueError("evidence reference has an invalid prefix")
 
 
+# A reference opened by one of these ends at the next of the same, not at the
+# line: backticks in prose, quotation marks in the `## Claims` JSON block. See
+# `docs/research/2026-09-25-a-quoted-reference-ends-at-its-quote.md`.
+_REFERENCE_DELIMITERS = frozenset({"`", '"'})
+
+
 def _reference_candidate(line: str, start: int) -> tuple[str, int]:
-    """A backtick-quoted reference ends at its closing backtick, not at the line."""
-    if start == 0 or line[start - 1] != "`":
+    """A delimited reference ends at its closing delimiter; an open one at the line."""
+    opener = line[start - 1] if start else ""
+    if opener not in _REFERENCE_DELIMITERS:
         return line[start:].strip(), len(line)
-    end = line.find("`", start)
+    end = line.find(opener, start)
     if end < 0:
         raise ValueError("evidence reference has no closing delimiter")
     return line[start:end], end + 1

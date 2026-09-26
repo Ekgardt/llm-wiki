@@ -122,11 +122,9 @@ def test_freshness_ignores_old_or_missing_legacy_index(tmp_path):
     stale = build_envelope({}, root=tmp_path, now=now)
     unknown = build_envelope({}, root=tmp_path / "missing", now=now)
 
-    assert stale["freshness"] == "unknown"
-    assert unknown["freshness"] == "unknown"
-    assert unknown["index_timestamp"] is None
-    assert stale["components"] == {}
-    assert unknown["components"] == {}
+    observed = (stale["freshness"], unknown["freshness"], unknown["index_timestamp"])
+    assert observed == ("unknown", "unknown", None)
+    assert (stale["components"], unknown["components"]) == ({}, {})
 
 
 @pytest.mark.parametrize(
@@ -139,7 +137,7 @@ def test_freshness_ignores_old_or_missing_legacy_index(tmp_path):
 def test_source_commit_failures_are_local_warnings(tmp_path, monkeypatch, failure):
     import mcp_contract
 
-    mcp_contract._source_commit.cache_clear()
+    mcp_contract._SOURCE_COMMITS.clear()
 
     def fail(*args, **kwargs):
         raise failure
@@ -155,7 +153,7 @@ def test_source_commit_failures_are_local_warnings(tmp_path, monkeypatch, failur
 def test_source_commit_nonzero_exit_is_a_local_warning(tmp_path, monkeypatch):
     import mcp_contract
 
-    mcp_contract._source_commit.cache_clear()
+    mcp_contract._SOURCE_COMMITS.clear()
     monkeypatch.setattr(
         mcp_contract.subprocess,
         "run",
@@ -196,33 +194,53 @@ def test_legacy_index_timestamp_is_not_read(
     assert not any("index" in warning.lower() for warning in envelope["warnings"])
 
 
-def test_envelope_schema_declares_every_field_type_and_numeric_bounds():
+_SCALAR_FIELD_TYPES = {
+    "schema_version": "string",
+    "generated_at": "string",
+    "index_timestamp": ["string", "null"],
+    "source_commit": ["string", "null"],
+    "freshness": "string",
+    "fallback": "boolean",
+    "partial": "boolean",
+}
+
+
+def _value_types(envelope: dict) -> dict:
+    return {
+        "schema_version": type(envelope["schema_version"]),
+        "generated_at": type(envelope["generated_at"]),
+        "coverage": type(envelope["coverage"]),
+        "confidence": type(envelope["confidence"]),
+        "fallback": type(envelope["fallback"]),
+        "partial": type(envelope["partial"]),
+        "warnings": type(envelope["warnings"]),
+        "components": type(envelope["components"]),
+    }
+
+
+def _schema_properties() -> tuple[dict, dict]:
     from mcp_contract import envelope_schema
 
     schema = envelope_schema()
-    properties = schema["properties"]
+    return schema, schema["properties"]
 
-    assert set(schema["required"]) == MANDATORY_FIELDS
-    assert schema["additionalProperties"] is False
-    assert properties["schema_version"]["type"] == "string"
-    assert properties["generated_at"]["type"] == "string"
-    assert properties["generated_at"]["format"] == "date-time"
-    assert properties["index_timestamp"]["type"] == ["string", "null"]
-    assert properties["source_commit"]["type"] == ["string", "null"]
-    assert properties["freshness"]["type"] == "string"
-    assert set(properties["freshness"]["enum"]) == {"fresh", "stale", "unknown"}
-    for field in ("coverage", "confidence"):
-        assert properties[field] == {
-            "type": "number",
-            "minimum": 0,
-            "maximum": 1,
-        }
-    assert properties["fallback"]["type"] == "boolean"
-    assert properties["partial"]["type"] == "boolean"
-    assert properties["warnings"] == {
-        "type": "array",
-        "items": {"type": "string"},
-    }
+
+def test_envelope_schema_declares_every_field_type():
+    schema, properties = _schema_properties()
+
+    assert (set(schema["required"]), schema["additionalProperties"]) == (MANDATORY_FIELDS, False)
+    assert {name: properties[name]["type"] for name in _SCALAR_FIELD_TYPES} == _SCALAR_FIELD_TYPES
+    assert (properties["generated_at"]["format"], set(properties["freshness"]["enum"])) == (
+        "date-time",
+        {"fresh", "stale", "unknown"},
+    )
+
+
+def test_envelope_schema_declares_numeric_bounds_and_nested_shapes():
+    _schema, properties = _schema_properties()
+    bounded = {"type": "number", "minimum": 0, "maximum": 1}
+    assert (properties["coverage"], properties["confidence"]) == (bounded, bounded)
+    assert properties["warnings"] == {"type": "array", "items": {"type": "string"}}
     assert properties["components"]["additionalProperties"] == {
         "type": "object",
         "properties": {
@@ -238,10 +256,10 @@ def test_envelope_schema_declares_every_field_type_and_numeric_bounds():
     assert properties["data"] == {}
 
 
-def test_built_envelope_values_match_declared_types_and_bounds(tmp_path):
+def _built_envelope(tmp_path) -> dict:
     from mcp_contract import build_envelope
 
-    envelope = build_envelope(
+    return build_envelope(
         {"result": True},
         root=tmp_path,
         coverage=0.25,
@@ -251,25 +269,30 @@ def test_built_envelope_values_match_declared_types_and_bounds(tmp_path):
         warnings=["degraded"],
     )
 
-    assert isinstance(envelope["schema_version"], str)
-    assert isinstance(envelope["generated_at"], str)
-    assert envelope["index_timestamp"] is None or isinstance(
-        envelope["index_timestamp"], str
-    )
-    assert envelope["source_commit"] is None or isinstance(
-        envelope["source_commit"], str
-    )
+
+def test_built_envelope_values_match_declared_types(tmp_path):
+    envelope = _built_envelope(tmp_path)
+
+    assert _value_types(envelope) == {
+        "schema_version": str,
+        "generated_at": str,
+        "coverage": float,
+        "confidence": float,
+        "fallback": bool,
+        "partial": bool,
+        "warnings": list,
+        "components": dict,
+    }
+    optional = {type(envelope["index_timestamp"]), type(envelope["source_commit"])}
+    assert optional <= {str, type(None)}
+
+
+def test_built_envelope_values_keep_their_bounds(tmp_path):
+    envelope = _built_envelope(tmp_path)
+
+    assert (envelope["coverage"], envelope["confidence"]) == (0.25, 0.75)
     assert envelope["freshness"] in {"fresh", "stale", "unknown"}
-    assert isinstance(envelope["coverage"], float)
-    assert 0 <= envelope["coverage"] <= 1
-    assert isinstance(envelope["confidence"], float)
-    assert 0 <= envelope["confidence"] <= 1
-    assert isinstance(envelope["fallback"], bool)
-    assert isinstance(envelope["partial"], bool)
-    assert isinstance(envelope["warnings"], list)
-    assert isinstance(envelope["components"], dict)
-    assert all(isinstance(warning, str) for warning in envelope["warnings"])
-    assert envelope["data"] == {"result": True}
+    assert ({type(item) for item in envelope["warnings"]}, envelope["data"]) == ({str}, {"result": True})
 
 
 def test_non_finite_data_is_normalized_to_strict_json_null(tmp_path):

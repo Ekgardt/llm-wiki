@@ -85,7 +85,7 @@ def _pwsh_bootstrap(target: Path, url: str, commit: str) -> int:
 
 def _followed(bootstrap, upstream: Path, target: Path, monkeypatch) -> tuple:
     """Pin the second commit, publish a third, and ask the nightly update what it did."""
-    monkeypatch.setattr(self_update, "_synced_dependencies", lambda _root: True)
+    monkeypatch.setattr(self_update, "_synced_dependencies", lambda _root, _extras: True)
     pinned = _commit(upstream, "two")
     code = bootstrap(target, upstream.as_uri(), pinned)
     installed = _git(target, "rev-parse", "HEAD")
@@ -106,7 +106,7 @@ def test_the_windows_installer_follows_the_same_way(upstream, tmp_path, monkeypa
 
 @needs_bash
 def test_a_pin_outside_the_default_branch_is_left_where_it_is(upstream, tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(self_update, "_synced_dependencies", lambda _root: True)
+    monkeypatch.setattr(self_update, "_synced_dependencies", lambda _root, _extras: True)
     _git(upstream, "checkout", "-q", "-b", "side")
     pinned = _commit(upstream, "aside")
     _git(upstream, "checkout", "-q", "main")

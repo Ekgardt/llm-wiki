@@ -1001,7 +1001,7 @@ def test_initial_bootstrap_publishes_candidate_lease_and_refreshes_heartbeat(
                     _command("--lifecycle", "--bootstrap-handshake"),
                     cwd=tmp_path,
                     owner_root=tmp_path / OWNER_NONCE,
-                    deadline=time.monotonic() + 3,
+                    deadline=time.monotonic() + SHORT_TIMEOUT,
                     server_request_handlers={
                         "workspace/configuration": lambda _params: True
                     },
@@ -1235,7 +1235,7 @@ def test_transparent_restart_bootstraps_fresh_generation_before_request_replay(
         assert process.state is ProcessState.PROTOCOL_INITIALIZED
 
         result = process.request(
-            "initialized/query", {"retry": True}, deadline=time.monotonic() + 5
+            "initialized/query", {"retry": True}, deadline=time.monotonic() + SHORT_TIMEOUT
         )
 
         assert result["initialized"] is True
@@ -1549,7 +1549,7 @@ def test_generation_guard_wraps_each_autonomous_generation_without_transition_lo
     first_nonce = process.generation_nonce
     try:
         assert process.request(
-            "initialized/query", {}, deadline=time.monotonic() + 5
+            "initialized/query", {}, deadline=time.monotonic() + SHORT_TIMEOUT
         )["initialized"] is True
         second_nonce = process.generation_nonce
 
@@ -2312,7 +2312,7 @@ def test_restart_bootstrap_failure_is_terminal_and_never_replays_request(
         ProtocolViolation,
         match="^LSP replacement startup failed$",
     ) as raised:
-        process.request("initialized/query", {}, deadline=time.monotonic() + 5)
+        process.request("initialized/query", {}, deadline=time.monotonic() + SHORT_TIMEOUT)
 
     assert isinstance(raised.value.__cause__, RuntimeError)
     assert str(raised.value.__cause__) == "LSP replacement startup cause (RuntimeError)"
@@ -2562,7 +2562,6 @@ def test_caller_restart_failure_keeps_deadline_and_retains_cleanup_owner(
     process = _start(tmp_path, "--lifecycle", "--sleep-seconds", "30")
     coordinator = process._coordinator
     recovery = coordinator.recovery_thread
-    assert recovery is not None
     write_failure_record = lsp_process._write_failure_record
     terminate = lsp_process.ProcessTree.terminate
     evidence_started = threading.Event()
@@ -2620,36 +2619,49 @@ def test_caller_restart_failure_keeps_deadline_and_retains_cleanup_owner(
     caller = threading.Thread(target=restart)
     caller.start()
     try:
-        assert evidence_started.wait(LONG_TIMEOUT)
-        assert cleanup_started.wait(LONG_TIMEOUT)
-        assert caller_finished.wait(SHORT_TIMEOUT)
-        assert not caller.is_alive()
-        assert len(restart_errors) == 1
-        assert type(restart_errors[0]) is OSError
-        assert str(restart_errors[0]) == "caller restart candidate failed"
-        assert restart_elapsed[0] < 20
-        assert cleanup_threads[0] is caller
-        assert cleanup_deadlines[0] == caller_deadline
+        waited = (
+            evidence_started.wait(LONG_TIMEOUT),
+            cleanup_started.wait(LONG_TIMEOUT),
+            caller_finished.wait(SHORT_TIMEOUT),
+        )
+        # The event is set in the thread's `finally`, just before it leaves `run()`.
+        caller.join(SHORT_TIMEOUT)
+        assert (recovery is not None, waited, caller.is_alive(), [type(error) for error in restart_errors]) == (
+            True, (True, True, True), False, [OSError],
+        )
+        assert (
+            str(restart_errors[0]),
+            restart_elapsed[0] < 20,
+            cleanup_threads[0] is caller,
+            cleanup_deadlines[0] == caller_deadline,
+        ) == ("caller restart candidate failed", True, True, True)
 
-        assert autonomous_cleanup_started.wait(LONG_TIMEOUT)
-        assert recovery in cleanup_threads[1:]
-        assert recovery.is_alive()
-        assert lsp_process._coordinator_has_ownership(coordinator)
+        assert (
+            autonomous_cleanup_started.wait(LONG_TIMEOUT),
+            recovery in cleanup_threads[1:],
+            recovery.is_alive(),
+            lsp_process._coordinator_has_ownership(coordinator),
+        ) == (True, True, True, True)
 
         allow_autonomous_cleanup.set()
-        assert _coordinator_wait(
+        stopped = _coordinator_wait(
             process,
             lambda: coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE,
             timeout=120,
         )
         recovery.join(LONG_TIMEOUT)
-        assert not recovery.is_alive()
-        assert not lsp_process._coordinator_has_ownership(coordinator)
+        assert (stopped, recovery.is_alive(), lsp_process._coordinator_has_ownership(coordinator)) == (
+            True, False, False,
+        )
     finally:
-        allow_autonomous_cleanup.set()
-        caller.join(LONG_TIMEOUT)
-        if lsp_process._coordinator_has_ownership(coordinator):
-            process.close(time.monotonic() + 120)
+        _release_restart_caller(process, coordinator, caller, allow_autonomous_cleanup)
+
+
+def _release_restart_caller(process, coordinator, caller, allow_autonomous_cleanup) -> None:
+    allow_autonomous_cleanup.set()
+    caller.join(LONG_TIMEOUT)
+    if lsp_process._coordinator_has_ownership(coordinator):
+        process.close(time.monotonic() + 120)
 
 
 def test_concurrent_autonomous_fatals_bootstrap_only_one_replacement(
@@ -3540,14 +3552,17 @@ def test_live_lease_is_bounded_redacted_and_removed_after_graceful_close(
     lease_path = process.owner_root / "lease.json"
     lease = json.loads(lease_path.read_bytes())
 
+    # The start identities name who a pid meant, so a reused pid reads as dead (C-39).
     assert set(lease) == {
         "expires_at",
         "generation_nonce",
         "heartbeat_at",
         "manager_pid",
+        "manager_start_identity",
         "owner_nonce",
         "schema_version",
         "server_pid",
+        "server_start_identity",
         "state",
     }
     assert lease["manager_pid"] == os.getpid()
@@ -3699,7 +3714,7 @@ def test_request_after_shutdown_cannot_restart_terminal_process(tmp_path: Path) 
     process.shutdown(time.monotonic() + 5)
 
     with pytest.raises(RuntimeError, match="LSP process is closed"):
-        process.request("echo", {}, deadline=time.monotonic() + 5)
+        process.request("echo", {}, deadline=time.monotonic() + SHORT_TIMEOUT)
     assert process.process.pid == pid
     assert process.generation_nonce == generation
     assert process.restart_count == 0
@@ -3926,7 +3941,7 @@ def test_fatal_request_restarts_once_with_fresh_generation(tmp_path: Path) -> No
     process = _start(tmp_path, "--lifecycle", "--crash-once-marker", str(marker))
     first_generation = process.generation_nonce
 
-    assert process.request("echo", {"ok": True}, deadline=time.monotonic() + 5) == {
+    assert process.request("echo", {"ok": True}, deadline=time.monotonic() + SHORT_TIMEOUT) == {
         "ok": True
     }
     assert process.restart_count == 1
@@ -3978,7 +3993,7 @@ def test_second_fatal_failure_is_terminal_and_retains_bounded_evidence(
 
     try:
         with pytest.raises(ProtocolViolation):
-            process.request("echo", {}, deadline=time.monotonic() + 5)
+            process.request("echo", {}, deadline=time.monotonic() + SHORT_TIMEOUT)
 
         assert _coordinator_wait(
             process,
@@ -4321,7 +4336,7 @@ def test_fatal_endings_leave_no_real_descendants_after_leader_exit(
 
     if ending == "crash":
         with pytest.raises(ProtocolViolation):
-            process.request("ending", {}, deadline=time.monotonic() + 5)
+            process.request("ending", {}, deadline=time.monotonic() + SHORT_TIMEOUT)
         _await_settled_failure(process)
     else:
         with pytest.raises(TimeoutError):
@@ -4548,7 +4563,7 @@ def test_environment_requires_inherited_systemroot_on_windows() -> None:
 def test_child_receives_only_the_allowlisted_environment(tmp_path: Path) -> None:
     process = _start(tmp_path, "--report-environment")
     _expect_active_generation_exit(process)
-    environment = process.request("environment", {}, deadline=time.monotonic() + 5)
+    environment = process.request("environment", {}, deadline=time.monotonic() + SHORT_TIMEOUT)
     assert isinstance(environment, dict)
     # CoreFoundation adds `__CF_USER_TEXT_ENCODING` to a macOS process itself,
     # after exec and outside the environment the parent passed.
@@ -4707,6 +4722,7 @@ def test_owner_json_is_canonical_redacted_restricted_and_has_only_schema(
         "generation_nonce",
         "owner_nonce",
         "owner_pid",
+        "owner_start_identity",
         "started_at",
         "state",
     }
@@ -4825,7 +4841,7 @@ def test_exit_monitor_fails_all_pending_once_and_marks_failed(tmp_path: Path) ->
         "process_exited"
     )
     with pytest.raises(RuntimeError, match="exited"):
-        process.request("later", {}, deadline=time.monotonic() + 1)
+        process.request("later", {}, deadline=time.monotonic() + SHORT_TIMEOUT)
     process.close(time.monotonic() + 5)
 
 
@@ -6838,7 +6854,7 @@ def test_windows_200_crash_restarts_with_children_have_no_false_failure_or_leaks
         try:
             handles.append(open_identity(wait_for_pid_line(len(before))))
             assert process.request(
-                "echo", {"cycle": index}, deadline=time.monotonic() + 10
+                "echo", {"cycle": index}, deadline=time.monotonic() + SHORT_TIMEOUT
             ) == {"cycle": index}
             handles.append(open_identity(wait_for_pid_line(len(before) + 1)))
             assert process.restart_count == 1
@@ -6933,6 +6949,10 @@ def test_posix_scratch_parent_sync_failure_is_retryable_after_directory_removal(
     tmp_path: Path,
 ) -> None:
     class PosixOperations:
+        @staticmethod
+        def listdir(_descriptor: int) -> list[str]:
+            return []
+
         name = "posix"
 
         def __init__(self) -> None:
@@ -7007,6 +7027,10 @@ def test_posix_success_scratch_never_deletes_replacement_owner_directory(
     replacement_deleted = False
 
     class PosixOperations:
+        @staticmethod
+        def listdir(_descriptor: int) -> list[str]:
+            return []
+
         name = "posix"
 
         @staticmethod
@@ -7283,7 +7307,7 @@ def test_fatal_intent_survives_transition_lock_contention_and_recovers_once(
     callback.join(_BARRIER_SECONDS)
 
     assert _coordinator_wait(process, lambda: process.restart_count == 1)
-    assert process.request("echo", {"ok": True}, deadline=time.monotonic() + 3) == {
+    assert process.request("echo", {"ok": True}, deadline=time.monotonic() + SHORT_TIMEOUT) == {
         "ok": True
     }
     assert process.restart_count == 1
@@ -8929,7 +8953,7 @@ def test_caller_json_violation_never_restarts_and_valid_follow_up_works(
         )
 
     assert process.restart_count == 0
-    assert process.request("echo", {"valid": True}, deadline=time.monotonic() + 2) == {
+    assert process.request("echo", {"valid": True}, deadline=time.monotonic() + SHORT_TIMEOUT) == {
         "valid": True
     }
     process.close(time.monotonic() + 5)
@@ -8980,7 +9004,7 @@ def test_caller_json_violation_is_not_retried_after_concurrent_restart(
     assert isinstance(request_errors[0], ProtocolViolation)
     assert attempts == 1
     assert process.restart_count == 1
-    assert process.request("echo", {"valid": True}, deadline=time.monotonic() + 2) == {
+    assert process.request("echo", {"valid": True}, deadline=time.monotonic() + SHORT_TIMEOUT) == {
         "valid": True
     }
     process.close(time.monotonic() + 5)

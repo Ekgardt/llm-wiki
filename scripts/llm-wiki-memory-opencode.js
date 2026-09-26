@@ -1,7 +1,5 @@
 /** Thin OpenCode lifecycle adapter for the shared LLM-Wiki Python pipeline. */
 
-import path from "node:path";
-
 // The installer rewrites the marked line with the vault root it installed. A
 // checkout keeps the null, so the public source never claims to be a vault.
 // An OpenCode started from a desktop launcher inherits no shell environment,
@@ -32,8 +30,10 @@ function asObject(value) {
   return null;
 }
 
+// `session.created` sends `{ info: Session }`; `session.idle` and the hooks send
+// `sessionID` (OpenCode SDK types, checked 2026-09-25).
 function sessionId(input) {
-  const candidates = [input?.sessionInfo?.id, input?.sessionID, input?.sessionId];
+  const candidates = [input?.info?.id, input?.sessionInfo?.id, input?.sessionID, input?.sessionId];
   return candidates.find(isText) || null;
 }
 
@@ -75,19 +75,8 @@ function isUserMessage(output) {
 export const LlmWikiMemoryPlugin = async ({ client, directory }) => {
   const sessionContexts = new Map();
   const dirtySessions = new Set();
+  const forwardedTranscripts = new Map();
   const workingDirectory = () => (typeof directory === "string" ? directory : null);
-  const comparablePath = (value) => {
-    if (!isText(value)) return null;
-    const resolved = path.resolve(value);
-    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
-  };
-
-  const isVault = () => {
-    const dir = comparablePath(directory);
-    const root = comparablePath(_LLM_WIKI_ROOT);
-    if (!dir || !root) return false;
-    return dir === root || dir.startsWith(`${root}${path.sep}`);
-  };
 
   async function settleWithin(promise, fallback = null) {
     let timer;
@@ -166,7 +155,9 @@ export const LlmWikiMemoryPlugin = async ({ client, directory }) => {
 
   async function forwardLifecycle(event, input) {
     const payload = lifecyclePayload(input);
-    if (!_LLM_WIKI_ROOT || isVault() || payload === null) return null;
+    // Events from inside the vault are captured too; the adapter filters the
+    // memory's own processes by its reentry marker (2026-09-25).
+    if (!_LLM_WIKI_ROOT || payload === null) return null;
     const stdout = await runCapture(
       ["uv", "run", "--locked", "--no-sync", "--directory", _LLM_WIKI_ROOT, "python",
         `${SCRIPTS}/integration_adapter.py`, "--source", "opencode", "--event", event],
@@ -208,9 +199,23 @@ export const LlmWikiMemoryPlugin = async ({ client, directory }) => {
     rememberContext(sessionId(input), result?.context);
   }
 
+  function alreadyForwarded(id, transcriptText) {
+    if (!id || forwardedTranscripts.get(id) !== transcriptText) return false;
+    return true;
+  }
+
+  function rememberForwarded(id, transcriptText) {
+    if (!id) return;
+    forwardedTranscripts.set(id, transcriptText);
+    if (forwardedTranscripts.size > 32) forwardedTranscripts.delete(forwardedTranscripts.keys().next().value);
+  }
+
   async function handleSessionIdle(input) {
     const id = sessionId(input);
     const transcriptText = await collectTranscript(input);
+    // An idle with nothing new since the last one is not a second capture.
+    if (alreadyForwarded(id, transcriptText)) return;
+    rememberForwarded(id, transcriptText);
     await forwardLifecycle("session_end", {
       ...(input || {}),
       checkpoint_type: "session_idle",

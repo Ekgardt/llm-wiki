@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.slow_machine import LONG_TIMEOUT
+from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 DOCTOR = SCRIPTS / "doctor.py"
@@ -400,6 +400,7 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path, monkeypatch
         "generation",
         "scheduler",
         "capture",
+        "tools",
         "backup",
         "models",
         "hooks",
@@ -587,7 +588,7 @@ def test_filesystem_health_runs_bounded_probe_and_leaves_no_artifacts(tmp_path, 
     monkeypatch.setattr(reliable_memory, "_known_network_path", lambda path: False)
     monkeypatch.setattr(reliable_memory, "_sqlite_lock_probe", probe)
 
-    check = doctor._filesystem_check(state_root, deadline=time.monotonic() + 1)
+    check = doctor._filesystem_check(state_root, deadline=time.monotonic() + SHORT_TIMEOUT)
 
     assert (
         check["status"],
@@ -1299,7 +1300,7 @@ def test_maintenance_heartbeat_runs_during_long_operation(tmp_path, monkeypatch)
         assert second_beat.wait(timeout=LONG_TIMEOUT)
 
     with doctor._MaintenanceHeartbeat(
-        coordinator, lease, deadline=time.monotonic() + 180
+        coordinator, lease, deadline=time.monotonic() + SHORT_TIMEOUT
     ) as guard:
         guard.run(wait_for_two_heartbeats)
 
@@ -1319,7 +1320,7 @@ def test_a_busy_database_is_not_a_lost_fence(tmp_path, monkeypatch):
     assert acquired is not None
     coordinator, lease = acquired
     guard = doctor._MaintenanceHeartbeat(
-        coordinator, lease, deadline=time.monotonic() + 60
+        coordinator, lease, deadline=time.monotonic() + SHORT_TIMEOUT
     )
 
     monkeypatch.setattr(
@@ -1791,7 +1792,7 @@ def test_doctor_reports_missing_pyright(tmp_path, monkeypatch) -> None:
         "pyright_profile.discover_pyright",
         lambda *a, **k: _missing_pyright_identity(),
     )
-    check = doctor._pyright_check(tmp_path, tmp_path, deadline=time.monotonic() + 10)
+    check = doctor._pyright_check(tmp_path, tmp_path, deadline=time.monotonic() + SHORT_TIMEOUT)
     assert check["status"] == "degraded"
     assert check["details"]["status"] == "missing"
     assert check["details"]["codes"] == ["pyright_missing"]
@@ -1928,7 +1929,7 @@ def test_doctor_pyright_reports_exact_degradation_codes_and_fields(tmp_path, mon
         lambda repository, **kwargs: identity,
     )
 
-    check = doctor._pyright_check(tmp_path, tmp_path, deadline=time.monotonic() + 10)
+    check = doctor._pyright_check(tmp_path, tmp_path, deadline=time.monotonic() + SHORT_TIMEOUT)
 
     assert check["status"] == "degraded"
     assert check["details"] == {
@@ -1974,7 +1975,7 @@ def test_doctor_pyright_reports_unsafe_scope_separately(tmp_path, monkeypatch) -
 
     monkeypatch.setattr("repository_scope.resolve_repository_scope", resolve)
 
-    check = doctor._pyright_check(tmp_path, tmp_path, deadline=time.monotonic() + 10)
+    check = doctor._pyright_check(tmp_path, tmp_path, deadline=time.monotonic() + SHORT_TIMEOUT)
 
     assert check["status"] == "degraded"
     assert check["details"]["status"] == "unsafe"
@@ -1993,7 +1994,7 @@ def test_doctor_pyright_reports_unsafe_managed_discovery_separately(tmp_path, mo
 
     monkeypatch.setattr("pyright_profile.discover_pyright", discover)
 
-    check = doctor._pyright_check(tmp_path, tmp_path, deadline=time.monotonic() + 10)
+    check = doctor._pyright_check(tmp_path, tmp_path, deadline=time.monotonic() + SHORT_TIMEOUT)
 
     assert check["status"] == "degraded"
     assert check["details"]["status"] == "unsafe"
@@ -2121,7 +2122,7 @@ def test_doctor_reports_mismatched_pyright(tmp_path, monkeypatch) -> None:
         "pyright_profile.discover_pyright",
         lambda *a, **k: _mismatched_pyright_identity(),
     )
-    check = doctor._pyright_check(tmp_path, tmp_path, deadline=time.monotonic() + 10)
+    check = doctor._pyright_check(tmp_path, tmp_path, deadline=time.monotonic() + SHORT_TIMEOUT)
     assert check["status"] == "degraded"
     assert "pyright_version_mismatch" in check["details"]["codes"]
 
@@ -2358,7 +2359,7 @@ def test_doctor_lsp_path_swap_reads_only_retained_tree(tmp_path, monkeypatch) ->
     check = doctor._lsp_runtime_check(
         state_root,
         now,
-        deadline=time.monotonic() + 10,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
     assert [owner["owner_nonce"] for owner in check["details"]["owners"]] == [old_nonce]
@@ -2392,7 +2393,7 @@ def test_doctor_lsp_production_live_lease_blocks_deletion(tmp_path, monkeypatch)
         lambda pid: "alive" if pid in {1111, 2222} else "dead",
     )
 
-    check = doctor._lsp_runtime_check(tmp_path, now, deadline=time.monotonic() + 10)
+    check = doctor._lsp_runtime_check(tmp_path, now, deadline=time.monotonic() + SHORT_TIMEOUT)
     deletion = doctor._run_deletion_check(tmp_path, now, collected={"lsp": check})
 
     assert (
@@ -2475,7 +2476,7 @@ def test_doctor_lsp_unknown_pid_probe_fails_closed(tmp_path, monkeypatch) -> Non
         raising=False,
     )
 
-    check = doctor._lsp_runtime_check(tmp_path, now, deadline=time.monotonic() + 10)
+    check = doctor._lsp_runtime_check(tmp_path, now, deadline=time.monotonic() + SHORT_TIMEOUT)
     deletion = doctor._run_deletion_check(tmp_path, now, collected={"lsp": check})
 
     assert "lsp_owner_live" not in check["details"]["codes"]

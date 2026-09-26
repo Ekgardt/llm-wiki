@@ -1,20 +1,18 @@
-"""Helper for OpenCode plugin: append a pre-built block to today's daily log.
+"""Append to the daily log under its lock: the one writer every capture path shares.
 
-Reads JSON from stdin: {"slug": "...", "sessionId": "...", "block": "..."}
-Appends `block` to $LLM_WIKI_ROOT/knowledge/daily/<date>.md.
+`locked_append` and `locked_append_once` add a block to a day's log with an
+operation marker, so a retry finds the block instead of writing it twice;
+`append_daily` files a block under the day it belongs to. The capture hooks, the
+queue worker, the MCP server and episode consolidation all write through here.
 
-Why this exists: the OpenCode plugin does LLM work in JS (via OpenCode SDK),
-then needs to write the result to a markdown file. Calling Python for the
-file I/O keeps path handling cross-platform and reuses the canonical
-daily-log location without re-implementing it in JS.
-
-Never fails — always exits 0. Errors go to stderr.
+The module had a command line for an OpenCode plugin that stopped calling it on
+2026-07-13; it was retired on 2026-09-25
+(docs/research/2026-09-25-the-plugin-helpers-nothing-calls-are-retired.md).
 """
 from __future__ import annotations
 
 import hashlib
 import io
-import json
 import os
 import sys
 import time
@@ -37,7 +35,9 @@ from secret_redact import redact_secrets  # noqa: E402
 # hooks get 5 seconds, the session-end hook 15 (its delegate 10). A writer with
 # no deadline retried until it was killed and left no reason. See
 # `docs/research/2026-09-17-every-hook-writer-gives-up-before-its-host-does.md`.
-BREADCRUMB_APPEND_BUDGET_SECONDS = 3.0
+# 2.5 s plus 1 s to start the delegate stays under the host's 5 s with room for
+# the adapter itself (audit 2026-09-26 C-1).
+BREADCRUMB_APPEND_BUDGET_SECONDS = 2.5
 LIFECYCLE_APPEND_BUDGET_SECONDS = 7.0
 
 
@@ -191,65 +191,3 @@ def append_daily(
     return path
 
 
-def main() -> int:
-    payload = _stdin_payload()
-    if payload is None:
-        return 0
-    block = payload.get("block") or ""
-    if not block:
-        return 0
-    _append_event(payload, redact_secrets(block))
-    return 0
-
-
-def _stdin_payload() -> dict | None:
-    try:
-        raw = sys.stdin.read()
-        payload = json.loads(raw) if raw.strip() else {}
-    except (json.JSONDecodeError, OSError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    return payload
-
-
-def _append_event(payload: dict, block: str) -> None:
-    try:
-        append_daily(
-            payload.get("slug", ""),
-            payload.get("sessionId", ""),
-            block,
-            operation_id=_event_operation_id(payload),
-        )
-    except Exception as error:  # noqa: BLE001 - the helper's contract is exit 0; the reason is kept
-        report_helper_failure(
-            "daily_log_append", "opencode_daily_append", error, payload.get("sessionId")
-        )
-
-
-def report_helper_failure(
-    helper: str, kind: str, error: BaseException, session_id: object
-) -> None:
-    """The reason on stderr and in the capture-failure trail; never an exit status.
-
-    The plugin helpers say "never fails" and caught `OSError` only, while the
-    writer also raises value, transaction and ownership errors. See
-    `docs/research/2026-09-17-a-helper-that-says-it-never-fails-does-not.md`.
-    """
-    from capture_diagnostics import record_capture_failure
-
-    reason = redact_secrets(f"{type(error).__name__}: {error}")
-    print(f"{helper}: write failed: {reason}", file=sys.stderr)
-    known_session = session_id if isinstance(session_id, str) else None
-    record_capture_failure(kind, reason, error=error, session_id=known_session)
-
-
-def _event_operation_id(payload: dict) -> str | None:
-    event_id = payload.get("eventId") or payload.get("operationId")
-    if isinstance(event_id, str) and event_id:
-        return f"daily-event:{event_id}"
-    return None
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

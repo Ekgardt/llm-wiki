@@ -133,12 +133,19 @@ def test_anchor_rejects_non_integer_and_negative_coordinates(value: object) -> N
         document.validate_anchor(line=1, character=value)  # type: ignore[arg-type]
 
 
-def test_anchor_rejects_invalid_lines_offsets_codepoint_splits_and_newline_interior() -> None:
+def test_anchor_rejects_invalid_lines_and_codepoint_splits() -> None:
     document = SourceDocument.from_bytes("example.py", "a😀\r\nnext".encode())
 
-    for line, character in ((0, 0), (3, 0), (1, 6), (1, 2)):
+    for line, character in ((0, 0), (3, 0), (1, 2)):
         with pytest.raises(ValueError):
             document.validate_anchor(line=line, character=character)
+
+
+def test_anchor_past_the_line_end_is_the_line_end_not_the_newline() -> None:
+    """The LSP clamp (audit 2026-09-26 C-9): never inside `\r\n`."""
+    document = SourceDocument.from_bytes("example.py", "a😀\r\nnext".encode())
+
+    assert document.validate_anchor(line=1, character=6).byte_offset == 5
 
 
 def test_document_rejects_invalid_utf8() -> None:

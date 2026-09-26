@@ -35,6 +35,14 @@ MAX_STEP_HEAD_BYTES = 8 * 1024
 REPORT_RETENTION_DAYS = 30
 REPORT_RETENTION_FILES = 60
 REPORT_RETENTION_BYTES = 32 * 1024 * 1024
+# Step artifacts live as long as the reports that point at them. Held to the
+# report count (60) they lasted about two nights, and a 30-day report's "full
+# output" pointer led nowhere (audit C-31,
+# docs/research/2026-09-25-a-report-link-outlives-no-report.md). Measured on this
+# vault 2026-09-23..25: 13 to 32 artifacts a day, 60 of them 260 KB; the size
+# bound above still caps the family.
+ARTIFACTS_PER_DAY = 64
+ARTIFACT_RETENTION_FILES = REPORT_RETENTION_DAYS * ARTIFACTS_PER_DAY
 # The scheduler's own logs are appended to for the life of the vault (launchd's
 # StandardOutPath, the cron `>>`) and nothing rotates them, so the family size rule
 # above is their only bound. See
@@ -45,6 +53,9 @@ MAINTENANCE_REPORT_PATTERNS = (
     "lint-*.md",
     "scheduled-*.log",
     "cron-*.log",
+    # One file per day of dropped compile candidates, which nothing pruned
+    # (audit 2026-09-26 C-12).
+    "compile-drops-*.jsonl",
 )
 ARTIFACT_PATTERN = "*.log"
 # The files a scheduler redirects a pass into: launchd writes the first pair,
@@ -57,10 +68,16 @@ SCHEDULER_LOG_NAMES = (
     "scheduled-weekly.log",
     "cron-nightly.log",
     "cron-weekly.log",
-    # Appended by every hook that fails; 924 KB on 2026-09-24 with nothing
-    # bounding it. See `docs/research/2026-09-24-every-store-has-a-bound.md`.
-    "hook-errors.log",
 )
+# Appended by every hook that fails, each hook opening, appending and closing on
+# its own (924 KB on 2026-09-24 with nothing bounding it). An in-place trim races
+# those writers — a line appended between reading the tail and truncating is cut
+# off — so this log is rotated instead: renamed to `<name>.1`, replacing the one
+# before, and the next hook creates a fresh file. A hook that opened the old file
+# just before finishes its line there. See
+# `docs/research/2026-09-24-every-store-has-a-bound.md` and
+# `docs/research/2026-09-26-a-log-many-writers-append-to-is-rotated-not-trimmed.md`.
+ROTATED_LOG_NAMES = ("hook-errors.log",)
 SCHEDULER_LOG_KEEP_BYTES = 2 * 1024 * 1024
 
 
@@ -282,7 +299,7 @@ def prune_maintenance_output() -> int:
     removed = sum(
         prune_reports(REPORTS_DIR, pattern) for pattern in MAINTENANCE_REPORT_PATTERNS
     )
-    return removed + prune_reports(ARTIFACT_DIR, ARTIFACT_PATTERN)
+    return removed + prune_reports(ARTIFACT_DIR, ARTIFACT_PATTERN, max_files=ARTIFACT_RETENTION_FILES)
 
 
 def _trim_in_place(path: Path, keep_bytes: int) -> None:
@@ -315,16 +332,37 @@ def _trim_one_scheduler_log(path: Path, keep_bytes: int) -> int:
     return size - keep_bytes
 
 
-def trim_scheduler_logs(keep_bytes: int = SCHEDULER_LOG_KEEP_BYTES) -> int:
-    """Bound the append-only logs a scheduler redirects a pass into.
+def rotated_log_previous(path: Path) -> Path:
+    """Where a rotated log's previous generation lives."""
+    return path.with_name(f"{path.name}.1")
 
-    Returns how many bytes were dropped in total. A log held open with no
-    sharing (Windows) is left exactly as it is.
+
+def _rotate_one_log(path: Path, keep_bytes: int) -> int:
+    """Bytes moved out of the live name; 0 when small enough or cannot be renamed."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return 0
+    if size <= keep_bytes:
+        return 0
+    try:
+        os.replace(path, rotated_log_previous(path))
+    except OSError:
+        return 0
+    return size
+
+
+def trim_scheduler_logs(keep_bytes: int = SCHEDULER_LOG_KEEP_BYTES) -> int:
+    """Bound the append-only logs: trim a scheduler's own, rotate the hooks' one.
+
+    Returns how many bytes were dropped or moved in total. A log held open with
+    no sharing (Windows) is left exactly as it is.
     """
-    return sum(
+    trimmed = sum(
         _trim_one_scheduler_log(REPORTS_DIR / name, keep_bytes)
         for name in SCHEDULER_LOG_NAMES
     )
+    return trimmed + sum(_rotate_one_log(REPORTS_DIR / name, keep_bytes) for name in ROTATED_LOG_NAMES)
 
 
 def wait_for_compile_idle(log_fn) -> None:

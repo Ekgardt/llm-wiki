@@ -10,6 +10,8 @@ or `LLMWIKI_RERANKER_MODEL=off` to run without one.
 """
 from __future__ import annotations
 
+import functools
+import importlib.util
 import math
 import os
 import re
@@ -252,7 +254,26 @@ def _unavailable_reason(
         (profile not in RERANK_PROFILES, "profile_bypass"),
         (len(candidates) <= 1, "tiny_result_set"),
     )
-    return next((reason for failed, reason in checks if failed), None)
+    reason = next((reason for failed, reason in checks if failed), None)
+    if reason is None and not reranker_installed():
+        return "reranker_unavailable"
+    return reason
+
+
+def reranker_installed() -> bool:
+    """A configured reranker whose libraries can be imported and that has not failed to load.
+
+    Without it the stage was still asked for and reported a timeout that never
+    happened (audit 2026-09-26 B-16, docs/research/2026-09-26-a-rerank-is-tried-again.md).
+    """
+    if configured_reranker_identity() is None or _reranker_unavailable_reason is not None:
+        return False
+    return _libraries_importable()
+
+
+@functools.lru_cache(maxsize=1)
+def _libraries_importable() -> bool:
+    return all(importlib.util.find_spec(name) is not None for name in ("torch", "transformers"))
 
 
 def _exact_bypass_reason(profile: str, intents: set[str]) -> str | None:

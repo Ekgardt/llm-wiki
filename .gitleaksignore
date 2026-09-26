@@ -12,3 +12,9 @@
 # own public JavaScript bundle. Captured as a research note in
 # wiki/projects/your-project/state.md. Not a private secret.
 # (legacy wiki/projects fingerprint removed — path no longer exists)
+
+# Invented credentials the redactor's test must hide (audit 2026-09-26 A-2);
+# docs/research/2026-09-26-the-redactor-test-secrets-are-declared.md
+8d72383998464088f57090f7fc6f8d7d41bc6504:tests/test_a_credential_is_named_at_the_end_of_its_key.py:generic-api-key:26
+8d72383998464088f57090f7fc6f8d7d41bc6504:tests/test_a_credential_is_named_at_the_end_of_its_key.py:generic-api-key:34
+8d72383998464088f57090f7fc6f8d7d41bc6504:tests/test_a_credential_is_named_at_the_end_of_its_key.py:curl-auth-user:28

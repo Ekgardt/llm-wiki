@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -53,6 +54,7 @@ from operational_ownership import (  # noqa: E402
     heartbeat_owner,
     release_marker_owner,
 )
+from reclaim_runtime_state import RECLAIM_STEP_SECONDS  # noqa: E402
 from repository_index import REFRESH_ALL_BUDGET_SECONDS  # noqa: E402
 from repository_retention import RETIRE_BUDGET_SECONDS  # noqa: E402
 from secret_redact import describe_error  # noqa: E402
@@ -114,9 +116,19 @@ def _log_generation_details(log, result: dict) -> None:
     log(f"  generation: details {details}")
 
 
+def _utc_now() -> str:
+    """Every instant in the state is UTC with its offset; a date stays the local calendar day.
+
+    `skipped_at` and `failed_at` were local and `last_nightly_at` UTC, and doctor
+    compared them as strings (audit C-30,
+    docs/research/2026-09-25-the-scheduler-state-keeps-one-clock.md).
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def _record_nightly_result(today: str, failures: int, error: str | None = None) -> None:
     """Release today's catchup lease and persist the terminal result."""
-    timestamp = datetime.now().isoformat(timespec="seconds")
+    timestamp = _utc_now()
 
     def _mutate(state: dict) -> None:
         claim = state.get("nightly_catchup_claim", {})
@@ -135,9 +147,7 @@ def _record_nightly_result(today: str, failures: int, error: str | None = None) 
             state["last_nightly_date"] = today
             # The date alone cannot say whether a 03:00 run is late; the health
             # check needs an instant to measure an interval against.
-            state["last_nightly_at"] = datetime.now(timezone.utc).isoformat(
-                timespec="seconds"
-            )
+            state["last_nightly_at"] = timestamp
             state.pop("last_nightly_failure", None)
 
     update_state(_mutate)
@@ -145,7 +155,7 @@ def _record_nightly_result(today: str, failures: int, error: str | None = None) 
 
 def _record_nightly_skip(today: str, reason: str) -> None:
     """Release today's claim without replacing the last execution result."""
-    timestamp = datetime.now().isoformat(timespec="seconds")
+    timestamp = _utc_now()
 
     def _mutate(state: dict) -> None:
         claim = state.get("nightly_catchup_claim", {})
@@ -224,13 +234,84 @@ def _reclaim_step() -> _Step:
         "reclaiming runtime state...",
         "reclaim",
         _script("reclaim_runtime_state.py"),
-        180,
+        RECLAIM_STEP_SECONDS,
     )
 
 
 # The queue worker's wall time ends a margin before this step is killed. See
 # `docs/research/2026-09-14-no-task-is-claimed-to-be-killed.md`.
 QUEUE_STEP_SECONDS = 600
+
+
+# How long reading the checkout's HEAD commit time may take.
+HEAD_TIME_TIMEOUT_SECONDS = 10
+
+
+def _git_line(root: Path, *arguments: str) -> str | None:
+    """One line of a bounded git answer, or None when git cannot give it."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            capture_output=True,
+            text=True,
+            timeout=HEAD_TIME_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def head_arrival_time(root: Path = ROOT) -> str | None:
+    """When HEAD last moved in this checkout (its reflog), else its commit time.
+
+    The commit time is earlier than the fast-forward that brought the fix here,
+    so captures that died on the old code in between never got their redrive
+    (audit 2026-09-26 B-28,
+    docs/research/2026-09-26-a-fix-arrives-when-the-checkout-moves.md).
+    """
+    selector = _git_line(root, "reflog", "-1", "--date=iso-strict", "--format=%gd", "HEAD")
+    if selector is not None and selector.startswith("HEAD@{") and selector.endswith("}"):
+        return _offset_spelling(selector[len("HEAD@{") : -1])
+    return _git_line(root, "log", "-1", "--format=%cI", "HEAD")
+
+
+def _offset_spelling(moment: str) -> str:
+    """Git spells UTC `Z`; Python 3.10's `fromisoformat` reads only `+00:00`."""
+    return moment[:-1] + "+00:00" if moment.endswith("Z") else moment
+
+
+def _dead_capture_redrive_steps() -> list[_Step]:
+    """Give dead captures their one redrive once the code changed after they died.
+
+    Runs before the queue worker so the redriven captures are worked the same
+    night. No readable HEAD means no known code change, so no step. See
+    `docs/research/2026-09-25-a-dead-capture-gets-its-second-chance-after-a-fix.md`.
+    """
+    changed_after = head_arrival_time()
+    if changed_after is None:
+        return []
+    return [
+        _Step(
+            "redriving dead captures the code has changed since...",
+            "dead_capture_redrive",
+            _script("memory_queue.py") + ["redrive-dead-captures", "--changed-after", changed_after],
+            120,
+        )
+    ]
+
+
+def _intake_steps() -> list[_Step]:
+    """The steps that take in what arrived since the last pass, in order."""
+    return [
+        _capture_adoption_step(),
+        _reclaim_step(),
+        *_dead_capture_redrive_steps(),
+        _queue_step(),
+        _episode_step(),
+    ]
 
 
 def _queue_step() -> _Step:
@@ -593,8 +674,7 @@ def worst_case_seconds() -> float:
     """
     from self_update import WORST_CASE_SECONDS as UPDATE_SECONDS
 
-    steps = [_capture_adoption_step(), _reclaim_step(), _queue_step(), _episode_step()]
-    steps += [_compile_step(), _fact_keys_step(), *_post_compile_steps()]
+    steps = [*_intake_steps(), _compile_step(), _fact_keys_step(), *_post_compile_steps()]
     waits = COMPILE_IDLE_WAIT_SECONDS + _compile_wait_seconds()
     budgets = NIGHTLY_GENERATION_BUDGET_SECONDS + HEALTH_REPORT_BUDGET_SECONDS
     tail = MAINTENANCE_TAIL_BUDGET_SECONDS + UPDATE_SECONDS
@@ -633,11 +713,65 @@ def _update_code(log) -> None:
     from self_update import update_checkout
 
     log.step("updating the vault code...")
-    outcome = update_checkout(ROOT)
+    previous = load_state().get("last_update")
+    outcome = _carried_forward(update_checkout(ROOT), previous)
+    update_state(lambda state: state.__setitem__("last_update", update_record(outcome)))
     log(f"  update: {outcome['status']} ({outcome.get('reason') or 'none'})")
     if outcome.get("detail"):
         log(f"  update: {outcome['detail']}")
     _log_update_aftermath(log, outcome)
+
+
+UPDATE_RECORD_FIELDS = ("status", "reason", "dependencies", "resources", "resources_since")
+
+
+def _carried_forward(outcome: dict, previous: object) -> dict:
+    """What an earlier update left undone stays named until it is done.
+
+    A night with nothing to fetch overwrote the record, and "dependencies were
+    not synced" or "rerun the installer" vanished while still true (audit
+    2026-09-26 B-24, docs/research/2026-09-26-an-unfinished-update-stays-named.md).
+    Stale dependencies are synced again here; a needed installer run is kept until
+    the installer has run since.
+    """
+    if outcome.get("status") != "current" or not isinstance(previous, dict):
+        return outcome
+    return {**outcome, **_pending_dependencies(previous), **_pending_resources(previous)}
+
+
+def _pending_dependencies(previous: dict) -> dict:
+    from self_update import sync_dependencies
+
+    if previous.get("dependencies") != "stale":
+        return {}
+    return {"dependencies": sync_dependencies(ROOT)}
+
+
+def _pending_resources(previous: dict) -> dict:
+    since = previous.get("resources_since") or previous.get("at")
+    if previous.get("resources") != "rerun_installer" or _installed_since(since):
+        return {}
+    return {"resources": "rerun_installer", "resources_since": since}
+
+
+def _installed_since(moment: object) -> bool:
+    """Whether the installer committed after `moment`; doubt keeps the warning."""
+    try:
+        manifest = json.loads((STATE_ROOT / "run" / "install" / "manifest.json").read_text(encoding="utf-8"))
+        installed = datetime.fromisoformat(str(manifest["committed_at"]).replace("Z", "+00:00"))
+        return installed > datetime.fromisoformat(str(moment).replace("Z", "+00:00"))
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def update_record(outcome: dict) -> dict:
+    """What the code update did, kept for doctor; before, only the night's log knew.
+
+    See `docs/research/2026-09-25-the-scheduler-says-what-the-night-could-not-do.md`.
+    """
+    record = {field: outcome.get(field) for field in UPDATE_RECORD_FIELDS}
+    record["at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return record
 
 
 def _log_update_aftermath(log, outcome: dict) -> None:
@@ -648,7 +782,7 @@ def _log_update_aftermath(log, outcome: dict) -> None:
     if outcome.get("status") != "updated":
         return
     extras = ", ".join(outcome.get("extras") or ()) or "none"
-    log(f"  update: dependencies {outcome.get('dependencies')}; extras not upgraded: {extras}")
+    log(f"  update: dependencies {outcome.get('dependencies')} with extras: {extras}")
     log(f"  update: owned resources {outcome.get('resources')}")
 
 
@@ -660,11 +794,7 @@ def _prune_reports(log) -> None:
 
 
 def _nightly_steps(run_step, log, _ownership: OwnerLease | None = None) -> int:
-    failures = _run_steps(
-        run_step,
-        log,
-        [_capture_adoption_step(), _reclaim_step(), _queue_step(), _episode_step()],
-    )
+    failures = _run_steps(run_step, log, _intake_steps())
 
     # The compile step must not be skipped just because a hook-triggered one runs.
     _wait_for_compile_idle(log)
@@ -825,10 +955,26 @@ def _nightly_pass(
     failures = _nightly_steps(run_step, log, ownership)
     _require_fence(fence)
     _require_within_bound(deadline)
-    _prune_reports(log)
-    _update_code(log)
+    failures += int(not _housekeeping(log, "pruning", _prune_reports))
+    # An update is never a reason to fail the night; its failure is named only.
+    _housekeeping(log, "update", _update_code)
     log(f"=== Nightly pass complete (failures={failures}) ===")
     return failures
+
+
+def _housekeeping(log, label: str, step) -> bool:
+    """Run a step after the counted ones; its exception is named, never the night's end.
+
+    `_update_code` promised never to fail the night, and a busy state lock in its
+    one `update_state` did exactly that (audit 2026-09-26, regress 8,
+    docs/research/2026-09-26-a-housekeeping-step-names-its-failure.md).
+    """
+    try:
+        step(log)
+    except Exception as exc:  # noqa: BLE001 - named in the log, counted by the caller
+        log(f"  {label} failed: {describe_error(exc)}")
+        return False
+    return True
 
 
 def _record_result_quietly(today: str, failures: int, error: str | None) -> None:

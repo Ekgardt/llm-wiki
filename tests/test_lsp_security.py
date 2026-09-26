@@ -186,7 +186,7 @@ def test_read_repository_source_bytes_reads_one_bounded_contained_file(
         scope,
         "pkg/api.py",
         max_bytes=1024,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     ) == expected
 
 
@@ -500,6 +500,7 @@ def _token_separator(index: int) -> str:
     return ";"
 
 
+from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
 from tests.timing_floor import noise_floor_seconds  # noqa: E402
 
 

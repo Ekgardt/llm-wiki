@@ -32,6 +32,15 @@ param(
 $ErrorActionPreference = "Stop"
 $tasks = @("LLMWiki-Nightly", "LLMWiki-Weekly")
 
+# How long each task may run: install_control.SCHEDULER_LIMIT_HOURS, the one table
+# every scheduler uses, and the only place these hours are written in this script.
+# Each sits above its pass's own bound (scheduled_nightly.worst_case_seconds,
+# scheduled_weekly.worst_case_seconds); tests hold both facts.
+# A function, not only a script variable: the status check calls it, so a caller
+# that loads the check alone still reads the same table.
+function Get-LLMWikiLimitHours { return @{ nightly = 4; weekly = 6 } }
+$LimitHours = Get-LLMWikiLimitHours
+
 # Detect dot-sourcing at TOP LEVEL (outside any function).
 # Inside a function, $MyInvocation.CommandOrigin is always 'Internal',
 # so we must capture the flag here, before defining _SafeExit.
@@ -93,9 +102,10 @@ function Test-LLMWikiScheduledTasks {
         [ValidateSet(1, 2)][int]$SpecVersion = 2
     )
     $verified = $true
+    $limits = Get-LLMWikiLimitHours
     $specifications = @(
-        @{ Name = "LLMWiki-Nightly"; Kind = "nightly"; LimitHours = 4 },
-        @{ Name = "LLMWiki-Weekly"; Kind = "weekly"; LimitHours = 6 }
+        @{ Name = "LLMWiki-Nightly"; Kind = "nightly"; LimitHours = $limits.nightly },
+        @{ Name = "LLMWiki-Weekly"; Kind = "weekly"; LimitHours = $limits.weekly }
     )
     foreach ($specification in $specifications) {
         $name = $specification.Name
@@ -273,18 +283,17 @@ $nightlyAction = New-LLMWikiScheduledAction `
 
 $nightlyTrigger = New-ScheduledTaskTrigger -Daily -At 3am
 
-# The pass's own bounds add up to about 3.2 hours in auto provider mode
-# (scheduled_nightly.worst_case_seconds, which now counts the checkout update and
-# the whole provider order one call may walk); a one-hour limit killed the pass
-# before it could release its lease or record a result. The pass also stops
-# itself at that bound, so this limit is only the backstop.
+# Above the pass's own bound in auto provider mode (scheduled_nightly.worst_case_seconds,
+# which counts the checkout update and the whole provider order one call may walk);
+# a one-hour limit killed the pass before it could release its lease or record a
+# result. The pass also stops itself at that bound, so this limit is only the backstop.
 # See docs/research/2026-09-14-the-scheduler-outlasts-the-pass.md and
 # docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md.
 $nightlySettings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 4) `
+    -ExecutionTimeLimit (New-TimeSpan -Hours $LimitHours.nightly) `
     -RestartCount 2 `
     -RestartInterval (New-TimeSpan -Minutes 15)
 
@@ -315,15 +324,15 @@ $weeklyAction = New-LLMWikiScheduledAction `
 
 $weeklyTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 4am
 
-# The weekly pass runs the whole nightly one and more: about 4.9 hours by its own
-# bounds (scheduled_weekly.worst_case_seconds). See
+# The weekly pass can wait for a whole nightly one and then run its own steps
+# (scheduled_weekly.worst_case_seconds). See
 # docs/research/2026-09-14-the-weekly-task-outlasts-its-pass.md and
 # docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md.
 $weeklySettings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 6) `
+    -ExecutionTimeLimit (New-TimeSpan -Hours $LimitHours.weekly) `
     -RestartCount 2 `
     -RestartInterval (New-TimeSpan -Minutes 30)
 

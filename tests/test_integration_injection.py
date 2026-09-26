@@ -279,7 +279,7 @@ def test_installed_plugin_captures_without_an_inherited_environment(tmp_path: Pa
     assert f"{root}/scripts" in " ".join(calls[0]["args"])
 
 
-def test_user_prompt_ingestion_runs_prompt_and_feedback_capture_once(monkeypatch):
+def test_user_prompt_ingestion_runs_prompt_capture_once(monkeypatch):
     _ensure_scripts_on_path()
     import integration_adapter
 
@@ -308,17 +308,10 @@ def test_user_prompt_ingestion_runs_prompt_and_feedback_capture_once(monkeypatch
 
     integration_adapter.ingest_event(envelope)
 
-    assert [name for name, _, _ in calls] == [
-        "user_prompt_capture.py",
-        "feedback_capture.py",
-    ]
+    # Feedback candidates were retired on 2026-09-25; the prompt reaches compile
+    # through the daily log.
+    assert [name for name, _, _ in calls] == ["user_prompt_capture.py"]
     assert calls[0][1]["prompt"] == "Preserve this request"
-    assert calls[1][1] == {
-        "text": "Preserve this request",
-        "session_id": "session-1",
-        "slug": "demo",
-        "trigger": "opencode-user-message",
-    }
 
 
 def test_normalization_preserves_only_available_checkpoint_signals():
@@ -1014,7 +1007,7 @@ def test_session_start_maintenance_does_not_debounce_or_drop_following_delta(mon
         checkpoints[0]["delta"]["current_task"],
         checkpoints[0]["delta"]["current_task_operations"],
     ) == (
-        ordinary_event_at.isoformat().replace("+00:00", "Z"),
+        "2026-07-13T12:00:01.000000Z",
         [],
         1,
         integration_adapter._batch_occurrence_id([ordinary.event_id]),
@@ -4221,7 +4214,8 @@ def test_codex_project_state_observes_session_start_before_recovery(monkeypatch,
     assert calls == [("observe", "session_start"), ("recover", "session_start_project_state.py")]
 
 
-def test_opencode_vault_guard_uses_resolved_path_boundary(opencode_plugin_url: str):
+def test_opencode_forwards_sessions_inside_and_beside_the_vault(opencode_plugin_url: str):
+    """The in-vault drop was removed on 2026-09-25 (audit C-6); both sessions are forwarded."""
     plugin_url = opencode_plugin_url
     script = textwrap.dedent(
         f"""
@@ -4257,8 +4251,7 @@ def test_opencode_vault_guard_uses_resolved_path_boundary(opencode_plugin_url: s
         check=False,
     )
 
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "1"
+    assert (result.returncode, result.stdout.strip()) == (0, "2"), result.stderr
 
 
 def test_codex_wrapper_generates_context_file():
@@ -4382,8 +4375,10 @@ def test_install_scripts_generate_context(tmp_path):
                 ("$claudeMcp = $claudeUserConfig", ps_claude, True),
                 ("mcpServers = [ordered]@{", ps_claude, True),
                 (".claude\\.mcp.json", install_ps1, False),
-                ("Existing ~/.claude.json found without llm-wiki", ps_claude, True),
-                ("-notmatch '\"llm-wiki\"\\s*:'", ps_claude, True),
+                ("Existing ~/.claude.json found without llm-wiki", install_ps1, True),
+                ("Write-ClaudeRegistration -McpState $claudeMcpState", ps_claude, True),
+                ("Get-ClaudeMcpState -Config $claudeMcp -VaultRoot $VAULT_ROOT", ps_claude, True),
+                ("-notmatch '\"llm-wiki\"\\s*:'", ps_claude, False),
                 ("scripts\\installer_config.py", ps_opencode, True),
                 ('"opencode", "--root", $VAULT_ROOT', ps_opencode, True),
                 ('"--state-root", $STATE_ROOT', ps_opencode, True),
@@ -4561,7 +4556,8 @@ def test_windows_scheduler_status_accepts_only_the_registered_contract(tmp_path)
             {json.dumps(str(script))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         foreach ($name in @(
-            'New-LLMWikiScheduledAction', 'Test-LLMWikiTaskSpec', 'Test-LLMWikiScheduledTasks'
+            'Get-LLMWikiLimitHours', 'New-LLMWikiScheduledAction', 'Test-LLMWikiTaskSpec',
+            'Test-LLMWikiScheduledTasks'
         )) {{
             $fn = $ast.Find({{ param($node)
                 $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and

@@ -435,7 +435,8 @@ class TestToolDefinitions:
         assert "clamp" in recall_limit["description"].lower()
         assert "clamp" in decision_limit["description"].lower()
         assert "neighbors" not in include["description"].lower()
-        assert "content_preview" in include["description"]
+        # `content_preview` went with the context compiler on 2026-07-18 (audit C-20).
+        assert "ignored" in include["description"]
 
     def test_retrieval_schemas_declare_hard_string_and_array_bounds(self):
         import mcp_server
@@ -490,8 +491,12 @@ def _assert_degraded_search_calls(calls) -> None:
 
 
 def _assert_degraded_search_budget(calls) -> None:
-    assert calls[1][1]["rerank"] is False
-    assert calls[1][1]["deadline_monotonic"] == calls[0][1]["deadline_monotonic"]
+    import mcp_server
+
+    reserve = mcp_server.LEXICAL_FALLBACK_RESERVE_SECONDS
+    assert (calls[1][1]["rerank"], calls[1][1]["deadline_monotonic"] - calls[0][1]["deadline_monotonic"]) == (
+        False, reserve,
+    )
 
 
 def _assert_degraded_result_row(row) -> None:
@@ -841,7 +846,10 @@ class TestHelperFunctions:
         page = notes / "page.md"
         page.write_text("`daily:2026-01-01 broken`", encoding="utf-8")
         monkeypatch.setattr(memory_state, "ROOT", tmp_path)
-        assert "error" in mcp_server._read_page("page")
+        # Text that parses as no reference is named, the page still read (audit 2026-09-26 B-17).
+        assert mcp_server._read_page("page")["evidence"] == [
+            {"reference": None, "error": "not_an_evidence_reference"}
+        ]
 
         page.write_bytes(b"x" * (mcp_server.MAX_MCP_PAGE_BYTES + 1))
         result = mcp_server._read_page("page")
@@ -870,8 +878,8 @@ class TestHelperFunctions:
         monkeypatch.setattr(mcp_server, "read_stable_bytes", lambda *args, **kwargs: b"evidence")
         monkeypatch.setattr(
             evidence_resolver,
-            "extract_evidence_references",
-            lambda content: ["reference"],
+            "evidence_candidates",
+            lambda content: [object()],
         )
         monkeypatch.setattr(
             evidence_resolver.EvidenceResolver,
@@ -1043,8 +1051,9 @@ class TestHelperFunctions:
 
         mcp_server._search_vault("query", deadline=deadline)
 
-        assert len(calls) == 2
-        assert [call["deadline_monotonic"] for call in calls] == [deadline, deadline]
+        # The hybrid pass keeps back the lexical reserve; the fallback runs to the end (B-18).
+        reserve = mcp_server.LEXICAL_FALLBACK_RESERVE_SECONDS
+        assert [call["deadline_monotonic"] for call in calls] == [deadline - reserve, deadline]
 
     def test_search_vault_propagates_second_timeout(self, monkeypatch):
         import mcp_server
@@ -1657,7 +1666,7 @@ class TestHandleToolCall:
             "schema_version", "requested_mode", "effective_mode", "signals_used",
             "fallback_reason", "corpus_generation", "partial", "reranker_applied",
             "reranker_model_id", "reranker_model_revision", "reranker_depth",
-            "reranker_duration_ms", "reranker_fallback_reason",
+            "reranker_duration_ms", "reranker_fallback_reason", "signals_requested",
         }
         assert "_meta" in data
 
@@ -1840,7 +1849,8 @@ class TestHandleToolCall:
 
         self._run("recall", {"query": "question", "grounded": True})
 
-        assert deadlines[0] <= handler_start + mcp_server.MCP_OPERATION_SECONDS
+        # A grounded answer has the grounded budget, counted from handler entry (A-17).
+        assert deadlines[0] <= handler_start + query_memory.QA_DEADLINE_SECONDS
 
     def test_recall_second_timeout_uses_normal_error_envelope(self, monkeypatch):
         import mcp_server
@@ -2103,7 +2113,7 @@ class TestHandleToolCall:
             with pytest.raises(RuntimeError, match="cannot start"):
                 asyncio.run(
                     mcp_server._run_bounded(
-                        lambda: None, deadline=time.monotonic() + 1
+                        lambda: None, deadline=time.monotonic() + SHORT_TIMEOUT
                     )
                 )
 
@@ -2600,9 +2610,11 @@ class TestHandleToolCall:
             "dependencies": [3],
             **report,
         }
+        # No generation of tmp_path to compare commits with: not known to be fresh
+        # (audit B-34, docs/research/2026-09-25-a-structural-answer-says-its-own-freshness.md).
         assert envelope["components"]["graph"] == {
             "generation": "graph-17",
-            "freshness": "fresh",
+            "freshness": "unknown",
         }
 
     def test_external_repository_never_receives_active_repository_graph(
@@ -2885,7 +2897,7 @@ class TestHandleToolCall:
 
         received = []
 
-        def decisions(query, *, limit):
+        def decisions(query, *, limit, trace_sink=None):
             received.append(limit)
             return [{"path": "decision.md", "fused_score": 0.1}]
 
@@ -4143,7 +4155,7 @@ def test_structural_callers_not_routed_as_precise(monkeypatch) -> None:
     monkeypatch.setattr("code_graph.find_callers", lambda *a, **k: {"callers": []})
     resolved = str(Path(__file__).resolve().parent.parent)
     data = mcp_server._get_architecture_mode(
-        resolved, mode="callers", symbol="f", deadline=time.monotonic() + 5
+        resolved, mode="callers", symbol="f", deadline=time.monotonic() + SHORT_TIMEOUT
     )
     assert data.get("mode", "callers") == "callers" or "callers" in data
 
@@ -4460,7 +4472,7 @@ def test_precise_source_containment_finishes_before_manager_creation(
         path=path,
         line=1,
         character=0,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
     assert manager_calls == 0
@@ -5142,11 +5154,6 @@ def test_real_navigation_adapters_return_only_contained_exact_graph_evidence(
         "index_directory",
         lambda *_args, **_kwargs: pytest.fail("adapter must never index"),
     )
-    monkeypatch.setattr(
-        code_graph,
-        "detect_code_tools",
-        lambda *_args, **_kwargs: pytest.fail("adapter must never write tool cache"),
-    )
     deadline = time.monotonic() + 5
     definition_request = NavigationRequest(
         scope,
@@ -5241,7 +5248,7 @@ def _navigation_location_result(
         require_span_hash=require_span_hash,
         metadata=None,
         graph_version="generation-1",
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
 
@@ -5446,8 +5453,8 @@ def test_navigation_source_cache_remembers_byte_cap_rejections(
     monkeypatch.setattr(mcp_server, "_navigation_source_bytes", read_source)
     cache = mcp_server._NavigationSourceCache()
 
-    assert cache.read(scope, "large.py", deadline=time.monotonic() + 5) is None
-    assert cache.read(scope, "large.py", deadline=time.monotonic() + 5) is None
+    assert cache.read(scope, "large.py", deadline=time.monotonic() + SHORT_TIMEOUT) is None
+    assert cache.read(scope, "large.py", deadline=time.monotonic() + SHORT_TIMEOUT) is None
     _assert_cache_rejection_is_remembered(cache, reads)
 
 
@@ -5514,14 +5521,14 @@ def test_navigation_calls_use_lightweight_evidence_spans(
         "callee",
         scope,
         direction="incoming",
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
     include_span_hash = False
     missing_hash_locations = mcp_server._graph_call_locations(
         "callee",
         scope,
         direction="incoming",
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
     assert len(locations) == 1
@@ -5770,7 +5777,7 @@ def test_renderer_value_error_maps_to_normalized_navigation_error(
         path="api.py",
         line=1,
         character=4,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
     assert data["status"] == "error"

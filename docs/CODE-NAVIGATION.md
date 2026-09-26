@@ -31,7 +31,10 @@ uv run python scripts/install_language_server.py --profile rust-analyzer --state
 | gopls | v0.23.0, built from pinned Go 1.27.1 | `cache/code-tools/gopls/v0.23.0/` |
 | rust-analyzer | 1.98.1, with its pinned Rust toolchain | `cache/code-tools/rust-analyzer/1.98.1/` |
 
-The installer verifies the pinned SHA-256 and npm integrity before publishing.
+The installer verifies the pinned SHA-256 and npm integrity before publishing, and
+for gopls and rust-analyzer runs the toolchain the server uses (`go version`,
+`cargo --version`, `rustc --version`) in the staged tree first; a re-run refuses an
+install whose toolchain files are gone.
 No query, MCP call, doctor check, or profile discovery path downloads or updates a
 server. The qualified runtime uses Node 22; CI pins Node 22.23.1.
 
@@ -105,7 +108,7 @@ Every structural answer read from a generation carries a `freshness` block:
 ```
 
 `refresh` is `not_needed`, `started` (the bounded incremental refresh was
-spawned detached — once per repository and commit in this process; the
+spawned detached — once per checkout and commit in this process; the
 answer itself came from the generation the vault has, and the session never
 waits), `already_requested`, `spawn_failed`, or `vault_nightly` (the vault's
 own generation is rebuilt by the nightly pass and the freshness watch).
@@ -326,10 +329,20 @@ channel nodes, so there is nothing to match across repositories yet.
 - `timeout`: the operation deadline elapsed after cancellation.
 - `error`: validated execution failed without a safe semantic result.
 
+A start that ran out of time or met the operating system, and a server process
+that failed for good after its own one restart, are tried again at most three
+times, after 5 s, 30 s and 120 s; until then a query answers degraded with
+`<profile>_startup_retry_pending`. A server that ran ten minutes before failing
+gets the three tries back. Identity, protocol and capability failures are not
+retried.
+
 ## Positions, deadlines, and offsets
 
 - Positions are repository-relative; absolute roots and external paths are never
   exposed.
+- `line` is 1-based; `character` is a 0-based UTF-8 byte offset within the line,
+  not UTF-16 code units. A `character` past the line end means the line end, as
+  the LSP specification defines; one inside a multi-byte character is refused.
 - Offsets are stateless: each offset reruns the request against a fresh current
   revision.
 - Structural fallback is explicit, provenance-bearing, and appended after LSP

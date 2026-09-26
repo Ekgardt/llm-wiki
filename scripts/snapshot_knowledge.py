@@ -48,6 +48,16 @@ DEFAULT_SNAPSHOT_ROOT = Path.home() / "llm-wiki-snapshots"
 # `run/`, which are regenerable or operational by contract.
 SNAPSHOT_SUBTREE = "knowledge"
 
+# When the last snapshot succeeded, committed or not. Inside `.git`, so it is never
+# part of the copy: an unchanged memory makes no commit, and the commit time alone
+# made doctor call a current copy stale (audit B-32,
+# docs/research/2026-09-25-a-snapshot-says-when-it-last-looked.md).
+CHECKED_MARKER = Path(".git") / "llm-wiki-last-snapshot"
+
+
+class SnapshotFailed(RuntimeError):
+    """The copy could not be committed; the reason is git's own last line."""
+
 
 def snapshot_root(home: Path | None = None) -> Path:
     """`LLM_WIKI_SNAPSHOT_ROOT`, else `llm-wiki-snapshots` in the given home or the user's."""
@@ -59,14 +69,34 @@ def snapshot_root(home: Path | None = None) -> Path:
     return Path(home) / DEFAULT_SNAPSHOT_ROOT.name
 
 
+# A snapshot adds and commits a 20 MB tree; a git that hangs (a stale lock, a
+# signing agent waiting for a passphrase) must not hold the nightly pass.
+GIT_TIMEOUT_SECONDS = 120
+
+
+def _snapshot_git_environment() -> dict[str, str]:
+    """The operator's global and system git config stay out of the copy's commits.
+
+    A global `commit.gpgsign`, `core.hooksPath` or `core.fsmonitor` made the
+    snapshot sign, run hooks or start a monitor (audit 2026-09-26 C-13,
+    docs/research/2026-09-26-every-git-call-has-a-deadline.md).
+    """
+    return {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+
+
 def _git(root: Path, *arguments: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", *arguments],
-        cwd=str(root),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            check=False,
+            env=_snapshot_git_environment(),
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SnapshotFailed(f"git {arguments[0]} timed out after {GIT_TIMEOUT_SECONDS} s") from exc
 
 
 def _initialised(root: Path) -> None:
@@ -75,9 +105,9 @@ def _initialised(root: Path) -> None:
     root.chmod(0o700)
     if (root / ".git").is_dir():
         return
-    _git(root, "init", "--quiet")
-    _git(root, "config", "user.name", "llm-wiki snapshot")
-    _git(root, "config", "user.email", "snapshot@localhost")
+    _require_success(_git(root, "init", "--quiet"), "git init")
+    _require_success(_git(root, "config", "user.name", "llm-wiki snapshot"), "git config")
+    _require_success(_git(root, "config", "user.email", "snapshot@localhost"), "git config")
 
 
 def _mirrored(source: Path, destination: Path) -> None:
@@ -88,11 +118,31 @@ def _mirrored(source: Path, destination: Path) -> None:
 
 
 def _committed(root: Path, message: str) -> str:
-    _git(root, "add", "-A")
-    result = _git(root, "commit", "--quiet", "-m", message)
-    if result.returncode != 0:
+    """The new commit, or "no change" when nothing differs; a failed commit raises."""
+    _require_success(_git(root, "add", "-A"), "git add")
+    if _git(root, "diff", "--cached", "--quiet").returncode == 0:
         return "no change"
+    _require_success(_git(root, "commit", "--quiet", "-m", message), "git commit")
     return _git(root, "rev-parse", "--short", "HEAD").stdout.strip() or "committed"
+
+
+def _require_success(result: subprocess.CompletedProcess, step: str) -> None:
+    if result.returncode == 0:
+        return
+    lines = (result.stderr or result.stdout or "").strip().splitlines()
+    raise SnapshotFailed(f"{step} failed: {lines[-1] if lines else result.returncode}")
+
+
+def _mark_checked(root: Path, stamp: str) -> None:
+    (root / CHECKED_MARKER).write_text(stamp + "\n", encoding="utf-8")
+
+
+def last_checked_at(root: Path) -> datetime | None:
+    """When the last snapshot succeeded, from its marker; None when there is none."""
+    try:
+        return datetime.fromisoformat((root / CHECKED_MARKER).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
 
 
 def take_snapshot(vault: Path | None = None, root: Path | None = None) -> dict:
@@ -104,7 +154,9 @@ def take_snapshot(vault: Path | None = None, root: Path | None = None) -> dict:
     _initialised(destination_root)
     _mirrored(source, destination_root / SNAPSHOT_SUBTREE)
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    return {"status": "ok", "commit": _committed(destination_root, f"snapshot {stamp}")}
+    commit = _committed(destination_root, f"snapshot {stamp}")
+    _mark_checked(destination_root, stamp)
+    return {"status": "ok", "commit": commit}
 
 
 def _report(result: dict, root: Path) -> str:

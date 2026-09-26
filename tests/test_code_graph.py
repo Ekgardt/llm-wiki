@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -21,7 +22,6 @@ from code_graph import (  # noqa: E402
     LANGUAGE_MAP,
     _get_parser,
     _louvain_communities,
-    detect_code_tools,
     detect_communities,
     detect_language,
     enrich_python_semantics,
@@ -1729,17 +1729,19 @@ class TestIndexDirectory:
 
         assert {"files", "functions", "classes", "calls", "imports"} <= set(stats)
 
-    def test_index_detects_tools_fresh_on_every_call(self, tmp_path, monkeypatch):
-        calls = []
-        monkeypatch.setattr(
-            "code_graph.detect_code_tools",
-            lambda directory, cache_path=None: calls.append(directory) or {"tools": {}},
-        )
+    @pytest.mark.skipif(os.name == "nt", reason="the planted program is a POSIX shell script")
+    def test_index_writes_nothing_and_runs_no_workspace_program(self, tmp_path):
+        """Audit C-44: the summary is read-only and never runs the repository's `tsc`."""
+        binaries = tmp_path / "node_modules" / ".bin"
+        binaries.mkdir(parents=True)
+        marker = tmp_path / "ran"
+        (binaries / "tsc").write_text(f"#!/bin/sh\ntouch '{marker}'\n", encoding="utf-8")
+        (binaries / "tsc").chmod(0o755)
+        before = sorted(path.name for path in tmp_path.rglob("*"))
 
         index_directory(tmp_path, verbose=False)
-        index_directory(tmp_path, verbose=False)
 
-        assert calls == [tmp_path, tmp_path]
+        assert sorted(path.name for path in tmp_path.rglob("*")) == before
 
     def test_dynamic_receiver_is_semantically_eligible(self, tmp_path):
         source = tmp_path / "service.py"
@@ -1750,174 +1752,6 @@ class TestIndexDirectory:
         assert call["confidence"] == "unknown"
         assert call["semantic_eligible"] is True
         assert call["unresolved_reason"] == "dynamic_receiver"
-
-
-class TestCodeToolDetection:
-    def test_writes_manifest_with_workspace_typescript_preferred(self, tmp_path, monkeypatch):
-        workspace_tsc = tmp_path / "node_modules" / ".bin" / "tsc.cmd"
-        workspace_tsc.parent.mkdir(parents=True)
-        workspace_tsc.write_text("", encoding="utf-8")
-        cache_path = tmp_path / "state" / "cache" / "code_tools.json"
-        monkeypatch.setattr("code_graph.metadata.version", lambda name: "0.19.2")
-        monkeypatch.setattr(
-            "code_graph.shutil.which",
-            lambda name: {"rust-analyzer": "/bin/rust-analyzer", "gopls": None}.get(name),
-        )
-        monkeypatch.setattr(
-            "code_graph._probe_version",
-            lambda args, timeout=2: ("1.2.3", None),
-        )
-
-        manifest = detect_code_tools(tmp_path, cache_path=cache_path)
-
-        tools = manifest["tools"]
-
-        assert (
-            manifest["schema_version"],
-            bool(manifest["generated_at"]),
-            tools["python"]["provider"],
-            tools["python"]["capabilities"]["semantic"],
-            tools["typescript"]["path"],
-            tools["typescript"]["capabilities"]["semantic"],
-            tools["rust"]["available"],
-            tools["go"]["available"],
-        ) == (1, True, "jedi", True, str(workspace_tsc.resolve()), False, True, False)
-        assert json.loads(cache_path.read_text(encoding="utf-8")) == manifest
-
-    def test_windows_prefers_workspace_tsc_cmd(self, tmp_path, monkeypatch):
-        bin_dir = tmp_path / "node_modules" / ".bin"
-        bin_dir.mkdir(parents=True)
-        (bin_dir / "tsc").write_text("shim", encoding="utf-8")
-        cmd = bin_dir / "tsc.cmd"
-        cmd.write_text("cmd", encoding="utf-8")
-        monkeypatch.setattr(sys, "platform", "win32")
-        monkeypatch.setattr("code_graph.metadata.version", lambda name: "0.20")
-        monkeypatch.setattr("code_graph.importlib.import_module", lambda name: object())
-        monkeypatch.setattr("code_graph.shutil.which", lambda name: None)
-        monkeypatch.setattr(
-            "code_graph._probe_version", lambda args, timeout=2: ("Version 1", None)
-        )
-
-        manifest = detect_code_tools(tmp_path, cache_path=tmp_path / "tools.json")
-
-        assert manifest["tools"]["typescript"]["path"] == str(cmd.resolve())
-
-    def test_jedi_metadata_without_import_is_unavailable(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("code_graph.metadata.version", lambda name: "0.20")
-        monkeypatch.setattr(
-            "code_graph.importlib.import_module",
-            lambda name: (_ for _ in ()).throw(ImportError("broken jedi")),
-        )
-        monkeypatch.setattr("code_graph.shutil.which", lambda name: None)
-
-        manifest = detect_code_tools(tmp_path, cache_path=tmp_path / "tools.json")
-
-        assert manifest["tools"]["python"]["available"] is False
-        assert "broken jedi" in manifest["tools"]["python"]["failure"]
-
-    def test_external_version_probes_run_concurrently_with_short_timeouts(
-        self, tmp_path, monkeypatch
-    ):
-        """Three probes meet at one barrier; a sequential probe would wait alone and break it.
-
-        A stopwatch stood here (`elapsed < 0.35`) and measured the Windows runner:
-        0.60 s under four parallel shards on 2026-09-23, CI run 35857662331. See
-        `docs/research/2026-09-23-a-barrier-proves-concurrency.md`.
-        """
-        seen = []
-        rendezvous = threading.Barrier(3, timeout=5)
-        monkeypatch.setattr("code_graph.metadata.version", lambda name: "0.20")
-        monkeypatch.setattr("code_graph.importlib.import_module", lambda name: object())
-        monkeypatch.setattr("code_graph.shutil.which", lambda name: f"/bin/{name}")
-
-        def meeting_probe(args, timeout=5):
-            seen.append(timeout)
-            rendezvous.wait()
-            return "1.0", None
-
-        monkeypatch.setattr("code_graph._probe_version", meeting_probe)
-        detect_code_tools(tmp_path, cache_path=tmp_path / "tools.json")
-
-        assert rendezvous.broken is False
-        assert seen == [2, 2, 2]
-
-    def test_concurrent_manifest_writers_leave_valid_file_and_no_temps(
-        self, tmp_path, monkeypatch
-    ):
-        cache_path = tmp_path / "cache" / "code_tools.json"
-        monkeypatch.setattr("code_graph.metadata.version", lambda name: "0.20")
-        monkeypatch.setattr("code_graph.importlib.import_module", lambda name: object())
-        monkeypatch.setattr("code_graph.shutil.which", lambda name: None)
-        real_replace = __import__("os").replace
-        guard = threading.Lock()
-        active = 0
-        max_active = 0
-
-        def observed_replace(source, destination):
-            nonlocal active, max_active
-            with guard:
-                active += 1
-                max_active = max(max_active, active)
-            try:
-                time.sleep(0.001)
-                real_replace(source, destination)
-            finally:
-                with guard:
-                    active -= 1
-
-        monkeypatch.setattr("code_graph.os.replace", observed_replace)
-
-        with ThreadPoolExecutor(max_workers=32) as pool:
-            manifests = list(pool.map(lambda _: detect_code_tools(tmp_path, cache_path), range(256)))
-
-        written = json.loads(cache_path.read_text(encoding="utf-8"))
-        assert written in manifests
-        assert max_active == 1
-        assert list(cache_path.parent.glob("code_tools.json.*.tmp")) == []
-
-    def test_manifest_contention_is_best_effort_and_preserves_last_valid_file(
-        self, tmp_path, monkeypatch
-    ):
-        cache_path = tmp_path / "cache" / "code_tools.json"
-        cache_path.parent.mkdir()
-        previous = {"schema_version": 1, "generated_at": "old", "tools": {}}
-        cache_path.write_text(json.dumps(previous), encoding="utf-8")
-        monkeypatch.setattr("code_graph.metadata.version", lambda name: "0.20")
-        monkeypatch.setattr("code_graph.importlib.import_module", lambda name: object())
-        monkeypatch.setattr("code_graph.shutil.which", lambda name: None)
-        monkeypatch.setattr(
-            "code_graph.os.replace",
-            lambda source, destination: (_ for _ in ()).throw(PermissionError("busy")),
-        )
-
-        detected = detect_code_tools(tmp_path, cache_path)
-
-        assert detected["schema_version"] == 1
-        assert json.loads(cache_path.read_text(encoding="utf-8")) == previous
-        assert list(cache_path.parent.glob("code_tools.json.*.tmp")) == []
-
-    def test_missing_and_failing_tools_do_not_crash_and_replace_corrupt_manifest(
-        self, tmp_path, monkeypatch
-    ):
-        cache_path = tmp_path / "cache" / "code_tools.json"
-        cache_path.parent.mkdir()
-        cache_path.write_text("{broken", encoding="utf-8")
-
-        def missing_jedi(name):
-            raise ModuleNotFoundError(name)
-
-        monkeypatch.setattr("code_graph.metadata.version", missing_jedi)
-        monkeypatch.setattr("code_graph.shutil.which", lambda name: f"/bin/{name}")
-        monkeypatch.setattr(
-            "code_graph._probe_version", lambda args, timeout=2: (None, "probe failed")
-        )
-
-        manifest = detect_code_tools(tmp_path, cache_path=cache_path)
-
-        assert all(not tool["available"] for tool in manifest["tools"].values())
-        assert manifest["tools"]["python"]["failure"]
-        assert manifest["tools"]["typescript"]["failure"] == "probe failed"
-        assert json.loads(cache_path.read_text(encoding="utf-8")) == manifest
 
 
 class TestPythonSemanticEnrichment:

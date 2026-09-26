@@ -43,10 +43,22 @@ def _graph_locations(directory: Path, symbol: str, deadline: float) -> list[dict
     if graph is None:
         return []
     try:
-        rows = graph.find_nodes(name=symbol, max_rows=MAX_LOCATIONS, deadline=deadline)
+        return _named_rows(graph, symbol, deadline)
     finally:
         graph.close()
-    return [_location_row(row) for row in rows[:MAX_LOCATIONS]]
+
+
+def _named_rows(graph, symbol: str, deadline: float) -> list[dict]:
+    """Every node of this name up to the reader's ceiling; the cut is ours.
+
+    `max_rows=MAX_LOCATIONS` made the reader refuse any name with more than
+    five nodes (audit C-36,
+    docs/research/2026-09-25-a-common-name-is-asked-up-to-the-reader-ceiling.md).
+    """
+    from evidence_graph import MAX_ROWS
+
+    rows = graph.find_nodes(name=symbol, max_rows=MAX_ROWS, deadline=deadline)
+    return [_location_row(row) for row in rows]
 
 
 def _location_row(row: dict) -> dict:
@@ -136,7 +148,9 @@ def join_symbol_provenance(
     pages = _matching_pages(vault, pattern, deadline)
     return {
         "symbol": symbol,
-        "locations": locations,
+        "locations": locations[:MAX_LOCATIONS],
+        "location_count": len(locations),
+        "locations_truncated": len(locations) > MAX_LOCATIONS,
         "pages": pages,
         "verification": (
             "cited_sources are surfaced, not re-verified here; "

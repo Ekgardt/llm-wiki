@@ -653,7 +653,7 @@ def test_cli_cancel_redrive_and_purge(
         ],
     )
     assert memory_queue._cli() == 0
-    assert set(json.loads(capsys.readouterr().out)) == {"counts", "ids"}
+    assert set(json.loads(capsys.readouterr().out)) == {"counts", "ids", "retained"}
 
 
 @pytest.mark.parametrize("reason", ["", "x" * 4097])

@@ -10,13 +10,12 @@ The suite is the **full regression suite**. Highlights:
 |---|---|
 | `test_slug.py` | Slug collision resolution + strict `_slug_owns_dir` ownership (state.md without `- Project root:` must NOT be claimed). Base slug sanitization, Cyrillic preservation, git owner-repo fallback, hash-suffix last resort, idempotency. |
 | `test_compile_failure.py` | The `silent data loss` class bug where a failed LLM compile would still write `compiled_daily_hashes`. Monkey-patches `run_compile` to simulate failure, asserts hashes unchanged, exit=1, `last_compile_status=error`, `knowledge/log.md` untouched. |
-| `test_audit_runtime_contracts.py` | Post-audit regression guards: module-level `import re` in compile_memory (contradiction path), `subprocess` import in query_memory, feedback stdin JSON contract, flush_memory delegates to `maybe_compile.spawn_compile_if_idle` (PID lock). |
+| `test_audit_runtime_contracts.py` | Post-audit regression guards: module-level `import re` in compile_memory (contradiction path), `subprocess` import in query_memory, flush_memory delegates to `maybe_compile.spawn_compile_if_idle` (PID lock). |
 | `test_audit_fixes.py` | e2e compile with `MEMORY_LLM_PROVIDER=fake` end-to-end against a tmp vault; pinned `LLM_WIKI_ROOT` in settings.json hooks; no title-case duplicate notes after three-zone rename. |
 | `test_context_noise.py` | Technical noise (`Trigger:`, `Transcript:`, `Project root:`, session-id UUIDs) stripped from SessionStart-injected context; useful signal preserved; ≤4KB cap. |
 | `test_slugify.py` | Unicode-safe slugify for Cyrillic questions; punct-only / emoji-only inputs get deterministic hash suffix instead of colliding. |
 | `test_session_end_skip.py` | SessionEnd hook skips vault cwd (delegates to project-level hook) and skips $HOME (not a project); writes tagged entry for normal non-vault cwd. |
 | `test_capture_hooks.py` | Exit-0 invariants on capture hooks, MIN_PROMPT_CHARS / SIGNIFICANT_TOOLS filters, vault-internal skip, rate-limit window. |
-| `test_feedback_capture.py` | Correction/preference/instruction/rejection detection + candidate save/promote. |
 | `test_flush_classification.py` | FLUSH_MAJOR/MINOR/OK classification + tier gating of `maybe_trigger_compile`. |
 | `test_graph_neighbors.py` | Triple-RRF fusion weights + graph-neighbor boost resolution. |
 | `test_guardrails.py` | Correction/preference collection, project filter, dedup, formatting. |

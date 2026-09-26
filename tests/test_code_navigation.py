@@ -44,6 +44,7 @@ from tests.code_kernel_helpers import (
     SemanticPyrightFixture,
     create_semantic_pyright_fixture,
 )
+from tests.slow_machine import SHORT_TIMEOUT
 
 
 def test_navigation_status_has_exactly_seven_values() -> None:
@@ -526,9 +527,9 @@ def test_code_navigation_rejects_foreign_repository(
             other_scope, Capability.DEFINITIONS, "pkg/api.py", 1, 0
         )
         with pytest.raises(ValueError, match="navigation repository"):
-            navigation.query(request, deadline=time.monotonic() + 5)
+            navigation.query(request, deadline=time.monotonic() + SHORT_TIMEOUT)
     finally:
-        navigation.close(deadline=time.monotonic() + 5)
+        navigation.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_code_navigation_type_checks_constructor(
@@ -550,7 +551,7 @@ def test_code_navigation_type_checks_constructor(
     )
     with pytest.raises(TypeError):
         CodeNavigation(scope, "not-a-session", semantic_pyright.identity)  # type: ignore[arg-type]
-    session.close(deadline=time.monotonic() + 5)
+    session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_code_navigation_binds_exact_session_identity_and_repository(
@@ -572,7 +573,7 @@ def test_code_navigation_binds_exact_session_identity_and_repository(
         with pytest.raises(ValueError, match="repository"):
             CodeNavigation(other_scope, session, semantic_pyright.identity)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def _graph_location(path: str, start: int, end: int) -> NavigationLocation:
@@ -631,7 +632,7 @@ def _source_anchor(
 
 def _revision(repository: Path, marker: str) -> WorkspaceRevision:
     revision = compute_workspace_revision(
-        resolve_repository_scope(repository), deadline=time.monotonic() + 5
+        resolve_repository_scope(repository), deadline=time.monotonic() + SHORT_TIMEOUT
     )
     return replace(revision, revision_sha256=marker * 64)
 
@@ -658,7 +659,7 @@ def test_post_revision_reuses_exact_verified_revision(
     current = code_navigation._compute_post_revision(
         scope,
         expected,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
     assert current is expected
@@ -688,7 +689,7 @@ def test_post_revision_mismatch_falls_back_to_full_recomputation(
         code_navigation._compute_post_revision(
             scope,
             expected,
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         is current
     )
@@ -729,15 +730,15 @@ def test_stable_queries_reuse_content_addressed_source_documents(
         20,
     )
     try:
-        first = navigation.query(request, deadline=time.monotonic() + 5)
-        second = navigation.query(request, deadline=time.monotonic() + 5)
+        first = navigation.query(request, deadline=time.monotonic() + SHORT_TIMEOUT)
+        second = navigation.query(request, deadline=time.monotonic() + SHORT_TIMEOUT)
 
         assert first.status is NavigationStatus.OK
         assert second.status is NavigationStatus.OK
         assert parsed.count("pkg/service.py") == 1
         assert parsed.count("pkg/api.py") == 1
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def _write_cache_sources(repository: Path, prefix: str, names: tuple) -> tuple:
@@ -826,7 +827,7 @@ def test_source_document_cache_lru_tracks_only_consumed_documents(
     def query(path: str) -> None:
         result = navigation.query(
             NavigationRequest(scope, Capability.DEFINITIONS, path, 1, 0),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.OK
 
@@ -841,7 +842,7 @@ def test_source_document_cache_lru_tracks_only_consumed_documents(
         assert parsed.count(paths[0]) == 1
         assert parsed.count(paths[1]) == 2
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_source_document_cache_repeated_use_refreshes_attempt_recency(
@@ -878,15 +879,15 @@ def test_source_document_cache_repeated_use_refreshes_attempt_recency(
     parsed = _record_parsed_documents(monkeypatch)
     request = NavigationRequest(scope, Capability.DEFINITIONS, paths[0], 1, 0)
     try:
-        first = navigation.query(request, deadline=time.monotonic() + 5)
-        second = navigation.query(request, deadline=time.monotonic() + 5)
+        first = navigation.query(request, deadline=time.monotonic() + SHORT_TIMEOUT)
+        second = navigation.query(request, deadline=time.monotonic() + SHORT_TIMEOUT)
 
         assert first.status is NavigationStatus.OK
         assert second.status is NavigationStatus.OK
         assert parsed.count(paths[0]) == 1
         assert parsed.count(paths[1]) == 2
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_source_document_cache_rejects_newline_dense_document_over_byte_bound(
@@ -913,14 +914,14 @@ def test_source_document_cache_rejects_newline_dense_document_over_byte_bound(
     parsed = _record_parsed_documents(monkeypatch)
     request = NavigationRequest(scope, Capability.DEFINITIONS, path, 1, 0)
     try:
-        first = navigation.query(request, deadline=time.monotonic() + 5)
-        second = navigation.query(request, deadline=time.monotonic() + 5)
+        first = navigation.query(request, deadline=time.monotonic() + SHORT_TIMEOUT)
+        second = navigation.query(request, deadline=time.monotonic() + SHORT_TIMEOUT)
 
         assert first.status is NavigationStatus.OK
         assert second.status is NavigationStatus.OK
         assert parsed.count(path) == 2
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_source_document_cache_rejects_path_and_key_heavy_document_over_byte_bound(
@@ -947,14 +948,14 @@ def test_source_document_cache_rejects_path_and_key_heavy_document_over_byte_bou
     parsed = _record_parsed_documents(monkeypatch)
     request = NavigationRequest(scope, Capability.DEFINITIONS, path, 1, 0)
     try:
-        first = navigation.query(request, deadline=time.monotonic() + 5)
-        second = navigation.query(request, deadline=time.monotonic() + 5)
+        first = navigation.query(request, deadline=time.monotonic() + SHORT_TIMEOUT)
+        second = navigation.query(request, deadline=time.monotonic() + SHORT_TIMEOUT)
 
         assert first.status is NavigationStatus.OK
         assert second.status is NavigationStatus.OK
         assert parsed.count(path) == 2
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_source_document_cache_concurrent_publication_preserves_access_order(
@@ -989,7 +990,7 @@ def test_source_document_cache_concurrent_publication_preserves_access_order(
         assert sources[paths[1]].uri in current
         assert sources[paths[2]].uri in current
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_source_document_cache_consume_after_eviction_republishes_when_stable(
@@ -1024,7 +1025,7 @@ def test_source_document_cache_consume_after_eviction_republishes_when_stable(
         assert sources[paths[1]].uri not in current
         assert sources[paths[2]].uri in current
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_source_document_cache_structural_alias_refreshes_recency(
@@ -1066,15 +1067,15 @@ def test_source_document_cache_structural_alias_refreshes_recency(
     parsed = _record_parsed_documents(monkeypatch)
     request = NavigationRequest(scope, Capability.DEFINITIONS, paths[0], 1, 0)
     try:
-        first = navigation.query(request, deadline=time.monotonic() + 5)
-        second = navigation.query(request, deadline=time.monotonic() + 5)
+        first = navigation.query(request, deadline=time.monotonic() + SHORT_TIMEOUT)
+        second = navigation.query(request, deadline=time.monotonic() + SHORT_TIMEOUT)
 
         assert first.status is NavigationStatus.PARTIAL
         assert second.status is NavigationStatus.PARTIAL
         assert parsed.count(paths[0]) == 1
         assert parsed.count(paths[1]) == 2
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_code_navigation_close_clears_source_cache_when_session_close_fails(
@@ -1099,7 +1100,7 @@ def test_code_navigation_close_clears_source_cache_when_session_close_fails(
         NavigationRequest(
             scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
         ),
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
     assert result.status is NavigationStatus.OK
     assert navigation._source_document_cache
@@ -1111,11 +1112,11 @@ def test_code_navigation_close_clears_source_cache_when_session_close_fails(
     )
     try:
         with pytest.raises(RuntimeError, match="close failed"):
-            navigation.close(deadline=time.monotonic() + 5)
+            navigation.close(deadline=time.monotonic() + SHORT_TIMEOUT)
         assert not navigation._source_document_cache
         assert navigation._source_document_cache_bytes == 0
     finally:
-        real_close(deadline=time.monotonic() + 5)
+        real_close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def _patch_stable_attempt(
@@ -1177,13 +1178,13 @@ def test_query_rejects_empty_revision_before_provider_operation(
             NavigationRequest(
                 scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.ERROR
         assert result.locations == ()
         assert provider_calls == 0
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_query_attempt_order_keeps_structural_callback_and_target_reads_in_fence(
@@ -1273,7 +1274,7 @@ def test_query_attempt_order_keeps_structural_callback_and_target_reads_in_fence
             "post",
         ]
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_provider_return_after_deadline_prevents_structural_callback(
@@ -1689,7 +1690,7 @@ def test_provider_edit_race_retries_whole_attempt_once_and_never_publishes_stale
             NavigationRequest(
                 scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert provider_calls == 2
         assert synchronize_calls == 2
@@ -1705,7 +1706,7 @@ def test_provider_edit_race_retries_whole_attempt_once_and_never_publishes_stale
             assert result.workspace_revision_before == revisions[1].revision_sha256
             assert result.workspace_revision_after == revisions[1].revision_sha256
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_target_revision_mismatch_aborts_attempt_before_post_revision(
@@ -1765,7 +1766,7 @@ def test_target_revision_mismatch_aborts_attempt_before_post_revision(
             NavigationRequest(
                 scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert provider_calls == 2
         assert target_reads == 2
@@ -1775,7 +1776,7 @@ def test_target_revision_mismatch_aborts_attempt_before_post_revision(
         assert result.workspace_revision_before == revisions[1].revision_sha256
         assert result.workspace_revision_after == revisions[1].revision_sha256
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def _fenced_operation_slots(operation: str) -> dict:
@@ -1885,7 +1886,7 @@ def test_pre_revision_disk_read_failure_retries_every_fenced_path(
             mutate_every_attempt, operation
         )
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.mark.parametrize("mutate_every_attempt", [False, True])
@@ -1936,7 +1937,7 @@ def test_query_source_hash_is_checked_before_utf8_decode(
             NavigationRequest(
                 scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert open_calls == 2
         if mutate_every_attempt:
@@ -1947,7 +1948,7 @@ def test_query_source_hash_is_checked_before_utf8_decode(
             assert provider_calls == 1
             assert result.status is NavigationStatus.OK
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.mark.parametrize(
@@ -2001,7 +2002,7 @@ def test_open_document_is_bound_exactly_before_any_fact_callback(
             NavigationRequest(
                 scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.ERROR
         assert result.effective_capability is None
@@ -2010,7 +2011,7 @@ def test_open_document_is_bound_exactly_before_any_fact_callback(
         assert provider_calls == 0
         assert structural_calls == 0
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_invalid_utf8_already_recorded_by_revision_is_error_not_stale(
@@ -2039,13 +2040,13 @@ def test_invalid_utf8_already_recorded_by_revision_is_error_not_stale(
             NavigationRequest(
                 scope, Capability.DEFINITIONS, "pkg/service.py", 1, 0
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.ERROR
         assert result.locations == ()
         assert provider_calls == 0
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_query_indexes_revision_entries_once_for_all_targets(
@@ -2099,13 +2100,13 @@ def test_query_indexes_revision_entries_once_for_all_targets(
             NavigationRequest(
                 scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.OK
         assert len(result.locations) == 3
         assert entries.iterations == 1
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_target_read_timeout_aborts_without_partial_publication(
@@ -2203,7 +2204,7 @@ def test_provider_location_coverage_and_partial_are_preserved(
             NavigationRequest(
                 scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is expected
         assert result.locations == ()
@@ -2213,7 +2214,7 @@ def test_provider_location_coverage_and_partial_are_preserved(
             else ResolutionLabel.UNRESOLVED
         )
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.mark.parametrize(
@@ -2251,11 +2252,11 @@ def test_provider_call_coverage_is_not_stripped(
                 20,
                 direction="incoming",
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is expected
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_calls_fallback_classifies_only_structurally_correlated_references(
@@ -2365,14 +2366,14 @@ def test_types_combines_type_definition_and_hover_partial(
     try:
         result = navigation.query(
             NavigationRequest(scope, Capability.TYPES, "pkg/service.py", 10, 20),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.PARTIAL
         assert result.effective_capability is Capability.TYPES
         assert result.hover == "type hover"
         assert len(result.locations) == 1
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_types_marks_invalid_hover_range_partial_without_dropping_contents(
@@ -2405,13 +2406,13 @@ def test_types_marks_invalid_hover_range_partial_without_dropping_contents(
     try:
         result = navigation.query(
             NavigationRequest(scope, Capability.TYPES, "pkg/service.py", 10, 20),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.PARTIAL
         assert result.hover == "type hover"
         assert "hover" in " ".join(result.warnings)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.mark.parametrize(
@@ -2463,7 +2464,7 @@ def test_types_subrequests_are_independent(
     try:
         result = navigation.query(
             NavigationRequest(scope, Capability.TYPES, "pkg/service.py", 10, 20),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert calls == ["type_definition", "hover"]
         assert result.status is NavigationStatus.PARTIAL
@@ -2476,7 +2477,7 @@ def test_types_subrequests_are_independent(
             assert result.hover == "type hover"
         assert all("private" not in warning for warning in result.warnings)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.mark.parametrize(
@@ -2577,7 +2578,7 @@ def test_provider_setup_failure_publishes_only_fresh_structural_fallback(
             NavigationRequest(
                 scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert callbacks == 1
         assert result.status is NavigationStatus.PARTIAL
@@ -2589,7 +2590,7 @@ def test_provider_setup_failure_publishes_only_fresh_structural_fallback(
         assert "setup" in " ".join(result.warnings)
         assert all("private" not in warning for warning in result.warnings)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.mark.parametrize("stage", ["synchronize", "open_document"])
@@ -2647,7 +2648,7 @@ def test_setup_failure_never_bypasses_request_source_or_anchor_validation(
                 request_line,
                 0,
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
 
         assert result.status is NavigationStatus.ERROR
@@ -2655,7 +2656,7 @@ def test_setup_failure_never_bypasses_request_source_or_anchor_validation(
         assert result.provenance == ()
         assert structural_calls == 0
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_setup_failure_retries_request_source_disk_mismatch_before_fallback(
@@ -2705,7 +2706,7 @@ def test_setup_failure_retries_request_source_disk_mismatch_before_fallback(
                 1,
                 0,
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
 
         assert result.status is NavigationStatus.STALE
@@ -2714,7 +2715,7 @@ def test_setup_failure_retries_request_source_disk_mismatch_before_fallback(
         assert revision_calls == 2
         assert structural_calls == 0
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.mark.parametrize("mutate_every_attempt", [False, True])
@@ -2783,7 +2784,7 @@ def test_setup_failure_validates_after_synchronize_before_aba_fallback(
                 1,
                 0,
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
 
         assert synchronize_calls == 2
@@ -2801,7 +2802,7 @@ def test_setup_failure_validates_after_synchronize_before_aba_fallback(
             assert result.workspace_revision_after == revision_b.revision_sha256
             assert len(result.locations) == 1
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_query_retries_when_request_source_first_appears_inside_revision_fence(
@@ -2853,14 +2854,14 @@ def test_query_retries_when_request_source_first_appears_inside_revision_fence(
                 1,
                 0,
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
 
         assert result.status is NavigationStatus.OK
         assert result.workspace_revision_before == result.workspace_revision_after
         assert provider_calls == 1
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.mark.parametrize("stage", ["synchronize", "open_document"])
@@ -2962,7 +2963,7 @@ def test_setup_failure_fallback_retries_freshness_before_publication(
             NavigationRequest(
                 scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert callbacks == 2
         assert result.effective_capability is None
@@ -2977,7 +2978,7 @@ def test_setup_failure_fallback_retries_freshness_before_publication(
             assert result.status is NavigationStatus.NOT_READY
             assert result.locations == ()
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.mark.parametrize("stage", ["synchronize", "open_document"])
@@ -3051,12 +3052,6 @@ def _patch_early_revision(monkeypatch, early_stage: str, revision) -> None:
     monkeypatch.setattr(code_navigation, "_compute_revision", replacement)
 
 
-def _early_capability(early_stage: str) -> Capability:
-    if early_stage == "unsupported":
-        return Capability.DECLARATIONS
-    return Capability.DEFINITIONS
-
-
 def _early_deadline(early_stage: str) -> float:
     if early_stage == "expired":
         return 0.0
@@ -3065,7 +3060,7 @@ def _early_deadline(early_stage: str) -> float:
 
 @pytest.mark.parametrize(
     "early_stage",
-    ["unsupported", "expired", "revision_timeout", "revision_error", "empty_revision"],
+    ["expired", "revision_timeout", "revision_error", "empty_revision"],
 )
 def test_early_results_preserve_live_session_readiness(
     repository: Path,
@@ -3079,18 +3074,17 @@ def test_early_results_preserve_live_session_readiness(
     navigation, session = _navigation(repository, state_root, semantic_pyright)
     session._readiness = "query_ready"
     _patch_early_revision(monkeypatch, early_stage, revision)
-    capability = _early_capability(early_stage)
     deadline = _early_deadline(early_stage)
     try:
         result = navigation.query(
-            NavigationRequest(scope, capability, "pkg/service.py", 10, 20),
+            NavigationRequest(scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20),
             deadline=deadline,
         )
         assert result.readiness == "query_ready"
         assert result.effective_capability is None
         assert result.locations == ()
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_setup_failure_structural_interruption_still_propagates(
@@ -3208,7 +3202,7 @@ def test_post_setup_empty_results_preserve_readiness_and_empty_contract(
                 request_line,
                 20,
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is expected
         assert result.readiness == "query_ready"
@@ -3224,7 +3218,7 @@ def test_post_setup_empty_results_preserve_readiness_and_empty_contract(
         assert isinstance(result.provenance, tuple)
         assert isinstance(result.warnings, tuple)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.mark.parametrize(
@@ -3275,7 +3269,7 @@ def test_callback_exceptions_are_redacted_at_every_boundary(
             for warning in result.warnings
         )
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.mark.parametrize("callback_kind", ["structural", "resolver", "edge"])
@@ -3316,53 +3310,9 @@ def test_navigation_interruption_propagates_from_every_callback_boundary(
         session.close(deadline=time.monotonic() + 5)
 
 
-@pytest.mark.parametrize("capability", [Capability.DECLARATIONS, Capability.IMPORTS, Capability.INHERITANCE])
-def test_unrouted_capabilities_do_not_invoke_provider_or_structural_fallback(
-    repository: Path,
-    state_root: Path,
-    semantic_pyright: SemanticPyrightFixture,
-    monkeypatch: pytest.MonkeyPatch,
-    capability: Capability,
-) -> None:
-    scope = resolve_repository_scope(repository)
-    revision = _revision(repository, "a")
-    document = _open_document(scope, "pkg/service.py")
-    calls: list[str] = []
-    navigation, session = _navigation(
-        repository,
-        state_root,
-        semantic_pyright,
-        structural=lambda request, deadline: (
-            calls.append("structural") or _graph_location("pkg/api.py", 6, 15),
-        ),
-    )
-    monkeypatch.setattr(
-        code_navigation,
-        "_compute_revision",
-        lambda repository, *, deadline: calls.append("revision") or revision,
-    )
-    monkeypatch.setattr(
-        session,
-        "synchronize",
-        lambda value, *, deadline: calls.append("synchronize"),
-    )
-    monkeypatch.setattr(
-        session,
-        "open_document",
-        lambda path, *, deadline: calls.append("open") or document,
-    )
-    try:
-        result = navigation.query(
-            NavigationRequest(scope, capability, "pkg/service.py", 10, 20),
-            deadline=time.monotonic() + 5,
-        )
-        assert result.status is NavigationStatus.UNSUPPORTED
-        assert result.effective_capability is None
-        assert result.resolution is ResolutionLabel.UNSUPPORTED
-        assert result.locations == ()
-        assert calls == []
-    finally:
-        session.close(deadline=time.monotonic() + 5)
+def test_every_capability_has_a_route() -> None:
+    """Audit C-44: no `Capability` exists that a query would have to refuse."""
+    assert set(Capability) == set(code_navigation._CAPABILITY_DIRECTION)
 
 
 @pytest.mark.parametrize(
@@ -3412,7 +3362,7 @@ def test_cross_file_unicode_targets_use_negotiated_position_encoding(
                 10,
                 20,
             ),
-            deadline=time.monotonic() + 20,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.OK
         assert result.position_encoding is encoding
@@ -3423,7 +3373,7 @@ def test_cross_file_unicode_targets_use_negotiated_position_encoding(
         assert location.line == 1
         assert location.character == 14
     finally:
-        navigation.close(deadline=time.monotonic() + 5)
+        navigation.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_provider_target_with_stale_pre_revision_hash_returns_stale(
@@ -3466,13 +3416,13 @@ def test_provider_target_with_stale_pre_revision_hash_returns_stale(
             NavigationRequest(
                 scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.STALE
         assert result.locations == ()
         assert "changed" in " ".join(result.warnings)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 _REPEATED_RANGES = (
@@ -3541,7 +3491,7 @@ def test_provider_uri_normalization_is_attempt_local_for_repeated_locations(
     )
     try:
         results = tuple(
-            navigation.query(request, deadline=time.monotonic() + 5)
+            navigation.query(request, deadline=time.monotonic() + SHORT_TIMEOUT)
             for _ in range(2)
         )
 
@@ -3559,7 +3509,7 @@ def test_provider_uri_normalization_is_attempt_local_for_repeated_locations(
             external_uri,
         ]
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_external_provider_target_is_filtered_without_path_disclosure(
@@ -3593,13 +3543,13 @@ def test_external_provider_target_is_filtered_without_path_disclosure(
             NavigationRequest(
                 scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.PARTIAL
         assert result.locations == ()
         assert all("external-sensitive" not in warning for warning in result.warnings)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_structural_targets_are_revision_validated_and_rebuilt(
@@ -3640,7 +3590,7 @@ def test_structural_targets_are_revision_validated_and_rebuilt(
             NavigationRequest(
                 scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.PARTIAL
         assert len(result.locations) == 1
@@ -3649,7 +3599,7 @@ def test_structural_targets_are_revision_validated_and_rebuilt(
         assert result.locations[0].character == 6
         assert result.locations[0].resolution is ResolutionLabel.GRAPH_CANDIDATE
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_matching_graph_fact_upgrades_lsp_and_graph_only_fact_appends_after_lsp(
@@ -3697,7 +3647,7 @@ def test_matching_graph_fact_upgrades_lsp_and_graph_only_fact_appends_after_lsp(
             NavigationRequest(
                 scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert len(result.locations) == 2
         confirmed, candidate = result.locations
@@ -3714,7 +3664,7 @@ def test_matching_graph_fact_upgrades_lsp_and_graph_only_fact_appends_after_lsp(
             "evidence-graph",
         }
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_structural_fact_count_is_capped_at_ten_thousand(
@@ -3756,14 +3706,14 @@ def test_structural_fact_count_is_capped_at_ten_thousand(
             NavigationRequest(
                 scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
             ),
-            deadline=time.monotonic() + 20,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.PARTIAL
         assert result.total == 10_000
         assert len(result.locations) == 10_000
         assert "limit" in " ".join(result.warnings)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def _candidate_slots(operation: str, structural, resolver) -> dict:
@@ -3830,7 +3780,7 @@ def test_structural_cap_is_applied_after_unique_deduplication(
         ]
         assert "limit" not in " ".join(result.warnings)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.mark.parametrize("operation", ["query", "resolve_symbol"])
@@ -3885,7 +3835,7 @@ def test_structural_callback_input_is_bounded_before_fact_deduplication(
                 NavigationRequest(
                     scope, Capability.DEFINITIONS, "pkg/service.py", 10, 20
                 ),
-                deadline=time.monotonic() + 5,
+                deadline=time.monotonic() + SHORT_TIMEOUT,
             )
         else:
             result = navigation.resolve_symbol(
@@ -3898,7 +3848,7 @@ def test_structural_callback_input_is_bounded_before_fact_deduplication(
         assert "input bound" in " ".join(result.warnings)
         assert "failed" not in " ".join(result.warnings)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_diagnostics_preserve_severity_code_message_version_related_and_partial(
@@ -4032,12 +3982,12 @@ def test_lsp_diagnostic_severity_mapping_is_exact(
             NavigationRequest(
                 scope, Capability.DIAGNOSTICS, "pkg/service.py", 1, 0
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.OK
         assert result.diagnostics[0].severity is expected
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_diagnostic_key_distinguishes_missing_and_empty_codes(
@@ -4080,13 +4030,13 @@ def test_diagnostic_key_distinguishes_missing_and_empty_codes(
             NavigationRequest(
                 scope, Capability.DIAGNOSTICS, "pkg/service.py", 1, 0
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.OK
         assert result.total == 2
         assert {diagnostic.code for diagnostic in result.diagnostics} == {None, ""}
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_empty_unversioned_provider_diagnostics_are_not_ready_not_empty_ok(
@@ -4110,13 +4060,13 @@ def test_empty_unversioned_provider_diagnostics_are_not_ready_not_empty_ok(
             NavigationRequest(
                 scope, Capability.DIAGNOSTICS, "pkg/service.py", 1, 0
             ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.NOT_READY
         assert result.total == 0
         assert result.diagnostics == ()
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_diagnostic_and_related_facts_share_one_global_cap(
@@ -4202,7 +4152,7 @@ def test_resolve_symbol_returns_ambiguity_for_multiple_candidates(
         assert result.total == 2
         assert "disambiguation" in result.warnings[0]
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_resolve_symbol_returns_single_graph_confirmed(
@@ -4225,7 +4175,7 @@ def test_resolve_symbol_returns_single_graph_confirmed(
         assert result.resolution is ResolutionLabel.GRAPH_CONFIRMED
         assert result.total == 1
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_resolve_symbol_unresolved_when_no_candidates(
@@ -4247,7 +4197,7 @@ def test_resolve_symbol_unresolved_when_no_candidates(
         assert result.resolution is ResolutionLabel.UNRESOLVED
         assert result.total == 0
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.mark.parametrize("mutate_every_attempt", [False, True])
@@ -4311,7 +4261,7 @@ def test_resolve_symbol_retries_freshness_once_and_discards_second_race(
             assert result.workspace_revision_before == revisions[1].revision_sha256
             assert result.workspace_revision_after == revisions[1].revision_sha256
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_resolve_symbol_propagates_keyboard_interrupt(
@@ -4377,7 +4327,7 @@ def test_resolve_symbol_stable_sorts_dedupes_validates_and_marks_ambiguity(
         result = navigation.resolve_symbol(
             "PublicApi",
             repository=navigation.repository,
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.PARTIAL
         assert result.resolution is ResolutionLabel.AMBIGUOUS
@@ -4391,7 +4341,7 @@ def test_resolve_symbol_stable_sorts_dedupes_validates_and_marks_ambiguity(
         )
         assert "filtered" in " ".join(result.warnings)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_resolve_symbol_caps_candidates_and_reports_limit(
@@ -4426,7 +4376,7 @@ def test_resolve_symbol_caps_candidates_and_reports_limit(
         result = navigation.resolve_symbol(
             "many",
             repository=navigation.repository,
-            deadline=time.monotonic() + 20,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.PARTIAL
         assert result.total == 10_000
@@ -4437,7 +4387,7 @@ def test_resolve_symbol_caps_candidates_and_reports_limit(
         )
         assert "limit" in " ".join(result.warnings)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_resolve_symbol_input_bound_never_confirms_truncated_singleton(
@@ -4467,7 +4417,7 @@ def test_resolve_symbol_input_bound_never_confirms_truncated_singleton(
         result = navigation.resolve_symbol(
             "PublicApi",
             repository=navigation.repository,
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.PARTIAL
         assert result.total == 1
@@ -4475,7 +4425,7 @@ def test_resolve_symbol_input_bound_never_confirms_truncated_singleton(
         assert result.locations[0].resolution is ResolutionLabel.AMBIGUOUS
         assert "input bound" in " ".join(result.warnings)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_resolve_symbol_rejects_empty_revision_without_publishing_candidates(
@@ -4509,13 +4459,13 @@ def test_resolve_symbol_rejects_empty_revision_without_publishing_candidates(
         result = navigation.resolve_symbol(
             "PublicApi",
             repository=navigation.repository,
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.ERROR
         assert result.locations == ()
         assert calls == 0
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.mark.parametrize("verified", [False, True])
@@ -4578,7 +4528,7 @@ def test_verify_edge_uses_both_anchors_and_only_true_confirms_target(
             assert result.locations == ()
             assert "no structural edge proof" in result.warnings
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_verify_edge_without_verifier_is_partial_not_deadness_proof(
@@ -4602,13 +4552,13 @@ def test_verify_edge_without_verifier_is_partial_not_deadness_proof(
             source,
             target,
             repository=scope,
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.PARTIAL
         assert result.resolution is ResolutionLabel.UNRESOLVED
         assert result.locations == ()
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.mark.parametrize("mutate_every_attempt", [False, True])
@@ -4659,7 +4609,7 @@ def test_verify_edge_retries_freshness_once_and_discards_second_race(
             source,
             target,
             repository=scope,
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert verifier_calls == 2
         if mutate_every_attempt:
@@ -4671,7 +4621,7 @@ def test_verify_edge_retries_freshness_once_and_discards_second_race(
             assert result.workspace_revision_before == revisions[1].revision_sha256
             assert result.workspace_revision_after == revisions[1].revision_sha256
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.mark.parametrize(
@@ -4727,7 +4677,7 @@ def test_verify_edge_retries_resolution_failure_for_pre_revision_entry(
             source,
             target,
             repository=scope,
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         if mutate_every_attempt:
             assert target_resolutions == 2
@@ -4740,7 +4690,7 @@ def test_verify_edge_retries_resolution_failure_for_pre_revision_entry(
             assert verifier_calls == 1
             assert result.status is NavigationStatus.OK
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_verify_edge_missing_from_fresh_revision_is_error_after_post_fence(
@@ -4769,12 +4719,12 @@ def test_verify_edge_missing_from_fresh_revision_is_error_after_post_fence(
             source,
             target,
             repository=scope,
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.status is NavigationStatus.ERROR
         assert revision_calls == 2
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.mark.parametrize("appeared_anchor", ["source", "target"])
@@ -4822,14 +4772,14 @@ def test_verify_edge_retries_when_either_anchor_first_appears_inside_revision_fe
             source,
             target,
             repository=scope,
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
 
         assert result.status is NavigationStatus.OK
         assert result.workspace_revision_before == result.workspace_revision_after
         assert verifier_calls == 1
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_verify_edge_validates_both_anchors_before_callback_and_propagates_interrupt(
@@ -5011,8 +4961,8 @@ def test_empty_lsp_result_is_provider_reported_not_deadness(
     )
     navigation, session = _navigation(repository, state_root, fixture)
     try:
-        session.start(deadline=time.monotonic() + 10)
-        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
+        session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
         request = NavigationRequest(
             resolve_repository_scope(repository),
             Capability.DEFINITIONS,
@@ -5020,13 +4970,13 @@ def test_empty_lsp_result_is_provider_reported_not_deadness(
             10,
             20,
         )
-        result = navigation.query(request, deadline=time.monotonic() + 30)
+        result = navigation.query(request, deadline=time.monotonic() + SHORT_TIMEOUT)
         assert result.status is NavigationStatus.OK
         assert result.locations == ()
         assert result.resolution is ResolutionLabel.UNRESOLVED
         assert result.provider == "pyright"
     finally:
-        navigation.close(deadline=time.monotonic() + 5)
+        navigation.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.fixture

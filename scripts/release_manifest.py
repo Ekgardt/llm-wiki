@@ -30,6 +30,10 @@ PINNED_FILES = (
 )
 
 
+# A release tool reads one ref and a few blobs; a hung git is an error, not a wait.
+GIT_TIMEOUT_SECONDS = 60
+
+
 def commit_of(ref: str) -> str:
     """The 40-hex OID a ref names, which is what the bootstrap accepts."""
     result = subprocess.run(
@@ -38,6 +42,7 @@ def commit_of(ref: str) -> str:
         capture_output=True,
         text=True,
         check=False,
+        timeout=GIT_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
         raise SystemExit(f"unknown ref: {ref}")
@@ -50,6 +55,7 @@ def _blob(ref: str, path: str, root: Path) -> bytes:
         cwd=str(root),
         capture_output=True,
         check=False,
+        timeout=GIT_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
         raise SystemExit(f"missing from {ref}: {path}")

@@ -436,8 +436,21 @@ def best_effort_record_events(
             max_rows=max_rows,
         )
         return True
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - recorded, never silent (audit C-23)
+        _record_dropped_events(exc)
         return False
+
+
+def _record_dropped_events(error: BaseException) -> None:
+    """A telemetry write that failed leaves a diagnostic record, as a lost capture does.
+
+    A busy database is recorded as deferred, anything else as lost; recording
+    never raises. See docs/research/2026-09-25-a-dropped-telemetry-write-is-recorded.md.
+    """
+    from capture_diagnostics import record_capture_failure
+    from secret_redact import describe_error
+
+    record_capture_failure("telemetry_event", describe_error(error), error=error)
 
 
 def best_effort_record_event(

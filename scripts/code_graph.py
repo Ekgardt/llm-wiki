@@ -11,26 +11,18 @@ The graph enables:
 Languages: Python, JavaScript, TypeScript, Go, Rust, Java, C, C++, Ruby,
 PHP, C#, and Bash. Each grammar is optional and loaded only when needed.
 
-Install: uv sync --extra code-graph
+Install: uv sync --locked --inexact --extra code-graph
 """
 from __future__ import annotations
 
 import ast
 import importlib
-import json
 import math
 import os
 import re
-import shutil
 import sqlite3
-import subprocess
-import sys
-import tempfile
-import threading
 import time
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
-from importlib import metadata
 from pathlib import Path, PurePath
 
 try:
@@ -40,8 +32,10 @@ try:
         SymbolRegistry,
         build_python_symbol_registry,
         directory_skipped,
+        own_source_file,
         resolve_python_imports_and_calls,
     )
+    from .python_parse import PARSE_FAILURES, parse_python
 except ImportError:
     from code_languages import CODE_LANGUAGE_BY_SUFFIX, language_for_path
     from import_resolver import (
@@ -49,8 +43,10 @@ except ImportError:
         SymbolRegistry,
         build_python_symbol_registry,
         directory_skipped,
+        own_source_file,
         resolve_python_imports_and_calls,
     )
+    from python_parse import PARSE_FAILURES, parse_python
 
 try:
     from . import value_references
@@ -91,8 +87,6 @@ MAX_CALL_PAIR_ROWS = 200_000
 # candidate set from 8,546 of 10,000 rows (17% headroom) to 3,621 (2.8x).
 DEAD_CODE_NAME_PREFIXES = ("test_",)
 
-CODE_TOOLS_SCHEMA_VERSION = 1
-_MANIFEST_WRITE_LOCK = threading.Lock()
 
 QUERY_DIR = Path(__file__).with_name("queries")
 
@@ -132,163 +126,6 @@ def _get_parser(lang: str):
 def detect_language(file_path: Path) -> str | None:
     """Detect language from file extension."""
     return language_for_path(file_path)
-
-
-def _probe_version(args: list[str], timeout: float = 2) -> tuple[str | None, str | None]:
-    """Return a tool's first version line without invoking a shell."""
-    try:
-        result = subprocess.run(
-            args, capture_output=True, text=True, timeout=timeout, check=False
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return None, str(exc)
-    output = (result.stdout or result.stderr).strip().splitlines()
-    if result.returncode != 0 or not output:
-        return None, f"version probe exited {result.returncode}"
-    return output[0], None
-
-
-def _command_tool(provider: str, path: str | None, args: list[str], semantic: bool) -> dict:
-    if not path:
-        return {
-            "provider": provider, "available": False, "version": None, "path": None,
-            "capabilities": {"semantic": semantic}, "failure": "executable not found",
-        }
-    version, failure = _probe_version([path, *args], timeout=2)
-    return {
-        "provider": provider,
-        "available": failure is None,
-        "version": version,
-        "path": str(Path(path).resolve()),
-        "capabilities": {"semantic": semantic},
-        "failure": failure,
-    }
-
-
-def _jedi_tool() -> dict:
-    """Jedi's availability, reported as one tool record either way."""
-    try:
-        version = metadata.version("jedi")
-        importlib.import_module("jedi")
-    except (ImportError, metadata.PackageNotFoundError) as exc:
-        return {
-            "provider": "jedi", "available": False, "version": None, "path": None,
-            "capabilities": {"semantic": False},
-            "failure": str(exc) or "package not found",
-        }
-    return {
-        "provider": "jedi", "available": True, "version": version,
-        "path": None, "capabilities": {"semantic": True}, "failure": None,
-    }
-
-
-def _tsc_names() -> tuple[str, ...]:
-    if sys.platform == "win32":
-        return ("tsc.cmd", "tsc")
-    return ("tsc", "tsc.cmd")
-
-
-def _local_tsc(directory: Path) -> Path | None:
-    binaries = directory / "node_modules" / ".bin"
-    candidates = (binaries / name for name in _tsc_names())
-    return next((candidate for candidate in candidates if candidate.is_file()), None)
-
-
-def _tsc_command(directory: Path) -> str | None:
-    """A workspace-local tsc outranks one on PATH."""
-    local = _local_tsc(directory)
-    if local is None:
-        return shutil.which("tsc")
-    return str(local)
-
-
-def _command_tools(directory: Path) -> dict:
-    """Probe the optional command-line servers in parallel."""
-    specifications = {
-        "typescript": ("typescript", _tsc_command(directory), ["--version"], False),
-        "rust": ("rust-analyzer", shutil.which("rust-analyzer"), ["--version"], False),
-        "go": ("gopls", shutil.which("gopls"), ["version"], False),
-    }
-    with ThreadPoolExecutor(max_workers=len(specifications)) as pool:
-        futures = {
-            name: pool.submit(_command_tool, *specification)
-            for name, specification in specifications.items()
-        }
-        return {name: futures[name].result() for name in specifications}
-
-
-def _manifest_destination(cache_path: Path | None) -> Path:
-    if cache_path is not None:
-        return cache_path
-    try:
-        from . import memory_state
-    except ImportError:
-        import memory_state
-    return memory_state.STATE_ROOT / "cache" / "code_tools.json"
-
-
-def detect_code_tools(directory: Path, cache_path: Path | None = None) -> dict:
-    """Detect optional semantic tools and atomically refresh their manifest."""
-    from datetime import datetime, timezone
-
-    directory = directory.resolve()
-    manifest = {
-        "schema_version": CODE_TOOLS_SCHEMA_VERSION,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "tools": {"python": _jedi_tool(), **_command_tools(directory)},
-    }
-    _write_tool_manifest(_manifest_destination(cache_path), manifest)
-    return manifest
-
-
-_MANIFEST_REPLACE_ATTEMPTS = 20
-
-
-def _staged_manifest(path: Path, manifest: dict) -> Path:
-    """Write the manifest to a sibling temp file, removing it if the write fails.
-
-    The caller owns the returned path, so a failed write must not leave behind a
-    file whose name nobody holds: clean up here and re-raise.
-    """
-    handle = tempfile.NamedTemporaryFile(  # noqa: SIM115
-        mode="w", encoding="utf-8", dir=path.parent,
-        prefix=f"{path.name}.", suffix=".tmp", delete=False,
-    )
-    temporary = Path(handle.name)
-    try:
-        with handle:
-            json.dump(manifest, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-    return temporary
-
-
-def _sleep_before_retry(attempt: int) -> None:
-    if attempt < _MANIFEST_REPLACE_ATTEMPTS - 1:
-        time.sleep(0.01)
-
-
-def _replace_with_retry(temporary: Path, path: Path) -> None:
-    """Windows refuses os.replace while another writer still holds the target."""
-    for attempt in range(_MANIFEST_REPLACE_ATTEMPTS):
-        try:
-            os.replace(temporary, path)
-            return
-        except PermissionError:
-            _sleep_before_retry(attempt)
-
-
-def _write_tool_manifest(path: Path, manifest: dict) -> None:
-    """Atomically replace a manifest using a writer-unique sibling temp file."""
-    with _MANIFEST_WRITE_LOCK:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = _staged_manifest(path, manifest)
-        try:
-            _replace_with_retry(temporary, path)
-        finally:
-            temporary.unlink(missing_ok=True)
 
 
 def _jedi_script(file_path: Path, workspace_root: Path):
@@ -346,39 +183,6 @@ def enrich_python_semantics(file_path: Path, calls: list[dict], workspace_root: 
         return calls
     workspace = workspace_root.resolve()
     return [_enriched_call(script, call, workspace) for call in calls]
-
-
-def _git_log_line(file_path: Path) -> str:
-    """The one-line git record for this file, or empty when git cannot answer."""
-    parent = file_path.parent
-    cwd = str(parent) if parent.exists() else None
-    try:
-        result = subprocess.run(  # noqa: S603, S607
-            ["git", "log", "-1", "--format=%H|%cI|%an", "--", str(file_path)],
-            capture_output=True, text=True, timeout=5, cwd=cwd,
-        )
-    except Exception:
-        return ""
-    if result.returncode != 0:
-        return ""
-    return result.stdout.strip()
-
-
-def _get_git_info(file_path: Path) -> dict:
-    """Get git commit info for a file (bi-temporal tracking).
-
-    Returns dict with commit_hash, commit_date, author.
-    Falls back to empty strings if not in a git repo.
-    """
-    line = _git_log_line(file_path)
-    if not line:
-        return {"commit_hash": "", "commit_date": "", "author": ""}
-    padded = (*line.split("|"), "", "")
-    return {
-        "commit_hash": padded[0],
-        "commit_date": padded[1],
-        "author": padded[2],
-    }
 
 
 def parse_file(file_path: Path) -> dict:
@@ -440,8 +244,6 @@ def _parse_file(file_path: Path, registry: SymbolRegistry, workspace_root: Path)
         # Fallback: regex-based extraction (less accurate but no deps).
         return _regex_parse(file_path, lang, registry, workspace_root)
     functions, classes, calls, imports = symbols
-    # Bi-temporal: attach git commit info (valid_from = commit date).
-    git_info = _get_git_info(file_path)
     return {
         "file": str(file_path),
         "language": lang,
@@ -449,9 +251,6 @@ def _parse_file(file_path: Path, registry: SymbolRegistry, workspace_root: Path)
         "classes": classes,
         "calls": calls,
         "imports": imports,
-        "git_commit": git_info["commit_hash"],
-        "valid_from": git_info["commit_date"],
-        "author": git_info["author"],
     }
 
 
@@ -744,7 +543,6 @@ def _regex_parse(
         imports,
     )
     _close_regex_blocks(content.splitlines(), lang, [*functions, *classes])
-    git_info = _get_git_info(file_path)
     return {
         "file": str(file_path),
         "language": lang,
@@ -752,9 +550,6 @@ def _regex_parse(
         "classes": classes,
         "calls": calls,
         "imports": imports,
-        "git_commit": git_info["commit_hash"],
-        "valid_from": git_info["commit_date"],
-        "author": git_info["author"],
     }
 
 
@@ -920,12 +715,13 @@ def _regex_add_import(line: str, line_number: int, lang: str, imports: list[dict
         imports.append({"name": name.strip(), "line": line_number})
 
 
+# The LSP document bound (`lsp_protocol.MAX_FRAME_BYTES`): nothing larger is a
+# source a live answer should read.
+
+
 def _parsable_names(parent: Path, names: list[str]) -> list[Path]:
     found = [parent / name for name in names]
-    return [
-        path for path in found
-        if path.suffix.lower() in LANGUAGE_MAP and path.is_file()
-    ]
+    return [path for path in found if path.suffix.lower() in LANGUAGE_MAP and own_source_file(path)]
 
 
 def _live_source_files(directory: Path) -> list[Path]:
@@ -976,9 +772,11 @@ def _print_index_stats(stats: dict) -> None:
 def index_directory(directory: Path, verbose: bool = True) -> dict:
     """Index all source files in a directory.
 
-    Returns stats: {files, functions, classes, calls, imports}
+    Returns stats: {files, functions, classes, calls, imports}. Read-only: the
+    code index is `repository_index.py index <dir>`; the tool manifest this wrote
+    was read by nothing and ran the repository's own `tsc` (audit C-44,
+    docs/research/2026-09-25-navigation-dead-code-and-stale-words.md).
     """
-    detect_code_tools(directory)
     stats = {"files": 0, "functions": 0, "classes": 0, "calls": 0, "imports": 0}
     if not directory.exists():
         return stats
@@ -1402,10 +1200,15 @@ def _shown_community_members(communities: list[list[str]]) -> list[str]:
 
 
 def _stored_symbol_node_ids(graph, symbol: str | None):
+    """Every function or method of this name, asked up to the reader's ceiling.
+
+    A bound of 512 refused `symbol=__init__` on a repository with more
+    definitions of it (audit C-36,
+    docs/research/2026-09-25-a-common-name-is-asked-up-to-the-reader-ceiling.md).
+    """
     if symbol is None:
         return None
-    found = graph.find_nodes(kinds=("function", "method"), name=symbol, max_rows=512)
-    return {item["node_id"] for item in found}
+    return set(_named_node_ids(graph, ("function", "method"), symbol))
 
 
 def _stored_community_answer(graph, symbol: str | None = None) -> tuple[list, dict]:
@@ -2010,7 +1813,7 @@ def _live_dead_candidate(
         "file": str(path),
         "line": function["line"],
         "status": "candidate",
-        "reason": "zero_confirmed_incoming_calls",
+        "reason": _checked_reason("zero_confirmed_incoming_calls", str(path)),
         "graph_complete": False,
     }
 
@@ -2024,6 +1827,14 @@ def _live_dead_candidates_in_file(path: Path, result: dict, incoming) -> list[di
         for function in result["functions"]
     ]
     return [item for item in found if item is not None]
+
+
+def _named_dead_candidates(candidates: list[dict], symbol: str | None) -> list[dict]:
+    """Only the candidates the named symbol could be, as the stored path selects."""
+    if not symbol:
+        return candidates
+    wanted = str(symbol).rsplit(".", 1)[-1]
+    return [item for item in candidates if item.get("name") == wanted]
 
 
 def _stored_dead_code_result(directory: Path, with_report: bool, symbol=None):
@@ -2041,11 +1852,13 @@ def find_dead_code(
 ) -> list[dict] | dict:
     """Return conservative dead-code candidates from the incomplete static graph.
 
-    `symbol` narrows the question to one name, and with it the reference scan:
-    asking about one function used to parse every Python source in the
-    repository (11 s, measured 2026-09-12) to answer about one of them. The
-    verdict for that name is unchanged — a file that does not mention the name
-    cannot reference it — and the report says how many sources were skipped.
+    `symbol` narrows the question to one name. On the stored path it narrows the
+    reference scan too: asking about one function used to parse every Python
+    source in the repository (11 s, measured 2026-09-12). The verdict for that
+    name is unchanged — a file that does not mention the name cannot reference it
+    — and the report says how many sources were skipped. The live path must parse
+    the workspace to see its calls; it answers only for the name (audit C-44,
+    docs/research/2026-09-25-navigation-dead-code-and-stale-words.md).
     """
     stored, reason = None, NO_GENERATION
     if not live:
@@ -2059,7 +1872,7 @@ def find_dead_code(
     candidates: list[dict] = []
     for path, result in parsed:
         candidates.extend(_live_dead_candidates_in_file(path, result, incoming))
-    candidates = _ordered_dead_candidates(candidates)
+    candidates = _ordered_dead_candidates(_named_dead_candidates(candidates, symbol))
     report = {
         **_live_report(directory, parsed, reason),
         **_dead_code_counts(candidates),
@@ -2089,7 +1902,24 @@ DEAD_CODE_REASON_ORDER = (
     "zero_confirmed_incoming_calls",
     "referenced_without_call",
     "unresolved_receiver",
+    "references_not_indexed",
 )
+# The value-reference index reads Python only. For a TypeScript, JavaScript, Go
+# or Rust symbol "nothing names it" was never checked, so claiming it was put 8
+# live rows of 11 under the strongest verdict (audit 2026-09-26 A-7,
+# docs/research/2026-09-26-a-dead-code-claim-names-what-it-checked.md).
+_REFERENCE_INDEXED_SUFFIXES = frozenset({".py", ".pyi"})
+
+
+def _references_indexed(path: str) -> bool:
+    return PurePath(path).suffix in _REFERENCE_INDEXED_SUFFIXES
+
+
+def _checked_reason(reason: str, path: str) -> str:
+    """A claim that nothing names the symbol stands only where names were read."""
+    if reason == "unresolved_receiver" or _references_indexed(path):
+        return reason
+    return "references_not_indexed"
 
 
 def _dead_code_reason_rank(reason: str) -> int:
@@ -2220,7 +2050,7 @@ def _dead_candidate_row(
         "file": location[0],
         "line": location[1],
         "status": "candidate",
-        "reason": _dead_code_reason(name, called_names, index),
+        "reason": _checked_reason(_dead_code_reason(name, called_names, index), location[0]),
         "graph_complete": False,
     }
 
@@ -2308,19 +2138,26 @@ def _dropped_counts(rules: list[str], index) -> dict[str, object]:
     return {**report, **index.as_report()}
 
 
-def _stored_dead_nodes(graph) -> list[dict]:
+# The most dead-code candidates one answer reads; past it the answer says it was cut.
+MAX_DEAD_CODE_NODES = 10_000
+
+
+def _stored_dead_nodes(graph, name: str | None = None) -> tuple[list[dict], bool]:
     """Function and method nodes no resolved CALLS reaches and no EXPOSES names.
 
     The anti-join runs in SQL, so this reads its own answer — measured 3,621
     rows in 0.17 s — instead of the 19,153 nodes and 35,313 edges the old shape
-    materialised before refusing at the row ceiling.
+    materialised before refusing at the row ceiling. A named symbol narrows in
+    SQL, and a graph past the bound returns its first rows and says so instead of
+    refusing (audit 2026-09-26 B-7).
     """
     return graph.nodes_without_edges(
         kinds=("function", "method"),
         incoming_edge_types=("CALLS",),
         outgoing_edge_types=("EXPOSES",),
         exclude_name_prefixes=DEAD_CODE_NAME_PREFIXES,
-        max_rows=10_000,
+        name=name,
+        max_rows=MAX_DEAD_CODE_NODES,
     )
 
 
@@ -2337,13 +2174,11 @@ def _scope_names(symbol: str | None) -> frozenset[str] | None:
     return frozenset(part for part in str(symbol).split(".") if part)
 
 
-def _dead_nodes_for(graph, symbol: str | None) -> list[dict]:
-    """Every candidate node, or only those the named symbol could be."""
-    nodes = _stored_dead_nodes(graph)
+def _dead_nodes_for(graph, symbol: str | None) -> tuple[list[dict], bool]:
+    """Every candidate node, or only those the named symbol could be, and whether cut."""
     if not symbol:
-        return nodes
-    wanted = str(symbol).rsplit(".", 1)[-1]
-    return [node for node in nodes if str(node["metadata"].get("name")) == wanted]
+        return _stored_dead_nodes(graph)
+    return _stored_dead_nodes(graph, str(symbol).rsplit(".", 1)[-1])
 
 
 def _store_find_dead_code(
@@ -2353,13 +2188,13 @@ def _store_find_dead_code(
     if graph is None:
         return None
     try:
-        nodes = _dead_nodes_for(graph, symbol)
+        nodes, truncated = _dead_nodes_for(graph, symbol)
         candidates, dropped = _classified_dead_nodes(
             graph, nodes, directory, _scope_names(symbol)
         )
         report = _store_report(graph)
         ordered = _marked_complete(candidates, report)
-        counts = {**_dead_code_counts(ordered), **dropped}
+        counts = {**_dead_code_counts(ordered), **dropped, "candidates_truncated": truncated}
         return _with_report("candidates", ordered, {**report, **counts}, with_report)
     finally:
         graph.close()
@@ -2382,8 +2217,8 @@ def _all_names(node) -> set[str]:
 
 def _python_exports(source: str) -> set[str]:
     try:
-        tree = ast.parse(source)
-    except SyntaxError:
+        tree = parse_python(source)
+    except PARSE_FAILURES:
         return set()
     for node in tree.body:
         if _all_assignment(node):
@@ -3536,7 +3371,9 @@ def _cli_callers(function_name: str, directory: Path, *, live: bool) -> int:
 def main() -> int:
     import argparse
     p = argparse.ArgumentParser(description="Code graph — tree-sitter code intelligence.")
-    p.add_argument("directory", nargs="?", default=".", help="Directory to index.")
+    p.add_argument(
+        "directory", nargs="?", default=".", help="Directory to summarize (read-only)."
+    )
     p.add_argument("--callers", type=str, default=None, help="Find callers of a function.")
     p.add_argument(
         "--live",

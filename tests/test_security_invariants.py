@@ -47,8 +47,17 @@ def _rename_calls(tree: ast.AST) -> list[ast.Call]:
 
 
 def _mentions_daily_archive(text: str) -> bool:
-    lowered = text.casefold()
-    return "daily" in lowered and "archive" in lowered
+    """A daily-archive path is named on one line (`daily_root / "archive"`).
+
+    Matching the two words anywhere in one assignment took the transaction
+    allowlist, which lists `knowledge/daily` and `knowledge/log-archive` as
+    separate roots, for a daily-archive publisher (2026-09-25).
+    """
+    return any(_names_daily_archive(line.casefold()) for line in text.splitlines())
+
+
+def _names_daily_archive(line: str) -> bool:
+    return "daily" in line and "archive" in line
 
 
 def _assignment_sources(source: str, tree: ast.AST) -> list[str]:
@@ -136,27 +145,28 @@ class TestTranscriptPathContainment:
         "~/.docker/config.json",
     ]
 
+    # These asked `flush_memory._transcript_path_allowed`, removed long ago, behind
+    # `hasattr`, so they passed without testing anything (audit 2026-09-26 C-15).
+    # The capture path is validated by `integration_adapter`; a path that does
+    # not exist is refused as well, with FileNotFoundError, an OSError.
     @pytest.mark.parametrize("sensitive", SENSITIVE_PATHS)
     def test_sensitive_paths_rejected(self, sensitive):
-        """Each sensitive file path must be rejected by flush_memory."""
-        import flush_memory
+        """Each sensitive file path must be refused as a capture transcript."""
+        import integration_adapter
 
-        if hasattr(flush_memory, "_transcript_path_allowed"):
-            p = Path(sensitive).expanduser()
-            assert not flush_memory._transcript_path_allowed(p), (
-                f"Transcript path {sensitive} should be rejected"
-            )
+        with pytest.raises(OSError):
+            integration_adapter._validated_capture_transcript_path(str(Path(sensitive).expanduser()))
 
-    def test_transcript_must_have_known_extension(self):
-        """Transcripts with arbitrary extensions (e.g. .key, .pem) must be rejected."""
-        import flush_memory
+    @pytest.mark.parametrize("ext", (".pem", ".key", ".env", ".db", ".sqlite"))
+    def test_transcript_must_have_known_extension(self, ext, tmp_path):
+        """Transcripts with arbitrary extensions (e.g. .key, .pem) must be refused."""
+        import integration_adapter
 
-        if hasattr(flush_memory, "_transcript_path_allowed"):
-            for ext in (".pem", ".key", ".env", ".db", ".sqlite"):
-                p = Path.home() / ".claude" / f"session{ext}"
-                assert not flush_memory._transcript_path_allowed(p), (
-                    f"Extension {ext} should be rejected for transcript paths"
-                )
+        candidate = tmp_path / f"session{ext}"
+        candidate.write_text("secret\n", encoding="utf-8")
+
+        with pytest.raises(PermissionError, match="extension"):
+            integration_adapter._validated_capture_transcript_path(str(candidate))
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +225,6 @@ class TestRedactionBeforePersistence:
         "compile_memory.py",
         "query_memory.py",
         "flush_memory.py",
-        "feedback_capture.py",
         "daily_log_append.py",
         "bootstrap_project.py",
     ]
@@ -415,14 +424,6 @@ class TestPathSafety:
         assert evil not in categories
         assert not hasattr(compile_memory, "_execute_plan")
 
-    @pytest.mark.parametrize("evil", TRAVERSAL_INPUTS)
-    def test_feedback_candidate_id_rejects_traversal(self, evil):
-        """feedback_capture must reject non-hex candidate IDs."""
-        import feedback_capture
-
-        result = feedback_capture.promote_candidate(evil)
-        assert result is None, f"Traversal candidate_id {evil!r} was not rejected"
-
     def test_blackboard_project_rejects_traversal(self, tmp_path):
         """blackboard must reject traversal in project slug."""
         import blackboard
@@ -453,15 +454,6 @@ class TestYAMLSafety:
         "value: '\\nmalicious: true'",     # escape sequence
         '"""block string"""',              # YAML block scalar
     ]
-
-    def test_feedback_frontmatter_escapes_newlines(self):
-        """feedback_capture must escape newlines in interpolated fields."""
-
-        src = (SCRIPTS / "feedback_capture.py").read_text(encoding="utf-8")
-        # The _esc function should handle newlines
-        assert "chr(10)" in src or "\\n" in src, (
-            "feedback_capture.py does not escape newlines in YAML frontmatter"
-        )
 
     def test_compile_frontmatter_escapes_quotes(self):
         """compile_memory must escape quotes in title/summary."""

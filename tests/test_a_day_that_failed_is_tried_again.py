@@ -49,7 +49,7 @@ def test_a_rerun_skips_the_batch_that_already_finished(tmp_path, monkeypatch):
     monkeypatch.setattr(
         consolidation,
         "_record_consolidation",
-        lambda d, c, r, digest: recorded.update(day=d, digest=digest),
+        lambda d, c, r, digest, failed=(): recorded.update(day=d, digest=digest),
     )
 
     outcome = consolidation.consolidate_day(

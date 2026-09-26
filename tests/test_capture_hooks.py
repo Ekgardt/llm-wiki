@@ -110,25 +110,6 @@ def test_prompt_capture_skips_short_prompts(tmp_path, monkeypatch):
     assert list(tmp_path.glob("*.md")) == []
 
 
-def test_prompt_capture_skips_vault_internal_sessions(monkeypatch, tmp_path):
-    """Sessions where cwd = ROOT must be skipped (feedback loop guard)."""
-    import user_prompt_capture  # noqa: WPS433
-
-    fake_root = tmp_path / "vault"
-    fake_root.mkdir()
-    monkeypatch.setattr(user_prompt_capture, "ROOT", fake_root)
-    monkeypatch.setattr(user_prompt_capture, "DAILY_DIR", fake_root / "knowledge" / "daily")
-
-    rc = _run_capture_with_stdin(
-        "user_prompt_capture",
-        {"prompt": "this is a long enough prompt", "session_id": "s1", "cwd": str(fake_root)},
-    )
-    assert rc == 0
-    # No daily log written because cwd == ROOT.
-    daily_dir = fake_root / "knowledge" / "daily"
-    assert not daily_dir.exists() or list(daily_dir.glob("*.md")) == []
-
-
 def test_prompt_capture_writes_line_for_real_prompt(
     monkeypatch, tmp_path, isolated_capture_state
 ):
@@ -1067,29 +1048,6 @@ def test_tool_capture_bash_filters_short_commands(monkeypatch, tmp_path):
     assert rc == 0
     # No file should be written.
     assert list((tmp_path / "daily").glob("*.md")) == [] if (tmp_path / "daily").exists() else True
-
-
-def test_tool_capture_skips_vault_internal_sessions(monkeypatch, tmp_path):
-    """Tool calls where cwd = ROOT must be skipped."""
-    import post_tool_capture  # noqa: WPS433
-
-    fake_root = tmp_path / "vault"
-    fake_root.mkdir()
-    monkeypatch.setattr(post_tool_capture, "ROOT", fake_root)
-    monkeypatch.setattr(post_tool_capture, "DAILY_DIR", fake_root / "knowledge" / "daily")
-
-    rc = _run_capture_with_stdin(
-        "post_tool_capture",
-        {
-            "tool_name": "Edit",
-            "tool_input": {"filePath": "foo.py"},
-            "session_id": "s1",
-            "cwd": str(fake_root),
-        },
-    )
-    assert rc == 0
-    daily_dir = fake_root / "knowledge" / "daily"
-    assert not daily_dir.exists() or list(daily_dir.glob("*.md")) == []
 
 
 # The rate-limit window itself is pinned above, through the live claim

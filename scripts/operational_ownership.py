@@ -837,8 +837,8 @@ class OwnershipRegistry:
 
     def _remove_orphan_marker(self, relative_path: str) -> str:
         path = self.state_root / relative_path
-        pid = _marker_pid(path, self.state_root)
-        if _pid_exists(pid):
+        owner = _marker_owner_or_torn(path, self.state_root, relative_path)
+        if owner is not None and _marker_owner_alive(*owner):
             raise OperationalOwnershipError("owner_busy")
         _remove_marker_file(path)
         return "orphan_removed"
@@ -1125,8 +1125,31 @@ class OwnershipRegistry:
 
 
 def _publish_marker(state_root: Path, relative_path: str, payload: bytes) -> MarkerIdentity:
+    """Write the marker whole beside its name, then link it in: never torn, never replaced.
+
+    The marker used to be created empty and filled afterwards, so a crash in
+    between left a file no reader could parse, and every later pass refused on
+    it (audit 2026-09-26 B-21). `os.link` fails when the name exists, which is
+    the exclusivity `O_EXCL` gave. Research:
+    docs/research/2026-09-26-a-marker-is-published-whole.md
+    """
     path = Path(state_root) / restricted_relative_path(relative_path, ("run",))
     path.parent.mkdir(parents=True, exist_ok=True)
+    staged = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
+    _write_whole(staged, payload)
+    try:
+        os.link(staged, path)
+    finally:
+        staged.unlink(missing_ok=True)
+    return MarkerIdentity(
+        relative_path=relative_path,
+        sha256=sha256_bytes(payload),
+        file_identity=capture_runtime_file_identity(path, state_root=Path(state_root)),
+        pid=os.getpid(),
+    )
+
+
+def _write_whole(path: Path, payload: bytes) -> None:
     descriptor = os.open(
         path,
         os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0),
@@ -1142,12 +1165,6 @@ def _publish_marker(state_root: Path, relative_path: str, payload: bytes) -> Mar
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
-    return MarkerIdentity(
-        relative_path=relative_path,
-        sha256=sha256_bytes(payload),
-        file_identity=capture_runtime_file_identity(path, state_root=Path(state_root)),
-        pid=os.getpid(),
-    )
 
 
 def _require_marker_path_of_row(row: sqlite3.Row, relative_path: str) -> None:
@@ -1156,13 +1173,43 @@ def _require_marker_path_of_row(row: sqlite3.Row, relative_path: str) -> None:
         raise OperationalOwnershipError("marker_identity_invalid")
 
 
-def _marker_pid(path: Path, state_root: Path) -> int:
-    """The PID an ownerless marker names; anything else refuses by name."""
+# Markers only `_publish_marker` writes, which a live writer never leaves torn.
+# `run/compile.pid` is not one: the pre-registry compile lock writes it in place.
+_WHOLE_MARKERS = frozenset({"run/maintenance.lock"})
+
+
+def _marker_owner_or_torn(
+    path: Path, state_root: Path, relative_path: str
+) -> tuple[int, str] | None:
+    """The owner an ownerless marker names, or None for a torn one nobody can still be writing."""
+    try:
+        return _marker_owner(path, state_root)
+    except OperationalOwnershipError:
+        if relative_path in _WHOLE_MARKERS and _marker_is_torn(path, state_root):
+            return None
+        raise
+
+
+def _marker_is_torn(path: Path, state_root: Path) -> bool:
+    """Readable bytes that name no PID; an unreadable file is not proof of anything."""
+    try:
+        read_runtime_bytes(path, state_root, max_bytes=_MAX_MARKER_BYTES, owner_only=False)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _marker_owner(path: Path, state_root: Path) -> tuple[int, str]:
+    """The PID and start identity an ownerless marker names; anything else refuses by name.
+
+    A marker written before 2026-09-17 has one line and names no identity.
+    """
     try:
         payload = read_runtime_bytes(
             path, state_root, max_bytes=_MAX_MARKER_BYTES, owner_only=False
         )
-        return int(payload.splitlines()[0].decode("ascii").strip())
+        lines = [line.decode("ascii").strip() for line in payload.splitlines()]
+        return int(lines[0]), (lines[1:] or [""])[0]
     except (OSError, ValueError, IndexError, UnicodeDecodeError) as exc:
         raise OperationalOwnershipError("marker_identity_invalid") from exc
 
@@ -1185,12 +1232,21 @@ def _own_start_identity() -> str:
         return ""
 
 
-def _pid_exists(pid: int) -> bool:
-    """Whether a process with this PID exists; doubt refuses by name."""
+def _marker_owner_alive(pid: int, identity: str) -> bool:
+    """Whether the process a marker names still runs; doubt refuses by name.
+
+    With the identity the marker recorded, a PID handed to another process reads
+    as dead, as the registry rows and the other lock files already read it
+    (audit 2026-09-26 C-12). Research:
+    docs/research/2026-09-26-a-marker-is-judged-by-the-process-it-names.md
+    """
     try:
-        return process_start_identity(pid) is not None
+        observed = process_start_identity(pid)
     except (OSError, PermissionError) as exc:
         raise OperationalOwnershipError("owner_liveness_unknown") from exc
+    if observed is None:
+        return False
+    return not identity or observed == identity
 
 
 def _remove_marker_file(path: Path) -> None:
@@ -1254,6 +1310,24 @@ def adopted_ownership_registry(vault: Path, state_root: Path) -> OwnershipRegist
     return coordinator._ownership_registry()  # noqa: SLF001 - the coordinator's own rule
 
 
+def _pre_adoption_registry(
+    state_root: Path, *, clock: Callable[[], datetime] = utc_now
+) -> OwnershipRegistry:
+    """The candidate registry, which exists only before adoption.
+
+    An adopted vault's registry lives on its adopted coordinator and must be
+    passed in; opening the candidate there reads a database that is not the
+    vault's (audit C-14,
+    docs/research/2026-09-25-an-owner-helper-refuses-the-candidate-on-an-adopted-vault.md).
+    """
+    if markdown_transaction._reliability_v3_records_present(state_root):
+        raise OperationalOwnershipError(
+            "adopted_registry_required",
+            "an adopted vault's ownership registry must be passed in",
+        )
+    return OwnershipRegistry(state_root, clock=clock)
+
+
 def acquire_compile_owner(*, state_root: Path) -> tuple[OwnerLease, MarkerIdentity]:
     now = utc_now().replace(microsecond=0)
     actor_id = ownership_actor_identity("compile", "global")
@@ -1262,7 +1336,7 @@ def acquire_compile_owner(*, state_root: Path) -> tuple[OwnerLease, MarkerIdenti
         f"{os.getpid()}\n{_timestamp(now)}\n{token}\n".encode("ascii", errors="strict")
     )
     marker = _publish_marker(Path(state_root), "run/compile.pid", payload)
-    registry = OwnershipRegistry(Path(state_root), clock=lambda: now)
+    registry = _pre_adoption_registry(Path(state_root), clock=lambda: now)
     try:
         lease = registry.acquire(
             "compile",
@@ -1295,7 +1369,7 @@ def acquire_scheduled_owner(
     token = secrets.token_hex(16)
     payload = _marker_payload()
     if registry is None:
-        registry = OwnershipRegistry(Path(state_root), clock=lambda: now)
+        registry = _pre_adoption_registry(Path(state_root), clock=lambda: now)
     marker = _publish_marker_reclaiming(
         Path(state_root),
         "run/maintenance.lock",
@@ -1358,7 +1432,7 @@ def heartbeat_owner(
     (client-go's `OnStoppedLeading`; the doctor's own heartbeat does the same).
     """
     if registry is None:
-        registry = OwnershipRegistry(Path(lease.state_root))
+        registry = _pre_adoption_registry(Path(lease.state_root))
     stop = threading.Event()
     failure: list[BaseException] = []
     # The lease is already written; its expiry is counted from here.
@@ -1409,7 +1483,7 @@ def current_owner_lease(
     lease: OwnerLease, *, registry: OwnershipRegistry | None = None
 ) -> OwnerLease:
     if registry is None:
-        registry = OwnershipRegistry(Path(lease.state_root))
+        registry = _pre_adoption_registry(Path(lease.state_root))
     with contextlib.closing(registry._connect()) as database:
         row = database.execute(
             """SELECT * FROM maintenance_owners
@@ -1443,7 +1517,7 @@ def release_marker_owner(
     registry: OwnershipRegistry | None = None,
 ) -> None:
     if registry is None:
-        registry = OwnershipRegistry(Path(lease.state_root))
+        registry = _pre_adoption_registry(Path(lease.state_root))
     current = current_owner_lease(lease, registry=registry)
     registry.release(current)
     _remove_exact_marker(Path(lease.state_root), marker)

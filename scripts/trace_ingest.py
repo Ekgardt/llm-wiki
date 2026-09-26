@@ -49,7 +49,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from bounded_io import IO_CHUNK_BYTES
-from evidence_graph import MAX_NODE_FILTER
+from evidence_graph import MAX_NODE_FILTER, MAX_ROWS
 from reliable_memory import begin_immediate
 
 TRACE_SCHEMA = "execution-trace/v1"
@@ -606,9 +606,9 @@ def _trace_caller_rows(graph, entries, function_name: str) -> tuple[list[dict], 
 
 
 def _trace_caller_fields(graph, function_name: str, limit: int, state_root) -> dict:
-    targets = graph.find_nodes(
-        kinds=("function", "method"), name=function_name, max_rows=MAX_NODE_FILTER
-    )
+    # Up to the reader's ceiling, so `_require_target_bound` names the refusal
+    # (audit C-36, docs/research/2026-09-25-a-common-name-is-asked-up-to-the-reader-ceiling.md).
+    targets = graph.find_nodes(kinds=("function", "method"), name=function_name, max_rows=MAX_ROWS)
     target_ids = sorted({str(item["node_id"]) for item in targets})
     entries = _caller_totals(target_ids, state_root)
     rows, stale = _trace_caller_rows(graph, entries, function_name)

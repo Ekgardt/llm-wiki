@@ -77,8 +77,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   │                                no slug for a directory inside the vault,
 │   │                                a platform temp entry, or $HOME — 2026-09-23)
 │   ├── raw/                         immutable sources
-│   ├── inbox/                       unprocessed staging
-│   └── feedback/                    correction candidates
+│   └── inbox/                       unprocessed staging
 │
 ├── cache/                        RUNTIME — gitignored (FTS5/vector/graph)
 │   ├── evidence-graph/              immutable corpus-generation layout
@@ -101,9 +100,8 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   │   ├── typescript-language-server/6.0.0/   with tsserver 5.9.3
 │   │   ├── gopls/v0.23.0/             built from the pinned Go 1.27.1 toolchain
 │   │   └── rust-analyzer/1.98.1/      with its pinned Rust toolchain
-│   ├── code-hints/                  #24 C1: per-checkout hook-time symbol table
-│   │   └── <checkout-hash>.sqlite3    derived from that checkout's newest generation
-│   └── code_tools.json               v4.0: atomic code-tool capability manifest
+│   └── code-hints/                  #24 C1: per-checkout hook-time symbol table
+│       └── <checkout-hash>.sqlite3    derived from that checkout's newest generation
 ├── logs/                         RUNTIME — gitignored (lint/compile/hook logs)
 ├── run/                          RUNTIME — gitignored operational state
 │   ├── markdown-transactions.sqlite3 current DB; approved legacy tombstone target
@@ -441,7 +439,7 @@ once per MCP process and reused while `catalog.sqlite3`, the generation's
 `evidence.sqlite3` and the checkout's Git state keep their stat identity. It holds
 no state on disk and adds no runtime root. A foreign repository's generation is
 refreshed incrementally by `repository_index.py refresh` — spawned detached by the
-MCP server once per repository and commit when a structural answer finds the
+MCP server once per checkout and commit when a structural answer finds the
 checkout's commit ahead of the generation's, and by the nightly `refresh-all`
 step — under the ownership registry's `doctor` role scoped
 `repository:<repository_id>`. It is not a daemon: the process exits when the
@@ -450,8 +448,8 @@ refresh does. Answers carry a `freshness` block naming both commits.
 The runtime starts a managed language server lazily within the owning MCP process,
 exposes only allowlisted read operations, reports readiness and capability
 limitations, and falls back to existing structural evidence when unavailable. The
-server is chosen by file suffix from the four managed profiles; a suffix no profile
-claims falls back to Pyright and degrades to structural evidence. Exact small results
+server is chosen by file suffix from the four managed profiles; a file whose suffix
+no profile claims answers `unsupported` before any server is asked. Exact small results
 use a deterministic compact renderer; the Context Compiler remains responsible for
 broad multi-source synthesis. Installation is a separate explicit operator action
 per profile: `scripts/install_pyright.py`, or
@@ -590,7 +588,13 @@ or nonzero active state remains fail-closed.
 - `knowledge/daily/archive/YYYY-MM/bag-<timestamp>-<id>/` — private immutable,
   uncompressed BagIt-style daily-log bags and
   a derived archive index. Archive means move, never delete; evidence resolves by
-  logical ID, source hash, and byte span.
+  logical ID, source hash, and byte span. A day compiled whole carries
+  `archive-manifest/v1` and one embedded `compile-receipt.md`; a day compiled in
+  parts carries `archive-manifest/v2`, whose `compile_parts` list each part's byte
+  span, receipt reference and compile authority, with one embedded
+  `compile-receipt-<n>.md` per part, all in the tag manifest. A page quoting one
+  part resolves from the bag by that part's digest. See
+  `docs/research/2026-09-26-a-split-day-is-archived-with-every-part.md`.
 - `knowledge/raw/` — immutable sources. Gitignored (personal). One subtree is
   writable by the runtime: `knowledge/raw/sessions/<date>/<session>.md`, the
   session records of the 2026-08-23 retention decision. It is the only part of
@@ -600,7 +604,11 @@ or nonzero active state remains fail-closed.
   and decisions included) before it deletes that work from `run/` after
   `queue_result_retention_days` (2026-09-24).
 - `knowledge/inbox/` — unprocessed staging. Gitignored.
-- `knowledge/feedback/` — correction candidates (JSON). Gitignored.
+- `knowledge/log-archive/` — rotated copies of the private vault log, written by
+  the compile that passes 2 MiB (2026-09-25). Gitignored.
+- `knowledge/feedback/` — retired 2026-09-25 (correction candidates needed a
+  manual promote; compile learns corrections from the daily log). Old files stay
+  gitignored and are read by nothing but the guardrail source manifest.
 
 ### RUNTIME zone (always gitignored, inside vault)
 - Complete corpus generation is implemented by `generation_catalog.py`,
@@ -613,8 +621,9 @@ or nonzero active state remains fail-closed.
   changes the requirement to publish a complete generation. POSIX collection is
   descriptor-authoritative; Windows reparse and identity checks are best effort.
   This adds no daemon or automatic legacy-cache removal.
-- `cache/` — `evidence-graph/` (the generations: FTS5, vectors, graph),
-  `code_tools.json` (fresh code-tool detection and active semantic capabilities).
+- `cache/` — `evidence-graph/` (the generations: FTS5, vectors, graph). The
+  `code_tools.json` tool manifest was retired on 2026-09-25: read by nothing, it
+  ran the analysed repository's own `tsc`; an old copy is disposable cache.
   `cache/code-tools/<profile>/<version>/` are the managed language-server artifact
   roots (`pyright/1.1.411`, `typescript-language-server/6.0.0`, `gopls/v0.23.0`,
   `rust-analyzer/1.98.1`); `scripts/install_pyright.py` and

@@ -64,11 +64,18 @@ def test_the_watch_still_covers_notes_and_projects(tmp_path):
     ]
 
 
-def test_the_daily_log_is_deliberately_not_watched(tmp_path):
-    """The live capture appends to today's log continuously; that is not a leak."""
+def _daily_leak(tmp_path, monkeypatch, host_vault) -> list:
+    monkeypatch.setattr(conftest, "_HOST_VAULT", host_vault)
     before = conftest._knowledge_entries(tmp_path)
     _write(tmp_path, "knowledge/daily/2026-08-26.md")
+    return conftest._leaked_entries(before, conftest._knowledge_entries(tmp_path))
 
-    leaked = conftest._leaked_entries(before, conftest._knowledge_entries(tmp_path))
 
-    assert leaked == []
+def test_the_daily_log_of_the_live_vault_is_not_watched(tmp_path, monkeypatch):
+    """The live capture appends to today's log continuously; that is not a leak."""
+    assert _daily_leak(tmp_path, monkeypatch, str(tmp_path)) == []
+
+
+def test_the_daily_log_of_any_other_checkout_is_watched(tmp_path, monkeypatch):
+    """Nothing but a test appends there (docs/research/2026-09-25-a-test-that-writes-a-daily-log-is-caught.md)."""
+    assert _daily_leak(tmp_path, monkeypatch, None) == [str(Path("knowledge/daily/2026-08-26.md"))]

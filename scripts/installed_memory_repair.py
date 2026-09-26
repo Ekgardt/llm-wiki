@@ -1292,7 +1292,38 @@ def _coordinator_database_blockers(
             database, state_root, now, deadline
         )
         blockers.update(transaction_blockers)
+        known |= _recorded_transactions(database, _artifact_ids(state_root, deadline) - known)
     return blockers, known, retained
+
+
+def _artifact_ids(state_root: Path, deadline: float) -> set[str]:
+    return {_transaction_artifact_id(entry) for entry in _artifact_entries(state_root, deadline) if not _staged_prune(entry)}
+
+
+def _artifact_entries(state_root: Path, deadline: float) -> list[Path]:
+    return _bounded_entries(state_root / "run" / "transactions", state_root=state_root, deadline=deadline)
+
+
+def _staged_prune(entry: Path) -> bool:
+    """`.<id>.pruning-<uuid>`: images a prune set aside and did not finish removing.
+
+    It read as an invalid artifact name, so an interrupted prune reported the whole
+    transaction state unreadable (audit 2026-09-26 B-22). It is named instead, and
+    the next prune or `doctor --repair` settles it.
+    """
+    return entry.name.startswith(".") and ".pruning-" in entry.name
+
+
+def _recorded_transactions(database: sqlite3.Connection, ids: set[str]) -> set[str]:
+    """Which of `ids` the ledger names, asked in slices under SQLite's variable limit."""
+    ordered = sorted(ids)
+    found: set[str] = set()
+    for start in range(0, len(ordered), 500):
+        chunk = ordered[start : start + 500]
+        marks = ",".join("?" * len(chunk))
+        rows = database.execute(f'SELECT id FROM "transaction" WHERE id IN ({marks})', chunk).fetchall()
+        found.update(str(row[0]) for row in rows)
+    return found
 
 
 def _coordinator_owner_blockers(
@@ -1322,7 +1353,15 @@ def _coordinator_table_blockers(
 def _transaction_blockers(
     database: sqlite3.Connection, state_root: Path, now: datetime, deadline: float
 ) -> tuple[set[str], set[str], set[str]]:
-    rows = _bounded_rows(database, 'SELECT * FROM "transaction"', deadline=deadline)
+    # A committed row whose artifacts were pruned holds nothing: it produces no
+    # blocker and no retention. Reading all of them hit the 10 000-row bound on
+    # a vault with 23 664 rows and reported the state unreadable (audit
+    # 2026-09-26 A-11, docs/research/2026-09-26-a-backup-takes-what-any-installed-vault-holds.md).
+    rows = _bounded_rows(
+        database,
+        'SELECT * FROM "transaction" WHERE state <> \'committed\' OR artifacts_pruned_at IS NULL',
+        deadline=deadline,
+    )
     cutoff = now.astimezone(timezone.utc) - timedelta(days=_UNDO_RETENTION_DAYS)
     blockers: set[str] = set()
     known: set[str] = set()
@@ -1398,16 +1437,14 @@ def _transaction_artifact_blockers(
     known: set[str],
     retained: set[str],
 ) -> set[str]:
-    entries = _bounded_entries(
-        state_root / "run" / "transactions", state_root=state_root, deadline=deadline
+    artifact_ids = _artifact_ids(state_root, deadline)
+    staged = any(_staged_prune(entry) for entry in _artifact_entries(state_root, deadline))
+    findings = (
+        (staged, "transaction_prune_interrupted"),
+        (bool(retained & artifact_ids), "transaction_artifact_retained"),
+        (bool(artifact_ids - known), "transaction_artifact_state_unknown"),
     )
-    artifact_ids = {_transaction_artifact_id(entry) for entry in entries}
-    blockers: set[str] = set()
-    if retained & artifact_ids:
-        blockers.add("transaction_artifact_retained")
-    if artifact_ids - known:
-        blockers.add("transaction_artifact_state_unknown")
-    return blockers
+    return {code for present, code in findings if present}
 
 
 def _transaction_artifact_id(entry: Path) -> str:
@@ -1677,17 +1714,17 @@ def _require_no_sqlite_sidecars(path: Path) -> None:
 
 def _require_legacy_markers_quiescent(run: Path, state_root: Path) -> None:
     for name, parser in (
-        ("compile.pid", _compile_marker_pid),
-        ("maintenance.lock", _maintenance_marker_pid),
+        ("compile.pid", _compile_marker_owner),
+        ("maintenance.lock", _maintenance_marker_owner),
     ):
-        pid = _read_marker_pid(run / name, state_root, parser)
-        if pid is not None:
-            _require_process_absent(pid)
+        owner = _read_marker_owner(run / name, state_root, parser)
+        if owner is not None:
+            _require_process_absent(*owner)
 
 
-def _read_marker_pid(
-    path: Path, state_root: Path, parser: Callable[[bytes], int]
-) -> int | None:
+def _read_marker_owner(
+    path: Path, state_root: Path, parser: Callable[[bytes], tuple[int, str]]
+) -> tuple[int, str] | None:
     kind = _kind(path)
     if kind == "missing":
         return None
@@ -1697,11 +1734,11 @@ def _read_marker_pid(
     return parser(payload)
 
 
-def _compile_marker_pid(payload: bytes) -> int:
+def _compile_marker_owner(payload: bytes) -> tuple[int, str]:
     lines = _ascii_marker_lines(payload)
     _require_compile_marker_lines(lines)
     datetime.fromisoformat(lines[1])
-    return _positive_pid(lines[0])
+    return _positive_pid(lines[0]), (lines[3:] or [""])[0]
 
 
 def _require_compile_marker_lines(lines: list[str]) -> None:
@@ -1712,7 +1749,7 @@ def _require_compile_marker_lines(lines: list[str]) -> None:
         raise ValueError("compile marker owner token is empty")
 
 
-def _maintenance_marker_pid(payload: bytes) -> int:
+def _maintenance_marker_owner(payload: bytes) -> tuple[int, str]:
     """One line before 2026-09-17; a second names the owner's process.
 
     Research: docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
@@ -1720,7 +1757,7 @@ def _maintenance_marker_pid(payload: bytes) -> int:
     lines = _ascii_marker_lines(payload)
     if len(lines) not in {1, 2}:
         raise ValueError("maintenance marker shape is invalid")
-    return _positive_pid(lines[0])
+    return _positive_pid(lines[0]), (lines[1:] or [""])[0]
 
 
 def _ascii_marker_lines(payload: bytes) -> list[str]:
@@ -1738,10 +1775,12 @@ def _positive_pid(value: str) -> int:
     return pid
 
 
-def _require_process_absent(pid: int) -> None:
+def _require_process_absent(pid: int, identity: str) -> None:
+    """A marker's PID given to another process since is not its owner (C-12)."""
     from operational_ownership import process_start_identity
 
-    if process_start_identity(pid) is not None:
+    observed = process_start_identity(pid)
+    if observed is not None and (not identity or observed == identity):
         raise ValueError("live legacy owner blocks offline adoption")
 
 

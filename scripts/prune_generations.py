@@ -38,8 +38,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import sqlite3
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -199,15 +201,28 @@ def _discard_one(
     return f"removed {identifier} ({reclaimed} bytes)", reclaimed
 
 
-def _discard_reporting_failure(
-    catalog: GenerationCatalog, identifier: str, retained_ancestors: int, deadline: float
-) -> tuple[str, int]:
+# What one generation's removal may raise without stopping the pass: the next
+# generation is still tried and this one is named `ERROR:` (audit C-29,
+# docs/research/2026-09-25-one-bad-generation-does-not-stop-the-prune.md).
+_ONE_GENERATION_FAILURES = (OSError, ValueError, TimeoutError, RuntimeError, sqlite3.Error)
+
+
+def _attempted(identifier: str, deadline: float, removal: Callable[[], tuple[str, int]]) -> tuple[str, int]:
+    """One removal inside the pass's deadline; its failure is its own line."""
     if time.monotonic() >= deadline:
         return f"DEFERRED: {identifier}: the pass's budget is spent", 0
     try:
-        return _discard_one(catalog, identifier, retained_ancestors, deadline)
-    except (OSError, ValueError, TimeoutError, RuntimeError) as error:
+        return removal()
+    except _ONE_GENERATION_FAILURES as error:
         return f"ERROR: {identifier}: {error}", 0
+
+
+def _discard_reporting_failure(
+    catalog: GenerationCatalog, identifier: str, retained_ancestors: int, deadline: float
+) -> tuple[str, int]:
+    return _attempted(
+        identifier, deadline, lambda: _discard_one(catalog, identifier, retained_ancestors, deadline)
+    )
 
 
 def _planned(plan: PrunePlan) -> list[str]:
@@ -217,13 +232,12 @@ def _planned(plan: PrunePlan) -> list[str]:
 
 def _discard_abandoned(catalog: GenerationCatalog, identifier: str, deadline: float) -> tuple[str, int]:
     """A publication no writer touched for a day, removed the way an aborted build removes its own."""
-    if time.monotonic() >= deadline:
-        return f"DEFERRED: {identifier}: the pass's budget is spent", 0
+    return _attempted(identifier, deadline, lambda: _discard_one_abandoned(catalog, identifier, deadline))
+
+
+def _discard_one_abandoned(catalog: GenerationCatalog, identifier: str, deadline: float) -> tuple[str, int]:
     reclaimed = _directory_bytes(catalog.generations_path / identifier)
-    try:
-        catalog.discard_unactivated(identifier, deadline=deadline)
-    except (OSError, ValueError, TimeoutError, RuntimeError) as error:
-        return f"ERROR: {identifier}: {error}", 0
+    catalog.discard_unactivated(identifier, deadline=deadline)
     return f"removed abandoned {identifier} ({reclaimed} bytes)", reclaimed
 
 
@@ -249,10 +263,10 @@ def _applied(
     return outcomes
 
 
-def _retention_lines(plan: PrunePlan) -> list[str]:
+def _retention_lines(plan: PrunePlan, memory_registered: bool) -> list[str]:
     """Kept first, then the kinds this pass refuses to decide."""
     kept = [f"keeping {identifier}" for identifier in plan.retained]
-    rootless = _rootless_lines(plan)
+    rootless = _rootless_lines(plan, memory_registered)
     unpaired = [
         f"UNPAIRED: {identifier}: registration and tree disagree"
         for identifier in plan.unpaired
@@ -268,9 +282,19 @@ def _retention_lines(plan: PrunePlan) -> list[str]:
     return kept + rootless + unpaired + pending + orphans
 
 
-def _rootless_lines(plan: PrunePlan) -> list[str]:
+def _rootless_lines(plan: PrunePlan, memory_registered: bool) -> list[str]:
+    """No active generation is an error only when a memory publication is registered.
+
+    A vault whose first memory generation is still to be built has nothing to
+    prune (a code generation is registered and never activated by design); the
+    nightly counted that as a failed step until the build later in the same pass
+    (audit 2026-09-26 C-13, found running a pass on a fresh vault,
+    docs/research/2026-09-26-a-fresh-vault-has-nothing-to-prune.md).
+    """
     if plan.retained:
         return []
+    if not memory_registered:
+        return ["no memory generation is registered yet; nothing to prune"]
     return ["ERROR: catalog names no active generation; nothing is collectable"]
 
 
@@ -285,9 +309,10 @@ def prune_generations(
     deadline = time.monotonic() + budget_seconds
     catalog = GenerationCatalog(state_root or STATE_ROOT)
     plan = plan_prune(catalog, retained_ancestors=retained_ancestors)
+    retention = _retention_lines(plan, bool(_memory_publications(catalog)))
     if not apply:
-        return _retention_lines(plan) + _planned(plan)
-    return _retention_lines(plan) + _applied(catalog, plan, retained_ancestors, deadline)
+        return retention + _planned(plan)
+    return retention + _applied(catalog, plan, retained_ancestors, deadline)
 
 
 def _count_prefixed(outcomes: list[str], prefix: str) -> int:

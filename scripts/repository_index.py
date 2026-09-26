@@ -14,8 +14,9 @@ under the vault's own state root.
 
 **A foreign generation is registered, never activated.** The catalog has one
 active pointer and it belongs to the vault. Activating a foreign generation
-would make the vault's own scope unresolvable and send every knowledge query
-back to the legacy index -- NEW-65, recreated on purpose. Selection for a
+would make the vault's own scope unresolvable, and every knowledge query would
+lose its generation and read Markdown directly (`no_active_generation`) --
+NEW-65, recreated on purpose. Selection for a
 foreign scope is `GenerationCatalog._scoped_generation`, which never moves the
 pointer.
 
@@ -37,7 +38,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-SCHEMA_VERSION = "repository-index/v1"
+from repository_refusal import SCHEMA_VERSION, RepositoryIndexRefused  # noqa: E402
 
 # A listing names repositories, not files. 128 is far above the number of
 # repositories one operator keeps on one machine and far below MAX_GENERATIONS.
@@ -52,24 +53,6 @@ MAX_INDEXED_SOURCES = 20_000
 MAX_CODE_ROOTS = 128
 GIT_TIMEOUT_SECONDS = 10.0
 MAX_GIT_OUTPUT_BYTES = 4 * 1024 * 1024
-
-
-class RepositoryIndexRefused(ValueError):
-    """A named, fail-closed refusal. `reason` is stable; the message explains."""
-
-    def __init__(self, reason: str, message: str, **details: object) -> None:
-        super().__init__(message)
-        self.reason = reason
-        self.details = details
-
-    def as_dict(self) -> dict[str, object]:
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "status": "refused",
-            "reason": self.reason,
-            "message": str(self),
-            **self.details,
-        }
 
 
 def _refuse(reason: str, message: str, **details: object) -> RepositoryIndexRefused:
@@ -560,11 +543,15 @@ def _collect(root: Path, roots: tuple[str, ...], deadline: float | None):
     See `docs/research/2026-09-17-one-checkout-does-not-end-the-pass.md`.
     """
     from corpus_snapshot import CorpusChanged, collect_corpus
+    from workspace_revision import ignored_directories
 
     try:
         return collect_corpus(
             root,
             code_roots=roots,
+            # What git ignores is not the repository's code at any depth (audit
+            # 2026-09-26 A-8); the freshness walk prunes the same set.
+            pruned_directories=ignored_directories(root, deadline=deadline, cancelled=None),
             # The allowlist is this repository's own selected roots, not the
             # vault's `APPROVED_CODE_ROOTS`. What the collector still enforces
             # is the shape of each path and that the walk would descend into it.
@@ -631,6 +618,19 @@ def _fresh_generation_id(catalog) -> str:
 
 def _build(catalog, admission: Admission, snapshot, parent_id, deadline, cancelled):
     """Build and register; `activate=False` is the whole safety property here."""
+    from code_extractor import ExtractionCeilingExceeded
+
+    try:
+        return _built_generation(catalog, admission, snapshot, parent_id, deadline, cancelled)
+    except ExtractionCeilingExceeded as error:
+        raise _refuse(
+            "repository_exceeds_extraction_bounds",
+            f"the code extractor refused this repository: {error}",
+            directory=str(admission.root),
+        ) from error
+
+
+def _built_generation(catalog, admission: Admission, snapshot, parent_id, deadline, cancelled):
     import doctor
     from evidence_graph_builder import build_incremental_generation
 
@@ -678,6 +678,11 @@ def _index_receipt(
         "excluded_roots": list(roots.excluded),
         "sources": len(snapshot.sources),
         "chunks": len(snapshot.chunks),
+        # Entries under a root the collector left out rather than refuse the whole
+        # repository — a link, a file past the size bound, a name that is not
+        # UTF-8 — counted and the first twenty named (audit 2026-09-26 A-8).
+        "skipped_entries": len(snapshot.skipped),
+        "skipped_examples": list(snapshot.skipped[:20]),
         # What the collector did, and the cost of it, as a number rather than a
         # label. Under a root it walks the filesystem, not Git's index, so an
         # untracked file that is not pruned is collected. "Indexed" is not
@@ -1017,12 +1022,40 @@ def detect_repository_changes(
 
 def _detected(catalog, admission: Admission, generation_id, manifest, deadline):
     source_manifest = _verified_source_manifest(catalog, generation_id, manifest)
-    roots = tuple((source_manifest.get("policy") or {}).get("code_roots") or ())
-    snapshot = _collect(admission.root, roots, deadline)
+    recorded = tuple((source_manifest.get("policy") or {}).get("code_roots") or ())
+    roots = _live_roots(admission.root, recorded) or ()
     difference = _difference(
-        _recorded_hashes(source_manifest), _current_hashes(snapshot)
+        _recorded_hashes(source_manifest), _current_root_hashes(admission.root, roots, deadline)
     )
-    return _change_report(admission, generation_id, roots, difference)
+    report = _change_report(admission, generation_id, roots, difference)
+    return {**report, "uncovered_roots": _uncovered_roots(admission.root, recorded)}
+
+
+def _live_roots(root: Path, recorded: tuple[str, ...]) -> tuple[str, ...] | None:
+    """The recorded roots still on disk; None when none is, so the roots are found again.
+
+    A deleted or renamed top-level folder made every detect and refresh refuse
+    with `repository_root_missing`, the nightly `refresh-all` included (audit
+    A-15, docs/research/2026-09-25-a-gone-top-level-folder-does-not-stop-the-index.md).
+    """
+    present = tuple(name for name in recorded if os.path.lexists(root / name))
+    return present or None
+
+
+def _current_root_hashes(root: Path, roots: tuple[str, ...], deadline) -> dict:
+    """Current digests under the live roots; none left means everything recorded was removed."""
+    if not roots:
+        return {}
+    return _current_hashes(_collect(root, roots, deadline))
+
+
+def _uncovered_roots(root: Path, recorded: tuple[str, ...]) -> list[str]:
+    """Tracked top-level entries this index does not cover, named rather than silent."""
+    try:
+        discovered = _discovered_code_roots(root).selected
+    except RepositoryIndexRefused:
+        return []
+    return [name for name in discovered if name not in recorded and name != MEMORY_ROOT]
 
 
 # --------------------------------------------------------------------------
@@ -1140,7 +1173,7 @@ def _recorded_roots(catalog, generation_id, manifest) -> tuple[str, ...]:
 def _rebuilt(admission, catalog, generation_id, manifest, root, deadline, cancelled) -> dict:
     receipt = index_repository(
         admission.root,
-        roots=_recorded_roots(catalog, generation_id, manifest),
+        roots=_live_roots(admission.root, _recorded_roots(catalog, generation_id, manifest)),
         state_root=root,
         deadline=deadline,
         cancelled=cancelled,

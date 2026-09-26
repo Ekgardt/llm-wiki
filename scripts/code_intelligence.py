@@ -9,7 +9,6 @@ See `docs/research/2026-09-18-the-superseded-plan-a-seam-leaves-the-code.md`.
 
 from __future__ import annotations
 
-import unicodedata
 from dataclasses import dataclass
 from enum import Enum
 
@@ -18,13 +17,10 @@ _SQLITE_INT64_MAX = 2**63 - 1
 
 class Capability(str, Enum):
     DEFINITIONS = "definitions"
-    DECLARATIONS = "declarations"
     REFERENCES = "references"
     CALLS = "calls"
-    IMPORTS = "imports"
     TYPES = "types"
     TYPE_DEFINITIONS = "type_definitions"
-    INHERITANCE = "inheritance"
     IMPLEMENTATIONS = "implementations"
     DIAGNOSTICS = "diagnostics"
 
@@ -40,36 +36,6 @@ class DiagnosticSeverity(str, Enum):
     WARNING = "warning"
     INFORMATION = "information"
     HINT = "hint"
-
-
-def _require_text(value: object, label: str, *, maximum: int, optional: bool = False) -> str | None:
-    if optional and value is None:
-        return None
-    if not isinstance(value, str):
-        raise TypeError(f"{label} must be a string")
-    _require_bounded_utf8(value, label, maximum)
-    return value
-
-
-def _require_bounded_utf8(value: str, label: str, maximum: int) -> None:
-    encoded = _utf8(value, label)
-    if not encoded:
-        raise ValueError(f"{label} must not be empty")
-    if len(encoded) > maximum:
-        raise ValueError(f"{label} exceeds {maximum} UTF-8 bytes")
-    _require_nfc(value, label)
-
-
-def _utf8(value: str, label: str) -> bytes:
-    try:
-        return value.encode("utf-8", errors="strict")
-    except UnicodeEncodeError as exc:
-        raise ValueError(f"{label} must be valid UTF-8") from exc
-
-
-def _require_nfc(value: str, label: str) -> None:
-    if not unicodedata.is_normalized("NFC", value):
-        raise ValueError(f"{label} must use NFC normalization")
 
 
 def _require_sqlite_int(value: object, label: str, *, minimum: int) -> int:

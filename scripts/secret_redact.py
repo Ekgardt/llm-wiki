@@ -21,16 +21,31 @@ import re
 # follows is the block, not a value. A YAML scalar indented onto the next line
 # is the price, and it is named here rather than silently paid.
 _SAME_LINE = r"[^\S\r\n]*"
-_NAMED_VALUE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
-    re.compile(rf"(?i)({name}{_SAME_LINE}{separator}{_SAME_LINE})(\S+)")
-    for name, separator in (
-        (r"authorization", r":[^\S\r\n]*bearer[^\S\r\n]"),
-        (r"api[_-]?key", r"[=:]"),
-        (r"secret", r"[=:]"),
-        (r"password", r"[=:]"),
-        (r"token", r"[=:]"),
-        (r"entropy", r"[=:]"),
-    )
+# Any name that contains a credential word, as gitleaks' `generic-api-key` reads
+# one: `AWS_SECRET_ACCESS_KEY`, `client_secret`, `db.password` — and a JSON key,
+# whose closing quote sits between the name and the separator. See
+# docs/research/2026-09-25-a-secret-in-json-is-still-a-secret.md.
+#
+# The credential word must END the key (a digit or separator suffix aside):
+# `tokenizer_name`, `token_url`, `secretName` and `password_reset_url` name
+# something else, and `PWD`/`OLDPWD` are the shell's directories. See
+# docs/research/2026-09-26-a-credential-is-named-at-the-end-of-its-key.md.
+_CREDENTIAL_NAME = (
+    r"(?<![\w.-])(?!(?:old)?pwd(?![\w.-]))[\w.-]{0,50}?"
+    r"(?:passw(?:or)?d|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|"
+    r"credentials?|entropy)[_.-]?\d*(?![\w.-])"
+)
+# A quote, or a quote escaped inside a JSON string (`\"`).
+_QUOTE = r"\\?[\"']"
+# A quoted value whole (spaces included) or a bare one that stops before a
+# backslash, so an escaped closing quote of a JSON string is never swallowed.
+_VALUE = r"(\\?\"[^\"\r\n\\]*\\?\"|'[^'\r\n]*'|[^\s\\]+)"
+_NAMED_VALUE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        rf"(?i)(authorization(?:{_QUOTE})?{_SAME_LINE}:{_SAME_LINE}(?:{_QUOTE})?"
+        rf"(?:bearer|basic|token)[^\S\r\n])([^\s\\\"']+)"
+    ),
+    re.compile(rf"(?i)({_CREDENTIAL_NAME}(?:{_QUOTE})?{_SAME_LINE}[=:]{_SAME_LINE}){_VALUE}"),
 )
 
 _PATTERNS: list[tuple[re.Pattern[str], str]] = [
@@ -72,6 +87,20 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
         "[REDACTED_JWT]",
     ),
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"), "[REDACTED_PEM_KEY]"),
+    (re.compile(r"(?<![A-Za-z0-9])glpat-[\w-]{20,}"), "[REDACTED_GITLAB_TOKEN]"),
+    # The password in `scheme://user:password@host` (RFC 3986 3.2.1 deprecates it
+    # for exactly this reason); the user and the host stay readable.
+    # Up to the LAST `@` of the authority (`user:p@ss@host`), never a port alone.
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^\s/:@]+:)(?!\d+@)[^\s/]+(@)"), r"\1[REDACTED]\2"),
+    # `curl -u user:password`: the part after the first colon.
+    (re.compile(r"(?<![\w-])((?:-u|--user)(?:\s+|=)[^\s:]+:)(?!\$)[^\s]+"), r"\1[REDACTED]"),
+    # `--password=X`, `--password X` (docker login, podman, many CLIs).
+    (re.compile(r"(?<![\w-])(--password(?:=|[^\S\r\n]+))(?![$-])[^\s]+"), r"\1[REDACTED]"),
+    # MySQL clients take `-pPASSWORD` with no space.
+    (
+        re.compile(r"(?i)(\bmysql(?:dump|admin|import|show|check)?\b[^\r\n]*?\s-p)(?![\s$])[^\s]+"),
+        r"\1[REDACTED]",
+    ),
 ]
 
 _HIGH_ENTROPY_RE = re.compile(
@@ -82,14 +111,16 @@ _ENTROPY_THRESHOLD = 4.0
 _MIN_BASE64_SEGMENT = 3
 _MIN_BASE64_RUN = 16
 
-_QUOTE_CHARACTERS = "\"'`"
 # Syntax a credential literal never contains: calls, subscripts, generics,
 # SQL placeholders, shell and CI interpolation, and escapes. Base64 padding is
 # a trailing `=`, so `=` stays legal.
 _CODE_CHARACTERS = frozenset("()[]{}<>$\\?*|&")
 # A comma or semicolon ends the value and starts the next field, in
-# `connect(token="…",timeout=5)` as in `SET lease_token=NULL,lease_expires_at=NULL`.
-_VALUE_END_RE = re.compile(r"[,;]")
+# `connect(token="…",timeout=5)` as in `SET lease_token=NULL,lease_expires_at=NULL`;
+# a closing brace or bracket ends a JSON value.
+_VALUE_END_RE = re.compile(r"[,;}\]]")
+# Inside quotes a value is a literal; only interpolation makes it code.
+_INTERPOLATION_MARKS = ("${", "$(", "{{")
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # Below this a value is indistinguishable from a keyword, a type name, or a
 # small integer, and the false refusal costs more than the missed short secret.
@@ -114,15 +145,17 @@ def _redact_patterns(text: str) -> str:
     return out
 
 
-def _unquote(value: str) -> tuple[bool, str]:
-    """Strip surrounding quotes and say whether there were any."""
-    stripped = value.strip(_QUOTE_CHARACTERS)
-    return stripped != value, stripped
+def _value_is_code(value: str, quoted: bool) -> bool:
+    """`next(iterator)`, `tuple[bytes,`, `${{ secrets.X }}`, `?`, `128`.
 
-
-def _value_is_code(value: str) -> bool:
-    """`next(iterator)`, `tuple[bytes,`, `${{ secrets.X }}`, `?`, `128`."""
-    return bool(_CODE_CHARACTERS & set(value)) or value.isdigit()
+    A quoted value is a literal, so `"Hunter$2024?"` is a password and not code;
+    only interpolation inside the quotes names something stored elsewhere.
+    """
+    if value.isdigit():
+        return True
+    if quoted:
+        return any(mark in value for mark in _INTERPOLATION_MARKS)
+    return bool(_CODE_CHARACTERS & set(value))
 
 
 def _is_symbol_reference(value: str) -> bool:
@@ -148,29 +181,48 @@ def _matches_known_secret_shape(value: str) -> bool:
     return any(pattern.search(value) for pattern, _replacement in _PATTERNS)
 
 
+# An unquoted all-letter value this long is a secret, not a word like `required`.
+_MIN_ALPHA_SECRET_CHARS = 12
+_QUOTED_VALUE_RE = re.compile(r"(\\?[\"'])(.*)(\1)", re.DOTALL)
+_LOCATION_RE = re.compile(r"(?:/|~/|[A-Za-z]:\\|[a-z][a-z0-9+.-]*://)", re.IGNORECASE)
+
+
 def _bare_value_is_credential(value: str) -> bool:
     if _matches_known_secret_shape(value):
         return True
-    return not value.isalpha() and not _is_symbol_reference(value)
+    if value.isalpha():
+        return len(value) >= _MIN_ALPHA_SECRET_CHARS
+    return not _is_symbol_reference(value)
 
 
-def _value_is_credential(raw: str) -> bool:
+def _value_is_credential(value: str, quoted: bool) -> bool:
     """Whether the value after a credential-named key is a credential.
 
     The key names a slot; it does not prove the slot holds a secret. Declaring
-    the type of the slot, assigning an expression to it, or pointing at a
-    secret stored elsewhere all leave the secret itself absent.
+    the type of the slot, assigning an expression to it, pointing at a secret
+    stored elsewhere, or naming a path or a URL all leave the secret absent.
     """
-    quoted, value = _unquote(_VALUE_END_RE.split(raw, maxsplit=1)[0])
-    if len(value) < _MIN_CREDENTIAL_VALUE_CHARS or _value_is_code(value):
+    if len(value) < _MIN_CREDENTIAL_VALUE_CHARS or _value_is_code(value, quoted):
+        return False
+    if _LOCATION_RE.match(value):
         return False
     return True if quoted else _bare_value_is_credential(value)
 
 
+def _split_value(raw: str) -> tuple[str, str, str, str]:
+    """(opening quote, value, closing quote, what follows) — only a matching pair quotes."""
+    quoted = _QUOTED_VALUE_RE.fullmatch(raw)
+    if quoted is not None:
+        return quoted.group(1), quoted.group(2), quoted.group(3), ""
+    head = _VALUE_END_RE.split(raw, maxsplit=1)[0]
+    return "", head, "", raw[len(head):]
+
+
 def _replace_named_value(match: re.Match[str]) -> str:
-    if _value_is_credential(match.group(2)):
-        return f"{match.group(1)}[REDACTED]"
-    return match.group(0)
+    opening, value, closing, rest = _split_value(match.group(2))
+    if not _value_is_credential(value, bool(opening)):
+        return match.group(0)
+    return f"{match.group(1)}{opening}[REDACTED]{closing}{rest}"
 
 
 def _redact_named_values(text: str) -> str:

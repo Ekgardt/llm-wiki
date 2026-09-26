@@ -53,7 +53,7 @@ from corpus_snapshot import (  # noqa: E402
 from generation_catalog import GenerationCatalog  # noqa: E402
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
 from page_status import current_status_sql, is_retired  # noqa: E402
-from provenance import trust_weight  # noqa: E402
+from provenance import substance_weight, trust_weight  # noqa: E402
 from reliable_memory import (  # noqa: E402
     canonical_json_bytes,
     fsync_directory,
@@ -956,16 +956,18 @@ def _generation_embedder(embedder, *, is_query: bool):
 def _lazy_generation_query_encoder():
     """Encode a question, loading the model on first use rather than up front.
 
-    The load is about ten seconds cold on this vault. Done eagerly in `search()`
-    it was spent before retrieval started, outside the optional-stage boundary
-    and outside the caller's deadline, so the first recall in a fresh MCP server
-    burned its whole ten-second budget on a signal it had not asked for yet and
-    returned nothing at all — not even the lexical answer that was ready in 1.3 s.
+    The cold load measured about ten seconds when this was written and 2.7 s on
+    2026-09-24 (`docs/research/2026-09-24-an-answer-says-how-old-its-index-is.md`).
+    Done eagerly in `search()` it was spent before retrieval started, outside the
+    optional-stage boundary and outside the caller's deadline, so the first recall
+    in a fresh MCP server could burn its whole budget on a signal it had not asked
+    for yet and return nothing at all — not even the lexical answer that was ready
+    in 1.3 s.
 
     Resolved here, the same load happens inside the dense leg, which is already
     an abandonable optional stage: the caller gets the lexical answer on time,
-    the daemon straggler finishes the load, and the next call finds it in the
-    module-level cache. Two stragglers racing the cache would load twice and
+    the straggler (a thread `inference_threads` waits for at exit) finishes the
+    load, and the next call finds it in the module-level cache. Two stragglers racing the cache would load twice and
     keep the last; the cost is one wasted load, never a wrong vector.
 
     An unavailable model returns no vector rather than raising, because the
@@ -2969,6 +2971,8 @@ _QUERY_STOPWORDS = frozenset(
         "в", "во", "для", "до", "за", "и", "из", "или", "как", "какой", "когда",
         "мне", "мой", "моя", "на", "не", "о", "от", "по", "при", "с", "у",
         "что", "чтобы", "это", "я",
+        "а", "но", "почему", "зачем", "ли", "же", "бы", "то", "так", "где",
+        "кто", "чем", "мы", "вы", "ты", "он", "она", "они", "его", "её", "ее",
     }
 )
 
@@ -3171,21 +3175,38 @@ def _row_text(row: sqlite3.Row, key: str) -> str:
     return row[key] or ""
 
 
-def _first_line(content: str) -> str:
-    stripped = content.strip()
-    if not stripped:
-        return ""
-    return stripped.splitlines()[0][:120]
+def _page_title(row: sqlite3.Row) -> str:
+    """The page's own title, not the heading of the chunk that matched.
+
+    A row's stored `title` is its chunk's last heading, so a hit in `## Related`
+    was reported as a page called "Related" (audit 2026-09-26 C-10). The first
+    heading of the ancestry is the page's H1.
+    """
+    ancestry = json.loads(row["heading_ancestry"] or "[]")
+    if ancestry:
+        return str(ancestry[0])
+    return row["title"] or Path(row["source_path"]).stem
+
+
+def _first_prose_line(content: str) -> str:
+    """The first line under the headings: a summary that does not repeat the title."""
+    lines = [line for line in content.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+    return lines[0].strip()[:120] if lines else ""
+
+
+def _chunk_weight(authority: object, page_type: object, content: object) -> float:
+    """Who said it and what the page is, and whether this chunk is prose or a link list."""
+    return trust_weight(authority, page_type) * substance_weight(content)
 
 
 def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object]:
     authority = _row_text(row, "authority")
-    score = -float(row["rank"]) * trust_weight(authority, _row_text(row, "type"))
     content = _row_text(row, "content")
+    score = -float(row["rank"]) * _chunk_weight(authority, _row_text(row, "type"), content)
     return {
         "path": row["source_path"],
-        "title": row["title"] or Path(row["source_path"]).stem,
-        "summary": _first_line(content),
+        "title": _page_title(row),
+        "summary": _first_prose_line(content),
         "content": content,
         "score": score,
         "project": _row_text(row, "project"),
@@ -3531,7 +3552,7 @@ def _vector_scored_rows(
             score *= 1.5
         # Absent provenance weighs 1.0 by `trust_weight`'s own contract, so a row
         # that carries none is admitted on its cosine alone rather than refused.
-        score *= trust_weight(result.get("authority"), result.get("type"))
+        score *= _chunk_weight(result.get("authority"), result.get("type"), result.get("content"))
         result["score"] = round(score, 4)
         result["requested_mode"] = "hybrid"
         result["effective_mode"] = "hybrid"
@@ -3982,15 +4003,27 @@ def _document_terms(page: Path, title: str, summary: str, body: str) -> set[str]
 
 
 def _direct_match_score(
-    page: Path, title: str, read: _PageRead, query_terms: set[str]
+    page: Path, read: _PageRead, query_terms: set[str], shared: set[str]
 ) -> float:
-    """Literal matching has no BM25, so the term count carries the base score."""
-    score = float(len(query_terms))
-    if query_terms.issubset(set(re.findall(r"\w+", title.casefold()))):
+    """Literal matching has no BM25, so the count of shared terms carries the base score.
+
+    The title and filename lift a page only when they hold the whole question. They
+    were tested against the shared terms instead, so a page sharing one word of
+    the question, in its title, scored 12 against 3 for a page holding all three
+    in its body (audit 2026-09-26 C-10).
+    """
+    score = float(len(shared))
+    if query_terms.issubset(set(re.findall(r"\w+", read.title.casefold()))):
         score *= 3.0
     if query_terms.issubset(set(re.findall(r"\w+", page.stem.casefold()))):
         score *= 4.0
     return score * trust_weight(read.authority, read.page_type)
+
+
+def _evidence_terms(query: str) -> set[str]:
+    """The question's words without stop words, or all of them when that is all it has."""
+    words = re.findall(r"\w+", query.casefold())
+    return {word for word in words if _carries_evidence(word)} or set(words)
 
 
 def _direct_page_hit(
@@ -4006,12 +4039,12 @@ def _direct_page_hit(
     if read is None:
         return None
     body = _strip_frontmatter(read.content)
-    terms = _document_terms(page, read.title, read.summary, body)
-    if not query_terms.issubset(terms) or not _page_read_eligible(
+    shared = query_terms & _document_terms(page, read.title, read.summary, body)
+    if not shared or not _page_read_eligible(
         read, project=project, since=since, as_of=as_of
     ):
         return None
-    score = round(_direct_match_score(page, read.title, read, query_terms), 2)
+    score = round(_direct_match_score(page, read, query_terms, shared), 2)
     return {
         **_page_hit(read, score=score, bm25_score=score),
         "fallback_reason": "no_active_generation",
@@ -4030,8 +4063,14 @@ def _direct_markdown_hits(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> list[dict]:
-    """Return bounded literal matches from authoritative Markdown only."""
-    query_terms = set(re.findall(r"\w+", query.casefold()))
+    """Return bounded literal matches from authoritative Markdown only.
+
+    A page qualifies on any word of the question that carries evidence and ranks
+    by how many it shares; requiring every word, stop words included, found
+    nothing for a natural question (audit B-22,
+    docs/research/2026-09-25-a-question-finds-pages-without-a-generation.md).
+    """
+    query_terms = _evidence_terms(query)
     if not query_terms:
         return []
     results: list[dict] = []

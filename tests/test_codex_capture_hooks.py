@@ -43,7 +43,7 @@ def _run(adapter_module, monkeypatch, event: str, payload: dict) -> None:
     assert adapter_module.main(["--source", "codex", "--event", event]) == 0
 
 
-def test_a_codex_prompt_runs_prompt_and_feedback_capture_and_prints_nothing(
+def test_a_codex_prompt_runs_prompt_capture_and_prints_nothing(
     adapter, monkeypatch, capsys
 ):
     adapter_module, calls = adapter
@@ -56,7 +56,7 @@ def test_a_codex_prompt_runs_prompt_and_feedback_capture_and_prints_nothing(
     })
 
     assert ([name for name, _ in calls], calls[0][1]["prompt"], capsys.readouterr().out) == (
-        ["user_prompt_capture.py", "feedback_capture.py"],
+        ["user_prompt_capture.py"],
         "Keep this request",
         "",
     )

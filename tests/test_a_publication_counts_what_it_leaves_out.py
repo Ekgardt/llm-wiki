@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.slow_machine import SHORT_TIMEOUT
 from tests.test_reliability_v3_adoption import _vault, build_adopted_reliability_v3
 
 
@@ -35,7 +36,7 @@ def _image_with_a_link_and_an_empty_directory(tmp_path: Path) -> tuple[Path, str
         state_root=state_root,
         staging_parent=staging_parent,
         now=datetime(2026, 8, 25, tzinfo=timezone.utc),
-        deadline=time.monotonic() + 60,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     ) as image:
         shutil.copytree(image, kept, symlinks=True)
     return kept, backup.sha256_bytes((kept / "manifest.json").read_bytes()), _left_out(kept)

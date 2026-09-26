@@ -23,9 +23,6 @@ def fake_knowledge_dir(tmp_path, monkeypatch):
     knowledge.mkdir(parents=True)
     monkeypatch.setattr(build_guardrails, "KNOWLEDGE", knowledge)
     monkeypatch.setattr(
-        build_guardrails, "FEEDBACK_DIR", tmp_path / "knowledge" / "feedback"
-    )
-    monkeypatch.setattr(
         build_guardrails, "GUARDRAILS_FILE", tmp_path / "knowledge" / "guardrails.md"
     )
     monkeypatch.setattr(build_guardrails, "ROOT", tmp_path)
@@ -229,7 +226,6 @@ def test_apply_rejects_source_mutation_after_guardrails_snapshot(tmp_path, monke
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.setattr(build_guardrails, "ROOT", vault)
     monkeypatch.setattr(build_guardrails, "KNOWLEDGE", notes)
-    monkeypatch.setattr(build_guardrails, "FEEDBACK_DIR", feedback)
     monkeypatch.setattr(build_guardrails, "GUARDRAILS_FILE", target)
     original_mutate = markdown_transaction.mutate_knowledge
 
@@ -267,7 +263,6 @@ def test_apply_rejects_oversized_guardrails_before_read(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.setattr(build_guardrails, "ROOT", vault)
     monkeypatch.setattr(build_guardrails, "KNOWLEDGE", notes)
-    monkeypatch.setattr(build_guardrails, "FEEDBACK_DIR", feedback)
     monkeypatch.setattr(build_guardrails, "GUARDRAILS_FILE", target)
     monkeypatch.setattr(build_guardrails, "MAX_GUARDRAILS_BYTES", 4, raising=False)
     monkeypatch.setattr(sys, "argv", ["build_guardrails.py", "--apply"])

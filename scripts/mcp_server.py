@@ -4,7 +4,7 @@ Gives AI agents (Claude Code, OpenCode, Codex) structured
 access to the knowledge vault via Model Context Protocol. No server, no cloud,
 no network — stdio subprocess on the same machine.
 
-Install: uv sync --extra mcp-server
+Install: uv sync --locked (MCP is a base dependency)
 Run:    uv run --locked --no-sync python scripts/mcp_server.py
 
 Agent config (e.g. for Claude Code ~/.claude/.mcp.json):
@@ -21,7 +21,7 @@ Tools (task-shaped, not entity-shaped — see repowise design):
   recall(query, limit)       — hybrid search (BM25 + vector + graph + reranker)
   read_page(slug)            — full page content (the only raw-bytes tool)
   wiki_overview()            — vault stats, page count, retrieval tier
-  get_context(slugs, include) — batch page context and compatibility previews
+  get_context(slugs)          — batch page context under a token budget
   get_decisions(query)       — active architectural decisions
   vault_status()             — metacognitive block (gaps, backlog, stale)
   log_decision(summary)      — append a decision to daily log
@@ -37,9 +37,11 @@ import asyncio
 import concurrent.futures
 import contextvars
 import datetime as dt
+import functools
 import hashlib
 import inspect
 import itertools
+import json
 import os
 import re
 import sys
@@ -49,6 +51,7 @@ from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import asdict
 from pathlib import Path, PureWindowsPath
+from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -76,6 +79,9 @@ MAX_MCP_INCLUDE_LENGTH = 64
 MAX_MCP_CONTEXT_TOKENS = 32_768
 MAX_MCP_ERROR_CHARS = 256
 MCP_OPERATION_SECONDS = 10.0
+# What a lexical-only pass needs, kept back from the hybrid run: 0.13-0.19 s
+# measured on the live vault on 2026-09-25, five times over.
+LEXICAL_FALLBACK_RESERVE_SECONDS = 1.0
 MCP_LSP_STARTUP_SECONDS = 60.0
 # CODE-03: indexing a repository builds a whole generation, so its budget is a
 # measurement, not a choice. The real second repository on this machine --
@@ -190,13 +196,34 @@ _LONG_ARCHITECTURE_BUDGETS = {"index": MCP_REPOSITORY_INDEX_SECONDS}
 
 
 def _tool_operation_seconds(name: str, arguments: object) -> float:
-    if name != "get_architecture" or not isinstance(arguments, dict):
+    """The budget a tool call gets: the default, unless its tool names a longer one."""
+    budget = _TOOL_BUDGETS.get(name)
+    if budget is None or not isinstance(arguments, dict):
         return MCP_OPERATION_SECONDS
+    return budget(arguments)
+
+
+def _architecture_operation_seconds(arguments: dict) -> float:
     if _is_precise_architecture_request(arguments):
         return MCP_LSP_STARTUP_SECONDS
     return _LONG_ARCHITECTURE_BUDGETS.get(
         arguments.get("mode", "summary"), MCP_OPERATION_SECONDS
     )
+
+
+def _recall_operation_seconds(arguments: dict) -> float:
+    """A grounded answer waits on a provider: one round trip measured 32.5 s (A-17)."""
+    if arguments.get("grounded") is not True:
+        return MCP_OPERATION_SECONDS
+    from query_memory import QA_DEADLINE_SECONDS
+
+    return QA_DEADLINE_SECONDS
+
+
+_TOOL_BUDGETS = {
+    "get_architecture": _architecture_operation_seconds,
+    "recall": _recall_operation_seconds,
+}
 
 
 def _operation_cancelled():
@@ -637,7 +664,7 @@ TOOL_INPUT_SCHEMAS = {
                 "maxItems": MAX_MCP_CONTEXT_INCLUDE,
                 "uniqueItems": True,
                 "items": {"type": "string", "maxLength": MAX_MCP_INCLUDE_LENGTH},
-                "description": "Optional strings; 'frontmatter' adds content_preview for backward compatibility",
+                "description": "Accepted for compatibility and ignored; page content is already in `text`",
             },
             "token_budget": {
                 "type": "integer",
@@ -791,8 +818,15 @@ TOOL_INPUT_SCHEMAS = {
                     "search mode"
                 ),
             },
-            "line": {"type": "integer", "minimum": 1},
-            "character": {"type": "integer", "minimum": 0},
+            "line": {"type": "integer", "minimum": 1, "description": "1-based line of the position"},
+            "character": {
+                "type": "integer",
+                "minimum": 0,
+                "description": (
+                    "0-based UTF-8 byte offset within the line (not UTF-16 "
+                    "code units); past the line end means the line end"
+                ),
+            },
             "offset": {"type": "integer", "minimum": 0, "default": 0},
             "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10},
             **ANSWER_BUDGET_SCHEMA_FIELDS,
@@ -803,27 +837,56 @@ TOOL_INPUT_SCHEMAS = {
 }
 
 
+class SearchCaller(NamedTuple):
+    """Which tool is asking, and whether the search logs its own impressions."""
+
+    source_tool: str
+    emit_telemetry: bool
+
+
+RECALL_CALLER = SearchCaller("mcp.recall", True)
+# The tools that answer from the corpus through `_search_vault`: each reports its
+# trace, its quality from that trace, and its generation's freshness.
+RETRIEVAL_TOOLS = frozenset({"recall", "get_decisions"})
+# `get_decisions` records its own decision-filter impressions, one per page.
+DECISIONS_CALLER = SearchCaller("mcp.get_decisions", False)
+
+
 def _search_vault(
     query: str,
     limit: int = 8,
     *,
     deadline: float | None = None,
     trace_sink: dict[str, object] | None = None,
+    caller: SearchCaller = RECALL_CALLER,
 ) -> list[dict]:
-    """Run hybrid search on the vault; the planner trace lands in `trace_sink`."""
+    """Run hybrid search on the vault; the planner trace lands in `trace_sink`.
+
+    Every tool that answers from the corpus comes through here, so each gets the
+    same deadline reserve, lexical fallback and trace (audit 2026-09-26 C-10).
+    """
     if not isinstance(query, str) or len(query) > MAX_MCP_QUERY_LENGTH:
         raise ValueError("query exceeds the MCP retrieval bound")
     operation_deadline = _search_deadline(deadline)
+    # The hybrid run stops a reserved second early, so the lexical fallback has
+    # time left to answer in (audit B-18,
+    # docs/research/2026-09-25-the-lexical-fallback-keeps-its-own-second.md).
+    hybrid_deadline = operation_deadline - LEXICAL_FALLBACK_RESERVE_SECONDS
     try:
+        _check_deadline(hybrid_deadline)
         return _run_vault_search(
-            query, limit, operation_deadline, semantic=True, trace_sink=trace_sink
+            query, limit, hybrid_deadline, semantic=True, trace_sink=trace_sink, caller=caller
         )
     except TimeoutError:
-        return _lexical_after_deadline(query, limit, operation_deadline, trace_sink)
+        return _lexical_after_deadline(query, limit, operation_deadline, trace_sink, caller)
 
 
 def _lexical_after_deadline(
-    query: str, limit: int, operation_deadline: float, trace_sink: dict[str, object] | None
+    query: str,
+    limit: int,
+    operation_deadline: float,
+    trace_sink: dict[str, object] | None,
+    caller: SearchCaller = RECALL_CALLER,
 ) -> list[dict]:
     """The hybrid run hit its deadline: one lexical pass, marked as the fallback it is."""
     lexical = _run_vault_search(
@@ -834,6 +897,7 @@ def _lexical_after_deadline(
         graph=False,
         rerank=False,
         trace_sink=trace_sink,
+        caller=caller,
     )
     if trace_sink is not None:
         trace_sink.update(_lexical_fallback_row({}))
@@ -858,6 +922,7 @@ def _run_vault_search(
     graph: bool = True,
     rerank: bool = True,
     trace_sink: dict[str, object] | None = None,
+    caller: SearchCaller = RECALL_CALLER,
 ) -> list[dict]:
     from search_memory import search
 
@@ -872,7 +937,8 @@ def _run_vault_search(
         semantic=semantic,
         graph=graph,
         rerank=rerank,
-        source_tool="mcp.recall",
+        source_tool=caller.source_tool,
+        emit_telemetry=caller.emit_telemetry,
         deadline_monotonic=operation_deadline,
         trace_sink=trace_sink,
     )
@@ -906,6 +972,7 @@ def _reported_trace(reported: Mapping[str, object]) -> dict[str, object]:
         "reranker_depth": reported.get("reranker_depth"),
         "reranker_duration_ms": reported.get("reranker_duration_ms"),
         "reranker_fallback_reason": reported.get("reranker_fallback_reason"),
+        "signals_requested": list(reported.get("signals_requested") or ()),
     }
 
 
@@ -916,9 +983,9 @@ def _row_trace(row: Mapping[str, object]) -> dict[str, object]:
 
 def _unreported_trace(query: str) -> dict[str, object]:
     """Nothing reported a trace: say so, and never guess a generation."""
-    from retrieval import analyze_query
+    from retrieval import analyze_query, planned_request
 
-    requested = analyze_query(query).recommended_profile
+    requested, _signals = planned_request(None, analyze_query(query), semantic=True)
     return _reported_trace(
         {
             "requested_mode": requested,
@@ -1060,39 +1127,49 @@ def _require_evidence_within_bounds(resolved, evidence_bytes: int, error_class) 
     return len(resolved.bytes)
 
 
-def _resolved_evidence(resolver, references, deadline, error_class) -> list:
+def _resolved_evidence(resolver, candidates, deadline, error_class) -> list:
+    """One entry per candidate; a reference that parses must resolve or the page is refused.
+
+    Text that only mentions `daily:` and parses as no reference is named per entry
+    instead of refusing the page (audit 2026-09-26 B-17); a real reference whose
+    bytes do not match is still a page that cannot be trusted.
+    """
     evidence = []
-    evidence_bytes = 0
-    for reference in references:
+    spent = [0]
+    for candidate in candidates:
         _check_deadline(deadline)
-        resolved = resolver.resolve(reference)
-        evidence_bytes += _require_evidence_within_bounds(
-            resolved, evidence_bytes, error_class
-        )
-        evidence.append(
-            {
-                "reference": str(reference),
-                "sha256": resolved.sha256,
-                "text": resolved.bytes.decode("utf-8", errors="strict"),
-            }
-        )
+        evidence.append(_evidence_entry(resolver, candidate, spent, error_class))
     return evidence
 
 
+def _evidence_entry(resolver, candidate, spent: list[int], error_class) -> dict:
+    if isinstance(candidate, str):
+        return {"reference": None, "error": "not_an_evidence_reference"}
+    return _resolved_entry(resolver.resolve(candidate), candidate, spent, error_class)
+
+
+def _resolved_entry(resolved, reference, spent: list[int], error_class) -> dict:
+    spent[0] += _require_evidence_within_bounds(resolved, spent[0], error_class)
+    return {
+        "reference": str(reference),
+        "sha256": resolved.sha256,
+        "text": resolved.bytes.decode("utf-8", errors="strict"),
+    }
+
+
 def _page_evidence(root, state_root, content: str, resolve_evidence: bool, deadline):
-    """Return resolved evidence, or the error dict the caller must hand back."""
+    """Resolved evidence, or the error dict the caller must hand back."""
     from evidence_resolver import (
         EvidenceResolutionError,
         EvidenceResolver,
-        extract_evidence_references,
+        evidence_candidates,
     )
 
+    if not resolve_evidence:
+        return []
     resolver = EvidenceResolver(root, state_root=state_root)
     try:
-        references = extract_evidence_references(content) if resolve_evidence else []
-        return _resolved_evidence(
-            resolver, references, deadline, EvidenceResolutionError
-        )
+        return _resolved_evidence(resolver, evidence_candidates(content), deadline, EvidenceResolutionError)
     except (EvidenceResolutionError, OSError, UnicodeDecodeError, ValueError) as exc:
         return {"error": f"Evidence resolution failed: {_safe_evidence_error(exc)}"}
 
@@ -1124,7 +1201,7 @@ def _record_page_reads(page_path: str, evidence: list) -> None:
 
         kinds = [
             ("page_read", page_path),
-            *(("evidence_read", item["sha256"]) for item in evidence),
+            *(("evidence_read", item["sha256"]) for item in evidence if "sha256" in item),
         ]
         events = _page_read_events(best_effort_make_event, kinds)
         if events:
@@ -1198,32 +1275,69 @@ def _daily_needs_compile(daily_path: Path, file_hash, compiled: dict) -> bool:
 
 
 def _compile_backlog(root: Path, file_hash, compiled: dict, deadline) -> int:
+    """Past days whose log changed since it was compiled.
+
+    Today's log is still being written and is compiled by the nightly pass, so
+    it is not a backlog; counting it made the health resource partial all day
+    (audit C-24, docs/research/2026-09-25-today-is-not-a-compile-backlog.md).
+    """
     backlog = 0
-    for daily_path in _daily_files(root):
+    for daily_path in _closed_daily_files(root):
         _check_deadline(deadline)
         if _daily_needs_compile(daily_path, file_hash, compiled):
             backlog += 1
     return backlog
 
 
+def _closed_daily_files(root: Path) -> list[Path]:
+    open_days = _open_days()
+    return [path for path in _daily_files(root) if path.stem not in open_days]
+
+
+def _open_days() -> set[str]:
+    """Today, locally and in UTC: a capture may name its day in either."""
+    now = dt.datetime.now(dt.timezone.utc)
+    return {now.date().isoformat(), now.astimezone().date().isoformat()}
+
+
 def _get_decisions(
-    query: str | None = None, limit: int = 10, *, deadline: float | None = None
+    query: str | None = None,
+    limit: int = 10,
+    *,
+    deadline: float | None = None,
+    trace_sink: dict[str, object] | None = None,
 ) -> list[dict]:
-    """Get active decisions from the vault."""
-    from search_memory import search
+    """Get active decisions from the vault: up to `limit` decision pages, one row each.
+
+    The search is asked for a wider pool than the answer, because the filter to
+    decisions runs after it and several chunks of one page are one decision; the
+    rows are the agent's shape, as `recall` returns them (audit C-25,
+    docs/research/2026-09-25-get-decisions-returns-what-was-asked.md).
+    """
+    from retrieval import CANDIDATE_FANOUT
+    from search_memory import MAX_SEARCH_LIMIT
 
     _require_decision_query(query)
     effective_query = query or "decision"
-    candidates = search(
+    candidates = _search_vault(
         effective_query,
-        limit=limit,
-        source_tool="mcp.get_decisions",
-        emit_telemetry=False,
-        deadline_monotonic=deadline,
+        min(limit * CANDIDATE_FANOUT, MAX_SEARCH_LIMIT),
+        deadline=deadline,
+        trace_sink=trace_sink,
+        caller=DECISIONS_CALLER,
     )
-    results = [result for result in candidates if _is_decision_result(result)]
+    results = _decision_pages(candidates, limit)
     _record_decision_impressions(effective_query, results)
     return results
+
+
+def _decision_pages(candidates: list[dict], limit: int) -> list[dict]:
+    """The first row of each decision page, in search order, shaped for an agent."""
+    pages: dict[str, dict] = {}
+    for row in candidates:
+        if _is_decision_result(row):
+            pages.setdefault(row.get("path", ""), {**_agent_row(row), "type": "decision"})
+    return list(pages.values())[:limit]
 
 
 def _require_decision_query(query) -> None:
@@ -1290,13 +1404,19 @@ def _get_context(
 
     slugs, include = _validated_context_request(slugs, include, token_budget)
     operation_deadline = _operation_deadline(deadline)
+    collected_at = _utc_now_seconds()
     snapshot = collect_corpus(ROOT, deadline=operation_deadline)
     selection = _context_selection(snapshot, set(slugs))
     compiled = _compiled_context(
         snapshot, selection, token_budget, operation_deadline
     )
     _record_context_injections(selection["selected_paths"])
-    return _context_result(compiled, snapshot, selection, token_budget, include)
+    result = _context_result(compiled, snapshot, selection, token_budget, include)
+    return {**result, "collected_at": collected_at}
+
+
+def _utc_now_seconds() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
 
 def _slug_exceeds_bound(slug) -> bool:
@@ -1411,6 +1531,10 @@ def _compiled_context(snapshot, selection: dict, token_budget: int, deadline):
         )
 
 
+def _without_text(item: dict) -> dict:
+    return {key: value for key, value in item.items() if key != "text"}
+
+
 def _page_items(items: list) -> list:
     return [item for item in items if item["source"].endswith(".md")]
 
@@ -1432,7 +1556,10 @@ def _materialization_trace(compiled) -> list:
 
 
 def _context_result(compiled, snapshot, selection: dict, token_budget: int, include):
-    items = [asdict(item) for item in compiled.items]
+    # The packed text is sent once, in `text`; the lists name what it holds. Each
+    # list repeated every item's text, about four times the answer (audit
+    # 2026-09-26 B-18, docs/research/2026-09-26-a-context-answer-sends-its-text-once.md).
+    items = [_without_text(asdict(item)) for item in compiled.items]
     return {
         "text": compiled.text,
         "packed_tokens": compiled.packed_tokens,
@@ -1670,7 +1797,28 @@ def _get_architecture(
         return _code_graph_timeout_data(
             str(resolved), reason, completed=("directory_validation",)
         )
-    return _architecture_summary_data(resolved, architecture)
+    return _with_generation_freshness(resolved, _architecture_summary_data(resolved, architecture))
+
+
+def _with_generation_freshness(resolved: Path, answer):
+    """The generation's freshness block on an answer that read one, and its refresh.
+
+    The summary and six other modes never compared commits nor started a
+    refresh (audit B-35,
+    docs/research/2026-09-25-every-structural-answer-carries-its-freshness.md).
+    """
+    if not _wants_freshness(answer):
+        return answer
+    freshness = _repository_freshness(resolved)
+    if freshness is None:
+        return answer
+    return {**answer, "freshness": freshness}
+
+
+def _wants_freshness(answer) -> bool:
+    if not isinstance(answer, dict):
+        return False
+    return "error" not in answer and "freshness" not in answer
 
 
 # What the summary says instead of naming 300 community members. The counts
@@ -2020,8 +2168,8 @@ def _forget_follow_request(checkout: Path) -> None:
 def _forget_refresh_request(checkout) -> None:
     """Take back this commit's mark, and only this commit's."""
     with _REFRESH_REQUESTED_LOCK:
-        if _REFRESH_REQUESTED.get(checkout.repository_id) == checkout.git_commit:
-            del _REFRESH_REQUESTED[checkout.repository_id]
+        if _REFRESH_REQUESTED.get(checkout.checkout_id) == checkout.git_commit:
+            del _REFRESH_REQUESTED[checkout.checkout_id]
 
 
 # The freshness block decorates an answer that is already computed, so a
@@ -2093,7 +2241,7 @@ def _freshness_block(resolved: Path, checkout, generation, generation_id) -> dic
         "generation_commit": generation.git_commit,
         "checkout_commit": checkout.git_commit,
         "stale_by_commit": stale,
-        "refresh": _refresh_action(resolved, checkout, stale),
+        "refresh": _refresh_action(checkout, stale),
     }
 
 
@@ -2103,38 +2251,50 @@ def _is_the_vault(resolved: Path) -> bool:
     return resolved in {Path(ROOT).resolve(), Path(STATE_ROOT).resolve()}
 
 
-def _refresh_action(resolved: Path, checkout, stale: bool) -> str:
+def _refresh_action(checkout, stale: bool) -> str:
+    """What a stale answer does about it, judged on the checkout it belongs to.
+
+    Judging the directory asked about took `<vault>/scripts` for a foreign
+    checkout and refreshed the vault in the daytime (audit 2026-09-26 B-10,
+    docs/research/2026-09-26-the-vault-check-reads-the-checkout-root.md).
+    """
     if not stale:
         return "not_needed"
-    if _is_the_vault(resolved):
+    if _is_the_vault(Path(checkout.checkout_root).resolve()):
         # The vault's own memory generation is rebuilt and activated by the
         # nightly pass. Its code generation is refreshed
         # by the same nightly step as every other checkout's since 2026-09-12;
         # this path does not start one here (audit 3, G-L5).
         return "vault_nightly"
-    return _request_repository_refresh(resolved, checkout)
+    return _request_repository_refresh(checkout)
 
 
-def _refresh_log_paths(repository_id: str) -> tuple[Path, Path]:
+def _refresh_log_paths(identity: str) -> tuple[Path, Path]:
     from memory_state import STATE_ROOT
 
     folder = Path(STATE_ROOT) / "logs" / "repository-refresh"
-    stem = repository_id.rsplit(":", 1)[-1][:16]
+    stem = identity.rsplit(":", 1)[-1][:16]
     return folder / f"{stem}.out.log", folder / f"{stem}.err.log"
 
 
-def _request_repository_refresh(resolved: Path, checkout) -> str:
-    """Start the bounded refresh once per (repository, commit); never wait for it."""
+def _request_repository_refresh(checkout) -> str:
+    """Start the bounded refresh once per (checkout, commit); never wait for it.
+
+    It ran on the directory asked about, which a subfolder's refresh refused
+    while the answer said `started`, and one worktree's request stood for every
+    worktree of the repository (audit B-38,
+    docs/research/2026-09-25-a-refresh-runs-on-its-checkout.md).
+    """
     from memory_state import spawn_detached
 
     with _REFRESH_REQUESTED_LOCK:
-        if _REFRESH_REQUESTED.get(checkout.repository_id) == checkout.git_commit:
+        if _REFRESH_REQUESTED.get(checkout.checkout_id) == checkout.git_commit:
             return "already_requested"
-        _REFRESH_REQUESTED[checkout.repository_id] = checkout.git_commit
-    out_log, err_log = _refresh_log_paths(checkout.repository_id)
+        _REFRESH_REQUESTED[checkout.checkout_id] = checkout.git_commit
+    out_log, err_log = _refresh_log_paths(checkout.checkout_id)
     script = Path(__file__).resolve().parent / "repository_index.py"
     pid = spawn_detached(
-        [sys.executable, str(script), "refresh", str(resolved)],
+        [sys.executable, str(script), "refresh", str(Path(checkout.checkout_root))],
         stdout_path=out_log,
         stderr_path=err_log,
     )
@@ -2163,18 +2323,21 @@ def _get_architecture_mode(
     if argument_error is not None:
         return {"error": argument_error}
     _check_deadline(deadline)
+    operation_deadline = _operation_deadline(deadline)
     query = _ARCHITECTURE_MODE_QUERIES.get(mode, _architecture_symbol)
-    architecture = query(
-        {
-            "resolved": resolved,
-            "symbol": symbol,
-            "target": target,
-            "reverse": reverse,
-            "depth": depth,
-            "live": live,
-            "deadline": deadline,
-        }
-    )
+    request = {
+        "resolved": resolved,
+        "symbol": symbol,
+        "target": target,
+        "reverse": reverse,
+        "depth": depth,
+        "live": live,
+        "deadline": operation_deadline,
+    }
+    try:
+        architecture = _bounded_mode_query(query, request, operation_deadline)
+    except TimeoutError as reason:
+        return _code_graph_timeout_data(str(resolved), reason, completed=("directory_validation",))
     return {
         "directory": str(resolved),
         "mode": mode,
@@ -2182,6 +2345,18 @@ def _get_architecture_mode(
         **_architecture_report(architecture),
         **_freshness_fields(resolved, architecture),
     }
+
+
+def _bounded_mode_query(query, request: dict, deadline: float):
+    """Every mode on the bounded code-graph workers, as the summary always was.
+
+    The modes parsed the tree on the tool's own thread with no deadline; four
+    hung calls held every MCP slot (audit B-33,
+    docs/research/2026-09-25-every-architecture-mode-is-bounded.md).
+    """
+    return _bounded_code_graph_call(
+        contextvars.copy_context().run, query, request, deadline=deadline
+    )
 
 
 def _analyze_impact(
@@ -3320,11 +3495,9 @@ def _navigation_profile(normalized_path: str):
     two profiles, so the table is a function by construction. See
     `docs/research/2026-08-28-wiring-a-second-language-server.md`, question 1.
 
-    A suffix no profile claims falls back to Pyright, which is exactly what this
-    path did before profiles existed: the session opens the file, answers
-    nothing, and the caller degrades to structural evidence. Routing such a file
-    straight to the structural tier is the better shape and is deliberately not
-    done here, because `CodeNavigation` requires a session.
+    A suffix no profile claims is still handed a Pyright session, because
+    `CodeNavigation` requires one; `CodeNavigation.query` answers such a file
+    `unsupported` before the session is asked anything (audit 2026-09-26 C-9).
     """
     from lsp_profiles import PYRIGHT_PROFILE, profile_for_path
 
@@ -4829,7 +5002,7 @@ def _with_fallback_state(merged: dict, reason: object) -> dict:
 
 
 def _quality_of_results(name, data, arguments, limit_clamped) -> dict | None:
-    if name not in {"recall", "get_decisions"}:
+    if name not in RETRIEVAL_TOOLS:
         return None
     quality = _named_results_quality(name, data)
     if not limit_clamped:
@@ -4843,9 +5016,8 @@ def _quality_of_results(name, data, arguments, limit_clamped) -> dict | None:
 
 
 def _named_results_quality(name: str, data) -> dict:
-    """Recall carries its rows under `results` and a trace; decisions are the rows."""
-    if name != "recall":
-        return _results_quality(data)
+    """Both retrieval tools carry their rows under `results`, and a trace."""
+    del name
     quality = _results_quality(data.get("results", []))
     return _with_trace_state(quality, data.get("retrieval_trace"))
 
@@ -5035,8 +5207,25 @@ def _quality_of_context(name, data, arguments, limit_clamped) -> dict | None:
 
 
 # Order is behaviour: the first rule that recognises the result answers.
+def _quality_of_vault_status(name, data, arguments, limit_clamped) -> dict | None:
+    """The same compile health the health resource reports: never compiled is not full confidence."""
+    if name != "vault_status" or not isinstance(data, dict):
+        return None
+    return _compile_health_quality(data)
+
+
+# Tools whose successful answer is exact: a page read, a count of files, a write
+# that either happened or raised. Every other tool must be claimed by a rule
+# above, so an estimate never inherits the envelope's default full confidence
+# (audit 2026-09-26 C-10: `vault_status` did, with no compile history at all).
+EXACT_ANSWER_TOOLS = frozenset(
+    {"read_page", "wiki_overview", "log_decision", "compile", "get_context"}
+)
+
+
 _QUALITY_RULES = (
     _quality_of_error,
+    _quality_of_vault_status,
     _quality_of_grounded_recall,
     _quality_of_contradiction,
     _quality_of_results,
@@ -5115,9 +5304,14 @@ def _build_operation_envelope(
     *,
     components: dict[str, dict[str, object]] | None = None,
     index_timestamp: str | None = None,
+    source_root: str | None = None,
 ) -> dict:
     envelope = build_envelope(
-        data, components=components, index_timestamp=index_timestamp, **(quality or {})
+        data,
+        components=components,
+        index_timestamp=index_timestamp,
+        source_root=source_root,
+        **(quality or {}),
     )
     if components and envelope["freshness"] == "stale":
         _degrade_stale_envelope(envelope)
@@ -5176,10 +5370,35 @@ def _generation_built_ns(generation: object) -> int | None:
 
 
 def _newest_page_ns() -> int:
+    """The latest change to anything the generation indexes (audit B-19).
+
+    Notes and their directories (a removed or renamed page moves only its
+    directory's mtime), and each project's `state.md` and `context.md`, the
+    project files the corpus collects. See
+    `docs/research/2026-09-25-an-answer-is-stale-when-any-indexed-source-moved.md`.
+    """
     from memory_state import ROOT
 
-    notes = ROOT / "knowledge" / "notes"
-    return max((page.stat().st_mtime_ns for page in notes.rglob("*.md")), default=0)
+    knowledge = ROOT / "knowledge"
+    notes = knowledge / "notes"
+    sources = [*notes.rglob("*.md"), *_directories(notes), *_project_sources(knowledge / "projects")]
+    return max((_mtime_ns(path) for path in sources), default=0)
+
+
+
+def _directories(root: Path) -> list[Path]:
+    return [root, *(path for path in root.rglob("*") if path.is_dir())] if root.is_dir() else []
+
+
+def _project_sources(projects: Path) -> list[Path]:
+    return [path for name in ("state.md", "context.md") for path in projects.glob(f"*/{name}")]
+
+
+def _mtime_ns(path: Path) -> int:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return 0
 
 
 def _index_is_behind(generation: object) -> bool:
@@ -5190,15 +5409,80 @@ def _index_is_behind(generation: object) -> bool:
     built = _generation_built_ns(generation)
     if built is None:
         return False
-    return _newest_page_ns() > built
+    if _newest_page_ns() <= built:
+        return False
+    return _sources_differ(generation, built)
+
+
+def _sources_differ(generation: str, built: int) -> bool:
+    """Something the generation indexes really changed, not only its file time.
+
+    A touched page, an edited README or a renamed directory moved a time and left
+    every answer "stale" until the next build, which reused the old generation and
+    never moved its manifest (audit 2026-09-26 B-15,
+    docs/research/2026-09-26-an-answer-is-stale-only-when-a-source-changed.md).
+    """
+    from memory_state import ROOT
+
+    recorded = _recorded_memory_digests(generation)
+    if recorded is None:
+        return True
+    current = _memory_source_files(ROOT)
+    gone = set(recorded) - {path.relative_to(ROOT).as_posix() for path in current}
+    return bool(gone) or any(_changed_since(ROOT, path, recorded, built) for path in current)
+
+
+def _memory_source_files(root: Path) -> list[Path]:
+    knowledge = root / "knowledge"
+    return [*(knowledge / "notes").rglob("*.md"), *_project_sources(knowledge / "projects")]
+
+
+def _changed_since(root: Path, path: Path, recorded: dict[str, str], built: int) -> bool:
+    if _mtime_ns(path) <= built:
+        return False
+    relative = path.relative_to(root).as_posix()
+    if relative in recorded:
+        return _file_sha256(path) != recorded[relative]
+    from corpus_snapshot import memory_source_would_be_collected
+
+    return memory_source_would_be_collected(root, path)
+
+
+def _file_sha256(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(read_stable_bytes(path, MAX_MCP_PAGE_BYTES, label="indexed source")).hexdigest()
+    except (OSError, ValueError):
+        return None
+
+
+@functools.lru_cache(maxsize=4)
+def _recorded_memory_digests(generation: str) -> dict[str, str] | None:
+    """The memory sources a generation recorded, by path; None when it cannot be read."""
+    manifest = _generation_manifest(generation)
+    try:
+        from evidence_graph import MAX_SOURCE_MANIFEST_BYTES
+
+        value = json.loads(read_stable_bytes(manifest.with_name("source-manifest.json"), MAX_SOURCE_MANIFEST_BYTES, label="source manifest"))
+        return {str(item["relative_path"]): str(item["sha256"]) for item in value["sources"] if _is_memory_path(str(item["relative_path"]))}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def _is_memory_path(relative: str) -> bool:
+    return relative.startswith(("knowledge/notes/", "knowledge/projects/"))
 
 
 def _requested_signals(trace: dict) -> tuple[str, ...]:
-    """The signals the requested mode declares; graph is not 'missing' when never asked for."""
+    """The signals the requested mode declares, and any that ran besides.
+
+    Graph is not 'missing' when never asked for; dense that a planned GRAPH run
+    added is reported, not dropped.
+    """
     from retrieval import PROFILE_SIGNALS
 
     mode = str(trace.get("requested_mode") or "").upper()
-    return PROFILE_SIGNALS.get(mode, ("lexical", "dense", "graph"))
+    declared = trace.get("signals_requested") or PROFILE_SIGNALS.get(mode, ("lexical", "dense", "graph"))
+    return tuple(dict.fromkeys((*declared, *trace.get("signals_used", ()))))
 
 
 def _recall_trace(data) -> dict | None:
@@ -5230,15 +5514,20 @@ def _recall_components(data) -> dict:
 
 
 def _answer_generation(name: str, data) -> object:
-    if name == "recall":
+    if name in RETRIEVAL_TOOLS:
         return (_recall_trace(data) or {}).get("corpus_generation")
-    if name == "get_context" and isinstance(data, dict):
-        return data.get("corpus_generation")
     return None
 
 
 def _index_timestamp(name: str, data) -> str | None:
-    """When the index behind this answer was built, for the answers that read one."""
+    """When the corpus behind this answer was read.
+
+    Recall reads a generation, so its answer is as old as that generation's build.
+    Context collects the Markdown at request time, so its answer is as old as that
+    collection; its `corpus_generation` is a content hash, not a generation id.
+    """
+    if name == "get_context" and isinstance(data, dict):
+        return data.get("collected_at")
     built = _generation_built_ns(_answer_generation(name, data))
     if built is None:
         return None
@@ -5306,9 +5595,20 @@ _GRAPH_COMPONENT_KEYS = ("source_generation", "graph_complete", "fallback")
 
 
 def _graph_component_freshness(data: dict) -> str:
+    """What the answer's own freshness block says, not a constant.
+
+    It said `fresh` beside `stale_by_commit: true` (audit B-34,
+    docs/research/2026-09-25-a-structural-answer-says-its-own-freshness.md).
+    """
     if "error" in data:
         return "unknown"
-    return "fresh"
+    return _block_freshness(data.get("freshness"))
+
+
+def _block_freshness(block) -> str:
+    if not isinstance(block, dict) or "unavailable" in block:
+        return "unknown"
+    return "stale" if block.get("stale_by_commit") else "fresh"
 
 
 def _graph_components(data) -> dict:
@@ -5326,6 +5626,7 @@ def _graph_components(data) -> dict:
 
 _COMPONENT_BUILDERS = {
     "recall": _recall_components,
+    "get_decisions": _recall_components,
     "get_context": _context_components,
     "get_architecture": _graph_components,
     "find_dead_code": _graph_components,
@@ -5388,7 +5689,8 @@ AGENT_ROW_FIELDS = (
     # answer from a lexical-only one when no trace was reported.
     "vector_score",
     "fused_score",
-    "chunk_id",
+    # No `chunk_id`: it is `candidate_id` again, 64 hex characters per row
+    # (audit 2026-09-26 C-10).
     "heading_ancestry",
     "project",
     "timestamp",
@@ -5415,13 +5717,18 @@ def _tool_vault_status(arguments: dict, deadline: float):
 
 
 def _tool_get_decisions(arguments: dict, deadline: float):
+    """Decision pages, with the same trace and freshness a recall carries."""
     effective_limit, limit_clamped = _clamped_limit(arguments.get("limit", 10))
-    data = _call_with_deadline(
-        _get_decisions,
-        arguments.get("query"),
-        limit=effective_limit,
-        deadline=deadline,
+    reported: dict[str, object] = {}
+    query = arguments.get("query")
+    results = _call_with_deadline(
+        _get_decisions, query, limit=effective_limit, deadline=deadline, trace_sink=reported
     )
+    data = {
+        "results": results,
+        "retrieval_trace": _retrieval_trace(query or "decision", results, reported),
+        "_meta": _call_with_deadline(_meta, deadline=deadline),
+    }
     return data, limit_clamped
 
 
@@ -5756,7 +6063,7 @@ def _checked_directory_call(call, arguments: dict, deadline: float):
     resolved, error = _validated_code_directory(arguments.get("directory"), deadline=deadline)
     if error:
         return {"error": error}
-    return call({**arguments, "directory": str(resolved)}, deadline)
+    return _with_generation_freshness(resolved, call({**arguments, "directory": str(resolved)}, deadline))
 
 
 def _architecture_timeout_data(arguments: dict, error: BaseException) -> dict:
@@ -5857,8 +6164,24 @@ def _tool_call_envelope(
     components = _components_for(name, data)
     _check_deadline(operation_deadline)
     return _build_operation_envelope(
-        data, quality, components=components, index_timestamp=_index_timestamp(name, data)
+        data,
+        quality,
+        components=components,
+        index_timestamp=_index_timestamp(name, data),
+        source_root=_answer_source_root(name, arguments),
     )
+
+
+def _answer_source_root(name: str, arguments) -> str | None:
+    """The checkout a directory-scoped tool read, or None for the vault's answers.
+
+    Found from the schema, so a tool that gains a `directory` argument is
+    covered without being listed here (audit 2026-09-26 C-9).
+    """
+    if "directory" not in TOOL_INPUT_SCHEMAS.get(name, {}).get("properties", {}):
+        return None
+    directory = _dict_arguments(arguments).get("directory")
+    return directory if isinstance(directory, str) else ""
 
 
 def _record_answer_cost(envelope: dict, started: float, operation_deadline: float) -> None:
@@ -5888,14 +6211,29 @@ def _execute_tool_call(name: str, arguments, operation_deadline: float) -> str:
     try:
         data, limit_clamped = _tool_call_data(name, arguments, operation_deadline)
         _check_deadline(operation_deadline)
-        envelope = _tool_call_envelope(
-            name, data, arguments, limit_clamped, operation_deadline
-        )
+        return _answer_text(name, arguments, data, limit_clamped, started, operation_deadline)
+    finally:
+        _OPERATION_DEADLINE.reset(deadline_token)
+
+
+def _answer_text(
+    name: str, arguments, data, limit_clamped: bool, started: float, operation_deadline: float
+) -> str:
+    """The envelope of a finished tool call, behind the same boundary as the tool.
+
+    A failure while building or rendering it used to leave the handler, and the
+    SDK sent its raw text, paths included (audit B-20,
+    docs/research/2026-09-25-an-envelope-failure-is-a-safe-answer.md).
+    """
+    try:
+        envelope = _tool_call_envelope(name, data, arguments, limit_clamped, operation_deadline)
         _check_deadline(operation_deadline)
         _record_answer_cost(envelope, started, operation_deadline)
         return _rendered_envelope(envelope)
-    finally:
-        _OPERATION_DEADLINE.reset(deadline_token)
+    except TimeoutError:
+        raise
+    except Exception as error:  # noqa: BLE001 - stable answer boundary
+        return _rendered_envelope(_build_operation_envelope(_tool_call_failure(name, arguments, error)))
 
 
 async def _bounded_tool_call(name: str, arguments, execute, render):
@@ -6251,7 +6589,7 @@ def run_server() -> int:
     """Start the MCP server (stdio transport). Returns exit code."""
     if not MCP_AVAILABLE:
         print(
-            "MCP package not installed. Run: uv sync --extra mcp-server",
+            "MCP package not installed. Run: uv sync --locked --inexact",
             file=sys.stderr,
         )
         return 1

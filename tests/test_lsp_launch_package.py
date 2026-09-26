@@ -31,6 +31,8 @@ import lsp_launch_package
 import pytest
 from lsp_server_profile import PackageLaunch
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 pytestmark = pytest.mark.skipif(
     os.name != "posix", reason="the package launch is the POSIX branch only"
 )
@@ -180,7 +182,7 @@ def _guard(tmp_path: Path, package_launch: PackageLaunch | None):
         _digest(),
         command=("/usr/bin/node", str(server), "--stdio"),
         owner_root=owner,
-        deadline=time.monotonic() + 60.0,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
         degradation_prefix="typescript",
         package_launch=package_launch,
     )

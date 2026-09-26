@@ -271,7 +271,7 @@ uv sync --locked --no-default-groups --inexact --extra semantic
 
 ```
 CODE          scripts/  tests/  docs/  skills/  rules/  integrations/  benchmark/
-KNOWLEDGE     knowledge/{daily,notes,projects,raw,inbox,feedback}
+KNOWLEDGE     knowledge/{daily,notes,projects,raw,inbox}
 RUNTIME       cache/  logs/  run/   (gitignored, inside vault)
 ```
 

@@ -314,6 +314,11 @@ SYNC_ARGS=()
 while IFS= read -r sync_argument; do
   SYNC_ARGS+=("$sync_argument")
 done < <(python3 -c 'import json, sys; print(*json.loads(sys.argv[1])["arguments"], sep="\n")' "$SYNC_PLAN")
+IGNORED_ENVIRONMENT="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["ignored_environment"] or "")' "$SYNC_PLAN")"
+if [ -n "$IGNORED_ENVIRONMENT" ]; then
+  # Timers, hooks and the MCP server run the vault from its own .venv (audit B-26).
+  warn "UV_PROJECT_ENVIRONMENT=$IGNORED_ENVIRONMENT is not used: the vault runs from $PROJECT_ENVIRONMENT"
+fi
 export UV_PROJECT_ENVIRONMENT="$PROJECT_ENVIRONMENT"
 uv "${SYNC_ARGS[@]}"
 ok "Production dependencies installed (MCP included)"
@@ -759,13 +764,14 @@ case "$SYNC_EXIT" in
 esac
 
 # ─── 8b. Pinned model weights ──────────────────────────────────────
-# The read path loads weights local-only. With the semantic extra installed,
-# fetch the two pinned models now, verified; without it, nothing is expected.
+# The read path loads weights local-only. Every pinned model whose runtime is
+# installed is fetched now, verified; with none installed, nothing is expected,
+# and the script's own lines say which it was.
 MODELS_EXIT=0
 uv run --locked --no-sync python "$VAULT_ROOT/scripts/install_models.py" || MODELS_EXIT=$?
 case "$MODELS_EXIT" in
-  0) ok "Pinned model weights present" ;;
-  2) info "Semantic search not installed; model weights are fetched once it is" ;;
+  0) ok "Model weights step done" ;;
+  2) info "huggingface_hub is not installed; model weights are fetched once it is" ;;
   *) warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" ;;
 esac
 

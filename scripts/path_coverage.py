@@ -19,9 +19,13 @@ Research: `docs/research/2026-08-28-path-coverage-mode.md`,
 
 from __future__ import annotations
 
-import ast
 import hashlib
 from pathlib import Path
+
+try:
+    from .python_parse import PARSE_FAILURES, parse_python
+except ImportError:
+    from python_parse import PARSE_FAILURES, parse_python
 
 NODE_CEILING = 10_000
 PARSE_ERROR_LIMIT = 20
@@ -176,7 +180,7 @@ def _tree_sitter_parse(language: str, content: bytes) -> dict:
 
 def _python_parse(content: bytes) -> dict:
     try:
-        ast.parse(content)
+        parse_python(content)
     except SyntaxError as exc:
         line = int(exc.lineno or 1)
         error = {
@@ -186,7 +190,7 @@ def _python_parse(content: bytes) -> dict:
             "message": str(exc.msg)[:200],
         }
         return {"status": "error", "language": "python", "errors": [error], "errors_truncated": False}
-    except (ValueError, UnicodeError) as exc:
+    except PARSE_FAILURES as exc:
         error = {"kind": type(exc).__name__, "line_start": 1, "line_end": 1, "message": str(exc)[:200]}
         return {"status": "error", "language": "python", "errors": [error], "errors_truncated": False}
     return {"status": "ok", "language": "python", "errors": [], "errors_truncated": False}

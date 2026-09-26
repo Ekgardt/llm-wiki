@@ -6,6 +6,7 @@ import json
 import math
 import os
 import queue
+import re
 import select
 import threading
 import time
@@ -49,6 +50,13 @@ if os.name == "nt":
     _KERNEL32.CloseHandle.restype = wintypes.BOOL
 
 MAX_FRAME_BYTES = 8 * 1024 * 1024
+# A frame over MAX_FRAME_BYTES and up to this is consumed and refused, not fatal
+# (audit C-38, docs/research/2026-09-25-an-oversized-reply-fails-its-request-not-its-server.md).
+MAX_SKIPPED_FRAME_BYTES = 256 * 1024 * 1024
+_SKIP_CHUNK_BYTES = 64 * 1024
+_FRAME_EDGE_BYTES = 256
+_HEAD_RESPONSE_ID = re.compile(rb'\A\s*\{\s*(?:"jsonrpc"\s*:\s*"2\.0"\s*,\s*)?"id"\s*:\s*(\d{1,15})\s*,')
+_TAIL_RESPONSE_ID = re.compile(rb'[,{]\s*"id"\s*:\s*(\d{1,15})\s*\}\s*\Z')
 MAX_HEADER_BYTES = 8 * 1024
 MAX_PENDING_REQUESTS = 32
 # Locations one LSP reply may carry before it is refused as unbounded; the answer joiners keep 5.
@@ -106,6 +114,21 @@ class ProtocolViolation(RuntimeError):
 
 class _LocalRequestViolation(ProtocolViolation):
     """A caller request failed validation before transport ownership."""
+
+
+class ResponseRefused(ProtocolViolation):
+    """One response broke a client bound; its request fails and the connection stays."""
+
+
+class FrameTooLarge(ProtocolViolation):
+    """A frame over the frame bound was consumed whole; the stream is still framed.
+
+    `response_id` is the id of the response it carried, when its edges name one.
+    """
+
+    def __init__(self, response_id: int | None) -> None:
+        super().__init__("LSP frame exceeds 8 MiB")
+        self.response_id = response_id
 
 
 class RequestCancelled(RuntimeError):
@@ -202,6 +225,7 @@ class PendingRequest:
     terminal_at: float | None = None
     terminal_source: str | None = None
     terminal_error: ProtocolViolation | None = None
+    refusal: ProtocolViolation | None = None
     drain_deadline: float | None = None
     cancel_enqueued: bool = False
 
@@ -517,7 +541,7 @@ def _content_length_text_is_valid(length_text: str | None) -> bool:
 def _require_length_text(length_text: str | None) -> None:
     if not _content_length_text_is_valid(length_text):
         raise ProtocolViolation("Content-Length is missing or invalid")
-    if len(length_text) > len(str(MAX_FRAME_BYTES)):
+    if len(length_text) > len(str(MAX_SKIPPED_FRAME_BYTES)):
         raise ProtocolViolation("Content-Length exceeds the frame limit")
 
 
@@ -525,8 +549,8 @@ def _content_length(headers: dict[str, str]) -> int:
     length_text = headers.get("content-length")
     _require_length_text(length_text)
     length = int(length_text)
-    if length > MAX_FRAME_BYTES:
-        raise ProtocolViolation("LSP frame exceeds 8 MiB")
+    if length > MAX_SKIPPED_FRAME_BYTES:
+        raise ProtocolViolation("Content-Length exceeds the frame limit")
     return length
 
 
@@ -549,6 +573,35 @@ def _require_media_type(media_type: str, parameters: list[str]) -> None:
         raise ProtocolViolation("unsupported LSP charset")
 
 
+def _skipped_frame_edges(stream: BinaryIO, length: int) -> tuple[bytes, bytes]:
+    """Consume an oversized body in bounded chunks, keeping only its two edges."""
+    head = b""
+    tail = b""
+    remaining = length
+    while remaining:
+        chunk = stream.read(min(_SKIP_CHUNK_BYTES, remaining))
+        if not chunk:
+            raise ProtocolViolation("unexpected EOF in LSP body")
+        remaining -= len(chunk)
+        if len(head) < _FRAME_EDGE_BYTES:
+            head = (head + chunk)[:_FRAME_EDGE_BYTES]
+        tail = (tail + chunk)[-_FRAME_EDGE_BYTES:]
+    return head, tail
+
+
+def _oversized_response_id(head: bytes, tail: bytes) -> int | None:
+    """The id of the response an oversized frame carried, when its edges name it.
+
+    A frame whose head names a method is a request or notification. A response's
+    id is the first key after `jsonrpc` (vscode-jsonrpc, lsp-server) or the last
+    key (Go's field order); anything else is not recovered.
+    """
+    if b'"method"' in head:
+        return None
+    match = _HEAD_RESPONSE_ID.search(head) or _TAIL_RESPONSE_ID.search(tail)
+    return None if match is None else int(match.group(1))
+
+
 def _read_body(stream: BinaryIO, length: int) -> bytes:
     body = bytearray()
     while len(body) < length:
@@ -569,6 +622,8 @@ class JsonRpcFrameReader:
         headers = _header_fields(_header_lines(_read_header_bytes(self._stream)))
         length = _content_length(headers)
         _require_content_type(headers)
+        if length > MAX_FRAME_BYTES:
+            raise FrameTooLarge(_oversized_response_id(*_skipped_frame_edges(self._stream, length)))
         return _decode_body(_read_body(self._stream, length))
 
 
@@ -666,6 +721,8 @@ def _drop_self_cause(interruption: BaseException) -> None:
 
 
 def _response_value(pending: PendingRequest) -> object:
+    if pending.refusal is not None:
+        raise pending.refusal
     if pending.error is not None:
         raise JsonRpcResponseError(pending.error)
     return pending.result
@@ -1331,8 +1388,32 @@ class LspProtocol:
 
     def _read_until_stopped(self, frame_reader: JsonRpcFrameReader) -> None:
         while not self._is_stopped():
+            self._read_one(frame_reader)
+
+    def _read_one(self, frame_reader: JsonRpcFrameReader) -> None:
+        try:
             message = frame_reader.read()
-            self._dispatch_message(message, generation_nonce=self.generation_nonce)
+        except FrameTooLarge as exc:
+            self._refuse_oversized(exc)
+            return
+        self._dispatch_message(message, generation_nonce=self.generation_nonce)
+
+    def _refuse_oversized(self, exc: FrameTooLarge) -> None:
+        """The request an oversized response answered fails; the stream stays framed."""
+        if exc.response_id is None:
+            self._warn("dropped an oversized LSP frame whose response id is unknown")
+            return
+        with self._state_lock:
+            key = (self.generation_nonce, exc.response_id)
+            pending = self._pending.get(key)
+            if pending is not None and key not in self._responded_keys:
+                pending.refusal = ResponseRefused("LSP response exceeds 8 MiB")
+                self._settle_response_locked(key, pending)
+
+    def _warn(self, message: str) -> None:
+        callback = self._warning_callback
+        if callback is not None:
+            _call_quietly(callback, message)
 
     def _reader_loop(self) -> None:
         if not self._register_owner("reader", self._reader_started):
@@ -1511,8 +1592,7 @@ class LspProtocol:
     ) -> ProtocolViolation | None:
         try:
             if "result" in message:
-                self._validate_result(pending.method, message["result"])
-                pending.result = message["result"]
+                self._store_result_locked(pending, message["result"])
             else:
                 raw_error = message["error"]
                 pending.error = JsonRpcError(
@@ -1521,6 +1601,21 @@ class LspProtocol:
         except ProtocolViolation as exc:
             return exc
         return None
+
+    def _store_result_locked(self, pending: PendingRequest, result: object) -> None:
+        """The result, or a refusal of this request when it breaks a client bound.
+
+        A bound broken by one answer made the connection fatal, and the replay on
+        the next generation got the same answer, so one query killed the server
+        (audit C-38,
+        docs/research/2026-09-25-an-oversized-reply-fails-its-request-not-its-server.md).
+        """
+        try:
+            self._validate_result(pending.method, result)
+        except ProtocolViolation as exc:
+            pending.refusal = ResponseRefused(str(exc))
+            return
+        pending.result = result
 
     def _settle_response_locked(self, key: tuple[str, int], pending: PendingRequest) -> None:
         responded_at = time.monotonic()
@@ -1619,7 +1714,7 @@ class LspProtocol:
             self._become_fatal("diagnostic notification has invalid shape")
             return False
         if len(params["diagnostics"]) > MAX_DIAGNOSTICS:
-            self._become_fatal("diagnostic notification exceeds 10,000 items")
+            self._warn("dropped a diagnostic notification over 10,000 items")
             return False
         return True
 

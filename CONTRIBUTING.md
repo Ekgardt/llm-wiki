@@ -32,8 +32,9 @@ uv run --locked --no-sync pytest tests/test_xxx.py -v # run a specific test file
 uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json
 ```
 
-The installed-vault repair surface is check-only until the Reliability V3 runtime
-writers and canonical ownership protocol are complete. Tests must use explicit temporary
+The installed-vault repair surface checks by default; `--apply` (with
+`--adopt-ownership-v3 --confirm-all-agents-stopped` for adoption) is what the installers
+run, and it applies only what its checks allow. Tests must use explicit temporary
 `--root` and `--state-root` paths. Do not point repair verification at this public source
 checkout or an operator's installed vault, and do not weaken the current
 `reliability_v3_runtime_activation_incomplete` fail-closed gate.
@@ -87,7 +88,7 @@ The principles below summarize the non-negotiable invariants.
   `monkeypatch.setattr(module, "ROOT", vault)` **and**
   `monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))` — child processes read the
   environment, not the patched global
-- **Minimum coverage**: all scripts with ranking/scoring/archival logic MUST have dedicated tests. This includes: `search_memory.py`, `graph_neighbors.py`, `feedback_capture.py`, `archive_stale.py`, `build_guardrails.py`
+- **Minimum coverage**: all scripts with ranking/scoring/archival logic MUST have dedicated tests. This includes: `search_memory.py`, `graph_neighbors.py`, `archive_stale.py`, `build_guardrails.py`
 - The full regression suite is the release gate; see `tests/` for patterns.
 
 ## Test commands

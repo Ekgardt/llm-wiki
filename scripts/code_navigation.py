@@ -9,6 +9,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from enum import Enum
+from pathlib import PurePosixPath
 from types import MappingProxyType
 from typing import NoReturn, TypeVar
 
@@ -38,6 +39,7 @@ from pyright_session import (
 )
 from repository_scope import RepositoryScope
 from workspace_revision import (
+    NAVIGABLE_SUFFIXES,
     RevisionEntry,
     WorkspaceRevision,
     compute_workspace_revision,
@@ -396,6 +398,27 @@ class NavigationResult:
         object.__setattr__(self, "diagnostics", diagnostics)
         object.__setattr__(self, "provenance", provenance)
         object.__setattr__(self, "warnings", warnings)
+
+
+def _unclaimed_file_result(request: NavigationRequest, readiness: str) -> NavigationResult | None:
+    """A file no managed server claims is unsupported, not an error.
+
+    The workspace revision records only the suffixes some profile claims, so
+    such a file could never be validated and every query on it ended in
+    `error` / "source document validation failed" (audit 2026-09-26 C-9,
+    docs/research/2026-09-26-an-unclaimed-file-is-unsupported.md).
+    """
+    if PurePosixPath(request.path).suffix in NAVIGABLE_SUFFIXES:
+        return None
+    return _empty_result(
+        request,
+        NavigationStatus.UNSUPPORTED,
+        revision_before="",
+        revision_after="",
+        readiness=readiness,
+        resolution=ResolutionLabel.UNSUPPORTED,
+        warnings=("no managed language server claims this file type",),
+    )
 
 
 def _empty_result(
@@ -1461,16 +1484,8 @@ class CodeNavigation:
     def _query_refusal(
         self, request: NavigationRequest, deadline: float
     ) -> NavigationResult | None:
-        if request.capability not in _CAPABILITY_DIRECTION:
-            return _empty_result(
-                request,
-                NavigationStatus.UNSUPPORTED,
-                revision_before="",
-                revision_after="",
-                readiness=self._session.readiness,
-                resolution=ResolutionLabel.UNSUPPORTED,
-                warnings=("capability is unsupported",),
-            )
+        # Every `Capability` has a route (tests/test_code_navigation.py holds it),
+        # so no request is refused for its capability (audit C-44).
         if time.monotonic() >= deadline:
             return _empty_result(
                 request,
@@ -1480,7 +1495,7 @@ class CodeNavigation:
                 readiness=self._session.readiness,
                 warnings=("deadline expired before query",),
             )
-        return None
+        return _unclaimed_file_result(request, self._session.readiness)
 
     def _require_own_checkout(self, repository: RepositoryScope) -> None:
         if repository.checkout_id != self._repository.checkout_id:

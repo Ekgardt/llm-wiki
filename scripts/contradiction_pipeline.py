@@ -8,6 +8,7 @@ import stat
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
@@ -150,11 +151,26 @@ class BenchmarkMetrics:
         return asdict(self)
 
 
-def _time_key(value: object, *, upper: bool) -> str:
+_OPEN_BOUNDS = (
+    datetime.min.replace(tzinfo=timezone.utc),
+    datetime.max.replace(tzinfo=timezone.utc),
+)
+
+
+def _time_key(value: object, *, upper: bool) -> datetime:
+    """An instant, not its text: `.500000Z` sorted before `Z` as text (audit B-5)."""
     if value is None:
-        return "9999-12-31T23:59:59Z" if upper else "0001-01-01T00:00:00Z"
-    text = str(value)
-    return f"{text}T00:00:00Z" if "T" not in text else text
+        return _OPEN_BOUNDS[upper]
+    return _instant(str(value))
+
+
+def _instant(text: str) -> datetime:
+    """A date or instant as the page wrote it, read the same on Python 3.10 and 3.11+ (audit 2026-09-26 C-4)."""
+    from iso_time import parse_instant
+
+    if "T" not in text:
+        text = f"{text}T00:00:00+00:00"
+    return parse_instant(text)
 
 
 def intervals_overlap(first: Mapping[str, object], second: Mapping[str, object]) -> bool:
@@ -450,18 +466,15 @@ def _reduce_candidate_outcomes(outcomes: Sequence[_Outcome]) -> _Outcome:
 def _reduce_outcomes(
     outcomes: Sequence[_Outcome], retrieval_context: Sequence[Mapping[str, object]]
 ) -> _Outcome:
-    """One verdict for the whole candidate set."""
-    if retrieval_context:
-        return (
-            "unresolved",
-            LifecycleDecision(
-                "quarantine",
-                reason="retrieval-only context has no verified claim ledger",
-            ),
-            (),
-        )
+    """One verdict for the whole candidate set.
+
+    A page a search found is not a claim, so it contradicts nothing: with no
+    ledger candidate the claim is kept, and the retrieved pages stay in its
+    evidence. See `docs/research/2026-09-25-a-quarantined-claim-does-not-hold-its-day.md`.
+    """
     if not outcomes:
-        return ("no-candidate", LifecycleDecision("keep-both", reason="no candidate"), ())
+        reason = "no ledger candidate; retrieved pages are evidence only" if retrieval_context else "no candidate"
+        return ("no-candidate", LifecycleDecision("keep-both", reason=reason), ())
     return _reduce_candidate_outcomes(outcomes)
 
 

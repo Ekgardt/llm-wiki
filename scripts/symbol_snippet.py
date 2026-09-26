@@ -118,13 +118,22 @@ def _node_fields(node: dict) -> dict:
 
 
 def _matching_nodes(graph, symbol: str, deadline: float) -> list[dict]:
+    """The definitions of `symbol`, narrowed by its owner before any bound applies.
+
+    The owner filter ran on at most 200 rows the reader refused past, so a
+    qualified `Owner.close` could not be answered when more than 200 methods
+    shared the name (audit C-36,
+    docs/research/2026-09-25-a-common-name-is-asked-up-to-the-reader-ceiling.md).
+    """
+    from evidence_graph import MAX_ROWS
+
     wanted, name = _split_symbol(symbol)
-    rows = graph.find_nodes(
-        kinds=SNIPPET_KINDS, name=name, max_rows=MAX_NAME_MATCHES, deadline=deadline
-    )
+    rows = graph.find_nodes(kinds=SNIPPET_KINDS, name=name, max_rows=MAX_ROWS, deadline=deadline)
     matched = [
         row for row in rows if _owner_matches(str(row["metadata"].get("owner", "")), wanted)
     ]
+    if len(matched) > MAX_NAME_MATCHES:
+        raise ValueError("too many symbols share this name")
     return matched[:MAX_LOCATIONS]
 
 

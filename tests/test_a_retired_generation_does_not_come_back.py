@@ -18,6 +18,8 @@ for directory in (TESTS.parent / "scripts", TESTS):
 
 from test_generation_catalog import _catalog, _publish  # noqa: E402
 
+from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
+
 
 def _registered(catalog, name: str) -> None:
     _publish(catalog, name)
@@ -41,7 +43,7 @@ def test_the_discard_is_finished_by_the_next_call(tmp_path):
     with pytest.raises(TimeoutError):
         catalog.discard_unactivated("gen-retired", deadline=time.monotonic() - 1)
 
-    finished = catalog.discard_unactivated("gen-retired", deadline=time.monotonic() + 60)
+    finished = catalog.discard_unactivated("gen-retired", deadline=time.monotonic() + SHORT_TIMEOUT)
 
     assert (finished, (catalog.generations_path / "gen-retired").exists()) == (True, False)
 

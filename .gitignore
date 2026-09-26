@@ -67,9 +67,8 @@ knowledge/projects/*
 !knowledge/projects/_template/**
 !knowledge/projects/README.md
 
-# === Personal feedback / staging ===
+# === Retired feedback candidates (2026-09-25): old files stay private ===
 knowledge/feedback/*
-!knowledge/feedback/README.md
 knowledge/inbox/**
 !knowledge/inbox/README.md
 knowledge/raw/**
@@ -77,6 +76,7 @@ knowledge/raw/**
 # The vault's editorial log. The tracked knowledge/log.md is the shipped template and
 # nothing writes it; see docs/research/2026-09-14-the-vault-log-is-private.md.
 knowledge/log.local.md
+knowledge/log-archive/
 # `build_guardrails.py --apply` writes summaries of private pages here; see
 # docs/research/2026-09-17-the-guard-rails-say-how-many-rules-they-left-out.md.
 knowledge/guardrails.md

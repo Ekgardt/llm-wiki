@@ -88,7 +88,9 @@ def live_lease_tokens(database) -> frozenset[str]:
     """The lease tokens a project writer still holds, by the coordinator's clock."""
     from datetime import datetime, timezone
 
-    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    from iso_time import utc_text
+
+    now = utc_text(datetime.now(timezone.utc))
     rows = database.execute(
         "SELECT lease_token FROM project_leases WHERE expires_at > ?", (now,)
     ).fetchall()

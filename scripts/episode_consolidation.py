@@ -327,7 +327,41 @@ def _operation_id(day: str, lessons: list[Lesson]) -> str:
     return f"episodes:{day}:{sha256_bytes(payload)[:16]}"
 
 
-def _record_consolidation(day: str, count: int, records: int, digest: str) -> None:
+CODE_ROOT = Path(__file__).resolve().parent.parent
+CODE_REVISION_TIMEOUT_SECONDS = 5
+
+
+def code_revision(root: Path = CODE_ROOT) -> str | None:
+    """The commit the code runs at, or None when it cannot be read."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=CODE_REVISION_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _lost_batches(failed: list[str]) -> dict[str, object]:
+    """What a day closed with lost batches keeps: which, and under which code (audit B-10)."""
+    if not failed:
+        return {}
+    return {"failed_batches": sorted(failed), "code": code_revision()}
+
+
+def _record_consolidation(
+    day: str, count: int, records: int, digest: str, failed: tuple[str, ...] | list[str] = ()
+) -> None:
+    lost = _lost_batches(list(failed))
+
     def mutate(state: dict) -> None:
         days = state.setdefault("consolidated_session_days", {})
         days[day] = {
@@ -335,6 +369,7 @@ def _record_consolidation(day: str, count: int, records: int, digest: str) -> No
             "records": records,
             "items": count,
             "record_set": digest,
+            **lost,
         }
         progress = state.get(PROGRESS_KEY)
         if isinstance(progress, dict):
@@ -449,7 +484,25 @@ def _already_consolidated(vault: Path, state: dict, day: str) -> bool:
     recorded = stored.get("record_set")
     if not isinstance(recorded, str) or not recorded:
         return True
-    return recorded == record_set_digest(vault, day)
+    return _still_closed(vault, day, stored, recorded)
+
+
+def _still_closed(vault: Path, day: str, stored: dict, recorded: str) -> bool:
+    if recorded != record_set_digest(vault, day):
+        return False
+    return not _lost_batches_await_new_code(stored)
+
+
+def _lost_batches_await_new_code(stored: dict) -> bool:
+    """A day that lost batches opens again once the code has changed since.
+
+    Its finished batches are found by their markers, so only the lost ones cost a
+    call. See `docs/research/2026-09-25-a-lost-episode-batch-is-asked-again-after-a-fix.md`.
+    """
+    if not stored.get("failed_batches"):
+        return False
+    revision = code_revision()
+    return revision is not None and revision != stored.get("code")
 
 
 # The same bound the compile gives its provider calls (`COMPILE_PROVIDER_CEILING_S`).
@@ -483,13 +536,20 @@ def _consolidate_batch(
     day: str, batch: list[Path], call, moment: datetime, key: str
 ) -> tuple[int, str | None]:
     """(durable items written, path) for one prompt's worth of records."""
-    reply = call(build_prompt(day, batch))
-    if not reply:
-        raise ConsolidationUnavailable("consolidation provider returned nothing")
+    reply = _answered(call(build_prompt(day, batch)))
     lessons = grounded_lessons(reply, batch)
     if not lessons:
         return 0, None
     return len(lessons), str(_write_block(day, lessons, moment, key))
+
+
+def _answered(reply: str | None) -> str:
+    """No provider stops the run; an empty answer fails only this batch (audit B-4)."""
+    if reply is None:
+        raise ConsolidationUnavailable("consolidation provider returned nothing")
+    if not reply.strip():
+        raise ValueError("consolidation answered with empty text")
+    return reply
 
 
 def _logged_batches(vault: Path, day: str) -> frozenset[str]:
@@ -538,7 +598,7 @@ def consolidate_day(
     if not set(keys) <= progress.done:
         return _day_outcome("partial", progress, len(batches))
     _record_consolidation(
-        day, progress.items, len(paths), record_set_digest(vault, day)
+        day, progress.items, len(paths), record_set_digest(vault, day), progress.failed
     )
     return _day_outcome(_finished_status(progress), progress, len(batches))
 

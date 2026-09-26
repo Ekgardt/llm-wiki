@@ -30,6 +30,8 @@ SCRIPTS = VAULT_ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+# The vault the host's own hooks write to, as this process received it.
+_HOST_VAULT = os.environ.get("LLM_WIKI_ROOT")
 # 1. Vault root — always pin to this checkout for hermetic subprocess hooks.
 os.environ["LLM_WIKI_ROOT"] = str(VAULT_ROOT)
 # A test that starts a server must not load models in the background by accident:
@@ -122,11 +124,15 @@ def _isolate_test_state_root():
 #     same watch as notes. The accepted cost: a genuine capture finishing while
 #     the suite runs trips the guard too. The message names the path, and a real
 #     record names a real session id, so the two are told apart by looking.
-#   * `knowledge/daily` is still not watched at all: the capture appends to
-#     today's log continuously, measured mid-run today.
+#   * `knowledge/daily` is not watched in the live checkout: the capture appends
+#     to today's log continuously, measured mid-run. Anywhere else — a worktree,
+#     a clean checkout, CI — nothing but a test appends there, and it is watched
+#     file by file: two stale tests had been writing prompt lines into a
+#     worktree's daily log (docs/research/2026-09-25-a-test-that-writes-a-daily-log-is-caught.md).
 _WATCHED_PROJECTS = "knowledge/projects"
 _WATCHED_NOTES = "knowledge/notes"
 _WATCHED_SESSIONS = "knowledge/raw/sessions"
+_WATCHED_DAILY = "knowledge/daily"
 
 
 def _file_identity(path: Path) -> tuple[int, int]:
@@ -154,7 +160,21 @@ def _knowledge_entries(root: Path = VAULT_ROOT) -> dict[str, tuple[int, int]]:
     seen = _names_under(root / _WATCHED_PROJECTS, root)
     seen.update(_files_under(root / _WATCHED_NOTES, root))
     seen.update(_files_under(root / _WATCHED_SESSIONS, root))
+    seen.update(_daily_files(root))
     return seen
+
+
+def _host_writes_here(root: Path) -> bool:
+    if not _HOST_VAULT:
+        return False
+    return Path(_HOST_VAULT).resolve() == root.resolve()
+
+
+def _daily_files(root: Path) -> dict[str, tuple[int, int]]:
+    """The daily logs, unless the host's own capture is appending to them."""
+    if _host_writes_here(root):
+        return {}
+    return _files_under(root / _WATCHED_DAILY, root)
 
 
 def _leaked_entries(
@@ -201,6 +221,20 @@ def _unhurried_hook_appends(request, monkeypatch):
 
     for budget in _APPEND_BUDGETS:
         monkeypatch.setattr(budget, LONG_TIMEOUT)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_user_config(monkeypatch):
+    """No test resolves a config path from the machine's `XDG_CONFIG_HOME`.
+
+    GitHub's Ubuntu runners set it, so installer tests that pass a temporary
+    `home` wrote the OpenCode plugin into the runner's real `~/.config`, and a
+    later test found that file and refused it as someone else's
+    (`install_resource_ownership_ambiguous`, CI run 36182427739). A test that
+    wants the variable sets it itself. Research:
+    docs/research/2026-09-25-a-failed-reinstall-puts-the-old-one-back.md.
+    """
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
 
 
 # Default fake provider for any accidental live LLM calls in unit tests.

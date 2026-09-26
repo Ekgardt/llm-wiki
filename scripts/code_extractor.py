@@ -17,6 +17,11 @@ from pathlib import PurePosixPath
 from typing import Protocol
 
 try:
+    from .python_parse import PARSE_FAILURES, parse_python
+except ImportError:
+    from python_parse import PARSE_FAILURES, parse_python
+
+try:
     from .graph_storable import storable_identity_key, storable_metadata
 except ImportError:
     from graph_storable import storable_identity_key, storable_metadata
@@ -34,7 +39,7 @@ class _CapturedSource(Protocol):
     record: _SourceRecord
     content: bytes
 
-EXTRACTOR_VERSION = "code-extractor/v14"
+EXTRACTOR_VERSION = "code-extractor/v16"  # v16: a name the function binds hides an import of it (audit 2026-09-26 C-9)
 _SYNTAX_STOP_INTERVAL = 256
 _MAX_OBSERVATION_TARGET_CHARS = 4096
 _MAX_OBSERVATION_TARGET_BYTES = 4096
@@ -154,9 +159,18 @@ def _optional_parser(language: str):
         return None
 
 
+class ExtractionCeilingExceeded(ValueError):
+    """A repository bigger than one extraction may hold: a named refusal, not a crash.
+
+    Audit 2026-09-26 B-11, docs/research/2026-09-26-a-ceiling-is-a-named-refusal.md.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class ExtractionLimits:
-    max_sources: int = 10_000
+    # The same ceiling `repository_index.MAX_INDEXED_SOURCES` admits; at 10 000
+    # a checkout of 10 001-20 000 files was collected and then crashed here.
+    max_sources: int = 20_000
     max_source_bytes: int = 16 * 1024 * 1024
     max_total_bytes: int = 512 * 1024 * 1024
     max_nodes: int = 250_000
@@ -244,7 +258,7 @@ def _bounded_values(
     for value in values:
         _check_stop(deadline, cancelled)
         if len(retained) >= maximum:
-            raise ValueError(f"code extraction {label} ceiling exceeded")
+            raise ExtractionCeilingExceeded(f"code extraction {label} ceiling exceeded")
         retained.append(value)
     return tuple(retained)
 
@@ -718,6 +732,8 @@ def _route_methods(decorator: ast.Call, function: ast.Attribute) -> tuple[str, .
 # deep parses fine and then aborted the whole extraction from inside
 # `_call_edges`. Depth is measured iteratively before anything recurses.
 MAX_EXPRESSION_DEPTH = 64
+# A re-export chain is followed this many modules deep, then left unresolved.
+MAX_REEXPORT_HOPS = 8
 _TOO_DEEP_TEXT = f"<expression nested deeper than {MAX_EXPRESSION_DEPTH}>"
 
 
@@ -825,6 +841,99 @@ def _syntax_callee(node: object) -> object | None:
     return function
 
 
+# A nested scope binds its names for itself; its own name belongs to the outer one.
+_NESTED_SCOPES = (
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.ClassDef,
+    ast.Lambda,
+    ast.ListComp,
+    ast.SetComp,
+    ast.DictComp,
+    ast.GeneratorExp,
+)
+_DEFINITIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def _block_nodes(function: ast.AST) -> list[ast.AST]:
+    """Every node of the function's own block, without entering a nested scope."""
+    found: list[ast.AST] = []
+    pending = list(ast.iter_child_nodes(function))
+    while pending:
+        node = pending.pop()
+        found.append(node)
+        if not isinstance(node, _NESTED_SCOPES):
+            pending.extend(ast.iter_child_nodes(node))
+    return found
+
+
+def _stored_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+        return node.id
+    return None
+
+
+# Nodes whose `name` attribute is the name they bind: definitions, `except ... as`,
+# capture patterns, and (3.12+) type parameters.
+_NAMED_BINDERS = (
+    *_DEFINITIONS,
+    ast.ExceptHandler,
+    ast.MatchAs,
+    ast.MatchStar,
+    *(getattr(ast, kind) for kind in ("TypeVar", "ParamSpec", "TypeVarTuple") if hasattr(ast, kind)),
+)
+
+
+def _named_binding(node: ast.AST) -> str | None:
+    if isinstance(node, _NAMED_BINDERS):
+        return node.name
+    if isinstance(node, ast.MatchMapping):
+        return node.rest
+    return None
+
+
+def _bound_name(node: ast.AST) -> str | None:
+    """The name this node binds in its block: a target, a parameter, a definition, a handler."""
+    if isinstance(node, ast.arg):
+        return node.arg
+    return _named_binding(node) or _stored_name(node)
+
+
+def _declared_outside(nodes: list[ast.AST]) -> set[str]:
+    return {name for node in nodes if isinstance(node, (ast.Global, ast.Nonlocal)) for name in node.names}
+
+
+def _local_bindings(function: ast.AST) -> frozenset[str]:
+    nodes = _block_nodes(function)
+    bound = {_bound_name(node) for node in nodes} - {None}
+    return frozenset(bound - _declared_outside(nodes))
+
+
+_FUNCTION_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+
+def _enclosing_functions(node: ast.AST, parent: Mapping[int, ast.AST]) -> list[ast.AST]:
+    found: list[ast.AST] = []
+    current = parent.get(id(node))
+    while current is not None:
+        if isinstance(current, _FUNCTION_SCOPES):
+            found.append(current)
+        current = parent.get(id(current))
+    return found
+
+
+def _declared_global(nodes: list[ast.AST]) -> set[str]:
+    return {name for node in nodes if isinstance(node, ast.Global) for name in node.names}
+
+
+def _scope_chain_bindings(owner: ast.AST, parent: Mapping[int, ast.AST]) -> frozenset[str]:
+    """Names bound in `owner` or in a function around it, minus what `owner` declares global."""
+    outer: set[str] = set()
+    for function in _enclosing_functions(owner, parent):
+        outer.update(_local_bindings(function))
+    return frozenset(_local_bindings(owner) | (outer - _declared_global(_block_nodes(owner))))
+
+
 def _single_local_target(candidates: tuple, shadowed: bool, qualified: bool) -> bool:
     return len(candidates) == 1 and not shadowed and not qualified
 
@@ -908,7 +1017,11 @@ class _Collector:
         self.tables: dict[str, list[str]] = {}
         self.routes: dict[tuple[str, str], list[str]] = {}
         self.definitions: dict[tuple[str, str], list[str]] = {}
+        # (module, exported name) -> (source module, symbol) for a module-level
+        # `from x import y [as z]`: a package's re-export (audit 2026-09-26 B-6).
+        self.reexports: dict[tuple[str, str], tuple[str, str]] = {}
         self.python_scopes: dict[tuple[str, str, str], list[str]] = {}
+        self.local_bindings: dict[int, frozenset[str]] = {}
         self.function_body_scope: dict[str, str] = {}
         self.function_parent_scope: dict[str, str] = {}
         self.scope_parent: dict[str, str] = {}
@@ -927,7 +1040,7 @@ class _Collector:
     def check(self, records: object, maximum: int, label: str) -> None:
         self.check_stop()
         if len(records) > maximum:  # type: ignore[arg-type]
-            raise ValueError(f"code extraction {label} ceiling exceeded")
+            raise ExtractionCeilingExceeded(f"code extraction {label} ceiling exceeded")
 
     def check_stop(self) -> None:
         """The stop checks alone: the constructor already validated both arguments."""
@@ -1066,7 +1179,7 @@ class _Collector:
             return
         self.candidate_dependency_count += len(candidate_sources)
         if self.candidate_dependency_count > self.limits.max_candidate_dependencies:
-            raise ValueError("code extraction candidate dependency ceiling exceeded")
+            raise ExtractionCeilingExceeded("code extraction candidate dependency ceiling exceeded")
         self.observation_source_dependencies[observation_id] = candidate_sources
 
     def _add_evidence(
@@ -1197,9 +1310,23 @@ class _Collector:
         self.sqlite_modules[source.record.logical_id] = _sqlite_aliases(tree)
         self.python_entry_names[source.record.logical_id] = self._python_entry_names(tree)
         ctx = _PythonFile(source, _line_offsets(source.content), module_name, module_id)
+        self._record_reexports(ctx, tree)
         self._walk_python(
             ctx, tree.body, _PythonOwner(module_name or "<module>", module_id, False, module_name)
         )
+
+    def _record_reexports(self, ctx: _PythonFile, tree: ast.Module) -> None:
+        """Module-level `from x import y`: what this module hands on under its own name."""
+        for statement in tree.body:
+            if isinstance(statement, ast.ImportFrom) and statement.module is not None:
+                self._record_reexport(ctx, statement)
+
+    def _record_reexport(self, ctx: _PythonFile, statement: ast.ImportFrom) -> None:
+        imported = self._absolute_import(
+            ctx.module_name, statement.module or "", statement.level, is_package=ctx.is_package
+        )
+        for exported, target in _from_import_aliases(statement, imported).items():
+            self.reexports.setdefault((ctx.module_name, exported), target)
 
     def _walk_python(self, ctx: _PythonFile, body: list[ast.stmt], owner: _PythonOwner) -> None:
         """Every definition of one scope, including those under an `if` or a `try`.
@@ -1573,6 +1700,7 @@ class _Collector:
         owner = self._enclosing_node(node, parent)
         source_node_id = self.node_ast.get(id(owner), ctx.module_id) if owner else ctx.module_id
         span = ctx.span(node)
+        aliases = self._visible_aliases(aliases, owner, parent)
         targets = self._resolve_expression(node.func, ctx.module_name, aliases, owner)
         self._resolved_edge(
             source_node_id, "CALLS", targets, _expression_text(node.func), ctx.source, span,
@@ -1740,7 +1868,7 @@ class _Collector:
             node = pending.pop()
             nodes.append(node)
             if len(nodes) > maximum:
-                raise ValueError("code extraction syntax node ceiling exceeded")
+                raise ExtractionCeilingExceeded("code extraction syntax node ceiling exceeded")
             pending.extend(reversed(node.named_children))
         self.check_stop()
         return nodes
@@ -2065,17 +2193,67 @@ class _Collector:
             return list(self.python_scopes.get((module_name, module_name, expression.id), ()))
         return self._scoped_targets(expression.id, module_name, owner)
 
+    def _visible_aliases(
+        self,
+        aliases: Mapping[str, tuple[str, str]],
+        owner: ast.AST | None,
+        parent: Mapping[int, ast.AST],
+    ) -> Mapping[str, tuple[str, str]]:
+        """The imports a call inside `owner` can still see.
+
+        A name bound anywhere in a function is local to the whole function, and
+        to the functions nested in it, so an import of the same name is not
+        what a call there reaches (audit 2026-09-26 C-9,
+        docs/research/2026-09-26-a-local-name-hides-an-import.md).
+        """
+        hidden = self._shadowing_names(owner, parent).intersection(aliases)
+        if not hidden:
+            return aliases
+        return {name: target for name, target in aliases.items() if name not in hidden}
+
+    def _shadowing_names(self, owner: ast.AST | None, parent: Mapping[int, ast.AST]) -> frozenset[str]:
+        if owner is None:
+            return frozenset()
+        if id(owner) not in self.local_bindings:
+            self.local_bindings[id(owner)] = _scope_chain_bindings(owner, parent)
+        return self.local_bindings[id(owner)]
+
     def _alias_targets(self, module: str, symbol: str) -> list[str]:
         if symbol:
             return self._symbol_targets(module, symbol)
         return self._module_candidates(module)
 
     def _symbol_targets(self, module: str, symbol: str) -> list[str]:
+        """The definition, or the one a chain of re-exports hands it on from.
+
+        `from lib import compute as calc` named `lib.compute`, which `lib/__init__.py`
+        only re-exports, so the call was `missing_dependency` and the live function
+        looked dead (audit 2026-09-26 B-6,
+        docs/research/2026-09-26-a-re-export-is-followed-to-its-definition.md).
+        """
+        return self._defined_targets(module, symbol) or self._reexported_targets(module, symbol)
+
+    def _defined_targets(self, module: str, symbol: str) -> list[str]:
         return [
             node_id
             for candidate in self._matching_modules(module)
             for node_id in self.definitions.get((candidate, symbol), ())
         ]
+
+    def _reexported_targets(self, module: str, symbol: str) -> list[str]:
+        seen: set[tuple[str, str]] = set()
+        hop = self._reexport_of(module, symbol)
+        while hop is not None and hop not in seen and len(seen) < MAX_REEXPORT_HOPS:
+            seen.add(hop)
+            targets = self._defined_targets(*hop)
+            if targets:
+                return targets
+            hop = self._reexport_of(*hop)
+        return []
+
+    def _reexport_of(self, module: str, symbol: str) -> tuple[str, str] | None:
+        hops = (self.reexports.get((candidate, symbol)) for candidate in self._matching_modules(module))
+        return next((hop for hop in hops if hop is not None), None)
 
     def _scoped_targets(self, name: str, module_name: str, owner: ast.AST) -> list[str]:
         """The innermost enclosing scope that defines `name`, falling back to module level."""
@@ -2200,9 +2378,9 @@ class _Collector:
     def _parsed_python(self, source: _CapturedSource) -> ast.Module | None:
         try:
             self.check_stop()
-            tree = ast.parse(source.content, filename=source.record.relative_path)
+            tree = parse_python(source.content, filename=source.record.relative_path)
             self.check_stop()
-        except (SyntaxError, ValueError, UnicodeError) as exc:
+        except PARSE_FAILURES as exc:
             self.add_observation(
                 self.source_modules[source.record.logical_id],
                 "PARSES", str(exc), "parse_error", source, _whole_span(source),
@@ -2302,7 +2480,7 @@ def _checked_source_size(source: _CapturedSource, bounds: ExtractionLimits, tota
     _require_source_shape(source)
     size = len(source.content)
     if size > bounds.max_source_bytes or total + size > bounds.max_total_bytes:
-        raise ValueError("code extraction source byte ceiling exceeded")
+        raise ExtractionCeilingExceeded("code extraction source byte ceiling exceeded")
     _require_recorded_content(source)
     return size
 

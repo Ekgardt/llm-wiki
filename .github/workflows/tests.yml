@@ -180,7 +180,8 @@ jobs:
       # The name of the test a killed process was running comes from
       # LLM_WIKI_TEST_PROGRESS_FILE, one line per test, uploaded below. `-v` was
       # tried first and cost two runs: a 40-minute and then a 60-minute cap on
-      # Windows shards that normally take 22-26 minutes.
+      # Windows shards that stayed well under both without it. Shard cost comes
+      # from tests/shard_weights.json (see tests/shard_plan.py).
       - run: >
           uv run --locked --no-sync python -m tests.shard_plan
           --shard ${{ matrix.shard }} --of 4 --
@@ -262,14 +263,44 @@ jobs:
       - run: uv sync --locked --no-default-groups --extra hybrid
       - run: uv run --locked --no-sync python -c "import importlib.util; assert importlib.util.find_spec('pytest') is None"
       - run: uv run --locked --no-sync python -c "import os; from pathlib import Path; import numpy as np; path=Path(os.environ['LLM_WIKI_STATE_ROOT'])/'vector.npy'; path.parent.mkdir(parents=True, exist_ok=True); np.save(path, np.array([1,2,3])); assert np.load(path).tolist()==[1,2,3]"
-      # The extra exists for the encoder and for search; the job used to prove
-      # only that NumPy round-trips an array. Model weights are not fetched here:
-      # the read path is local-only and says so when they are absent. The
-      # encoder runs through ONNX Runtime, and the extra must not pull torch
-      # (docs/research/2026-09-25-the-encoder-runs-without-torch.md).
+      # The extra is search: the encoder on ONNX Runtime and the reranker on torch
+      # (docs/research/2026-09-25-an-update-brings-the-extras-the-operator-chose.md).
+      # Model weights are not fetched here: the read path is local-only and says
+      # so when they are absent.
       - run: uv run --locked --no-sync python -c "import onnxruntime, tokenizers, huggingface_hub"
-      - run: uv run --locked --no-sync python -c "import importlib.util; assert importlib.util.find_spec('torch') is None"
+      - run: uv run --locked --no-sync python -c "import torch, transformers"
       - run: uv run --locked --no-sync python scripts/search_memory.py "installation"
+      # The real encoder, end to end: fetch the pinned ONNX weights (470 MB, cached;
+      # the 2.3 GB reranker stays out of CI), build a generation with vectors, and
+      # require the search to answer with the dense signal. Before this nothing in CI
+      # reached the model session (audit B-28,
+      # docs/research/2026-09-25-ci-runs-the-real-encoder.md).
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/huggingface/hub/models--intfloat--multilingual-e5-small
+          key: hf-encoder-${{ hashFiles('scripts/embedding_model.py') }}
+      - name: Fetch the pinned encoder
+        run: >-
+          uv run --locked --no-sync python -c "import sys; sys.path.insert(0, 'scripts');
+          import install_models as m; outcome = m.ensure(m.pinned_models()[0], m.hub_library(), download=True);
+          print(outcome); assert outcome['state'] in {m.STATE_PRESENT, m.STATE_FETCHED}, outcome"
+      - name: Build a generation with the real encoder
+        run: |
+          printf '%s\n' '---' 'type: concept' '---' '# Installing the memory' \
+            'One-sentence summary: the installer sets up the hooks and the nightly pass.' \
+            > knowledge/notes/ci-encoder-probe.md
+          uv run --locked --no-sync python scripts/doctor.py --rebuild-generation --time-budget 600 --json > "$RUNNER_TEMP/doctor.json" || true
+          uv run --locked --no-sync python -c "import json, os; report = json.load(open(os.path.join(os.environ['RUNNER_TEMP'], 'doctor.json')));
+          generation = [check for check in report['checks'] if check['id'] == 'generation'][0];
+          assert generation['status'] == 'ok', generation;
+          assert any(item.get('action') == 'rebuild_generation' for item in report['repaired']), report['repaired']"
+      - name: Search answers with the dense signal
+        run: >-
+          uv run --locked --no-sync python -c "import sys; sys.path.insert(0, 'scripts');
+          from search_memory import search; trace = {};
+          rows = search('how is the memory installed', limit=3, rerank=False, trace_sink=trace);
+          print(trace['signals_used'], [row.get('path') for row in rows]);
+          assert 'dense' in trace['signals_used'], trace; assert rows"
 
   clean-code-graph:
     name: timing::clean::code-graph-py${{ matrix.python }}
@@ -366,7 +397,10 @@ jobs:
     env:
       LLM_WIKI_ROOT: ${{ github.workspace }}
       LLM_WIKI_STATE_ROOT: ${{ github.workspace }}/../llm-wiki-e2e-state-${{ matrix.platform }}
-      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/../llm-wiki-e2e-env-${{ matrix.platform }}
+      # No UV_PROJECT_ENVIRONMENT: the installer always builds the vault's own `.venv`
+      # and the scheduler runs `uv run` without one, so every step here reads the
+      # environment an operator's install does. With it set, the steps after the
+      # install ran in an empty environment (`No module named 'yaml'`, 2026-09-26).
       MEMORY_LLM_PROVIDER: fake
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -391,12 +425,34 @@ jobs:
         env:
           USERPROFILE: ${{ runner.temp }}\installer-home
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File ./install.ps1
+      # A reinstall over its own install is how an operator applies an update the
+      # nightly could not bring into force; no job ever ran one (audit 2026-09-26
+      # C-13, docs/research/2026-09-26-ci-runs-a-reinstall-and-a-pass.md).
+      - name: Run install.sh again over its own install
+        if: runner.os != 'Windows'
+        env:
+          HOME: ${{ runner.temp }}/installer-home
+        run: /bin/bash ./install.sh --scheduler cron
+      - name: Run install.ps1 again over its own install
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          USERPROFILE: ${{ runner.temp }}\installer-home
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File ./install.ps1
       - name: The installed vault reports session capture enabled
         shell: bash
         env:
           HOME: ${{ runner.temp }}/installer-home
           USERPROFILE: ${{ runner.temp }}\installer-home
         run: uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json
+      # The command the scheduler registers, run once on the installed vault: the
+      # passes themselves never ran after an install anywhere in CI.
+      - name: A nightly pass runs on the installed vault
+        shell: bash
+        env:
+          HOME: ${{ runner.temp }}/installer-home
+          USERPROFILE: ${{ runner.temp }}\installer-home
+        run: uv run --locked --no-sync python scripts/scheduled_nightly.py
 
   # Tests whose dependency no job installed, so they skipped everywhere and a skip
   # is not a pass. `torch` stays out on purpose: the locked wheel pulls the CUDA

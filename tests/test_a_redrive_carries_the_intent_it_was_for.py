@@ -116,9 +116,20 @@ def test_a_first_redrive_is_allowed():
 def test_a_second_redrive_is_refused():
     database = _database()
     _linked(database, generation=memory_queue.MAX_REDRIVE_GENERATIONS)
+    _Queue()._carry_capture_link(database, "parent", "child", NOW)
+    database.execute("INSERT INTO tasks(id, state, lineage_generation, redrive_of) VALUES ('child', 'cancelled', 0, 'parent')")
 
     with pytest.raises(QueueOperationError, match="redrive_generations_exhausted"):
         memory_queue._require_dead_task(database, "parent")
+
+
+def test_a_child_that_never_carried_the_link_did_not_spend_the_chance():
+    """The 2026-09-06 children: created before a redrive carried the link, never reachable."""
+    database = _database()
+    _linked(database, generation=memory_queue.MAX_REDRIVE_GENERATIONS)
+    database.execute("INSERT INTO tasks(id, state, lineage_generation, redrive_of) VALUES ('child', 'cancelled', 0, 'parent')")
+
+    assert memory_queue._require_dead_task(database, "parent")["id"] == "parent"
 
 
 def test_a_task_that_is_not_dead_is_still_refused_first():

@@ -416,8 +416,11 @@ def test_public_search_goes_through_retrieve(tmp_path, monkeypatch) -> None:
     assert "vector_distance" not in row
 
 
-def test_retrieve_conditional_rerank_blends_and_reports_signal() -> None:
+def test_retrieve_conditional_rerank_blends_and_reports_signal(monkeypatch) -> None:
     import retrieval
+
+    # The fake scorer stands for an installed reranker (audit 2026-09-26 B-16).
+    monkeypatch.setattr("reranker.reranker_installed", lambda: True)
 
     def lexical(**_kwargs):
         return [

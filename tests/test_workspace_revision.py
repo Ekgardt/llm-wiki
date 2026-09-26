@@ -30,6 +30,7 @@ from workspace_revision import (
 )
 
 from tests.code_kernel_helpers import copy_python_fixture
+from tests.slow_machine import SHORT_TIMEOUT
 
 
 def _indexed_git_config_variables() -> list[str]:
@@ -262,7 +263,6 @@ def test_public_contract_has_exact_constants_dataclass_fields_and_signatures() -
             "changed",
             "renamed",
             "deleted",
-            "configuration_changed",
         ],
     )
     assert (
@@ -300,11 +300,10 @@ def test_revision_changes_for_dirty_untracked_deleted_and_config(repository: Pat
         _entries(after)["pkg/base.py"],
     ) == (True, True, RevisionEntry("pkg/base.py", "deleted", None, 0))
     delta = diff_workspace_revisions(before, after)
-    assert (delta.created, delta.changed, delta.deleted, delta.configuration_changed) == (
+    assert (delta.created, delta.changed, delta.deleted) == (
         ("pkg/new.py",),
         ("pkg/api.py", "pyrightconfig.json"),
         ("pkg/base.py",),
-        True,
     )
 
 
@@ -1293,7 +1292,7 @@ def test_private_index_parser_rejects_malformed_binary_indexes(repository: Path)
         assert workspace_revision._parse_git_index(
             content,
             hash_name="sha1",
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
             cancelled=None,
         ) is None
 
@@ -1375,7 +1374,7 @@ def test_private_index_parser_rejects_unsupported_extensions_and_modes(
         assert workspace_revision._parse_git_index(
             _append_index_extension(raw, signature),
             hash_name="sha1",
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
             cancelled=None,
         ) is None
 
@@ -1384,7 +1383,7 @@ def test_private_index_parser_rejects_unsupported_extensions_and_modes(
     assert workspace_revision._parse_git_index(
         _rechecksum_index(bytes(nonregular)),
         hash_name="sha1",
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
         cancelled=None,
     ) is None
     zero_oid = bytearray(raw)
@@ -1392,7 +1391,7 @@ def test_private_index_parser_rejects_unsupported_extensions_and_modes(
     assert workspace_revision._parse_git_index(
         _rechecksum_index(bytes(zero_oid)),
         hash_name="sha1",
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
         cancelled=None,
     ) is None
 
@@ -1657,7 +1656,7 @@ def test_private_index_parser_rejects_v4_split_and_colliding_paths(
         assert workspace_revision._parse_git_index(
             (root / ".git/index").read_bytes(),
             hash_name="sha1",
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
             cancelled=None,
         ) is None
 
@@ -3005,7 +3004,7 @@ def test_hash_file_reads_owned_descriptor_without_fdopen(
         resolved_root=repository.resolve(strict=True),
         directory_snapshots={},
         remaining_bytes=MAX_REVISION_BYTES,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
         cancelled=None,
     )
 
@@ -3061,7 +3060,7 @@ def test_delta_detects_content_identical_rename(repository: Path) -> None:
         ("pkg/settings.py", "pyrightconfig.json"),
     ],
 )
-def test_content_rename_reports_configuration_change_for_either_path(
+def test_a_content_rename_of_a_configuration_file_is_paired(
     source: str, destination: str
 ) -> None:
     digest = "a" * 64
@@ -3083,7 +3082,6 @@ def test_content_rename_reports_configuration_change_for_either_path(
     delta = diff_workspace_revisions(before, after)
 
     assert delta.renamed == ((source, destination),)
-    assert delta.configuration_changed is True
 
 
 def test_ambiguous_content_matches_remain_created_and_deleted(repository: Path) -> None:
@@ -3973,3 +3971,18 @@ def test_revision_rejects_known_oversized_file_before_reading_it(
 
     with pytest.raises(ValueError, match="byte ceiling"):
         compute_workspace_revision(resolve_repository_scope(root))
+
+
+def test_a_cancel_during_the_ignored_folder_query_stops_the_revision(tmp_path: Path) -> None:
+    """A stop is a TimeoutError, an OSError; it was taken for a Git failure.
+
+    docs/research/2026-09-25-a-cancel-is-not-a-git-failure.md
+    """
+    import workspace_revision
+
+    root = tmp_path / "repository"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+
+    with pytest.raises(TimeoutError, match="cancel"):
+        workspace_revision.ignored_directories(root, deadline=None, cancelled=lambda: True)

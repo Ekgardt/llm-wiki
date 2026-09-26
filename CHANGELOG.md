@@ -6,6 +6,222 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- The CI installer job checks the installed vault in the `.venv` the install built, as the scheduler does, and a test refuses an installing job that points uv elsewhere; the Windows task check reads its hour limits through a function, so it works for any caller.
+- No test gives work it expects to finish a literal few-second deadline: 572 of them name the shared scaled timeout, and a guard refuses a new one outside a test about time running out; a full run had failed on one under load.
+- The nightly removes a staged copy a killed write left beside a Markdown page (three on this vault, the oldest from 2026-08-26); every staging name in the code has the one shape the sweep recognises, held by a test.
+- The 90-day history prune keeps only the families other records read back and bounds every other one, including project and session-evidence rows and any family added later; a committed checkpoint releases its settled transaction (audit 2026-09-26 C-11).
+- A maintenance marker, doctor's owner rows, offline adoption, the writer gate and queue source fences judge an owner by the process it recorded, so a reused PID no longer keeps a dead owner alive (audit 2026-09-26 C-12).
+- The nightly capture adoption also finishes half-published intents and writes what it could not recover to the capture-failure trail (audit 2026-09-26 C-12).
+- The nightly image prune stops before its step is killed, and undo puts back images a killed prune left staged (audit 2026-09-26 C-12).
+- `logs/hook-errors.log` is rotated to `hook-errors.log.1` instead of trimmed under its writers; doctor reads both (audit 2026-09-26 C-12).
+- Doctor reports a project whose checkpoints have waited in the queue for more than 36 hours (audit 2026-09-26 C-12).
+- The blackboard race test is sized to what it proves, so it no longer runs into its hang bound on slow runners (audit 2026-09-26 B-27).
+- The guide names the state recovery sets for an unexplained target: `conflicted`.
+- A long session keeps its first and last turns: each edge of an over-bound transcript skips service records and keeps whole turns (audit 2026-09-26 C-5).
+- A nightly housekeeping step names its failure instead of ending the night; a failed update is named, a failed retention counts once (audit 2026-09-26 C-13).
+- An extra counts as chosen only by a distribution nothing outside it pulls in, so the reranker's `transformers` no longer implies `semantic` (audit 2026-09-26 C-13).
+- A launchd job is absent only on `launchctl print` exit 113; any other failure still gets its `bootout` (audit 2026-09-26 C-13).
+- Every git call has a timeout, and the knowledge snapshot ignores the operator's global and system git config; a guard scans every script (audit 2026-09-26 C-13).
+- `install.ps1` registers Claude MCP through the `claude` CLI and reports every entry state as `install.sh` does (audit 2026-09-26 C-13).
+- The Windows task script writes its hour limits in one table (audit 2026-09-26 C-13).
+- Every test file has a measured shard weight, refreshed from CI JUnit reports; a guard holds new files to it (audit 2026-09-26 C-13).
+- On a vault whose first memory generation is not built yet, the prune step reports nothing to prune instead of failing the nightly pass.
+- The CI installer job installs twice and then runs a nightly pass (audit 2026-09-26 C-13).
+- A "Related" list or an empty heading ranks behind prose in recall; an annotated Related list counts as navigation too (audit 2026-09-26 C-10).
+- Recall and get_decisions name a hit by its page, not by the heading of the matching chunk, and send one id per row (audit 2026-09-26 C-10).
+- get_decisions reports its fallback and freshness as recall does and returns results, retrieval_trace and _meta (audit 2026-09-26 C-10).
+- Without a generation, a page's title lifts it only when it holds the whole question (audit 2026-09-26 C-10).
+- A retrieval leg that was asked for and did not run is reported missing (audit 2026-09-26 C-10).
+- vault_status no longer reports full confidence for a vault with no compile history (audit 2026-09-26 C-10).
+- The tool list an agent reads has a 10 KiB budget, checked by a test (audit 2026-09-26 C-10).
+- A TypeScript query no longer lets tsserver fetch `@types` from npm, and rust-analyzer reads the project with `cargo.noDeps` (audit 2026-09-26 C-8).
+- A language server that failed for good is started again only after its pause (5 s, 30 s, 120 s) and answers degraded meanwhile (audit 2026-09-26 C-2).
+- A navigation position past the end of a line means the line end; the schema says `character` is a 0-based UTF-8 byte offset (audit 2026-09-26 C-9).
+- A file no managed language server claims answers `unsupported` without starting a server (audit 2026-09-26 C-9).
+- An answer about another repository names that repository's commit, not the vault's (audit 2026-09-26 C-9).
+- Installing gopls or rust-analyzer runs its toolchain before publishing (audit 2026-09-26 C-9).
+- A local name that matches an import no longer makes a false caller of that import; extractor v16 rebuilds stored generations (audit 2026-09-26 C-9).
+- Cancelling an impact analysis stops its running git process within 0.1 s (audit 2026-09-26 C-9).
+- On a `core.autocrlf` checkout an edit names only the symbol it touched, as exact (audit 2026-09-26 B-8).
+- Every instant the coordinator and the project journal store has six fraction digits, so a lease written on a whole second no longer reads as live half a second past its expiry when SQL compares it as text (audit 2026-09-26 C-12).
+- A daily log compiled in several parts can be archived: its bag carries `archive-manifest/v2` with one embedded compile receipt per part, and a page quoting one part resolves from the archive by that part's digest; whole-day bags stay `archive-manifest/v1` (audit 2026-09-26 B-1).
+- A compiled page belongs to the project its evidence names: captured session blocks now carry `- Project slug:`, and a new page whose quoted entries all name one project gets `project:` in its frontmatter, so project-scoped rules stop reaching other projects' sessions (audit 2026-09-26 B-14).
+- The guide and the structure notes say what the code does: `index_timestamp` is filled, the update syncs the extras you installed, a hung pass on macOS or cron keeps the fence until it exits, the detached refresh runs once per checkout and commit, and the plain unencrypted `knowledge/` snapshot in `~/llm-wiki-snapshots` is named (audit 2026-09-26 C-14).
+- Doctor knows the coordinator's `aborting` and `aborted` states (an aborting transaction counts as unsettled instead of "a state this runtime does not define"), and the daily `compile-drops-*.jsonl` logs get the same retention as the other maintenance reports (audit 2026-09-26 C-12, two of its parts).
+- A hook delegate is stopped only after its append's own budget has run out: both breadcrumb delegates stop at the 2.5 s append budget plus 1 s to start, under the host's 5 s, instead of the prompt delegate being killed at 2.5 s while its writer could try for 3 s (audit 2026-09-26 C-1).
+- A session record's tool line is redacted before it is cut to 200 characters, so a secret split at the bound no longer leaves its first characters in the record (audit 2026-09-26 C-6).
+- A date a page or model writes with a fraction of seconds that is not 3 or 6 digits, or with `Z`, is read on Python 3.10 as on 3.11 by one shared reader, `iso_time` (audit 2026-09-26 C-4).
+- Legacy sweep: two functions and one constant nothing called are removed, and the transcript-containment security test, which asked a function removed long ago and so tested nothing, now calls the live validator (audit 2026-09-26 C-15).
+- Impact analysis names each edit of a file as its own range instead of one span from the first to the last, finds the repository top when asked from a subfolder, and looks changed files up by value instead of reading every file node under a 10 000-row ceiling (audit 2026-09-26 B-8; the CRLF part stays open).
+- `get_context` sends its packed text once: the item lists name what the text holds instead of repeating it about four times, and mandatory items keep the order they were asked in within their class; the guide describes `get_context` and `read_page` as they now behave (audit 2026-09-26 B-18).
+- An answer is called stale only when a source its generation indexes really changed, was removed, or a new page the corpus would take appeared; a touched file, an edited README or a renamed folder no longer makes every answer stale until the next build (audit 2026-09-26 B-15).
+- A call through a package re-export (`from lib import compute as calc` where `lib/__init__.py` re-exports it) now reaches the definition instead of `missing_dependency`, so the live function is not reported dead; code generations are rebuilt under `code-extractor/v15` (audit 2026-09-26 B-6).
+- An install no longer puts the dependencies into a custom `UV_PROJECT_ENVIRONMENT` that timers, hooks and the MCP server never use: the vault always runs from its own `.venv`, and the installer names the ignored setting (audit 2026-09-26 B-26).
+- A knowledge append whose attempt meets a database busy past its timeout repeats the attempt instead of failing the write, and the retry's lineage read waits out the busy database too; this was the Windows `database is locked` failure of concurrent appends (audit 2026-09-26 B-27).
+- An interrupted transaction-image prune is settled by `doctor --repair` as well as by the next prune, and is no longer reported as a damaged or unreadable transaction trail (audit 2026-09-26 B-22).
+- The nightly reclaim step names what it could not do and fails when a prune, the history prune, the snapshot or a backlog project failed; doctor treats a queue task that died this week as needing attention instead of calling the queue healthy (audit 2026-09-26 B-23).
+- The live symbol registry reads only regular files of the tree within the size bound: a link out of the tree, an oversized file or a FIFO named `*.py` no longer reaches it (audit 2026-09-26 B-9).
+- Worktrees refused for any reason no longer hold every follow slot night after night: a refusal is remembered with the worktree's commit and asked again only once that commit changes (audit 2026-09-26 B-12).
+- `find_dead_code` answers about one symbol on a graph with more than 10 000 candidates: the name narrows in SQL, and a whole-graph scan past the bound returns its first rows with `candidates_truncated` instead of failing (audit 2026-09-26 B-7).
+- `read_page` returns a page that mentions `daily:` in prose: an unparseable mention is listed as `not_an_evidence_reference` instead of refusing the page; a real reference that does not resolve still refuses it (audit 2026-09-26 B-17).
+- A code update that left dependencies unsynced or asked for an installer run stays named: the next quiet night syncs the dependencies again and keeps asking for the installer until it has run; doctor's advice no longer suggests a `uv sync` that removes optional extras (audit 2026-09-26 B-24).
+- A weekly pass that starts while the nightly holds the shared fence waits for it (asking every minute, for as long as the nightly can run) instead of losing the week, and doctor names a weekly that has only ever been skipped (audit 2026-09-26 B-20).
+- A torn `run/maintenance.lock` no longer stops every later maintenance pass: the marker is written whole and linked in, so a live writer never shows a partial file, and an ownerless one that names no PID is taken back like a dead owner's (audit 2026-09-26 B-21).
+- A code file whose bytes are not UTF-8 is named in the index receipt's `skipped_examples` instead of vanishing from the graph in silence (audit 2026-09-26 B-13).
+- A hook error is judged by when it happened: its writers stamp local time with the offset, and doctor reads an older stamp without one as local time instead of UTC, which made a fresh error look hours old west of UTC (audit 2026-09-26 B-25).
+- A repository of 10 001-20 000 code files no longer crashes the nightly `refresh-all`: the extractor holds the 20 000 files the index admits, and any extraction ceiling is the named refusal `repository_exceeds_extraction_bounds` (audit 2026-09-26 B-11).
+- `find_dead_code` no longer calls a TypeScript, JavaScript, Go or Rust symbol dead on a check it never made: the value-reference index reads Python only, so such rows say `references_not_indexed`, the weakest reason, ordered last (audit 2026-09-26 A-7).
+- One symbolic link, one file past 8 MiB, one name that is not UTF-8 or a nested git-ignored folder such as `web/node_modules` no longer makes a whole repository unindexable: under a code root such entries are skipped and named in the receipt (`skipped_entries`), and git-ignored directories are pruned at any depth by both the corpus and the freshness walk (audit 2026-09-26 A-8).
+- The encrypted backup completes on an installed vault: the runtime check reads only transactions that can hold anything (the live ledger had 23 664 rows against a 10 000-row bound and was called unreadable), and the install manifest, retired pre-v3 databases and quarantined or conflicted transactions are carried rather than refused. The guide's recovery order is now clone, restore, publish, then install (audit 2026-09-26 A-11).
+- A redriven capture no longer fails on the decision file its dead parent wrote but never indexed (13 such files on the live vault): the unindexed leftover is removed and the decision made again. The weekly purge keeps a redrive family, named, instead of stopping on it (audit 2026-09-26 A-12).
+- A release of the canonical Markdown writer gate refused by a database busy past its timeout is retried by the same process (1 s … every minute, about an hour) instead of leaving its rows to shut every other writer out until the process exits; the committed operation is no longer reported failed (audit 2026-09-26 A-13).
+- A reinstall is no longer rolled back because the vault had a bad night: the install smoke fails only on an error in a check the installer owns (environment, filesystem, adoption, MCP, integrations) or an error that names no check; other errors are named on stderr and reported as degraded (audit 2026-09-26 A-10).
+- The nightly code update no longer stops on an untracked file identical to one it adds (a research note merged through a pull request): the copy is set aside and recreated by the fast-forward, and put back if the merge fails; a differing file stops the update as `untracked_files_conflict`, by name. A failed git call now carries git's own words (audit 2026-09-26 A-9).
+- A native language server's verified launch copy is removed with its owner root, so a gopls or rust-analyzer session closes instead of stranding its slot; a dead failure root keeps its records and drops the 43 MB copy (audit 2026-09-26 A-6, C-7).
+- Run as a script, the repository index answers a refusal raised by its worktree and retention helpers as JSON instead of crashing: one opted-out checkout no longer ends the nightly `refresh-all` for every checkout after it (audit 2026-09-26 A-5).
+- Doctor reads open transactions first and then the newest, and the queue its unfinished tasks first: its bounded scan judged the oldest 10 000 rows, so a conflict written today was reported healthy (audit 2026-09-26 A-3).
+- Dead captures get their one redrive for everything that died before the fix reached this checkout (the time HEAD moved, from its reflog), not only before the fix was committed (audit 2026-09-26 B-28).
+- Secret redaction is exact at both ends: a credential word must end its key (`tokenizer_name`, `token_url`, `PWD` and code such as `api_key = os.environ["API_KEY"]` are left alone), paths and URLs are not credentials, a port is not a password; and it now catches `curl -u user:pass`, `mysql -pPASS`, `--password PASS`, `Authorization: Basic …`, quoted passphrases with spaces, long letter-only values and `user:p@ss@host`. In a raw JSON line the value stops before `"`, so the line stays JSON and the turn is no longer dropped from the session record (audit 2026-09-26 A-2, B-2, B-3).
+- Reranking recovers after one slow run: a cost that said "does not fit" is tried again as a background trial after five minutes instead of switching the stage off for the life of the server; and without the reranker installed an answer says `reranker_unavailable` instead of a timeout that never happened (audit 2026-09-26 B-16).
+- Doctor judges each check the moment it returns: a store found broken early stays an `error` with its repair advice, instead of reading "not completed" whenever a later check pushed the run past the time budget (audit 2026-09-26 B-19).
+- A question about a folder inside the vault no longer starts a daytime refresh of the vault's code index: the stale-answer check judges the checkout the folder belongs to (audit 2026-09-26 B-10).
+- A day whose log holds two entries written in the same second compiles again: an evidence reference picks the entry that holds its byte span, as the compiler's quote did, instead of refusing every repeated id (the live compile had stopped on 2026-09-25 and every later day waited); a prompt breadcrumb is one line, so a pasted log excerpt can no longer forge an entry (audit 2026-09-26 A-1, B-4).
+- On Python 3.10 a Python file with a very long operator chain no longer kills the indexer or the MCP server with a C stack overflow (seen on Windows CI): every reader of repository code parses through `python_parse.parse_python`, which refuses such a line with `RecursionError`, as Python 3.11 and later do on their own.
+- A cancel or an expired deadline while the workspace revision asks Git for ignored folders now stops the revision instead of being taken for a Git failure; the background refresh gets the checkout path in the platform's own spelling (Windows CI, run 36197318516).
+- The private vault log rotates instead of stopping compile: past 2 MiB, the compile archives it whole to `knowledge/log-archive/log.local.<date>.md` in the same transaction and starts a fresh log that names the archive. Before, compile refused every run once the log passed its 4 MiB cap.
+- Feedback correction candidates are retired: `feedback_capture.py`, its hook delegate, the guardrails source that read promoted candidates, and the `knowledge/feedback/` zone in the layout are removed. They reached the rules only through a manual `promote`, and compile already learns corrections from the daily log that holds every prompt. Old candidate files stay gitignored and inert.
+- Opening the pre-adoption queue no longer takes the write lock unless a ready task is out of attempts, so a queue opened while another writer holds it no longer fails with `database is locked` (seen on Windows CI).
+- Navigation cleanup (audit C-44): the dead `code_intelligence` text helpers and three unreachable `Capability` members are removed (a test now holds that every capability has a route); `code_graph.py <dir>` no longer writes the unread `cache/code_tools.json` or runs the analysed repository's own `tsc`; live `find_dead_code` answers only for the named symbol; a Git run in `workspace_revision` gets the caller's whole deadline instead of a 5 s cap; `WorkspaceDelta.configuration_changed` (read by nothing) is removed; comments no longer describe the retired legacy index as a fallback. CLAUDE.md and AGENTS.md name `repository_index.py index <dir>` as the indexing command.
+- A worktree its owner marked not to index is no longer a follow candidate, so eight such worktrees can no longer take every nightly follow slot from the rest (audit C-43).
+- Vault code generations built before their manifest named their code roots are now collected: repository retention asks the catalog's own `holds_code`, the predicate prune uses, so no generation falls between the two collectors (audit C-42).
+- The live code graph parses only regular files of its own tree up to 8 MiB (a symbolic link to a file elsewhere is no longer read), and no longer starts one unused `git log` per file (about 836 processes per live answer on this repository); the unread `git_commit`/`valid_from`/`author` parse fields are removed (audit C-41).
+- An impact Git command checks its deadline before the child starts, so an expired deadline no longer leaves an unreaped Git process with an open pipe (audit C-40).
+- The sweep of dead `run/lsp` owner roots reaches every dead root: roots that kept failure evidence no longer use up its window, `owner.json` and `lease.json` record each process's start identity so a reused pid reads as dead, and removal never chmods through a symbolic link (audit C-39).
+- One oversized language-server reply fails only its own request: a result over a client bound or a frame over 8 MiB (consumed, up to 256 MiB) refuses that request with `ResponseRefused`, and an oversized diagnostics notification is dropped with a warning; the server keeps running instead of being killed and replayed into a second fatal failure (audit C-38).
+- A failed language server's stderr tail is redacted before it is cut: no value loses its key to the cut, and a PEM private key block is removed whole, even when the cut took its BEGIN line (audit C-37).
+- Lookups by a common name are no longer refused: community mode with a symbol, the provenance join, qualified snippets and trace callers ask up to the reader's ceiling and cut on their side, and the provenance answer says how many locations it left out (audit C-36).
+- An impact answer keeps its graph result when the note scan fails: a note changed mid-scan or a scan ceiling becomes a warning instead of losing the answer (audit C-35).
+- rust-analyzer and gopls answer queries offline (`CARGO_NET_OFFLINE=true`, `GOPROXY=off`): they could fetch crates or modules into the managed cache while a query waited.
+- The workspace revision behind code navigation holds only relevant files and sees nested server configuration: an edited `README.md` no longer enters it while dirty (its commit made the server receive a `deleted` event for a file that exists), and a nested `go.mod` or `Cargo.toml` is now watched.
+- A language-server process that failed for good is replaced by the next query, within the startup retry budget: the session kept the dead process and never started another, so a key in steady use stayed degraded.
+- A Git command the workspace revision runs that exits non-zero is a `ValueError` (`GitCommandFailed`), so code navigation degrades with a named reason instead of passing a generic `CalledProcessError` to the caller.
+- A language server whose install is missing or inconsistent leaves its session degraded with `<profile>_install_invalid` instead of raising and launching again on every query.
+- A structural answer's refresh runs on its checkout's root (a question about a subfolder started a refresh the indexer refused, while the answer said `started`), and each worktree of a repository is asked for on its own.
+- A slow `git` in the worktree helpers is that checkout's named refusal (`repository_git_probe_timed_out`), not the end of the nightly `refresh-all` or `retire`: the helpers now use the index's own bounded Git runner.
+- Impact analysis says `approximate`, not `exact`, when the generation indexed other bytes of a changed file than the diff's old side: its offsets then pointed at other lines.
+- The `get_architecture` summary and the `provenance`, `snippet`, `coverage`, `search`, `query`, `data_flow` and `cross_service` modes carry the generation's freshness block and start its refresh when the checkout moved, as the graph modes did.
+- A structural answer's `graph` component says `stale` when its generation was built from an older commit of the checkout and `unknown` when no commit could be compared (it always said `fresh`), and the envelope's `source_commit` is read again every 5 s instead of once per server.
+- Every `get_architecture` mode runs on the bounded code-graph workers under the call's deadline, as the summary did: `callers`, `callees`, `dependencies`, `path`, `community` and the symbol view parsed on the tool's own thread with no deadline, and a few hung calls held every MCP slot.
+- The workspace revision behind code navigation no longer walks top-level folders git ignores whole (`node_modules`, `dist`, …): on a TypeScript checkout with dependencies installed it walked for 14.8 s and then refused at its 100 000-entry ceiling.
+- A deleted or renamed top-level folder no longer stops a repository's code index: the refresh uses the recorded roots that still exist (and finds roots again when none does), and `changes` names tracked top-level entries the index does not cover.
+- One Python file too long or too deeply nested to parse is that file's parse error, not the end of the repository's code index: every reader of repository Python now catches the same failures (`python_parse.PARSE_FAILURES`, including `RecursionError`).
+- The Windows installer says when the `llm-wiki` MCP entry in `~/.claude.json` points at another vault, as the POSIX one does; a macOS uninstall no longer fails on a LaunchAgent launchd has already unloaded; the guide says the Linux timers run while you are logged in and how to enable lingering.
+- The user guide lists the nightly and weekly steps the code runs and the 4 h/6 h scheduler limits it sets; every install hint keeps the other extras (`uv sync --locked --inexact --extra ...`); CONTRIBUTING and ARCHITECTURE no longer describe a check-only repair or a retired vector path. A test ties the guide to the code.
+- The weekly pass counts a failed reflection or tier step (it logged the exception and reported success), and a weekly skipped because maintenance was already running records the skip, which doctor names when the weekly goes stale.
+- Step artifacts under `logs/maintenance/` are kept as long as the reports that point at them (30 days): held to the report count, they lasted about two nights and a report's "full output" link led nowhere.
+- The nightly writes every instant in its state in UTC with an offset (`failed_at` and `skipped_at` were local), and doctor compares a skip with the last run as instants, not as strings that differed by the time zone.
+- One generation the weekly prune cannot remove is its own `ERROR:` line and the pass goes on (an oversized abandoned tree stopped the whole step), and `install_models` gives each model its own boundary: offline, the first fetch no longer keeps the second model from being tried.
+- `install_models` replaces a cached weights file that does not match its pin in the same run (it removed only the link, and the cache re-linked the same bad bytes), and no longer re-hashes 2.3 GB of verified, unchanged weights every night; a file changed within 2 s of its verification is still re-read.
+- `install_models` replaces a cached weights file that does not match its pin in the same run (it removed only the link, and the cache re-linked the same bad bytes), and no longer re-hashes 2.3 GB of verified, unchanged weights every night.
+- Generation retention keeps the generation the fallback would try first — the previous activation — not only the parent: after a full rebuild, which records no parent, the prune removed the only spare.
+- The knowledge snapshot reports a failed `git commit` as a failure (it said "no change"), and records each successful run inside its `.git`, so doctor no longer calls an unchanged memory's backup stale. The contract names the snapshot's own repository beside the one automatic Git operation on the checkout.
+- A rerun of the installer that replaces an outgrown install puts the previous one back when the new install fails, instead of leaving no scheduler and no hooks; the install smoke names the doctor checks that failed (it printed only "RuntimeError"), and the last two places that resolved the uv link keep it.
+- Scheduled runs call uv by the path the shell found, links kept: resolving it pinned Homebrew's versioned Cellar target, which `brew upgrade` deletes, and every scheduled run then failed to start. Doctor now says when an installed unit or LaunchAgent calls a uv that is gone.
+- The Windows installer no longer passes `--environment ""` when `UV_PROJECT_ENVIRONMENT` is unset (Windows PowerShell 5.1 drops the empty string and the setup step stopped), and its native-command runner refuses any empty argument.
+- CI runs the real encoder: the `clean-hybrid` job fetches the pinned ONNX encoder (cached), builds a generation with vectors and requires a search to answer with the dense signal. Before, no CI job reached the model session.
+- The user guide names `doctor --rebuild-generation` where it tells how to rebuild the evidence generation; it said `--repair`, which only repairs the generation catalog. A test keeps the docs from saying it again.
+- Failed MCP tool calls and telemetry writes are no longer counted as lost captures: they share the diagnostics trail but have their own count and a doctor `tools` check, so the capture check and the session-start line stop reporting tool errors as capture loss.
+- Doctor says a check did not finish when its budget ran out mid-read, instead of `error` with advice to run `--repair`: under the default 5 s budget `queue` and `claims` were reported broken on a healthy vault. The check keeps its deletion codes.
+- Three stale docstrings corrected: `answer_cost` (the wire is compact JSON, not `indent=2`), the lazy query encoder (a 2.7 s cold load, a tracked straggler) and `lookup_mode` (relation questions run GRAPH).
+- `get_decisions` returns up to `limit` decision pages, one row each, in the agent row shape `recall` uses: it asked the search for exactly `limit` rows and filtered afterwards, so other pages and repeated chunks took the places.
+- The health resource and `vault_status` count only past days as compile backlog: today's log is still being written and the nightly compiles it, so it made every answer partial from the first capture of the day.
+- A telemetry write that fails leaves a record in the capture diagnostics (kind `telemetry_event`: deferred when the database was busy, lost otherwise); the best-effort writer returned False and no caller read it.
+- `recall` and the CLI search ask the evidence graph when the question is about relations ("depends on", "callers", "related to", …), keeping dense search beside it; every semantic search used to run HYBRID, so the graph never answered them. A trace nothing reported names the mode the search would run.
+- `get_context` answers name when their corpus was read: the envelope's `index_timestamp` was always empty because the tool reports a content hash, not a generation id; it now carries `collected_at`, the moment the Markdown snapshot was taken.
+- `get_context` no longer promises a `content_preview` for `include: ["frontmatter"]`: the preview went with the context compiler in July; `include` is accepted for compatibility and ignored, and the page content is in `text`.
+- Every process that starts model inference waits for it at exit (up to 30 s), not only the MCP server: a one-shot search or query whose deadline abandoned a rerank could otherwise exit mid-inference and abort.
+- The reranker learns its cost once and stops wasting CPU under load: when its cost is unknown the one background run gets the stage ceiling so it can finish and record it, and when its cost is known not to fit the caller's window it is not started at all. Before, the background run was cut at the caller's deadline on every call, never recorded a cost and was never admitted.
+- A failure while the MCP server builds or renders an answer's envelope is answered with the tool's safe error envelope, where it used to escape to the SDK and reach the client as raw text, possibly with a local path.
+- An MCP answer is marked stale when any source its index holds moved after the index was built: a removed or renamed note and a changed project `state.md` or `context.md` now count, where only note contents did.
+- The MCP search keeps one second of its deadline for the lexical fallback: the hybrid pass stops that much early, so when it runs out of time the lexical pass still answers, where before it was handed an expired deadline and failed too.
+- With no active generation a natural question still finds pages: the Markdown fallback drops stop words and ranks pages by how many of the question's words they share, where it required every word, so "почему systemd таймер, а не cron" found nothing. Common Russian function words join the shared stop-word list.
+- The MCP supervisor waits 35 s for a worker whose input closed before it signals it, so the worker's own 30-second wait for model inference is not cut short; and a server source removed while the supervisor fingerprints the code (the nightly update) changes the fingerprint instead of crashing the supervisor.
+- A grounded `recall` through MCP has the grounded budget (120 s) instead of the 10 s every tool got, so it can answer at all; its provider call runs under a ceiling equal to the time left and is ended at the deadline instead of outliving it. The per-call ceiling is kept per context, so a compile's ceiling no longer applies to calls on other server threads.
+- The ownership helpers refuse with `adopted_registry_required` instead of opening the migration-candidate database when called on an adopted vault without its registry.
+- A prune that died after marking its row no longer has its images put back by the next recovery; they are removed, as the row says.
+- A checkpoint reservation whose checkpoint another attempt committed is dropped by the next history prune instead of standing for 90 days (41 on this vault). The checkpoint log itself keeps growing by design: it is what a project journal is rebuilt from.
+- A transaction and its images agree: the prune removes a directory no row names once it is an hour old (9 on this vault; a failed prepare leaves it for the prune, because whether its row committed is not known at the failure), and a settled row whose images are already gone is marked pruned so the history prune can take it (13 on this vault).
+- Empty capture-intent shards under `ready/` are removed like those under `pending/`.
+- A compile failure recorded for bytes a daily log no longer has is retired on the next compile pass: 44 of the 45 rows on this vault named content that was gone and held its day out of the archive and `run/` out of deletion for ever.
+- The compile offers the planner the pages its day is about: the optional context of a batch is ranked by BM25 relevance to the batch's days instead of by path, so a day about a known subject updates the existing page instead of creating a near-duplicate beside it and leaving the old figures untouched. It costs about 40 ms on this vault and asks no model.
+- The OpenCode plugin and the adapter read the events OpenCode sends: the session id of `session.created` (`info.id`), so the session-start context reaches the system prompt, and a tool's arguments (`args`), so tool lines name their target. The plugin no longer drops sessions inside the vault, and an idle with nothing new is not captured twice. Still open: one classification per OpenCode turn, which needs a measurement on a live OpenCode.
+- A transcript copy the adapter makes for one event is removed when the event ends even if its capture intent could not be published; nothing read a kept copy any more, so it was private text left in the cache.
+- The two plugin helper commands nothing has called since 2026-07-13 are retired: `tool_breadcrumb_append.py` and the command line of `daily_log_append.py` (whose appenders stay). `integrations/README.md` now says the OpenCode plugin ships in `scripts/` and forwards every event to the adapter.
+- The `flush_memory.py` command line is retired with the 37 definitions only it reached (451 lines): nothing in the product ran it, and its "queue the call when no provider answers" branch was the only thing behind CLAUDE.md §6's claim, which now says what happens.
+- Provider calls fail closed. A `claude --help` that failed once is no longer remembered as "no flags" for the life of the process, and while the isolation flags are unknown the Claude backend is not called; a `MEMORY_LLM_PROVIDER` that names no provider (a typo) calls no provider instead of the automatic chain with its cloud providers, and `doctor` names the value.
+- `doctor` names installed Claude hooks that still pass a delegate retired on 2026-09-17 and says to rerun the installer, instead of reporting them as current.
+- The weekly archive names each day older than the hot window that stays flat and why, goes on past a day that fails, and exits 1 when any did, so the weekly is reported degraded instead of stopping silently.
+- Two stale capture tests no longer write prompt lines into the checkout's daily log, and the test session now fails when any test leaves a daily log behind outside the live vault.
+- A Claude prompt reaches feedback capture like every other host's (a hook that names the event's own capture script now takes the full path), and the delegates behind the 5-second prompt and tool hooks stop at 2.5, 1 and 3.5 seconds, so a hang is recorded before the host kills the hook; a test ties those bounds to the installed hook timeouts.
+- Episode consolidation: an empty answer for one batch fails that batch instead of stopping every later day, and a day closed with batches it could not read records them with the code revision, so it is opened again once the code changes and only the lost batches are asked again.
+- Tool calls made inside the vault are captured, as prompts have been since 2026-09-24, and neither capture hook runs on a stand-in: a module that cannot import fails the hook visibly instead of a no-op recorder or a different project slug. A test now refuses any module that replaces a failed import with a function.
+- A Codex session is recorded and classified: its rollout lines (`response_item` messages and tool calls) are read as the conversation they record, where before every line rendered to nothing, so a Codex session left no session record and gave the classifier no text.
+- The contradiction check compares what can change its answer: a new claim is compared with every active claim about the same subject (relation-only matches, which were always unrelated, filled the list, and it was cut at 50 without a word); the compile no longer asks a model for a verdict that cannot change the decision, which spent tokens and sent the claim text out; and instants are compared as times, not as text.
+- A quarantined claim no longer holds back its day. A page that a search happened to find no longer quarantines a new claim — it is evidence, not a contradiction — and a claim that is quarantined stays on its published page as `quarantined` with its candidate beside it, instead of keeping the whole batch unpublished until a manual review nobody performs.
+- A day whose compile batch was quarantined stays pending, as the message says: the quarantine wrote the day into the compiled-days mirror without a receipt, and the day was never offered again. The mirror now records only receipted days, and each pass takes back out a day that an earlier quarantine hid.
+- A capture whose provider does not answer waits an hour between attempts, as intended: the real client's "no answer" was read as an ordinary failure, so the eight attempts were spent in about an hour and the capture was lost.
+- A long day split into parts is compiled whole: two parts of one day never share a compile batch, and a batch that would hold them is refused instead of silently dropping the second part while writing its receipt.
+
+- **A secret written as JSON is still a secret.** The redactor — the one scrub
+  before a provider, the daily log and the session record — passed `{"api_key":
+  "…"}`, `{"password": "…"}`, a JSON `Authorization: Bearer` header, a database URL
+  password, `AWS_SECRET_ACCESS_KEY=…` and GitLab tokens. A key is now any name that
+  contains a credential word, as gitleaks' `generic-api-key` reads it, with a quote
+  allowed before the separator; a JSON value keeps its quotes and brackets; a quoted
+  value is code only when it interpolates; URL userinfo and `glpat-` are caught. See
+  `docs/research/2026-09-25-a-secret-in-json-is-still-a-secret.md`.
+- **`read_page` returns every note again.** 52 of 209 live notes answered "Evidence
+  resolution failed": the `## Claims` block writes its references inside JSON strings,
+  and the extractor ended a reference only at a backtick. A reference opened by a
+  backtick or a quotation mark now ends at the matching one; strictness is unchanged.
+  Lint skipped that block and so never saw it; it now reads the whole page, as
+  `read_page` does. See `docs/research/2026-09-25-a-quoted-reference-ends-at-its-quote.md`.
+- **The scheduler check says what the night could not do.** One table of limits
+  (`SCHEDULER_LIMIT_HOURS`, 4 h and 6 h) now renders both the systemd units and the
+  Windows tasks; the systemd nightly limit was 3 h, below the pass's 3.19 h worst
+  case in auto provider mode, which the test missed because it measured the `fake`
+  provider. The nightly records its code update outcome, and doctor's `scheduler`
+  check names a failed fetch, stale dependencies, a needed installer run, a branch
+  that is not the default, and installed units older than this release's time
+  limit. See `docs/research/2026-09-25-the-scheduler-says-what-the-night-could-not-do.md`.
+- **An update brings the extras the operator chose; `hybrid` has its reranker
+  again; a base install has no failed nights.** `hybrid` is `semantic` plus
+  `reranker` again, as documented (the ONNX change had dropped `torch` from it and
+  turned the reranker off silently). The nightly update syncs every extra the
+  operator chose — one with a package only it brings installed, names compared as
+  the packaging specification normalizes them — so a package added to an extra
+  arrives with the code; before, `huggingface_hub` never matched `huggingface-hub`
+  and no extra was synced at all. `install_models.py` fetches only models whose
+  runtime is installed and exits 0 with nothing to fetch, so a base install's
+  nightly no longer records a failure every night. See
+  `docs/research/2026-09-25-an-update-brings-the-extras-the-operator-chose.md`.
+- **The history prune keeps every row something reads back.** The 90-day prune
+  of 2026-09-24 would have deleted compile transactions that compile receipts,
+  daily archives and evidence resolution read back, from about 2026-11-18. It now
+  removes only the hook breadcrumb families `post-tool` and `user-prompt` (16 414
+  of 23 457 rows on the live vault). See
+  `docs/research/2026-09-25-history-prune-keeps-every-authority-row.md`.
+- **A dead capture gets its second chance after a fix, and the weekly purge no
+  longer aborts on one.** The nightly redrives every dead capture task that died
+  before the checkout's HEAD commit, once, before the queue worker runs
+  (`memory_queue.py redrive-dead-captures`). A redrive counts as spent only when
+  its child could reach the capture worker; the 23 children of 2026-09-06 carried
+  no capture link, so their parents still get theirs. The ordinary purge leaves a
+  capture without a terminal record in place and names it as retained instead of
+  failing the whole plan. See
+  `docs/research/2026-09-25-a-dead-capture-gets-its-second-chance-after-a-fix.md`.
+
 ## [5.0.0] — 2026-09-24
 
 Everything since 4.0.0, found and fixed by the audits of 2026-09-17 and

@@ -96,30 +96,34 @@ def test_disjoint_intervals_are_not_a_contradiction():
 def test_functional_conflict_supersedes_only_with_overlap_authority_and_ledger():
     from contradiction_pipeline import ContradictionPipeline
 
+    existing = indexed("blue", authority="web").claim.record
     result = ContradictionPipeline().assess(
         claim("red", authority="user"),
         candidates=[indexed("blue", authority="web")],
     )
-    assert result.contradiction_class == "contradiction"
-    assert result.recommendation == "supersede"
-    assert len(result.lifecycle_mutations) == 1
     target = result.lifecycle_mutations[0]
-    assert target.page == "knowledge/notes/existing.md"
-    assert target.claim_id == "existing"
-    assert target.fingerprint == indexed("blue", authority="web").claim.record["fingerprint"]
-    assert target.record_hash == sha256_bytes(
-        canonical_json_bytes(indexed("blue", authority="web").claim.record)
+
+    assert (result.contradiction_class, result.recommendation, len(result.lifecycle_mutations)) == (
+        "contradiction", "supersede", 1,
     )
-    assert target.evidence_hash == indexed("blue", authority="web").claim.record["evidence"][
-        "sha256"
-    ]
+    assert (target.page, target.claim_id, target.fingerprint, target.record_hash, target.evidence_hash) == (
+        "knowledge/notes/existing.md",
+        "existing",
+        existing["fingerprint"],
+        sha256_bytes(canonical_json_bytes(existing)),
+        existing["evidence"]["sha256"],
+    )
+
+
+def test_a_conflict_with_a_claim_outside_the_ledger_is_quarantined():
+    from contradiction_pipeline import ContradictionPipeline
 
     ledgerless = IndexedClaim(
         "knowledge/notes/existing.md", indexed("blue").claim, ledger_backed=False
     )
     blocked = ContradictionPipeline().assess(claim("red"), candidates=[ledgerless])
-    assert blocked.recommendation == "quarantine"
-    assert blocked.lifecycle_mutations == ()
+
+    assert (blocked.recommendation, blocked.lifecycle_mutations) == ("quarantine", ())
 
 
 def test_lower_authority_conflict_is_quarantined():
@@ -472,11 +476,8 @@ def test_all_compatible_supersession_mutations_are_sorted_and_conflicts_quaranti
     assert conflicted.lifecycle_mutations == ()
 
 
-def test_secondary_search_context_is_retrieval_only_and_cannot_mutate(
-    tmp_path, monkeypatch
-):
-    import search_memory
-    from contradiction_pipeline import ContradictionPipeline, default_secondary_search
+def test_secondary_search_context_is_retrieval_only_and_cannot_mutate():
+    from contradiction_pipeline import ContradictionPipeline
 
     pipeline = ContradictionPipeline(
         evaluators=(),
@@ -486,31 +487,29 @@ def test_secondary_search_context_is_retrieval_only_and_cannot_mutate(
     )
     result = pipeline.assess(claim("red"))
 
-    assert result.recommendation == "quarantine"
-    assert result.lifecycle_mutations == ()
+    # A page a search found is not a claim: it contradicts nothing (audit A-13).
+    assert (result.recommendation, result.lifecycle_mutations) == ("keep-both", ())
     assert result.evidence[0]["retrieval_only"] is True
 
-    vault = tmp_path / "vault"
-    notes = vault / "knowledge" / "notes"
+
+def test_secondary_search_over_another_vault_scans_that_vault_only(tmp_path, monkeypatch):
+    import search_memory
+    from contradiction_pipeline import default_secondary_search
+
+    notes = tmp_path / "vault" / "knowledge" / "notes"
     notes.mkdir(parents=True)
     (notes / "local-evidence.md").write_text(
         "---\ntype: concept\n---\n# Local Evidence\n\nThe project state is green.\n",
         encoding="utf-8",
     )
     global_calls = []
-    monkeypatch.setattr(
-        search_memory,
-        "search",
-        lambda *args, **kwargs: global_calls.append((args, kwargs))
-        or [{"path": "knowledge/notes/global.md"}],
+    monkeypatch.setattr(search_memory, "search", lambda *args, **kwargs: global_calls.append(args))
+
+    results = default_secondary_search(tmp_path / "vault", "project state green", 5)
+
+    assert (global_calls, [item["path"] for item in results]) == (
+        [], ["knowledge/notes/local-evidence.md"],
     )
-
-    results = default_secondary_search(vault, "project state green", 5)
-
-    assert global_calls == []
-    assert [item["path"] for item in results] == [
-        "knowledge/notes/local-evidence.md"
-    ]
 
 
 def test_deterministic_lifecycle_edit_is_committed_without_candidate(tmp_path):

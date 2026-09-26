@@ -376,7 +376,7 @@ def test_a_typescript_source_is_a_relevant_path() -> None:
 # so a list of cases has to be data rather than a run of statements.
 _RELEVANT_PYTHON_PATHS = ("scripts/a.py", "pyproject.toml", "requirements-dev.txt")
 _RELEVANT_TYPESCRIPT_PATHS = ("src/main.ts", "src/app.tsx", "src/plugin.mjs")
-_IRRELEVANT_PATHS = ("README.md", "docs/notes.txt", "nested/tsconfig.json")
+_IRRELEVANT_PATHS = ("README.md", "docs/notes.txt", "nested/pyproject.toml")
 
 
 def test_python_relevance_is_unchanged() -> None:
@@ -386,13 +386,16 @@ def test_python_relevance_is_unchanged() -> None:
         assert not workspace_revision._is_relevant_path(path), path
 
 
-def test_a_profile_declares_its_own_root_configuration() -> None:
+def test_a_profile_declares_its_own_configuration_at_any_depth() -> None:
     """`tsconfig.json` changes the answer, so it has to change the revision.
 
-    Only at the root, exactly as the Python rule has always worked; the nested
-    case is covered by `_IRRELEVANT_PATHS`.
+    At any depth since 2026-09-25: a nested one is the root of a TypeScript
+    project, as a nested `go.mod` is a Go module's (audit B-42,
+    docs/research/2026-09-25-a-revision-holds-only-what-it-proves.md). Python's
+    names stay root-only; `_IRRELEVANT_PATHS` holds that case.
     """
     assert workspace_revision._is_relevant_path("tsconfig.json")
+    assert workspace_revision._is_relevant_path("nested/tsconfig.json")
 
 
 def test_a_typescript_checkout_produces_revision_entries(tmp_path: Path) -> None:

@@ -31,11 +31,16 @@ import sys
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import process_liveness
 from reliable_memory import durable_publish_file, fsync_directory, sha256_bytes
+
+# Every hook imports this module, and the probe below runs at import. A hook's
+# whole budget is seconds; `rev-parse` answers in milliseconds.
+ROOT_PROBE_TIMEOUT_SECONDS = 2.0
 
 
 def _resolve_vault_root(start: Path) -> Path:
@@ -52,12 +57,13 @@ def _resolve_vault_root(start: Path) -> Path:
             cwd=str(start),
             text=True,
             stderr=subprocess.DEVNULL,
+            timeout=ROOT_PROBE_TIMEOUT_SECONDS,
         ).strip()
         git_common_dir = Path(out) if Path(out).is_absolute() else (start / out).resolve()
         git_common_dir = git_common_dir.resolve()
         if git_common_dir.name == ".git":
             return git_common_dir.parent
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
         pass
     return start
 
@@ -129,7 +135,8 @@ def _keep_corrupt_copy(raw: bytes) -> None:
         err_log = REPORTS_DIR / "hook-errors.log"
         REPORTS_DIR.mkdir(parents=True, exist_ok=True)
         with err_log.open("a", encoding="utf-8") as f:
-            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] state.json corrupt; backed up to {bak.name}\n")
+            stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+            f.write(f"[{stamp}] state.json corrupt; backed up to {bak.name}\n")
     except OSError:
         pass
 

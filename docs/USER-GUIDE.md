@@ -126,7 +126,7 @@ remove v2 state by hand.
    ```bash
    git clone https://github.com/Ekgardt/llm-wiki.git
    cd llm-wiki
-   uv sync --locked --extra mcp-server
+   uv sync --locked          # the base install includes MCP
    uv run pytest -q          # inspect the current full regression status
    ```
 
@@ -181,11 +181,11 @@ integrated Tasks 1-29 branch, not the broader Task 17 target:
 | Tool | Current behavior |
 |---|---|
 | `recall` | Routes search through the retrieval planner. Result rows expose requested/effective mode, actual signals, generation, reranker fields, and fallback reason. The requested result limit is clamped to 1-20. |
-| `read_page` | Reads one bounded slug-only Markdown page and resolves cited daily/archive evidence with source hashes. Evidence failure fails the page read closed. |
+| `read_page` | Reads one bounded slug-only Markdown page and resolves cited daily/archive evidence with source hashes. A cited reference that does not resolve fails the page read closed; a `daily:` mention that is not a reference is listed as `not_an_evidence_reference` and the page is still returned. |
 | `wiki_overview` | Reports page count, recommended retrieval tier, and vault root. It does not yet provide per-component generation health. |
 | `vault_status` | Reports compile timestamp/status and changed-daily backlog only. |
-| `get_decisions` | Uses the same retrieval path, filters active decision results, emits bounded telemetry, and clamps limits to 1-20. |
-| `get_context` | Remains the bounded 1-20 slug batch with optional compatibility `content_preview`. The planned token-budgeted repo/symbol/evidence package is **evidence pending**. |
+| `get_decisions` | Uses the same retrieval path as `recall` (deadline, lexical fallback, trace), keeps one row per active decision page, emits bounded telemetry, and clamps limits to 1-20. Returns `results`, `retrieval_trace` and `_meta`, and its envelope reports a fallback and the generation's freshness as recall's does. |
+| `get_context` | Packs the requested pages into one token-budgeted `text` (the budget is counted conservatively, one token per UTF-8 byte, unless a tokenizer is configured) and reports `packed_tokens` and `token_budget`. `pages`, `symbols`, `decisions`, `incidents`, `active_task` and `evidence` list what the text holds without repeating it; mandatory items keep the order they were asked in within their class. |
 | `check_contradiction` | Returns structured assessments, evidence, validity, and lifecycle recommendations; unsupported evidence is quarantined rather than treated as verified. |
 | `log_decision` | Appends through the locked daily-log writer; it does not directly publish a durable decision page. |
 | `compile` | Requests the existing non-blocking, single-lock background compile. |
@@ -195,9 +195,10 @@ integrated Tasks 1-29 branch, not the broader Task 17 target:
 
 All responses retain JSON text compatibility and the common envelope. Structured MCP
 output is used when the installed SDK supports it. The envelope's top-level
-`index_timestamp` is null and its freshness comes from the per-component generation
-fields; the legacy index it once read was retired on 2026-09-23. Treat row-level
-generation and fallback fields as the current retrieval truth.
+`index_timestamp` says when the corpus behind the answer was read: the build time of the
+generation a recall or code answer came from, or the collection time of a `get_context`
+answer; it is null when neither is known. Treat row-level generation and fallback fields
+as the current retrieval truth.
 
 ## Repository indexes follow your worktrees
 
@@ -309,29 +310,40 @@ END OF SESSION (agent idle or you close)
   MAJOR triggers background compile (detached, doesn't block you)
 
 NIGHTLY 03:00 (scheduler, subject to the operating-system login policy)
-  Drain deferred queue → consolidate yesterday's session records into the daily
-  log → compile all pending → structural lint → add owed backlinks → rebuild the
-  FTS index → refresh the immutable evidence generation (and its vectors) →
-  fetch any missing pinned model weights → compact retrieval telemetry →
-  prune old reports → fast-forward the checkout
+  Adopt undispatched capture intents → reclaim runtime state (prune settled
+  transactions, snapshot the knowledge) → redrive captures that died before a code change →
+  drain the deferred queue → consolidate pending session records into the daily
+  log → compile all pending → post fact keys → structural lint → add owed
+  backlinks → refresh registered repository generations and retire the unread
+  ones → prune superseded evidence generations → clear unsettled checkpoints →
+  retire old LSP evidence, own call transcripts and benchmark runs → fetch any
+  missing pinned model weights → refresh the immutable evidence generation (and
+  its vectors) → compact retrieval telemetry → write the health report → prune
+  old reports → fast-forward the checkout
 
-The fast-forward brings new code in; it does not bring everything into force. Optional
-extras are never upgraded unattended (the `reranker` extra alone pins gigabytes), and owned
-resources — scheduler entries, agent hook blocks, shell profile lines — are written only by
-an explicit install. So when the update moves `uv.lock` the report names the extras you have
-installed, and when it changes what the installer renders it says `owned resources
-rerun_installer`. Resync an extra with `uv sync --locked --no-default-groups --inexact
---extra <name>`, and re-render owned resources by running the installer again.
+The fast-forward brings new code in; it does not bring everything into force. The update
+syncs the locked baseline together with the extras you have installed (it reads them from
+the environment) in one `--inexact` sync, and names them in the report; a sync that fails is
+recorded as `dependencies stale` and tried again on the next quiet night. Owned resources —
+scheduler entries, agent hook blocks, shell profile lines — are written only by an explicit
+install: when the update changes what the installer renders it says `owned resources
+rerun_installer`, and keeps saying it until the installer has run.
 
-SUNDAY 04:00 (scheduler)
-  Everything nightly does + OKF conformance sweep + archive stale + prune failed queue tasks
+SUNDAY 04:00 (scheduler; its own pass, not a second nightly)
+  OKF conformance sweep → queue status → archive and purge finished queue work
+  past its retention (dead tasks after 30 days) → archive stale pages (>180 days)
+  → archive session records (>90 days) → archive daily logs past the hot window
+  → prune superseded evidence generations → optional LLM contradiction check →
+  page reflection → L1 tier overviews
 ```
 
 Windows tasks run only while the current user is logged on. macOS LaunchAgents use
 the same login-scoped policy.
 `StartWhenAvailable` runs a missed Windows task after the machine wakes and the user
 signs in; it does not run under a logged-out account. Linux user-systemd timers use
-persistent catch-up after the user manager starts. The product does not claim
+persistent catch-up after the user manager starts; the installer does not enable
+lingering, so they run while you are logged in (`loginctl enable-linger` keeps your user
+manager running without a session, if you want that). The product does not claim
 wake-from-sleep or logged-out execution. Explicit cron fallback follows the host's
 cron and sleep policy.
 When a night is missed entirely, the next session start asks for it: the maintenance
@@ -339,10 +351,11 @@ pass a session start already spawns runs that day's nightly once, claimed in
 `run/state.json` so two sessions cannot both run it.
 
 Two of the four backends can kill a pass that overruns: the systemd timer carries
-`TimeoutStartSec` and the Windows task an `ExecutionTimeLimit`, 3 hours nightly and 5 hours
+`TimeoutStartSec` and the Windows task an `ExecutionTimeLimit`, 4 hours nightly and 6 hours
 weekly. A macOS LaunchAgent and a cron line have no such limit — launchd's `ExitTimeOut`
-bounds only how long it waits after asking a job to stop — so there a hung pass ends when its
-maintenance lease is reclaimed, not on a clock. The scheduler's own log
+bounds only how long it waits after asking a job to stop — so there a hung pass is not stopped
+on a clock: it keeps the maintenance fence until it exits, and the passes that meet it are
+recorded as skipped, which doctor names. The scheduler's own log
 (`logs/scheduled-*.log`, `logs/cron-*.log`) is kept by the same retention as the maintenance
 reports: 30 days, 60 files, 32 MB per family.
 
@@ -552,17 +565,27 @@ uv run --locked --no-sync python scripts/repair_refused_page_creation.py  # page
 uv run --locked --no-sync python scripts/repair_exhausted_queue_tasks.py  # tasks out of attempts that still look ready
 ```
 
-Recovery rolls verified prepared/applying transactions forward and quarantines a
-target that matches neither its recorded before nor after hash. It never overwrites
-unknown bytes. Undo creates a new forward transaction and works only while every
+Recovery rolls verified prepared/applying transactions forward and marks a
+transaction `conflicted` (`unknown_target_bytes`) when a target matches neither its
+recorded before nor after hash. It never overwrites unknown bytes. Undo creates a new forward transaction and works only while every
 target still matches the original committed after-hash. Pruning removes expired
 transaction images; after the 2-day undo window, or after an explicit prune, that
-undo history is gone. External editors may briefly observe a mixed tree while a
+undo history is gone. The rows themselves go after 90 days, settled and pruned of
+their images, except the families other records read back (compile receipts and
+quarantines, daily-archive removals, capture decisions, episode consolidation) and
+any transaction an unsettled project checkpoint still names; a committed checkpoint
+keeps its own event, which is what a journal rebuild reads. External editors may briefly observe a mixed tree while a
 multi-file transaction applies. CAS safety is guaranteed only for cooperating
 transaction-API writers; concurrent external edits are unsupported and detected
 best-effort.
 
 ### Encrypted private-vault backup and validated restore
+
+Besides this encrypted backup, the nightly keeps a plain second copy of the whole
+`knowledge/` tree — private pages, daily logs and the redacted session records under
+`knowledge/raw/sessions/` included — as a local Git history in `~/llm-wiki-snapshots`
+(or `LLM_WIKI_SNAPSHOT_ROOT`). It is not encrypted: keep it out of synchronised or
+shared folders, and treat it as private as the vault itself.
 
 Install exact Restic `0.19.1`, initialize a repository outside the vault, and keep
 its credentials in Restic's standard external environment, protected password file,
@@ -584,7 +607,9 @@ tracked file identical to `HEAD` is left out — a clone brings it back — and 
 `cache/`, `logs/`, `run/` (staged separately), `.git/`, `.venv/`, and tool caches such
 as `__pycache__`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache` and `node_modules`. A
 vault that is not a git checkout, or a machine without `git`, is backed up whole.
-Recovery is therefore: clone the repository, install, restore, publish.
+Recovery is therefore: clone the repository, restore, publish, then install. The
+installer creates runtime files of its own, so publishing after it meets them and
+refuses; published first, the installer finds an adopted vault and keeps it.
 
 Restore only to a pre-existing empty directory:
 
@@ -631,8 +656,10 @@ retry base/cap, and worker bounds of 20 tasks, 600 seconds, or 2 idle seconds.
 `redrive` creates a linked new task without resetting dead history. `purge` requires
 a terminal cutoff and verified export path before deleting terminal rows/results.
 Succeeded and cancelled results default to 30 days. A dead task — one whose attempts
-are exhausted — is kept until you ask for it by name with `--include-dead`, because it
-is evidence that work never happened. `restore --export <path>` reads one export back,
+are exhausted — leaves only with `--include-dead`, which the weekly pass passes after
+30 days. A dead capture is different: once the code has changed after it died, the
+nightly redrives it once (`redrive-dead-captures`), and a capture without a terminal
+record is never purged — the purge names it as retained and doctor reports it. `restore --export <path>` reads one export back,
 verifies its manifest and every digest, and re-enqueues the work as new ready tasks;
 it refuses the whole export if anything fails to verify.
 
@@ -652,14 +679,15 @@ preflight, exact evidence, or pins do not validate. Published BagIt bags are imm
 and uncompressed; logical evidence resolves from the flat file first and then a
 verified bag. There is no gzip archive tier. Claims with invalid evidence, evaluator
 disagreement, unsupported semantics, or low confidence enter
-`knowledge/inbox/claims/` quarantine. A batch that quarantines publishes the
-candidate only, no page: the compile prints `batch quarantined`, records
-`last_compile_outcome: quarantined` (or `partial` when other batches published),
-and the daily stays pending, so the next run retries it. The batch is atomic:
-an independent decision in the same daily is not published on its own. There is
-no accept command for a candidate; review it, then publish the decision as a
-page through the transaction API, or edit the daily and recompile it with
-`compile_memory.py --file`. The candidate and the audit trail are kept. The frozen benchmark reports false
+`knowledge/inbox/claims/` quarantine. Quarantine holds the claim, not the day:
+the batch publishes its pages and receipts, the held claim stays on its page as
+`lifecycle: quarantined` (it supersedes nothing and nothing supersedes it), and
+its candidate file is written in the same commit. The compile prints how many
+claims it held. A page that a search finds but that carries no matching claim
+is evidence only; it does not quarantine a new claim. Nothing needs a person:
+the candidate and the audit trail are kept. Only a concurrent change to a claim
+the batch meant to supersede still ends in candidates only (`batch
+quarantined`), and the daily stays pending for the next run. The frozen benchmark reports false
 supersession and provenance metrics; automatic semantic supersession and eager
 backfill remain disabled.
 
@@ -698,7 +726,7 @@ For hybrid search that finds semantically related pages even when keywords
 don't match:
 
 ```bash
-uv sync --extra semantic
+uv sync --locked --inexact --extra semantic
 ```
 
 This installs ONNX Runtime and `tokenizers`, not `torch`; the encoder is `intfloat/multilingual-e5-small`
@@ -727,8 +755,8 @@ A first query in a fresh process loads the model: measured on this vault on
 Vectors live inside the active evidence generation
 (`cache/evidence-graph/generations/<id>/`, beside its search index), and
 are built by a generation refresh — the nightly maintenance pass, or
-`uv run python scripts/doctor.py --repair` — not at install and not when a
-page changes. Until a refresh has run with the model installed, `doctor`
+`uv run python scripts/doctor.py --rebuild-generation` (`--repair` alone only
+repairs the generation catalog) — not at install and not when a page changes. Until a refresh has run with the model installed, `doctor`
 reports `vector_state: absent` and search stays lexical. (Issue #29.)
 
 ## Reranker (on by default)
@@ -772,16 +800,16 @@ at most 0.04 (`docs/research/2026-09-10-cross-lingual-memory-world-practice.md`)
 - See what the search reads: `uv run python scripts/search_memory.py --status`
   (the active generation; without one, Markdown directly)
 - Check health and rebuild the generation: `uv run python scripts/doctor.py`,
-  then `uv run python scripts/doctor.py --repair`
+  then `uv run python scripts/doctor.py --rebuild-generation`
 - `search_memory.py --rebuild` rebuilds the evidence generation, the one index
 
 ### "Hook errors"
-- Check `logs/hook-errors.log` for captured exceptions
+- Check `logs/hook-errors.log` for captured exceptions (past 2 MB it moves to `logs/hook-errors.log.1`)
 - All hooks exit 0 on any error (never break your session), so errors are
   silent unless you check the log
 
 ### "Tests fail on fresh clone"
-- Run `uv sync --locked --extra mcp-server` first (the installed baseline includes MCP)
+- Run `uv sync --locked --inexact` first (the base install includes MCP; `--inexact` keeps any extras you added)
 - `uv run pytest -q` — inspect the current full regression status and reported failures
 - If collection or imports fail, update the checkout and rerun `uv sync --locked --dev`
 
@@ -803,7 +831,6 @@ at most 0.04 (`docs/research/2026-09-10-cross-lingual-memory-world-practice.md`)
 | `knowledge/projects/<slug>/` | KNOWLEDGE | Append-only journal.md + projected state.md |
 | `knowledge/raw/` | KNOWLEDGE | Immutable sources |
 | `knowledge/inbox/` | KNOWLEDGE | Unprocessed staging |
-| `knowledge/feedback/` | KNOWLEDGE | Correction candidates |
 | `cache/` | RUNTIME | FTS5/vector/graph indexes, compile plans, derived claims index |
 | `logs/` | RUNTIME | Lint reports, compile logs (gitignored) |
 | `run/` | RUNTIME | transactions, receipts, queue database/results, leases, locks |

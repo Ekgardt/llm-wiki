@@ -988,16 +988,6 @@ def _run_usearch_cell(*, corpus, queries, k, mask, selectivity) -> dict[str, Any
     return cell
 
 
-def _flat_index_metadata(ann: bool) -> dict[str, Any]:
-    return {
-        "requested": "ann" if ann else "flat",
-        "status": "flat",
-        "type": "flat-scan",
-        "verified_by": "no_vector_index_requested",
-        "reason": None,
-    }
-
-
 def _directory_bytes(path: str) -> int:
     return sum(p.stat().st_size for p in Path(path).rglob("*") if p.is_file())
 

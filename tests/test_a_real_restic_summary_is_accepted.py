@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.slow_machine import SHORT_TIMEOUT
 from tests.test_private_vault_backup import _restic_restore_fixture
 from tests.test_reliability_v3_adoption import _vault, build_adopted_reliability_v3
 
@@ -56,7 +57,7 @@ def test_a_summary_without_the_zero_counters_restores(tmp_path, monkeypatch):
         repository_file=repository_file,
         snapshot_id="b" * 64,
         expected_manifest_sha256=digest,
-        deadline=time.monotonic() + 30,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
     assert receipt["manifest_sha256"] == digest
@@ -112,7 +113,7 @@ def test_a_real_restic_backs_up_and_restores_the_vault(tmp_path, monkeypatch):
         restic_binary=binary,
         repository_file=repository_file,
         now=datetime(2026, 8, 15, tzinfo=timezone.utc),
-        deadline=time.monotonic() + 120,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
     receipt = backup.restore_private_vault(
         target=target,
@@ -120,7 +121,7 @@ def test_a_real_restic_backs_up_and_restores_the_vault(tmp_path, monkeypatch):
         repository_file=repository_file,
         snapshot_id=saved["snapshot_id"],
         expected_manifest_sha256=saved["manifest_sha256"],
-        deadline=time.monotonic() + 120,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
     assert receipt["manifest_sha256"] == saved["manifest_sha256"]

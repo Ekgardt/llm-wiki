@@ -186,7 +186,7 @@ def _await_pid_gone(pid: int, timeout: float) -> None:
 def _terminate_and_close(tree: ProcessTree) -> None:
     """Terminate a tree that still owns something, then close it either way."""
     if tree.process_group is not None or tree.windows_job is not None:
-        tree.terminate(deadline=time.monotonic() + 5)
+        tree.terminate(deadline=time.monotonic() + SHORT_TIMEOUT)
     tree.close()
 
 
@@ -349,7 +349,7 @@ def test_posix_spawn_inherits_explicit_verified_descriptor(tmp_path: Path) -> No
             ),
             cwd=tmp_path,
             env=dict(os.environ),
-            deadline=time.monotonic() + 5,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
             pass_fds=(read_descriptor,),
         )
         assert tree.process.stdout is not None
@@ -381,7 +381,7 @@ def test_posix_spawn_rejects_writable_inherited_descriptor(
                 (sys.executable, "-c", "pass"),
                 cwd=tmp_path,
                 env=dict(os.environ),
-                deadline=time.monotonic() + 5,
+                deadline=time.monotonic() + SHORT_TIMEOUT,
                 pass_fds=(stream.fileno(),),
             )
 
@@ -624,7 +624,7 @@ def test_spawn_owns_a_real_descendant_and_terminate_leaves_no_surviving_pid(
     assert _pid_alive(tree.process.pid)
     assert _pid_alive(descendant_pid)
 
-    tree.terminate(deadline=time.monotonic() + 5)
+    tree.terminate(deadline=time.monotonic() + SHORT_TIMEOUT)
     tree.close()
 
     assert tree.process.poll() is not None
@@ -649,7 +649,7 @@ def test_close_is_release_only_and_retains_a_live_owned_tree(tmp_path: Path) -> 
     assert tree.process.poll() is None
     assert _pid_alive(descendant_pid)
 
-    tree.terminate(deadline=time.monotonic() + 5)
+    tree.terminate(deadline=time.monotonic() + SHORT_TIMEOUT)
     tree.close()
     tree.close()
 
@@ -672,7 +672,7 @@ def test_terminate_cleans_descendant_after_direct_leader_already_exited(
     try:
         assert _pid_alive(descendant_pid)
         assert tree.has_live_descendants() is True
-        tree.terminate(deadline=time.monotonic() + 5)
+        tree.terminate(deadline=time.monotonic() + SHORT_TIMEOUT)
         _await_pid_gone(descendant_pid, 2.0)
         assert not _pid_alive(descendant_pid)
     finally:
@@ -695,7 +695,7 @@ def test_close_retains_group_until_descendant_after_exited_leader_is_gone(
         tree.close()
 
     assert tree.process_group is not None or tree.windows_job is not None
-    tree.terminate(deadline=time.monotonic() + 5)
+    tree.terminate(deadline=time.monotonic() + SHORT_TIMEOUT)
     tree.close()
 
     deadline = time.monotonic() + 2
@@ -1059,7 +1059,7 @@ def test_posix_wait_reaps_zombie_leader_before_each_group_probe(
     monkeypatch.setattr(lsp_process_tree.time, "sleep", lambda _seconds: None)
     tree = ProcessTree(ZombieLeader(), None, 4242)  # type: ignore[arg-type]
 
-    tree.terminate(deadline=time.monotonic() + 1)
+    tree.terminate(deadline=time.monotonic() + SHORT_TIMEOUT)
 
     probe_indexes = [index for index, event in enumerate(events) if event == "probe"]
     assert probe_indexes
@@ -1120,7 +1120,7 @@ def test_linux_orphan_zombie_does_not_strand_owned_process_group(
         time.sleep(0.01)
 
     assert state is None or state in {"Z", "X", "x"}
-    tree.terminate(deadline=time.monotonic() + 2)
+    tree.terminate(deadline=time.monotonic() + SHORT_TIMEOUT)
     tree.close()
     assert tree.process_group is None
     assert not _pid_alive(descendant_pid)
@@ -1260,7 +1260,7 @@ def test_windows_terminate_attempts_direct_kill_when_job_termination_fails(
     monkeypatch.setattr(lsp_process_tree, "_job_active_processes", lambda _job: 0)
 
     with pytest.raises(OSError):
-        tree.terminate(deadline=time.monotonic() + 1)
+        tree.terminate(deadline=time.monotonic() + SHORT_TIMEOUT)
 
     assert "terminate-job" in calls
     assert "kill" in calls
@@ -1305,7 +1305,7 @@ def test_windows_terminate_discards_snapshot_error_after_stable_active_zero(
     )
     monkeypatch.setattr(lsp_process_tree, "_job_active_processes", active_processes)
 
-    tree.terminate(deadline=time.monotonic() + 1)
+    tree.terminate(deadline=time.monotonic() + SHORT_TIMEOUT)
 
     assert active_queries >= 2
     assert tree.windows_job == 23
@@ -1405,7 +1405,7 @@ def test_windows_terminate_attempts_every_independent_step_after_error(
     monkeypatch.setattr(lsp_process_tree, "_job_active_processes", active_processes)
 
     with pytest.raises(OSError, match="failed"):
-        tree.terminate(deadline=time.monotonic() + 1)
+        tree.terminate(deadline=time.monotonic() + SHORT_TIMEOUT)
 
     assert calls.count("terminate-job") == 1
     assert calls.count("kill") == 1
@@ -1453,7 +1453,7 @@ def test_windows_close_releases_reaped_process_handle_and_keeps_cached_status(
     handle = int(process._handle)
     assert _windows_handle_status(handle) == (True, 0)
 
-    tree.terminate(deadline=time.monotonic() + 3)
+    tree.terminate(deadline=time.monotonic() + SHORT_TIMEOUT)
     returncode = process.returncode
     tree.close()
     tree.close()
@@ -1487,7 +1487,7 @@ def test_windows_process_handle_close_failure_retains_tree_for_retry(
         real_close()
 
     monkeypatch.setattr(process._handle, "Close", close)
-    tree.terminate(deadline=time.monotonic() + 3)
+    tree.terminate(deadline=time.monotonic() + SHORT_TIMEOUT)
 
     with pytest.raises(OSError, match="process handle close failed"):
         tree.close()

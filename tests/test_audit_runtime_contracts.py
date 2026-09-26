@@ -2,7 +2,6 @@
 
 Covers:
 - compile_memory no longer exposes heuristic lifecycle mutation
-- feedback_capture stdin JSON (OpenCode plugin)
 - MEMORY_LLM_PROVIDER=fake smoke for compile plan apply
 """
 
@@ -11,9 +10,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-import os
 import stat
-import subprocess
 import sys
 import tarfile
 import zipfile
@@ -92,46 +89,6 @@ def test_compile_memory_removes_heuristic_lifecycle_mutation():
     assert not hasattr(compile_memory, "_check_contradictions_pre_write")
     assert not hasattr(compile_memory, "_mark_superseded")
     assert not hasattr(compile_memory, "_mark_refined")
-
-
-def test_feedback_capture_stdin_json(tmp_path, monkeypatch):
-    import feedback_capture
-
-    monkeypatch.setattr(feedback_capture, "ROOT", tmp_path)
-    monkeypatch.setattr(feedback_capture, "FEEDBACK_DIR", tmp_path / "knowledge" / "feedback")
-    (tmp_path / "knowledge" / "notes").mkdir(parents=True)
-    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
-    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "runtime"))
-
-    payload = json.dumps(
-        {
-            "text": "No, always use Postgres instead of SQLite for production",
-            "session_id": "sess-test",
-            "slug": "demo",
-            "trigger": "opencode-idle",
-        }
-    )
-    env = dict(os.environ)
-    result = subprocess.run(
-        [sys.executable, str(SCRIPTS / "feedback_capture.py")],
-        input=payload,
-        text=True,
-        capture_output=True,
-        env=env,
-        cwd=str(ROOT),
-    )
-    assert result.returncode == 0
-    # Candidate files under vault feedback dir (module uses its ROOT from env at import
-    # in subprocess — script resolves ROOT from memory_state). Check via capture_from_text
-    # unit path as well:
-    cid = feedback_capture.capture_from_text(
-        "No, always use Postgres instead of SQLite for production",
-        session_id="sess-test",
-        slug="demo",
-        trigger="opencode-idle",
-    )
-    assert cid is not None
-    assert (tmp_path / "knowledge" / "feedback" / f"{cid}.json").exists()
 
 
 @pytest.mark.parametrize(
@@ -302,24 +259,3 @@ def test_fake_llm_provider_returns_canned_json(monkeypatch):
     assert "COMPILE_AUDIT" in out
 
 
-def test_flush_memory_uses_maybe_compile(monkeypatch, tmp_path):
-    """maybe_trigger_compile must call spawn_compile_if_idle, not spawn_detached."""
-    import flush_memory
-
-    calls = []
-
-    def fake_spawn(force=False):
-        calls.append(force)
-        return True, "spawned compile pid=1"
-
-    monkeypatch.setattr(flush_memory, "spawn_compile_if_idle", fake_spawn)
-    monkeypatch.setattr(flush_memory, "file_hash", lambda p: "abc")
-    monkeypatch.setenv("MEMORY_COMPILE_AFTER_HOUR", "0")
-    monkeypatch.setenv("MEMORY_COMPILE_COOLDOWN_SECONDS", "0")
-
-    daily = tmp_path / "2026-07-09.md"
-    daily.write_text("# d\n", encoding="utf-8")
-    state: dict = {"compiled_daily_hashes": {}}
-    flush_memory.maybe_trigger_compile(state, daily, "major")
-    assert calls == [False]
-    assert state["last_compile_spawned_reason"] == "spawned compile pid=1"

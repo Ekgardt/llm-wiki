@@ -118,7 +118,6 @@ class WorkspaceDelta:
     changed: tuple[str, ...]
     renamed: tuple[tuple[str, str], ...]
     deleted: tuple[str, ...]
-    configuration_changed: bool
 
 
 _Identity = tuple[int, int, int, int, int, int]
@@ -476,11 +475,22 @@ def _normalized_path(raw: str) -> str:
 
 
 def _is_configuration(path: str) -> bool:
-    return "/" not in path and (
-        path in PYTHON_CONFIG_NAMES
-        or path in PROFILE_CONFIG_NAMES
-        or (path.startswith("requirements") and path.endswith(".txt"))
-    )
+    """A server's configuration file.
+
+    A profile's names count at any depth: a nested `go.mod` or `Cargo.toml` is
+    a module or crate root the server reads (audit B-42,
+    docs/research/2026-09-25-a-revision-holds-only-what-it-proves.md). Python's
+    stay at the root, where the Python server reads them.
+    """
+    if PurePosixPath(path).name in PROFILE_CONFIG_NAMES:
+        return True
+    return "/" not in path and _is_python_configuration(path)
+
+
+def _is_python_configuration(path: str) -> bool:
+    if path in PYTHON_CONFIG_NAMES:
+        return True
+    return path.startswith("requirements") and path.endswith(".txt")
 
 
 def _is_relevant_path(path: str) -> bool:
@@ -895,8 +905,18 @@ def _git_run_outcome(
         run, output, maximum_bytes=maximum_bytes, label=label, deadline=deadline
     )
     if run.process.returncode != 0:
-        raise subprocess.CalledProcessError(run.process.returncode, command)
+        raise GitCommandFailed(f"{label} failed with exit code {run.process.returncode}")
     return output
+
+
+class GitCommandFailed(ValueError):
+    """A Git command this module ran exited non-zero.
+
+    It was `subprocess.CalledProcessError`, which is neither the `OSError` nor
+    the `ValueError` the navigation catches to degrade, so a failed `git status`
+    reached the caller as a generic error (audit B-41,
+    docs/research/2026-09-25-a-failed-git-status-is-a-navigation-degradation.md).
+    """
 
 
 def _git_output(
@@ -916,13 +936,7 @@ def _git_output(
     command = _git_command(root, arguments, executable)
     process = subprocess.Popen(command, **_git_popen_options(environment, pass_fds))
     holds_fds = bool(pass_fds) and os.name != "nt"
-    local_deadline = time.monotonic() + GIT_STATUS_TIMEOUT_SECONDS
-    run = _GitRun(
-        process,
-        maximum_bytes,
-        local_deadline if deadline is None else min(local_deadline, deadline),
-        cancelled,
-    )
+    run = _GitRun(process, maximum_bytes, _git_run_deadline(deadline), cancelled)
     try:
         run.wait_for_output()
         output = run.output()
@@ -934,6 +948,18 @@ def _git_output(
     return _git_run_outcome(
         run, command, output, maximum_bytes=maximum_bytes, label=label, deadline=deadline
     )
+
+
+def _git_run_deadline(deadline: float | None) -> float:
+    """The caller's deadline; `GIT_STATUS_TIMEOUT_SECONDS` only when it gave none.
+
+    A 5 s cap under every budget failed a large checkout's `git status` inside a
+    deadline that would have fit it (audit C-44,
+    docs/research/2026-09-25-navigation-dead-code-and-stale-words.md).
+    """
+    if deadline is None:
+        return time.monotonic() + GIT_STATUS_TIMEOUT_SECONDS
+    return deadline
 
 
 def _git_state_head_identity(output: bytes) -> bytes:
@@ -1523,8 +1549,14 @@ def _relevant_files(
     relevant_paths: set[str] | None = None,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    skipped_directories: frozenset[str] = frozenset(),
 ) -> Iterator[Path]:
-    """Every relevant file under the root, in a deterministic walk order."""
+    """Every relevant file under the root, in a deterministic walk order.
+
+    `skipped_directories` names the directories git ignores whole, at any depth,
+    as root-relative POSIX paths; the corpus prunes the same set (audit A-16,
+    audit 2026-09-26 A-8).
+    """
     scan = _RelevantScan(
         root=root,
         resolved_root=resolved_root,
@@ -1541,8 +1573,47 @@ def _relevant_files(
     while stack:
         _check_stop(deadline, cancelled)
         directories: list[Path] = []
-        yield from _scan_directory(scan, stack.pop(), directories)
-        stack.extend(reversed(directories))
+        current = stack.pop()
+        yield from _scan_directory(scan, current, directories)
+        stack.extend(reversed(_walkable(root, current, directories, skipped_directories)))
+
+
+def _walkable(
+    root: Path, current: Path, directories: list[Path], skipped: frozenset[str]
+) -> list[Path]:
+    if not skipped:
+        return directories
+    return [directory for directory in directories if directory.relative_to(root).as_posix() not in skipped]
+
+
+def ignored_directories(
+    root: Path, *, deadline: float | None, cancelled: Callable[[], bool] | None
+) -> frozenset[str]:
+    """Directories git ignores whole, at any depth, e.g. `node_modules`, `web/dist`.
+
+    Walking them cost 14.8 s and then refused at the 100 000-entry ceiling on a
+    TypeScript checkout with its dependencies installed (audit A-16,
+    docs/research/2026-09-25-a-revision-walks-no-ignored-top-level-folder.md); a
+    nested `web/node_modules` did the same one level down (audit 2026-09-26 A-8,
+    docs/research/2026-09-26-one-entry-does-not-refuse-a-repository.md).
+    Git cannot answer (no repository, a failed command): none is skipped.
+    """
+    try:
+        output = _git_output(
+            root,
+            ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
+            maximum_bytes=MAX_GIT_STATUS_BYTES,
+            label="Git ignored directories",
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+    except _RevisionStopped:
+        # A stop is a TimeoutError, which is an OSError; it is the caller's, not
+        # Git's (docs/research/2026-09-25-a-cancel-is-not-a-git-failure.md).
+        raise
+    except (ValueError, OSError):
+        return frozenset()
+    return frozenset(os.fsdecode(record[:-1]) for record in output.split(b"\0") if record.endswith(b"/"))
 
 class _VerificationDigests:
     """The SHA-256 every hash needs, plus git's blob hash when one is wanted."""
@@ -3788,9 +3859,14 @@ def _require_inside_checkout(path: Path, resolved_root: Path) -> None:
 
 
 def _add_status_entry(build: _RevisionBuild, raw: str, status: str) -> None:
-    """Record one path git reported as changed, as the disk says it is."""
+    """Record one relevant path git reported as changed, as the disk says it is.
+
+    A path the walk does not hold (a `README.md`) entered the revision only while
+    it was dirty, so the next clean revision reported it deleted and a watched-file
+    `deleted` event reached the server for a file that exists (audit B-42).
+    """
     normalized = _normalized_path(raw)
-    if _inside_pruned_directory(normalized):
+    if _inside_pruned_directory(normalized) or not _is_relevant_path(normalized):
         return
     path = build.root / PurePosixPath(normalized)
     try:
@@ -3867,6 +3943,9 @@ def _add_relevant_files(build: _RevisionBuild) -> None:
         private_inventory_safe=build.private_safe,
         deadline=build.deadline,
         cancelled=build.cancelled,
+        skipped_directories=ignored_directories(
+            build.root, deadline=build.deadline, cancelled=build.cancelled
+        ),
     ):
         _check_stop(build.deadline, build.cancelled)
         _add_relevant_file(build, path)
@@ -4660,6 +4739,7 @@ def _walk_relevant_files(
         relevant_paths=state.relevant,
         deadline=deadline,
         cancelled=cancelled,
+        skipped_directories=ignored_directories(root, deadline=deadline, cancelled=cancelled),
     ):
         normalized = _normalized_path(current_path.relative_to(root).as_posix())
         if normalized in state.paths:
@@ -4924,11 +5004,6 @@ def _changed_paths(
     }
 
 
-def _any_configuration(paths: Iterable[str]) -> bool:
-    """Whether any of these paths is one of the checkout's configuration files."""
-    return any(_is_configuration(path) for path in paths)
-
-
 def diff_workspace_revisions(
     before: WorkspaceRevision, after: WorkspaceRevision
 ) -> WorkspaceDelta:
@@ -4943,13 +5018,10 @@ def diff_workspace_revisions(
     created = set(after_entries) - set(before_entries)
     deleted = set(before_entries) - set(after_entries)
     changed = _changed_paths(before_entries, after_entries)
-    configuration_changed = _any_configuration(created | changed | deleted)
     renames = _unambiguous_renames(deleted, created, before_entries, after_entries)
     return WorkspaceDelta(
         created=tuple(sorted(created)),
         changed=tuple(sorted(changed)),
         renamed=tuple(sorted(renames)),
         deleted=tuple(sorted(deleted)),
-        configuration_changed=configuration_changed
-        or _any_configuration(path for pair in renames for path in pair),
     )

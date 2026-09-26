@@ -218,7 +218,7 @@ def test_public_contract_and_initial_state(
     assert dict(session.capabilities) == {}
     assert session.active_operations == 0
     assert before <= session.last_used_monotonic <= time.monotonic()
-    session.close(deadline=time.monotonic() + 1)
+    session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
     assert get_type_hints(PyrightSession.__init__) == {
         "repository": RepositoryScope,
@@ -240,7 +240,7 @@ def test_session_exposes_immutable_qualified_identity(
         with pytest.raises(AttributeError):
             session.identity = _missing_identity()  # type: ignore[misc]
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_unqualified_identity_never_spawns_or_creates_lsp_parent(
@@ -258,7 +258,7 @@ def test_unqualified_identity_never_spawns_or_creates_lsp_parent(
         state_root=state_root,
     )
 
-    assert session.start(deadline=time.monotonic() + 1) is None
+    assert session.start(deadline=time.monotonic() + SHORT_TIMEOUT) is None
     assert session.readiness == "not_ready"
     assert session.readiness_evidence == ()
     assert session.degradation_codes == ("pyright_missing",)
@@ -288,7 +288,7 @@ def test_server_mutated_after_qualification_never_spawns(
         state_root=state_root,
     )
 
-    session.start(deadline=time.monotonic() + 5)
+    session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
 
     assert session.readiness == "not_ready"
     assert session.readiness_evidence == ()
@@ -346,7 +346,7 @@ def test_server_replaced_at_spawn_never_executes_replacement(
         state_root=state_root,
     )
     try:
-        session.start(deadline=time.monotonic() + 10)
+        session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
 
         assert replaced is True
         assert not replacement_marker.exists()
@@ -355,7 +355,7 @@ def test_server_replaced_at_spawn_never_executes_replacement(
             "pyright_executable_digest_mismatch",
         )
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX verified Node loader")
@@ -394,7 +394,7 @@ def test_posix_node_loader_preserves_main_module_and_original_paths(
         hashlib.sha256(server.read_bytes()).hexdigest(),
         command=(str(node), str(server), str(output)),
         owner_root=owner,
-        deadline=time.monotonic() + 10,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
 
     with guard as launch:
@@ -408,7 +408,7 @@ def test_posix_node_loader_preserves_main_module_and_original_paths(
             launch.command,
             cwd=repository,
             env=dict(os.environ),
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
             pass_fds=launch.pass_fds,
         )
         try:
@@ -470,7 +470,7 @@ def test_posix_launch_snapshot_is_scoped_to_owner_and_removed_on_all_branches(
         hashlib.sha256(server.read_bytes()).hexdigest(),
         command=("python", str(server)),
         owner_root=owner,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
     with guard as launch:
         assert isinstance(launch, lsp_process.GenerationLaunch)
@@ -484,7 +484,7 @@ def test_posix_launch_snapshot_is_scoped_to_owner_and_removed_on_all_branches(
         hashlib.sha256(server.read_bytes()).hexdigest(),
         command=("python", str(server)),
         owner_root=owner,
-        deadline=time.monotonic() + 5,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     )
     monkeypatch.setattr(
         failing,
@@ -619,7 +619,7 @@ def test_server_identity_is_held_and_reverified_through_bootstrap(
 
     monkeypatch.setattr(session, "_bootstrap_generation", mutate_during_bootstrap)
     try:
-        session.start(deadline=time.monotonic() + 10)
+        session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
         if os.name == "nt":
             assert mutation_errors
             assert session.readiness == "protocol_initialized"
@@ -630,7 +630,7 @@ def test_server_identity_is_held_and_reverified_through_bootstrap(
                 "pyright_executable_digest_mismatch",
             )
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def _assert_evictions_reserved(manager, evicting) -> None:
@@ -972,7 +972,7 @@ def test_start_uses_exact_command_initialize_and_configuration_contract(
     session = _session(repository, state_root, semantic_pyright)
     scope = resolve_repository_scope(repository)
     try:
-        assert session.start(deadline=time.monotonic() + 10) is None
+        assert session.start(deadline=time.monotonic() + SHORT_TIMEOUT) is None
         assert session.readiness == "protocol_initialized"
         assert session.readiness_evidence == (
             "initialize",
@@ -1078,7 +1078,7 @@ def test_start_uses_exact_command_initialize_and_configuration_contract(
             None,
         ]
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
     assert not owner_root.exists()
 
 
@@ -1352,10 +1352,10 @@ def test_close_retries_startup_cleanup_retained_by_session(
 
     monkeypatch.setattr(LspProcess, "start_configured", fail_start)
 
-    session.start(deadline=time.monotonic() + 5)
+    session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
     assert len(cleanup_deadlines) == 1
 
-    session.close(deadline=time.monotonic() + 5)
+    session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
     assert len(cleanup_deadlines) == 2
     assert cleanup_deadlines[1] > time.monotonic()
@@ -1494,13 +1494,13 @@ def test_start_retries_retained_cleanup_before_new_spawn(
 
     monkeypatch.setattr(LspProcess, "start_configured", start)
 
-    session.start(deadline=time.monotonic() + 5)
-    session.start(deadline=time.monotonic() + 5)
+    session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
+    session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
 
     assert cleanup_attempts == 2
     assert start_attempts == 2
     assert session._process is not None
-    session.close(deadline=time.monotonic() + 5)
+    session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_session_adopts_cleanup_owner_without_exhausting_global_registry(
@@ -1538,14 +1538,14 @@ def test_session_adopts_cleanup_owner_without_exhausting_global_registry(
         for _index in range(lsp_process._MAX_STARTUP_CLEANUP_OWNERS + 1):
             session = _session(repository, state_root, semantic_pyright)
             sessions.append(session)
-            session.start(deadline=time.monotonic() + 5)
+            session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
 
         assert len(errors) == lsp_process._MAX_STARTUP_CLEANUP_OWNERS + 1
         assert _pending_cleanup_owner_ids() == baseline
         assert [session._startup_cleanup_error for session in sessions] == errors
     finally:
         for session in sessions:
-            session.close(deadline=time.monotonic() + 5)
+            session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
         _unregister_cleanup_owners(errors)
 
 
@@ -1874,7 +1874,7 @@ def test_startup_process_wrapper_is_reachable_without_exception_graph_revisit(
         KeyboardInterrupt,
         match="wrapped session process interruption",
     ) as raised:
-        session.start(deadline=time.monotonic() + 5)
+        session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
 
     pending = [raised.value]
     seen: set[int] = set()
@@ -2057,14 +2057,14 @@ def test_concurrent_start_waits_for_process_publication(
 
     def start_first() -> None:
         try:
-            session.start(deadline=time.monotonic() + 10)
+            session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
         except BaseException as error:
             errors.append(error)
 
     def start_second() -> None:
         second_entered.set()
         try:
-            session.start(deadline=time.monotonic() + 10)
+            session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
         except BaseException as error:
             errors.append(error)
         finally:
@@ -2084,7 +2084,7 @@ def test_concurrent_start_waits_for_process_publication(
         publish_process.set()
         first.join(SHORT_TIMEOUT)
         second.join(SHORT_TIMEOUT)
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
     assert not first.is_alive()
     assert not second.is_alive()
@@ -2115,11 +2115,11 @@ def test_position_encoding_is_negotiated_or_defaults_to_utf16(
     )
     session = _session(repository, state_root, fixture)
     try:
-        session.start(deadline=time.monotonic() + 10)
+        session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
         assert session.readiness == "protocol_initialized"
         assert session.position_encoding is expected
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_unsupported_server_position_encoding_fails_closed(
@@ -2137,7 +2137,7 @@ def test_unsupported_server_position_encoding_fails_closed(
     )
     session = _session(repository, state_root, fixture)
 
-    assert session.start(deadline=time.monotonic() + 10) is None
+    assert session.start(deadline=time.monotonic() + SHORT_TIMEOUT) is None
     assert session.readiness == "not_ready"
     assert session.position_encoding is None
     assert session.degradation_codes == ("pyright_position_encoding_unsupported",)
@@ -2156,7 +2156,7 @@ def test_operational_startup_failure_returns_stable_not_ready_degradation(
     )
     session = _session(repository, state_root, fixture)
 
-    assert session.start(deadline=time.monotonic() + 10) is None
+    assert session.start(deadline=time.monotonic() + SHORT_TIMEOUT) is None
     assert session.readiness == "not_ready"
     assert session.readiness_evidence == ()
     assert session.degradation_codes == ("pyright_startup_failed",)
@@ -2247,7 +2247,7 @@ def test_open_document_establishes_exact_query_readiness_and_reopens_once(
     try:
         document = session.open_document(
             "pkg/service.py",
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert document == OpenDocument(
             RepositorySource(
@@ -2272,7 +2272,7 @@ def test_open_document_establishes_exact_query_readiness_and_reopens_once(
 
         reopened = session.open_document(
             "pkg/service.py",
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert reopened is document
         messages = [
@@ -2299,7 +2299,7 @@ def test_open_document_establishes_exact_query_readiness_and_reopens_once(
             "textDocument": {"uri": document.source.uri}
         }
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_concurrent_first_open_sends_one_didopen(
@@ -2334,13 +2334,13 @@ def test_concurrent_first_open_sends_one_didopen(
             documents.append(
                 session.open_document(
                     "pkg/service.py",
-                    deadline=time.monotonic() + 10,
+                    deadline=time.monotonic() + SHORT_TIMEOUT,
                 )
             )
         except BaseException as error:
             errors.append(error)
 
-    session.start(deadline=time.monotonic() + 10)
+    session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
     monkeypatch.setattr(pyright_session_module, "OpenDocument", delayed_construction)
     threads = (threading.Thread(target=open_source), threading.Thread(target=open_source))
     for thread in threads:
@@ -2353,7 +2353,7 @@ def test_concurrent_first_open_sends_one_didopen(
         assert documents[0] is documents[1]
         assert _client_methods(semantic_pyright).count("textDocument/didOpen") == 1
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_open_racing_restart_sends_didopen_once_for_replacement_generation(
@@ -2401,11 +2401,11 @@ def test_open_racing_restart_sends_didopen_once_for_replacement_generation(
         )
 
     try:
-        session.start(deadline=time.monotonic() + 10)
+        session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
         monkeypatch.setattr(LspProcess, "notify", notify)
         monkeypatch.setattr(LspProcess, "notify_generation", notify_generation)
 
-        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
 
         process = session._process
         assert restarted is True
@@ -2416,7 +2416,7 @@ def test_open_racing_restart_sends_didopen_once_for_replacement_generation(
         assert len(pids) == 2
         assert _method_events(events, pids[-1], "textDocument/didOpen") == 1
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_failed_generation_notify_records_no_didopen_and_retries_later(
@@ -2479,7 +2479,7 @@ def test_failed_readiness_probe_retries_without_duplicate_didopen(
     try:
         first = session.open_document(
             "pkg/service.py",
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert session.readiness == "protocol_initialized"
         assert session.readiness_evidence == (
@@ -2490,7 +2490,7 @@ def test_failed_readiness_probe_retries_without_duplicate_didopen(
         )
         second = session.open_document(
             "pkg/service.py",
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert second is first
         assert session.readiness == "query_ready"
@@ -2502,7 +2502,7 @@ def test_failed_readiness_probe_retries_without_duplicate_didopen(
         assert methods.count("textDocument/didOpen") == 1
         assert methods.count("textDocument/documentSymbol") == 2
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_ready_second_document_cannot_authorize_failed_first_document(
@@ -2517,23 +2517,23 @@ def test_ready_second_document_cannot_authorize_failed_first_document(
     try:
         session.open_document(
             "pkg/service.py",
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         session.open_document(
             "pkg/api.py",
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert session.readiness == "query_ready"
 
         result = session.definition(
             _anchor(repository, "pkg/service.py", 10, 20),
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
 
         assert result == ProviderLocations((), "not_ready", True)
         assert "textDocument/definition" not in _client_methods(fixture)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_restart_rebuilds_readiness_per_replayed_document(
@@ -2550,8 +2550,8 @@ def test_restart_rebuilds_readiness_per_replayed_document(
     )
     session = _session(repository, state_root, fixture)
     try:
-        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
-        session.open_document("pkg/api.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
+        session.open_document("pkg/api.py", deadline=time.monotonic() + SHORT_TIMEOUT)
         config = json.loads(fixture.config_path.read_text(encoding="utf-8"))
         config["document_symbol_failure_uris"] = ["$SERVICE_URI"]
         fixture.config_path.write_text(
@@ -2561,7 +2561,7 @@ def test_restart_rebuilds_readiness_per_replayed_document(
 
         result = session.definition(
             _anchor(repository, "pkg/service.py", 10, 20),
-            deadline=time.monotonic() + 15,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
 
         assert result == ProviderLocations((), "not_ready", True)
@@ -2574,7 +2574,7 @@ def test_restart_rebuilds_readiness_per_replayed_document(
             (repository / "pkg/api.py").resolve().as_uri(),
         ]
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_missing_document_symbol_capability_never_sends_probe_or_claims_ready(
@@ -2587,7 +2587,7 @@ def test_missing_document_symbol_capability_never_sends_probe_or_claims_ready(
     )
     session = _session(repository, state_root, fixture)
     try:
-        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
         assert session.readiness == "protocol_initialized"
         assert session.readiness_evidence == (
             "initialize",
@@ -2602,7 +2602,7 @@ def test_missing_document_symbol_capability_never_sends_probe_or_claims_ready(
         ]
         assert "textDocument/documentSymbol" not in methods
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_malformed_document_symbol_list_cannot_establish_readiness(
@@ -2615,7 +2615,7 @@ def test_malformed_document_symbol_list_cannot_establish_readiness(
     )
     session = _session(repository, state_root, fixture)
     try:
-        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
         assert session.readiness == "protocol_initialized"
         assert session.readiness_evidence == (
             "initialize",
@@ -2626,12 +2626,12 @@ def test_malformed_document_symbol_list_cannot_establish_readiness(
 
         result = session.definition(
             _anchor(repository, "pkg/service.py", 10, 20),
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result == ProviderLocations((), "not_ready", True)
         assert "textDocument/definition" not in _client_methods(fixture)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_document_symbol_normalizer_is_strict_and_accepts_empty_list(
@@ -2677,7 +2677,7 @@ def test_open_document_rejects_invalid_utf8_and_frame_sized_content(
     session = _session(repository, state_root, semantic_pyright)
     try:
         with pytest.raises(error):
-            session.open_document(name, deadline=time.monotonic() + 10)
+            session.open_document(name, deadline=time.monotonic() + SHORT_TIMEOUT)
         methods = [
             event["method"]
             for event in semantic_pyright.events()
@@ -2686,7 +2686,7 @@ def test_open_document_rejects_invalid_utf8_and_frame_sized_content(
         assert "textDocument/didOpen" not in methods
         assert session.readiness == "protocol_initialized"
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_open_document_propagates_deadline_to_stable_source_read(
@@ -2930,7 +2930,7 @@ def test_document_lock_post_acquire_interruption_releases_and_remains_usable(
         assert session.synchronize(
             revision,
             deadline=time.monotonic() + 10,
-        ) == WorkspaceDelta((), (), (), (), False)
+        ) == WorkspaceDelta((), (), (), ())
         assert session._documents[document.source.uri] is document
     finally:
         interrupting_lock.cleanup_failed_test()
@@ -2945,15 +2945,15 @@ def test_definition_references_type_and_implementation_are_capability_honest(
     session = _session(repository, state_root, semantic_pyright)
     anchor = _anchor(repository, "pkg/service.py", 10, 20)
     try:
-        definition = session.definition(anchor, deadline=time.monotonic() + 10)
-        references = session.references(anchor, deadline=time.monotonic() + 10)
+        definition = session.definition(anchor, deadline=time.monotonic() + SHORT_TIMEOUT)
+        references = session.references(anchor, deadline=time.monotonic() + SHORT_TIMEOUT)
         type_definition = session.type_definition(
             anchor,
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         implementations = session.implementations(
             anchor,
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
 
         assert definition == ProviderLocations(
@@ -2987,7 +2987,7 @@ def test_definition_references_type_and_implementation_are_capability_honest(
         ]
         assert "textDocument/implementation" not in methods
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.mark.parametrize("advertised", ["missing", "false"])
@@ -3007,12 +3007,12 @@ def test_missing_or_false_capability_sends_no_feature_request(
     try:
         result = session.definition(
             _anchor(repository, "pkg/service.py", 10, 20),
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result == ProviderLocations((), "unsupported", True)
         assert "textDocument/definition" not in _client_methods(fixture)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_not_ready_never_returns_a_complete_provider_negative(
@@ -3027,12 +3027,12 @@ def test_not_ready_never_returns_a_complete_provider_negative(
     try:
         result = session.definition(
             _anchor(repository, "pkg/service.py", 10, 20),
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result == ProviderLocations((), "not_ready", True)
         assert "textDocument/definition" not in _client_methods(fixture)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_unsupported_document_features_return_before_source_open(
@@ -3048,19 +3048,19 @@ def test_unsupported_document_features_return_before_source_open(
     try:
         assert session.definition(
             anchor,
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         ) == ProviderLocations((), "unsupported", True)
         assert session.hover(
             anchor,
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         ) == ProviderHover(None, None, True)
         assert session.incoming_calls(
             anchor,
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         ) == ProviderCalls("incoming", (), "unsupported", True)
         assert session.document_symbols(
             "missing.py",
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         ) == ProviderLocations((), "unsupported", True)
         methods = [
             event["method"]
@@ -3070,7 +3070,7 @@ def test_unsupported_document_features_return_before_source_open(
         assert "textDocument/didOpen" not in methods
         assert "textDocument/documentSymbol" not in methods
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_unsupported_workspace_symbols_precede_query_readiness(
@@ -3085,7 +3085,7 @@ def test_unsupported_workspace_symbols_precede_query_readiness(
     try:
         assert session.workspace_symbols(
             "Service",
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         ) == ProviderLocations((), "unsupported", True)
         methods = [
             event["method"]
@@ -3094,7 +3094,7 @@ def test_unsupported_workspace_symbols_precede_query_readiness(
         ]
         assert "workspace/symbol" not in methods
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_locations_filter_external_malformed_and_duplicate_entries_in_wire_order(
@@ -3147,7 +3147,7 @@ def test_locations_filter_external_malformed_and_duplicate_entries_in_wire_order
     try:
         result = session.definition(
             _anchor(repository, "pkg/service.py", 10, 20),
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result == ProviderLocations(
             (
@@ -3164,7 +3164,7 @@ def test_locations_filter_external_malformed_and_duplicate_entries_in_wire_order
             True,
         )
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_anchor_is_validated_against_current_document_and_negotiated_encoding(
@@ -3184,7 +3184,7 @@ def test_anchor_is_validated_against_current_document_and_negotiated_encoding(
     session = _session(repository, state_root, fixture)
     anchor = _anchor(repository, "pkg/unicode_api.py", 1, len('VALUE = "a😀'.encode()))
     try:
-        session.definition(anchor, deadline=time.monotonic() + 10)
+        session.definition(anchor, deadline=time.monotonic() + SHORT_TIMEOUT)
         definition = next(
             event["message"]
             for event in fixture.events()
@@ -3199,9 +3199,9 @@ def test_anchor_is_validated_against_current_document_and_negotiated_encoding(
             0,
         )
         with pytest.raises(ValueError, match="byte_offset"):
-            session.definition(invalid, deadline=time.monotonic() + 10)
+            session.definition(invalid, deadline=time.monotonic() + SHORT_TIMEOUT)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_document_and_workspace_symbols_normalize_selection_ranges(
@@ -3213,11 +3213,11 @@ def test_document_and_workspace_symbols_normalize_selection_ranges(
     try:
         document = session.document_symbols(
             "pkg/service.py",
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         workspace = session.workspace_symbols(
             "Service",
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         service_uri = (repository / "pkg/service.py").resolve().as_uri()
         assert document == ProviderLocations(
@@ -3249,7 +3249,7 @@ def test_document_and_workspace_symbols_normalize_selection_ranges(
             False,
         )
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.mark.parametrize(
@@ -3292,7 +3292,7 @@ def test_hover_normalizes_string_markup_and_marked_string_forms(
     try:
         hover = session.hover(
             _anchor(repository, "pkg/service.py", 10, 20),
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert hover == ProviderHover(
             expected,
@@ -3300,7 +3300,7 @@ def test_hover_normalizes_string_markup_and_marked_string_forms(
             False,
         )
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_malformed_hover_is_bounded_partial_instead_of_complete_negative(
@@ -3325,10 +3325,10 @@ def test_malformed_hover_is_bounded_partial_instead_of_complete_negative(
     try:
         assert session.hover(
             _anchor(repository, "pkg/service.py", 10, 20),
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         ) == ProviderHover(None, None, True)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_incoming_and_outgoing_calls_use_call_hierarchy_not_references(
@@ -3339,8 +3339,8 @@ def test_incoming_and_outgoing_calls_use_call_hierarchy_not_references(
     session = _session(repository, state_root, semantic_pyright)
     anchor = _anchor(repository, "pkg/service.py", 10, 20)
     try:
-        incoming = session.incoming_calls(anchor, deadline=time.monotonic() + 10)
-        outgoing = session.outgoing_calls(anchor, deadline=time.monotonic() + 10)
+        incoming = session.incoming_calls(anchor, deadline=time.monotonic() + SHORT_TIMEOUT)
+        outgoing = session.outgoing_calls(anchor, deadline=time.monotonic() + SHORT_TIMEOUT)
         assert incoming == ProviderCalls(
             "incoming",
             (
@@ -3373,7 +3373,7 @@ def test_incoming_and_outgoing_calls_use_call_hierarchy_not_references(
         assert methods.count("callHierarchy/outgoingCalls") == 1
         assert "textDocument/references" not in methods
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_every_prepared_call_item_is_queried_and_results_are_deduplicated(
@@ -3425,7 +3425,7 @@ def test_every_prepared_call_item_is_queried_and_results_are_deduplicated(
         ) is None
         calls = session.incoming_calls(
             _anchor(repository, "pkg/service.py", 10, 20),
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert len(calls.locations) == 1
         methods = [
@@ -3435,7 +3435,7 @@ def test_every_prepared_call_item_is_queried_and_results_are_deduplicated(
         ]
         assert methods.count("callHierarchy/incomingCalls") == 257
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_unsupported_calls_never_fall_back_to_references(
@@ -3455,7 +3455,7 @@ def test_unsupported_calls_never_fall_back_to_references(
     try:
         calls = session.outgoing_calls(
             _anchor(repository, "pkg/service.py", 10, 20),
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert calls == ProviderCalls("outgoing", (), "unsupported", True)
         methods = [
@@ -3466,7 +3466,7 @@ def test_unsupported_calls_never_fall_back_to_references(
         assert "textDocument/prepareCallHierarchy" not in methods
         assert "textDocument/references" not in methods
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_push_diagnostics_are_current_normalized_and_related(
@@ -3551,14 +3551,14 @@ def test_stale_lower_diagnostic_version_cannot_replace_current_snapshot(
     try:
         result = session.diagnostics(
             "pkg/service.py",
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result.document_version == 1
         assert [item.message for item in result.diagnostics] == ["current"]
         assert result.diagnostics[0].code == "1001"
         assert result.partial is False
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_diagnostic_filtering_marks_snapshot_partial_and_drops_external_related(
@@ -3672,10 +3672,10 @@ def test_not_ready_diagnostics_are_partial_even_when_push_arrived(
     try:
         assert session.diagnostics(
             "pkg/service.py",
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         ) == ProviderDiagnostics((), None, True)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_diagnostics_ignore_unopened_uri(
@@ -3696,14 +3696,14 @@ def test_diagnostics_ignore_unopened_uri(
         "message": "must not be retained",
     }
     try:
-        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
         session._publish_diagnostics(
             {"uri": api_uri, "version": 1, "diagnostics": [diagnostic]}
         )
 
         assert api_uri not in session._diagnostics
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_diagnostic_aggregate_rejection_preserves_previous_snapshot(
@@ -3730,7 +3730,7 @@ def test_diagnostic_aggregate_rejection_preserves_previous_snapshot(
         raising=False,
     )
     try:
-        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
         session._publish_diagnostics(
             {
                 "uri": uri,
@@ -3750,7 +3750,7 @@ def test_diagnostic_aggregate_rejection_preserves_previous_snapshot(
         assert session._diagnostics[uri] is previous
         assert session._diagnostic_bytes == previous.retained_bytes
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_diagnostic_replacement_and_stale_accounting_are_exact(
@@ -3782,8 +3782,8 @@ def test_diagnostic_replacement_and_stale_accounting_are_exact(
         raising=False,
     )
     try:
-        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
-        session.open_document("pkg/api.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
+        session.open_document("pkg/api.py", deadline=time.monotonic() + SHORT_TIMEOUT)
         session._publish_diagnostics(
             {
                 "uri": service_uri,
@@ -3827,7 +3827,7 @@ def test_diagnostic_replacement_and_stale_accounting_are_exact(
         assert session._diagnostics[service_uri] is retained
         assert session._diagnostic_bytes == retained_bytes
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_benign_server_requests_and_progress_are_bounded_in_memory_only(
@@ -3840,7 +3840,7 @@ def test_benign_server_requests_and_progress_are_bounded_in_memory_only(
     )
     session = _session(repository, state_root, fixture)
     try:
-        session.start(deadline=time.monotonic() + 10)
+        session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
         assert session.progress_events == (
             ("$/progress", "semantic-progress", "begin", "Analyzing"),
             ("pyright/beginProgress",),
@@ -3851,7 +3851,7 @@ def test_benign_server_requests_and_progress_are_bounded_in_memory_only(
         assert session.capabilities["implementations"] is False
         assert not _runtime_files_matching(state_root, ("progress", "diagnostic"))
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_progress_retention_has_count_and_aggregate_byte_bounds(
@@ -3899,7 +3899,7 @@ def test_transparent_restart_requires_fresh_query_after_reopen_and_reprobe(
     try:
         initial_diagnostics = session.diagnostics(
             "pkg/service.py",
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert len(initial_diagnostics.diagnostics) == 1
         config = json.loads(fixture.config_path.read_text(encoding="utf-8"))
@@ -3910,12 +3910,12 @@ def test_transparent_restart_requires_fresh_query_after_reopen_and_reprobe(
         )
         result = session.definition(
             _anchor(repository, "pkg/service.py", 10, 20),
-            deadline=time.monotonic() + 15,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert result == ProviderLocations((), "not_ready", True)
         fresh = session.definition(
             _anchor(repository, "pkg/service.py", 10, 20),
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert fresh.coverage == "provider_reported"
         assert len(fresh.locations) == 1
@@ -3938,8 +3938,8 @@ def test_transparent_restart_requires_fresh_query_after_reopen_and_reprobe(
             deadline=time.monotonic() + 0.1,
         ) == ProviderDiagnostics((), None, True)
     finally:
-        session.close(deadline=time.monotonic() + 5)
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
     assert tuple((state_root / "run/lsp").iterdir()) == ()
 
 
@@ -3991,7 +3991,7 @@ def test_server_mutated_before_transparent_restart_never_spawns_replacement(
         classmethod(record_spawn),
     )
     try:
-        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
         assert session.readiness == "query_ready"
         assert len(trees) == 1
         server.write_bytes(server.read_bytes() + b"\n# changed before restart\n")
@@ -3999,7 +3999,7 @@ def test_server_mutated_before_transparent_restart_never_spawns_replacement(
         with pytest.raises(ProtocolViolation):
             result = session.definition(
                 _anchor(repository, "pkg/service.py", 10, 20),
-                deadline=time.monotonic() + 15,
+                deadline=time.monotonic() + SHORT_TIMEOUT,
             )
             assert result.coverage != "provider_reported"
 
@@ -4021,7 +4021,7 @@ def test_server_mutated_before_transparent_restart_never_spawns_replacement(
         assert not (process.owner_root / "lease.json").exists()
         assert not lsp_process._coordinator_has_ownership(coordinator)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_server_mutated_during_replacement_bootstrap_never_commits_candidate(
@@ -4098,7 +4098,7 @@ def test_server_mutated_during_replacement_bootstrap_never_commits_candidate(
         classmethod(record_spawn),
     )
     try:
-        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
         first_nonce = session._generation_nonce
         assert first_nonce is not None
         assert session.readiness == "query_ready"
@@ -4106,7 +4106,7 @@ def test_server_mutated_during_replacement_bootstrap_never_commits_candidate(
         with pytest.raises(ProtocolViolation):
             result = session.definition(
                 _anchor(repository, "pkg/service.py", 10, 20),
-                deadline=time.monotonic() + 15,
+                deadline=time.monotonic() + SHORT_TIMEOUT,
             )
             assert result.coverage != "provider_reported"
 
@@ -4133,7 +4133,7 @@ def test_server_mutated_during_replacement_bootstrap_never_commits_candidate(
         assert not (process.owner_root / "lease.json").exists()
         assert not lsp_process._coordinator_has_ownership(coordinator)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_successful_close_releases_all_protocol_derived_session_state(
@@ -4145,13 +4145,13 @@ def test_successful_close_releases_all_protocol_derived_session_state(
         config={"push_progress": True},
     )
     session = _session(repository, state_root, fixture)
-    session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+    session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
     assert session.readiness == "query_ready"
     assert session._documents
     assert session._ready_uri_generations
     assert session.progress_events
 
-    session.close(deadline=time.monotonic() + 5)
+    session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
     assert session.readiness == "not_ready"
     assert session.readiness_evidence == ()
@@ -4172,12 +4172,12 @@ def test_post_start_probe_promotes_owned_process_state(
 ) -> None:
     session = _session(repository, state_root, semantic_pyright)
     try:
-        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
 
         assert session._process is not None
         assert session._process.state is ProcessState.WORKSPACE_READY
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_rejected_lifecycle_promotion_cannot_claim_query_readiness(
@@ -4201,18 +4201,18 @@ def test_rejected_lifecycle_promotion_cannot_claim_query_readiness(
         return False
 
     try:
-        session.start(deadline=time.monotonic() + 10)
+        session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
         process = session._process
         assert process is not None
         monkeypatch.setattr(LspProcess, "promote_workspace_ready", reject_transition)
 
-        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
 
         assert transitions == [process.generation_nonce]
         assert session.readiness == "protocol_initialized"
         assert process.state is ProcessState.PROTOCOL_INITIALIZED
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_timed_out_lifecycle_promotion_cannot_leave_query_readiness(
@@ -4265,9 +4265,11 @@ def test_timed_out_lifecycle_promotion_cannot_leave_query_readiness(
         session.close(deadline=time.monotonic() + 5)
 
 
+# FAILED is no longer terminal for the session: the dead process is replaced
+# (audit B-40, tests/test_a_failed_server_is_started_again.py).
 @pytest.mark.parametrize(
     "terminal_state",
-    [ProcessState.DEGRADED, ProcessState.FAILED],
+    [ProcessState.DEGRADED],
 )
 def test_terminal_process_state_revokes_session_readiness_before_semantic_use(
     repository: Path,
@@ -4279,7 +4281,7 @@ def test_terminal_process_state_revokes_session_readiness_before_semantic_use(
     process: LspProcess | None = None
     original_state: ProcessState | None = None
     try:
-        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
         process = session._process
         assert process is not None
         original_state = process.state
@@ -4292,13 +4294,13 @@ def test_terminal_process_state_revokes_session_readiness_before_semantic_use(
         assert dict(session.capabilities) == {}
         assert session.definition(
             _anchor(repository, "pkg/service.py", 10, 20),
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         ) == ProviderLocations((), "not_ready", True)
         assert _definition_requests(semantic_pyright) == definitions_before
     finally:
         if process is not None and original_state is not None:
             process.state = original_state
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_active_operation_and_lru_state_are_released_after_blocking_request(
@@ -4317,7 +4319,7 @@ def test_active_operation_and_lru_state_are_released_after_blocking_request(
     def query() -> None:
         try:
             results.append(
-                session.definition(anchor, deadline=time.monotonic() + 10)
+                session.definition(anchor, deadline=time.monotonic() + SHORT_TIMEOUT)
             )
         except BaseException as error:
             errors.append(error)
@@ -4349,11 +4351,11 @@ def test_active_operation_and_lru_state_are_released_after_blocking_request(
 
         invalid = SourceAnchor(anchor.path, anchor.line, anchor.utf8_character, 0)
         with pytest.raises(ValueError):
-            session.definition(invalid, deadline=time.monotonic() + 5)
+            session.definition(invalid, deadline=time.monotonic() + SHORT_TIMEOUT)
         assert session.active_operations == 0
     finally:
         thread.join(SHORT_TIMEOUT)
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_definition_drops_response_after_same_generation_document_change(
@@ -4521,11 +4523,11 @@ def test_synchronize_fence_rejects_queries_started_before_and_during_wire_commit
     try:
         document = session.open_document(
             "pkg/service.py",
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         scope = resolve_repository_scope(repository)
-        prior = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
-        session.synchronize(prior, deadline=time.monotonic() + 10)
+        prior = compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
+        session.synchronize(prior, deadline=time.monotonic() + SHORT_TIMEOUT)
         process = session._process
         assert process is not None
         request = LspProcess.request
@@ -4602,7 +4604,7 @@ def test_synchronize_fence_rejects_queries_started_before_and_during_wire_commit
                         session,
                         repository,
                         feature,
-                        deadline=time.monotonic() + 15,
+                        deadline=time.monotonic() + SHORT_TIMEOUT,
                     )
                 )
             except BaseException as error:
@@ -4621,12 +4623,12 @@ def test_synchronize_fence_rejects_queries_started_before_and_during_wire_commit
         (repository / "pkg/service.py").write_bytes(
             document.content + b"\nchanged = True\n"
         )
-        revision = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        revision = compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
 
         def synchronize() -> None:
             try:
                 sync_results.append(
-                    session.synchronize(revision, deadline=time.monotonic() + 15)
+                    session.synchronize(revision, deadline=time.monotonic() + SHORT_TIMEOUT)
                 )
             except BaseException as error:
                 errors.append(error)
@@ -4667,7 +4669,7 @@ def test_synchronize_fence_rejects_queries_started_before_and_during_wire_commit
             session,
             repository,
             feature,
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert fresh != not_ready
         assert semantic_requests >= 2
@@ -4677,7 +4679,7 @@ def test_synchronize_fence_rejects_queries_started_before_and_during_wire_commit
         for worker in (first_worker, during_worker, sync_worker):
             if worker is not None:
                 worker.join(SHORT_TIMEOUT)
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_call_hierarchy_stops_after_prepare_when_document_version_changes(
@@ -4776,7 +4778,7 @@ def test_workspace_symbols_drop_response_after_generation_replacement(
     errors: list[BaseException] = []
     worker: threading.Thread | None = None
     try:
-        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
         process = session._process
         generation = session._generation_nonce
         assert process is not None and generation is not None
@@ -4809,7 +4811,7 @@ def test_workspace_symbols_drop_response_after_generation_replacement(
         def query() -> None:
             try:
                 results.append(
-                    session.workspace_symbols("Service", deadline=time.monotonic() + 15)
+                    session.workspace_symbols("Service", deadline=time.monotonic() + SHORT_TIMEOUT)
                 )
             except BaseException as error:
                 errors.append(error)
@@ -4834,7 +4836,7 @@ def test_workspace_symbols_drop_response_after_generation_replacement(
         release_response.set()
         if worker is not None:
             worker.join(SHORT_TIMEOUT)
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_diagnostics_wait_stops_when_exact_open_document_is_replaced(
@@ -4868,7 +4870,7 @@ def test_diagnostics_wait_stops_when_exact_open_document_is_replaced(
     try:
         document = session.open_document(
             "pkg/service.py",
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
 
         def query() -> None:
@@ -4876,7 +4878,7 @@ def test_diagnostics_wait_stops_when_exact_open_document_is_replaced(
                 results.append(
                     session.diagnostics(
                         "pkg/service.py",
-                        deadline=time.monotonic() + 1,
+                        deadline=time.monotonic() + SHORT_TIMEOUT,
                     )
                 )
             except BaseException as error:
@@ -4893,9 +4895,9 @@ def test_diagnostics_wait_stops_when_exact_open_document_is_replaced(
         )
         revision = compute_workspace_revision(
             resolve_repository_scope(repository),
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
-        session.synchronize(revision, deadline=time.monotonic() + 10)
+        session.synchronize(revision, deadline=time.monotonic() + SHORT_TIMEOUT)
 
         assert done.wait(SHORT_TIMEOUT), "diagnostics wait retained a replaced document"
         assert errors == []
@@ -4903,7 +4905,7 @@ def test_diagnostics_wait_stops_when_exact_open_document_is_replaced(
     finally:
         if worker is not None:
             worker.join(SHORT_TIMEOUT)
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_configuration_request_item_bound_returns_empty_snapshot(
@@ -4920,14 +4922,14 @@ def test_configuration_request_item_bound_returns_empty_snapshot(
     )
     session = _session(repository, state_root, fixture)
     try:
-        session.start(deadline=time.monotonic() + 10)
+        session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
         configuration = next(
             event for event in fixture.events() if event["kind"] == "configuration"
         )
         assert configuration["values"] == []
         assert session.readiness == "protocol_initialized"
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_invalid_server_capability_shape_degrades_without_claiming_support(
@@ -4940,7 +4942,7 @@ def test_invalid_server_capability_shape_degrades_without_claiming_support(
     )
     session = _session(repository, state_root, fixture)
 
-    session.start(deadline=time.monotonic() + 10)
+    session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
     assert session.readiness == "not_ready"
     assert session.capabilities == {}
     assert session.degradation_codes == ("pyright_definition_capability_invalid",)
@@ -4984,13 +4986,15 @@ def test_qualified_identity_validation_unwinds_start_state_for_retry_and_close(
         state_root=state_root,
     )
 
-    with pytest.raises(TypeError, match="node_executable"):
-        session.start(deadline=time.monotonic() + 1)
-    assert session.active_operations == 0
-    assert session.readiness == "not_ready"
-    with pytest.raises(TypeError, match="node_executable"):
-        session.start(deadline=time.monotonic() + 1)
-    session.close(deadline=time.monotonic() + 1)
+    # An unusable install is a named degradation, not an exception that re-arms
+    # the start for every query (audit B-39,
+    # docs/research/2026-09-25-a-broken-install-is-a-named-degradation.md).
+    session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
+    first = (session.active_operations, session.readiness, session.degradation_codes)
+    session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
+    assert first == (0, "not_ready", ("pyright_install_invalid",))
+    assert session.degradation_codes == ("pyright_install_invalid",)
+    session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_symlinked_lsp_owner_parent_fails_closed_without_mutating_target(
@@ -5008,7 +5012,7 @@ def test_symlinked_lsp_owner_parent_fails_closed_without_mutating_target(
         pytest.skip("directory symlinks are unavailable")
     session = _session(repository, state_root, semantic_pyright)
 
-    session.start(deadline=time.monotonic() + 5)
+    session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
     assert session.readiness == "not_ready"
     assert session.degradation_codes == ("pyright_startup_failed",)
     assert tuple(outside.iterdir()) == ()
@@ -5024,12 +5028,12 @@ def test_symlinked_lsp_owner_parent_fails_closed_without_mutating_target(
         semantic_pyright,
     )
     try:
-        linked_session.start(deadline=time.monotonic() + 5)
+        linked_session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
         assert linked_session.readiness == "not_ready"
         assert linked_session.degradation_codes == ("pyright_startup_failed",)
         assert tuple(linked_state.iterdir()) == ()
     finally:
-        linked_session.close(deadline=time.monotonic() + 5)
+        linked_session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_exact_public_method_annotations() -> None:
@@ -5093,27 +5097,27 @@ def test_unqualified_semantic_features_return_not_ready_without_opening_or_wirin
 
     assert session.definition(
         anchor,
-        deadline=time.monotonic() + 1,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     ) == ProviderLocations((), "not_ready", True)
     assert session.hover(
         anchor,
-        deadline=time.monotonic() + 1,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     ) == ProviderHover(None, None, True)
     assert session.incoming_calls(
         anchor,
-        deadline=time.monotonic() + 1,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     ) == ProviderCalls("incoming", (), "not_ready", True)
     assert session.document_symbols(
         "pkg/service.py",
-        deadline=time.monotonic() + 1,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     ) == ProviderLocations((), "not_ready", True)
     assert session.workspace_symbols(
         "Service",
-        deadline=time.monotonic() + 1,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     ) == ProviderLocations((), "not_ready", True)
     assert session.diagnostics(
         "pkg/service.py",
-        deadline=time.monotonic() + 1,
+        deadline=time.monotonic() + SHORT_TIMEOUT,
     ) == ProviderDiagnostics((), None, True)
     assert not (state_root / "run/lsp").exists()
 
@@ -5129,12 +5133,12 @@ def test_multimegabyte_document_below_frame_limit_can_be_opened(
     try:
         document = session.open_document(
             "large.py",
-            deadline=time.monotonic() + 15,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert document.content == content
         assert session.readiness == "query_ready"
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_document_count_limit_closes_the_oldest_without_partial_session_state(
@@ -5158,8 +5162,8 @@ def test_document_count_limit_closes_the_oldest_without_partial_session_state(
     )
     session = _session(repository, state_root, semantic_pyright)
     try:
-        session.open_document("first.py", deadline=time.monotonic() + 10)
-        second = session.open_document("second.py", deadline=time.monotonic() + 10)
+        session.open_document("first.py", deadline=time.monotonic() + SHORT_TIMEOUT)
+        second = session.open_document("second.py", deadline=time.monotonic() + SHORT_TIMEOUT)
         methods = [event.get("method") for event in semantic_pyright.events()]
         assert (
             session._documents,
@@ -5173,7 +5177,7 @@ def test_document_count_limit_closes_the_oldest_without_partial_session_state(
             (2, 1),
         )
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_document_byte_limit_rejects_without_partial_session_state(
@@ -5195,16 +5199,16 @@ def test_document_byte_limit_rejects_without_partial_session_state(
     )
     session = _session(repository, state_root, semantic_pyright)
     try:
-        first = session.open_document("first.py", deadline=time.monotonic() + 10)
+        first = session.open_document("first.py", deadline=time.monotonic() + SHORT_TIMEOUT)
         target = session._readiness_target_uri
         with pytest.raises(RuntimeError, match="document source bytes"):
-            session.open_document("second.py", deadline=time.monotonic() + 10)
+            session.open_document("second.py", deadline=time.monotonic() + SHORT_TIMEOUT)
 
         assert session._documents == {first.source.uri: first}
         assert session._readiness_target_uri == target
         assert session._document_bytes == len(first.content)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_non_string_position_encoding_shape_is_operational_degradation(
@@ -5217,7 +5221,7 @@ def test_non_string_position_encoding_shape_is_operational_degradation(
     )
     session = _session(repository, state_root, fixture)
 
-    session.start(deadline=time.monotonic() + 10)
+    session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
     assert session.readiness == "not_ready"
     assert session.degradation_codes == ("pyright_position_encoding_unsupported",)
 
@@ -5240,14 +5244,14 @@ def test_supported_empty_locations_are_complete_only_after_query_readiness(
     try:
         assert session.definition(
             anchor,
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         ) == ProviderLocations((), "provider_reported", False)
         assert session.references(
             anchor,
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         ) == ProviderLocations((), "provider_reported", True)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def _client_messages(fixture: SemanticPyrightFixture, method: str) -> tuple[dict, ...]:
@@ -5276,14 +5280,14 @@ def test_first_synchronize_establishes_retained_workspace_revision(
 ) -> None:
     session = _session(repository, state_root, semantic_pyright)
     try:
-        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
         scope = resolve_repository_scope(repository)
-        revision = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
-        delta = session.synchronize(revision, deadline=time.monotonic() + 10)
-        assert delta == WorkspaceDelta((), (), (), (), False)
+        revision = compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
+        delta = session.synchronize(revision, deadline=time.monotonic() + SHORT_TIMEOUT)
+        assert delta == WorkspaceDelta((), (), (), ())
         assert session._workspace_revision is revision
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_first_synchronize_reverifies_unchanged_open_document_after_revision(
@@ -5423,13 +5427,13 @@ def test_synchronize_rejects_projected_source_bounds_before_reads_or_notificatio
     try:
         document = session.open_document(
             "pkg/service.py",
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         scope = resolve_repository_scope(repository)
-        prior = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
-        session.synchronize(prior, deadline=time.monotonic() + 10)
+        prior = compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
+        session.synchronize(prior, deadline=time.monotonic() + SHORT_TIMEOUT)
         (repository / "pkg/service.py").write_bytes(b"projected = True\n")
-        revision = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        revision = compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
         if bound == "document":
             revision = _oversized_document_revision(revision)
             expected = "source document byte limit"
@@ -5448,14 +5452,14 @@ def test_synchronize_rejects_projected_source_bounds_before_reads_or_notificatio
         before_events = tuple(semantic_pyright.events())
 
         with pytest.raises(RuntimeError, match=expected):
-            session.synchronize(revision, deadline=time.monotonic() + 10)
+            session.synchronize(revision, deadline=time.monotonic() + SHORT_TIMEOUT)
 
         assert reads == 0
         assert tuple(semantic_pyright.events()) == before_events
         assert session._documents[document.source.uri] is document
         assert session._workspace_revision is prior
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_changed_open_document_sends_full_did_change_and_increments_version_once(
@@ -5597,15 +5601,15 @@ def test_synchronize_commit_preserves_diagnostics_published_during_wire_calls(
     try:
         service = session.open_document(
             "pkg/service.py",
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         api = session.open_document(
             "pkg/api.py",
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         scope = resolve_repository_scope(repository)
-        prior = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
-        session.synchronize(prior, deadline=time.monotonic() + 10)
+        prior = compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
+        session.synchronize(prior, deadline=time.monotonic() + SHORT_TIMEOUT)
         session._publish_diagnostics(
             {
                 "uri": api.source.uri,
@@ -5614,7 +5618,7 @@ def test_synchronize_commit_preserves_diagnostics_published_during_wire_calls(
             }
         )
         (repository / "pkg/service.py").write_bytes(b"changed = True\n")
-        revision = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        revision = compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
         process = session._process
         assert process is not None
 
@@ -5648,7 +5652,7 @@ def test_synchronize_commit_preserves_diagnostics_published_during_wire_calls(
         def synchronize() -> None:
             try:
                 sync_results.append(
-                    session.synchronize(revision, deadline=time.monotonic() + 10)
+                    session.synchronize(revision, deadline=time.monotonic() + SHORT_TIMEOUT)
                 )
             except BaseException as error:
                 sync_errors.append(error)
@@ -5681,7 +5685,7 @@ def test_synchronize_commit_preserves_diagnostics_published_during_wire_calls(
         release_wire.set()
         if worker is not None:
             worker.join(SHORT_TIMEOUT)
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.mark.parametrize(
@@ -5702,10 +5706,10 @@ def test_synchronize_notification_failure_replays_prior_snapshot_without_commit(
 ) -> None:
     session = _session(repository, state_root, semantic_pyright)
     try:
-        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
         scope = resolve_repository_scope(repository)
-        prior = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
-        session.synchronize(prior, deadline=time.monotonic() + 10)
+        prior = compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
+        session.synchronize(prior, deadline=time.monotonic() + SHORT_TIMEOUT)
         process = session._process
         assert process is not None
         before_documents = dict(session._documents)
@@ -5717,7 +5721,7 @@ def test_synchronize_notification_failure_replays_prior_snapshot_without_commit(
             (repository / "pkg/service.py").unlink()
         else:
             (repository / "pkg/watched.py").write_bytes(b"watched = True\n")
-        revision = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        revision = compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
 
         notify_generation = LspProcess.notify_generation
         notify = LspProcess.notify
@@ -5761,7 +5765,7 @@ def test_synchronize_notification_failure_replays_prior_snapshot_without_commit(
         monkeypatch.setattr(LspProcess, "notify", fail_notify)
 
         with pytest.raises(RuntimeError, match="notification"):
-            session.synchronize(revision, deadline=time.monotonic() + 10)
+            session.synchronize(revision, deadline=time.monotonic() + SHORT_TIMEOUT)
 
         assert session._workspace_revision is prior
         assert session._documents == before_documents
@@ -5774,7 +5778,7 @@ def test_synchronize_notification_failure_replays_prior_snapshot_without_commit(
             for document in before_documents.values()
         )
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_synchronize_recovery_preserves_already_replayed_replacement_state(
@@ -5787,7 +5791,7 @@ def test_synchronize_recovery_preserves_already_replayed_replacement_state(
     try:
         document = session.open_document(
             "pkg/service.py",
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         process = session._process
         failed_generation = session._generation_nonce
@@ -5821,7 +5825,7 @@ def test_synchronize_recovery_preserves_already_replayed_replacement_state(
         session._recover_synchronize_snapshot(
             process,
             failed_generation,
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
 
         with session._lock:
@@ -5834,7 +5838,7 @@ def test_synchronize_recovery_preserves_already_replayed_replacement_state(
             assert session._process is process
             assert session._synchronize_snapshot_replayed_locked(process)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_synchronize_deadline_recovery_quarantines_partially_mutated_process(
@@ -6228,16 +6232,16 @@ def test_synchronize_rejects_noop_recovery_as_unproven(
     try:
         document = session.open_document(
             "pkg/service.py",
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         scope = resolve_repository_scope(repository)
-        prior = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
-        session.synchronize(prior, deadline=time.monotonic() + 10)
+        prior = compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
+        session.synchronize(prior, deadline=time.monotonic() + SHORT_TIMEOUT)
         process = session._process
         generation = session._generation_nonce
         assert process is not None and generation is not None
         (repository / "pkg/service.py").write_bytes(b"changed = True\n")
-        revision = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        revision = compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
         notify_generation = LspProcess.notify_generation
 
         def partial_change(
@@ -6267,7 +6271,7 @@ def test_synchronize_rejects_noop_recovery_as_unproven(
         )
 
         with pytest.raises(RuntimeError, match="notification recovery failed"):
-            session.synchronize(revision, deadline=time.monotonic() + 10)
+            session.synchronize(revision, deadline=time.monotonic() + SHORT_TIMEOUT)
 
         assert session._workspace_revision is prior
         assert session._documents[document.source.uri] is document
@@ -6276,7 +6280,7 @@ def test_synchronize_rejects_noop_recovery_as_unproven(
         assert session._startup_process is process
         assert session.readiness == "not_ready"
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_unchanged_content_sends_no_did_change_and_keeps_version(
@@ -6312,17 +6316,17 @@ def test_created_and_deleted_files_produce_watched_file_events(
 ) -> None:
     session = _session(repository, state_root, semantic_pyright)
     try:
-        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
         scope = resolve_repository_scope(repository)
         session.synchronize(
-            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
-            deadline=time.monotonic() + 10,
+            compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT),
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         (repository / "pkg/created.py").write_bytes(b"value = 1\n")
         (repository / "pkg/base.py").unlink()
         session.synchronize(
-            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
-            deadline=time.monotonic() + 10,
+            compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT),
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         watched = _wait_client_messages(
             semantic_pyright, "workspace/didChangeWatchedFiles"
@@ -6333,7 +6337,7 @@ def test_created_and_deleted_files_produce_watched_file_events(
         )
         assert types == [1, 3]
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_watched_file_notification_stays_on_captured_generation(
@@ -6344,15 +6348,15 @@ def test_watched_file_notification_stays_on_captured_generation(
 ) -> None:
     session = _session(repository, state_root, semantic_pyright)
     try:
-        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
         scope = resolve_repository_scope(repository)
-        prior = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
-        session.synchronize(prior, deadline=time.monotonic() + 10)
+        prior = compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
+        session.synchronize(prior, deadline=time.monotonic() + SHORT_TIMEOUT)
         process = session._process
         generation = session._generation_nonce
         assert process is not None and generation is not None
         (repository / "pkg/watched.py").write_bytes(b"watched = True\n")
-        revision = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        revision = compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
         notify = LspProcess.notify
         notify_generation = LspProcess.notify_generation
         replaced = False
@@ -6403,7 +6407,7 @@ def test_watched_file_notification_stays_on_captured_generation(
         )
 
         with pytest.raises(RuntimeError, match="watched-files"):
-            session.synchronize(revision, deadline=time.monotonic() + 10)
+            session.synchronize(revision, deadline=time.monotonic() + SHORT_TIMEOUT)
 
         assert replaced is True
         assert process.restart_count == 1
@@ -6414,7 +6418,7 @@ def test_watched_file_notification_stays_on_captured_generation(
         ) == ()
         assert session._workspace_revision is prior
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_deleted_open_document_sends_did_close_and_clears_retention(
@@ -6425,17 +6429,17 @@ def test_deleted_open_document_sends_did_close_and_clears_retention(
     session = _session(repository, state_root, semantic_pyright)
     try:
         document = session.open_document(
-            "pkg/service.py", deadline=time.monotonic() + 10
+            "pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT
         )
         scope = resolve_repository_scope(repository)
         session.synchronize(
-            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
-            deadline=time.monotonic() + 10,
+            compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT),
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         (repository / "pkg/service.py").unlink()
         session.synchronize(
-            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
-            deadline=time.monotonic() + 10,
+            compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT),
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         closed = _wait_client_messages(semantic_pyright, "textDocument/didClose")
         assert len(closed) == 1
@@ -6443,7 +6447,7 @@ def test_deleted_open_document_sends_did_close_and_clears_retention(
         assert document.source.uri not in session._documents
         assert document.source.uri not in session._diagnostics
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_rename_closes_old_open_uri_and_reports_watched_events(
@@ -6454,19 +6458,19 @@ def test_rename_closes_old_open_uri_and_reports_watched_events(
     session = _session(repository, state_root, semantic_pyright)
     try:
         document = session.open_document(
-            "pkg/rename_target.py", deadline=time.monotonic() + 10
+            "pkg/rename_target.py", deadline=time.monotonic() + SHORT_TIMEOUT
         )
         scope = resolve_repository_scope(repository)
         session.synchronize(
-            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
-            deadline=time.monotonic() + 10,
+            compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT),
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         (repository / "pkg/rename_target.py").rename(
             repository / "pkg/renamed.py"
         )
         delta = session.synchronize(
-            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
-            deadline=time.monotonic() + 10,
+            compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT),
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert delta.renamed == (("pkg/rename_target.py", "pkg/renamed.py"),)
         closed = _wait_client_messages(semantic_pyright, "textDocument/didClose")
@@ -6484,7 +6488,7 @@ def test_rename_closes_old_open_uri_and_reports_watched_events(
         assert ("rename_target.py", 3) in uris
         assert document.source.uri not in session._documents
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 @pytest.mark.parametrize("operation", ["delete", "rename"])
@@ -6498,13 +6502,13 @@ def test_synchronize_removing_readiness_target_revokes_query_ready(
     try:
         document = session.open_document(
             "pkg/service.py",
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         assert session.readiness == "query_ready"
         scope = resolve_repository_scope(repository)
         session.synchronize(
-            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
-            deadline=time.monotonic() + 10,
+            compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT),
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         if operation == "delete":
             (repository / "pkg/service.py").unlink()
@@ -6512,8 +6516,8 @@ def test_synchronize_removing_readiness_target_revokes_query_ready(
             (repository / "pkg/service.py").rename(repository / "pkg/moved.py")
 
         session.synchronize(
-            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
-            deadline=time.monotonic() + 10,
+            compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT),
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
 
         assert document.source.uri not in session._documents
@@ -6521,10 +6525,10 @@ def test_synchronize_removing_readiness_target_revokes_query_ready(
         assert session.readiness == "protocol_initialized"
         assert session.workspace_symbols(
             "service",
-            deadline=time.monotonic() + 10,
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         ).coverage == "not_ready"
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_content_hash_mismatch_after_revision_fails_stale(
@@ -6535,28 +6539,28 @@ def test_content_hash_mismatch_after_revision_fails_stale(
     session = _session(repository, state_root, semantic_pyright)
     try:
         document = session.open_document(
-            "pkg/service.py", deadline=time.monotonic() + 10
+            "pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT
         )
         scope = resolve_repository_scope(repository)
         session.synchronize(
-            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
-            deadline=time.monotonic() + 10,
+            compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT),
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         (repository / "pkg/service.py").write_bytes(
             b"class First:\n    pass\n"
         )
         revision = compute_workspace_revision(
-            scope, deadline=time.monotonic() + 10
+            scope, deadline=time.monotonic() + SHORT_TIMEOUT
         )
         (repository / "pkg/service.py").write_bytes(
             b"class Second:\n    pass\n"
         )
         with pytest.raises(RuntimeError, match="hash differs from the revision"):
-            session.synchronize(revision, deadline=time.monotonic() + 10)
+            session.synchronize(revision, deadline=time.monotonic() + SHORT_TIMEOUT)
         assert _client_messages(semantic_pyright, "textDocument/didChange") == ()
         assert session._documents[document.source.uri].version == 1
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_synchronize_rejects_foreign_checkout_revision(
@@ -6567,18 +6571,18 @@ def test_synchronize_rejects_foreign_checkout_revision(
 ) -> None:
     session = _session(repository, state_root, semantic_pyright)
     try:
-        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
         foreign = replace(
             compute_workspace_revision(
                 resolve_repository_scope(repository),
-                deadline=time.monotonic() + 10,
+                deadline=time.monotonic() + SHORT_TIMEOUT,
             ),
             checkout_id="deadbeef",
         )
         with pytest.raises(ValueError, match="must describe this checkout"):
-            session.synchronize(foreign, deadline=time.monotonic() + 10)
+            session.synchronize(foreign, deadline=time.monotonic() + SHORT_TIMEOUT)
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_synchronize_does_not_persist_semantic_results(
@@ -6588,11 +6592,11 @@ def test_synchronize_does_not_persist_semantic_results(
 ) -> None:
     session = _session(repository, state_root, semantic_pyright)
     try:
-        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/service.py", deadline=time.monotonic() + SHORT_TIMEOUT)
         scope = resolve_repository_scope(repository)
         session.synchronize(
-            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
-            deadline=time.monotonic() + 10,
+            compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT),
+            deadline=time.monotonic() + SHORT_TIMEOUT,
         )
         cache_root = state_root / "cache"
         semantic_files = (
@@ -6606,7 +6610,7 @@ def test_synchronize_does_not_persist_semantic_results(
             assert not (owner / "diagnostics.json").exists()
             assert not (owner / "results.json").exists()
     finally:
-        session.close(deadline=time.monotonic() + 5)
+        session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def _patch_discovery(
@@ -6637,12 +6641,12 @@ def test_manager_reuses_matching_live_session(
     _patch_discovery(monkeypatch, {scope.checkout_id: fixture.identity})
     manager = PyrightSessionManager(state_root=state_root)
     try:
-        first = manager.get(scope, deadline=time.monotonic() + 10)
-        second = manager.get(scope, deadline=time.monotonic() + 10)
+        first = manager.get(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
+        second = manager.get(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
         assert first is second
         assert len(manager._sessions) == 1
     finally:
-        manager.close_all(deadline=time.monotonic() + 5)
+        manager.close_all(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_manager_keys_by_checkout_and_profile_identity(
@@ -6663,12 +6667,12 @@ def test_manager_keys_by_checkout_and_profile_identity(
     )
     manager = PyrightSessionManager(state_root=state_root)
     try:
-        session_a = manager.get(scope_a, deadline=time.monotonic() + 10)
-        session_b = manager.get(scope_b, deadline=time.monotonic() + 10)
+        session_a = manager.get(scope_a, deadline=time.monotonic() + SHORT_TIMEOUT)
+        session_b = manager.get(scope_b, deadline=time.monotonic() + SHORT_TIMEOUT)
         assert session_a is not session_b
         assert len(manager._sessions) == 2
     finally:
-        manager.close_all(deadline=time.monotonic() + 5)
+        manager.close_all(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_manager_key_includes_complete_qualified_identity(
@@ -6694,14 +6698,14 @@ def test_manager_key_includes_complete_qualified_identity(
     )
     manager = PyrightSessionManager(state_root=state_root)
     try:
-        first = manager.get(scope, deadline=time.monotonic() + 10)
-        second = manager.get(scope, deadline=time.monotonic() + 10)
+        first = manager.get(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
+        second = manager.get(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
         assert first is not second
         assert first._identity is first_identity
         assert second._identity is second_identity
         assert len(manager._sessions) == 2
     finally:
-        manager.close_all(deadline=time.monotonic() + 5)
+        manager.close_all(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_session_idle_close_reservation_blocks_new_operations(
@@ -6722,7 +6726,7 @@ def test_session_idle_close_reservation_blocks_new_operations(
         with session._operation():
             pytest.fail("operation started after close reservation")
     assert session.active_operations == 0
-    session.close(deadline=time.monotonic() + 1)
+    session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
     assert session._closed is True
 
 
@@ -6746,7 +6750,7 @@ def test_session_close_reserves_before_waiting_for_active_operation(
 
     def close_session() -> None:
         try:
-            session.close(deadline=time.monotonic() + 2)
+            session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
         except BaseException as error:
             close_errors.append(error)
 
@@ -6790,8 +6794,8 @@ def test_failed_real_session_close_keeps_reservation_until_a_retry(
         lambda *_args, **_kwargs: semantic_pyright.identity,
     )
     manager = PyrightSessionManager(state_root=state_root)
-    session = manager.get(scope, deadline=time.monotonic() + 10)
-    session.start(deadline=time.monotonic() + 10)
+    session = manager.get(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
+    session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
     process = session._process
     assert process is not None
     generation = process._coordinator.active
@@ -6809,7 +6813,7 @@ def test_failed_real_session_close_keeps_reservation_until_a_retry(
     try:
         assert session._reserve_idle_close(time.monotonic() + 1) is True
         with pytest.raises(OSError, match="retained session tree close failed"):
-            session.close(deadline=time.monotonic() + 3)
+            session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 
         assert session._closing is True
         assert session._closed is False
@@ -6818,13 +6822,13 @@ def test_failed_real_session_close_keeps_reservation_until_a_retry(
                 pytest.fail("operation started after retained close failure")
 
         tree_fault = False
-        manager.close_all(deadline=time.monotonic() + 5)
+        manager.close_all(deadline=time.monotonic() + SHORT_TIMEOUT)
         assert session._closed is True
         assert manager._sessions == {}
     finally:
         tree_fault = False
         if manager._sessions:
-            manager.close_all(deadline=time.monotonic() + 5)
+            manager.close_all(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_session_close_state_lock_wait_obeys_absolute_deadline(
@@ -6882,16 +6886,16 @@ def test_manager_evicts_lru_idle_and_never_exceeds_four(
     _patch_discovery(monkeypatch, identities)
     manager = PyrightSessionManager(state_root=state_root)
     try:
-        first = manager.get(scopes[0], deadline=time.monotonic() + 10)
+        first = manager.get(scopes[0], deadline=time.monotonic() + SHORT_TIMEOUT)
         for index in range(1, 5):
-            manager.get(scopes[index], deadline=time.monotonic() + 10)
+            manager.get(scopes[index], deadline=time.monotonic() + SHORT_TIMEOUT)
         assert len(manager._sessions) == 4
         assert first._closed
-        fifth = manager.get(scopes[0], deadline=time.monotonic() + 10)
+        fifth = manager.get(scopes[0], deadline=time.monotonic() + SHORT_TIMEOUT)
         assert fifth is not first
         assert len(manager._sessions) == 4
     finally:
-        manager.close_all(deadline=time.monotonic() + 5)
+        manager.close_all(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_manager_failed_eviction_retains_slot_and_closes_outside_global_lock(
@@ -6909,7 +6913,7 @@ def test_manager_failed_eviction_retains_slot_and_closes_outside_global_lock(
     _patch_discovery(monkeypatch, identities)
     manager = PyrightSessionManager(state_root=state_root)
     retained = [
-        manager.get(scope, deadline=time.monotonic() + 10)
+        manager.get(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
         for scope in scopes[:4]
     ]
     for index, session in enumerate(retained):
@@ -6925,7 +6929,7 @@ def test_manager_failed_eviction_retains_slot_and_closes_outside_global_lock(
         with monkeypatch.context() as patch:
             patch.setattr(retained[0], "close", fail_close)
             with pytest.raises(OSError, match="injected close failure"):
-                manager.get(scopes[4], deadline=time.monotonic() + 2)
+                manager.get(scopes[4], deadline=time.monotonic() + SHORT_TIMEOUT)
 
         assert lock_was_available.is_set()
         assert len(manager._sessions) == 4
@@ -6933,7 +6937,7 @@ def test_manager_failed_eviction_retains_slot_and_closes_outside_global_lock(
         assert retained[0]._closed is False
         assert not _sessions_for_checkout(manager, scopes[4].checkout_id)
     finally:
-        manager.close_all(deadline=time.monotonic() + 5)
+        manager.close_all(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_manager_returns_not_ready_when_all_four_active(
@@ -6955,12 +6959,12 @@ def test_manager_returns_not_ready_when_all_four_active(
     sessions: list[PyrightSession] = []
     try:
         for index in range(4):
-            session = manager.get(scopes[index], deadline=time.monotonic() + 10)
+            session = manager.get(scopes[index], deadline=time.monotonic() + SHORT_TIMEOUT)
             sessions.append(session)
             session._active_operations = 1
-        denied = manager.get(scopes[4], deadline=time.monotonic() + 10)
+        denied = manager.get(scopes[4], deadline=time.monotonic() + SHORT_TIMEOUT)
         assert denied._capacity_locked is True
-        assert denied.start(deadline=time.monotonic() + 2) is None
+        assert denied.start(deadline=time.monotonic() + SHORT_TIMEOUT) is None
         assert denied.readiness == "not_ready"
         assert "pyright_capacity_exhausted" in denied.degradation_codes
         assert len(manager._sessions) == 4
@@ -6969,7 +6973,7 @@ def test_manager_returns_not_ready_when_all_four_active(
             with session._lock:
                 session._active_operations = 0
                 session._condition.notify_all()
-        manager.close_all(deadline=time.monotonic() + 5)
+        manager.close_all(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_manager_close_all_closes_every_retained_session(
@@ -6989,10 +6993,10 @@ def test_manager_close_all_closes_every_retained_session(
     _patch_discovery(monkeypatch, identities)
     manager = PyrightSessionManager(state_root=state_root)
     retained = [
-        manager.get(scopes[0], deadline=time.monotonic() + 10),
-        manager.get(scopes[1], deadline=time.monotonic() + 10),
+        manager.get(scopes[0], deadline=time.monotonic() + SHORT_TIMEOUT),
+        manager.get(scopes[1], deadline=time.monotonic() + SHORT_TIMEOUT),
     ]
-    manager.close_all(deadline=time.monotonic() + 5)
+    manager.close_all(deadline=time.monotonic() + SHORT_TIMEOUT)
     assert all(session._closed for session in retained)
     assert manager._sessions == {}
 
@@ -7173,7 +7177,7 @@ def test_manager_get_rechecks_closed_after_per_key_wait(
 
     def get_waiting() -> None:
         try:
-            manager.get(scope, deadline=time.monotonic() + 2)
+            manager.get(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
         except BaseException as error:
             errors.append(error)
 
@@ -7183,7 +7187,7 @@ def test_manager_get_rechecks_closed_after_per_key_wait(
     try:
         def close_manager() -> None:
             try:
-                manager.close_all(deadline=time.monotonic() + 2)
+                manager.close_all(deadline=time.monotonic() + SHORT_TIMEOUT)
             except BaseException as error:
                 close_errors.append(error)
             finally:
@@ -7262,7 +7266,7 @@ def test_manager_close_all_waits_for_get_retained_before_per_key_lock(
 
     def get_session() -> None:
         try:
-            manager.get(scope, deadline=time.monotonic() + 5)
+            manager.get(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
         except BaseException as error:
             get_errors.append(error)
         finally:
@@ -7270,7 +7274,7 @@ def test_manager_close_all_waits_for_get_retained_before_per_key_lock(
 
     def close_manager() -> None:
         try:
-            manager.close_all(deadline=time.monotonic() + 5)
+            manager.close_all(deadline=time.monotonic() + SHORT_TIMEOUT)
         except BaseException as error:
             close_errors.append(error)
         finally:
@@ -7517,7 +7521,7 @@ def test_manager_key_lock_lives_through_waiters_and_releases_after_last_get(
 
     def get_session(*, third: bool = False) -> None:
         try:
-            results.append(manager.get(scope, deadline=time.monotonic() + 5))
+            results.append(manager.get(scope, deadline=time.monotonic() + SHORT_TIMEOUT))
         except BaseException as error:
             errors.append(error)
         finally:
@@ -7557,7 +7561,7 @@ def test_manager_key_lock_lives_through_waiters_and_releases_after_last_get(
         for worker in (first, second, third):
             if worker.ident is not None:
                 worker.join(SHORT_TIMEOUT)
-        manager.close_all(deadline=time.monotonic() + 2)
+        manager.close_all(deadline=time.monotonic() + SHORT_TIMEOUT)
 
     assert manager._key_locks == {}
 
@@ -7600,7 +7604,7 @@ def test_manager_parallel_evictions_reserve_distinct_idle_sessions_with_capacity
     scopes = _prepared_scopes(tmp_path, monkeypatch, "parallel", 6)
     manager = PyrightSessionManager(state_root=state_root)
     retained = [
-        manager.get(scope, deadline=time.monotonic() + 10)
+        manager.get(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
         for scope in scopes[:4]
     ]
     _stagger_last_used(retained)
@@ -7618,7 +7622,7 @@ def test_manager_parallel_evictions_reserve_distinct_idle_sessions_with_capacity
 
     def get_new(scope: RepositoryScope) -> None:
         try:
-            results.append(manager.get(scope, deadline=time.monotonic() + 5))
+            results.append(manager.get(scope, deadline=time.monotonic() + SHORT_TIMEOUT))
         except BaseException as error:
             errors.append(error)
 
@@ -7639,7 +7643,7 @@ def test_manager_parallel_evictions_reserve_distinct_idle_sessions_with_capacity
         assert retained[1]._closed is True
     finally:
         release_close.set()
-        manager.close_all(deadline=time.monotonic() + 5)
+        manager.close_all(deadline=time.monotonic() + SHORT_TIMEOUT)
 
 
 def test_manager_registers_atexit_once(
@@ -7652,8 +7656,8 @@ def test_manager_registers_atexit_once(
     _patch_discovery(monkeypatch, {scope.checkout_id: fixture.identity})
     manager = PyrightSessionManager(state_root=state_root)
     assert manager._atexit_registered is False
-    manager.get(scope, deadline=time.monotonic() + 10)
+    manager.get(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
     assert manager._atexit_registered is True
-    manager.get(scope, deadline=time.monotonic() + 10)
+    manager.get(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
     assert manager._atexit_registered is True
-    manager.close_all(deadline=time.monotonic() + 5)
+    manager.close_all(deadline=time.monotonic() + SHORT_TIMEOUT)

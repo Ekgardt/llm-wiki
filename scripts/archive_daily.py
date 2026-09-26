@@ -25,6 +25,7 @@ from evidence_resolver import (  # noqa: E402
     EvidenceRef,
     EvidenceResolutionError,
     EvidenceResolver,
+    _daily_part_bounds,
     _line_span,
     _regular_directory,
     bounded_directory_entries,
@@ -83,12 +84,34 @@ _BROAD_ACL_SIDS = (
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
+def _receipt_names(count: int) -> list[str]:
+    """`compile-receipt.md` for a one-part day, as v1 always wrote it; numbered for a split day."""
+    if count == 1:
+        return ["compile-receipt.md"]
+    return [f"compile-receipt-{index}.md" for index in range(count)]
+
+
+@dataclass(frozen=True)
+class CompiledPart:
+    """One compile part of a day: its span, its digest, and the receipt that took it.
+
+    A day longer than one compile part is compiled part by part, and each part has
+    its own receipt (audit 2026-09-26 B-1,
+    docs/research/2026-09-26-a-split-day-is-archived-with-every-part.md).
+    """
+
+    byte_start: int
+    byte_end: int
+    digest: str
+    receipt: dict[str, object] | None
+
+
 @dataclass(frozen=True)
 class Eligibility:
     eligible: bool
     reasons: tuple[str, ...]
     source_sha256: str | None = None
-    receipt: dict[str, object] | None = None
+    parts: tuple[CompiledPart, ...] = ()
     blocking_task_ids: tuple[str, ...] = ()
 
 
@@ -314,7 +337,7 @@ class DailyArchiver:
         self,
         source: Path,
         digest: str,
-        receipt: dict[str, object] | None,
+        parts: tuple[CompiledPart, ...],
         transaction_retention_days: int,
     ) -> list[str]:
         """Transactions, decisions, and manual pins that hold the source in place."""
@@ -323,9 +346,10 @@ class DailyArchiver:
             source.name, transaction_retention_days=transaction_retention_days
         ):
             reasons.append("active_transaction")
-        reasons.extend(
-            self._receipt_retention_reason(receipt, digest, transaction_retention_days)
-        )
+        for part in parts:
+            reasons.extend(
+                self._receipt_retention_reason(part.receipt, part.digest, transaction_retention_days)
+            )
         return reasons + self._pin_reasons(source, digest)
 
     def _eligible(
@@ -349,7 +373,7 @@ class DailyArchiver:
 
         digest = sha256_bytes(content)
         logical_path = f"knowledge/daily/{source.name}"
-        receipt, receipt_reasons = self._receipt_reasons(logical_path, digest)
+        parts, receipt_reasons = self._part_receipts(logical_path, content)
         blocking_tasks, queue_reasons = self._queue_reasons(
             source,
             digest,
@@ -361,16 +385,29 @@ class DailyArchiver:
             *receipt_reasons,
             *self._evidence_reasons(source, content, digest),
             *queue_reasons,
-            *self._retained_reasons(source, digest, receipt, transaction_retention_days),
+            *self._retained_reasons(source, digest, parts, transaction_retention_days),
             *self._writer_reason(ignore_current_writer),
         ]
         return Eligibility(
             not reasons,
             tuple(dict.fromkeys(reasons)),
             digest,
-            receipt,
+            parts,
             blocking_tasks,
         )
+
+    def _part_receipts(
+        self, logical_path: str, content: bytes
+    ) -> tuple[tuple[CompiledPart, ...], list[str]]:
+        """Every compile part of the day with its receipt, and what any part lacks."""
+        parts: list[CompiledPart] = []
+        reasons: list[str] = []
+        for start, end in _daily_part_bounds(content):
+            digest = sha256_bytes(content[start:end])
+            receipt, part_reasons = self._receipt_reasons(logical_path, digest)
+            parts.append(CompiledPart(start, end, digest, receipt))
+            reasons.extend(part_reasons)
+        return tuple(parts), reasons
 
     def _receipt_operation_state(
         self, logical_path: str, digest: str
@@ -865,11 +902,14 @@ class DailyArchiver:
             raise RuntimeError("compile transaction authority disappeared")
         return int(row["commit_sequence"])
 
+    def _compile_authorities(self, eligibility: Eligibility, daily_id: str) -> list[_CompileAuthority]:
+        """Re-prove every part's receipt and committed transaction at build time."""
+        return [self._compile_authority(part.receipt, daily_id, part.digest) for part in eligibility.parts]
+
     def _compile_authority(
-        self, eligibility: Eligibility, daily_id: str, digest: str
+        self, receipt: dict[str, object] | None, daily_id: str, digest: str
     ) -> _CompileAuthority:
-        """Re-prove the compile receipt and its committed transaction at build time."""
-        receipt = eligibility.receipt
+        """Re-prove one compile receipt and its committed transaction at build time."""
         assert receipt is not None
         logical_path = f"knowledge/daily/{daily_id}.md"
         from compile_memory import (
@@ -919,13 +959,9 @@ class DailyArchiver:
         ]
 
     @staticmethod
-    def _write_tag_manifest(publish_build: Path) -> None:
-        tag_names = (
-            "archive-manifest.json",
-            "bag-info.txt",
-            "bagit.txt",
-            "compile-receipt.md",
-            "manifest-sha256.txt",
+    def _write_tag_manifest(publish_build: Path, receipt_names: list[str]) -> None:
+        tag_names = sorted(
+            ("archive-manifest.json", "bag-info.txt", "bagit.txt", *receipt_names, "manifest-sha256.txt")
         )
         (publish_build / "tagmanifest-sha256.txt").write_bytes(
             "".join(
@@ -940,36 +976,28 @@ class DailyArchiver:
         daily_id: str,
         content: bytes,
         digest: str,
-        authority: _CompileAuthority,
+        authorities: list[_CompileAuthority],
         eligibility: Eligibility,
         now: datetime,
         *,
         hot_days: int,
     ) -> None:
-        (publish_build / "compile-receipt.md").write_bytes(authority.receipt_bytes)
+        names = _receipt_names(len(authorities))
+        for name, authority in zip(names, authorities):
+            (publish_build / name).write_bytes(authority.receipt_bytes)
         manifest = {
-            "schema_version": "archive-manifest/v1",
             "logical_daily_id": daily_id,
             "original_path": f"knowledge/daily/{daily_id}.md",
             "source_hash": digest,
             "payload_hash": digest,
-            "compile_receipt_ref": {
-                "schema": "compile-receipt-ref/v1",
-                "path": authority.receipt_path.relative_to(self.vault).as_posix(),
-                "logical_path": authority.logical_path,
-                "source_digest": digest,
-                "source_identity": authority.source_identity,
-                "receipt_file_hash": sha256_bytes(authority.receipt_bytes),
-                "embedded_path": "compile-receipt.md",
-            },
-            "compile_authority": authority.attestation,
+            **self._receipt_fields(authorities, eligibility.parts, names),
             "queue_preflight": {
                 "checked_at": now.isoformat().replace("+00:00", "Z"),
                 "passed": True,
                 "blocking_task_ids": list(eligibility.blocking_task_ids),
             },
             "operations": [
-                {"operation_id": authority.operation_id, "state": "succeeded"}
+                {"operation_id": authority.operation_id, "state": "succeeded"} for authority in authorities
             ],
             "evidence": self._evidence_entries(content),
             "pins": [],
@@ -978,7 +1006,41 @@ class DailyArchiver:
         (publish_build / "archive-manifest.json").write_bytes(
             canonical_json_bytes(manifest)
         )
-        self._write_tag_manifest(publish_build)
+        self._write_tag_manifest(publish_build, names)
+
+    def _receipt_fields(
+        self, authorities: list[_CompileAuthority], parts: tuple[CompiledPart, ...], names: list[str]
+    ) -> dict[str, object]:
+        """v1 names one receipt; v2 lists one per compile part of a split day."""
+        if len(authorities) == 1:
+            return {
+                "schema_version": "archive-manifest/v1",
+                "compile_receipt_ref": self._receipt_ref(authorities[0], parts[0].digest, names[0]),
+                "compile_authority": authorities[0].attestation,
+            }
+        return {
+            "schema_version": "archive-manifest/v2",
+            "compile_parts": [
+                {
+                    "byte_start": part.byte_start,
+                    "byte_end": part.byte_end,
+                    "compile_receipt_ref": self._receipt_ref(authority, part.digest, name),
+                    "compile_authority": authority.attestation,
+                }
+                for part, authority, name in zip(parts, authorities, names)
+            ],
+        }
+
+    def _receipt_ref(self, authority: _CompileAuthority, digest: str, name: str) -> dict[str, object]:
+        return {
+            "schema": "compile-receipt-ref/v1",
+            "path": authority.receipt_path.relative_to(self.vault).as_posix(),
+            "logical_path": authority.logical_path,
+            "source_digest": digest,
+            "source_identity": authority.source_identity,
+            "receipt_file_hash": sha256_bytes(authority.receipt_bytes),
+            "embedded_path": name,
+        }
 
     def _finalize_build(self, publish_build: Path) -> None:
         """Harden, flush, seal, and validate the finished build directory."""
@@ -1014,13 +1076,13 @@ class DailyArchiver:
             month, daily_id, nonce, final_bag, now, content
         )
         digest = self._write_payload_and_tags(publish_build, daily_id, content, now)
-        authority = self._compile_authority(eligibility, daily_id, digest)
+        authorities = self._compile_authorities(eligibility, daily_id)
         self._write_manifest(
             publish_build,
             daily_id,
             content,
             digest,
-            authority,
+            authorities,
             eligibility,
             now,
             hot_days=hot_days,
@@ -2004,6 +2066,7 @@ def _archive_one(
         transaction_retention_days=args.transaction_retention_days,
     )
     if not status.eligible:
+        _report_kept(source, status.reasons)
         return None
     if not args.commit:
         print(f"Would archive: {source.name}")
@@ -2015,20 +2078,51 @@ def _archive_one(
     )
 
 
+# Reasons every day inside the hot window has; naming them would list 90 normal days.
+_HOT_REASONS = frozenset({"today", "hot_retention"})
+
+
+def _report_kept(source: Path, reasons: tuple[str, ...]) -> None:
+    """A day that should have left the hot window says why it stays (audit B-9)."""
+    if not reasons or _HOT_REASONS.intersection(reasons):
+        return
+    print(f"Kept flat: {source.stem}: {', '.join(reasons)}")
+
+
+@dataclass
+class _ArchiveRun:
+    archived: int = 0
+    failed: int = 0
+
+
+def _archive_reported(
+    archiver: DailyArchiver, source: Path, args: argparse.Namespace, run: _ArchiveRun
+) -> None:
+    """One day; its failure is named and the run goes on to the next day."""
+    try:
+        receipt = _archive_one(archiver, source, args)
+    except (OSError, RuntimeError, ValueError, sqlite3.Error) as error:
+        from secret_redact import describe_error
+
+        run.failed += 1
+        print(f"Failed: {source.stem}: {describe_error(error)}", file=sys.stderr)
+        return
+    run.archived += receipt is not None
+
+
 def main(argv: list[str] | None = None) -> int:
+    """Archive what is eligible; exit 1 when any day failed, so the weekly says so.
+
+    See `docs/research/2026-09-25-the-weekly-archive-says-why-and-goes-on.md`.
+    """
     args = parse_args(argv)
     archiver = DailyArchiver(ROOT, STATE_ROOT)
-    results = [
-        receipt
-        for receipt in (
-            _archive_one(archiver, source, args)
-            for source in _flat_daily_sources(archiver)
-        )
-        if receipt is not None
-    ]
+    run = _ArchiveRun()
+    for source in _flat_daily_sources(archiver):
+        _archive_reported(archiver, source, args, run)
     if args.commit:
-        print(f"Archived {len(results)} log(s).")
-    return 0
+        print(f"Archived {run.archived} log(s); {run.failed} failed.")
+    return 1 if run.failed else 0
 
 
 if __name__ == "__main__":

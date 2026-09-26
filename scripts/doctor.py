@@ -111,7 +111,13 @@ TRANSACTION_STATES = (
     "discarded",
     "conflicted",
     "quarantined",
+    # An operator discard rolls back through `aborting` to `aborted`; doctor
+    # called both "a state this runtime does not define" (audit 2026-09-26 C-12).
+    "aborting",
+    "aborted",
 )
+# Transactions still on their way somewhere: a crash here needs recovery.
+UNSETTLED_TRANSACTION_STATES = ("preparing", "prepared", "applying", "aborting")
 QUEUE_STATES = ("ready", "leased", "blocked", "succeeded", "dead", "cancelled")
 # One source of truth for the window; it was 30 in four files. See
 # `docs/research/2026-09-02-where-undo-belongs-and-for-how-long.md`.
@@ -173,8 +179,36 @@ def _environment_check(root: Path, state_root: Path) -> dict:
         "vault_root": {"status": _ok_or_error(root_ok)},
         "state_root": {"status": _ok_or_error(state_parent_ok)},
         "layout": layout,
+        "provider": _provider_setting(),
     }
-    return _result("environment", status, _environment_message(status), details)
+    return _with_provider_finding(
+        _result("environment", status, _environment_message(status), details)
+    )
+
+
+def _provider_setting() -> dict[str, object]:
+    """`MEMORY_LLM_PROVIDER` as the calls read it, and whether it names a provider.
+
+    A name that is no provider yields no provider at all (audit C-3); saying so
+    here is the only way the operator learns of the typo.
+    """
+    from llm_client import KNOWN_PROVIDERS, forced_provider
+
+    value = forced_provider()
+    known = value in {"", "fake", *KNOWN_PROVIDERS}
+    return {"value": value or "auto", "known": known, "accepted": ["auto (unset)", *KNOWN_PROVIDERS]}
+
+
+def _with_provider_finding(result: dict) -> dict:
+    provider = result["details"]["provider"]
+    if provider["known"] or result["status"] != "ok":
+        return result
+    result["status"] = "degraded"
+    result["message"] = (
+        f"MEMORY_LLM_PROVIDER={provider['value']} names no provider, so no model is called; "
+        f"use one of: {', '.join(provider['accepted'])}."
+    )
+    return result
 
 
 def _ok_or_error(value: bool) -> str:
@@ -605,17 +639,23 @@ def _parse_utc(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _row_value(row: sqlite3.Row, column: str) -> object:
+    return row[column] if column in row.keys() else None
+
+
 def _live_owner(row: sqlite3.Row, now: datetime, *, pid_column: str) -> bool:
-    columns = set(row.keys())
-    pid = row[pid_column] if pid_column in columns else None
-    expiry = _parse_utc(row["expires_at"]) if "expires_at" in columns else None
-    return _owner_pid_live(pid) or _owner_unexpired(expiry, now)
+    identity = _row_value(row, "process_start_identity")
+    expiry = _parse_utc(_row_value(row, "expires_at"))
+    return _owner_pid_live(_row_value(row, pid_column), identity) or _owner_unexpired(expiry, now)
 
 
-def _owner_pid_live(pid: object) -> bool:
+def _owner_pid_live(pid: object, identity: object = None) -> bool:
+    """The recorded start identity, when a row has one, names the process, not the PID (C-12)."""
     if not isinstance(pid, int) or pid <= 0:
         return False
-    return _pid_alive(pid)
+    if not isinstance(identity, str):
+        return _pid_alive(pid)
+    return process_liveness.owner_alive(pid, identity)
 
 
 def _owner_unexpired(expiry: datetime | None, now: datetime) -> bool:
@@ -647,29 +687,45 @@ def _transaction_artifacts(state_root: Path, deadline: float) -> tuple[set[str],
         limit=MAX_RUNTIME_ENTRIES,
         deadline=deadline,
     )
-    identifiers: set[str] = set()
-    unsafe = truncated or error
-    for entry in entries:
-        if (
-            _safe_kind(entry, state_root)[0] != "directory"
-            or re.fullmatch(r"[0-9a-z_-]{1,128}", entry.name) is None
-        ):
-            unsafe = True
-        else:
-            identifiers.add(entry.name)
-    return identifiers, unsafe
+    kinds = {entry.name: _artifact_kind(entry, state_root) for entry in entries}
+    identifiers = _names_of_kind(kinds, "artifact")
+    return identifiers, bool(truncated or error or _names_of_kind(kinds, "unsafe"))
+
+
+def _names_of_kind(kinds: dict[str, str], wanted: str) -> set[str]:
+    return {name for name, kind in kinds.items() if kind == wanted}
+
+
+def _artifact_kind(entry: Path, state_root: Path) -> str:
+    """`artifact`, `staged` (images a prune set aside and the next prune or repair removes), or `unsafe`.
+
+    A staged prune read as an unsafe entry, so an interrupted prune looked like a
+    damaged transaction trail (audit 2026-09-26 B-22).
+    """
+    if _safe_kind(entry, state_root)[0] != "directory":
+        return "unsafe"
+    if entry.name.startswith(".") and ".pruning-" in entry.name:
+        return "staged"
+    return "artifact" if _TRANSACTION_ID_RE.fullmatch(entry.name) else "unsafe"
 
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _TRANSACTION_ID_RE = re.compile(r"[0-9a-z_-]{1,128}")
+# Open states first, then newest: an unordered bounded scan judged the oldest
+# 10 000 rows and never the ones that matter now (audit 2026-09-26 A-3,
+# docs/research/2026-09-26-doctor-reads-the-open-rows-first.md).
+_TRANSACTION_ORDER = " ORDER BY state IN ('committed', 'discarded'), rowid DESC"
 _TRANSACTION_QUERY = (
     "SELECT id, operation_id, request_hash, state, preconditions_json, "
     "plan_hash, created_at, updated_at, artifacts_pruned_at "
-    'FROM "transaction"'
+    'FROM "transaction"' + _TRANSACTION_ORDER
 )
 _OPERATION_QUERY = (
-    "SELECT transaction_id, position, kind, path, before_hash, "
-    'after_hash, parent_device, parent_inode, applied FROM "operation"'
+    "SELECT operation.transaction_id, operation.position, operation.kind, "
+    "operation.path, operation.before_hash, operation.after_hash, "
+    "operation.parent_device, operation.parent_inode, operation.applied "
+    'FROM "operation" JOIN "transaction" ON "transaction".id = operation.transaction_id'
+    " ORDER BY \"transaction\".state IN ('committed', 'discarded'), \"transaction\".rowid DESC"
 )
 _OWNER_TABLE_QUERIES = {
     "writer_owners": "SELECT * FROM writer_owners LIMIT ?",
@@ -1531,7 +1587,7 @@ def _transaction_status(
 
 def _append_state_deletion_codes(details: dict, states: dict[str, int]) -> None:
     nonterminal = any(
-        states.get(state, 0) for state in ("preparing", "prepared", "applying")
+        states.get(state, 0) for state in UNSETTLED_TRANSACTION_STATES
     )
     ordered = (
         (nonterminal, "transaction_nonterminal"),
@@ -1556,7 +1612,7 @@ def _append_live_deletion_codes(details: dict) -> None:
 
 def _unsettled_count(states: dict[str, int]) -> int:
     return (
-        sum(states[state] for state in ("preparing", "prepared", "applying"))
+        sum(states[state] for state in UNSETTLED_TRANSACTION_STATES)
         + states["conflicted"]
     )
 
@@ -1595,7 +1651,7 @@ def _transaction_result(details: dict, states: dict[str, int]) -> dict:
     details["codes"] = sorted(set(details["codes"]))
     details["deletion_codes"] = list(dict.fromkeys(details["deletion_codes"]))
     problem = (
-        sum(states[state] for state in ("preparing", "prepared", "applying"))
+        sum(states[state] for state in UNSETTLED_TRANSACTION_STATES)
         + states["conflicted"]
         + details["quarantined_unresolved"]
     )
@@ -1620,13 +1676,19 @@ def _truncated_scan_verdict(details: dict, status: str, message: str) -> tuple[s
     """
     if status != "ok" or not details.get("truncated_scans"):
         return status, message
-    totals = ", ".join(f"{state} {count}" for state, count in sorted((details.get("state_totals") or {}).items()))
     return (
         "ok",
         "Transaction state is healthy within the scanned rows; the scan stopped at "
         "its row bound, so its counts are a lower bound. Rows by state, counted "
-        f"whole: {totals or 'unknown'}.",
+        f"whole: {_state_totals_text(details.get('state_totals'))}.",
     )
+
+
+def _state_totals_text(totals: object) -> str:
+    """`committed 3, quarantined 1`, or `unknown` when the whole-table count failed."""
+    if not isinstance(totals, dict) or not totals:
+        return "unknown"
+    return ", ".join(f"{state} {count}" for state, count in sorted(totals.items()))
 
 
 def _empty_transaction_details() -> tuple[dict, dict[str, int]]:
@@ -1893,7 +1955,8 @@ def _scan_queue_tasks(
 
 def _bounded_task_rows(database: sqlite3.Connection, details: dict) -> list[sqlite3.Row]:
     rows = database.execute(
-        "SELECT * FROM tasks LIMIT ?", (MAX_OPERATIONAL_ROWS + 1,)
+        "SELECT * FROM tasks ORDER BY state IN ('succeeded', 'dead', 'cancelled'), rowid DESC LIMIT ?",
+        (MAX_OPERATIONAL_ROWS + 1,),
     ).fetchall()
     if len(rows) <= MAX_OPERATIONAL_ROWS:
         return rows
@@ -2069,6 +2132,7 @@ def _scan_queue_database(
             rows, now=now, deadline=deadline, details=details, states=states
         )
         _append_queue_scan_codes(details, unknown_state, corrupt_metadata, rows)
+        details["recent_dead"] = _recent_dead_count(rows, now)
         _count_queue_side_tables(database, tables, details, now)
         _validate_queue_results(state_root, references, result_hashes, details)
         return _QueueScan(None, unknown_state, corrupt_metadata)
@@ -2083,7 +2147,24 @@ def _queue_error_state(
 
 
 def _queue_pending_work(states: dict[str, int], details: dict) -> bool:
-    return bool(states["ready"] or states["leased"] or states["blocked"])
+    return bool(states["ready"] or states["leased"] or states["blocked"] or details.get("recent_dead"))
+
+
+# A task that died this week is work that did not happen: 25 of them were
+# reported healthy (audit 2026-09-26 B-23). Older dead tasks are history the
+# weekly purge exports and removes.
+DEAD_TASK_LIVE_SECONDS = 7 * 24 * 3600
+
+
+def _recent_dead_count(rows: list[sqlite3.Row], now: datetime) -> int:
+    return sum(1 for row in rows if _died_recently(row, now))
+
+
+def _died_recently(row: sqlite3.Row, now: datetime) -> bool:
+    if row["state"] != "dead" or "updated_at" not in row.keys():
+        return False
+    moment = _parse_utc(row["updated_at"])
+    return moment is not None and (now - moment).total_seconds() <= DEAD_TASK_LIVE_SECONDS
 
 
 def _queue_status(
@@ -2728,6 +2809,10 @@ _LSP_OWNER_FIELDS = {
     "started_at",
     "state",
 }
+# Written since 2026-09-25 when the platform can name a process start (audit C-39).
+_LSP_OWNER_OPTIONAL_FIELDS = {"owner_start_identity"}
+_LSP_LEASE_OPTIONAL_FIELDS = {"manager_start_identity", "server_start_identity"}
+_LSP_START_IDENTITY_CHARS = 128
 _LSP_LEASE_FIELDS = {
     "expires_at",
     "generation_nonce",
@@ -2790,9 +2875,20 @@ def _valid_lsp_owner_process(record: dict[str, Any]) -> bool:
     return record.get("state") == "process_running"
 
 
+def _lsp_fields_valid(record: dict[str, Any], required: set, optional: set) -> bool:
+    """The required fields, and optional start identities that are bounded text."""
+    if not required <= set(record) <= required | optional:
+        return False
+    return all(_lsp_start_identity(record[name]) for name in optional & set(record))
+
+
+def _lsp_start_identity(value: object) -> bool:
+    return isinstance(value, str) and 0 < len(value) <= _LSP_START_IDENTITY_CHARS
+
+
 def _valid_lsp_owner(record: dict[str, Any], owner_nonce: str) -> bool:
     if not (
-        set(record) == _LSP_OWNER_FIELDS
+        _lsp_fields_valid(record, _LSP_OWNER_FIELDS, _LSP_OWNER_OPTIONAL_FIELDS)
         and _valid_lsp_command(record.get("command_basename"))
         and _valid_lsp_nonces(record, owner_nonce)
     ):
@@ -2822,8 +2918,14 @@ def _lsp_lease_window_valid(record: dict[str, Any]) -> bool:
     return heartbeat < expires
 
 
+def _lsp_lease_shape_valid(record: dict[str, Any]) -> bool:
+    if not _lsp_fields_valid(record, _LSP_LEASE_FIELDS, _LSP_LEASE_OPTIONAL_FIELDS):
+        return False
+    return _lsp_schema_version_one(record)
+
+
 def _lsp_lease_identity_valid(record: dict[str, Any], owner_nonce: str) -> bool:
-    if set(record) != _LSP_LEASE_FIELDS or not _lsp_schema_version_one(record):
+    if not _lsp_lease_shape_valid(record):
         return False
     if record.get("owner_nonce") != owner_nonce:
         return False
@@ -4675,6 +4777,40 @@ def _capture_loss_result(lost: int, live: bool, details: dict) -> dict:
     return _result("capture", "ok", f"No lost capture is recorded.{suffix}", details)
 
 
+def _tool_failure_check(state_root: Path, deadline: float) -> dict:
+    """Report failed tool calls and telemetry writes, which are not lost captures.
+
+    They share the capture trail and were counted as lost captures (audit B-25,
+    docs/research/2026-09-25-a-tool-failure-is-not-a-lost-capture.md).
+    """
+    from capture_diagnostics import (
+        last_operational_failure_at,
+        operational_failure_is_live,
+        operational_failure_totals,
+    )
+
+    state, state_error = _read_state(state_root, deadline)
+    totals = operational_failure_totals(state)
+    failed = sum(totals.values())
+    details = {
+        "failed": failed,
+        "kinds": totals,
+        "trail": "logs/capture-failures.jsonl",
+        "last_at": last_operational_failure_at(state),
+        "state_error": state_error,
+    }
+    if state_error:
+        return _result("tools", "ok", "Tool failures could not be read; the capture check says why.", details)
+    if not operational_failure_is_live(state):
+        return _result("tools", "ok", f"{failed} tool failure(s) recorded, none recently.", details)
+    return _result(
+        "tools",
+        "degraded",
+        f"{failed} tool call(s) or telemetry write(s) failed; see `logs/capture-failures.jsonl`.",
+        details,
+    )
+
+
 def _models_check() -> dict:
     """Name the pinned model weights the cache lacks, with the command that fetches them.
 
@@ -4807,6 +4943,24 @@ CONTENTION_MESSAGES = (
 )
 
 
+def _hook_error_generations(path: Path, state_root: Path) -> list[Path]:
+    """The rotated generation, then the live one: a rotation must not hide a burst.
+
+    See `docs/research/2026-09-26-a-log-many-writers-append-to-is-rotated-not-trimmed.md`.
+    """
+    from maintenance_helpers import rotated_log_previous
+
+    candidates = (rotated_log_previous(path), path)
+    return [part for part in candidates if _safe_kind(part, state_root)[0] != "missing"]
+
+
+def _hook_error_trail(generations: list[Path]) -> list[str]:
+    lines: list[str] = []
+    for part in generations:
+        lines.extend(_hook_error_lines(part))
+    return lines
+
+
 def _hook_error_lines(path: Path) -> list[str]:
     """The end of the trail, bounded, so an unbounded log cannot stall health.
 
@@ -4853,8 +5007,11 @@ def _hook_error_is_live(last_at: str, now: datetime) -> bool:
         seen = datetime.fromisoformat(last_at)
     except ValueError:
         return False
+    # Writers stamped local wall-clock time without an offset until 2026-09-26;
+    # read as UTC it was hours off (audit 2026-09-26 B-25). A line without an
+    # offset is local time, which is what those writers meant.
     if seen.tzinfo is None:
-        seen = seen.replace(tzinfo=now.tzinfo)
+        seen = seen.astimezone()
     return (now - seen).total_seconds() <= HOOK_ERROR_LIVE_SECONDS
 
 
@@ -4973,20 +5130,73 @@ def _checkpoint_result(stuck: list[dict[str, Any]], details: dict) -> dict:
     )
 
 
+# A checkpoint event waits in `run/state.json` until a drain reserves it. The
+# nightly reclaim step drains every queue, so an event older than one nightly
+# interval plus half of one outlived a drain that should have taken it. Before
+# 2026-09-26 the queue was only a depth beside the finding, and a project whose
+# events never reached the database was reported as fine (audit C-12). See
+# `docs/research/2026-09-26-a-checkpoint-that-never-reached-the-database-is-seen.md`.
+CHECKPOINT_QUEUE_STUCK_SECONDS = 36 * 3600.0
+
+
+def _queued_instant(item: object) -> datetime | None:
+    if not isinstance(item, dict):
+        return None
+    return _parse_utc(item.get("occurred_at"))
+
+
+def _queued_instants(queue: object) -> list[datetime]:
+    if not isinstance(queue, list):
+        return []
+    return [instant for instant in map(_queued_instant, queue) if instant is not None]
+
+
+def _queued_head(slug: str, queue: object) -> dict[str, Any] | None:
+    """The oldest event a project still holds in the queue, as a head row."""
+    known = _queued_instants(queue)
+    if not known:
+        return None
+    return {"project": slug, "state": "queued", "created_at": min(known).isoformat()}
+
+
+def _queued_checkpoint_heads(state_root: Path) -> list[dict[str, Any]]:
+    pending = _checkpoint_pending_state(Path(state_root) / "run" / "state.json")
+    if not isinstance(pending, dict):
+        return []
+    heads = [_queued_head(str(slug), queue) for slug, queue in pending.items()]
+    return [head for head in heads if head is not None]
+
+
+def _queue_stuck(row: Mapping[str, Any], now: datetime) -> bool:
+    created = _parse_utc(row.get("created_at"))
+    return created is not None and (now - created).total_seconds() > CHECKPOINT_QUEUE_STUCK_SECONDS
+
+
+def _stuck_checkpoint_heads(rows: list[dict[str, Any]], state_root: Path, now: datetime) -> list[dict[str, Any]]:
+    """Heads stuck in the database, then projects whose events never reached it."""
+    queued = [row for row in _queued_checkpoint_heads(state_root) if _queue_stuck(row, now)]
+    return [row for row in rows if _checkpoint_stuck(row, now)] + queued
+
+
+def _checkpoint_database_heads(path: Path) -> list[dict[str, Any]]:
+    """The unfinished head rows; none before the database exists."""
+    if not path.is_file():
+        return []
+    return _checkpoint_head_rows(path)
+
+
 def _checkpoint_check(state_root: Path, now: datetime) -> dict:
-    """Report a project whose checkpoint sequence stopped moving."""
+    """Report a project whose checkpoints stopped moving, in the database or before it."""
     path = Path(state_root) / "run" / "markdown-transactions-v3.sqlite3"
     details: dict[str, Any] = {"database": "run/markdown-transactions-v3.sqlite3"}
-    if not path.is_file():
-        return _result("checkpoints", "ok", "No checkpoint database exists.", details)
     try:
-        rows = _checkpoint_head_rows(path)
+        rows = _checkpoint_database_heads(path)
     except sqlite3.Error as error:
         details["error"] = str(error)[:200]
         return _result(
             "checkpoints", "degraded", "The checkpoint database could not be read.", details
         )
-    stuck = [row for row in rows if _checkpoint_stuck(row, now)]
+    stuck = _stuck_checkpoint_heads(rows, state_root, now)
     details.update({"unfinished": rows, "queued": _checkpoint_queue_depths(state_root)})
     return _checkpoint_result(stuck, details)
 
@@ -4995,9 +5205,10 @@ def _hook_error_check(state_root: Path, now: datetime) -> dict:
     """Report what the lifecycle hooks failed at, so a silent outage is visible."""
     path = Path(state_root) / "logs" / "hook-errors.log"
     details: dict[str, Any] = {"trail": "logs/hook-errors.log", "window_bytes": 0}
-    if _safe_kind(path, state_root)[0] == "missing":
+    generations = _hook_error_generations(path, state_root)
+    if not generations:
         return _result("hooks", "ok", "No hook failure trail exists.", details)
-    records = _hook_error_records(_hook_error_lines(path))
+    records = _hook_error_records(_hook_error_trail(generations))
     if not records:
         return _result("hooks", "ok", "No hook failure is recorded.", details)
     last_at = max(at for at, _kind in records)
@@ -5013,7 +5224,9 @@ def _hook_error_check(state_root: Path, now: datetime) -> dict:
     return _hook_error_result(live, len(records), details)
 
 
-def _scheduler_check(root: Path, state_root: Path, now: datetime, deadline: float) -> dict:
+def _scheduler_check(
+    root: Path, state_root: Path, now: datetime, deadline: float, home: Path | None = None
+) -> dict:
     scripts = {
         "scheduled_nightly": (root / "scripts" / "scheduled_nightly.py").is_file(),
         "search_memory": (root / "scripts" / "search_memory.py").is_file(),
@@ -5040,7 +5253,184 @@ def _scheduler_check(root: Path, state_root: Path, now: datetime, deadline: floa
         )
     details["last_weekly_status"] = state.get("last_weekly_status")
     details["last_weekly_at"] = state.get("last_weekly_at")
-    return _with_weekly(_nightly_result(state, now, details), _weekly_verdict(state, now))
+    details["last_update"] = state.get("last_update")
+    verdicts = _scheduler_verdicts(state, now, home or Path.home())
+    return _with_findings(_nightly_result(state, now, details), verdicts)
+
+
+def _scheduler_verdicts(state: dict, now: datetime, home: Path) -> tuple[tuple[str, str] | None, ...]:
+    return (
+        _weekly_verdict(state, now),
+        _update_verdict(state.get("last_update")),
+        _unit_limit_verdict(home),
+        _scheduled_program_verdict(home),
+    )
+
+
+# What a recorded code update outcome means for the operator, by field and value.
+_UPDATE_ATTENTION = {
+    ("status", "error"): "The nightly code update failed; see the nightly log.",
+    ("reason", "fetch_failed"): "The nightly code update could not fetch the remote.",
+    ("reason", "not_on_default_branch"): (
+        "The vault is not on its default branch, so the nightly never updates it."
+    ),
+    ("reason", "diverged_branch"): "The vault's branch has diverged from the remote.",
+    ("reason", "local_changes_conflict"): (
+        "A local change stops the nightly code update; see the nightly log."
+    ),
+    ("dependencies", "stale"): (
+        "The code was updated but its dependencies were not synced; the nightly syncs "
+        "them again, or run `uv sync --locked --inexact` with your `--extra` flags."
+    ),
+    ("resources", "rerun_installer"): (
+        "The update changed what the installer renders; rerun the installer."
+    ),
+}
+
+
+def _update_verdict(record: object) -> tuple[str, str] | None:
+    """(status, message) when the last code update needs the operator, else None.
+
+    The nightly records the outcome since 2026-09-25; before, only its log did. See
+    `docs/research/2026-09-25-the-scheduler-says-what-the-night-could-not-do.md`.
+    """
+    if not isinstance(record, dict):
+        return None
+    messages = [message for (field, value), message in _UPDATE_ATTENTION.items() if record.get(field) == value]
+    if not messages:
+        return None
+    return "degraded", " ".join(messages)
+
+
+def _unit_limit_verdict(home: Path) -> tuple[str, str] | None:
+    """(status, message) when an installed systemd unit lacks this release's time limit."""
+    stale = [kind for kind, limit in _installed_unit_limits(home).items() if limit != _expected_unit_limit(kind)]
+    if not stale:
+        return None
+    return (
+        "degraded",
+        "Installed maintenance units are older than this release ("
+        + ", ".join(stale)
+        + " time limit); rerun the installer.",
+    )
+
+
+def _scheduled_program_verdict(home: Path) -> tuple[str, str] | None:
+    """(status, message) when an installed schedule calls a uv that is no longer there.
+
+    A package manager's upgrade removes the versioned target a resolved path named
+    (audit B-30, docs/research/2026-09-25-a-scheduled-run-keeps-the-uv-link.md).
+    """
+    missing = sorted({program for program in _scheduled_programs(home) if not Path(program).exists()})
+    if not missing:
+        return None
+    return (
+        "degraded",
+        "The scheduled runs call uv at " + ", ".join(missing) + ", which no longer exists; rerun the installer.",
+    )
+
+
+def _scheduled_programs(home: Path) -> list[str]:
+    """The program each installed systemd unit or LaunchAgent starts; none installed, none read."""
+    return [*_systemd_programs(home), *_launchd_programs(home)]
+
+
+def _systemd_programs(home: Path) -> list[str]:
+    directory = _systemd_user_directory(home)
+    programs = [_unit_program(directory / f"llm-wiki-{kind}.service") for kind in ("nightly", "weekly")]
+    return [program for program in programs if program]
+
+
+def _unit_program(path: Path) -> str:
+    text = _read_small_text(path)
+    if text is None:
+        return ""
+    return _first_word(_unit_setting(text, "ExecStart") or "")
+
+
+def _first_word(command: str) -> str:
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return ""
+    return words[0] if words else ""
+
+
+def _launchd_programs(home: Path) -> list[str]:
+    import plistlib
+
+    programs = []
+    for kind in ("nightly", "weekly"):
+        path = home / "Library" / "LaunchAgents" / f"io.github.ekgardt.llm-wiki.{kind}.plist"
+        text = _read_small_bytes(path)
+        if text is not None:
+            programs.append(_plist_program(plistlib, text))
+    return [program for program in programs if program]
+
+
+def _plist_program(plistlib, data: bytes) -> str:
+    try:
+        arguments = plistlib.loads(data).get("ProgramArguments") or [""]
+    except (plistlib.InvalidFileException, ValueError, AttributeError):
+        return ""
+    return str(arguments[0])
+
+
+def _read_small_bytes(path: Path) -> bytes | None:
+    try:
+        if not path.is_file() or path.stat().st_size > 64 * 1024:
+            return None
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _expected_unit_limit(kind: str) -> str:
+    from install_control import SYSTEMD_START_LIMITS
+
+    return SYSTEMD_START_LIMITS[kind]
+
+
+def _installed_unit_limits(home: Path) -> dict[str, str | None]:
+    """`TimeoutStartSec` of each installed llm-wiki systemd service; none installed, none read."""
+    directory = _systemd_user_directory(home)
+    limits: dict[str, str | None] = {}
+    for kind in ("nightly", "weekly"):
+        text = _read_small_text(directory / f"llm-wiki-{kind}.service")
+        if text is not None:
+            limits[kind] = _unit_setting(text, "TimeoutStartSec")
+    return limits
+
+
+def _systemd_user_directory(home: Path) -> Path:
+    """Where the installer puts user units: `$XDG_CONFIG_HOME`, else under `home`."""
+    configured = os.environ.get("XDG_CONFIG_HOME")
+    if configured and Path(configured).is_absolute():
+        return Path(configured) / "systemd" / "user"
+    return home / ".config" / "systemd" / "user"
+
+
+def _read_small_text(path: Path) -> str | None:
+    try:
+        if not path.is_file() or path.stat().st_size > 64 * 1024:
+            return None
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+
+
+def _unit_setting(text: str, name: str) -> str | None:
+    prefix = f"{name}="
+    values = [line[len(prefix):].strip() for line in text.splitlines() if line.startswith(prefix)]
+    return values[-1] if values else None
+
+
+def _with_findings(nightly: dict, verdicts: tuple[tuple[str, str] | None, ...]) -> dict:
+    """The scheduler finding: the nightly's, joined by every other verdict that has one."""
+    result = nightly
+    for verdict in verdicts:
+        result = _with_weekly(result, verdict)
+    return result
 
 
 # A seven-day period plus a day of grace. The weekly keeps its own record since
@@ -5054,9 +5444,31 @@ def _weekly_verdict(state: dict, now: datetime) -> tuple[str, str] | None:
     """(status, message) when the weekly pass needs attention, else None."""
     if state.get("last_weekly_status") == "failed":
         return "error", "Last weekly maintenance failed."
+    lateness = _weekly_lateness(state, now)
+    if lateness is None:
+        return None
+    return "degraded", f"{lateness}{_weekly_skip_note(state)}"
+
+
+def _weekly_lateness(state: dict, now: datetime) -> str | None:
     if _weekly_is_stale(_parse_utc(state.get("last_weekly_at")), now):
-        return "degraded", "Weekly maintenance is stale."
+        return "Weekly maintenance is stale."
+    if _weekly_never_ran_but_skipped(state):
+        return "Weekly maintenance has never completed."
     return None
+
+
+def _weekly_never_ran_but_skipped(state: dict) -> bool:
+    """A weekly with no run on record but a skip was due and did not happen (audit 2026-09-26 B-20)."""
+    return state.get("last_weekly_at") is None and isinstance(state.get("last_weekly_skip"), dict)
+
+
+def _weekly_skip_note(state: dict) -> str:
+    """Why the last weekly did not run, when it recorded a skip."""
+    skip = state.get("last_weekly_skip")
+    if not isinstance(skip, dict):
+        return ""
+    return f" The last weekly was skipped at {skip.get('skipped_at')}: {skip.get('reason')}."
 
 
 def _weekly_is_stale(ran_at: datetime | None, now: datetime) -> bool:
@@ -5127,8 +5539,21 @@ def _skip_moment(skip: dict) -> str:
 
 
 def _skip_is_newer_than_run(state: dict, skip: dict) -> bool:
-    ran_at = str(state.get("last_nightly_at") or state.get("last_nightly_date") or "")
-    return _skip_moment(skip) >= ran_at
+    """Compared as instants: an older state wrote the skip in local time, the run in UTC."""
+    skipped = _state_instant(_skip_moment(skip))
+    if skipped is None:
+        return False
+    ran = _state_instant(str(state.get("last_nightly_at") or state.get("last_nightly_date") or ""))
+    return ran is None or skipped >= ran
+
+
+def _state_instant(text: str) -> datetime | None:
+    """An ISO instant or date from the state; one without an offset is local time."""
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed.astimezone()
 
 
 def _nightly_result(state: dict, now: datetime, details: dict) -> dict:
@@ -5782,17 +6207,35 @@ def _codex_host_result(root: Path, home: Path, deadline: float) -> dict[str, obj
     return _codex_degraded_result(root, home, reason)
 
 
+# Delegates deleted on 2026-09-17 that an older install's hooks still name; the
+# adapter tolerates them, the installer replaces them (audit C-1,
+# docs/research/2026-09-25-doctor-names-hooks-older-than-the-release.md).
+RETIRED_HOOK_DELEGATES = ("precompact_capture.py", "session_end_capture.py")
+
+
+def _names_a_retired_delegate(configs: list[tuple[Path, tuple[str, ...]]]) -> bool:
+    return any(
+        _contains_markers(path, (name,)) for path, _markers in configs for name in RETIRED_HOOK_DELEGATES
+    )
+
+
 def _generic_host_result(
     host_dir: Path, configs: list[tuple[Path, tuple[str, ...]]]
 ) -> dict[str, object]:
     if not host_dir.exists():
         return {"status": "skipped", "message": "Optional host not installed."}
-    if any(_contains_markers(path, markers) for path, markers in configs):
-        return {"status": "ok", "message": "User integration config detected."}
-    return {
-        "status": "degraded",
-        "message": "Host detected without LLM-Wiki config.",
-    }
+    if not any(_contains_markers(path, markers) for path, markers in configs):
+        return {"status": "degraded", "message": "Host detected without LLM-Wiki config."}
+    return _configured_host_result(configs)
+
+
+def _configured_host_result(configs: list[tuple[Path, tuple[str, ...]]]) -> dict[str, object]:
+    if _names_a_retired_delegate(configs):
+        return {
+            "status": "degraded",
+            "message": "Installed hooks predate this release; rerun the installer to refresh them.",
+        }
+    return {"status": "ok", "message": "User integration config detected."}
 
 
 def _required_host_config(
@@ -5832,7 +6275,7 @@ def _integration_summary(
         return "error", f"{missing_sources} integration source adapter(s) are missing."
     configured_missing = sum(host.get("status") == "degraded" for host in hosts.values())
     if configured_missing:
-        return "degraded", f"{configured_missing} installed host(s) lack integration config."
+        return "degraded", f"{configured_missing} installed host(s) lack current integration config."
     return "ok", "Integration sources are available; optional hosts were checked."
 
 
@@ -7889,11 +8332,17 @@ def _last_snapshot_at(root: Path) -> datetime | None:
     return datetime.fromtimestamp(int(stamp), tz=timezone.utc)
 
 
+def _latest(*moments: datetime | None) -> datetime | None:
+    known = [moment for moment in moments if moment is not None]
+    return max(known, default=None)
+
+
 def _backup_check(home_path: Path, now: datetime) -> dict:
     """Whether the memory's second copy was taken recently."""
-    from snapshot_knowledge import snapshot_root
+    from snapshot_knowledge import last_checked_at, snapshot_root
 
-    taken = _last_snapshot_at(snapshot_root(home_path))
+    root = snapshot_root(home_path)
+    taken = _latest(_last_snapshot_at(root), last_checked_at(root))
     details = {"last_snapshot_at": taken.isoformat() if taken else None}
     if taken is None:
         return _result("backup", "degraded", "No knowledge snapshot has been taken yet.", details)
@@ -7922,10 +8371,11 @@ def _deferrable_checks(
         (
             "scheduler",
             lambda budget: _scheduler_check(
-                root_path, state_path, generated_at, budget
+                root_path, state_path, generated_at, budget, home_path
             ),
         ),
         ("capture", lambda budget: _capture_check(root_path, state_path, budget)),
+        ("tools", lambda budget: _tool_failure_check(state_path, budget)),
         ("backup", lambda _budget: _backup_check(home_path, generated_at)),
         ("models", lambda _budget: _models_check()),
         ("hooks", lambda _budget: _hook_error_check(state_path, generated_at)),
@@ -7957,13 +8407,36 @@ def _completed_or_deferred(
 ) -> dict:
     """The LSP check owns its own budget; the rest defer once time is up."""
     if check_id != "lsp" and time.monotonic() >= deadline:
-        return _result(
-            check_id,
-            "degraded",
-            "Check not completed because the doctor time budget was exhausted.",
-            {"budget_exhausted": True},
-        )
+        return _unfinished_result(check_id)
     return operation(share)
+
+
+def _unfinished_result(check_id: str) -> dict:
+    return _result(
+        check_id,
+        "degraded",
+        "Check not completed because the doctor time budget was exhausted.",
+        {"budget_exhausted": True},
+    )
+
+
+def _unfinished_when_late(check: dict, deadline: float) -> dict:
+    """A read that failed once the budget ran out is an unfinished check, not a broken store.
+
+    Every check catches its deadline together with real read errors, and a
+    SQLite read the deadline interrupts raises `sqlite3.OperationalError`; so
+    under the default budget `queue` and `claims` said `error` and advised
+    `--repair` on a healthy vault (audit A-9,
+    docs/research/2026-09-25-a-late-check-is-unfinished-not-broken.md).
+    """
+    details = check.get("details") or {}
+    if check.get("status") != "error" or not details.get("read_error"):
+        return check
+    if not _deadline_reached(deadline):
+        return check
+    unfinished = _unfinished_result(check["id"])
+    unfinished["details"]["deletion_codes"] = _derived_deletion_codes(check)
+    return unfinished
 
 
 def _collect_checks(
@@ -7973,21 +8446,31 @@ def _collect_checks(
     generated_at: datetime,
     deadline: float,
 ) -> list[dict]:
-    checks = [
-        _environment_check(root_path, state_path),
-        _runtime_check(state_path),
-        _adoption_check(root_path, state_path),
-        _filesystem_check(state_path, deadline),
-        _transaction_check(state_path, generated_at, deadline, vault_root=root_path),
-        _queue_check(state_path, generated_at, deadline),
-        _archive_check(root_path, state_path, deadline),
-        _claim_check(root_path, state_path, deadline),
+    """Every check, each judged the moment it returns.
+
+    Judging all of them after the last one called a corrupt store found early
+    "not completed" whenever a later check ran past the deadline (audit
+    2026-09-26 B-19, docs/research/2026-09-26-a-check-is-judged-when-it-ends.md).
+    """
+    runs = [
+        lambda: _environment_check(root_path, state_path),
+        lambda: _runtime_check(state_path),
+        lambda: _adoption_check(root_path, state_path),
+        lambda: _filesystem_check(state_path, deadline),
+        lambda: _transaction_check(state_path, generated_at, deadline, vault_root=root_path),
+        lambda: _queue_check(state_path, generated_at, deadline),
+        lambda: _archive_check(root_path, state_path, deadline),
+        lambda: _claim_check(root_path, state_path, deadline),
     ]
-    for check_id, operation in _deferrable_checks(
-        root_path, state_path, home_path, generated_at
-    ):
-        checks.append(_completed_or_deferred(check_id, operation, deadline, deadline))
-    return checks
+    runs.extend(
+        _deferred_run(check_id, operation, deadline)
+        for check_id, operation in _deferrable_checks(root_path, state_path, home_path, generated_at)
+    )
+    return [_unfinished_when_late(run(), deadline) for run in runs]
+
+
+def _deferred_run(check_id: str, operation, deadline: float):
+    return lambda: _completed_or_deferred(check_id, operation, deadline, deadline)
 
 
 def _mark_repair_deferred(check: dict) -> None:

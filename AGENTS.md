@@ -57,7 +57,6 @@ knowledge/
   projects/   # per-project state.md / context
   raw/        # immutable sources
   inbox/      # unprocessed staging
-  feedback/   # correction candidates
 
 # RUNTIME (inside the vault, gitignored)
 # Override root via LLM_WIKI_STATE_ROOT (tests use a temp dir).
@@ -134,10 +133,12 @@ evidence or evaluator disagreement enter quarantine; automatic semantic superses
 and eager backfill remain disabled. Do not delete `run/` while doctor reports a
 source failure, any 2-day undo artifact, retained work/result, or live owner. There
 is no persistent daemon, cloud service, remote queue/cache, exactly-once promise, or
-gzip archive tier. The single automatic Git operation is the nightly fast-forward
-update of the checkout, which never pushes, never resolves a conflict, and declines
+gzip archive tier. The single automatic Git operation on the checkout is the nightly
+fast-forward update, which never pushes, never resolves a conflict, and declines
 whenever the update would touch a locally modified file — see
-`knowledge/notes/automatic-code-update-decision.md`.
+`knowledge/notes/automatic-code-update-decision.md`. The knowledge snapshot
+(`scripts/snapshot_knowledge.py`) commits only in its own remote-less repository
+outside the vault (`~/llm-wiki-snapshots/`).
 
 **Reliability v3 (implemented; the installers adopt it):** New
 unprocessed lifecycle evidence is create-only under `run/capture-intents/`
@@ -199,8 +200,9 @@ platform-qualified lifecycle ownership, repository containment, safe log redacti
 explicit profile installation, document synchronization, session-manager capacity,
 the normalized navigation facade, deterministic rendering, precise
 `get_architecture` modes, doctor diagnostics, and qualification gates. A query is
-routed to one profile by file suffix; a suffix no profile claims falls back to
-Pyright, which opens the file, answers nothing, and degrades to structural evidence.
+routed to one profile by file suffix; a file whose suffix no profile claims answers
+`unsupported` before any server is started (2026-09-26; it used to reach Pyright and
+end as an error).
 A session whose close failed is closed again by the next caller for its key, under
 that caller's deadline, and is evicted before a healthy idle one. A start that ran
 out of time or met the operating system is retried at most three times, after 5 s,
@@ -371,7 +373,10 @@ three agent runs outright on 2026-08-29 with `Prompt is too long`. Rule 4
 forbids spending tokens like that on the vault's own changelog. Read it when
 you need it: `grep` it, or ask the memory for the decision you are after. Rule
 4 of section 3 still requires appending to it on every important update. See
-`docs/research/2026-08-29-what-belongs-in-every-session.md`.
+`docs/research/2026-08-29-what-belongs-in-every-session.md`. Past 2 MiB a compile
+archives it whole to `knowledge/log-archive/log.local.<date>.md` (gitignored) and
+starts a fresh log that names the archive
+(`docs/research/2026-09-25-the-vault-log-rotates-before-its-cap.md`).
 
 ### Default behavior for new material
 When asked to compile or ingest new material:
@@ -456,13 +461,14 @@ contradiction checks, and playbook crystallization. Backend is
 **auto-detected** via `scripts/llm_client.py` — no API keys required.
 
 Priority: OpenCode (only when `OPENCODE_SERVER_PASSWORD` protects its server) →
-Codex → Claude CLI → OpenAI → Ollama. If none available,
-the call is enqueued in `run/queue.sqlite3` and processed at the next active
-session. A `run/queue/` directory left by a release before v4.0.0 is refused and
-named by `doctor`, never imported (2026-09-23).
+Codex → Claude CLI → OpenAI → Ollama. If none answers, the call returns
+nothing: a capture already sits in `run/queue.sqlite3` and waits an hour before
+its next attempt, and every other caller skips or fails its step; nothing else is
+queued for later (2026-09-25). A `run/queue/` directory left by a release before
+v4.0.0 is refused and named by `doctor`, never imported (2026-09-23).
 
 Override via `MEMORY_LLM_PROVIDER` env var. `fake` returns a canned response
-for tests/e2e.
+for tests/e2e. A value that names no provider calls none, and `doctor` names it.
 
 **Zero-cost path:** no paid API beyond existing agent subscriptions. Ollama remains
 an optional local backend; the retired Cognee bridge is not a supported feature.
@@ -481,7 +487,8 @@ uv run python scripts/lookup_mode.py               # show retrieval tier
 uv run python scripts/mcp_server.py                # MCP server (12 tools, stdio; base install)
 uv run python scripts/doctor.py                    # local health; --repair is explicit
 # v4.0 optional features (require --extra flags):
-uv run python scripts/code_graph.py .              # index code graph (tree-sitter)
+uv run python scripts/repository_index.py index .  # index a repository's code (a generation)
+uv run python scripts/code_graph.py .              # read-only live parse summary
 uv run python scripts/impact_analysis.py           # git diff → stale wiki pages
 uv run python scripts/reflection.py --apply        # A-MEM page consolidation
 uv run python scripts/access_tracking.py --flush   # flush access counts

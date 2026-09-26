@@ -65,7 +65,7 @@ def test_the_sum_counts_the_checkout_update_and_the_tail(monkeypatch) -> None:
     monkeypatch.setattr(self_update, "WORST_CASE_SECONDS", 0.0)
 
     assert counted - scheduled_nightly.worst_case_seconds() == update
-    assert update == 2 * 120.0 + 600.0 + 13 * 60.0
+    assert update == 2 * 120.0 + 600.0 + 16 * 60.0
 
 
 def test_the_sum_follows_the_wait_the_operator_set(monkeypatch) -> None:

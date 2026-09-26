@@ -138,8 +138,12 @@ TYPESCRIPT_NOTIFICATIONS = frozenset({"$/typescriptVersion"})
 
 # `logVerbosity: off` keeps tsserver from writing a log file next to the
 # repository; the managed path owns its scratch and writes nothing else.
+# `disableAutomaticTypingAcquisition` keeps tsserver from fetching `@types`
+# packages with npm while it answers: a query makes no network call (audit
+# 2026-09-26 C-8, docs/research/2026-09-26-no-managed-server-reaches-the-network.md).
 TYPESCRIPT_INITIALIZATION_OPTIONS = freeze_profile_value(
     {
+        "disableAutomaticTypingAcquisition": True,
         "hostInfo": "llm-wiki",
         "tsserver": {"logVerbosity": "off", "path": ""},
         "preferences": {"includeCompletionsForModuleExports": False},
@@ -298,6 +302,10 @@ GOPLS_ENVIRONMENT_TEMPLATE = (
     ("GOMODCACHE", "{root}/gopath/pkg/mod"),
     ("GOCACHE", "{root}/gocache"),
     ("GOTOOLCHAIN", "local"),
+    # No module download while answering a query: a missing module is an
+    # unresolved import, not a network fetch into the managed root (audit B-43,
+    # docs/research/2026-09-25-a-query-makes-no-network-call.md).
+    ("GOPROXY", "off"),
 )
 
 
@@ -372,6 +380,10 @@ GOPLS_PROFILE = LanguageServerProfile(
     max_decompressed_bytes=GOPLS_MAX_DECOMPRESSED_BYTES,
     max_members=GOPLS_MAX_MEMBERS,
     environment_template=GOPLS_ENVIRONMENT_TEMPLATE,
+    # gopls runs `go list` while it answers.
+    toolchain_probes=(
+        (_gopls_relative(GO_TOOLCHAIN_RELATIVE, GO_TOOLCHAIN_RELATIVE_WINDOWS), "version"),
+    ),
 )
 
 # ---------------------------------------------------------------------------
@@ -595,6 +607,13 @@ RUST_MAX_MEMBER_BYTES = 512 * 1024 * 1024
 RUST_ANALYZER_RELATIVE = Path("toolchain/bin/rust-analyzer")
 RUST_ANALYZER_RELATIVE_WINDOWS = Path("toolchain/bin/rust-analyzer.exe")
 
+# What rust-analyzer runs while it answers: `cargo metadata` reads the project and
+# `rustc --print sysroot` finds the standard library.
+RUST_TOOLCHAIN_PROBES = tuple(
+    (Path(f"toolchain/bin/{tool}.exe" if _windows() else f"toolchain/bin/{tool}"), "--version")
+    for tool in ("cargo", "rustc")
+)
+
 # The toolchain this profile installed is the only one on its PATH, so the
 # sysroot rust-analyzer discovers is ours; cargo writes its own state inside
 # the managed root rather than into the operator's home.
@@ -611,14 +630,21 @@ RUST_ENVIRONMENT_TEMPLATE = (
     ("CARGO_HOME", "{root}/cargo-home"),
     ("LD_LIBRARY_PATH", "{root}/toolchain/lib"),
     ("DYLD_FALLBACK_LIBRARY_PATH", "{root}/toolchain/lib"),
+    # `cargo metadata`, which rust-analyzer runs, fetches crates unless it is
+    # offline; the configuration's promise of no downloads needs this (audit B-43).
+    ("CARGO_NET_OFFLINE", "true"),
 )
 
 # Read-only defaults: no `cargo check` on save, no build scripts run for a
 # navigation query, and no crate downloads triggered by opening a file.
+# `noDeps`: the managed `CARGO_HOME` is empty and offline, so `cargo metadata`
+# cannot resolve a registry dependency and fails (measured 2026-09-26, exit 101);
+# rust-analyzer then retries with `--no-deps`. Asking for that directly skips the
+# failing run; dependency crates stay unresolved either way (audit C-8).
 RUST_ANALYZER_CONFIGURATION = freeze_profile_value(
     {
         "rust-analyzer": {
-            "cargo": {"buildScripts": {"enable": False}},
+            "cargo": {"buildScripts": {"enable": False}, "noDeps": True},
             "checkOnSave": False,
             "procMacro": {"enable": False},
         }
@@ -674,6 +700,7 @@ RUST_ANALYZER_PROFILE = LanguageServerProfile(
     max_members=RUST_MAX_MEMBERS,
     max_member_bytes=RUST_MAX_MEMBER_BYTES,
     environment_template=RUST_ENVIRONMENT_TEMPLATE,
+    toolchain_probes=RUST_TOOLCHAIN_PROBES,
 )
 
 REGISTRY = ProfileRegistry(

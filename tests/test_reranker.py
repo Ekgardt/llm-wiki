@@ -342,9 +342,11 @@ class TestShouldRerank:
             candidates=[{"rrf_score": 1.0}, {"rrf_score": 0.9}],
         )[0] is False
 
-    def test_every_question_in_a_rerank_profile_is_reranked(self):
+    def test_every_question_in_a_rerank_profile_is_reranked(self, monkeypatch):
         """No trigger is needed: a Russian question over English pages matched
         none of the old ones, and that is the question the reranker is for."""
+        # The reranker is installed here; its absence is its own refusal (audit 2026-09-26 B-16).
+        monkeypatch.setattr("reranker.reranker_installed", lambda: True)
         agreeing = [
             {"rrf_score": 1.0, "bm25_rank": 1, "vector_rank": 1},
             {"rrf_score": 0.1, "bm25_rank": 2, "vector_rank": 2},

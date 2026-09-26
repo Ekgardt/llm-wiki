@@ -43,8 +43,8 @@ from lsp_protocol import (
     _LocalRequestViolation,
     _ProtocolStartupCleanupError,
 )
-from lsp_security import redact_lsp_text
-from process_liveness import process_state
+from lsp_security import redact_lsp_text, redact_private_key_blocks
+from process_liveness import owner_alive, process_start_identity, process_state
 
 ProcessTree = _lsp_process_tree.ProcessTree
 
@@ -89,6 +89,8 @@ _MAX_EVIDENCE_BYTES = 4096
 # The redacted last words of a failed server, as JSON encodes them. The rest of
 # the record is under 300 bytes, so the whole file stays well inside its bound.
 _STDERR_TAIL_BYTES = 1024
+# Redacted before the tail is cut, so no line reaches the redactor without its key.
+_STDERR_REDACTION_WINDOW_BYTES = 64 * 1024
 _MAX_ACL_OUTPUT_BYTES = 16 * 1024
 _HEARTBEAT_SECONDS = 10.0
 _LEASE_EXPIRY_SECONDS = 30.0
@@ -887,8 +889,13 @@ class _OwnerDirectory:
         return _canonical_evidence_record(payload)
 
     def _unlink_posix_scratch(self) -> None:
-        """Remove the evidence files and the cancellation directory."""
-        for name in ("owner.json", "failure.json"):
+        """Remove the evidence files, native launch copies and the cancellation directory.
+
+        A native server's verified copy (`.launch-*`) stayed behind, the root's
+        `rmdir` failed on every close, and the session was stranded (audit
+        2026-09-26 A-6, docs/research/2026-09-26-a-native-server-copy-leaves-with-its-owner.md).
+        """
+        for name in ("owner.json", "failure.json", *_launch_copies(self.owner_handle)):
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(name, dir_fd=self.owner_handle)
         with contextlib.suppress(FileNotFoundError):
@@ -1915,6 +1922,7 @@ def _publish_owner_record(
         return
     published_owner_record = dict(owner_record)
     published_owner_record["owner_pid"] = process.pid
+    _add_start_identity(published_owner_record, "owner_start_identity", process.pid)
     _write_owner_record(owner, published_owner_record)
     owner.verify_lexical_identity()
 
@@ -2096,6 +2104,8 @@ def _write_generation_lease(
             "server_pid": server_pid,
             "state": "live",
         }
+    _add_start_identity(record, "manager_start_identity", os.getpid())
+    _add_start_identity(record, "server_start_identity", server_pid)
     owner.write_lease(
         record,
         deadline=deadline,
@@ -4292,18 +4302,31 @@ def _failure_stderr_tail(generation: _Generation | None) -> str | None:
         return None
     with generation.stderr_lock:
         written = b"".join(generation.stderr)
-    return _bounded_stderr_tail(written[-_STDERR_TAIL_BYTES:])
+    return _bounded_stderr_tail(_whole_line_window(written))
+
+
+def _whole_line_window(written: bytes) -> bytes:
+    """The last lines that fit the redaction window, none of them cut at its start.
+
+    The tail was cut to its record bound first, so a `token=` just before the cut
+    left its value to a redactor that needs the key (audit C-37,
+    docs/research/2026-09-25-a-stderr-tail-is-redacted-before-it-is-cut.md).
+    """
+    if len(written) <= _STDERR_REDACTION_WINDOW_BYTES:
+        return written
+    window = written[-_STDERR_REDACTION_WINDOW_BYTES:]
+    return window.partition(b"\n")[2]
 
 
 def _redacted_lines(tail: bytes) -> str:
-    """Every non-empty line, redacted on its own.
+    """Every non-empty line, redacted on its own, after any private key block.
 
     A credential assignment runs to the end of its line, so the redactor is
     given one line at a time: one `authorization:` must not swallow every
-    message the server printed after it.
+    message the server printed after it. A key spans lines, so it goes first.
     """
-    lines = tail.decode("utf-8", errors="replace").splitlines()
-    return "\n".join(redact_lsp_text(line) for line in lines if line)
+    text = redact_private_key_blocks(tail.decode("utf-8", errors="replace"))
+    return "\n".join(redact_lsp_text(line) for line in text.splitlines() if line)
 
 
 def _bounded_stderr_tail(tail: bytes) -> str | None:
@@ -6578,8 +6601,25 @@ def _validated_owner_root(owner_root: Path) -> str:
 
 
 _OWNER_NONCE_PATTERN = re.compile(r"[0-9a-f]{32}")
-# The sweep looks at no more owner roots than doctor reports on.
+# The sweep examines no more owner roots than doctor reports on; a root that
+# kept failure evidence is passed over with one stat and costs nothing of it.
 _MAX_SWEPT_OWNER_ROOTS = 128
+_MAX_SCANNED_OWNER_ENTRIES = 4096
+_MAX_START_IDENTITY_CHARS = 128
+
+
+def _add_start_identity(record: dict, field: str, pid: int) -> None:
+    """Name the start of the process a pid points at, when the platform can tell.
+
+    A pid alone kept a dead root forever once the OS handed it to another process
+    (audit C-39, docs/research/2026-09-25-the-lsp-sweep-reaches-every-dead-root.md).
+    """
+    try:
+        identity = process_start_identity(pid)
+    except (OSError, ValueError):
+        return
+    if isinstance(identity, str) and 0 < len(identity) <= _MAX_START_IDENTITY_CHARS:
+        record[field] = identity
 
 
 def _sweep_dead_owner_roots(owner_root: Path) -> None:
@@ -6598,33 +6638,87 @@ def _sweep_dead_owner_roots(owner_root: Path) -> None:
 
 
 def _sweep_owner_parent(parent: Path, mine: str) -> None:
+    """Examine at most `_MAX_SWEPT_OWNER_ROOTS` candidates among the first entries.
+
+    Counting every entry let roots that kept failure evidence fill the window, so
+    dead roots past them were never examined (audit C-39).
+    """
+    examined = 0
     with os.scandir(parent) as entries:
         for scanned, entry in enumerate(entries, 1):
-            if scanned > _MAX_SWEPT_OWNER_ROOTS:
+            if scanned > _MAX_SCANNED_OWNER_ENTRIES or examined >= _MAX_SWEPT_OWNER_ROOTS:
                 return
-            _sweep_one_owner_root(Path(entry.path), entry.name, mine)
+            examined += _sweep_one_owner_root(Path(entry.path), entry.name, mine)
 
 
-def _sweep_one_owner_root(root: Path, name: str, mine: str) -> None:
+def _launch_copies(directory_handle: int) -> list[str]:
+    """The regular `.launch-*` files directly inside an owner root."""
+    return [name for name in os.listdir(directory_handle) if _is_launch_copy(directory_handle, name)]
+
+
+def _is_launch_copy(directory_handle: int, name: str) -> bool:
+    if not name.startswith(".launch-"):
+        return False
+    try:
+        return stat.S_ISREG(os.stat(name, dir_fd=directory_handle, follow_symlinks=False).st_mode)
+    except FileNotFoundError:
+        return False
+
+
+def _strip_dead_evidence_root(root: Path) -> None:
+    """A failure root keeps its records; its dead server's binary copy is not evidence (C-7)."""
+    copies = _plain_launch_copies(root)
+    if copies and _owner_root_is_dead(root):
+        _unlink_all(copies)
+
+
+def _plain_launch_copies(root: Path) -> list[Path]:
+    return [path for path in root.glob(".launch-*") if _is_plain_file(path)]
+
+
+def _unlink_all(paths: list[Path]) -> None:
+    for path in paths:
+        with contextlib.suppress(OSError):
+            path.unlink()
+
+
+def _is_plain_file(path: Path) -> bool:
+    return path.is_file() and not path.is_symlink()
+
+
+def _remove_dead_owner_root(root: Path) -> None:
+    if _owner_root_is_dead(root):
+        with contextlib.suppress(OSError):
+            _remove_owner_root_tree(root)
+
+
+def _sweep_one_owner_root(root: Path, name: str, mine: str) -> int:
+    """1 when this root was a candidate the sweep examined, else 0."""
     if name == mine or _OWNER_NONCE_PATTERN.fullmatch(name) is None:
-        return
-    if not _owner_root_is_dead(root):
-        return
-    with contextlib.suppress(OSError):
-        _remove_owner_root_tree(root)
+        return 0
+    if (root / "failure.json").exists():
+        _strip_dead_evidence_root(root)
+        return 0
+    _remove_dead_owner_root(root)
+    return 1
 
 
 def _owner_root_is_dead(root: Path) -> bool:
-    """No retained evidence, and every process the records name is proven gone."""
-    if (root / "failure.json").exists():
+    """Every process the records name is proven gone (the caller kept evidence roots)."""
+    processes = _owner_root_pids(root)
+    if not processes:
         return False
-    pids = _owner_root_pids(root)
-    if not pids:
-        return False
-    return all(process_state(pid) == "dead" for pid in pids)
+    return all(_process_is_gone(pid, identity) for pid, identity in processes)
 
 
-def _owner_root_pids(root: Path) -> tuple[int, ...]:
+def _process_is_gone(pid: int, identity: str | None) -> bool:
+    """Proven dead: gone, or its pid now names a process that started later."""
+    if identity is None:
+        return process_state(pid) == "dead"
+    return not owner_alive(pid, identity)
+
+
+def _owner_root_pids(root: Path) -> tuple[tuple[int, str | None], ...]:
     """Every process this root's records name, or () when they cannot be read.
 
     The owner record must be there: without it the root belongs to a start
@@ -6633,9 +6727,16 @@ def _owner_root_pids(root: Path) -> tuple[int, ...]:
     generation running now, which after a restart is not the one the owner
     record names.
     """
-    owner = _record_pids(root / "owner.json", ("owner_pid",), required=True)
+    owner = _record_pids(
+        root / "owner.json", (("owner_pid", "owner_start_identity"),), required=True
+    )
     lease = _record_pids(
-        root / "lease.json", ("manager_pid", "server_pid"), required=False
+        root / "lease.json",
+        (
+            ("manager_pid", "manager_start_identity"),
+            ("server_pid", "server_start_identity"),
+        ),
+        required=False,
     )
     if owner is None or lease is None:
         return ()
@@ -6643,8 +6744,8 @@ def _owner_root_pids(root: Path) -> tuple[int, ...]:
 
 
 def _record_pids(
-    path: Path, names: tuple[str, ...], *, required: bool
-) -> tuple[int, ...] | None:
+    path: Path, names: tuple[tuple[str, str], ...], *, required: bool
+) -> tuple[tuple[int, str | None], ...] | None:
     """The pids the record names; () when absent and allowed to be; None otherwise."""
     try:
         payload = _bounded_record_bytes(path)
@@ -6663,16 +6764,33 @@ def _bounded_record_bytes(path: Path) -> bytes:
     return payload
 
 
-def _payload_pids(payload: bytes, names: tuple[str, ...]) -> tuple[int, ...] | None:
-    """Those fields as process identifiers, or None when any one is not."""
+def _payload_pids(
+    payload: bytes, names: tuple[tuple[str, str], ...]
+) -> tuple[tuple[int, str | None], ...] | None:
+    """Each (pid, start identity) pair, or None when any pid is not one."""
     try:
         record = _canonical_evidence_record(payload)
     except ValueError:
         return None
-    pids = tuple(record.get(name) for name in names)
-    if not all(_is_server_pid(pid) for pid in pids):
+    return _pid_pairs(record, names)
+
+
+def _pid_pairs(
+    record: dict, names: tuple[tuple[str, str], ...]
+) -> tuple[tuple[int, str | None], ...] | None:
+    pairs = tuple(
+        (record.get(pid_name), _recorded_identity(record.get(identity_name)))
+        for pid_name, identity_name in names
+    )
+    if not all(_is_server_pid(pid) for pid, _ in pairs):
         return None
-    return pids
+    return pairs
+
+
+def _recorded_identity(value: object) -> str | None:
+    if isinstance(value, str) and 0 < len(value) <= _MAX_START_IDENTITY_CHARS:
+        return value
+    return None
 
 
 def _remove_owner_root_tree(root: Path) -> None:
@@ -6686,7 +6804,11 @@ def _unseal_for_removal(directory: Path, files: Sequence[str]) -> None:
     """A sealed launch tree is 0o500 and 0o400; nothing can be unlinked inside it."""
     os.chmod(directory, 0o700)
     for name in files:
-        os.chmod(directory / name, 0o600)
+        path = directory / name
+        # chmod follows a link, and Linux cannot chmod the link itself; a link
+        # needs no mode to be unlinked (audit C-39).
+        if not stat.S_ISLNK(os.lstat(path).st_mode):
+            os.chmod(path, 0o600)
 
 
 def _require_fresh_owner_root(owner_root: Path) -> None:

@@ -280,6 +280,20 @@ def test_a_catalog_with_no_active_pointer_collects_nothing(tmp_path):
     assert _footprint(catalog, "gen-1") == (True, 1, 0)
 
 
+def test_a_catalog_with_no_generation_yet_has_nothing_to_prune(tmp_path):
+    """A fresh vault before its first build: not a failed step."""
+    import prune_generations
+
+    catalog = _catalog(tmp_path)
+
+    lines = prune_generations.prune_generations(state_root=catalog.state_root, apply=True)
+
+    assert (lines[0], prune_generations._report(lines)) == (
+        "no memory generation is registered yet; nothing to prune",
+        0,
+    )
+
+
 def test_the_weekly_pass_prunes_generations():
     """Retention runs unattended or it does not run: the owner is not asked."""
     prune = [

@@ -229,8 +229,10 @@ def test_resolution_rejects_non_utf8_boundary_outside_or_ambiguous_block(vault: 
     alpha = source.index("α".encode())
     resolver = EvidenceResolver(vault)
 
+    # A span that no single entry holds is refused; one inside an entry names it
+    # (docs/research/2026-09-26-an-evidence-span-names-its-own-block.md).
     with pytest.raises(EvidenceResolutionError, match="ambiguous"):
-        resolver.resolve(EvidenceRef.parse(_reference("2026-01-01", source, "evt-1", alpha, alpha + 2)))
+        resolver.resolve(EvidenceRef.parse(_reference("2026-01-01", source, "evt-1", alpha, len(source))))
 
     unique = b"preamble\n## [evt-1] event\n" + "α".encode() + b"\n"
     path.write_bytes(unique)

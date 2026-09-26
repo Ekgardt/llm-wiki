@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -145,6 +146,10 @@ MAX_RELATED = 64
 MAX_AFTER_IMAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 MAX_RECEIPT_BYTES = 1024 * 1024
 MAX_LOG_BYTES = 4 * 1024 * 1024
+# The log is archived and restarted past half its cap, inside the compile that
+# would pass it (docs/research/2026-09-25-the-vault-log-rotates-before-its-cap.md).
+LOG_ROTATE_BYTES = MAX_LOG_BYTES // 2
+LOG_ARCHIVE_DIRECTORY = "knowledge/log-archive"
 CLAIM_RECORD_SCHEMA = json.loads(LEDGER_SCHEMA.read_text(encoding="utf-8"))[
     "properties"
 ]["claims"]["items"]
@@ -577,15 +582,17 @@ def _context_sources(
 def _deduplicated_sources(
     selected: Sequence[DailySnapshot],
 ) -> list[SourceSnapshot]:
-    """Two parts of the same day would otherwise appear twice under one path."""
-    seen_paths: set[str] = set()
-    sources: list[SourceSnapshot] = []
-    for item in selected:
-        if item.logical_path in seen_paths:
-            continue
-        seen_paths.add(item.logical_path)
-        sources.append(SourceSnapshot(item.logical_path, item.content, item.sha256))
-    return sources
+    """One source per selected part; two parts of one day in one batch is refused.
+
+    Sources are keyed by path downstream, so a second part used to be dropped here
+    while its receipt was still written, and its text was never compiled. The
+    planner keeps one part of a day per batch (`_group_dailies`); this is the
+    guard behind it. See `docs/research/2026-09-25-one-part-of-a-day-per-batch.md`.
+    """
+    paths = [item.logical_path for item in selected]
+    if len(set(paths)) != len(paths):
+        raise ValueError("two parts of one day in one compile batch")
+    return [SourceSnapshot(item.logical_path, item.content, item.sha256) for item in selected]
 
 
 MAX_FAILURE_DETAIL_CHARS = 300
@@ -629,6 +636,7 @@ def pack_compile_batches(
     optional_sources = tuple(
         item for item in inputs.sources if item.logical_path not in daily_paths
     )
+    ranking = _ContextRanking(optional_sources)
     return tuple(
         _compile_batch(
             inputs,
@@ -636,10 +644,71 @@ def pack_compile_batches(
             budget,
             model,
             token_adapters,
-            optional_paths=_fitting_context(paths, optional_sources, budget, measure),
+            optional_paths=_fitting_context(
+                paths, ranking.ordered(_batch_text(inputs, paths)), budget, measure
+            ),
         )
         for paths in _group_dailies(inputs, budget, measure)
     )
+
+
+_RANKING_WORD = re.compile(r"[^\W\d_]{4,}")
+# BM25's usual constants; see _ContextRanking.
+BM25_K1 = 1.2
+BM25_B = 0.75
+
+
+def _words(content: bytes) -> frozenset[str]:
+    return frozenset(_RANKING_WORD.findall(content.decode("utf-8", errors="ignore").casefold()))
+
+
+def _batch_text(inputs: CompileInputs, paths: set[str]) -> bytes:
+    return b"\n".join(item.content for item in inputs.dailies if item.part_key in paths)
+
+
+def _inverse_document_frequency(documents, total: int) -> dict[str, float]:
+    """BM25's IDF: `ln((N - n + 0.5) / (n + 0.5) + 1)` for each word."""
+    frequency: dict[str, int] = {}
+    for words in documents:
+        for word in words:
+            frequency[word] = frequency.get(word, 0) + 1
+    return {word: math.log((total - count + 0.5) / (count + 0.5) + 1) for word, count in frequency.items()}
+
+
+def _length_factors(words_by_path: Mapping[str, frozenset[str]]) -> dict[str, float]:
+    """BM25's length normalisation with a term frequency of one."""
+    lengths = [len(words) for words in words_by_path.values()]
+    average = (sum(lengths) / len(lengths)) if lengths else 1.0
+    return {
+        path: (BM25_K1 + 1) / (1 + BM25_K1 * (1 - BM25_B + BM25_B * len(words) / max(average, 1.0)))
+        for path, words in words_by_path.items()
+    }
+
+
+class _ContextRanking:
+    """Optional context in order of relevance to a batch's days, not by path.
+
+    A 32k window shows a fraction of the notes; offered by path, the planner saw
+    the alphabetically early pages and created a new page beside the one its day
+    was about (audit B-12, B-13). The score is the BM25 IDF of the words a page
+    shares with the days; ties go by path, so the order is deterministic. See
+    `docs/research/2026-09-25-the-compile-sees-the-pages-its-day-is-about.md`.
+    """
+
+    def __init__(self, sources: Sequence[SourceSnapshot]) -> None:
+        self.sources = tuple(sources)
+        self.words = {item.logical_path: _words(item.content) for item in self.sources}
+        self.idf = _inverse_document_frequency(self.words.values(), len(self.sources))
+        self.length_factor = _length_factors(self.words)
+
+    def ordered(self, day_text: bytes) -> tuple[SourceSnapshot, ...]:
+        day = _words(day_text)
+        return tuple(sorted(self.sources, key=lambda item: (-self._score(item, day), item.logical_path)))
+
+    def _score(self, item: SourceSnapshot, day: frozenset[str]) -> float:
+        """BM25 with every shared word counted once: a long page does not win by length."""
+        shared = sum(self.idf[word] for word in self.words[item.logical_path] & day)
+        return shared * self.length_factor[item.logical_path]
 
 
 def _draft_prompt_text(inputs: CompileInputs) -> str:
@@ -675,20 +744,35 @@ def _group_dailies(
     budget: ContextBudget,
     measure: Callable[..., int],
 ) -> list[set[str]]:
-    """Pack whole days into the largest groups the input budget allows."""
+    """Pack days into the largest groups the input budget allows, one part of a day each."""
     groups: list[set[str]] = []
     current: set[str] = set()
+    days: set[str] = set()
     for daily in inputs.dailies:
         _require_daily_fits(daily, budget, measure)
-        prospective = {*current, daily.part_key}
-        if current and measure(prospective) > budget.available_input_tokens:
+        if _starts_a_new_group(current, days, daily, budget, measure):
             groups.append(current)
-            current = {daily.part_key}
-            continue
-        current = prospective
+            current, days = set(), set()
+        current.add(daily.part_key)
+        days.add(daily.logical_path)
     if current:
         groups.append(current)
     return groups
+
+
+def _starts_a_new_group(
+    current: set[str],
+    days: set[str],
+    daily: DailySnapshot,
+    budget: ContextBudget,
+    measure: Callable[..., int],
+) -> bool:
+    """A full group, or one already holding another part of this day, is closed."""
+    if not current:
+        return False
+    if daily.logical_path in days:
+        return True
+    return measure({*current, daily.part_key}) > budget.available_input_tokens
 
 
 def _require_daily_fits(
@@ -1806,11 +1890,34 @@ def _validate_semantic_operation(
     _require_semantic_links(operation)
     evidence = operation["evidence"]
     _require_evidence_shape(evidence)
-    bindings = [_evidence_binding(item, inputs) for item in evidence]
+    bound = [_bound_evidence_block(item, inputs) for item in evidence]
     _require_claims(operation, inputs)
     normalized = json.loads(canonical_json_bytes(operation))
     assert isinstance(normalized, dict)
-    return normalized, bindings
+    return _with_page_project(normalized, [block for _binding, block in bound]), [binding for binding, _block in bound]
+
+
+# The line a captured session block names its project with; `session-end` blocks
+# have always carried it (`session_end_project_tag`).
+_PROJECT_LINE = re.compile(rb"^- Project slug: `([a-z0-9][a-z0-9._-]{0,127})`$", re.MULTILINE)
+
+
+def _with_page_project(operation: dict[str, object], blocks: list[bytes]) -> dict[str, object]:
+    """The page's project when every block it quotes names the same one, else none.
+
+    No note carried `project:`, so every project's rules reached every session
+    (audit 2026-09-26 B-14, docs/research/2026-09-26-a-page-belongs-to-the-project-its-evidence-names.md).
+    Derived from the quoted bytes, never from the model, so every render agrees.
+    """
+    projects = {_block_project(block) for block in blocks}
+    if len(projects) != 1 or None in projects:
+        return operation
+    return {**operation, "project": projects.pop()}
+
+
+def _block_project(block: bytes) -> str | None:
+    match = _PROJECT_LINE.search(block)
+    return match.group(1).decode("ascii") if match else None
 
 
 _SEMANTIC_FIELDS = frozenset(
@@ -1936,6 +2043,11 @@ def _bound_part(
 
 def _evidence_binding(item: object, inputs: CompileInputs) -> dict[str, str]:
     """Bind one quoted line to an exact byte span of an immutable daily source."""
+    return _bound_evidence_block(item, inputs)[0]
+
+
+def _bound_evidence_block(item: object, inputs: CompileInputs) -> tuple[dict[str, str], bytes]:
+    """The binding, and the daily block the quote was found in."""
     date, timestamp, quote = _require_evidence_fields(item)
     quote_bytes = quote.encode("utf-8")
     source, block, marker_at = _bound_part(
@@ -1956,12 +2068,13 @@ def _evidence_binding(item: object, inputs: CompileInputs) -> dict[str, str]:
         source.content,
         source_path=ROOT / source.logical_path,
     )
-    return {
+    binding = {
         "source_path": source.logical_path,
         "source_digest": source.sha256,
         "quote_sha256": sha256_bytes(quote_bytes),
         "reference": str(reference),
     }
+    return binding, block
 
 
 # Every claim dropped in this process, so the compile can report the count
@@ -1972,6 +2085,7 @@ DROPPED_CLAIMS: list[dict[str, str]] = []
 # Issue #26.2: `done` and `ok` said the same thing whether pages were published
 # or only a candidate was quarantined. Each batch returns what it did.
 QUARANTINE_OPERATION_PREFIX = "compile-quarantine:"
+CANDIDATE_DIRECTORY = "knowledge/inbox/claims/"
 
 
 @dataclass(frozen=True)
@@ -1993,7 +2107,9 @@ def _committed_outcome(result: CompileApplyResult) -> BatchOutcome:
             "pending until the candidate is reviewed."
         )
         return BatchOutcome(0, "quarantined", paths)
-    print(f"compile_memory: batch published {paths} page(s).")
+    candidates = sum(1 for path in result.touched if path.startswith(CANDIDATE_DIRECTORY))
+    held = f"; {candidates} claim(s) quarantined under {CANDIDATE_DIRECTORY}" if candidates else ""
+    print(f"compile_memory: batch published {paths - candidates} page(s){held}.")
     return BatchOutcome(0, "published", paths)
 
 
@@ -2393,6 +2509,11 @@ def _require_literal_match(
         raise ValueError("compile claim literal evidence does not match")
 
 
+def _project_line(operation: Mapping[str, object]) -> str:
+    project = operation.get("project")
+    return f"project: {project}\n" if isinstance(project, str) else ""
+
+
 def _render_page(
     operation: dict[str, object], completed_at: str, evidence_refs: Sequence[str] = ()
 ) -> bytes:
@@ -2410,6 +2531,7 @@ def _render_page(
         f"timestamp: {completed_at}\n"
         "confidence: medium\n"
         "source_authority: ai-derived\n"
+        f"{_project_line(operation)}"
         "---\n\n"
         f"# {title}\n\n"
         f"One-sentence summary: {summary}\n\n"
@@ -3094,7 +3216,10 @@ class _ApplyPlan:
     def _pipeline(self, source_page: str) -> ContradictionPipeline:
         return ContradictionPipeline(
             claim_index=self.claim_index,
-            evaluators=_contradiction_evaluators(),
+            # No model is asked: outside the benchmark gate a semantic answer
+            # cannot change the decision (semantic supersession is disabled), so
+            # the calls only spent tokens and sent claim text out (audit B-3).
+            evaluators=(),
             vault=ROOT,
             coordinator=self.coordinator,
             source_page=source_page,
@@ -3123,8 +3248,9 @@ class _ApplyPlan:
         committed = self._existing_receipts()
         if committed is not None:
             return committed
-        if self._quarantined():
-            return self._commit_quarantine()
+        # A quarantined claim is carried on its page as `quarantined` and its
+        # candidate joins this commit; it does not hold back the batch (audit
+        # A-13, docs/research/2026-09-25-a-quarantined-claim-does-not-hold-its-day.md).
         return self._publish_changes()
 
     def _publish_changes(self) -> CompileApplyResult:
@@ -3167,13 +3293,6 @@ class _ApplyPlan:
             )
             for source in self.batch.manifest
         ]
-
-    def _quarantined(self) -> bool:
-        return any(
-            assessment.recommendation == "quarantine"
-            for _pipeline, assessments in self.claim_groups
-            for assessment in assessments
-        )
 
     def _commit_quarantine(self) -> CompileApplyResult:
         """A quarantined batch publishes candidates only, and no pages."""
@@ -3413,10 +3532,27 @@ class _ApplyPlan:
         )
         log_relative = LOG.relative_to(ROOT).as_posix()
         log_source = sources.get(log_relative)
-        log_bytes = _append_log_bytes(_log_before(log_source), self._log_entry())
-        if len(log_bytes) > MAX_LOG_BYTES:
-            raise ValueError("knowledge log exceeds after-image limit")
+        log_before = _log_before(log_source)
+        log_bytes = _append_log_bytes(log_before, self._log_entry())
+        if len(log_bytes) > LOG_ROTATE_BYTES:
+            log_bytes = self._rotated_log(log_before)
         self._append_vault_file(log_relative, log_bytes, sources, MAX_LOG_BYTES)
+
+    def _rotated_log(self, log_before: bytes) -> bytes:
+        """Archive the whole log in this transaction and start a fresh one naming it.
+
+        The compile rewrote the log whole and refused past 4 MiB, so every compile
+        failed from then on (docs/research/2026-09-25-the-vault-log-rotates-before-its-cap.md).
+        """
+        archive = f"{LOG_ARCHIVE_DIRECTORY}/log.local.{self.completed_at[:10]}.md"
+        self.coordinator.ensure_target_parent(archive)
+        self.preconditions[archive] = "absent"
+        self.changes.append(MarkdownChange.create(archive, log_before, max_before_bytes=MAX_LOG_BYTES))
+        fresh = (
+            f"# Session Memory Log\n\n- {self.completed_at[:10]} — Rotated: earlier entries are "
+            f"in `{archive}`.\n"
+        ).encode()
+        return _append_log_bytes(fresh, self._log_entry())
 
     def _vault_sources(self) -> dict[str, object]:
         """What is on disk outranks what one prompt had room to carry.
@@ -3568,13 +3704,6 @@ def _operation_claims(planned: object) -> list[object]:
     if not isinstance(claims, list):
         return []
     return claims
-
-
-def _contradiction_evaluators() -> tuple[object, ...] | None:
-    """The fake provider has no evaluator to call, so none are configured."""
-    if os.environ.get("MEMORY_LLM_PROVIDER") == "fake":
-        return ()
-    return None
 
 
 def _receipt_authority(receipts: Sequence[Mapping[str, object]]) -> tuple[str, str]:
@@ -3876,18 +4005,47 @@ def _repair_compile_mirror(coordinator: MarkdownCoordinator) -> None:
     """
     compiled = _receipt_predicate(coordinator)
     corrected = {}
+    unreceipted = []
     for path in _canonical_dailies():
         whole = _whole_daily_digest(path.relative_to(ROOT).as_posix(), compiled)
-        if whole is not None:
-            corrected[path.name] = whole
-    if corrected:
-        update_state(lambda state: _apply_mirror_repair(state, corrected))
+        if whole is None:
+            unreceipted.append(path.name)
+            continue
+        corrected[path.name] = whole
+    quarantined = _quarantine_only_days(unreceipted, coordinator)
+    if corrected or quarantined:
+        update_state(lambda state: _apply_mirror_repair(state, corrected, quarantined))
 
 
-def _apply_mirror_repair(state: dict, corrected: dict) -> None:
+def _quarantine_only_days(names: Sequence[str], coordinator: MarkdownCoordinator) -> list[str]:
+    """Days the mirror holds only because a quarantined batch once wrote them there.
+
+    A quarantine commit writes candidates and no receipt, so such a day was
+    skipped for ever. A mirror-only day from before receipts has no quarantine
+    commit behind it and is left alone. See
+    `docs/research/2026-09-25-a-quarantined-day-stays-pending.md`.
+    """
+    commits = load_state().get("compiled_daily_commits", {})
+    if not isinstance(commits, dict):
+        return []
+    return [name for name in names if _committed_by_quarantine(commits.get(name), coordinator)]
+
+
+def _committed_by_quarantine(record: object, coordinator: MarkdownCoordinator) -> bool:
+    if not isinstance(record, dict) or not isinstance(record.get("sequence"), int):
+        return False
+    operation_id = coordinator.operation_id_at(record["sequence"]) or ""
+    return operation_id.startswith(QUARANTINE_OPERATION_PREFIX)
+
+
+def _apply_mirror_repair(state: dict, corrected: dict, quarantined: Sequence[str]) -> None:
     mirror = _require_state_mapping(state, "compiled_daily_hashes")
+    commits = _require_state_mapping(state, "compiled_daily_commits")
     for name, digest in corrected.items():
         mirror[name] = digest
+    for name in quarantined:
+        mirror.pop(name, None)
+        commits.pop(name, None)
 
 
 def select_dailies(
@@ -4283,6 +4441,7 @@ def _run(
     coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT)
     dailies = select_dailies(args, state, coordinator=coordinator)
     _repair_compile_mirror(coordinator)
+    _retire_stale_source_failures(coordinator.state_root)
     _require_compile_active(deadline, cancelled)
     if not dailies:
         print("compile_memory: no changed daily logs; nothing to do.")
@@ -4453,17 +4612,36 @@ def _mirror_digests(batch: CompileBatch, coordinator: MarkdownCoordinator) -> di
     opening the coordinator. A long day is compiled part by part, and recording
     the last part's digest under the file name made every one of those readers
     call a fully compiled day stale for ever. The mirror now names the whole
-    file, and only once every part of it carries a receipt.
+    file, and only once every part of it carries a receipt: a quarantined batch
+    writes no receipt, so it writes nothing here either (audit A-12).
     """
     compiled = _receipt_predicate(coordinator)
     digests = {
-        Path(item.logical_path).name: item.sha256 for item in batch.inputs.dailies
+        Path(item.logical_path).name: item.sha256
+        for item in batch.inputs.dailies
+        if _receipted_whole_snapshot(item, compiled)
     }
-    for logical_path in sorted({item.logical_path for item in batch.inputs.dailies}):
+    digests.update(_whole_file_digests(batch.inputs.dailies, compiled))
+    return digests
+
+
+def _whole_file_digests(
+    dailies: Sequence[DailySnapshot], compiled: Callable[[str, str], bool]
+) -> dict[str, str]:
+    """The file digest of every day in the batch whose every part now carries a receipt."""
+    digests: dict[str, str] = {}
+    for logical_path in sorted({item.logical_path for item in dailies}):
         whole = _whole_daily_digest(logical_path, compiled)
         if whole is not None:
             digests[Path(logical_path).name] = whole
     return digests
+
+
+def _receipted_whole_snapshot(item: DailySnapshot, compiled: Callable[[str, str], bool]) -> bool:
+    """A one-part snapshot this commit compiled: the file may have grown since."""
+    if item.part_count != 1:
+        return False
+    return compiled(item.logical_path, item.sha256)
 
 
 def _record_batch_diagnostics(
@@ -4525,6 +4703,31 @@ def _record_compile_source_failures(
             error_code=error_code[:200],
             producer="compile",
         )
+
+
+def _retire_stale_source_failures(state_root: Path) -> None:
+    """Retire every failure row whose digest the file no longer has (audit B-15).
+
+    A daily log only grows, so a failure of older bytes can never be cleared by a
+    commit, and it held the day out of the archive and `run/` out of deletion
+    for ever. See `docs/research/2026-09-25-a-failure-of-content-that-is-gone-is-retired.md`.
+    """
+    queue = active_or_legacy_memory_queue(ROOT, state_root)
+    current: dict[str, frozenset[str]] = {}
+    for logical_path, digest in queue.source_failure_keys():
+        if logical_path not in current:
+            current[logical_path] = _current_source_digests(logical_path)
+        if digest not in current[logical_path]:
+            queue.clear_source_failure(logical_path, digest)
+
+
+def _current_source_digests(logical_path: str) -> frozenset[str]:
+    """The digests a compile of this file would record: the whole and each part."""
+    content = _readable_daily(ROOT / logical_path)
+    if content is None:
+        return frozenset()
+    parts = {sha256_bytes(content[start:end]) for start, end in _daily_part_bounds(content)}
+    return frozenset({sha256_bytes(content), *parts})
 
 
 def _clear_compile_source_failures(inputs: CompileInputs, state_root: Path) -> None:

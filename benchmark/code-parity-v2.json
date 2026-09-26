@@ -99,22 +99,17 @@
       "gold": {
         "citations": [
           "scripts/session_evidence.py (def write_session_evidence)",
-          "scripts/flush_memory.py (def _keep_session_record), call at scripts/flush_memory.py:1304",
-          "scripts/flush_memory.py (def _keep_transcript_record), call at scripts/flush_memory.py:1340",
-          "scripts/backfill_sessions.py (def _write_one), call at scripts/backfill_sessions.py:132"
+          "scripts/flush_memory.py (def _keep_session_record), call at scripts/flush_memory.py:1141",
+                    "scripts/backfill_sessions.py (def _write_one), call at scripts/backfill_sessions.py:224"
         ],
         "must": [
           [
             "_keep_session_record",
-            "1304"
-          ],
-          [
-            "_keep_transcript_record",
-            "1340"
+            "1141"
           ],
           [
             "_write_one",
-            "132"
+            "224"
           ]
         ],
         "must_not": []

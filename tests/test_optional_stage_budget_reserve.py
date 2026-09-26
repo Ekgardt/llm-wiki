@@ -107,7 +107,7 @@ def test_a_failed_run_is_not_recorded_as_a_cheap_one():
     retrieval._observe_optional_stage("dense", 0.01)
     with pytest.raises(RuntimeError):
         retrieval._run_optional_bounded(
-            explode, deadline=time.monotonic() + 5.0, cancelled=None, kind="dense"
+            explode, deadline=time.monotonic() + SHORT_TIMEOUT, cancelled=None, kind="dense"
         )
     # Still the figure from the run that produced something, not the failure's.
     assert retrieval._observed_optional_stage_cost("dense") == 0.01
@@ -131,7 +131,7 @@ def test_a_kind_observed_to_be_slower_than_the_window_is_not_waited_for():
 def test_a_kind_observed_to_fit_is_waited_for():
     retrieval._observe_optional_stage("dense", 0.01)
     value = retrieval._run_optional_bounded(
-        lambda: "value", deadline=time.monotonic() + 5.0, cancelled=None, kind="dense"
+        lambda: "value", deadline=time.monotonic() + SHORT_TIMEOUT, cancelled=None, kind="dense"
     )
     assert value == "value"
 
@@ -184,6 +184,6 @@ def test_a_pathological_run_is_recorded_as_does_not_fit_not_as_its_length():
 def test_unlabelled_optional_work_is_still_admitted():
     """The cost model is per kind; work with no kind has nothing to be modelled against."""
     value = retrieval._run_optional_bounded(
-        lambda: "value", deadline=time.monotonic() + 1.0, cancelled=None, kind=None
+        lambda: "value", deadline=time.monotonic() + SHORT_TIMEOUT, cancelled=None, kind=None
     )
     assert value == "value"

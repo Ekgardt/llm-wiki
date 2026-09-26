@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import lane_score
-from provenance import authority_weight, curated_pages_first, source_type_weight
+from provenance import authority_weight, curated_pages_first, source_type_weight, substance_weight
 
 MAX_OPTIONAL_STRAGGLERS = 2
 
@@ -127,6 +127,12 @@ class OptionalStageTimeout(TimeoutError):
 # either direction, and a wrongly skipped stage degrades to the lexical answer,
 # which is the designed fallback rather than a failure.
 _OPTIONAL_STAGE_OBSERVED: dict[str, float] = {}
+# When each cost was observed (monotonic). A cost that said "does not fit" is
+# tried again after this long, as a background trial, so one slow run under load
+# does not switch the stage off for the life of the process (audit 2026-09-26
+# B-16, docs/research/2026-09-26-a-rerank-is-tried-again.md).
+_OPTIONAL_STAGE_OBSERVED_AT: dict[str, float] = {}
+OPTIONAL_STAGE_REPROBE_SECONDS = 300.0
 _OPTIONAL_STAGE_OBSERVED_LOCK = threading.Lock()
 
 
@@ -146,6 +152,16 @@ def _observe_optional_stage(kind: str | None, seconds: float) -> None:
         return
     with _OPTIONAL_STAGE_OBSERVED_LOCK:
         _OPTIONAL_STAGE_OBSERVED[kind] = min(seconds, OPTIONAL_STAGE_MAX_SECONDS)
+        _OPTIONAL_STAGE_OBSERVED_AT[kind] = time.monotonic()
+
+
+def _observed_cost_is_stale(kind: str) -> bool:
+    """Whether the last observed cost is old enough to be tried again."""
+    with _OPTIONAL_STAGE_OBSERVED_LOCK:
+        observed_at = _OPTIONAL_STAGE_OBSERVED_AT.get(kind)
+    if observed_at is None:
+        return False
+    return time.monotonic() - observed_at >= OPTIONAL_STAGE_REPROBE_SECONDS
 
 
 def _observed_optional_stage_cost(kind: str | None) -> float | None:
@@ -547,6 +563,10 @@ class RetrievalTrace:
     reranker_depth: int | None = None
     reranker_duration_ms: int | None = None
     reranker_fallback_reason: str | None = None
+    # The signals the run asked for. A planned GRAPH run adds dense to what its
+    # profile declares, so the profile alone cannot say a dense leg went missing
+    # (audit 2026-09-26 C-10).
+    signals_requested: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1351,7 +1371,7 @@ def _weigh_by_trust(
     curated_first: bool,
     query: str | None = None,
 ) -> dict[str, float]:
-    """Multiply each fused score by who said it, what the page is, and what it did.
+    """Multiply each fused score by who said it, what the page is, what it did, and whether it is prose.
 
     Every factor is recorded on the candidate separately, so the ordering can be
     explained by name rather than by one opaque number. `curated_first` is what
@@ -1370,11 +1390,13 @@ def _weigh_by_trust(
         )
         carried = standing.get(str(meta[key].get("relative_path")), 1.0)
         near = alongside.get(_page_name(meta[key].get("relative_path")), 1.0)
+        substance = substance_weight(meta[key].get("content"))
         meta[key]["authority_weight"] = authority
         meta[key]["type_weight"] = page
         meta[key]["carried_weight"] = carried
         meta[key]["alongside_weight"] = near
-        weighted[key] = value * authority * page * carried * near
+        meta[key]["substance_weight"] = substance
+        weighted[key] = value * authority * page * carried * near * substance
     return weighted
 
 
@@ -1439,7 +1461,7 @@ def _is_real_digest(sha: object) -> bool:
 def _source_sha256(row: Mapping[str, Any]) -> str:
     """The digest of the row's source.
 
-    The legacy FTS index stores no digest, so a row from it carried sixty-four
+    The legacy FTS index (retired 2026-09-23) stored no digest, so a row from it carried sixty-four
     zeros — a value that passes the citation schema while identifying nothing.
     The page is right there, so it is hashed instead, and the placeholder is
     left for the case where the file genuinely cannot be read.
@@ -1711,9 +1733,10 @@ def _effective_for_hybrid(signals: set[str], requested: str) -> str:
 
 
 def _effective_for_graph(signals: set[str], requested: str) -> str:
+    """A planned GRAPH run also asks for dense, so without the graph it is HYBRID."""
     if "graph" in signals:
         return "GRAPH"
-    return _lexical_or_requested(signals, requested)
+    return _effective_for_hybrid(signals, requested)
 
 
 def _effective_for_global(signals: set[str], requested: str) -> str:
@@ -1728,7 +1751,7 @@ def _effective_for_graph_profile(signals: set[str], requested: str) -> str:
     """REPO_MAP and IMPACT keep their name only while the graph answered."""
     if "graph" in signals:
         return requested
-    return _lexical_or_requested(signals, requested)
+    return _effective_for_hybrid(signals, requested)
 
 
 def _lexical_or_requested(signals: set[str], requested: str) -> str:
@@ -2189,13 +2212,35 @@ def _run_reranker(
     # scoring, on the same four cores as the answer that is now being built
     # without it. Told when to stop, it stops between batches instead.
     stage_deadline = _optional_stage_deadline(deadline_monotonic)
+    worker_deadline = _rerank_worker_deadline(stage_deadline)
     return _run_optional_bounded(
-        lambda: call(stage_deadline),
+        lambda: call(worker_deadline),
         deadline=stage_deadline,
         cancelled=cancelled,
         kind="rerank",
         observes=_rerank_scored,
     )
+
+
+def _rerank_worker_deadline(stage_deadline: float) -> float:
+    """When the rerank itself stops: the window, once to learn its cost, or never started.
+
+    A straggler told to stop at the caller's window never finished under load,
+    so it never recorded a cost and was started and cut on every call (audit
+    B-17, docs/research/2026-09-25-a-rerank-that-cannot-fit-is-not-started.md).
+    """
+    if _optional_stage_fits("rerank", stage_deadline):
+        return stage_deadline
+    if _rerank_cost_worth_learning():
+        return time.monotonic() + OPTIONAL_STAGE_MAX_SECONDS
+    raise OptionalStageTimeout("the rerank is known not to fit this window")
+
+
+def _rerank_cost_worth_learning() -> bool:
+    """No cost yet, or one old enough that the model may be warm again."""
+    if _observed_optional_stage_cost("rerank") is None:
+        return True
+    return _observed_cost_is_stale("rerank")
 
 
 def _rerank_scored(reranked: Sequence[Mapping[str, Any]]) -> bool:
@@ -3736,6 +3781,7 @@ def _retrieval_trace(
     corpus_generation: str,
     partial: bool,
     rerank_trace: _RerankTrace,
+    wanted: Sequence[str] = (),
 ) -> RetrievalTrace:
     return RetrievalTrace(
         requested_mode=requested,
@@ -3750,6 +3796,7 @@ def _retrieval_trace(
         reranker_depth=_as_optional_int(rerank_trace.depth),
         reranker_duration_ms=_as_optional_int(rerank_trace.duration_ms),
         reranker_fallback_reason=rerank_trace.fallback_reason,
+        signals_requested=tuple(wanted),
     )
 
 
@@ -3833,6 +3880,7 @@ def _assembled_partial(progress: _PlanProgress, reason: str) -> RetrievalResult:
             corpus_generation=progress.corpus_generation,
             partial=True,
             rerank_trace=progress.rerank_trace,
+            wanted=progress.wanted,
         ),
         analysis=progress.analysis,
         display_meta=display_meta,
@@ -3950,6 +3998,7 @@ def _executed_plan(
             corpus_generation=progress.corpus_generation,
             partial=partial,
             rerank_trace=rerank_trace,
+            wanted=progress.wanted,
         ),
         analysis=progress.analysis,
         display_meta=display_meta,
@@ -3978,8 +4027,12 @@ def retrieve(
     graph_per_seed_limit: int = GRAPH_PER_SEED_LIMIT,
     graph_global_limit: int = GRAPH_GLOBAL_LIMIT,
     graph_edge_families: Mapping[str, bool] | None = None,
+    signals: Sequence[str] | None = None,
 ) -> RetrievalResult:
     """Plan and execute retrieval with truthful mode/signal reporting.
+
+    `signals`, when given, are the signals the caller planned for the profile;
+    by default the profile's declared ones.
 
     Lexical and dense backends are invoked independently with identical hard
     filters. Fusion is rank-only RRF. Raw backend scores stay on candidates.
@@ -4004,7 +4057,7 @@ def retrieve(
         "as_of": as_of,
     }
 
-    wanted = PROFILE_SIGNALS[requested]
+    wanted = _planned_signals(requested, signals)
     _require_bounded_int(graph_per_seed_limit, 1, 100, "graph_per_seed_limit")
     _require_bounded_int(graph_global_limit, 1, 1000, "graph_global_limit")
     _require_known_edge_families(graph_edge_families)
@@ -4067,6 +4120,7 @@ def _legacy_trace_fields(trace: RetrievalTrace) -> dict[str, Any]:
         "reranker_depth": trace.reranker_depth,
         "reranker_duration_ms": trace.reranker_duration_ms,
         "reranker_fallback_reason": trace.reranker_fallback_reason,
+        "signals_requested": list(trace.signals_requested),
     }
 
 
@@ -4267,23 +4321,40 @@ def _backend_hit_from_legacy(
     return hit
 
 
-def _requested_profile(
+def _planned_signals(requested: str, signals: Sequence[str] | None) -> tuple[str, ...]:
+    if signals is None:
+        return PROFILE_SIGNALS[requested]
+    planned = tuple(signals)
+    if not planned or not set(planned) <= {"lexical", "dense", "graph"}:
+        raise ValueError(f"unknown retrieval signals: {planned!r}")
+    return planned
+
+
+def planned_request(
     profile: str | None, analysis: QueryAnalysis, *, semantic: bool
-) -> str:
-    """`semantic=False` forces the lexical profile whatever the planner says."""
+) -> tuple[str, tuple[str, ...]]:
+    """The profile a search runs and the signals it asks for.
+
+    `semantic=False` forces the lexical profile whatever the planner says, and an
+    explicit profile runs as declared. Otherwise a question the planner reads as
+    one about relations (a profile that declares the graph) keeps that profile
+    and adds dense; every other question runs HYBRID. Before 2026-09-25 every
+    semantic search ran HYBRID, so the evidence graph never answered `recall`
+    (audit C-22, docs/research/2026-09-25-recall-asks-the-graph-about-relations.md).
+    """
     if not semantic:
-        return "BASE"
+        return "BASE", ("lexical",)
     requested = _normalize_profile(profile)
     if requested is not None:
-        return requested
-    return "HYBRID"
+        return requested, PROFILE_SIGNALS[requested]
+    return _planned_semantic_request(analysis.recommended_profile)
 
 
-def _wanted_signals(requested: str, *, semantic: bool) -> tuple[str, ...]:
-    wanted = PROFILE_SIGNALS[requested]
-    if semantic:
-        return tuple(wanted)
-    return tuple(signal for signal in wanted if signal != "dense") or ("lexical",)
+def _planned_semantic_request(recommended: str) -> tuple[str, tuple[str, ...]]:
+    declared = PROFILE_SIGNALS[recommended]
+    if "graph" not in declared:
+        return "HYBRID", PROFILE_SIGNALS["HYBRID"]
+    return recommended, tuple(dict.fromkeys(("lexical", "dense", *declared)))
 
 
 def _selected_catalog(catalog: Any, search_memory: Any) -> Any:
@@ -4722,6 +4793,7 @@ class _SearchRun:
             deadline_monotonic=self.deadline,
             max_candidates=self.max_candidates,
             cancelled=self.cancelled,
+            signals=self.wanted,
         )
 
     def run_under_seal(self) -> RetrievalResult:
@@ -4798,7 +4870,7 @@ def retrieve_via_search_memory(
         model_revision=generation_model_revision,
     )
     analysis = analyze_query(query)
-    requested = _requested_profile(profile, analysis, semantic=semantic)
+    requested, wanted = planned_request(profile, analysis, semantic=semantic)
     run = _SearchRun(
         search_memory,
         query,
@@ -4819,7 +4891,7 @@ def retrieve_via_search_memory(
         max_candidates,
         cancelled,
         requested,
-        _wanted_signals(requested, semantic=semantic),
+        wanted,
     )
     run.open()
     result = run.reported(run.run())

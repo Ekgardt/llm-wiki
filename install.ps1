@@ -34,6 +34,52 @@ function Info($msg) { Write-Host "[INFO] $msg" -ForegroundColor Blue }
 function Ok($msg)   { Write-Host "[OK] $msg"   -ForegroundColor Green }
 function Warn($msg) { Write-Host "[WARN] $msg"  -ForegroundColor Yellow }
 function Fail($msg) { Write-Host "[FAIL] $msg"  -ForegroundColor Red; exit 1 }
+# The llm-wiki entry in ~/.claude.json, judged as install.sh judges it: an entry that
+# points at another vault is not this install's (audit C-34,
+# docs/research/2026-09-25-the-installers-agree.md). The file is only read.
+function Get-ClaudeMcpState {
+    param([string]$Config, [string]$VaultRoot)
+    if (-not (Test-Path -LiteralPath $Config)) { return "missing" }
+    try {
+        $parsed = Get-Content -LiteralPath $Config -Raw | ConvertFrom-Json
+    } catch {
+        return "unreadable"
+    }
+    $entry = $null
+    if ($null -ne $parsed.mcpServers) { $entry = $parsed.mcpServers.'llm-wiki' }
+    if ($null -eq $entry) { return "absent" }
+    if (@($entry.args) -contains $VaultRoot) { return "current" }
+    return "elsewhere"
+}
+
+# The same line install.sh's claude_status_line prints for each entry state: only a
+# current entry is "active automatic" (audit 2026-09-26 C-13,
+# docs/research/2026-09-26-the-installers-register-claude-mcp-alike.md).
+function Get-ClaudeStatusLine {
+    param([bool]$Automatic, [string]$McpState)
+    if (-not $Automatic) { return "Claude Code: not wired (install transaction failed)" }
+    if ($McpState -eq "current") { return "Claude Code: active automatic" }
+    if ($McpState -eq "elsewhere") { return "Claude Code: hooks active; MCP entry points at another vault" }
+    return "Claude Code: hooks active; MCP server not registered"
+}
+
+function Write-ClaudeRegistration {
+    param([string]$McpState, [string]$VaultRoot)
+    if ($McpState -eq "current") { Ok "Claude MCP server registered: llm-wiki"; return }
+    Warn "Existing ~/.claude.json found without llm-wiki; add it with:"
+    Warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VaultRoot python scripts/mcp_server.py"
+}
+
+# ~/.claude.json is Claude Code's live state file: it is never rewritten here. Its own
+# CLI adds the entry, as install.sh does; without the CLI the command is printed.
+function Register-ClaudeMcp {
+    param([string]$VaultRoot)
+    if ($null -eq (Get-Command claude -ErrorAction SilentlyContinue)) { return "absent" }
+    & claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VaultRoot python scripts/mcp_server.py *> $null
+    if ($LASTEXITCODE -ne 0) { return "absent" }
+    return "current"
+}
+
 function Invoke-NativeCommand {
     [CmdletBinding()]
     param(
@@ -43,6 +89,13 @@ function Invoke-NativeCommand {
         [switch]$CaptureOutput,
         [switch]$ReturnResult
     )
+    # Windows PowerShell 5.1 drops an empty argument on the way to a native
+    # command (7.3 keeps it), so `--flag ""` arrives as a bare `--flag`. Refuse
+    # it here on every PowerShell, so a caller omits the flag instead. See
+    # docs/research/2026-09-25-an-empty-argument-is-omitted-not-passed.md.
+    if (@($ArgumentList | Where-Object { [string]::IsNullOrEmpty($_) }).Count -gt 0) {
+        throw "$FilePath was given an empty argument; omit the flag instead"
+    }
     if ($CaptureOutput) {
         $output = @(& $FilePath @ArgumentList)
     } else {
@@ -304,11 +357,16 @@ Ok "uv $installedUvVersion"
 # --- 3. Install dependencies --------------------------------------
 
 Info "Installing locked production dependencies..."
-$syncPlanJson = Invoke-NativeCommand python @(
-    (Join-Path $VAULT_ROOT "scripts\installer_config.py"),
-    "sync-args", "--root", $VAULT_ROOT, "--environment", [string]$env:UV_PROJECT_ENVIRONMENT
-) -CaptureOutput
+$syncArguments = @((Join-Path $VAULT_ROOT "scripts\installer_config.py"), "sync-args", "--root", $VAULT_ROOT)
+if (-not [string]::IsNullOrEmpty($env:UV_PROJECT_ENVIRONMENT)) {
+    $syncArguments += @("--environment", $env:UV_PROJECT_ENVIRONMENT)
+}
+$syncPlanJson = Invoke-NativeCommand python $syncArguments -CaptureOutput
 $syncPlan = $syncPlanJson | ConvertFrom-Json
+if (-not [string]::IsNullOrEmpty($syncPlan.ignored_environment)) {
+    # Timers, hooks and the MCP server run the vault from its own .venv (audit B-26).
+    Warn "UV_PROJECT_ENVIRONMENT=$($syncPlan.ignored_environment) is not used: the vault runs from $($syncPlan.environment)"
+}
 $env:UV_PROJECT_ENVIRONMENT = $syncPlan.environment
 Invoke-NativeCommand uv @($syncPlan.arguments)
 Ok "Production dependencies installed (MCP included)"
@@ -539,6 +597,7 @@ if ($claudeDetected) {
         Warn "Claude settings not written: the install ownership transaction failed"
     }
     $claudeMcp = $claudeUserConfig
+    $claudeMcpState = "missing"
     $claudeEntryObject = [ordered]@{
         command = "uv"
         args = @("run", "--locked", "--no-sync", "--directory", $VAULT_ROOT, "python", "scripts/mcp_server.py")
@@ -547,22 +606,23 @@ if ($claudeDetected) {
         mcpServers = [ordered]@{ "llm-wiki" = $claudeEntryObject }
     }
     $claudeJson = $claudeConfigObject | ConvertTo-Json -Depth 6 -Compress
-    $claudeMerge = ([ordered]@{ "llm-wiki" = $claudeEntryObject } | ConvertTo-Json -Depth 5 -Compress)
     if (-not (Test-Path $claudeMcp)) {
         Write-Utf8NoBom $claudeMcp $claudeJson
+        $claudeMcpState = "current"
         Ok "Claude MCP config created -> $claudeMcp"
     } else {
-        $claudeExisting = Get-Content -LiteralPath $claudeMcp -Raw
-        if ($claudeExisting -notmatch '"llm-wiki"\s*:') {
-            Warn 'Existing ~/.claude.json found without llm-wiki; merge this under top-level "mcpServers":'
-            Warn "  $claudeMerge"
+        $claudeMcpState = Get-ClaudeMcpState -Config $claudeMcp -VaultRoot $VAULT_ROOT
+        if ($claudeMcpState -eq "absent") {
+            $claudeMcpState = Register-ClaudeMcp -VaultRoot $VAULT_ROOT
+            Write-ClaudeRegistration -McpState $claudeMcpState -VaultRoot $VAULT_ROOT
+        }
+        if ($claudeMcpState -eq "elsewhere") {
+            Warn "The llm-wiki MCP entry in ~/.claude.json points at another vault; replace it with:"
+            Warn "  claude mcp remove --scope user llm-wiki"
+            Warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VAULT_ROOT python scripts/mcp_server.py"
         }
     }
-    if ($claudeAutomatic) {
-        $agents += "Claude Code: active automatic"
-    } else {
-        $agents += "Claude Code: not wired (install transaction failed)"
-    }
+    $agents += Get-ClaudeStatusLine -Automatic $claudeAutomatic -McpState $claudeMcpState
 }
 
 if ($agents.Count -eq 0) {
@@ -644,12 +704,12 @@ switch ($syncExit) {
 }
 
 # --- 8b. Pinned model weights ------------------------------------
-# The read path loads weights local-only; with the semantic extra installed,
-# fetch the two pinned models now, verified.
+# The read path loads weights local-only. Every pinned model whose runtime is
+# installed is fetched now, verified; the script's own lines say which.
 uv run --locked --no-sync python "$VAULT_ROOT\scripts\install_models.py"
 switch ($LASTEXITCODE) {
-    0 { Ok "Pinned model weights present" }
-    2 { Info "Semantic search not installed; model weights are fetched once it is" }
+    0 { Ok "Model weights step done" }
+    2 { Info "huggingface_hub is not installed; model weights are fetched once it is" }
     default { Warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" }
 }
 

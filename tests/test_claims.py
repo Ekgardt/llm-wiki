@@ -130,16 +130,19 @@ def test_normalize_is_deterministic_unicode_canonical_and_fingerprinted(pipeline
     block = pipeline.split_blocks(source_bytes())[0]
     verified = pipeline.verify_literal(pipeline.extract(block, raw_claim())[0])
     normalized = pipeline.normalize(verified)
-    assert normalized.record["id"] == "claim:2026-01-02-03:04:05:0"
-    assert normalized.record["subject"] == "service a"
-    assert normalized.record["relation"] == "depends-on"
-    assert normalized.record["value"] == {"type": "entity", "value": "café"}
-    assert normalized.record["qualifiers"] == [
-        {"key": "environment", "value": {"type": "string", "value": "PROD"}}
-    ]
-    assert normalized.record["observed_at"] == "2026-01-02T03:04:05Z"
-    assert normalized.record["fingerprint"] == pipeline.normalize(verified).record["fingerprint"]
-    assert len(normalized.record["fingerprint"]) == 64
+    fields = ("id", "subject", "relation", "value", "qualifiers", "observed_at")
+
+    assert {name: normalized.record[name] for name in fields} == {
+        "id": "claim:2026-01-02-03:04:05:0",
+        "subject": "service a",
+        "relation": "depends-on",
+        "value": {"type": "entity", "value": "café"},
+        "qualifiers": [{"key": "environment", "value": {"type": "string", "value": "PROD"}}],
+        "observed_at": "2026-01-02T03:04:05Z",
+    }
+    assert (normalized.record["fingerprint"], len(normalized.record["fingerprint"])) == (
+        pipeline.normalize(verified).record["fingerprint"], 64,
+    )
 
 
 def test_numeric_values_normalize_decimal_strings_without_binary_floats(pipeline) -> None:
@@ -253,15 +256,18 @@ def test_claim_index_rebuilds_derived_delete_full_database_and_bounds_candidates
     index = ClaimIndex(state)
     index.rebuild([page.parent])
 
-    assert index.path == state / "cache/claims.sqlite3"
     with sqlite3.connect(index.path) as database:
-        assert database.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
-        assert database.execute("PRAGMA synchronous").fetchone()[0] == 2
-    assert len(index.candidates(normalized, limit=1)) == 1
-    assert index.candidates(normalized, limit=0) == []
+        pragmas = (
+            database.execute("PRAGMA journal_mode").fetchone()[0],
+            database.execute("PRAGMA synchronous").fetchone()[0],
+        )
+    found = len(index.candidates(normalized))
     page.write_bytes(b"---\ntype: concept\n---\n# Ledgerless\n")
     index.rebuild([page.parent])
-    assert index.candidates(normalized) == []
+
+    assert (index.path, pragmas, found, index.candidates(normalized)) == (
+        state / "cache/claims.sqlite3", ("delete", 2), 1, [],
+    )
 
 
 def test_claim_index_excludes_unresolved_active_evidence_with_stable_diagnostic(
@@ -339,8 +345,8 @@ def test_claim_index_rejects_escape_symlink_oversize_and_unbounded_limit(
         index.rebuild([outside])
     with pytest.raises((PermissionError, ValueError)):
         index.rebuild(lambda: [outside])
-    with pytest.raises(ValueError, match="limit"):
-        index.candidates(None, limit=51)
+    with pytest.raises(TypeError, match="normalized"):
+        index.candidates(None)
     huge = tmp_path / "knowledge/notes/huge.md"
     huge.parent.mkdir(parents=True)
     huge.write_bytes(b"x" * (MAX_CLAIM_PAGE_BYTES + 1))
@@ -587,14 +593,17 @@ def test_substantive_and_ledgerless_policy() -> None:
     from claims import is_substantive
 
     item = raw_claim()["claims"][0]
-    assert is_substantive(item)
-    for relation in ("title", "summary", "link", "provenance", "mentions"):
-        changed = dict(item, relation=relation)
-        assert not is_substantive(changed)
-    assert not is_substantive(dict(item, lifecycle="quarantined"))
     malformed_evidence = json.loads(json.dumps(item))
     malformed_evidence["evidence"]["sha256"] = "0" * 64
-    assert not is_substantive(malformed_evidence)
+    not_substantive = [
+        *(dict(item, relation=relation) for relation in ("title", "summary", "link", "provenance", "mentions")),
+        dict(item, lifecycle="quarantined"),
+        malformed_evidence,
+    ]
+
+    assert (is_substantive(item), [is_substantive(value) for value in not_substantive]) == (
+        True, [False] * 7,
+    )
 
 
 def test_lint_validates_claim_ledgers_and_candidates(tmp_path: Path, monkeypatch) -> None:
@@ -631,8 +640,7 @@ def test_lint_skips_claim_json_in_prose_scan_but_resolves_claim_evidence(
     page.parent.mkdir(parents=True)
     page.write_bytes(ledger_page(normalized.record))
 
-    assert lint_memory.check_evidence_references([page]) == []
-    assert lint_memory.check_claim_schemas([page]) == []
+    clean = (lint_memory.check_evidence_references([page]), lint_memory.check_claim_schemas([page]))
 
     malformed = json.loads(json.dumps(normalized.record))
     malformed["evidence"]["reference"] = malformed["evidence"]["reference"].replace(
@@ -640,15 +648,13 @@ def test_lint_skips_claim_json_in_prose_scan_but_resolves_claim_evidence(
     )
     page.write_bytes(ledger_page(malformed))
     findings = lint_memory.check_claim_schemas([page])
-    assert len(findings) == 1
-    assert "hash mismatch" in findings[0]
-
     page.write_text(
         "## Evidence\n- `daily:2026-01-02 broken`\n\n## Claims\nnot-json\n",
         encoding="utf-8",
     )
-    assert lint_memory.check_evidence_references([page])
-    assert lint_memory.check_claim_schemas([page])
+    broken = (bool(lint_memory.check_evidence_references([page])), bool(lint_memory.check_claim_schemas([page])))
+
+    assert (clean, len(findings), "hash mismatch" in findings[0], broken) == (([], []), 1, True, (True, True))
 
 
 def test_lint_candidate_location_and_project_claim_page_selection(
@@ -690,11 +696,12 @@ def test_lint_candidate_location_and_project_claim_page_selection(
     misplaced = wrong_dir / "misplaced.md"
     allowed.write_text(candidate, encoding="utf-8")
     misplaced.write_text(candidate, encoding="utf-8")
-    assert lint_memory.check_claim_schemas([allowed]) == []
-    assert any(
-        "only under knowledge/inbox/claims" in item
-        for item in lint_memory.check_claim_schemas([misplaced])
-    )
+    misplaced_findings = " ".join(lint_memory.check_claim_schemas([misplaced]))
     selected = lint_memory._project_claim_pages(tmp_path / "knowledge/projects")
-    assert [item.name for item in selected] == ["context.md", "state.md"]
-    assert len(lint_memory.check_claim_schemas(selected)) == 2
+
+    assert (
+        lint_memory.check_claim_schemas([allowed]),
+        "only under knowledge/inbox/claims" in misplaced_findings,
+        [item.name for item in selected],
+        len(lint_memory.check_claim_schemas(selected)),
+    ) == ([], True, ["context.md", "state.md"], 2)

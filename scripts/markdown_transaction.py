@@ -40,6 +40,7 @@ from claim_tree_manifest import (
     validate_claim_tree_manifest,
     validate_guardrail_source_manifest,
 )
+from iso_time import utc_text
 from model_dlp import DLPContentBlocked, DLPPolicyError, require_safe_publication
 from reliable_memory import (
     DEFAULTS,
@@ -76,6 +77,8 @@ _ALLOWED_DIRECTORIES = (
     "knowledge/projects",
     "knowledge/inbox",
     "knowledge/feedback",
+    # Rotated copies of the private vault log (compile_memory.LOG_ROTATE_BYTES).
+    "knowledge/log-archive",
     # Session records, by the 2026-08-23 retention decision. Only this subtree of
     # `knowledge/raw/` is writable: the rest of raw holds immutable sources that
     # no automatic writer may touch. Without this line every session record was
@@ -107,6 +110,10 @@ _ADOPTION_VALIDATION_LOCK = threading.Lock()
 # Nested gate releases that failed in this process: (database, owner token, fencing epoch).
 # Set operations are atomic under the interpreter lock; an entry is proof the row is residue.
 _UNRELEASED_PROJECTIONS: set[tuple[str, str, int]] = set()
+# When a busy canonical release is tried again: soon, then once a minute for about
+# an hour (audit 2026-09-26 A-13,
+# docs/research/2026-09-26-a-busy-release-is-retried-until-it-lands.md).
+_RELEASE_RETRY_DELAYS = (1.0, 2.0, 5.0, 10.0, 30.0) + (60.0,) * 60
 MAX_KNOWLEDGE_TARGET_BYTES = 64 * 1024 * 1024
 MAX_KNOWLEDGE_PATH_BYTES = 512
 MAX_KNOWLEDGE_COMPONENT_BYTES = 128
@@ -648,14 +655,51 @@ _PRUNE_COMMITTED_ATTEMPTS = (
     "SELECT 1 FROM project_checkpoints AS c WHERE c.project = project_checkpoint_attempts.project "
     "AND c.sequence = project_checkpoint_attempts.sequence AND c.state = 'committed')"
 )
+# The operation families whose settled rows are authority for something that
+# outlives them, and so are never pruned: compile receipts and quarantine records,
+# daily archive attestations, capture terminal records and episode consolidation.
+# Every other family goes once settled, pruned of its images and past the window:
+# its content lives in the Markdown it wrote, and the only thing the row still
+# answers is a replay of the same operation, whose sources (hook replays within
+# seconds, queue tasks kept 30 days) are gone long before 90 days. Kept by name,
+# pruned by default, so a new family is bounded without being listed. See
+# `docs/research/2026-09-25-history-prune-keeps-every-authority-row.md` and
+# `docs/research/2026-09-26-a-new-operation-family-is-bounded-by-default.md`.
+KEPT_OPERATION_FAMILIES = ("compile", "compile-quarantine", "archive-remove", "capture-markdown", "episodes")
+
+# A reservation on a checkpoint another attempt committed will never run (C-11).
+_PRUNE_SPENT_RESERVATIONS = (
+    "DELETE FROM project_checkpoint_attempts WHERE state = 'reserved' AND EXISTS ("
+    "SELECT 1 FROM project_checkpoints AS c WHERE c.project = project_checkpoint_attempts.project "
+    "AND c.sequence = project_checkpoint_attempts.sequence AND c.state = 'committed')"
+)
+_SETTLED_PAST_WINDOW = (
+    "state IN ('committed', 'discarded') AND artifacts_pruned_at IS NOT NULL AND updated_at < ?"
+)
+# A committed checkpoint carries its own event, and `rebuild_journal` reads only
+# that; the transaction that appended it is history once settled past the window.
+_RELEASE_SETTLED_CHECKPOINT_TRANSACTIONS = (
+    "UPDATE project_checkpoints SET transaction_id = NULL WHERE state = 'committed' "
+    'AND transaction_id IN (SELECT id FROM "transaction" WHERE ' + _SETTLED_PAST_WINDOW + ")"
+)
 _PRUNE_SETTLED_TRANSACTIONS = (
-    'DELETE FROM "transaction" WHERE state IN (\'committed\', \'discarded\') '
-    "AND artifacts_pruned_at IS NOT NULL AND updated_at < ? "
+    'DELETE FROM "transaction" WHERE ' + _SETTLED_PAST_WINDOW + " "
+    "AND NOT (" + " OR ".join("operation_id LIKE ?" for _ in KEPT_OPERATION_FAMILIES) + ") "
     "AND id NOT IN (SELECT transaction_id FROM project_checkpoints WHERE transaction_id IS NOT NULL) "
     "AND id NOT IN (SELECT transaction_id FROM project_checkpoint_attempts WHERE transaction_id IS NOT NULL)"
 )
 
 MAX_ATTEMPT_ORDINAL = 100
+
+# How old a transaction directory no row names must be before the prune removes it.
+UNNAMED_ARTIFACT_AGE_SECONDS = 3600
+
+
+def _abandoned_artifact_root(root: Path, named: frozenset[str], cutoff: float) -> bool:
+    if root.name.startswith(".") or root.name in named or not root.is_dir():
+        return False
+    return root.stat().st_mtime < cutoff
+
 
 # Transaction states a reserved checkpoint can never recover from: the write it
 # stood for did not happen and no longer can. `preparing`, `prepared`,
@@ -2810,7 +2854,7 @@ def _require_live_intent_fence(
             intent_fence.mode,
             intent_fence.token,
             intent_fence.epoch,
-            now.isoformat().replace("+00:00", "Z"),
+            utc_text(now),
         ),
     ).fetchone()
     if row is None:
@@ -2875,7 +2919,7 @@ def _insert_binding_projection(
             binding.task_id,
             binding.active_digest,
             binding.seal_digest,
-            now.isoformat().replace("+00:00", "Z"),
+            utc_text(now),
             intent_fence.token,
             intent_fence.epoch,
         ),
@@ -4303,6 +4347,23 @@ def _run_append_candidate(
     )
 
 
+def _contended_append_candidate(coordinator: MarkdownCoordinator, candidate_id: str, *args, **kwargs):
+    """One attempt; a database busy past its timeout repeats the same attempt.
+
+    Four writers on Windows let `database is locked` escape the append and fail
+    the caller's write (CI run 36204706220, audit 2026-09-26 B-27). The stall
+    guard and the caller's deadline still bound how long it may repeat.
+    Research: docs/research/2026-09-26-a-busy-append-repeats-its-attempt.md
+    """
+    try:
+        return _run_append_candidate(coordinator, candidate_id, *args, **kwargs)
+    except (OSError, sqlite3.Error) as exc:
+        if not _is_transient_writer_contention(exc):
+            raise
+        time.sleep(_writer_retry_delay(0, kwargs["deadline"]))
+        return "retry"
+
+
 def _refused_parent(coordinator: MarkdownCoordinator, candidate_id: str) -> str | None:
     """The quarantined attempt a retry follows, when the refusal was recorded.
 
@@ -4314,10 +4375,21 @@ def _refused_parent(coordinator: MarkdownCoordinator, candidate_id: str) -> str 
     the create-outcome proof cannot speak for it — stays an open finding
     forever, and a health check that can never go green stops being read.
     """
-    record = coordinator._record_for_operation_id(candidate_id)
+    record = _record_when_readable(coordinator, candidate_id)
     if record is None or record.state != "quarantined":
         return None
     return record.id
+
+
+def _record_when_readable(coordinator: MarkdownCoordinator, operation_id: str):
+    """The record, read again while the database is only busy (audit 2026-09-26 B-27)."""
+    deadline = time.monotonic() + _WRITER_WAIT_SECONDS
+    attempt = 0
+    while True:
+        try:
+            return coordinator._record_for_operation_id(operation_id)
+        except (OSError, sqlite3.Error) as exc:
+            attempt = _retry_or_raise(exc, attempt, deadline)
 
 
 # How long an append may repeat one attempt without advancing before it gives up:
@@ -4364,7 +4436,7 @@ def _append_until_committed(
         coordinator._require_operation_active(deadline, cancelled)
         stall.require_moving()
         candidate_id = _append_candidate_id(operation_id, attempt)
-        outcome = _run_append_candidate(
+        outcome = _contended_append_candidate(
             coordinator,
             candidate_id,
             relative,
@@ -4466,20 +4538,24 @@ def append_captured_knowledge(
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return utc_text(datetime.now(timezone.utc))
 
 
 def _future_timestamp(seconds: float) -> str:
-    value = datetime.now(timezone.utc) + timedelta(seconds=seconds)
-    return value.isoformat().replace("+00:00", "Z")
+    return utc_text(datetime.now(timezone.utc) + timedelta(seconds=seconds))
 
 
 def _timestamp(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return utc_text(value)
 
 
 def _parse_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _row_start_identity(row: sqlite3.Row) -> str | None:
+    """The owner's recorded start identity; a row of an older schema has none (C-12)."""
+    return row["process_start_identity"] if "process_start_identity" in row.keys() else None
 
 
 def _pid_alive(pid: int) -> bool:
@@ -4932,8 +5008,8 @@ class MarkdownCoordinator:
                     owner.epoch,
                     owner.process.pid,
                     owner.process.start_identity,
-                    now.isoformat().replace("+00:00", "Z"),
-                    expires_at.isoformat().replace("+00:00", "Z"),
+                    utc_text(now),
+                    utc_text(expires_at),
                 ),
             ).rowcount
             if inserted != 1:
@@ -5044,8 +5120,8 @@ class MarkdownCoordinator:
                      AND canonical_owner_token=? AND canonical_fencing_epoch=?
                      AND process_id=? AND process_start_identity=? AND expires_at>?""",
                 (
-                    now.isoformat().replace("+00:00", "Z"),
-                    expires_at.isoformat().replace("+00:00", "Z"),
+                    utc_text(now),
+                    utc_text(expires_at),
                     fence.intent_id,
                     fence.mode,
                     fence.token,
@@ -5054,7 +5130,7 @@ class MarkdownCoordinator:
                     owner.epoch,
                     owner.process.pid,
                     owner.process.start_identity,
-                    now.isoformat().replace("+00:00", "Z"),
+                    utc_text(now),
                 ),
             ).rowcount
             if renewed != 1:
@@ -5639,6 +5715,9 @@ class MarkdownCoordinator:
                     "operation_id is already bound to a different request"
                 ) from None
             return existing
+        # Any other failure keeps the directory: whether the row committed is not
+        # known here, and a committed row must keep its images. An unnamed one is
+        # removed by the prune an hour later (C-8, revised 2026-09-25).
         return None
 
     def _staged_change(
@@ -6646,7 +6725,7 @@ class MarkdownCoordinator:
                 database,
                 intent_fence,
                 active_link_digest,
-                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                utc_text(datetime.now(timezone.utc)),
                 "aborting",
                 "abort_final_verification_failed",
                 "abort final verification failed",
@@ -6693,7 +6772,7 @@ class MarkdownCoordinator:
         before_manifest = self._abort_before_manifest(transaction_id)
         manifest_sha256 = sha256_bytes(canonical_json_bytes(before_manifest))
         chosen_at = (
-            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            utc_text(datetime.now(timezone.utc))
         )
         direction = _AbortDirection(
             _abort_identity(
@@ -6944,6 +7023,9 @@ class MarkdownCoordinator:
         with self.writer_gate(owner=owner, wait_seconds=writer_wait_seconds):
             if self._recovery_stopped(deadline, cancelled):
                 return []
+            # A prune that died mid-way is settled here too, so `doctor --repair`
+            # heals what it reports (audit 2026-09-26 B-22).
+            self._recover_interrupted_prunes()
             return self._recover_selected(max_transactions, deadline, cancelled)
 
     def _recover_aborting(self, transaction_id: str) -> None:
@@ -7496,6 +7578,7 @@ class MarkdownCoordinator:
         pruned = 0
         with self.writer_gate():
             self._recover_interrupted_prunes()
+            self._remove_unnamed_artifact_roots()
             for row in self._prunable_rows():
                 self._require_operation_active(deadline, cancelled)
                 if _parse_timestamp(row["updated_at"]) < cutoff:
@@ -7507,14 +7590,21 @@ class MarkdownCoordinator:
     ) -> dict[str, int]:
         """Drop settled history past its window: committed attempts, then settled rows.
 
-        Attempts first, so the transactions they named are no longer named. A
-        transaction a checkpoint row names stays, and so does every quarantined
-        one; operations go with their transaction (`ON DELETE CASCADE`).
+        Attempts first, so the transactions they named are no longer named, then a
+        committed checkpoint lets go of its settled transaction. Every family but
+        the authority ones (`KEPT_OPERATION_FAMILIES`) goes; a transaction an
+        unsettled checkpoint names stays, and so does every quarantined one;
+        operations go with their transaction (`ON DELETE CASCADE`).
         """
         cutoff = _timestamp(_prune_cutoff(retention_days, now))
         with self.writer_gate(), self._connect() as database, begin_immediate(database):
-            attempts = database.execute(_PRUNE_COMMITTED_ATTEMPTS, (cutoff,)).rowcount
-            transactions = database.execute(_PRUNE_SETTLED_TRANSACTIONS, (cutoff,)).rowcount
+            spent = database.execute(_PRUNE_SPENT_RESERVATIONS).rowcount
+            attempts = spent + database.execute(_PRUNE_COMMITTED_ATTEMPTS, (cutoff,)).rowcount
+            database.execute(_RELEASE_SETTLED_CHECKPOINT_TRANSACTIONS, (cutoff,))
+            families = tuple(f"{family}:%" for family in KEPT_OPERATION_FAMILIES)
+            transactions = database.execute(
+                _PRUNE_SETTLED_TRANSACTIONS, (cutoff, *families)
+            ).rowcount
         return {"attempts": attempts, "transactions": transactions}
 
     def _recover_interrupted_prunes(self) -> None:
@@ -7530,13 +7620,45 @@ class MarkdownCoordinator:
         for staged in sorted(self.transaction_root.glob(".*.pruning-*")):
             self._restore_staged_prune(staged)
 
+    def _remove_unnamed_artifact_roots(self) -> None:
+        """A directory no row names, an hour old, is the debris of a failed prepare.
+
+        A prepare inserts its row seconds after making the directory, outside the
+        writer gate, so only an old one is certainly abandoned. See
+        `docs/research/2026-09-25-a-transaction-and-its-images-agree.md`.
+        """
+        if not self.transaction_root.is_dir():
+            return
+        named = self._transaction_ids()
+        cutoff = time.time() - UNNAMED_ARTIFACT_AGE_SECONDS
+        for root in self.transaction_root.iterdir():
+            if _abandoned_artifact_root(root, named, cutoff):
+                self._remove_artifacts(root)
+
+    def _transaction_ids(self) -> frozenset[str]:
+        with self._connect() as database:
+            return frozenset(str(row[0]) for row in database.execute('SELECT id FROM "transaction"'))
+
     def _restore_staged_prune(self, staged: Path) -> None:
-        """The images go back where the row still says they are; a live one wins."""
-        artifact_root = self.transaction_root / _staged_prune_owner(staged.name)
-        if artifact_root.exists():
+        """The images go back only where the row still says they are.
+
+        A row marked pruned (or gone) already disowned them: the crash came after
+        the mark, so the prune is finished and the images go (audit C-10,
+        docs/research/2026-09-25-a-finished-prune-is-not-undone.md).
+        """
+        owner = _staged_prune_owner(staged.name)
+        artifact_root = self.transaction_root / owner
+        if artifact_root.exists() or not self._images_still_owned(owner):
             self._remove_artifacts(staged)
             return
         staged.replace(artifact_root)
+
+    def _images_still_owned(self, transaction_id: str) -> bool:
+        with self._connect() as database:
+            row = database.execute(
+                'SELECT artifacts_pruned_at FROM "transaction" WHERE id = ?', (transaction_id,)
+            ).fetchone()
+        return row is not None and row["artifacts_pruned_at"] is None
 
     def _prunable_rows(self) -> list[sqlite3.Row]:
         with self._connect() as database:
@@ -7557,6 +7679,8 @@ class MarkdownCoordinator:
         """The images are staged aside first, so a failure can put them back."""
         artifact_root = self.transaction_root / row["id"]
         if not artifact_root.exists():
+            # Nothing left to keep; marked, so the history prune can take the row (C-9).
+            self._mark_artifacts_pruned(row["id"], deadline, cancelled)
             return 0
         staged_root = self.transaction_root / (
             f".{row['id']}{_STAGED_PRUNE_MARK}{uuid.uuid4().hex}"
@@ -7877,15 +8001,49 @@ class MarkdownCoordinator:
         stop.set()
         heartbeat.join(timeout=lease.heartbeat_seconds * 2)
         try:
-            # A heartbeat that failed transiently is not a lost gate. What
-            # proves the loss is the projection row: reclaiming it deletes
-            # this owner's row and bumps the fence, so a delete that removes
-            # our row means nobody else ever took the gate.
-            with self._connect() as database, begin_immediate(database):
-                self._delete_writer_projection(database, lease)
-                registry._release_in_transaction(database, lease)
+            self._release_canonical_lease(registry, lease)
+        except (OSError, sqlite3.Error) as exc:
+            if not _is_transient_writer_contention(exc):
+                raise
+            self._release_later(registry, lease)
         finally:
             self._clear_gate()
+
+    def _release_canonical_lease(self, registry: object, lease: OwnerLease) -> None:
+        # A heartbeat that failed transiently is not a lost gate. What
+        # proves the loss is the projection row: reclaiming it deletes
+        # this owner's row and bumps the fence, so a delete that removes
+        # our row means nobody else ever took the gate.
+        with self._connect() as database, begin_immediate(database):
+            self._delete_writer_projection(database, lease)
+            registry._release_in_transaction(database, lease)
+
+    def _release_later(self, registry: object, lease: OwnerLease) -> None:
+        """Keep trying a release the busy database refused; nobody else may take our row.
+
+        The registry reclaims only a dead owner, and this process is alive, so a
+        release left undone shut every other writer out until it exited (A-13).
+        """
+        threading.Thread(
+            target=self._retry_release,
+            args=(registry, lease),
+            name="markdown-writer-release",
+            daemon=True,
+        ).start()
+
+    def _retry_release(self, registry: object, lease: OwnerLease) -> None:
+        for delay in _RELEASE_RETRY_DELAYS:
+            time.sleep(delay)
+            if self._release_settled(registry, lease):
+                return
+
+    def _release_settled(self, registry: object, lease: OwnerLease) -> bool:
+        """True once released, or once the failure is not contention and waiting cannot help."""
+        try:
+            self._release_canonical_lease(registry, lease)
+        except (OSError, sqlite3.Error) as exc:
+            return not _is_transient_writer_contention(exc)
+        return True
 
     @staticmethod
     def _insert_writer_projection(database: sqlite3.Connection, owner: OwnerLease) -> None:
@@ -8111,7 +8269,7 @@ class MarkdownCoordinator:
     def _writer_owner_reclaimable(self, row: sqlite3.Row) -> bool:
         expires_at = row["expires_at"]
         expired = not expires_at or _parse_timestamp(expires_at) <= datetime.now(timezone.utc)
-        return expired or not _pid_alive(row["process_id"])
+        return expired or not process_liveness.owner_alive(row["process_id"], _row_start_identity(row))
 
     def _heartbeat_writer_gate(
         self,
@@ -8658,7 +8816,15 @@ class MarkdownCoordinator:
         self._require_retained_undo_images(transaction_id)
 
     def _require_retained_undo_images(self, transaction_id: str) -> None:
-        """Undo needs the before-images; a pruned transaction cannot be undone."""
+        """Undo needs the before-images; a pruned transaction cannot be undone.
+
+        Images a killed prune staged aside are still owned by their row, so they
+        are put back first — under the gate undo holds — instead of refusing an
+        undo the window still allows (audit 2026-09-26 C-12,
+        docs/research/2026-09-26-a-killed-prune-neither-blocks-undo-nor-outruns-its-step.md).
+        """
+        if not (self.transaction_root / transaction_id).is_dir():
+            self._recover_interrupted_prunes()
         if not (self.transaction_root / transaction_id).is_dir():
             raise RuntimeError("transaction undo images are no longer retained")
 
@@ -8853,7 +9019,7 @@ class MarkdownCoordinator:
                 "precondition_failed",
                 "quarantined",
             )
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = utc_text(datetime.now(timezone.utc))
         row = database.execute(
             """SELECT 1 FROM intent_fences AS fence
                JOIN capture_binding_projections AS binding
@@ -9382,6 +9548,15 @@ class MarkdownCoordinator:
                 (transaction_id,),
             ).fetchone()
         return row is not None and row["artifacts_pruned_at"] is not None
+
+    def operation_id_at(self, sequence: int) -> str | None:
+        """The operation a committed transaction ran, by its commit sequence (rowid)."""
+        with self._connect() as database:
+            row = database.execute(
+                'SELECT operation_id FROM "transaction" WHERE rowid=? AND state=\'committed\'',
+                (sequence,),
+            ).fetchone()
+        return None if row is None else str(row["operation_id"])
 
     def _record_for_operation_id(self, operation_id: str) -> TransactionRecord | None:
         with self._connect() as database:

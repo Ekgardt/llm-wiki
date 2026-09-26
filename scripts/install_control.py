@@ -508,9 +508,15 @@ def select_scheduler_backend(platform: str, requested: str, systemd_available: b
     return _native_scheduler_backend(platform, systemd_available)
 
 
+def _stable_uv_path(uv_path: Path) -> Path:
+    from installer_config import stable_uv_path
+
+    return stable_uv_path(uv_path)
+
+
 def _scheduled_arguments(root: Path, uv_path: Path, kind: str) -> list[str]:
     return [
-        str(Path(uv_path).resolve()),
+        str(_stable_uv_path(uv_path)),
         "run",
         "--locked",
         "--no-sync",
@@ -609,10 +615,18 @@ def _scheduled_path(uv_path: Path) -> str:
     return scheduled_path(uv_path, _SYSTEMD_USER_PATH)
 
 
+# How long a scheduler lets each pass run: above each pass's own worst case in auto
+# provider mode, which counts the checkout update and the whole provider order one
+# model call may walk (`worst_case_seconds` of each; tests hold the order, and no
+# comment carries a measured figure that drifts). One table for every scheduler; the
+# systemd units once said 3 h and 5 h while the Windows tasks said 4 h and 6 h.
+# Research: docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md,
+# docs/research/2026-09-25-the-scheduler-says-what-the-night-could-not-do.md
+SCHEDULER_LIMIT_HOURS = {"nightly": 4, "weekly": 6}
+
 # A oneshot service has no start timeout by default, so a hung pass would hold its
-# lease forever. The limits match the Windows tasks and sit above each pass's own worst
-# case. See `docs/research/2026-09-14-ci-and-scheduler-gaps.md`.
-SYSTEMD_START_LIMITS = {"nightly": "3h", "weekly": "5h"}
+# lease forever. See `docs/research/2026-09-14-ci-and-scheduler-gaps.md`.
+SYSTEMD_START_LIMITS = {kind: f"{hours}h" for kind, hours in SCHEDULER_LIMIT_HOURS.items()}
 
 
 def _systemd_service(root: Path, state_root: Path, uv_path: Path, kind: str) -> bytes:
@@ -1226,7 +1240,7 @@ def systemd_scheduler_resource(
         metadata={
             "definition_set": "linux",
             "unit_directory": str(unit_directory),
-            "uv_path": str(Path(uv_path).resolve()),
+            "uv_path": str(_stable_uv_path(uv_path)),
         },
         definitions=persisted,
         adopt_as_absent=True,
@@ -1237,11 +1251,17 @@ def _launchd_label(name: str) -> str:
     return name.removesuffix(".plist")
 
 
+# `launchctl print` exits 113 ("Could not find service") for a job launchd does not
+# have; any other failure says nothing about the job (audit 2026-09-26, regress 11,
+# docs/research/2026-09-26-launchd-absent-only-when-launchd-says-so.md).
+LAUNCHD_SERVICE_NOT_FOUND = 113
+_LAUNCHD_PRINT_STATES = {0: "active", LAUNCHD_SERVICE_NOT_FOUND: "absent"}
+
+
 def _launchd_job_state(runner: CommandRunner, launchctl: str, domain: str, label: str) -> str:
+    """`active`, `absent`, or `unknown` when launchctl failed for another reason."""
     exit_code, _output = runner((launchctl, "print", f"{domain}/{label}"), None)
-    if exit_code == 0:
-        return "active"
-    return "absent"
+    return _LAUNCHD_PRINT_STATES.get(exit_code, "unknown")
 
 
 def _launchd_projection_state(
@@ -1281,9 +1301,21 @@ def _uninstall_launchd(
     domain: str,
 ) -> None:
     for name in reversed(definitions):
-        label = _launchd_label(name)
-        _require_command(runner, (launchctl, "bootout", f"{domain}/{label}"))
+        _bootout_if_loaded(runner, launchctl, domain, _launchd_label(name))
     _remove_systemd_files(launch_agents_directory, definitions)
+
+
+def _bootout_if_loaded(runner: CommandRunner, launchctl: str, domain: str, label: str) -> None:
+    """A job launchd no longer has is already out; `bootout` of it fails and blocked the uninstall.
+
+    Only a job launchd says it does not have is skipped: a `print` that failed
+    otherwise still gets its `bootout`, whose failure then stops the uninstall
+    instead of leaving the job loaded. Audit C-34,
+    docs/research/2026-09-25-the-installers-agree.md.
+    """
+    if _launchd_job_state(runner, launchctl, domain, label) == "absent":
+        return
+    _require_command(runner, (launchctl, "bootout", f"{domain}/{label}"))
 
 
 def _write_launchd(
@@ -1392,7 +1424,7 @@ def launchd_scheduler_resource(
         metadata={
             "definition_set": "macos",
             "launchd_domain": domain,
-            "uv_path": str(Path(uv_path).resolve()),
+            "uv_path": str(_stable_uv_path(uv_path)),
         },
         definitions=persisted,
         adopt_as_absent=True,
@@ -1405,14 +1437,14 @@ def render_cron_block(root: Path, state_root: Path, uv_path: Path) -> bytes:
     nightly = build_cron_command(
         root=Path(root).resolve(),
         state_root=Path(state_root).resolve(),
-        uv_path=Path(uv_path).resolve(),
+        uv_path=_stable_uv_path(uv_path),
         kind="nightly",
         log_path=Path(state_root).resolve() / "logs" / "cron-nightly.log",
     )
     weekly = build_cron_command(
         root=Path(root).resolve(),
         state_root=Path(state_root).resolve(),
-        uv_path=Path(uv_path).resolve(),
+        uv_path=_stable_uv_path(uv_path),
         kind="weekly",
         log_path=Path(state_root).resolve() / "logs" / "cron-weekly.log",
     )
@@ -1540,7 +1572,7 @@ def cron_scheduler_resource(
             "cron_existed": table is not None,
             "cron_insert_separator": _cron_separator(table),
             "definition_set": "cron",
-            "uv_path": str(Path(uv_path).resolve()),
+            "uv_path": str(_stable_uv_path(uv_path)),
         }
     return ManagedResource(
         resource_id="cron-user-maintenance",
@@ -1643,10 +1675,7 @@ def windows_environment_resources(
 # installed manifests record it, and uninstall and rollback have to take it back.
 # See docs/research/2026-09-17-a-changed-task-setting-reaches-an-installed-machine.md.
 WINDOWS_TASK_SPEC_VERSION = 2
-# Above each pass's own worst case, which now counts the checkout update and
-# the whole provider order one model call may walk (about 3.2 h and 4.9 h).
-# Research: docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
-WINDOWS_TASK_LIMIT_HOURS = {"nightly": 4, "weekly": 6}
+WINDOWS_TASK_LIMIT_HOURS = SCHEDULER_LIMIT_HOURS
 
 
 def render_windows_task_spec(root: Path, state_root: Path, uv_path: Path) -> bytes:
@@ -1655,7 +1684,7 @@ def render_windows_task_spec(root: Path, state_root: Path, uv_path: Path) -> byt
         "spec": WINDOWS_TASK_SPEC_VERSION,
         "state_root": str(Path(state_root).resolve()),
         "tasks": _expected_windows_tasks(),
-        "uv_path": str(Path(uv_path).resolve()),
+        "uv_path": str(_stable_uv_path(uv_path)),
     }
     return canonical_json_bytes(value)
 
@@ -1737,7 +1766,7 @@ def _windows_task_command(
         "-StateRoot",
         str(Path(state_root).resolve()),
         "-UvPath",
-        str(Path(uv_path).resolve()),
+        str(_stable_uv_path(uv_path)),
         "-SpecVersion",
         str(spec_version),
     )
@@ -1905,7 +1934,7 @@ def windows_task_scheduler_resource(
         recover_legacy_projection=lambda snapshot: _recover_windows_spec(snapshot, legacy_loader),
         metadata={
             "definition_set": "windows",
-            "uv_path": str(Path(uv_path).resolve()),
+            "uv_path": str(_stable_uv_path(uv_path)),
         },
         definitions={"scheduler/windows/tasks.json": desired},
         adopt_as_absent=True,
@@ -4893,7 +4922,7 @@ def _requested_resources(args: argparse.Namespace, backend: str) -> list[Managed
         backend=backend,
         root=args.root.resolve(),
         state_root=args.state_root.resolve(),
-        uv_path=args.uv_path.resolve(),
+        uv_path=_stable_uv_path(args.uv_path),
         home=args.home.resolve(),
         profile=args.profile,
         powershell_path=args.powershell_path,
@@ -4944,31 +4973,70 @@ def _outgrown_manifest(
     return manifest
 
 
-def _replace_outgrown_install(args: argparse.Namespace, backend: str) -> bool:
+def _replace_outgrown_install(
+    args: argparse.Namespace, backend: str
+) -> dict[str, object] | None:
+    """Take back an outgrown install; return its manifest, so a failure can restore it."""
     state_root = args.state_root.resolve()
     manifest = _outgrown_manifest(state_root, _requested_resources(args, backend))
     if manifest is None:
-        return False
+        return None
     uninstall_resources(state_root=state_root, resources=_resources_from_record(args, manifest))
-    return True
+    return manifest
 
 
-def _install_from_args(args: argparse.Namespace) -> dict[str, object]:
+def _install_requested(args: argparse.Namespace, backend: str) -> dict[str, object]:
     root = args.root.resolve()
-    backend = _selected_backend(args.scheduler)
-    replaced = _replace_outgrown_install(args, backend)
     # Built after the old set is taken back: a resource records what it found on disk.
-    resources = _requested_resources(args, backend)
-    manifest = install_resources(
+    return install_resources(
         state_root=args.state_root.resolve(),
         vault_root=root,
         release=build_release_identity(root),
         scheduler_backend=backend,
-        resources=resources,
+        resources=_requested_resources(args, backend),
         control_version=2,
     )
+
+
+def _restore_replaced(args: argparse.Namespace, replaced: Mapping[str, object]) -> None:
+    """Put the previous install back after its replacement failed.
+
+    The old set was uninstalled first, and a failed new install left the machine
+    with no scheduler and no hooks (audit B-31,
+    docs/research/2026-09-25-a-failed-reinstall-puts-the-old-one-back.md).
+    """
+    root = args.root.resolve()
+    install_resources(
+        state_root=args.state_root.resolve(),
+        vault_root=root,
+        release=build_release_identity(root),
+        scheduler_backend=_record_backend(replaced),
+        resources=_resources_from_record(args, replaced),
+        control_version=2,
+    )
+
+
+def _install_or_restore(
+    args: argparse.Namespace, backend: str, replaced: Mapping[str, object] | None
+) -> dict[str, object]:
+    """Install the request; a failure after a replacement puts the old set back first.
+
+    A restore that fails itself raises with the install's failure as its context.
+    """
+    try:
+        return _install_requested(args, backend)
+    except Exception:
+        if replaced is not None:
+            _restore_replaced(args, replaced)
+        raise
+
+
+def _install_from_args(args: argparse.Namespace) -> dict[str, object]:
+    backend = _selected_backend(args.scheduler)
+    replaced = _replace_outgrown_install(args, backend)
+    manifest = _install_or_restore(args, backend, replaced)
     return {
-        "replaced": replaced,
+        "replaced": replaced is not None,
         "scheduler_backend": backend,
         "status": "committed",
         "transaction_id": manifest["transaction_id"],
@@ -5036,7 +5104,7 @@ def _resources_from_record(
         backend=_record_backend(record),
         root=root,
         state_root=state_root,
-        uv_path=args.uv_path.resolve(),
+        uv_path=_stable_uv_path(args.uv_path),
         home=args.home.resolve(),
         profile=_recorded_profile(record, args.profile),
         powershell_path=args.powershell_path,

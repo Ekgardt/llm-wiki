@@ -657,6 +657,8 @@ hybrid = [
     { name = "onnxruntime", version = "1.23.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "onnxruntime", version = "1.27.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "tokenizers" },
+    { name = "torch" },
+    { name = "transformers" },
 ]
 lexical-benchmark = [
     { name = "jieba" },
@@ -713,8 +715,8 @@ requires-dist = [
     { name = "jedi", marker = "extra == 'code-graph'", specifier = ">=0.19,<1" },
     { name = "jieba", marker = "extra == 'lexical-benchmark'", specifier = "==0.42.1" },
     { name = "jieba", marker = "extra == 'retrieval-benchmark'", specifier = "==0.42.1" },
-    { name = "llm-wiki", extras = ["semantic"], marker = "extra == 'hybrid'" },
     { name = "llm-wiki", extras = ["semantic", "hybrid", "code-graph", "mcp-server", "reranker"], marker = "extra == 'full'" },
+    { name = "llm-wiki", extras = ["semantic", "reranker"], marker = "extra == 'hybrid'" },
     { name = "mcp", specifier = ">=1.29,<2" },
     { name = "numpy", marker = "extra == 'hybrid'", specifier = ">=2.2.6,<3" },
     { name = "numpy", marker = "extra == 'semantic'", specifier = ">=2.2.6,<3" },

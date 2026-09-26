@@ -115,9 +115,12 @@ def test_check_reports_without_downloading(two_models, capsys):
 
 def test_without_the_library_the_command_says_which_extra_to_install(monkeypatch, capsys):
     monkeypatch.setattr(install_models, "hub_library", lambda: None)
+    # A runtime is installed but the hub library is not: the vault the test runs
+    # in may have neither, and then the command has nothing to fetch at all.
+    monkeypatch.setattr(install_models, "wanted_models", install_models.pinned_models)
 
     assert install_models.main([]) == install_models.EXIT_NO_LIBRARY
-    assert "uv sync --extra semantic" in capsys.readouterr().err
+    assert "uv sync --locked --inexact --extra semantic" in capsys.readouterr().err
 
 
 def test_the_pins_name_the_two_models_the_read_path_loads():
@@ -221,3 +224,34 @@ def test_the_text_report_names_the_file_it_removed(two_models, capsys):
     install_models.main([])
 
     assert "fetched org/encoder@ffffffffffff; removed model.safetensors" in capsys.readouterr().out
+
+
+def _without_runtime(model: install_models.PinnedModel) -> install_models.PinnedModel:
+    return install_models.PinnedModel(
+        model.repo_id,
+        model.revision,
+        model.weights_file,
+        model.weights_sha256,
+        model.weights_bytes,
+        model.allow_patterns,
+        model.retired_files,
+        ("a_module_nobody_installed",),
+    )
+
+
+def test_a_model_whose_runtime_is_absent_is_not_fetched(two_models, monkeypatch):
+    encoder, reranker = _pinned_to({"org/encoder": b"encoder weights", "org/reranker": b"reranker weights"})
+    monkeypatch.setattr(install_models, "pinned_models", lambda: (encoder, _without_runtime(reranker)))
+
+    assert install_models.main([]) == 0
+    assert [repo for repo, _, _ in two_models.downloads] == ["org/encoder"]
+
+
+def test_with_no_runtime_installed_there_is_nothing_to_fetch_and_no_failure(monkeypatch, capsys):
+    """A base install's nightly `models` step is not a failed night."""
+    pins = tuple(_without_runtime(model) for model in install_models.pinned_models())
+    monkeypatch.setattr(install_models, "pinned_models", lambda: pins)
+    monkeypatch.setattr(install_models, "hub_library", lambda: None)
+
+    assert install_models.main([]) == 0
+    assert "nothing to fetch" in capsys.readouterr().out

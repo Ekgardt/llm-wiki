@@ -20,6 +20,8 @@ from impact_analysis import (  # noqa: E402
     format_for_advisory,
 )
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 
 def _git(root: Path, *arguments: str) -> str:
     result = subprocess.run(
@@ -39,6 +41,15 @@ def _repository(tmp_path: Path) -> Path:
     _git(root, "add", ".")
     _git(root, "commit", "-m", "initial")
     return root
+
+
+def _verifications(calls: list[tuple]) -> list[tuple]:
+    return [arguments for arguments in calls if arguments[:2] == ("rev-parse", "--verify")]
+
+
+def _diff_endpoints_are_oids(calls: list[tuple]) -> bool:
+    diff = next(arguments for arguments in calls if arguments[0] == "diff")
+    return all(len(oid) in {40, 64} and int(oid, 16) >= 0 for oid in diff[-3:-1])
 
 
 class TestGitComparisons:
@@ -172,13 +183,15 @@ class TestGitComparisons:
             target="HEAD",
         )
 
-        assert calls[:2] == [
-            ("rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"),
-            ("rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"),
-        ]
-        diff = next(arguments for arguments in calls if arguments[0] == "diff")
-        endpoints = diff[-3:-1]
-        assert all(len(oid) in {40, 64} and int(oid, 16) >= 0 for oid in endpoints)
+        # The top of the repository is asked first (audit 2026-09-26 B-8); the
+        # verifications follow it.
+        assert (_verifications(calls)[:2], _diff_endpoints_are_oids(calls)) == (
+            [
+                ("rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"),
+                ("rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"),
+            ],
+            True,
+        )
 
     def test_requested_root_ignores_ambient_git_repository_and_config_selectors(
         self, tmp_path, monkeypatch
@@ -279,6 +292,13 @@ class _Graph:
 
     def find_nodes(self, *, path=None, kinds=None, **_options):
         return [node for node in self.nodes.values() if _node_selected(node, path, kinds)]
+
+    # The bytes this generation indexed: the committed `alpha.py` of `_repository`.
+    indexed = {"alpha.py": b"def alpha():\n    return 1\n"}
+
+    def source_by_path(self, relative_path, **_options):
+        content = self.indexed.get(relative_path)
+        return None if content is None else {"relative_path": relative_path, "content": content}
 
     def occurrences(self, node_id, **_options):
         if node_id == "symbol":
@@ -918,7 +938,7 @@ def test_a_git_warning_on_stderr_is_not_a_diff_record(tmp_path):
     root = _autocrlf_checkout(tmp_path / "repository")
     warning = subprocess.run(["git", "diff", "--raw", "-z"], cwd=root, capture_output=True, check=True)
 
-    raw = impact_analysis._git(root, ["diff", "--raw", "-z"], deadline=time.monotonic() + 30, max_bytes=1 << 20)
+    raw = impact_analysis._git(root, ["diff", "--raw", "-z"], deadline=time.monotonic() + SHORT_TIMEOUT, max_bytes=1 << 20)
     records = impact_analysis._parse_raw_records(raw, "dirty")
 
     assert b"LF will be replaced by CRLF" in warning.stderr
