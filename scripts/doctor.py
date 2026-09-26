@@ -5130,20 +5130,73 @@ def _checkpoint_result(stuck: list[dict[str, Any]], details: dict) -> dict:
     )
 
 
+# A checkpoint event waits in `run/state.json` until a drain reserves it. The
+# nightly reclaim step drains every queue, so an event older than one nightly
+# interval plus half of one outlived a drain that should have taken it. Before
+# 2026-09-26 the queue was only a depth beside the finding, and a project whose
+# events never reached the database was reported as fine (audit C-12). See
+# `docs/research/2026-09-26-a-checkpoint-that-never-reached-the-database-is-seen.md`.
+CHECKPOINT_QUEUE_STUCK_SECONDS = 36 * 3600.0
+
+
+def _queued_instant(item: object) -> datetime | None:
+    if not isinstance(item, dict):
+        return None
+    return _parse_utc(item.get("occurred_at"))
+
+
+def _queued_instants(queue: object) -> list[datetime]:
+    if not isinstance(queue, list):
+        return []
+    return [instant for instant in map(_queued_instant, queue) if instant is not None]
+
+
+def _queued_head(slug: str, queue: object) -> dict[str, Any] | None:
+    """The oldest event a project still holds in the queue, as a head row."""
+    known = _queued_instants(queue)
+    if not known:
+        return None
+    return {"project": slug, "state": "queued", "created_at": min(known).isoformat()}
+
+
+def _queued_checkpoint_heads(state_root: Path) -> list[dict[str, Any]]:
+    pending = _checkpoint_pending_state(Path(state_root) / "run" / "state.json")
+    if not isinstance(pending, dict):
+        return []
+    heads = [_queued_head(str(slug), queue) for slug, queue in pending.items()]
+    return [head for head in heads if head is not None]
+
+
+def _queue_stuck(row: Mapping[str, Any], now: datetime) -> bool:
+    created = _parse_utc(row.get("created_at"))
+    return created is not None and (now - created).total_seconds() > CHECKPOINT_QUEUE_STUCK_SECONDS
+
+
+def _stuck_checkpoint_heads(rows: list[dict[str, Any]], state_root: Path, now: datetime) -> list[dict[str, Any]]:
+    """Heads stuck in the database, then projects whose events never reached it."""
+    queued = [row for row in _queued_checkpoint_heads(state_root) if _queue_stuck(row, now)]
+    return [row for row in rows if _checkpoint_stuck(row, now)] + queued
+
+
+def _checkpoint_database_heads(path: Path) -> list[dict[str, Any]]:
+    """The unfinished head rows; none before the database exists."""
+    if not path.is_file():
+        return []
+    return _checkpoint_head_rows(path)
+
+
 def _checkpoint_check(state_root: Path, now: datetime) -> dict:
-    """Report a project whose checkpoint sequence stopped moving."""
+    """Report a project whose checkpoints stopped moving, in the database or before it."""
     path = Path(state_root) / "run" / "markdown-transactions-v3.sqlite3"
     details: dict[str, Any] = {"database": "run/markdown-transactions-v3.sqlite3"}
-    if not path.is_file():
-        return _result("checkpoints", "ok", "No checkpoint database exists.", details)
     try:
-        rows = _checkpoint_head_rows(path)
+        rows = _checkpoint_database_heads(path)
     except sqlite3.Error as error:
         details["error"] = str(error)[:200]
         return _result(
             "checkpoints", "degraded", "The checkpoint database could not be read.", details
         )
-    stuck = [row for row in rows if _checkpoint_stuck(row, now)]
+    stuck = _stuck_checkpoint_heads(rows, state_root, now)
     details.update({"unfinished": rows, "queued": _checkpoint_queue_depths(state_root)})
     return _checkpoint_result(stuck, details)
 
