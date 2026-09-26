@@ -818,8 +818,15 @@ TOOL_INPUT_SCHEMAS = {
                     "search mode"
                 ),
             },
-            "line": {"type": "integer", "minimum": 1},
-            "character": {"type": "integer", "minimum": 0},
+            "line": {"type": "integer", "minimum": 1, "description": "1-based line of the position"},
+            "character": {
+                "type": "integer",
+                "minimum": 0,
+                "description": (
+                    "0-based UTF-8 byte offset within the line (not UTF-16 "
+                    "code units); past the line end means the line end"
+                ),
+            },
             "offset": {"type": "integer", "minimum": 0, "default": 0},
             "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10},
             **ANSWER_BUDGET_SCHEMA_FIELDS,

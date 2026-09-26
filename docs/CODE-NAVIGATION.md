@@ -337,6 +337,9 @@ retried.
 
 - Positions are repository-relative; absolute roots and external paths are never
   exposed.
+- `line` is 1-based; `character` is a 0-based UTF-8 byte offset within the line,
+  not UTF-16 code units. A `character` past the line end means the line end, as
+  the LSP specification defines; one inside a multi-byte character is refused.
 - Offsets are stateless: each offset reruns the request against a fresh current
   revision.
 - Structural fallback is explicit, provenance-bearing, and appended after LSP
