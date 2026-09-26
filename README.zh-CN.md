@@ -5,193 +5,102 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](CHANGELOG.md)
 
-**面向 AI 智能体的本地优先记忆系统。Markdown 文件，git 版本控制，完全由你掌控。**
+**为你所有的 AI 编码代理提供同一份本地记忆——磁盘上的纯 Markdown，存于 Git，归你所有。**
 
-LLM Wiki 为你使用的每一个 AI 编码智能体——Claude Code、OpenCode、Codex——提供统一的 MCP-first 接口和共享的持久知识库。MCP 负责读取与操作；轻量原生 lifecycle adapter 捕获 MCP 无法观察的会话事件。知识跨会话保留，让你无需重复解释同样的事情。
+Claude Code、Codex 和 OpenCode 在会话结束时都会忘掉一切。LLM Wiki 记录每次会话发生
+了什么，在夜间把它提炼成简短的知识页面，并把决策、经验和项目状态交给下一次会话——
+无论你用的是哪个代理。同样的事情不必再解释第二遍。
 
-一切以纯 Markdown 文件形式存储在你的磁盘上：可在 Obsidian 中阅读，可用 git 对比，完全归你所有。
-
-存储、捕获、MCP 和检索均在本地运行。模型支持的分类与编译使用已配置的
-provider：OpenCode、Codex、Claude 和 OpenAI 可能使用云服务；Ollama 可以在
-本地运行。自动检测并不保证 local-only 模式。
+存储、捕获、搜索和 MCP 服务器都在本地运行。把会话变成页面需要一个语言模型：你配置
+的那个，或在 OpenCode、Codex、Claude、OpenAI 和 Ollama 中找到的第一个。只有 Ollama 是
+本地的，其余都是云服务，因此自动检测并不保证一切留在本机。当前版本：**5.0.0**。
 
 **语言：** [English](README.md) | [Русский](README.ru.md) | [简体中文](README.zh-CN.md)
-
----
-
-## 目录
-
-- [工作原理](#工作原理)
-- [功能特性](#功能特性)
-- [快速开始](#快速开始)
-- [接入智能体](#接入智能体)
-- [架构](#架构)
-- [Evidence generation 与迁移](#evidence-generation-与迁移)
-- [基准测试](#基准测试)
-- [对比](#对比)
-- [贡献](#贡献)
-- [致谢](#致谢)
-- [许可证](#许可证)
 
 ---
 
 ## 工作原理
 
 ```
-智能体通过本地 MCP 服务器读取记忆并执行操作
-             ↓
-轻量钩子/插件通过 integration_adapter.py 转发 lifecycle 事件
-             ↓
-后台编译将 daily 日志提炼为持久知识页面
-（带 VERIFY-BEFORE-WRITE——引用会被验证，而非信任 LLM）
-             ↓
-下次会话：guardrails + advisory + 元认知上下文自动注入
-             ↓
-智能体从你停下的地方继续——无需重复解释
+你照常与代理协作
+      ↓  轻量钩子把每个会话事件交给 integration_adapter.py
+会话记录  →  knowledge/raw/sessions/<日期>/  （已脱敏，每次会话都保留）
+每日日志  →  knowledge/daily/<日期>.md
+      ↓  编译（空闲时在会话开始时进行，并且每晚进行）
+知识页面  →  knowledge/notes/<slug>.md   （每条引用都与来源核对）
+      ↓
+任何代理的下一次会话：学到的规则、未完成事项、最近的决策、项目状态——
+以及 12 个 task-shaped MCP 工具，用来向记忆提问
 ```
 
-系统遵循"编译而非检索"模式（[Karpathy，2026 年 4 月](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)）：原始会话信号实时捕获，随后后台 LLM 处理将其编译为结构化知识页面，而非在查询时依赖原始检索。
+思路是"编译，而不是检索"（[Karpathy，2026 年 4 月](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)）：
+不在提问时搜索原始会话记录，而是由后台一次性把它们变成结构化页面，代理读取这些页面。
 
----
+系统眼中的一个工作日：
 
-## 功能特性
-
-### 捕获流水线
-- **轻量 lifecycle adapter**：Claude Code 和 Codex 钩子以及 OpenCode 插件通过 `integration_adapter.py` 规范化事件
-- **3 级会话分类**：FLUSH_MAJOR（决策/经验→触发编译）、FLUSH_MINOR（注意事项→仅保存）、FLUSH_OK（闲聊→跳过）
-- **非 LLM breadcrumbs**——prompt 和 tool 调用标记，毫秒级延迟，无 API 调用
-- **密钥脱敏**——API 密钥、令牌、长 base64 字符串在任何写入前清除
-
-### Agent-native 接口
-- **MCP-first 访问**——12 个本地 task-shaped 工具，覆盖 recall、上下文、决策、维护、代码智能和 `doctor`
-- **统一 response envelope**——每个工具返回 schema version、freshness、evidence quality、warnings 和 data；MCP resources 提供 health 与 context
-- **自动健康检查**——健康时 SessionStart 保持静默，仅注入 degraded/error 结果；`doctor(repair=true)` 只执行安全、幂等的本地修复
-
-### 编译流水线
-- **JSON 协议编译**——无需智能体 tool-use，适用于任何 LLM 后端
-- **Fail-closed 模型边界**——prompt 在传输前脱敏；敏感的 provider output 或无效的必需 DLP policy 会阻止发布
-- **VERIFY-BEFORE-WRITE**——Python 端确定性引用验证；LLM 无法伪造证据
-- **带 quarantine 的语义去重**——优先 update 而非 create；不确定或 evaluator 有分歧的矛盾进入 quarantine，automatic semantic supersession 保持禁用
-- **增量编译**——SHA-256 哈希；仅重新编译变更的 daily 日志
-- **并发安全**——PID 锁 + stale 检测；同时只运行一个编译
-- **持久任务队列**——离线容错；延迟 LLM 任务在下次会话时排空
-
-### 搜索与检索
-- **Generation-consistent retrieval**：一个经过验证的不可变 generation 可将 FTS、vectors、graph、tiers 和 evidence 绑定到同一 source snapshot
-- **如实的 retrieval trace**：结果报告 requested/effective mode、实际使用的 signals、generation、reranker 状态和 fallback 原因
-- **可用时进行 Triple-fusion**：BM25（FTS5）+ Vector（ONNX Runtime 上的多语言 E5）+ evidence-backed Graph-neighbor RRF
-- **加权 RRF**：BM25=2.0、Vector=1.0、Graph=0.5——防止已知项查询回归
-- **Title + filename 提升**——文件名精确匹配直接短路到 rank 1
-- **Typed-provenance 排序**——同一张权重表（`user` 1.35、`web` 1.1、`ai-derived` 1.0、`inferred` 0.8）在每条路径上乘以决定顺序的分数：BM25、融合 RRF 与重排序之后
-- **时间查询**——`--as-of YYYY-MM-DD` 按 `valid_to` frontmatter 过滤
-- **本地检索模式**——小规模直接读取页面，基于 evidence generation 的 FTS5 BM25（首次构建前直接读取 Markdown）、可选的 vectors + graph，以及默认开启的多语言 cross-encoder reranker 混合检索
-- **Grounded QA**——检索到的 source span 带有 citation ID、路径、source/span 哈希、revision 及 byte/line 范围；证据不足、冲突或超出时间范围时会拒答
-
-### 主动智能
-- **Guardrails**——在 SessionStart 自动注入已学习的纠正（防止重复犯错）
-- **Advisory**——呈现开放线程、最近决策、lint 告警、跨项目洞察
-- **元认知上下文**——vault 清单、编译积压、flush 层级分布
-- **反馈捕获**——检测记录中的纠正/偏好，保存为提升候选
-
-### 多项目与多智能体
-- **一个 vault，多个项目**——5 步 collision-safe slug 系统，每个项目独立的 `state.md`
-- **项目引导**——从 git 历史、README、技术栈自动生成上下文
-- **Blackboard 协议**——并行智能体认领任务、信号完成、检测冲突
-- **循环检测器**——标记重复编辑循环（fix → review → redo）
-- **智能体时间线**——归因：哪个智能体何时做了什么决策
-
-### 维护
-- **16 项 lint 检查（15 项结构性 + 1 项 LLM 判定矛盾）**——损坏的 wikilinks、孤儿页面、未编译日志、缺失反向链接、稀疏页面、缺失 frontmatter、缺失或无效 type、缺失来源、无效 supersede 链、孤立 gap、时间有效性、无法解析的证据、无效 claim 模式、矛盾
-- **类型感知归档**——debugging 60 天、patterns 180 天、decisions 永不
-- **Nightly + weekly 计划**——编译、lint、归档、OKF 迁移（Windows 使用 Task Scheduler，macOS 使用 LaunchAgent，Linux 使用用户级 systemd；cron 仅作为显式降级回退）
-- **OKF v0.1 frontmatter**——`type`、`confidence`、`source_authority`、`supersede` 字段；从遗留页面自动迁移
-
-### 基础设施
-- **5 个 LLM 后端**（自动检测）：OpenCode（需设置 `OPENCODE_SERVER_PASSWORD`）→ Codex → Claude CLI → OpenAI → Ollama
-- **跨平台**：Windows、macOS、Linux、WSL2
-- **本地且零 daemon**——安装基线包含 MCP 包；vector search 仍为可选项
-- **跨平台 CI 矩阵**：Ubuntu + Windows + macOS，Python 3.10–3.14
-- **Pre-commit 钩子（opt-in）**：ruff（静态分析）+ 结构 lint + gitleaks（密钥扫描）。可选；安装程序不会启用这些钩子。启用命令：`uv run --locked --no-sync pre-commit install --hook-type pre-commit --hook-type pre-push`。
+- 你在 Claude Code 里修复一个错误，并说"这里再也不要用旧 API"。会话被记录下来；
+  当晚这条纠正变成一个规则页面。
+- 第二天早上你在同一仓库打开 Codex。它的第一条消息就已包含这条规则、项目的未完成
+  事项和昨天的决策。
+- 你问"我们为什么放弃 LanceDB？"。代理调用 `recall`，用决策页面和它所出自的会话
+  中的确切行来回答。
 
 ---
 
 ## 快速开始
 
-### 前置条件
+### 前提条件
 
-- Python 3.10+
-- git
-- [uv](https://docs.astral.sh/uv/) 必须是 0.12.3 —— 两个安装脚本都会拒绝其他版本
-- 一个你已在使用的 AI 智能体（Claude Code、OpenCode 或 Codex）
+- Python 3.10+ 和 git
+- [uv](https://docs.astral.sh/uv/) 恰好 0.12.3——两个安装程序都会拒绝其他版本
+- 你已在使用的代理：Claude Code、Codex 或 OpenCode
+- Node 22——仅在需要精确的 TypeScript 或 Python 导航时（见下文）
 
-### 从源码安装
+### 安装
 
-推荐方式仍然是在安装前先克隆并检查源码：
+先克隆并阅读源码，然后从该副本运行安装程序：
 
 ```bash
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 ```
 
-检查完成后，从该 checkout 运行本地安装程序：
-
-**macOS / Linux / WSL2:**
+**macOS / Linux / WSL2：**
 ```bash
 LLM_WIKI_ROOT="$(pwd)" bash ./install.sh
 ```
 
-**Windows:**
+**Windows：**
 ```powershell
 $env:LLM_WIKI_ROOT = (Get-Location).Path
 .\install.ps1
 ```
 
-仅当 `LLM_WIKI_COMMIT` 是精确的 40 位十六进制 commit OID 时，才支持远程 bootstrap。
-请只从可信位置传入安装程序并设置该值；bootstrap 会获取精确 commit，验证 `HEAD`、
-仓库身份和必需文件，然后只执行 checkout 中的安装程序。分支名和标签名会被拒绝。
-经过验证的 commit 会成为跟踪 `origin/main` 的本地 `main` 分支，因此夜间 fast-forward
-更新会像对待克隆的仓库一样到达该 vault；`git -C ~/LLM-wiki checkout --detach` 会将其冻结在当前 commit。
+安装程序按精确的锁文件构建知识库自己的 `.venv`，安装固定版本的搜索模型，运行有时限
+的 production smoke 测试，接入它找到的每个代理，注册每晚和每周的维护，并构建第一个
+搜索索引。它会逐个代理说明做了什么、是否还需要你手动处理。
 
-本地安装程序会同步锁定的 production baseline，运行有界 production smoke，创建 runtime
-目录并接入受支持的智能体。完整回归套件仍是独立的 development 与 release gate。已有
-checkout 会保留全部 Git remote 设置；传入 `--protect-push` 或 `-ProtectPush` 才会把每个
-remote 的 push URL 替换为 `no-push`。
-
-### 校验发行版
-
-发行版会给出远程 bootstrap 接受的确切提交（分支名与标签名一律拒绝），以及
-bootstrap 运行的每个文件的 SHA-256。在本地检出中打印任意标签的清单：
+远程引导安装仅支持精确的提交：把 `LLM_WIKI_COMMIT` 设为完整的 40 位提交 OID，并从
+可信位置获取安装程序。分支和标签名会被拒绝。每个发布版本都列出其提交以及引导所运行
+的每个文件的 SHA-256：
 
 ```bash
 uv run python scripts/release_manifest.py v5.0.0 --markdown
 ```
 
-安装该确切提交：
+### 检查
 
 ```bash
-git checkout --detach "$(git rev-parse 'v5.0.0^{commit}')"
-bash ./install.sh
+uv run python scripts/doctor.py
+uv run python scripts/search_memory.py "auth"
 ```
 
-### 共享 HTTP 传输（可选）
-
-MCP 服务器默认使用 stdio：每个代理都会启动自己的进程。如果同时运行多个代理，一个
-共享的本地服务器更划算——在本仓库实测：每增加一个代理，stdio 需 1220.3 MiB，共享
-服务器仅需 0.1 MiB；新会话响应时间为 0.010–0.013 秒，而非 1.3–2.9 秒。代价是单次
-调用多花 8–22 毫秒，所以只有一个代理时 stdio 仍然更优。
-
-```bash
-uv run python scripts/mcp_http.py --port 8931
-```
-
-仅绑定字面回环地址，拒绝任何 `Origin`，并要求服务器写入
-`<状态根目录>/run/mcp-http/token`（权限 0600）的持有者令牌。stdio 未作改动，仍是
-默认方式。
+`doctor` 只读，报告哪些正常、哪些处于 degraded 状态、哪些损坏，以及该运行什么。
 
 ### 依赖配置
 
-MCP 属于 production baseline；`mcp-server` 仍是 compatibility alias。全新 production
-安装使用精确 lock，且不安装 development groups：
+MCP 属于 production 基线；`mcp-server` 保留为 compatibility alias。安装程序会替你完成；
+手动执行：
 
 ```bash
 uv sync --locked --no-default-groups
@@ -199,143 +108,154 @@ uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120
 uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json
 ```
 
-repair 命令默认只读；它会报告 Reliability V3 evidence 的 fresh、upgrade-required、
-partial、adopted 或 conflicting 状态，并且不会创建 `run/`。提供 offline apply 参数
-（`--apply --adopt-ownership-v3 --confirm-all-agents-stopped`）时，该命令会在全新或
-静止的 vault 上执行 v3 切换；在全新 vault 上安装程序会自动运行它，因为切换前会话捕获会被拒绝
-（issue #17）。对于已经持有旧队列的 vault，只有当你亲自告诉安装程序没有 agent 正在运行时
-（`--confirm-all-agents-stopped`，PowerShell 为 `-ConfirmAllAgentsStopped`）才会切换；
-否则安装程序只会给出命令，不动队列。该命令绝不会删除 `run/`、knowledge、retired
-databases、legacy caches 或 compatibility markers。
+修复命令默认只读。在新的或空闲的知识库上，安装程序会以
+`--apply --adopt-ownership-v3 --confirm-all-agents-stopped` 运行它，把运行时数据迁移到
+当前的数据库格式；若知识库中已有工作，会先请你确认没有代理在运行。它从不删除知识
+或 `run/`。
 
-可选 extras 以 additive 方式安装，并保留操作员已选择的包：
+可选扩展会叠加到已安装的内容上，并保留你已选择的部分：
 
 ```bash
-uv sync --locked --no-default-groups --inexact --extra hybrid
-uv sync --locked --no-default-groups --inexact --extra code-graph
+uv sync --locked --no-default-groups --inexact --extra hybrid      # 向量 + reranker
+uv sync --locked --no-default-groups --inexact --extra code-graph  # 代码索引
 ```
 
-贡献者安装 locked development group，并在不触发隐式同步的情况下运行完整回归套件：
+贡献者安装开发依赖组并运行完整回归套件：
 
 ```bash
 uv sync --locked
 uv run --locked --no-sync pytest -q
 ```
 
-Node 22 是可选项，仅 qualified precise Python navigation with Pyright 需要它。
-
-### 验证可用
-
-```bash
-uv run python scripts/search_memory.py "auth"
-uv run python scripts/lookup_mode.py
-```
+提供 pre-commit 钩子（ruff、结构 lint、gitleaks）。
+可选；安装程序不会启用这些钩子：
+`uv run --locked --no-sync pre-commit install --hook-type pre-commit --hook-type pre-push`。
 
 ---
 
-## 接入智能体
+## 代理
 
-LLM Wiki 在安装时检测已安装的智能体，并说明集成是自动完成还是需要手动步骤：
-
-| 智能体 | 状态 | 集成方式 | 如何接入 |
-|--------|------|----------|----------|
-| **OpenCode** | 配置验证成功后自动 | MCP + 轻量 JS lifecycle 插件 | MCP 提供读取/操作；插件将事件转发到 `integration_adapter.py` |
-| **Codex CLI** | 配置验证成功后自动；在 `/hooks` 中审核信任 | MCP + 官方 lifecycle 钩子 | MCP 提供读取/操作；钩子转发 lifecycle 事件 |
-| **Claude Code** | settings 合并并验证成功后自动 | MCP + 轻量 settings.json 钩子 | MCP 提供读取/操作；五个钩子转发 lifecycle 事件 |
-| **Obsidian** | 仅 viewer | 可选 Markdown viewer | 直接打开 vault；不要求 Obsidian UI 或 ingestion 功能 |
+| 代理 | 状态 | 接入方式 |
+|------|------|----------|
+| **Claude Code** | 设置合并验证通过后自动接入 | MCP 服务器 + `settings.json` 中的钩子：七个生命周期事件交给 `integration_adapter.py`，两个钩子为搜索和子代理添加代码图提示 |
+| **Codex CLI** | 配置验证通过后自动接入；在 `/hooks` 中批准一次钩子 | MCP 服务器 + 七个生命周期钩子 |
+| **OpenCode** | 配置验证通过后自动接入 | MCP 服务器 + 轻量 JS 生命周期插件 |
+| **Obsidian** | 仅 viewer | Obsidian 为可选 viewer：打开知识库文件夹即可，无需安装 |
 
 Cursor 与 Antigravity 已于 2026-08-26 退出支持：安装程序不再检测或配置它们，
-而 `uninstall` 仍会收回旧版安装写入的钩子。
-所有智能体共享同一个 vault——Claude Code 记录的决策在 OpenCode 的下次会话中可见。
+`uninstall` 仍会收回旧版安装写入的钩子。
 
-### 可选：语义搜索
+所有代理共用一个知识库：在 Claude Code 中记录的决策会出现在 Codex 的下一次会话中。
 
-用于混合 BM25 + Vector 搜索（即使关键词不匹配也能找到语义相关页面）：
+### MCP 接口
+
+本地 MCP 服务器提供 **12 个 task-shaped 工具**：`recall`、`read_page`、
+`wiki_overview`、`vault_status`、`get_decisions`、`get_context`、
+`check_contradiction`、`log_decision`、`compile`、`find_dead_code`、
+`get_architecture` 和 `doctor`。每个回答都使用统一的 response envelope，写明 schema
+版本、新鲜度、证据质量和警告；两个 MCP resources 提供健康状态与上下文。一切正常时
+会话开始保持静默，只注入 degraded 或 error 结果。`doctor(repair=true)` 只执行安全、
+幂等的本地修复。
+
+服务器默认使用 stdio。同时运行多个代理时，一个共享的本地服务器更省资源：
 
 ```bash
-uv sync --locked --no-default-groups --inexact --extra semantic
+uv run python scripts/mcp_http.py --port 8931
 ```
+
+它只绑定字面 loopback 地址，拒绝任何 `Origin`，并要求它写入
+`<state root>/run/mcp-http/token`（权限 0600）的 bearer 令牌。
 
 ---
 
-## 架构
+## 你能得到什么
 
-```
-CODE          scripts/  tests/  docs/  skills/  rules/  integrations/  benchmark/
-KNOWLEDGE     knowledge/{daily,notes,projects,raw,inbox}
-RUNTIME       cache/  logs/  run/   （gitignored，vault 内）
-```
+**不丢失任何会话的捕获。** 每次会话都会先写下自己的脱敏记录——对话、每次工具调用
+一行、子代理的报告——然后才判断它的价值。之后由分类器决定它是否还值得编译成页面。
+密钥、令牌、URL 和命令中的密码会在写入前被移除。
 
-- **CODE**——git 跟踪。流水线、测试、文档、技能、规则、集成。
-- **KNOWLEDGE**——你的记忆；仓库以空状态交付。所有页面和 daily 日志均 gitignored，仅跟踪 README。
-- **RUNTIME**——gitignored。搜索索引和日志可丢弃；`run/` 中的事务、队列状态和 undo 映像属于操作状态。
-- **权威边界**——Markdown、Git history 和 append-only project journal 是权威来源。FTS、vectors、Evidence Graph 数据库、tiers、telemetry 和 model cache 都是可重建的派生状态。
+**可以信任的页面。** 编译把每日日志变成带 YAML 头部的类型化页面（决策、模式、调试、
+概念……）。写入页面前，Python 会把每条引用与来源行及其摘要核对；第二轮模型审查每处
+修改并丢弃薄弱的部分。与已有页面的矛盾会被记录，而不是覆盖：旧页面标记为
+`superseded`，不确定的情况进入隔离区等待。每次写入都是可恢复的事务，两天内可撤销。
 
-完整设计原理（7 条公理、系统架构图、记忆分类法、搜索架构）见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+**会话开始时的上下文。** 从你的纠正中学到的规则、未完成事项、最近的决策、lint 提醒
+以及来自其他项目的发现——并按你所在的项目区分：由某个项目的会话编译出的页面带有
+`project:`，不会进入其他项目的会话。
 
-规范结构参考（什么放在哪里、环境变量契约、禁止布局）见 [docs/STRUCTURE.md](docs/STRUCTURE.md)。
+**会说明自己如何作答的搜索。** 以词法搜索（BM25）为基础；`hybrid` 扩展加入多语言
+向量（ONNX Runtime 上的 `intfloat/multilingual-e5-small`）和 cross-encoder reranker
+（`BAAI/bge-reranker-v2-m3`），关系类问题还会用到证据图。排序会考虑说法的来源（你、
+网络、模型、推测）以及它所在页面的类型。每个回答都报告请求的模式、实际使用的信号
+以及回退原因。在第一个索引建成之前，搜索直接读取 Markdown，并如实说明。
+
+**多个项目，一个知识库。** 每个仓库都有自己的项目文件夹，包含状态、上下文和只追加
+的日志；新项目在首次出现时根据其 Git 历史和 README 生成初始上下文。
+
+**自动运行的维护。** 每晚的维护会更新代码（仅 fast-forward，从不 push，若会触及你
+修改过的文件则放弃），处理队列，编译，刷新搜索索引，为 `knowledge/` 保存本地 Git
+快照，并报告健康状态。每周的维护运行 lint（17 项检查）、归档旧的每日日志并迁移页面
+头部。Windows 使用 Task Scheduler，macOS 使用 LaunchAgent，Linux 使用用户级 systemd
+定时器；cron 是明确的 degraded 后备方案。
+
+**代码理解。** `get_architecture` 和 `find_dead_code` 依据你的仓库的代码索引作答；
+精确的定义、引用、调用方和诊断来自固定版本的语言服务器（见[代码导航](#代码导航)）。
 
 ---
 
-## Evidence generation 与迁移
+## 文件位置
 
-`cache/evidence-graph/catalog.sqlite3` 在 `cache/evidence-graph/generations/<generation-id>/` 中选择一个不可变的 active generation。候选 generation 只有在 manifest、source membership、artifact 哈希、数据库完整性和 evidence span 全部验证后才会注册。激活通过 compare-and-swap 更新指针。激活前构建失败或中断时，先前 generation 仍保持 active；active generation 损坏时，会跳过它并使用最新的已验证历史 generation。恢复时可注册完整的 orphan generation，但不会自动激活。
+```
+CODE        scripts/  tests/  docs/  skills/  rules/  integrations/  benchmark/
+KNOWLEDGE   knowledge/{daily,notes,projects,raw,inbox}
+RUNTIME     cache/  logs/  run/        （位于知识库内，从不提交）
+```
 
-删除 `cache/evidence-graph/` 只会删除派生状态。先停止活动命令，保留 `run/`，并在期望 generation-backed retrieval 前完成重建（`uv run python scripts/doctor.py --rebuild-generation`）。generation 是唯一的索引：legacy `cache/index.sqlite`、`cache/vectors.npy` 和 `cache/vectors_meta.json` 已于 2026-09-23 退役，不再被任何代码读取。在没有 generation 时，记忆搜索会在截止时间内直接读取 Markdown，每条结果都标注 `no_active_generation`；代码答案给出自己的原因：仓库没有 generation 时为 `no_generation`，有 generation 但无法打开时为 `generation_unreadable:<ExceptionClass>`。安全 rollback 绝不删除 `knowledge/`、Git history、project journal 或 `run/`。
+- **代码** 就是这个仓库。
+- **知识** 是你的记忆。仓库发布时它是空的：每个页面、每日日志和会话记录都被
+  `.gitignore` 拒绝，只跟踪 README。发布某个页面是一次有意的操作。
+- **运行时数据** 不进入 Git。`cache/` 和 `logs/` 可以删除并重建；`run/` 保存事务、
+  队列和撤销历史，遵循 [docs/STRUCTURE.md](docs/STRUCTURE.md) 中的删除规则。
+- **权威来源** 是 Markdown、Git 历史和项目日志。搜索索引、向量、证据图和遥测都是
+  派生的，可以重建。
 
-Model matrix 固定候选 revision，并要求 EN/RU/ZH quality、resource、license 和 Pareto gates 全部通过后才选择 defaults。默认模型为用于向量的 `intfloat/multilingual-e5-small` 和用于重排序的 `BAAI/bge-reranker-v2-m3`，二者均已固定；替换任何一个都需要 matrix 的 evidence，目前尚未具备。Token count 标记为 `reported`、`tokenizer`、`estimated`、`mixed` 或 `unknown`；货币成本另行标记为 `reported`、`estimated` 或 `unknown`。UTF-8 byte 估算只用于保守规划，并非独立于 tokenizer 的保证。
-
-真实 Graphify 对比与 model superiority evidence 尚未获得：**evidence pending**。确定性 comparative smoke 只验证 orchestration，不支持质量或 token-ratio 声明。
-
-激活、恢复、rollback、citation 和准确 MCP 行为见 [docs/USER-GUIDE.md](docs/USER-GUIDE.md)。
+设计依据：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。日常运维、恢复和备份：
+[docs/USER-GUIDE.md](docs/USER-GUIDE.md)。
 
 ---
 
-## 可靠记忆操作
+## 记忆的安全
 
-Markdown 仍是权威来源。Runtime SQLite 用于协调可恢复写入和排队工作，但不是知识来源。操作数据库使用 rollback-journal、`synchronous=FULL`，当前 SQLite runtime 不使用 WAL。State root 必须位于本地文件系统；网络路径会被拒绝，对云同步目录的检测为 best-effort。
+运行时数据库使用 rollback journal 和 `synchronous=FULL`；请把 state root 放在本地
+磁盘上（网络路径会被拒绝）。队列至少投递一次，因此每个处理程序都是幂等的。
 
 ```bash
 uv run python scripts/doctor.py
 uv run python scripts/doctor.py --repair
-uv run python scripts/doctor.py --time-budget 60
+uv run python scripts/doctor.py --rebuild-generation
 uv run python scripts/markdown_transaction.py recover
 uv run python scripts/markdown_transaction.py undo <transaction-id>
 uv run python scripts/markdown_transaction.py prune --retention-days 30
 uv run python scripts/memory_queue.py work --max-tasks 20 --max-seconds 600 --idle-seconds 2 --lease-seconds 120 --heartbeat-seconds 40 --max-attempts 8 --retry-base-seconds 30 --retry-cap-seconds 3600
 uv run python scripts/memory_queue.py redrive <task-id>
 uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path>
-uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path> --include-dead
-uv run python scripts/memory_queue.py restore --export <path>
 uv run python scripts/archive_daily.py --commit --hot-days 90
-uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contradiction-v1.json
-uv run python benchmark/run_flush_classification.py --corpus benchmark/flush-classification-v1.json
 ```
 
-队列采用至少一次投递，因此 handler 使用稳定 operation ID 保证幂等。归档把超过 90 天 hot window 且符合条件的 daily 日志移动到经过验证、未压缩的 BagIt 包，同时保留逻辑 evidence 解析；每周任务会自动运行该归档器，上面的命令只是它的手动形式。无法确定或 evaluator 有分歧的 claims 会进入 quarantine；在 frozen benchmark gate 达标之前，semantic supersession 保持禁用。恢复、保留和安全删除流程见 [docs/USER-GUIDE.md](docs/USER-GUIDE.md)。
+超过 90 天的每日日志会移入经过校验、未压缩的 BagIt 包（由每周维护完成）；引用它们的
+证据仍可解析。若需要在磁盘丢失后仍能保留的副本，知识库提供加密的 Restic 备份和分阶段
+恢复；每晚的 `knowledge/` Git 快照只在本地且未加密。参见
+[docs/USER-GUIDE.md](docs/USER-GUIDE.md) 的备份部分。
 
 ---
 
-## 基准测试
+## 代码导航
 
-检索门禁是冻结的公开合成语料 `benchmark/retrieval-v2.json`：多语言页面，带有分级证据、
-干扰文档、时间历史和弃答案例，由 `benchmark/run_retrieval_v2.py` 运行。长程记忆在
-LongMemEval 测试台（`benchmark/run_longmemeval.py`）上测量。基于仓库过去附带页面的历史
-BM25 门禁（112 条生成查询和 60 条冻结查询）已于 2026-09-10 随这些页面一起退役；其最后
-数字见 `benchmark/baseline-2026-07-16.md`。其他地方的竞品数字来自不同数据集，不可比较。
-
-运行 retrieval-v2：`uv run python benchmark/run_benchmark.py`
-
-### MCP 智能体接口
-
-本地 stdio MCP 服务器提供 **12 个 task-shaped 工具**，包括 `doctor`，并统一使用 response envelope 和 health/context resources。`find_dead_code(directory)` 返回保守候选项，`get_architecture(directory)` 返回入口点、路由、基于 canonical symbol ID 的热点和社区。文件系统分析要求显式提供存在的非根目录，且绝不回退到进程 CWD。
-
-精确模式 `definition`、`references`、`implementations`、`type`、
-`diagnostics` 以及带位置的 `callers`/`callees` 使用四个固定的受管语言服务器：
-**Pyright 1.1.411**（Python）、**typescript-language-server 6.0.0**（配 tsserver
-5.9.3，用于 TypeScript/JavaScript）、**gopls v0.23.0**（Go，安装时由固定的 Go
-1.27.1 工具链编译）和 **rust-analyzer 1.98.1**（Rust，附带其固定的 Rust 工具链）。
-请逐个显式安装；查询期间不会下载或更新：
+精确模式——`definition`、`references`、`implementations`、`type`、`diagnostics`
+以及带位置的 `callers`/`callees`——使用四个固定版本的语言服务器：**Pyright 1.1.411**
+（Python）、**typescript-language-server 6.0.0** 配合 tsserver 5.9.3
+（TypeScript/JavaScript）、**gopls v0.23.0**（Go）和 **rust-analyzer 1.98.1**（Rust）。
+每个都需显式安装；查询从不下载任何东西：
 
 ```bash
 uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
@@ -344,51 +264,58 @@ uv run python scripts/install_language_server.py --profile gopls --state-root "$
 uv run python scripts/install_language_server.py --profile rust-analyzer --state-root "$LLM_WIKI_STATE_ROOT"
 ```
 
-该路径仅支持**受信任的本地仓库**，且**不是 OS sandbox**。位置、deadline、
-freshness、containment 和 qualification 限制见
+没有服务器认领的文件会得到 `unsupported`；服务器缺失或出错时，回答会降级到代码索引，
+而不是失败。
+此路径仅适用于受信任的本地仓库，不是 OS sandbox。详见
 [docs/CODE-NAVIGATION.md](docs/CODE-NAVIGATION.md)。
 
 ---
 
-## 对比
+## 搜索索引
 
-| 能力 | LLM Wiki | agentmemory | ReMe | akitaonrails |
-|------|----------|-------------|------|--------------|
-| Markdown 优先 | 是 | 否 | 是 | 是 |
-| 多智能体（3+ 工具） | 是（3） | 是（32+ via MCP） | 仅 Claude | 是（12+） |
-| IDE 支持 | Obsidian 为可选 viewer | 否 | 否 | 否 |
-| 编译而非检索 | 是 | 否 | 否 | 否 |
-| VERIFY-BEFORE-WRITE | 是 | 否 | 否 | 否 |
-| Guardrails（学习纠正） | 是 | 否 | 否 | 否 |
-| Blackboard 协调 | 是 | 否 | 否 | 否 |
-| 循环检测 | 是 | 否 | 否 | 否 |
-| 智能体时间线 | 是 | 否 | 否 | 否 |
-| 反馈学习 | 是 | 否 | 否 | 否 |
-| 本地 / 零 daemon | 是 | 否（Docker） | 否（pip） | 否（Rust） |
-| 时间有效性（`valid_to`） | 是 | 否 | 否 | 否 |
-| Typed-provenance 排序 | 是 | 否 | 否 | 否 |
+`cache/evidence-graph/catalog.sqlite3` 在 `cache/evidence-graph/generations/<generation-id>/`
+下选择一个不可变的活动 generation：由你的页面的同一快照构建的全文索引、向量、证据图和
+分层。新的 generation 只有在其清单、哈希、数据库和证据片段全部校验通过后才会激活；
+构建失败时保留之前的那个。安装程序构建第一个 generation，每晚的维护刷新它，
+`uv run python scripts/doctor.py --rebuild-generation` 可按需重建。删除
+`cache/evidence-graph/` 只会耗费时间，不会丢失任何东西。
 
 ---
 
-## 贡献
+## 基准测试
 
-欢迎贡献。接受标准是"这是否能在真实的多智能体工作流中存活？"
+检索以冻结的公开合成语料 `benchmark/retrieval-v2.json` 为门槛——多语言页面，带分级
+证据、干扰页面、时间历史以及必须拒答的问题：
 
-参见 [CONTRIBUTING.md](CONTRIBUTING.md)：
-- 开发环境设置
-- 发布检查清单（README i18n 同步、CHANGELOG、版本提升）
-- 编码标准（ruff、pytest、pre-commit）
-- 如何添加新的智能体集成
+```bash
+uv run python benchmark/run_benchmark.py
+```
+
+长期记忆在 LongMemEval 上测量（`benchmark/run_longmemeval.py`），矛盾处理在其自己的
+冻结语料上测量：
+
+```bash
+uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contradiction-v1.json
+```
+
+这里不声称与其他记忆系统相比较：它们公布的数字使用的是不同的数据集。
+
+---
+
+## 参与贡献
+
+欢迎贡献。标准是"它能否经受住真实的多代理工作流？"。环境搭建、编码规范和发布清单
+（三个 README、CHANGELOG 和版本号一起变更）见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ---
 
 ## 致谢
 
-- [Karpathy LLM Wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)——"编译而非检索"模式
-- [Harrison Chase "Wiki Memory"](https://blog.langchain.dev/wiki-memory/)——智能体维护的文件
-- [Google OKF spec](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)——厂商中立的 Markdown 知识格式
-- [Anthropic context engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)——capture/compact/subagent 模式
-- [VEP Semantic DNA](https://vep.live)——confidence/supersede/temporal 生命周期
+- [Karpathy's LLM Wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)——"编译，而不是检索"模式
+- [Harrison Chase, "Wiki Memory"](https://blog.langchain.dev/wiki-memory/)——由代理维护的文件
+- [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)——厂商中立的 Markdown 知识格式
+- [Anthropic, effective context engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)——捕获、压缩与子代理模式
+- [VEP Semantic DNA](https://vep.live)——置信度、替代与时间生命周期
 
 ---
 

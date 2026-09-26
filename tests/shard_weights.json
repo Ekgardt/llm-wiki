@@ -279,6 +279,7 @@
   "test_an_open_that_runs_out_of_time_closes_its_database.py": 0.95,
   "test_an_oversized_reply_fails_its_request_not_its_server.py": 0.06,
   "test_an_owner_helper_refuses_the_candidate_on_an_adopted_vault.py": 0.0,
+  "test_an_ownership_probe_says_why_it_measured_nothing.py": 0.01,
   "test_an_unclaimed_file_is_unsupported.py": 0.17,
   "test_an_unfinished_update_stays_named.py": 0.01,
   "test_an_uninstall_names_what_it_leaves.py": 0.55,
