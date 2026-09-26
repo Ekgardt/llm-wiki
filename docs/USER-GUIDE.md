@@ -181,11 +181,11 @@ integrated Tasks 1-29 branch, not the broader Task 17 target:
 | Tool | Current behavior |
 |---|---|
 | `recall` | Routes search through the retrieval planner. Result rows expose requested/effective mode, actual signals, generation, reranker fields, and fallback reason. The requested result limit is clamped to 1-20. |
-| `read_page` | Reads one bounded slug-only Markdown page and resolves cited daily/archive evidence with source hashes. Evidence failure fails the page read closed. |
+| `read_page` | Reads one bounded slug-only Markdown page and resolves cited daily/archive evidence with source hashes. A cited reference that does not resolve fails the page read closed; a `daily:` mention that is not a reference is listed as `not_an_evidence_reference` and the page is still returned. |
 | `wiki_overview` | Reports page count, recommended retrieval tier, and vault root. It does not yet provide per-component generation health. |
 | `vault_status` | Reports compile timestamp/status and changed-daily backlog only. |
 | `get_decisions` | Uses the same retrieval path, filters active decision results, emits bounded telemetry, and clamps limits to 1-20. |
-| `get_context` | Remains the bounded 1-20 slug batch with optional compatibility `content_preview`. The planned token-budgeted repo/symbol/evidence package is **evidence pending**. |
+| `get_context` | Packs the requested pages into one token-budgeted `text` (the budget is counted conservatively, one token per UTF-8 byte, unless a tokenizer is configured) and reports `packed_tokens` and `token_budget`. `pages`, `symbols`, `decisions`, `incidents`, `active_task` and `evidence` list what the text holds without repeating it; mandatory items keep the order they were asked in within their class. |
 | `check_contradiction` | Returns structured assessments, evidence, validity, and lifecycle recommendations; unsupported evidence is quarantined rather than treated as verified. |
 | `log_decision` | Appends through the locked daily-log writer; it does not directly publish a durable decision page. |
 | `compile` | Requests the existing non-blocking, single-lock background compile. |

@@ -1491,6 +1491,10 @@ def _compiled_context(snapshot, selection: dict, token_budget: int, deadline):
         )
 
 
+def _without_text(item: dict) -> dict:
+    return {key: value for key, value in item.items() if key != "text"}
+
+
 def _page_items(items: list) -> list:
     return [item for item in items if item["source"].endswith(".md")]
 
@@ -1512,7 +1516,10 @@ def _materialization_trace(compiled) -> list:
 
 
 def _context_result(compiled, snapshot, selection: dict, token_budget: int, include):
-    items = [asdict(item) for item in compiled.items]
+    # The packed text is sent once, in `text`; the lists name what it holds. Each
+    # list repeated every item's text, about four times the answer (audit
+    # 2026-09-26 B-18, docs/research/2026-09-26-a-context-answer-sends-its-text-once.md).
+    items = [_without_text(asdict(item)) for item in compiled.items]
     return {
         "text": compiled.text,
         "packed_tokens": compiled.packed_tokens,

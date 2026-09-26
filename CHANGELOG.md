@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- `get_context` sends its packed text once: the item lists name what the text holds instead of repeating it about four times, and mandatory items keep the order they were asked in within their class; the guide describes `get_context` and `read_page` as they now behave (audit 2026-09-26 B-18).
 - An answer is called stale only when a source its generation indexes really changed, was removed, or a new page the corpus would take appeared; a touched file, an edited README or a renamed folder no longer makes every answer stale until the next build (audit 2026-09-26 B-15).
 - A call through a package re-export (`from lib import compute as calc` where `lib/__init__.py` re-exports it) now reaches the definition instead of `missing_dependency`, so the live function is not reported dead; code generations are rebuilt under `code-extractor/v15` (audit 2026-09-26 B-6).
 - An install no longer puts the dependencies into a custom `UV_PROJECT_ENVIRONMENT` that timers, hooks and the MCP server never use: the vault always runs from its own `.venv`, and the installer names the ignored setting (audit 2026-09-26 B-26).
