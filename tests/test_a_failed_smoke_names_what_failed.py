@@ -30,7 +30,7 @@ def test_a_doctor_error_exit_is_read_before_its_code() -> None:
         "generated_at": "2026-09-25T00:00:00+00:00",
         "overall_status": "error",
         "repaired": [],
-        "checks": [{"id": "claims", "status": "error"}],
+        "checks": [{"id": "environment", "status": "error"}],
         "counts": {},
         "run_deletion": {},
     }
@@ -40,4 +40,4 @@ def test_a_doctor_error_exit_is_read_before_its_code() -> None:
         install_smoke._checked_doctor_report(completed)
     except install_smoke.SmokeFailure as failure:
         message = str(failure)
-    assert message.startswith("Doctor reported error in: claims;")
+    assert message.startswith("Doctor reported error in: environment;")

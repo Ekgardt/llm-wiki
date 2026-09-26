@@ -7,6 +7,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A reinstall is no longer rolled back because the vault had a bad night: the install smoke fails only on an error in a check the installer owns (environment, filesystem, adoption, MCP, integrations) or an error that names no check; other errors are named on stderr and reported as degraded (audit 2026-09-26 A-10).
 - The nightly code update no longer stops on an untracked file identical to one it adds (a research note merged through a pull request): the copy is set aside and recreated by the fast-forward, and put back if the merge fails; a differing file stops the update as `untracked_files_conflict`, by name. A failed git call now carries git's own words (audit 2026-09-26 A-9).
 - A native language server's verified launch copy is removed with its owner root, so a gopls or rust-analyzer session closes instead of stranding its slot; a dead failure root keeps its records and drops the 43 MB copy (audit 2026-09-26 A-6, C-7).
 - Run as a script, the repository index answers a refusal raised by its worktree and retention helpers as JSON instead of crashing: one opted-out checkout no longer ends the nightly `refresh-all` for every checkout after it (audit 2026-09-26 A-5).

@@ -35,6 +35,14 @@ EXPECTED_TOOL_NAMES = (
 )
 
 
+# The doctor checks whose `error` means the install itself is broken. Any other
+# `error` is the vault's history (a failed night, a dead task), which a reinstall
+# must not be blocked by (audit 2026-09-26 A-10,
+# docs/research/2026-09-26-a-smoke-checks-the-install-not-the-vault.md).
+INSTALL_OWNED_CHECKS = frozenset({"environment", "filesystem", "adoption", "mcp", "integrations"})
+_EXPECTED_EXIT = {"ok": 0, "degraded": 1, "error": 2}
+
+
 class SmokeFailure(RuntimeError):
     """A smoke failure whose message is ours, so the installer may print it.
 
@@ -103,16 +111,27 @@ def _doctor_report(root: Path, state_root: Path, timeout: float) -> dict[str, ob
 def _checked_doctor_report(completed: subprocess.CompletedProcess) -> dict[str, object]:
     """The report, read before the exit code: an `error` exits 2 and must be named."""
     report = _validate_doctor_report(_parsed_doctor_output(completed.stdout))
-    status = report["overall_status"]
-    if status == "error":
+    if _install_is_broken(report):
         raise SmokeFailure(_doctor_error_message(report))
-    if completed.returncode != {"ok": 0, "degraded": 1}[status]:
+    if completed.returncode != _EXPECTED_EXIT[report["overall_status"]]:
         raise SmokeFailure("Doctor failed during install smoke")
     return report
 
 
+def _failing_checks(report: dict) -> list[str]:
+    return [str(check.get("id")) for check in report.get("checks", []) if isinstance(check, dict) and check.get("status") == "error"]
+
+
+def _install_is_broken(report: dict) -> bool:
+    """An `error` in a check the installer owns, or an `error` that names no check."""
+    if report["overall_status"] != "error":
+        return False
+    failing = _failing_checks(report)
+    return not failing or bool(INSTALL_OWNED_CHECKS.intersection(failing))
+
+
 def _doctor_error_message(report: dict) -> str:
-    failing = [str(check.get("id")) for check in report["checks"] if isinstance(check, dict) and check.get("status") == "error"]
+    failing = _failing_checks(report)
     return (
         "Doctor reported error in: "
         + (", ".join(failing) or "unknown")
@@ -189,9 +208,10 @@ def _remaining_before(deadline: float, stage: str) -> float:
 
 
 def _smoke_status(doctor: dict[str, object]) -> str:
-    if doctor["overall_status"] == "degraded":
-        return "degraded"
-    return "ok"
+    """`degraded` for any finding the install leaves to the vault, `ok` otherwise."""
+    if doctor["overall_status"] == "ok":
+        return "ok"
+    return "degraded"
 
 
 def run_smoke(
@@ -255,8 +275,17 @@ def main(argv: list[str] | None = None) -> int:
     except BaseException as error:
         sys.stderr.write(_bounded_error(error))
         return 1
+    sys.stderr.write(_vault_findings_note(report.get("doctor", {})))
     print(json.dumps(report, ensure_ascii=False, sort_keys=True, allow_nan=False))
     return 0
+
+
+def _vault_findings_note(doctor: dict) -> str:
+    """The vault errors the install left in place, named so the operator sees them."""
+    failing = _failing_checks(doctor)
+    if not failing:
+        return ""
+    return f"install smoke: the vault reports errors in: {', '.join(failing)}; run `uv run python scripts/doctor.py`\n"
 
 
 if __name__ == "__main__":
