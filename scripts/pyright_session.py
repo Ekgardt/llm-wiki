@@ -424,6 +424,12 @@ def _startup_code(error: BaseException, prefix: str = "pyright") -> str:
 # a language server is heavier than an HTTP call, so the delays grow.
 _STARTUP_RETRY_BACKOFF = (5.0, 30.0, 120.0)
 
+# A server that ran this long before it failed earns its retry budget back, so
+# its next failure counts as the first. Kubernetes resets a container's restart
+# back-off after ten minutes without problems; this is the same rule (audit
+# 2026-09-26 C-2, docs/research/2026-09-26-a-revived-server-waits-its-turn.md).
+HEALTHY_RUN_SECONDS = 600.0
+
 
 def _startup_is_retryable(error: BaseException, prefix: str) -> bool:
     """Whether trying this start again could plausibly end differently.
@@ -2089,6 +2095,7 @@ class LanguageServerSession:
         # before the monotonic instant the last failure named.
         self._startup_retries = 0
         self._startup_retry_after = 0.0
+        self._process_started_at = 0.0
         self._startup_cleanup_error: StartupCleanupError | None = None
         self._startup_process: LspProcess | None = None
         self._bootstrap_owner_nonce: str | None = None
@@ -3476,7 +3483,7 @@ class LanguageServerSession:
         attempt = _StartupAttempt()
         process: LspProcess | None = None
         try:
-            if not self._clear_retained_owners(
+            if not self._ready_to_launch(
                 retained_cleanup, retained_process, startup_deadline
             ):
                 return
@@ -3491,12 +3498,38 @@ class LanguageServerSession:
                 return
             with self._lock:
                 self._process = process
+                self._process_started_at = time.monotonic()
                 self._startup_process = None
                 self._sync_startup_atexit_locked()
         except BaseException as error:
             self._abandon_startup(
                 error, process, attempt, startup_deadline=startup_deadline
             )
+
+    def _ready_to_launch(
+        self,
+        retained_cleanup: StartupCleanupError | None,
+        retained_process: LspProcess | None,
+        startup_deadline: float,
+    ) -> bool:
+        """What a previous attempt left is cleared, and the backoff has passed."""
+        if not self._clear_retained_owners(
+            retained_cleanup, retained_process, startup_deadline
+        ):
+            return False
+        return not self._paced_by_backoff()
+
+    def _paced_by_backoff(self) -> bool:
+        """A replacement is not launched before the backoff its failure named.
+
+        Clearing what the failed process left runs at once; only the new launch
+        waits, and the query answers degraded meanwhile (audit 2026-09-26 C-2).
+        """
+        with self._lock:
+            if time.monotonic() >= self._startup_retry_after:
+                return False
+            self._degrade_locked(self._profile.degradation_code("startup_retry_pending"))
+            return True
 
     def start(self, *, deadline: float) -> None:
         caller_deadline = _validated_deadline(deadline)
@@ -3579,16 +3612,26 @@ class LanguageServerSession:
         never allowed another start: a key in steady use stayed degraded until the
         server process was restarted by hand (audit B-40,
         docs/research/2026-09-25-a-failed-server-is-started-again.md). The same
-        startup retry budget bounds how often that happens.
+        startup retry budget bounds how often that happens, and the same backoff
+        paces it: the replacement waits its turn instead of starting at once, and
+        a server that ran for `HEALTHY_RUN_SECONDS` first gets the budget back
+        (audit 2026-09-26 C-2). A replacement that then fails for an identity,
+        protocol or capability reason stays terminal through `_start_owned`.
         """
         process = self._process
         if process is None or process.state is not ProcessState.FAILED:
             return
+        self._renew_budget_after_healthy_run_locked()
         if self._startup_retries >= len(_STARTUP_RETRY_BACKOFF):
             return
+        self._startup_retry_after = time.monotonic() + _STARTUP_RETRY_BACKOFF[self._startup_retries]
         self._startup_retries += 1
         self._detach_recovered_process_locked(process, None)
         self._startup_attempted = False
+
+    def _renew_budget_after_healthy_run_locked(self) -> None:
+        if time.monotonic() - self._process_started_at >= HEALTHY_RUN_SECONDS:
+            self._startup_retries = 0
 
     def _process_state_needs_reconciling(self) -> bool:
         """The process has failed or degraded out from under this session."""

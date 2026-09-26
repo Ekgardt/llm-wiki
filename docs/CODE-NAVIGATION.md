@@ -326,6 +326,13 @@ channel nodes, so there is nothing to match across repositories yet.
 - `timeout`: the operation deadline elapsed after cancellation.
 - `error`: validated execution failed without a safe semantic result.
 
+A start that ran out of time or met the operating system, and a server process
+that failed for good after its own one restart, are tried again at most three
+times, after 5 s, 30 s and 120 s; until then a query answers degraded with
+`<profile>_startup_retry_pending`. A server that ran ten minutes before failing
+gets the three tries back. Identity, protocol and capability failures are not
+retried.
+
 ## Positions, deadlines, and offsets
 
 - Positions are repository-relative; absolute roots and external paths are never
