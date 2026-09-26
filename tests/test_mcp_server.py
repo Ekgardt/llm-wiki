@@ -2897,7 +2897,7 @@ class TestHandleToolCall:
 
         received = []
 
-        def decisions(query, *, limit):
+        def decisions(query, *, limit, trace_sink=None):
             received.append(limit)
             return [{"path": "decision.md", "fused_score": 0.1}]
 

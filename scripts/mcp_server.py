@@ -51,6 +51,7 @@ from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import asdict
 from pathlib import Path, PureWindowsPath
+from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -829,14 +830,34 @@ TOOL_INPUT_SCHEMAS = {
 }
 
 
+class SearchCaller(NamedTuple):
+    """Which tool is asking, and whether the search logs its own impressions."""
+
+    source_tool: str
+    emit_telemetry: bool
+
+
+RECALL_CALLER = SearchCaller("mcp.recall", True)
+# The tools that answer from the corpus through `_search_vault`: each reports its
+# trace, its quality from that trace, and its generation's freshness.
+RETRIEVAL_TOOLS = frozenset({"recall", "get_decisions"})
+# `get_decisions` records its own decision-filter impressions, one per page.
+DECISIONS_CALLER = SearchCaller("mcp.get_decisions", False)
+
+
 def _search_vault(
     query: str,
     limit: int = 8,
     *,
     deadline: float | None = None,
     trace_sink: dict[str, object] | None = None,
+    caller: SearchCaller = RECALL_CALLER,
 ) -> list[dict]:
-    """Run hybrid search on the vault; the planner trace lands in `trace_sink`."""
+    """Run hybrid search on the vault; the planner trace lands in `trace_sink`.
+
+    Every tool that answers from the corpus comes through here, so each gets the
+    same deadline reserve, lexical fallback and trace (audit 2026-09-26 C-10).
+    """
     if not isinstance(query, str) or len(query) > MAX_MCP_QUERY_LENGTH:
         raise ValueError("query exceeds the MCP retrieval bound")
     operation_deadline = _search_deadline(deadline)
@@ -847,14 +868,18 @@ def _search_vault(
     try:
         _check_deadline(hybrid_deadline)
         return _run_vault_search(
-            query, limit, hybrid_deadline, semantic=True, trace_sink=trace_sink
+            query, limit, hybrid_deadline, semantic=True, trace_sink=trace_sink, caller=caller
         )
     except TimeoutError:
-        return _lexical_after_deadline(query, limit, operation_deadline, trace_sink)
+        return _lexical_after_deadline(query, limit, operation_deadline, trace_sink, caller)
 
 
 def _lexical_after_deadline(
-    query: str, limit: int, operation_deadline: float, trace_sink: dict[str, object] | None
+    query: str,
+    limit: int,
+    operation_deadline: float,
+    trace_sink: dict[str, object] | None,
+    caller: SearchCaller = RECALL_CALLER,
 ) -> list[dict]:
     """The hybrid run hit its deadline: one lexical pass, marked as the fallback it is."""
     lexical = _run_vault_search(
@@ -865,6 +890,7 @@ def _lexical_after_deadline(
         graph=False,
         rerank=False,
         trace_sink=trace_sink,
+        caller=caller,
     )
     if trace_sink is not None:
         trace_sink.update(_lexical_fallback_row({}))
@@ -889,6 +915,7 @@ def _run_vault_search(
     graph: bool = True,
     rerank: bool = True,
     trace_sink: dict[str, object] | None = None,
+    caller: SearchCaller = RECALL_CALLER,
 ) -> list[dict]:
     from search_memory import search
 
@@ -903,7 +930,8 @@ def _run_vault_search(
         semantic=semantic,
         graph=graph,
         rerank=rerank,
-        source_tool="mcp.recall",
+        source_tool=caller.source_tool,
+        emit_telemetry=caller.emit_telemetry,
         deadline_monotonic=operation_deadline,
         trace_sink=trace_sink,
     )
@@ -1265,7 +1293,11 @@ def _open_days() -> set[str]:
 
 
 def _get_decisions(
-    query: str | None = None, limit: int = 10, *, deadline: float | None = None
+    query: str | None = None,
+    limit: int = 10,
+    *,
+    deadline: float | None = None,
+    trace_sink: dict[str, object] | None = None,
 ) -> list[dict]:
     """Get active decisions from the vault: up to `limit` decision pages, one row each.
 
@@ -1275,16 +1307,16 @@ def _get_decisions(
     docs/research/2026-09-25-get-decisions-returns-what-was-asked.md).
     """
     from retrieval import CANDIDATE_FANOUT
-    from search_memory import MAX_SEARCH_LIMIT, search
+    from search_memory import MAX_SEARCH_LIMIT
 
     _require_decision_query(query)
     effective_query = query or "decision"
-    candidates = search(
+    candidates = _search_vault(
         effective_query,
-        limit=min(limit * CANDIDATE_FANOUT, MAX_SEARCH_LIMIT),
-        source_tool="mcp.get_decisions",
-        emit_telemetry=False,
-        deadline_monotonic=deadline,
+        min(limit * CANDIDATE_FANOUT, MAX_SEARCH_LIMIT),
+        deadline=deadline,
+        trace_sink=trace_sink,
+        caller=DECISIONS_CALLER,
     )
     results = _decision_pages(candidates, limit)
     _record_decision_impressions(effective_query, results)
@@ -4964,7 +4996,7 @@ def _with_fallback_state(merged: dict, reason: object) -> dict:
 
 
 def _quality_of_results(name, data, arguments, limit_clamped) -> dict | None:
-    if name not in {"recall", "get_decisions"}:
+    if name not in RETRIEVAL_TOOLS:
         return None
     quality = _named_results_quality(name, data)
     if not limit_clamped:
@@ -4978,9 +5010,8 @@ def _quality_of_results(name, data, arguments, limit_clamped) -> dict | None:
 
 
 def _named_results_quality(name: str, data) -> dict:
-    """Recall carries its rows under `results` and a trace; decisions are the rows."""
-    if name != "recall":
-        return _results_quality(data)
+    """Both retrieval tools carry their rows under `results`, and a trace."""
+    del name
     quality = _results_quality(data.get("results", []))
     return _with_trace_state(quality, data.get("retrieval_trace"))
 
@@ -5455,7 +5486,7 @@ def _recall_components(data) -> dict:
 
 
 def _answer_generation(name: str, data) -> object:
-    if name == "recall":
+    if name in RETRIEVAL_TOOLS:
         return (_recall_trace(data) or {}).get("corpus_generation")
     return None
 
@@ -5567,6 +5598,7 @@ def _graph_components(data) -> dict:
 
 _COMPONENT_BUILDERS = {
     "recall": _recall_components,
+    "get_decisions": _recall_components,
     "get_context": _context_components,
     "get_architecture": _graph_components,
     "find_dead_code": _graph_components,
@@ -5657,13 +5689,18 @@ def _tool_vault_status(arguments: dict, deadline: float):
 
 
 def _tool_get_decisions(arguments: dict, deadline: float):
+    """Decision pages, with the same trace and freshness a recall carries."""
     effective_limit, limit_clamped = _clamped_limit(arguments.get("limit", 10))
-    data = _call_with_deadline(
-        _get_decisions,
-        arguments.get("query"),
-        limit=effective_limit,
-        deadline=deadline,
+    reported: dict[str, object] = {}
+    query = arguments.get("query")
+    results = _call_with_deadline(
+        _get_decisions, query, limit=effective_limit, deadline=deadline, trace_sink=reported
     )
+    data = {
+        "results": results,
+        "retrieval_trace": _retrieval_trace(query or "decision", results, reported),
+        "_meta": _call_with_deadline(_meta, deadline=deadline),
+    }
     return data, limit_clamped
 
 
