@@ -35,7 +35,7 @@ try:
         directory_skipped,
         resolve_python_imports_and_calls,
     )
-    from .python_parse import PARSE_FAILURES
+    from .python_parse import PARSE_FAILURES, parse_python
 except ImportError:
     from code_languages import CODE_LANGUAGE_BY_SUFFIX, language_for_path
     from import_resolver import (
@@ -45,7 +45,7 @@ except ImportError:
         directory_skipped,
         resolve_python_imports_and_calls,
     )
-    from python_parse import PARSE_FAILURES
+    from python_parse import PARSE_FAILURES, parse_python
 
 try:
     from . import value_references
@@ -2209,7 +2209,7 @@ def _all_names(node) -> set[str]:
 
 def _python_exports(source: str) -> set[str]:
     try:
-        tree = ast.parse(source)
+        tree = parse_python(source)
     except PARSE_FAILURES:
         return set()
     for node in tree.body:

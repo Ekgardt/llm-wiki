@@ -38,9 +38,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 try:
-    from .python_parse import PARSE_FAILURES
+    from .python_parse import PARSE_FAILURES, parse_python
 except ImportError:
-    from python_parse import PARSE_FAILURES
+    from python_parse import PARSE_FAILURES, parse_python
 
 #: Decorators that wrap a definition for the attribute lookup that already
 #: names it, rather than handing it to a registry. Anything else is treated as
@@ -231,7 +231,7 @@ def _record_definition(
 
 def _parsed(content: bytes) -> ast.Module | None:
     try:
-        return ast.parse(content)
+        return parse_python(content)
     except PARSE_FAILURES:
         return None
 

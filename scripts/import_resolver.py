@@ -9,9 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 try:
-    from .python_parse import PARSE_FAILURES
+    from .python_parse import PARSE_FAILURES, parse_python
 except ImportError:
-    from python_parse import PARSE_FAILURES
+    from python_parse import PARSE_FAILURES, parse_python
 
 
 @dataclass(frozen=True)
@@ -98,7 +98,7 @@ class _ReExport:
 
 def _parsed_module(path: Path) -> ast.Module | None:
     try:
-        return ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+        return parse_python(path.read_text(encoding="utf-8", errors="ignore"))
     except (OSError, *PARSE_FAILURES):
         return None
 

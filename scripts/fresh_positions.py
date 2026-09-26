@@ -18,9 +18,9 @@ import ast
 from pathlib import Path
 
 try:
-    from .python_parse import PARSE_FAILURES
+    from .python_parse import PARSE_FAILURES, parse_python
 except ImportError:
-    from python_parse import PARSE_FAILURES
+    from python_parse import PARSE_FAILURES, parse_python
 
 MAX_FILES = 20
 # One source file re-read for fresh positions; a snippet reads at most 1 MiB.
@@ -84,7 +84,7 @@ def _record_body(node: ast.AST, prefix: str, lines: dict[str, int]) -> None:
 
 def _parsed_definitions(text: str) -> dict[str, int]:
     lines: dict[str, int] = {}
-    _record_body(ast.parse(text), "", lines)
+    _record_body(parse_python(text), "", lines)
     return lines
 
 
@@ -109,7 +109,7 @@ def definition_spans(path: Path) -> dict[str, tuple[int, int]]:
         if path.stat().st_size > MAX_FILE_BYTES:
             return {}
         spans: dict[str, tuple[int, int]] = {}
-        _record_spans_body(ast.parse(path.read_text(encoding="utf-8")), "", spans)
+        _record_spans_body(parse_python(path.read_text(encoding="utf-8")), "", spans)
         return spans
     except (OSError, *PARSE_FAILURES):
         return {}
