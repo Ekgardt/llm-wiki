@@ -610,6 +610,13 @@ def _capture_text(value: object, fallback: str) -> str:
     return fallback
 
 
+def _project_slug_line(slug: object) -> str:
+    """The same line `session-end` blocks carry, so a compiled page can name its project (audit 2026-09-26 B-14)."""
+    if not isinstance(slug, str) or not slug:
+        return ""
+    return f"- Project slug: `{slug}`\n"
+
+
 def _capture_daily_block(
     record: Mapping[str, object], tier: str, body: str, chosen_at: datetime
 ) -> str:
@@ -620,6 +627,7 @@ def _capture_daily_block(
     metadata = (
         f"- Trigger: `{trigger}`\n"
         f"- Agent: `{record['host']}`\n"
+        f"{_project_slug_line(record.get('project_slug'))}"
         f"- Capture intent: `{record['intent_id']}`\n"
         f"- Tier: `{tier}`\n\n"
     )

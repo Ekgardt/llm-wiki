@@ -1890,11 +1890,34 @@ def _validate_semantic_operation(
     _require_semantic_links(operation)
     evidence = operation["evidence"]
     _require_evidence_shape(evidence)
-    bindings = [_evidence_binding(item, inputs) for item in evidence]
+    bound = [_bound_evidence_block(item, inputs) for item in evidence]
     _require_claims(operation, inputs)
     normalized = json.loads(canonical_json_bytes(operation))
     assert isinstance(normalized, dict)
-    return normalized, bindings
+    return _with_page_project(normalized, [block for _binding, block in bound]), [binding for binding, _block in bound]
+
+
+# The line a captured session block names its project with; `session-end` blocks
+# have always carried it (`session_end_project_tag`).
+_PROJECT_LINE = re.compile(rb"^- Project slug: `([a-z0-9][a-z0-9._-]{0,127})`$", re.MULTILINE)
+
+
+def _with_page_project(operation: dict[str, object], blocks: list[bytes]) -> dict[str, object]:
+    """The page's project when every block it quotes names the same one, else none.
+
+    No note carried `project:`, so every project's rules reached every session
+    (audit 2026-09-26 B-14, docs/research/2026-09-26-a-page-belongs-to-the-project-its-evidence-names.md).
+    Derived from the quoted bytes, never from the model, so every render agrees.
+    """
+    projects = {_block_project(block) for block in blocks}
+    if len(projects) != 1 or None in projects:
+        return operation
+    return {**operation, "project": projects.pop()}
+
+
+def _block_project(block: bytes) -> str | None:
+    match = _PROJECT_LINE.search(block)
+    return match.group(1).decode("ascii") if match else None
 
 
 _SEMANTIC_FIELDS = frozenset(
@@ -2020,6 +2043,11 @@ def _bound_part(
 
 def _evidence_binding(item: object, inputs: CompileInputs) -> dict[str, str]:
     """Bind one quoted line to an exact byte span of an immutable daily source."""
+    return _bound_evidence_block(item, inputs)[0]
+
+
+def _bound_evidence_block(item: object, inputs: CompileInputs) -> tuple[dict[str, str], bytes]:
+    """The binding, and the daily block the quote was found in."""
     date, timestamp, quote = _require_evidence_fields(item)
     quote_bytes = quote.encode("utf-8")
     source, block, marker_at = _bound_part(
@@ -2040,12 +2068,13 @@ def _evidence_binding(item: object, inputs: CompileInputs) -> dict[str, str]:
         source.content,
         source_path=ROOT / source.logical_path,
     )
-    return {
+    binding = {
         "source_path": source.logical_path,
         "source_digest": source.sha256,
         "quote_sha256": sha256_bytes(quote_bytes),
         "reference": str(reference),
     }
+    return binding, block
 
 
 # Every claim dropped in this process, so the compile can report the count
@@ -2480,6 +2509,11 @@ def _require_literal_match(
         raise ValueError("compile claim literal evidence does not match")
 
 
+def _project_line(operation: Mapping[str, object]) -> str:
+    project = operation.get("project")
+    return f"project: {project}\n" if isinstance(project, str) else ""
+
+
 def _render_page(
     operation: dict[str, object], completed_at: str, evidence_refs: Sequence[str] = ()
 ) -> bytes:
@@ -2497,6 +2531,7 @@ def _render_page(
         f"timestamp: {completed_at}\n"
         "confidence: medium\n"
         "source_authority: ai-derived\n"
+        f"{_project_line(operation)}"
         "---\n\n"
         f"# {title}\n\n"
         f"One-sentence summary: {summary}\n\n"
