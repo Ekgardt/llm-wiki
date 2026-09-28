@@ -170,7 +170,7 @@ def test_an_adopted_resource_is_updated_and_its_current_content_is_the_rollback(
 @pytest.mark.parametrize(
     ("kind", "adopt", "code"),
     [
-        ("systemd_scheduler", ("second",), "install_adopt_unsupported"),
+        ("cron_scheduler", ("second",), "install_adopt_unsupported"),
         ("test_value", ("missing",), "install_adopt_unknown_resource"),
     ],
 )

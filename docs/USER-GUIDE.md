@@ -174,7 +174,10 @@ globs, and a hook never blocks or fails a tool call. See
 
 Managed IDE hooks preserve unrelated configuration and use verified sibling preimages.
 Malformed configuration, ownership conflicts, or drift fail closed instead of being
-overwritten. `doctor` reports active, absent, or conflicting structural ownership and
+overwritten; the installer names the file and, where it can, the way on
+(`--adopt <resource-id>` keeps the file as it is as the rollback point). The OpenCode
+plugin is the installer's own file: an update replaces it and keeps a changed copy under
+`run/install/displaced/`. `doctor` reports active, absent, or conflicting structural ownership and
 never repairs these files implicitly.
 
 The MCP server exposes 12 task-shaped tools, including `doctor`. All tools use
@@ -276,6 +279,24 @@ keeps the pre-first-install projection for uninstall and one latest committed up
 projection for explicit rollback. Recovery uses persisted historical definitions, not
 the current checkout templates. Rerun the native installer to reconcile owned state;
 do not edit generated task, plist, unit, or owned hook definitions in place.
+
+An update replaces the systemd units and launchd plists even if they were edited by
+hand. It keeps a readable copy of the edited files under
+`run/install/displaced/<time>-<resource-id>/`, and `install_control.py rollback` puts
+them back. A line you added to a systemd unit is moved into
+`~/.config/systemd/user/<unit>.d/50-local.conf`, which the installer never touches, so
+the setting keeps working; the installer prints what it moved and anything it could not
+carry over (a changed line of ours, or an existing `50-local.conf`). Keep local settings
+in such a drop-in, for example:
+
+```ini
+# ~/.config/systemd/user/llm-wiki-nightly.service.d/50-local.conf
+[Service]
+Environment=MEMORY_CLAUDE_MODEL=claude-sonnet-5
+```
+
+A rerun that drops an agent integration writes the new set first and takes the dropped
+one back last; if anything fails, both are reverted.
 
 Inspect the control-plane state without mutation:
 

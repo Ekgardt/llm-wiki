@@ -127,7 +127,12 @@ def test_the_same_request_is_not_a_replacement(machine: Path) -> None:
 
 
 def test_a_failed_replacement_puts_the_previous_install_back(machine: Path, monkeypatch) -> None:
-    """Research: docs/research/2026-09-25-a-failed-reinstall-puts-the-old-one-back.md."""
+    """Research: docs/research/2026-09-25-a-failed-reinstall-puts-the-old-one-back.md.
+
+    A moved profile is still taken back before its replacement is written: one name
+    cannot be recorded in two files. A set that only drops something is one update
+    and needs no restore (`tests/test_an_update_replaces_what_it_owns.py`).
+    """
     _install(machine, scheduler="native", profile=".bashrc", plugin=True)
     real_install = install_control.install_resources
     calls: list[int] = []
@@ -141,6 +146,12 @@ def test_a_failed_replacement_puts_the_previous_install_back(machine: Path, monk
     monkeypatch.setattr(install_control, "install_resources", fail_first)
 
     with pytest.raises(install_control.InstallControlError, match="injected_install_failure"):
-        _install(machine, scheduler="native", profile=".bashrc", plugin=False)
+        _install(machine, scheduler="native", profile=".zshrc", plugin=True)
 
-    assert (_plugin(machine).exists(), (machine / "sched" / "systemd_user.txt").exists(), len(calls)) == (True, True, 2)
+    bashrc = (machine / "home" / ".bashrc").read_bytes()
+    assert (
+        _plugin(machine).exists(),
+        (machine / "sched" / "systemd_user.txt").exists(),
+        b"LLM_WIKI_ROOT" in bashrc,
+        len(calls),
+    ) == (True, True, True, 2)

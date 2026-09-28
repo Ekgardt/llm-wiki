@@ -97,9 +97,27 @@ class ManagedResource:
     # keeping its current content as the rollback point instead of refusing the drift
     # (docs/research/2026-09-28-a-rollback-undoes-only-what-it-did.md).
     adopt_current: bool = field(default=False, compare=False)
-    # The resource as it is on disk even when no rendering of ours matches it: what an
-    # adopted scheduler records as its rollback point. None where it cannot be read so.
+    # The resource as it is on disk even when no rendering of ours matches it: what a
+    # replaced scheduler records as its rollback point. None where it cannot be read so.
     read_current: Callable[[], bytes | None] | None = field(default=None, compare=False)
+
+
+# Files the installer owns whole: nothing but its own rendering belongs in them, so an
+# update replaces them instead of refusing a change made outside it. The displaced
+# version stays the rollback point, a copy is kept, and the report names it; a local
+# setting belongs in a systemd drop-in, which the installer never touches
+# (docs/research/2026-09-28-an-update-replaces-what-it-owns.md). A shared file keeps
+# the fragment rules, and a cron table or a Windows task cannot be read back as it is.
+_WHOLLY_OWNED_KINDS = frozenset({"systemd_scheduler", "launchd_scheduler", "opencode_plugin"})
+
+
+def _replaced_whole(resource: ManagedResource) -> bool:
+    return resource.kind in _WHOLLY_OWNED_KINDS
+
+
+def _taken_as_is(resource: ManagedResource) -> bool:
+    """Whether the resource is recorded as it is on disk, whatever it holds."""
+    return resource.adopt_current or _replaced_whole(resource)
 
 
 def _utc_now() -> str:
@@ -2084,8 +2102,8 @@ def _persist_resource_definition(install_root: Path, resource: ManagedResource) 
 
 
 def _require_recognized(resource: ManagedResource, current: bytes | None) -> None:
-    """A file we cannot tell ours is refused, unless the operator adopts it as it is."""
-    if current is None or resource.adopt_current:
+    """A file we cannot tell ours is refused, unless it is taken as it is."""
+    if current is None or _taken_as_is(resource):
         return
     if not resource.recognizes(current):
         raise InstallControlError("install_resource_ownership_ambiguous")
@@ -2648,11 +2666,27 @@ def _v2_snapshot(install_root: Path, value: bytes | None) -> dict[str, object]:
     return _snapshot(value, _write_preimage(install_root, value))
 
 
+def _found_value(resource: ManagedResource) -> bytes | None:
+    """What the resource holds now; one taken as it is is read as it is on disk."""
+    if _taken_as_is(resource):
+        return _adopted_value(resource)
+    return resource.read_owned()
+
+
+def _first_origin(resource: ManagedResource, current: bytes | None) -> bytes | None:
+    """What an uninstall puts back: an adopted or foreign file itself, else as before."""
+    if resource.adopt_current:
+        return current
+    if current is not None and not resource.recognizes(current):
+        return current
+    return _resource_origin(resource, current)
+
+
 def _v2_resource_record(install_root: Path, resource: ManagedResource) -> dict[str, object]:
     _persist_resource_definition(install_root, resource)
-    current = _adopted_value(resource) if resource.adopt_current else resource.read_owned()
+    current = _found_value(resource)
     _require_recognized(resource, current)
-    origin = current if resource.adopt_current else _resource_origin(resource, current)
+    origin = _first_origin(resource, current)
     baseline = _v2_snapshot(install_root, origin)
     return {
         "desired": _v2_snapshot(install_root, resource.desired),
@@ -3347,8 +3381,8 @@ def _new_v2_resource_record(
 def _update_rollback(
     install_root: Path, resource: ManagedResource, previous: Mapping[str, object]
 ) -> Mapping[str, object]:
-    """What an update reverts to: what was installed, or what an adopted file holds now."""
-    if resource.adopt_current:
+    """What an update reverts to: what was installed, or what a taken-over file holds now."""
+    if _taken_as_is(resource):
         return _v2_snapshot(install_root, _adopted_value(resource))
     return previous["desired"]
 
@@ -3416,10 +3450,15 @@ def _start_v2_update(
     scheduler_backend: str,
     resources: Sequence[ManagedResource],
     request_sha256: str,
+    retiring: Sequence[ManagedResource] = (),
 ) -> dict[str, object]:
-    checkpoint_records = _checkpoint_resources(install_root, manifest, resources)
+    everything = [*resources, *retiring]
+    checkpoint_records = _checkpoint_resources(install_root, manifest, everything)
     checkpoint = _rollback_point(manifest, checkpoint_records)
-    records = _updated_resource_records(install_root, resources, checkpoint_records)
+    records = [
+        *_updated_resource_records(install_root, resources, checkpoint_records),
+        *_retiring_records(install_root, retiring, checkpoint_records),
+    ]
     base_digest = _sha256(canonical_json_bytes(manifest))
     transaction = _new_v2_update_transaction(
         manifest=manifest,
@@ -3438,8 +3477,43 @@ def _start_v2_update(
         transaction_path=transaction_path,
         transaction=transaction,
         records=records,
-        resources=resources,
+        resources=everything,
     )
+
+
+def _retiring_records(
+    install_root: Path,
+    retiring: Sequence[ManagedResource],
+    checkpoint: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """What the new set no longer owns, taken back after the new set is written.
+
+    Each goes back to what it was before the installer, like an uninstall, and leaves
+    the manifest when the update commits; a failure reverts it with the rest
+    (docs/research/2026-09-28-an-update-replaces-what-it-owns.md).
+    """
+    previous = {str(record["id"]): record for record in checkpoint}
+    return [
+        _retiring_record(install_root, resource, previous[resource.resource_id])
+        for resource in retiring
+    ]
+
+
+def _retiring_record(
+    install_root: Path, resource: ManagedResource, previous: Mapping[str, object]
+) -> dict[str, object]:
+    metadata = dict(previous["metadata"])
+    metadata["_retire_after_commit"] = True
+    return {
+        "desired": previous["origin"],
+        "id": resource.resource_id,
+        "kind": resource.kind,
+        "locator": resource.locator,
+        "metadata": metadata,
+        "origin": previous["origin"],
+        "rollback": _update_rollback(install_root, resource, previous),
+        "state": "pending",
+    }
 
 
 def _active_v2_request(
@@ -3451,13 +3525,10 @@ def _active_v2_request(
     scheduler_backend: str,
     resources: Sequence[ManagedResource],
     request_sha256: str,
+    retiring: Sequence[ManagedResource] = (),
 ) -> dict[str, object]:
     _validate_active_manifest(install_root, manifest, transaction)
-    same_v2_request = (
-        manifest.get("schema") == "install-manifest/v2"
-        and manifest.get("request_sha256") == request_sha256
-    )
-    if same_v2_request:
+    if _same_v2_request(manifest, request_sha256, resources):
         _require_active_resources(install_root, manifest, resources)
         _checkpoint_resources(install_root, manifest, resources)
         return manifest
@@ -3468,7 +3539,37 @@ def _active_v2_request(
         scheduler_backend=scheduler_backend,
         resources=resources,
         request_sha256=request_sha256,
+        retiring=retiring,
     )
+
+
+def _same_v2_request(
+    manifest: Mapping[str, object], request_sha256: str, resources: Sequence[ManagedResource]
+) -> bool:
+    """Whether the rerun asks for what is installed and finds it in place.
+
+    A wholly owned file changed since is replaced by a new generation, the same as an
+    update, instead of being refused as drift.
+    """
+    if manifest.get("schema") != "install-manifest/v2":
+        return False
+    if manifest.get("request_sha256") != request_sha256:
+        return False
+    return not _whole_files_changed(manifest, resources)
+
+
+def _whole_files_changed(
+    manifest: Mapping[str, object], resources: Sequence[ManagedResource]
+) -> bool:
+    by_id = _resources_by_id(resources)
+    pairs = ((record, _active_resource(by_id, record)) for record in _transaction_resources(manifest))
+    return any(_whole_file_changed(record, resource) for record, resource in pairs)
+
+
+def _whole_file_changed(record: Mapping[str, object], resource: ManagedResource) -> bool:
+    if not _replaced_whole(resource):
+        return False
+    return not _same_snapshot(_adopted_value(resource), _record_desired(record))
 
 
 def _v2_nonterminal(transaction: Mapping[str, object] | None) -> bool:
@@ -3560,6 +3661,7 @@ def _install_v2_under_lock(
     release: Mapping[str, object],
     scheduler_backend: str,
     resources: Sequence[ManagedResource],
+    retiring: Sequence[ManagedResource] = (),
 ) -> dict[str, object]:
     manifest = _optional_install_record(install_root / "manifest.json", "install-manifest/")
     transaction = _optional_install_record(
@@ -3571,7 +3673,7 @@ def _install_v2_under_lock(
         manifest=manifest,
         transaction=transaction,
         request_sha256=request_sha256,
-        resources=resources,
+        resources=[*resources, *retiring],
     )
     if resumed is not None:
         return resumed
@@ -3584,6 +3686,7 @@ def _install_v2_under_lock(
             scheduler_backend=scheduler_backend,
             resources=resources,
             request_sha256=request_sha256,
+            retiring=retiring,
         )
     _require_settled_transaction(transaction)
     return _start_v2_install(
@@ -3616,6 +3719,7 @@ def _install_v2(
     scheduler_backend: str,
     resources: Sequence[ManagedResource],
     lock_timeout: float,
+    retiring: Sequence[ManagedResource] = (),
 ) -> dict[str, object]:
     install_root = _prepare_install_root(state_root)
     with _install_lock(install_root / "install.lock", lock_timeout):
@@ -3626,12 +3730,25 @@ def _install_v2(
             release=release,
             scheduler_backend=scheduler_backend,
             resources=resources,
+            retiring=retiring,
         )
 
 
 def _validate_v2_recovery_support(resources: Sequence[ManagedResource]) -> None:
     if any(not resource.supports_v2_recovery for resource in resources):
         raise InstallControlError("install_v2_resource_recovery_unsupported")
+
+
+def _validate_request(
+    resources: Sequence[ManagedResource],
+    scheduler_backend: str,
+    retiring: Sequence[ManagedResource],
+    control_version: int,
+) -> None:
+    _validate_resources(resources)
+    _validate_backend(scheduler_backend)
+    if retiring and control_version != 2:
+        raise InstallControlError("install_control_version_invalid")
 
 
 def install_resources(
@@ -3643,9 +3760,14 @@ def install_resources(
     resources: Sequence[ManagedResource],
     lock_timeout: float = 10.0,
     control_version: int = 1,
+    retiring: Sequence[ManagedResource] = (),
 ) -> dict[str, object]:
-    _validate_resources(resources)
-    _validate_backend(scheduler_backend)
+    """Install or update the resources; `retiring` are recorded ones the request drops.
+
+    An update writes the requested set first and takes the retiring ones back after it,
+    in one transaction, so a failure reverts both. Only control version 2 records that.
+    """
+    _validate_request(resources, scheduler_backend, retiring, control_version)
     if control_version == 2:
         _validate_v2_recovery_support(resources)
         return _install_v2(
@@ -3655,6 +3777,7 @@ def install_resources(
             scheduler_backend=scheduler_backend,
             resources=resources,
             lock_timeout=lock_timeout,
+            retiring=retiring,
         )
     if control_version != 1:
         raise InstallControlError("install_control_version_invalid")
@@ -4037,10 +4160,35 @@ def _committed_rollback_records(
     manifest: Mapping[str, object], checkpoint: Mapping[str, object]
 ) -> list[dict[str, object]]:
     previous = _checkpoint_by_id(checkpoint)
+    active = _transaction_resources(manifest)
     return [
-        _committed_rollback_record(active, previous.get(str(active["id"])))
-        for active in _transaction_resources(manifest)
+        *(_committed_rollback_record(record, previous.get(str(record["id"]))) for record in active),
+        *_restored_retired_records(previous, {str(record["id"]) for record in active}),
     ]
+
+
+def _restored_retired_records(
+    previous: Mapping[str, Mapping[str, object]], active_ids: set[str]
+) -> list[dict[str, object]]:
+    """What the update took back because the new set no longer owned it, put back."""
+    return [
+        _restored_retired_record(record)
+        for resource_id, record in previous.items()
+        if resource_id not in active_ids
+    ]
+
+
+def _restored_retired_record(previous: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "desired": previous["desired"],
+        "id": previous["id"],
+        "kind": previous["kind"],
+        "locator": previous["locator"],
+        "metadata": dict(previous["metadata"]),
+        "origin": previous["origin"],
+        "rollback": previous["origin"],
+        "state": "pending",
+    }
 
 
 def _new_v2_rollback_transaction(
@@ -5106,21 +5254,20 @@ def _marked_adopted(
     return [_adopted(resource, adopt) for resource in resources]
 
 
-# A scheduler's state is "which of our rendered definitions is installed". The
-# systemd and launchd units are files and can be read as they are (`read_current`),
-# so an edited one can be adopted; a cron table entry or a Windows task cannot be read
-# back as our definitions, so those still cannot be recorded as a rollback point.
-_SCHEDULER_KINDS = frozenset(
-    {"systemd_scheduler", "launchd_scheduler", "windows_task_scheduler", "cron_scheduler"}
-)
+# A cron table entry or a Windows task cannot be read back as it is, so neither can be
+# recorded as a rollback point; the wholly owned kinds need no `--adopt`, an update
+# replaces them (docs/research/2026-09-28-an-update-replaces-what-it-owns.md).
+_UNADOPTABLE_KINDS = frozenset({"windows_task_scheduler", "cron_scheduler"})
 
 
 def _adoptable(resource: ManagedResource) -> bool:
-    return resource.kind not in _SCHEDULER_KINDS or resource.read_current is not None
+    return resource.kind not in _UNADOPTABLE_KINDS
 
 
 def _drift_next_step(resource: ManagedResource) -> str:
     """What the operator can do about a changed resource, as a command where there is one."""
+    if _replaced_whole(resource):
+        return "rerun the installer: it replaces the file and keeps the changed one"
     if _adoptable(resource):
         return (
             f"rerun the installer with --adopt {resource.resource_id} to take it over as it "
@@ -5137,7 +5284,25 @@ def _adopted(resource: ManagedResource, adopt: Sequence[str]) -> ManagedResource
         return resource
     if not _adoptable(resource):
         raise InstallControlError("install_adopt_unsupported")
+    return _taken_over(resource)
+
+
+def _taken_over(resource: ManagedResource) -> ManagedResource:
+    """A shared file is adopted as it is; a wholly owned one needs no flag to be replaced."""
+    if _replaced_whole(resource):
+        return resource
     return replace(resource, adopt_current=True)
+
+
+def _say_adopt_is_not_needed(resources: Sequence[ManagedResource], adopt: Sequence[str]) -> None:
+    """`--adopt` of a wholly owned file still works, and says it is no longer needed."""
+    for resource in resources:
+        if resource.resource_id in adopt and _replaced_whole(resource):
+            print(
+                f"install control: --adopt {resource.resource_id} is no longer needed; an "
+                "update replaces this file and keeps the changed version.",
+                file=sys.stderr,
+            )
 
 
 def _adopted_value(resource: ManagedResource) -> bytes | None:
@@ -5203,28 +5368,76 @@ def _outgrown_manifest(
     return manifest
 
 
-def _replace_outgrown_install(
+def _install_request_set(
     args: argparse.Namespace, backend: str
-) -> dict[str, object] | None:
-    """Take back an outgrown install; return its manifest, so a failure can restore it."""
-    state_root = args.state_root.resolve()
-    manifest = _outgrown_manifest(state_root, _requested_resources(args, backend))
+) -> tuple[bool, dict[str, object]]:
+    """Install the request; (whether it replaced a different recorded set, the manifest).
+
+    A set that only drops resources is one update: the new set is written first and
+    the dropped ones are taken back after it, so a failure reverts both. A resource
+    that moved (a profile in another file, the other scheduler) cannot be recorded in
+    two places under one name, so that set is still taken back first and put back if
+    its replacement fails (docs/research/2026-09-28-an-update-replaces-what-it-owns.md).
+    """
+    requested = _requested_resources(args, backend)
+    manifest = _outgrown_manifest(args.state_root.resolve(), requested)
     if manifest is None:
-        return None
-    uninstall_resources(state_root=state_root, resources=_resources_from_record(args, manifest))
-    return manifest
+        return False, _install_requested(args, backend, requested, _unfinished_drops(args, requested))
+    if _only_drops(manifest, requested, backend):
+        retiring = _dropped_resources(args, manifest, requested)
+        return True, _install_requested(args, backend, requested, retiring)
+    uninstall_resources(
+        state_root=args.state_root.resolve(), resources=_resources_from_record(args, manifest)
+    )
+    return True, _install_or_restore(args, backend, manifest)
 
 
-def _install_requested(args: argparse.Namespace, backend: str) -> dict[str, object]:
+def _only_drops(
+    manifest: Mapping[str, object], requested: Sequence[ManagedResource], backend: str
+) -> bool:
+    """Whether every recorded resource the request still names is the same one."""
+    if _record_backend(manifest) != backend:
+        return False
+    by_id = _resources_by_id(requested)
+    kept = (record for record in _transaction_resources(manifest) if record.get("id") in by_id)
+    return all(_resource_identity_matches(record, by_id[str(record["id"])]) for record in kept)
+
+
+def _unfinished_drops(
+    args: argparse.Namespace, requested: Sequence[ManagedResource]
+) -> list[ManagedResource]:
+    """What an interrupted update was taking back, so the rerun can finish it."""
+    transaction = _optional_install_record(
+        args.state_root.resolve() / "run" / "install" / "transaction.json", "install-transaction/"
+    )
+    if not _v2_nonterminal(transaction) or transaction.get("operation") != "update":
+        return []
+    return _dropped_resources(args, transaction, requested)
+
+
+def _dropped_resources(
+    args: argparse.Namespace, manifest: Mapping[str, object], requested: Sequence[ManagedResource]
+) -> list[ManagedResource]:
+    names = {resource.resource_id for resource in requested}
+    recorded = _resources_from_record(args, manifest)
+    return [resource for resource in recorded if resource.resource_id not in names]
+
+
+def _install_requested(
+    args: argparse.Namespace,
+    backend: str,
+    requested: Sequence[ManagedResource],
+    retiring: Sequence[ManagedResource] = (),
+) -> dict[str, object]:
     root = args.root.resolve()
-    # Built after the old set is taken back: a resource records what it found on disk.
     return install_resources(
         state_root=args.state_root.resolve(),
         vault_root=root,
         release=build_release_identity(root),
         scheduler_backend=backend,
-        resources=_requested_resources(args, backend),
+        resources=requested,
         control_version=2,
+        retiring=retiring,
     )
 
 
@@ -5247,80 +5460,53 @@ def _restore_replaced(args: argparse.Namespace, replaced: Mapping[str, object]) 
 
 
 def _install_or_restore(
-    args: argparse.Namespace, backend: str, replaced: Mapping[str, object] | None
+    args: argparse.Namespace, backend: str, replaced: Mapping[str, object]
 ) -> dict[str, object]:
-    """Install the request; a failure after a replacement puts the old set back first.
+    """Install the request after the old set was taken back; a failure puts it back.
 
     A restore that fails itself raises with the install's failure as its context.
     """
     try:
-        return _install_requested(args, backend)
+        # Built after the old set is taken back: a resource records what it found on disk.
+        return _install_requested(args, backend, _requested_resources(args, backend))
     except Exception:
-        if replaced is not None:
-            _restore_replaced(args, replaced)
+        _restore_replaced(args, replaced)
         raise
 
 
-def _text_lines(text: str) -> set[str]:
-    stripped = (line.strip() for line in text.splitlines())
-    return {line for line in stripped if line}
-
-
-def _bundle_texts(bundle: bytes) -> list[str]:
-    definitions = _strict_json_object(bundle).get("definitions", {})
-    return [_decode_definition_value(value).decode("utf-8", "replace") for value in definitions.values()]
-
-
-def _bundle_lines(bundle: bytes | None) -> set[str]:
-    """Every non-empty line of every file in a definitions bundle."""
-    if bundle is None:
-        return set()
-    return set().union(*map(_text_lines, _bundle_texts(bundle)))
-
-
-def _displaced_lines(resource: ManagedResource) -> list[str]:
-    """Lines of an adopted schedule the new rendering will not carry, before it is written."""
-    if not resource.adopt_current or resource.read_current is None:
-        return []
-    return sorted(_bundle_lines(resource.read_current()) - _bundle_lines(resource.desired))
-
-
-def _displaced_by_adoption(resources: Sequence[ManagedResource]) -> dict[str, list[str]]:
-    lines = {resource.resource_id: _displaced_lines(resource) for resource in resources}
-    return {resource_id: found for resource_id, found in lines.items() if found}
-
-
-def _report_displaced(displaced: Mapping[str, Sequence[str]]) -> None:
-    """Say what an adopted schedule loses, where it is kept, and where it belongs.
-
-    The old units are the rollback point (`install_control.py rollback` restores them);
-    a local setting belongs in a drop-in, and a provider setting in the environment the
-    installer runs with. docs/research/2026-09-28-a-changed-file-is-named-and-can-be-taken-over.md
-    """
-    for resource_id, lines in displaced.items():
-        print(
-            f"install control: {resource_id} was taken over; the previous version is its "
-            "rollback point. These lines are not in the new version: "
-            + "; ".join(lines)
-            + ". Keep a local setting in a drop-in (<unit>.d/*.conf), or export a provider "
-            "variable (for example MEMORY_CLAUDE_MODEL) when you run the installer.",
-            file=sys.stderr,
-        )
-
-
 def _install_from_args(args: argparse.Namespace) -> dict[str, object]:
+    from install_takeover import keep_changed_whole_files, report_takeovers
+
     backend = _selected_backend(args.scheduler)
-    displaced = _displaced_by_adoption(_requested_resources(args, backend))
-    replaced = _replace_outgrown_install(args, backend)
-    manifest = _install_or_restore(args, backend, replaced)
-    _report_displaced(displaced)
+    requested = _requested_resources(args, backend)
+    _say_adopt_is_not_needed(requested, getattr(args, "adopt", None) or ())
+    takeovers = keep_changed_whole_files(args.state_root.resolve(), requested)
+    replaced, manifest = _install_keeping_takeovers(args, backend, takeovers)
+    report_takeovers(takeovers)
     return {
-        "displaced": displaced,
-        "replaced": replaced is not None,
+        "displaced": {takeover.resource_id: takeover.as_json() for takeover in takeovers},
+        "replaced": replaced,
         "scheduler_backend": backend,
         "status": "committed",
         "transaction_id": manifest["transaction_id"],
     }
+
+
+def _install_keeping_takeovers(
+    args: argparse.Namespace, backend: str, takeovers: Sequence[object]
+) -> tuple[bool, dict[str, object]]:
+    """Install the request; a failure withdraws the drop-ins this run wrote.
+
+    The failed install put the edited units back, and they still carry the lines the
+    drop-in would add a second time. The kept copies stay.
+    """
+    from install_takeover import withdraw_drop_ins
+
+    try:
+        return _install_request_set(args, backend)
+    except Exception:
+        withdraw_drop_ins(takeovers)
+        raise
 
 
 def _record_metadata(record: Mapping[str, object]) -> dict[str, Mapping[str, object]]:

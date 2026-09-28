@@ -328,6 +328,7 @@
   "test_an_update_costs_what_it_says.py": 0.44,
   "test_an_update_keeps_what_is_installed.py": 0.0,
   "test_an_update_only_to_what_main_holds.py": 4.1,
+  "test_an_update_replaces_what_it_owns.py": 2.77,
   "test_an_update_says_what_it_did_not_bring_into_force.py": 7.63,
   "test_answer_budget.py": 0.03,
   "test_answer_cost.py": 0.06,

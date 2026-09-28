@@ -1,5 +1,9 @@
 # A changed file is named, and a changed schedule can be taken over
 
+Superseded in part on 2026-09-28 by `2026-09-28-an-update-replaces-what-it-owns.md`: a
+systemd or launchd schedule is no longer adopted, an update replaces it and keeps the
+edited copy. The named refusal below still holds for shared files.
+
 Date: 2026-09-28. Scope: `scripts/install_control.py` drift refusals and `--adopt`;
 `scripts/doctor.py` scheduler advice.
 

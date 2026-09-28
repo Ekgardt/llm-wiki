@@ -31,6 +31,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── pyright_profile.py            pinned identity discovery and qualification
 │   ├── install_pyright.py            explicit managed-package installer
 │   ├── install_control.py            resumable install/update/rollback ownership
+│   ├── install_takeover.py           keeps a replaced owned file, moves unit edits to a drop-in
 │   ├── integration_hook_config.py    bounded host hook-config projections
 │   ├── pyright_session.py            Pyright readiness, sync, and semantic provider
 │   ├── workspace_revision.py         bounded pre/post freshness proofs
@@ -131,6 +132,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   │   ├── transaction.json            resumable install/upgrade/rollback state
 │   │   ├── install.lock                process-lifetime advisory writer lock
 │   │   ├── preimages/                  verified owned-fragment/value preimages
+│   │   ├── displaced/                  readable copies of owned files an update replaced
 │   │   └── scheduler/                  non-secret native scheduler definitions
 │   └── state.json.lock
 │
@@ -286,6 +288,25 @@ active until target verification and publishes generation +1. The original proje
 is retained for uninstall; the prior installed projection supports only the latest
 committed-update rollback. Restoration requires the exact expected installed value and
 never overwrites a concurrent user edit.
+
+Files the installer owns whole -- the systemd units, the launchd plists, and the OpenCode
+plugin -- are replaced by every install or update even when they were changed outside
+it (2026-09-28). The changed version becomes the transaction's rollback point, and
+`install_takeover.py` first keeps a readable copy under
+`run/install/displaced/<time>-<resource-id>/` and reports what the new version does not
+carry. A line added to a systemd unit moves to `<unit>.d/50-local.conf`, a drop-in the
+installer creates once and never touches again; a line that replaced one of ours with the
+same key is reported instead, because in a drop-in it would add to ours. launchd has no
+drop-ins, so its copy and the report keep the edit. The copies are not pruned; they grow
+only with hand edits. Shared files (the profile block, the cron block, the Claude and
+Codex hook files, Windows variables and tasks) keep the fragment rules: a change outside
+the installer is refused with the resource, its location, and `--adopt <resource-id>`
+where it can be adopted. A rerun that only drops resources is one update: the new set is
+written and verified first, the dropped resources go back to their origin last, and a
+failure reverts both; `rollback` puts the dropped ones back. A resource that moved (a
+profile in another file, the other scheduler backend) is still taken back before its
+replacement and restored if that fails, because one resource id cannot be recorded in two
+places. See `docs/research/2026-09-28-an-update-replaces-what-it-owns.md`.
 
 `manifest.json`, `transaction.json`, preimages, and scheduler definitions are bounded,
 digest-verified, and durably published on the supported local-filesystem boundary.
