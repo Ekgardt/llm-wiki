@@ -464,3 +464,17 @@ def test_the_doctor_says_to_rerun_the_installer_and_where_an_edit_goes(
         False,
         True,
     )
+
+
+def test_a_failed_update_leaves_no_copy_of_a_unit_it_put_back(machine: dict[str, object]) -> None:
+    """Each failed attempt left a copy of the unchanged unit; a retry added another."""
+    install_control._install_from_args(_args(machine, "old", plugin=False))
+    _add_line(machine["path"])
+    machine["runner"].armed = True
+    machine["release"]["version"] = "4.1.0"
+
+    with pytest.raises(install_control.InstallControlError):
+        install_control._install_from_args(_args(machine, "new", plugin=False))
+
+    displaced = machine["path"] / "state" / "run" / "install" / "displaced"
+    assert sorted(displaced.iterdir()) == []

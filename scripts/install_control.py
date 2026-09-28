@@ -5689,14 +5689,23 @@ def _install_or_restore(
 
 
 def _install_from_args(args: argparse.Namespace) -> dict[str, object]:
-    from install_takeover import drop_in_resources, keep_changed_whole_files, report_takeovers
+    from install_takeover import (
+        discard_unneeded_copies,
+        drop_in_resources,
+        keep_changed_whole_files,
+        report_takeovers,
+    )
 
     backend = _selected_backend(args.scheduler)
     requested = _requested_resources(args, backend)
     _say_adopt_is_not_needed(requested, getattr(args, "adopt", None) or ())
     takeovers = keep_changed_whole_files(args.state_root.resolve(), requested)
     released = drop_in_resources(takeovers, requested)
-    replaced, manifest = _install_request_set(args, backend, released)
+    try:
+        replaced, manifest = _install_request_set(args, backend, released)
+    except Exception:
+        discard_unneeded_copies(takeovers, requested)
+        raise
     report_takeovers(takeovers)
     return {
         "displaced": {takeover.resource_id: takeover.as_json() for takeover in takeovers},

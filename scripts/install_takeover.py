@@ -195,6 +195,29 @@ def _keep_copy(directory: Path, files: Mapping[str, bytes], value: bytes) -> Pat
     return directory
 
 
+def discard_unneeded_copies(
+    takeovers: Sequence[Takeover], resources: Sequence[control.ManagedResource]
+) -> None:
+    """After a failed attempt: a copy whose original is still in place is not needed.
+
+    A failure before the transaction left the file untouched, and one inside it was
+    reverted; either way the file holds what was copied, and a retry would only add
+    another copy. A file that does not (a revert that did not finish) keeps its copy.
+    """
+    by_id = {resource.resource_id: resource for resource in resources}
+    for takeover in takeovers:
+        _discard_if_intact(Path(takeover.kept), by_id[takeover.resource_id])
+
+
+def _discard_if_intact(kept: Path, resource: control.ManagedResource) -> None:
+    current = control._adopted_value(resource)
+    if current is None:
+        return
+    recorded = json.loads((kept / _COPY_RECORD).read_bytes())
+    if recorded.get("sha256") == control._sha256(current):
+        shutil.rmtree(kept)
+
+
 # --- Retiring old copies ----------------------------------------------------------------
 
 _COPY_RECORD = "copy.json"
