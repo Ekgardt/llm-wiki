@@ -19,6 +19,9 @@ from sync_memory import _run_process_tree
 DEFAULT_DEADLINE_SECONDS = 120.0
 MAX_CHILD_BYTES = 4 * 1024 * 1024
 MAX_ERROR_BYTES = 512
+# The end of doctor's stderr quoted in a failure: what fits in MAX_ERROR_BYTES after the
+# fixed text before it (about 90 bytes), so the cause is not cut off by the bound.
+STDERR_TAIL_CHARS = 400
 EXPECTED_TOOL_NAMES = (
     "recall",
     "read_page",
@@ -110,7 +113,7 @@ def _doctor_report(root: Path, state_root: Path, timeout: float) -> dict[str, ob
 
 def _checked_doctor_report(completed: subprocess.CompletedProcess) -> dict[str, object]:
     """The report, read before the exit code: an `error` exits 2 and must be named."""
-    report = _validate_doctor_report(_parsed_doctor_output(completed.stdout))
+    report = _validate_doctor_report(_parsed_doctor_output(completed))
     if _install_is_broken(report):
         raise SmokeFailure(_doctor_error_message(report))
     if completed.returncode != _EXPECTED_EXIT[report["overall_status"]]:
@@ -139,14 +142,20 @@ def _doctor_error_message(report: dict) -> str:
     )
 
 
-def _parsed_doctor_output(stdout: str) -> object:
-    encoded = stdout.encode("utf-8", errors="replace")
+def _parsed_doctor_output(completed: subprocess.CompletedProcess) -> object:
+    encoded = completed.stdout.encode("utf-8", errors="replace")
     if len(encoded) > MAX_CHILD_BYTES:
         raise SmokeFailure("Doctor output exceeded the install smoke bound")
     try:
-        return json.loads(stdout)
+        return json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
-        raise SmokeFailure("Doctor did not return valid JSON") from exc
+        raise SmokeFailure(f"Doctor did not return valid JSON ({_doctor_reply_cause(completed)})") from exc
+
+
+def _doctor_reply_cause(completed: subprocess.CompletedProcess) -> str:
+    """What doctor gave instead of a report: its exit code and the end of its stderr."""
+    tail = (completed.stderr or "").strip()[-STDERR_TAIL_CHARS:]
+    return f"exit {completed.returncode}; stderr: {tail or '(empty)'}"
 
 
 async def _mcp_tools(root: Path, state_root: Path, timeout: float) -> tuple[str, ...]:

@@ -116,7 +116,7 @@ _WRITER_WAIT_SECONDS = DEFAULTS.markdown_busy_ms / 1_000
 _WRITER_RETRY_BASE_SECONDS = 0.005
 # Retry delay cap: short against the hook budgets, so a waiting hook still sees the gate free within them.
 _WRITER_RETRY_CAP_SECONDS = 0.05
-# Deadline for validating a v3 candidate during offline adoption. basis unknown — value predates measurement; review when adoption reports this deadline on a real vault.
+# How long an admission check (a writer's, and doctor's) waits out a busy operational database. basis unknown — value predates measurement (one check takes about 0.36 s on the live vault, 2026-09-28); review when adoption reports this deadline on a real vault.
 _ADOPTION_VALIDATION_SECONDS = 30.0
 _ADOPTION_VALIDATION_CACHE: set[tuple[object, ...]] = set()
 _ADOPTION_VALIDATION_LOCK = threading.Lock()
@@ -3727,9 +3727,18 @@ def _retire_strays_before_validation(state_root: Path) -> None:
 
 
 def _validate_adoption_with_retry(vault: Path, state_root: Path) -> None:
+    _retire_strays_before_validation(state_root)
+    require_adopted_through_contention(vault, state_root)
+
+
+def require_adopted_through_contention(vault: Path, state_root: Path) -> None:
+    """The writers' admission verdict: a busy database is waited out, not a refusal.
+
+    Doctor asks the same question and must get the same answer, so it calls this
+    and not the single attempt beneath it.
+    """
     from installed_memory_repair import require_reliability_v3_adopted
 
-    _retire_strays_before_validation(state_root)
     deadline = time.monotonic() + _ADOPTION_VALIDATION_SECONDS
     while True:
         try:

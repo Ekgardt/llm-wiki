@@ -8442,11 +8442,11 @@ def _adoption_check(root: Path, state_root: Path) -> dict:
     reported only the symptoms. This reads two small records and `lstat`s two
     paths, so no bound on `run/state.json` can hide it.
     """
-    from installed_memory_repair import (
-        ReliabilityV3ValidationError,
-        require_reliability_v3_adopted,
+    from installed_memory_repair import ReliabilityV3ValidationError
+    from markdown_transaction import (
+        _reliability_v3_records_present,
+        require_adopted_through_contention,
     )
-    from markdown_transaction import _reliability_v3_records_present
 
     if not _reliability_v3_records_present(state_root):
         message = "Reliability V3 is not adopted here; writers use the legacy path."
@@ -8458,7 +8458,7 @@ def _adoption_check(root: Path, state_root: Path) -> dict:
         "quarantined_candidates": _quarantined_candidates(state_root),
     }
     try:
-        require_reliability_v3_adopted(root=root, state_root=state_root)
+        require_adopted_through_contention(Path(root), state_root)
     except ReliabilityV3ValidationError as exc:
         details.update(code=exc.code, cause=describe_error_chain(exc))
         message = _adoption_refusal_message(exc.code, details["cause"], strays)

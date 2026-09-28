@@ -312,3 +312,43 @@ rotation obligation for a rare event. Trade-off: stderr is read only if the
 client keeps it (Claude Code writes MCP stderr to its own log).
 Guard: `tests/test_a_protocol_warning_reaches_the_log.py` refuses an
 `LspProtocol(...)` in `lsp_process.py` built without `warning_callback`.
+
+## Addendum (2026-09-28, live update): doctor waits out a busy admission as writers do
+
+Observed on the live vault while it was being updated to this branch: `install.sh`
+aborted in its production smoke twice. The first refusal said only "Doctor did not
+return valid JSON" and dropped doctor's exit code and stderr, so its cause is not
+known; 85 later direct runs of `doctor.py --json` all returned JSON. The second,
+reproduced by running the smoke exactly as the installer does (one run in three),
+was `Doctor reported error in: adoption`. Traceback:
+`_validate_active_database_reference` -> `PRAGMA foreign_key_check` ->
+`sqlite3.OperationalError: database is locked`, on attempt 7 of a loop over
+`_load_complete_adoption` while live hooks were writing. One check takes about
+0.36 s here.
+
+Cause: writers admit themselves through `_validate_adoption_with_retry`, which
+waits out a busy database for `_ADOPTION_VALIDATION_SECONDS`; doctor's adoption
+check called the single attempt beneath it, so a moment's lock became "Every
+Markdown writer is refused", which was false, and the smoke stopped the update.
+
+Sources, read today:
+- SQLite result codes, SQLITE_BUSY: "could not be written (or in some cases read)
+  because of concurrent activity by some other database connection"; the remedy
+  is to wait, with busy_timeout or a busy handler. https://www.sqlite.org/rescode.html
+- SQLite file locking (rollback journal): while a writer holds PENDING "no new
+  SHARED locks are permitted", and EXCLUSIVE allows no other lock at all, so a
+  reader in rollback-journal mode meets BUSY whenever a writer commits.
+  https://www.sqlite.org/lockingv3.html
+- Python `sqlite3.connect(timeout=...)`: how long a connection waits for a lock
+  before raising OperationalError. https://docs.python.org/3/library/sqlite3.html
+
+Fix: the retry loop is `markdown_transaction.require_adopted_through_contention`,
+used by writers (after the stray retiral they alone may do) and by doctor, so the
+two give one verdict. A lock that outlasts the deadline still refuses both, and
+still says so. The smoke's JSON refusal now carries `exit N; stderr: <tail>`.
+Alternative considered: a busy timeout on the read-only opener. It would also
+serve other readers, but `open_readonly_operational_db` lives in
+`reliable_memory.py`, and its callers' deadlines were chosen with `busy_ms=0`;
+changing them all is a separate change with its own measurement.
+Guard: `tests/test_doctor_waits_out_a_busy_admission.py` (a real exclusive lock
+held for 0.5 s; fails on the old code) and the smoke's named-cause test.

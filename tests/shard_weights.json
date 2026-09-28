@@ -434,6 +434,7 @@
   "test_doctor_names_hooks_older_than_the_release.py": 0.01,
   "test_doctor_quarantine_lineage.py": 0.02,
   "test_doctor_reads_the_open_rows_first.py": 4.93,
+  "test_doctor_waits_out_a_busy_admission.py": 1.04,
   "test_durability_stand.py": 28.91,
   "test_durability_stand_recovery.py": 34.29,
   "test_embedder_unavailable_names_its_reason.py": 0.01,
