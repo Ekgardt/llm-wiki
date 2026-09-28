@@ -55,6 +55,26 @@ class InstallControlError(RuntimeError):
     """Stable fail-closed install control-plane error."""
 
 
+class ResourceDriftError(InstallControlError):
+    """A resource the installer owns no longer holds what it recorded, named with the way on.
+
+    The message is for the operator; `code` is the stable record a transaction keeps.
+    See `docs/research/2026-09-28-a-changed-file-is-named-and-can-be-taken-over.md`.
+    """
+
+    def __init__(self, code: str, resource: ManagedResource) -> None:
+        super().__init__(
+            f"{code}: {resource.resource_id} ({resource.locator}) was changed outside the "
+            f"installer; {_drift_next_step(resource)}"
+        )
+        self.code = code
+
+
+def _error_code(error: BaseException) -> str:
+    """The stable code of an install error, without the operator's explanation."""
+    return getattr(error, "code", None) or str(error)
+
+
 @dataclass(frozen=True, slots=True)
 class ManagedResource:
     resource_id: str
@@ -77,6 +97,9 @@ class ManagedResource:
     # keeping its current content as the rollback point instead of refusing the drift
     # (docs/research/2026-09-28-a-rollback-undoes-only-what-it-did.md).
     adopt_current: bool = field(default=False, compare=False)
+    # The resource as it is on disk even when no rendering of ours matches it: what an
+    # adopted scheduler records as its rollback point. None where it cannot be read so.
+    read_current: Callable[[], bytes | None] | None = field(default=None, compare=False)
 
 
 def _utc_now() -> str:
@@ -971,6 +994,25 @@ def _definition_bundle(definitions: Mapping[str, bytes]) -> bytes:
     return encoded
 
 
+def _current_definitions_bundle(directory: Path, names: Sequence[str]) -> bytes | None:
+    """The scheduler files as they are on disk, bundled like a rendering; None when absent.
+
+    Read for `--adopt` only: an edited unit matches none of our renderings, and this is
+    the rollback point that keeps it. A partly present set cannot be restored as one.
+    """
+    present = _present_definitions(Path(directory), names)
+    if not present:
+        return None
+    if len(present) != len(names):
+        raise InstallControlError("install_scheduler_projection_conflict")
+    return _definition_bundle(present)
+
+
+def _present_definitions(directory: Path, names: Sequence[str]) -> dict[str, bytes]:
+    values = {name: _read_managed_file(directory / name) for name in names}
+    return {name: value for name, value in values.items() if value is not None}
+
+
 def _decode_definition_value(value: object) -> bytes:
     if not isinstance(value, str):
         raise InstallControlError("install_definition_bundle_invalid")
@@ -1257,6 +1299,7 @@ def systemd_scheduler_resource(
         },
         definitions=persisted,
         adopt_as_absent=True,
+        read_current=partial(_current_definitions_bundle, unit_directory, _SYSTEMD_DEFINITION_NAMES),
     )
 
 
@@ -1441,6 +1484,9 @@ def launchd_scheduler_resource(
         },
         definitions=persisted,
         adopt_as_absent=True,
+        read_current=partial(
+            _current_definitions_bundle, launch_agents_directory, _LAUNCHD_DEFINITION_NAMES
+        ),
     )
 
 
@@ -2184,7 +2230,7 @@ def _apply_resource(
         _mark_resource_state(transaction_path, transaction, record, "verified")
         return
     if not _same_snapshot(current, origin):
-        raise InstallControlError("install_resource_drift")
+        raise ResourceDriftError("install_resource_drift", resource)
     _mutate_resource(transaction_path, transaction, record, resource)
 
 
@@ -2338,7 +2384,7 @@ def _rollback_install(
 
 def _failure_code(error: Exception) -> str:
     if isinstance(error, InstallControlError):
-        return str(error)
+        return _error_code(error)
     return "install_resource_mutation_failed"
 
 
@@ -2423,7 +2469,7 @@ def _require_installed_resources(
     for record, resource in zip(records, resources, strict=True):
         installed, _origin = _resource_snapshots(record)
         if not _same_snapshot(resource.read_owned(), installed):
-            raise InstallControlError("install_resource_drift")
+            raise ResourceDriftError("install_resource_drift", resource)
 
 
 def _complete_published_transaction(
@@ -2604,7 +2650,7 @@ def _v2_snapshot(install_root: Path, value: bytes | None) -> dict[str, object]:
 
 def _v2_resource_record(install_root: Path, resource: ManagedResource) -> dict[str, object]:
     _persist_resource_definition(install_root, resource)
-    current = resource.read_owned()
+    current = _adopted_value(resource) if resource.adopt_current else resource.read_owned()
     _require_recognized(resource, current)
     origin = current if resource.adopt_current else _resource_origin(resource, current)
     baseline = _v2_snapshot(install_root, origin)
@@ -2659,12 +2705,27 @@ def _snapshot_values(install_root: Path, snapshots: Sequence[Mapping[str, object
     return [value for value in values if value is not None]
 
 
+_PROJECTION_DRIFT_CODES = frozenset(
+    {"install_scheduler_projection_conflict", "install_scheduler_projection_ambiguous"}
+)
+
+
 def _read_resource_projections(
     resource: ManagedResource, candidates: Sequence[bytes]
 ) -> bytes | None:
     if resource.read_projections is None:
         return resource.read_owned()
-    return resource.read_projections(candidates)
+    try:
+        return resource.read_projections(candidates)
+    except InstallControlError as error:
+        _raise_named_projection_drift(error, resource)
+        raise
+
+
+def _raise_named_projection_drift(error: InstallControlError, resource: ManagedResource) -> None:
+    """A schedule that matches none of our renderings is named, with the way on."""
+    if _error_code(error) in _PROJECTION_DRIFT_CODES:
+        raise ResourceDriftError(_error_code(error), resource) from error
 
 
 def _write_resource_projection(
@@ -2722,7 +2783,7 @@ def _v2_apply_resource(
         _mark_resource_state(transaction_path, transaction, record, "verified")
         return
     if not _same_snapshot(current, rollback):
-        raise InstallControlError("install_resource_drift")
+        raise ResourceDriftError("install_resource_drift", resource)
     _v2_mutate_resource(
         install_root=install_root,
         transaction_path=transaction_path,
@@ -2776,7 +2837,7 @@ def _revert_start_projection(
     except InstallControlError as error:
         if rollback.get("state") != "absent":
             raise
-        if str(error) != "install_scheduler_projection_conflict":
+        if _error_code(error) != "install_scheduler_projection_conflict":
             raise
         return _UNREADABLE_PROJECTION
 
@@ -3155,16 +3216,26 @@ def _checkpoint_desired_snapshot(
     return _checkpoint_owned_snapshot(install_root, snapshot, resource)
 
 
+def _owned_snapshot(
+    install_root: Path, snapshot: Mapping[str, object], resource: ManagedResource
+) -> dict[str, object]:
+    """The resource as the checkpoint recorded it, or a drift that names the resource."""
+    actual = resource.read_owned()
+    if not _same_snapshot(actual, snapshot):
+        raise ResourceDriftError("install_resource_drift", resource)
+    return _v2_snapshot(install_root, actual)
+
+
 def _checkpoint_owned_snapshot(
     install_root: Path,
     snapshot: Mapping[str, object],
     resource: ManagedResource,
 ) -> dict[str, object]:
     if resource.recover_legacy_projection is None:
-        return _normalized_snapshot(install_root, snapshot, resource.read_owned())
+        return _owned_snapshot(install_root, snapshot, resource)
     actual, persisted = resource.recover_legacy_projection(snapshot)
     if not _same_snapshot(actual, snapshot):
-        raise InstallControlError("install_resource_drift")
+        raise ResourceDriftError("install_resource_drift", resource)
     return _v2_snapshot(install_root, persisted)
 
 
@@ -3227,7 +3298,7 @@ def _require_active_resources(
         desired = _record_desired(record)
         current = _read_v2_resource(install_root, resource, (desired,))
         if not _same_snapshot(current, desired):
-            raise InstallControlError("install_resource_drift")
+            raise ResourceDriftError("install_resource_drift", resource)
 
 
 def _checkpoint_resources(
@@ -3278,7 +3349,7 @@ def _update_rollback(
 ) -> Mapping[str, object]:
     """What an update reverts to: what was installed, or what an adopted file holds now."""
     if resource.adopt_current:
-        return _v2_snapshot(install_root, resource.read_owned())
+        return _v2_snapshot(install_root, _adopted_value(resource))
     return previous["desired"]
 
 
@@ -5035,19 +5106,45 @@ def _marked_adopted(
     return [_adopted(resource, adopt) for resource in resources]
 
 
-# A scheduler's state is "which of our rendered definitions is installed": a unit or
-# task edited by hand is none of them, so it cannot be recorded as a rollback point.
-_UNADOPTABLE_KINDS = frozenset(
+# A scheduler's state is "which of our rendered definitions is installed". The
+# systemd and launchd units are files and can be read as they are (`read_current`),
+# so an edited one can be adopted; a cron table entry or a Windows task cannot be read
+# back as our definitions, so those still cannot be recorded as a rollback point.
+_SCHEDULER_KINDS = frozenset(
     {"systemd_scheduler", "launchd_scheduler", "windows_task_scheduler", "cron_scheduler"}
 )
+
+
+def _adoptable(resource: ManagedResource) -> bool:
+    return resource.kind not in _SCHEDULER_KINDS or resource.read_current is not None
+
+
+def _drift_next_step(resource: ManagedResource) -> str:
+    """What the operator can do about a changed resource, as a command where there is one."""
+    if _adoptable(resource):
+        return (
+            f"rerun the installer with --adopt {resource.resource_id} to take it over as it "
+            "is now (it becomes the rollback point)"
+        )
+    return (
+        "restore it or remove it by hand, or run `install_control.py uninstall`, "
+        "then run the installer again"
+    )
 
 
 def _adopted(resource: ManagedResource, adopt: Sequence[str]) -> ManagedResource:
     if resource.resource_id not in adopt:
         return resource
-    if resource.kind in _UNADOPTABLE_KINDS:
+    if not _adoptable(resource):
         raise InstallControlError("install_adopt_unsupported")
     return replace(resource, adopt_current=True)
+
+
+def _adopted_value(resource: ManagedResource) -> bytes | None:
+    """What an adopted resource holds now: as it is on disk, even if no rendering matches."""
+    if resource.read_current is not None:
+        return resource.read_current()
+    return resource.read_owned()
 
 
 def _built_resources(args: argparse.Namespace, backend: str) -> list[ManagedResource]:
@@ -5164,11 +5261,61 @@ def _install_or_restore(
         raise
 
 
+def _text_lines(text: str) -> set[str]:
+    stripped = (line.strip() for line in text.splitlines())
+    return {line for line in stripped if line}
+
+
+def _bundle_texts(bundle: bytes) -> list[str]:
+    definitions = _strict_json_object(bundle).get("definitions", {})
+    return [_decode_definition_value(value).decode("utf-8", "replace") for value in definitions.values()]
+
+
+def _bundle_lines(bundle: bytes | None) -> set[str]:
+    """Every non-empty line of every file in a definitions bundle."""
+    if bundle is None:
+        return set()
+    return set().union(*map(_text_lines, _bundle_texts(bundle)))
+
+
+def _displaced_lines(resource: ManagedResource) -> list[str]:
+    """Lines of an adopted schedule the new rendering will not carry, before it is written."""
+    if not resource.adopt_current or resource.read_current is None:
+        return []
+    return sorted(_bundle_lines(resource.read_current()) - _bundle_lines(resource.desired))
+
+
+def _displaced_by_adoption(resources: Sequence[ManagedResource]) -> dict[str, list[str]]:
+    lines = {resource.resource_id: _displaced_lines(resource) for resource in resources}
+    return {resource_id: found for resource_id, found in lines.items() if found}
+
+
+def _report_displaced(displaced: Mapping[str, Sequence[str]]) -> None:
+    """Say what an adopted schedule loses, where it is kept, and where it belongs.
+
+    The old units are the rollback point (`install_control.py rollback` restores them);
+    a local setting belongs in a drop-in, and a provider setting in the environment the
+    installer runs with. docs/research/2026-09-28-a-changed-file-is-named-and-can-be-taken-over.md
+    """
+    for resource_id, lines in displaced.items():
+        print(
+            f"install control: {resource_id} was taken over; the previous version is its "
+            "rollback point. These lines are not in the new version: "
+            + "; ".join(lines)
+            + ". Keep a local setting in a drop-in (<unit>.d/*.conf), or export a provider "
+            "variable (for example MEMORY_CLAUDE_MODEL) when you run the installer.",
+            file=sys.stderr,
+        )
+
+
 def _install_from_args(args: argparse.Namespace) -> dict[str, object]:
     backend = _selected_backend(args.scheduler)
+    displaced = _displaced_by_adoption(_requested_resources(args, backend))
     replaced = _replace_outgrown_install(args, backend)
     manifest = _install_or_restore(args, backend, replaced)
+    _report_displaced(displaced)
     return {
+        "displaced": displaced,
         "replaced": replaced is not None,
         "scheduler_backend": backend,
         "status": "committed",

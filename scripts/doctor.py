@@ -5351,11 +5351,15 @@ def _unit_limit_verdict(home: Path) -> tuple[str, str] | None:
     stale = [kind for kind, limit in _installed_unit_limits(home).items() if limit != _expected_unit_limit(kind)]
     if not stale:
         return None
+    # The installer refuses units edited outside it and names them; `--adopt` takes them
+    # over and keeps the edited version as the rollback point, so the advice and the
+    # installer agree (docs/research/2026-09-28-a-changed-file-is-named-and-can-be-taken-over.md).
     return (
         "degraded",
         "Installed maintenance units are older than this release ("
         + ", ".join(stale)
-        + " time limit); rerun the installer.",
+        + " time limit); rerun the installer, and if it says the units were changed outside "
+        "it, rerun it with --adopt systemd-user-maintenance.",
     )
 
 

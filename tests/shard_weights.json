@@ -17,6 +17,7 @@
   "test_a_capture_keeps_its_claim_while_it_asks.py": 8.66,
   "test_a_capture_that_fails_says_so.py": 0.2,
   "test_a_ceiling_is_a_named_refusal.py": 0.79,
+  "test_a_changed_file_is_named_and_can_be_taken_over.py": 0.51,
   "test_a_changed_task_setting_reaches_an_installed_machine.py": 6.35,
   "test_a_changelog_line_belongs_to_one_release.py": 0.01,
   "test_a_check_is_judged_when_it_ends.py": 2.56,
