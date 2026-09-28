@@ -93,12 +93,20 @@ def test_the_same_vault_reads_adopted_once_the_writer_is_gone(
     assert _summary(root, state_root) == "Reliability V3 is adopted; session capture is enabled."
 
 
+def _null_byte_cause() -> str:
+    """The running Python's own words for a path with a NUL (they differ by version)."""
+    try:
+        Path("vault\x00name").resolve()
+    except ValueError as error:
+        return f"ValueError: {error}"
+    raise AssertionError("a NUL in a path no longer raises ValueError")
+
+
 def test_the_repair_command_names_what_stopped_it(tmp_path: Path) -> None:
     printed = io.StringIO()
     with contextlib.redirect_stdout(printed):
         code = repair_installed_memory.main(["--root", "vault\x00name", "--summary"])
     assert (code, printed.getvalue().strip()) == (
         2,
-        "Reliability V3 state is 'unknown'. Cause: repair_backend_error; "
-        "ValueError: embedded null byte",
+        f"Reliability V3 state is 'unknown'. Cause: repair_backend_error; {_null_byte_cause()}",
     )
