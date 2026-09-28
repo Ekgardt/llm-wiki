@@ -756,6 +756,7 @@
   "test_the_shared_server_settles_inference_before_it_exits.py": 0.0,
   "test_the_six_capture_corrections_the_first_round_left.py": 0.2,
   "test_the_small_integrity_gaps.py": 0.01,
+  "test_the_smoke_report_goes_to_a_file.py": 0.01,
   "test_the_stand_keys_the_turns_before_it_builds.py": 1.71,
   "test_the_stand_prices_its_own_ceilings.py": 0.01,
   "test_the_supervisor_lets_the_worker_finish.py": 0.01,

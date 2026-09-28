@@ -10,6 +10,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - The three READMEs are rewritten to match the code as it is: removed features (loop detector, agent timeline, feedback capture) and the unverifiable comparison table are gone; the agents, hooks, search, maintenance, backup and code navigation are described as they work today.
 
 ### Fixed
+- The installers keep the production smoke's JSON report in `logs/install-smoke.json` (`install_smoke.py --report`) instead of printing about 15 kB of it into the terminal; the smoke's own lines still show.
 - A failed installer update removes the copy it made of a unit it did not end up replacing (the file is untouched or reverted), so retries no longer pile up copies under `run/install/displaced/`; a copy whose original was not restored stays.
 - An update takes over the Claude and Codex hook blocks an older release wrote (recognised by our command marker), instead of stopping with `install_resource_ownership_ambiguous`; only blocks whose roots name another vault are refused, and every ownership refusal names the resource, its path and the way on.
 - Doctor waits out a busy database before it judges the adoption record, through the same `require_adopted_through_contention` the writers use; a moment's lock no longer reads as "Every Markdown writer is refused" and no longer stops an update in the installer's smoke. When doctor's reply is not a report, the smoke names its exit code and the end of its stderr.

@@ -470,7 +470,8 @@ start_test_child() {
     *m*) testMonitorMode=on ;;
     *) testMonitorMode=off; set -m ;;
   esac
-  uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds "$smokeDeadlineSeconds" &
+  uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds "$smokeDeadlineSeconds" \
+    --report "$STATE_ROOT/logs/install-smoke.json" &
   testPid=$! testPgid=$!
   (
     trap 'exit 0' HUP INT TERM

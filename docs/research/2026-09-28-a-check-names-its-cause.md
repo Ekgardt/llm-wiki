@@ -352,3 +352,17 @@ serve other readers, but `open_readonly_operational_db` lives in
 changing them all is a separate change with its own measurement.
 Guard: `tests/test_doctor_waits_out_a_busy_admission.py` (a real exclusive lock
 held for 0.5 s; fails on the old code) and the smoke's named-cause test.
+
+## Addendum (2026-09-28, live update): the smoke's report goes to logs/
+
+The same live install printed doctor's whole report, one line of about 15 kB, into
+the owner's terminal between the smoke's two short lines. The report is for a
+machine. clig.dev ("Output"): machine-readable output belongs on stdout for a
+program that is piped, messages on stderr, and "a command is saying too much when
+it dumps pages and pages of debugging output, drowning what's truly important".
+The installers are the human-facing command, so they now pass
+`install_smoke.py --report <state>/logs/install-smoke.json`; the smoke still
+prints to stdout when not asked (CI keeps its log). Redirecting the installers'
+stdout was rejected: `tests/test_quality_guards.py` forbids redirection around
+the smoke step so its status is never inferred from output, and that guard
+stays. Guard: `tests/test_the_smoke_report_goes_to_a_file.py`.

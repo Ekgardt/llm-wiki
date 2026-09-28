@@ -383,7 +383,10 @@ _SHELL_SMOKE_FORBIDDEN = (
 )
 _SHELL_SMOKE_REQUIRED_PATTERNS = (
     r"trap .*EXIT",
-    r'uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds "\$smokeDeadlineSeconds"\s*&',
+    # The report file is the only argument allowed after the deadline (it keeps the JSON
+    # out of the operator's terminal); the launch is still in the background.
+    r'uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds "\$smokeDeadlineSeconds"'
+    r'(?: \\\n\s+--report "\$STATE_ROOT/logs/install-smoke\.json")?\s*&',
 )
 _SHELL_SMOKE_FORBIDDEN_PATTERNS = (r'=\s*"\$\(uv run .*install_smoke',)
 

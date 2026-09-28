@@ -274,6 +274,11 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=DEFAULT_DEADLINE_SECONDS,
     )
+    parser.add_argument(
+        "--report",
+        type=Path,
+        help="Write the JSON report to this file instead of stdout (the installers keep it in logs/).",
+    )
     args = parser.parse_args(argv)
     try:
         report = run_smoke(
@@ -285,8 +290,21 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(_bounded_error(error))
         return 1
     sys.stderr.write(_vault_findings_note(report.get("doctor", {})))
-    print(json.dumps(report, ensure_ascii=False, sort_keys=True, allow_nan=False))
+    _emit_report(json.dumps(report, ensure_ascii=False, sort_keys=True, allow_nan=False), args.report)
     return 0
+
+
+def _emit_report(encoded: str, destination: Path | None) -> None:
+    """The report is for a machine: stdout by default, a file when an installer asks.
+
+    An installer's operator reads the stderr lines; the whole report printed into
+    the terminal buried them (clig.dev: output that drowns what matters).
+    """
+    if destination is None:
+        print(encoded)
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(encoded + "\n", encoding="utf-8")
 
 
 def _vault_findings_note(doctor: dict) -> str:

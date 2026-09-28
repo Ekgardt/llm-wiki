@@ -406,7 +406,7 @@ $testFailure = $null
 try {
     $testProcess = Start-Process `
         -FilePath "uv" `
-        -ArgumentList "run --locked --no-sync python scripts/install_smoke.py --deadline-seconds $smokeDeadlineSeconds" `
+        -ArgumentList "run --locked --no-sync python scripts/install_smoke.py --deadline-seconds $smokeDeadlineSeconds --report `"$(Join-Path $STATE_ROOT 'logs\install-smoke.json')`"" `
         -NoNewWindow `
         -PassThru
     # Windows PowerShell 5.1 needs an open handle to retain a fast process's exit code.
