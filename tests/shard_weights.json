@@ -65,6 +65,7 @@
   "test_a_derived_field_is_derived_again.py": 0.01,
   "test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py": 1.23,
   "test_a_discarded_receipt_reopens_its_day.py": 0.33,
+  "test_a_dlp_refusal_names_its_rule.py": 0.01,
   "test_a_document_is_opened_in_its_own_language.py": 0.25,
   "test_a_download_that_resets_is_tried_again.py": 1.06,
   "test_a_dropped_claim_is_written_down.py": 0.01,

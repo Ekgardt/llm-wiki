@@ -383,3 +383,15 @@ when the final doctor errs in a check the install owns; otherwise a finding exit
 writes themselves are live defects and are investigated separately; this change
 does not hide them (doctor still says `error`). Guard:
 `tests/test_a_vault_finding_is_not_a_failed_sync.py`.
+
+## Addendum (2026-09-28, live vault): a DLP refusal names its rule
+
+72 session captures on this vault were refused `dlp_content_blocked` on every
+retry from 2026-09-26 to 2026-09-28 (operation ids `capture-markdown:…:cas:1..5`),
+and each refusal said only "model output contains protected content". The model
+output is not kept, so whether these were real secrets or false positives (the
+redactor includes a high-entropy rule, and session summaries quote hashes and ids)
+cannot be told after the fact: that is not established. The refusal now names the
+rule markers and their counts, never the matched text, as detect-secrets and
+gitleaks report a rule id with a finding (https://github.com/Yelp/detect-secrets,
+https://github.com/gitleaks/gitleaks). Guard: `tests/test_a_dlp_refusal_names_its_rule.py`.

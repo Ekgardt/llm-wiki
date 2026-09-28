@@ -10,6 +10,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - The three READMEs are rewritten to match the code as it is: removed features (loop detector, agent timeline, feedback capture) and the unverifiable comparison table are gone; the agents, hooks, search, maintenance, backup and code navigation are described as they work today.
 
 ### Fixed
+- A model output the DLP boundary refuses names the rules that fired and how often (`REDACTED_GITHUB_TOKEN x2`), never the matched text; 72 captures on the owner's vault were refused on every retry with no way to tell a secret from a false positive.
 - `sync_memory.py` exits 2 only when an action could not run, its own work failed, or the final doctor errs in a check the install owns; a finding about the vault (refused writes, queue attention) exits 1, so an install that did every step ends "installed with warnings" naming the checks instead of `[FAIL] Runtime synchronization failed`.
 - The installers keep the production smoke's JSON report in `logs/install-smoke.json` (`install_smoke.py --report`) instead of printing about 15 kB of it into the terminal; the smoke's own lines still show.
 - A failed installer update removes the copy it made of a unit it did not end up replacing (the file is untouched or reverted), so retries no longer pile up copies under `run/install/displaced/`; a copy whose original was not restored stays.
