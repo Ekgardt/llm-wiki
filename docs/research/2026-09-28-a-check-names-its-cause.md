@@ -366,3 +366,20 @@ prints to stdout when not asked (CI keeps its log). Redirecting the installers'
 stdout was rejected: `tests/test_quality_guards.py` forbids redirection around
 the smoke step so its status is never inferred from output, and that guard
 stays. Guard: `tests/test_the_smoke_report_goes_to_a_file.py`.
+
+## Addendum (2026-09-28, live update): a vault finding is not a failed sync
+
+The third live run installed the scheduler, the Claude settings, adoption, models
+and Pyright, refreshed the generation, and then ended `[FAIL] Runtime
+synchronization failed`: `sync_memory.py` exited 2 because its `transactions` and
+final `doctor` actions reported 183 refused writes, all from 2026-09-26..28 (108
+`post-tool` appends refused `precondition_failed`, 72 session captures refused
+`dlp_content_blocked` on every retry). Those actions only report doctor's
+findings; no install can settle them. The smoke already fails an install only on
+`INSTALL_OWNED_CHECKS`; the sync now agrees: exit 2 when an action could not run,
+when its own work (environment, dependencies, integrations, indexes) failed, or
+when the final doctor errs in a check the install owns; otherwise a finding exits
+1 and the installers end "installed with warnings" naming each check. The refused
+writes themselves are live defects and are investigated separately; this change
+does not hide them (doctor still says `error`). Guard:
+`tests/test_a_vault_finding_is_not_a_failed_sync.py`.

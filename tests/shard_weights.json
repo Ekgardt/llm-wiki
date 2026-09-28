@@ -269,6 +269,7 @@
   "test_a_twin_question_expects_silence.py": 0.01,
   "test_a_user_turn_always_starts_its_own_chunk.py": 0.06,
   "test_a_vanished_project_is_rebuilt_by_the_night.py": 15.11,
+  "test_a_vault_finding_is_not_a_failed_sync.py": 0.0,
   "test_a_verified_digest_is_remembered.py": 1.62,
   "test_a_verified_first_install_then_follows_main.py": 6.58,
   "test_a_weekly_pass_counts_what_failed.py": 0.0,

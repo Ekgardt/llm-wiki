@@ -498,6 +498,10 @@ def _attention(report: dict) -> dict[str, str]:
     }
 
 
+def _error_ids(report: dict) -> set[str]:
+    return {str(check.get("id")) for check in report.get("checks", []) if check.get("status") == "error"}
+
+
 def _final_doctor_message(status: str, attention: dict[str, str]) -> str:
     """The verdict, and when it is not ok, which checks made it so.
 
@@ -518,8 +522,37 @@ def _skipped_by_limit(action_id: str) -> dict:
 
 def _failed_action(action_id: str, exc: Exception) -> dict:
     return _result(
-        action_id, "error", f"{action_id.title()} action failed.", {"error": type(exc).__name__}
+        action_id,
+        "error",
+        f"{action_id.title()} action failed.",
+        {"error": type(exc).__name__, "failed": True},
     )
+
+
+# Actions that report the vault's state as doctor sees it; the others do the sync's work.
+_FINDING_ACTIONS = frozenset({"transactions", "queue", "doctor"})
+
+
+def _is_sync_failure(action: dict) -> bool:
+    """An error the sync or the install owns; a finding about the vault is not one.
+
+    The live update of 2026-09-28 finished every step and then failed on 183
+    refused writes from the three days before it, which no install can settle.
+    """
+    if action["status"] != "error":
+        return False
+    if action["id"] not in _FINDING_ACTIONS or action["details"].get("failed"):
+        return True
+    from install_smoke import INSTALL_OWNED_CHECKS
+
+    return bool(INSTALL_OWNED_CHECKS.intersection(action["details"].get("errors", ())))
+
+
+def _exit_code(report: dict) -> int:
+    """2 when the sync failed, 1 when it finished with findings, 0 when clean."""
+    if any(_is_sync_failure(action) for action in report["actions"]):
+        return 2
+    return {"ok": 0, "changed": 0}.get(report["overall_status"], 1)
 
 
 _SUBSET_CHECKS = {
@@ -620,7 +653,11 @@ class _SyncRun:
             "doctor",
             status,
             _final_doctor_message(status, attention),
-            {"overall_status": report.get("overall_status", "error"), "attention": attention},
+            {
+                "overall_status": report.get("overall_status", "error"),
+                "attention": attention,
+                "errors": sorted(_error_ids(report)),
+            },
         )
 
     def action(self, action_id: str) -> dict:
@@ -750,7 +787,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"LLM-Wiki sync ({report['mode']}): {report['overall_status']}")
         for action in report["actions"]:
             print(f"{action['id']}: {action['status']} - {action['message']}")
-    return {"ok": 0, "changed": 0, "degraded": 1, "error": 2}.get(report["overall_status"], 2)
+    return _exit_code(report)
 
 
 if __name__ == "__main__":
