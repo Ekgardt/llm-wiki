@@ -1644,6 +1644,10 @@ def test_run_packs_before_provider_dispatch(vault, monkeypatch):
     daily.write_bytes(b"x" * 28_000)
     import compile_memory
 
+    # A day is now cut inside a long entry, so no daily part outgrows the default
+    # budget; a window too small for one part keeps packing the step that refuses
+    # (docs/research/2026-09-28-a-long-entry-is-cut-inside-itself.md).
+    monkeypatch.setattr(compile_memory, "COMPILE_CONTEXT_WINDOW_TOKENS", 8_000)
     monkeypatch.setattr(compile_memory, "load_state", lambda: {})
     monkeypatch.setattr(compile_memory, "_mark_finished", lambda *args, **kwargs: None)
     monkeypatch.setattr(

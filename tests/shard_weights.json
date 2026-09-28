@@ -121,6 +121,7 @@
   "test_a_lock_names_the_process_not_only_its_number.py": 0.6,
   "test_a_locomo_question_carries_its_evidence_labels.py": 0.01,
   "test_a_log_many_writers_append_to_is_rotated_not_trimmed.py": 2.43,
+  "test_a_long_entry_is_cut_inside_itself.py": 0.01,
   "test_a_long_session_in_the_vault_is_captured.py": 0.02,
   "test_a_long_session_keeps_its_first_turns.py": 0.01,
   "test_a_lost_episode_batch_is_asked_again_after_a_fix.py": 0.14,
