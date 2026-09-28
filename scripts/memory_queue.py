@@ -7240,6 +7240,26 @@ def _proved_lease_only(
     """The action of a pass that only proves the lease and its payload hold."""
 
 
+# What `work` may claim from the adopted queue, and therefore what it counts as
+# remaining: one predicate, so the count can never name a task the claim skips.
+# The two were written apart and drifted twice — a ready capture task (the capture
+# worker's) and a task under a source fence were both counted and never claimed,
+# and the nightly's work step failed on `remaining_eligible` with nothing to do.
+# Parameters: max_attempts, now. See docs/research/2026-09-28-a-check-names-its-cause.md.
+# substr(..., 17, 10) is the daily id inside the canonical
+# 'knowledge/daily/YYYY-MM-DD.md'; acquire_source_fence validates that form
+# before any fence row exists, so the slice is always the date.
+_V3_WORK_CLAIMABLE = """state='ready' AND attempts < ? AND available_at <= ?
+    AND NOT EXISTS (
+        SELECT 1 FROM capture_task_links link WHERE link.task_id=tasks.id
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM source_fences fence
+        WHERE instr(CAST(tasks.payload_blob AS TEXT), substr(fence.logical_path, 17, 10)) > 0
+           OR instr(CAST(tasks.payload_blob AS TEXT), fence.source_digest) > 0
+    )"""
+
+
 class _QueueV3CandidateReader:
     """The queue-v3 backend: an unpublished candidate, or the adopted database.
 
@@ -7317,17 +7337,14 @@ class _QueueV3CandidateReader:
         ]
 
     def count_eligible(self, *, max_attempts: int = DEFAULTS.queue_max_attempts) -> int:
-        """Ready tasks `work` could claim. A capture task is the capture worker's
-        (`claim_capture`); `work` never claims one, so it is not counted here. Counting
-        it failed the nightly's work step whenever a capture waited on its retry."""
+        """Ready tasks `work` could claim, by the claim's own predicate.
+
+        A capture task is the capture worker's (`claim_capture`) and a fenced source
+        waits for its fence; `work` claims neither, so neither is counted here.
+        """
         with closing(self._connect()) as database:
             row = database.execute(
-                """SELECT COUNT(*) FROM tasks
-                   WHERE state='ready' AND attempts < ? AND available_at <= ?
-                     AND NOT EXISTS (
-                         SELECT 1 FROM capture_task_links link
-                         WHERE link.task_id=tasks.id
-                     )""",
+                f"SELECT COUNT(*) FROM tasks WHERE {_V3_WORK_CLAIMABLE}",
                 (max_attempts, _timestamp(_utc_now())),
             ).fetchone()
         return int(row[0])
@@ -11302,28 +11319,9 @@ class _QueueV3CandidateReader:
         self, database: sqlite3.Connection, now: datetime, max_attempts: int
     ) -> tuple[sqlite3.Row, PayloadValidation] | None:
         """The next ready task with a readable payload and attempts to spare."""
-        # substr(..., 17, 10) is the daily id inside the canonical
-        # 'knowledge/daily/YYYY-MM-DD.md'; acquire_source_fence validates that
-        # form before any fence row exists, so the slice is always the date.
         while True:
             row = database.execute(
-                """SELECT * FROM tasks
-                   WHERE state='ready' AND attempts < ? AND available_at <= ?
-                     AND NOT EXISTS (
-                         SELECT 1 FROM capture_task_links link
-                         WHERE link.task_id=tasks.id
-                     )
-                     AND NOT EXISTS (
-                         SELECT 1 FROM source_fences fence
-                         WHERE instr(
-                                   CAST(tasks.payload_blob AS TEXT),
-                                   substr(fence.logical_path, 17, 10)
-                               ) > 0
-                            OR instr(
-                                   CAST(tasks.payload_blob AS TEXT),
-                                   fence.source_digest
-                               ) > 0
-                     )
+                f"""SELECT * FROM tasks WHERE {_V3_WORK_CLAIMABLE}
                    ORDER BY priority DESC, available_at, created_at, id LIMIT 1""",
                 (max_attempts, _timestamp(now)),
             ).fetchone()

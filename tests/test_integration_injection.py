@@ -2401,7 +2401,12 @@ def test_codex_mcp_config_state_accepts_exact_enabled_table(tmp_path, quoted):
             '[mcp_servers.llm-wiki]\ncommand = "uv"\n'
             'args = ["run", "--locked", "--no-sync", "--directory", "wrong", "python", '
             '"scripts/mcp_server.py"]\nenabled = false\n',
-            "conflict",
+            "disabled",
+        ),
+        (
+            '[mcp_servers.llm-wiki]\ncommand = "uv"\n'
+            'args = ["run", "--directory", "elsewhere", "python", "scripts/mcp_server.py"]\n',
+            "stale",
         ),
     ],
 )
@@ -3602,7 +3607,14 @@ def test_unix_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario
     if not bash.exists():
         pytest.skip("Git Bash unavailable")
     source = (ROOT / "install.sh").read_text(encoding="utf-8")
-    function = _shell_functions(source, "write_codex_mcp_block", "add_codex_mcp_block", "codex_mcp_state_status", "configure_codex_mcp")
+    function = _shell_functions(
+        source,
+        "write_codex_mcp_block",
+        "add_codex_mcp_block",
+        "codex_mcp_state_status",
+        "replace_codex_mcp",
+        "configure_codex_mcp",
+    )
     home = tmp_path / "home"
     config = home / ".codex" / "config.toml"
     config.parent.mkdir(parents=True)
@@ -3617,7 +3629,7 @@ def test_unix_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario
     runner.write_text(
         function
         + "\nuv() {\n"
-        + "  while [[ $# -gt 0 && $1 != config-state ]]; do shift; done\n"
+        + "  while [[ $# -gt 0 && $1 != config-state && $1 != config-replace ]]; do shift; done\n"
         + '  command "$TEST_PYTHON" "$TEST_VAULT/scripts/codex_memory.py" "$@"\n'
         + "}\nset +e\n"
         + 'configure_codex_mcp "$TEST_VAULT" "$HOME/.codex/config.toml"\n'
@@ -3676,6 +3688,7 @@ def test_windows_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scena
         function uv {{
             $all = @($args)
             $index = [Array]::IndexOf($all, 'config-state')
+            if ($index -lt 0) {{ $index = [Array]::IndexOf($all, 'config-replace') }}
             if ($index -lt 0) {{ throw 'config-state missing' }}
             & {ps_literal(sys.executable)} {ps_literal(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
         }}

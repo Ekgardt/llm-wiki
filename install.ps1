@@ -25,6 +25,8 @@
 param(
     [switch]$ProtectPush,
     [switch]$ConfirmAllAgentsStopped,
+    # Replace a Codex 'llm-wiki' MCP entry this product did not write, keeping a preimage.
+    [switch]$ReplaceCodexMcp,
     # The operator takes over a file changed outside the installer as it is now;
     # see docs/research/2026-09-28-a-rollback-undoes-only-what-it-did.md.
     [string[]]$Adopt = @()
@@ -213,16 +215,28 @@ function Get-CodexInlineHooksState(
     if ($LASTEXITCODE -ne 0 -or -not $state) { return "unknown" }
     return $state
 }
+# This product's own earlier entry (`stale`) is rewritten to this vault's; an entry the
+# operator wrote is replaced only with -ReplaceCodexMcp. Either way the previous file
+# is kept as a verified preimage beside config.toml. The function is self-contained:
+# the installer tests run it alone. See docs/research/2026-09-28-a-check-names-its-cause.md.
 function Install-CodexMcp(
     [string]$VaultRoot,
-    [string]$Config
+    [string]$Config,
+    [bool]$ReplaceForeign = $false
 ) {
     $state = (& uv run --locked --no-sync --directory $VaultRoot python (Join-Path $VaultRoot "scripts\codex_memory.py") `
         config-state --config $Config --vault-root $VaultRoot | Out-String).Trim()
     if ($LASTEXITCODE -ne 0) { return 1 }
-    if ($state -eq "equivalent") { return 0 }
-    if ($state -in @("conflict", "invalid")) { return 2 }
-    if ($state -ne "absent") { return 1 }
+    if ($state -in @("stale", "conflict")) {
+        $replaceArguments = @("config-replace", "--config", $Config, "--vault-root", $VaultRoot)
+        if ($ReplaceForeign) { $replaceArguments += "--foreign" }
+        $state = (& uv run --locked --no-sync --directory $VaultRoot python (Join-Path $VaultRoot "scripts\codex_memory.py") `
+            @replaceArguments | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) { return 1 }
+    }
+    $script:codexMcpState = $state
+    if ($state -in @("equivalent", "replaced")) { return 0 }
+    if ($state -ne "absent") { return 2 }
 
     $directory = Split-Path $Config -Parent
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
@@ -303,6 +317,7 @@ if ($scriptDirectory -and (Test-Path -LiteralPath (Join-Path $scriptDirectory "p
     )
     if ($ProtectPush) { $reexecArguments += "-ProtectPush" }
     if ($ConfirmAllAgentsStopped) { $reexecArguments += "-ConfirmAllAgentsStopped" }
+    if ($ReplaceCodexMcp) { $reexecArguments += "-ReplaceCodexMcp" }
     foreach ($resourceId in $Adopt) { $reexecArguments += @("-Adopt", $resourceId) }
     try {
         & $hostExecutable @reexecArguments
@@ -557,14 +572,14 @@ if (Get-Command codex -ErrorAction SilentlyContinue) {
     $codexConfig = Join-Path $env:USERPROFILE ".codex\config.toml"
     $codexDir = Split-Path $codexConfig -Parent
     New-Item -ItemType Directory -Path $codexDir -Force | Out-Null
-    $codexMcpExit = Install-CodexMcp -VaultRoot $VAULT_ROOT -Config $codexConfig
+    $codexMcpExit = Install-CodexMcp -VaultRoot $VAULT_ROOT -Config $codexConfig -ReplaceForeign ([bool]$ReplaceCodexMcp)
     if ($codexMcpExit -eq 0) {
         $codexMcpReady = $true
         Ok "Codex MCP config verified -> $codexConfig"
-    } elseif ($codexMcpExit -eq 2) {
-        Warn "Existing Codex MCP entry conflicts with LLM-Wiki; config.toml was not changed. Merge manually."
     } else {
-        Warn "Codex MCP config could not be verified; config.toml was not changed."
+        # The helper's own line for the state the entry was left in; none asks for a manual merge.
+        $mcpState = if ($codexMcpExit -eq 2) { $script:codexMcpState } else { "unverified" }
+        Warn ((uv run --locked --no-sync --directory $VAULT_ROOT python (Join-Path $VAULT_ROOT "scripts\codex_memory.py") config-advice --state $mcpState | Out-String).Trim())
     }
     $codexHooks = Join-Path $codexDir "hooks.json"
     if ($codexHooksState -eq "absent") {
@@ -695,8 +710,10 @@ if ($adoptionPlan -eq "adopted") {
     }
 } else {
     $syncWarning = $true
-    Warn "Reliability V3 state is '$adoptionState'; session capture is disabled until adoption runs:"
-    Warn "  uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json"
+    # The check's own line says what the state means; the installer claims no more.
+    # See docs/research/2026-09-28-a-check-names-its-cause.md.
+    Warn ((uv run --locked --no-sync python "$VAULT_ROOT\scripts\repair_installed_memory.py" --check --summary 2>$null) | Out-String).Trim()
+    Warn "  details: uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json"
 }
 
 # --- 8a. Pinned model weights ------------------------------------
@@ -711,6 +728,20 @@ switch ($LASTEXITCODE) {
     0 { Ok "Model weights step done" }
     2 { Info "huggingface_hub is not installed; model weights are fetched once it is" }
     default { Warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" }
+}
+
+# A managed Pyright the operator installed earlier is validated, and repaired when
+# its receipt is from before the tree digest (`install_pyright.py` retires such an
+# install and reinstalls the pinned release). Nothing is installed where the operator
+# never installed it: that stays an explicit action.
+# See docs/research/2026-09-28-a-check-names-its-cause.md.
+if (Test-Path -LiteralPath (Join-Path $STATE_ROOT "cache\code-tools\pyright") -PathType Container) {
+    $pyrightReport = (uv run --locked --no-sync python "$VAULT_ROOT\scripts\install_pyright.py" --state-root $STATE_ROOT 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -eq 0) {
+        Ok "Managed Pyright verified"
+    } else {
+        Warn "Managed Pyright could not be verified or repaired: $pyrightReport"
+    }
 }
 
 # --- 8b. Bounded runtime sync -------------------------------------
@@ -733,8 +764,9 @@ Write-Host "==============================================" -ForegroundColor Gre
 if ($syncWarning -or $schedulerWarning) {
     Write-Host "  LLM-Wiki installed with warnings" -ForegroundColor Yellow
     if ($syncWarning) {
-        Write-Host "  The runtime synchronization ran after every other step and named the checks that need"
-        Write-Host "  attention (the doctor line above). For the state now: uv run --locked --no-sync python scripts/doctor.py"
+        Write-Host "  The install completed; this is not a failure (a failure stops with [FAIL] and exit 1)."
+        Write-Host "  The [WARN] lines above and the doctor line name what needs attention now."
+        Write-Host "  For the state now: uv run --locked --no-sync python scripts/doctor.py"
     }
 } else {
     Write-Host "  LLM-Wiki installed successfully!" -ForegroundColor Green

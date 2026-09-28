@@ -68,3 +68,23 @@ def test_ordinary_work_is_still_counted_beside_a_capture(tmp_path: Path) -> None
     queue.enqueue("query", 1, {"prompt": "counted"})
 
     assert queue.count_eligible() == 1
+
+
+def test_a_task_under_a_source_fence_is_not_counted_while_the_fence_holds(
+    tmp_path: Path,
+) -> None:
+    """The class, not only the capture: whatever the claim skips, the count skips.
+
+    A task whose payload names a fenced day's date is skipped by the claim while
+    the fence holds; counting it failed the nightly's work step the same way
+    (2026-09-28, docs/research/2026-09-28-a-check-names-its-cause.md).
+    """
+    queue = _queue(tmp_path)
+    queue.enqueue("query", 1, {"prompt": "written", "written_at": "2026-01-01T09:00:00Z"})
+    fence = queue.acquire_source_fence("2026-01-01", "c" * 64)
+
+    counted = queue.count_eligible()
+    claimed = queue.claim("worker", lease_seconds=60)
+
+    queue.release_source_fence(fence.token)
+    assert (counted, claimed) == (0, None)

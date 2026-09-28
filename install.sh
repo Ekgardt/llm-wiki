@@ -33,6 +33,8 @@ CALLER_CWD="$(pwd -P)"
 INSTALLER_CREATED_CLONE="${LLM_WIKI_INSTALLER_CREATED_CLONE:-0}"
 PROTECT_PUSH=0
 AGENTS_STOPPED=0
+REPLACE_CODEX_MCP=0
+CODEX_MCP_STATE=unverified
 SCHEDULER_MODE=native
 EXPECT_SCHEDULER_VALUE=0
 EXPECT_ADOPT_VALUE=0
@@ -64,6 +66,7 @@ for argument in "$@"; do
   case "$argument" in
     --protect-push) PROTECT_PUSH=1 ;;
     --confirm-all-agents-stopped) AGENTS_STOPPED=1 ;;
+    --replace-codex-mcp) REPLACE_CODEX_MCP=1 ;;
     --scheduler) EXPECT_SCHEDULER_VALUE=1 ;;
     --scheduler=*) SCHEDULER_MODE="${argument#--scheduler=}" ;;
     --adopt) EXPECT_ADOPT_VALUE=1 ;;
@@ -153,10 +156,20 @@ add_codex_mcp_block() {
 
 codex_mcp_state_status() {
   case "$1" in
-    equivalent) return 0 ;;
-    conflict|invalid) return 2 ;;
-    *) return 1 ;;
+    equivalent|replaced) return 0 ;;
+    *) return 2 ;;
   esac
+}
+
+# This product's own earlier entry (`stale`) is rewritten to this vault's; an entry the
+# operator wrote is replaced only with --replace-codex-mcp. Either way the previous file
+# is kept as a verified preimage beside config.toml.
+# See docs/research/2026-09-28-a-check-names-its-cause.md.
+replace_codex_mcp() {
+  local vault_root="$1" config="$2" foreign=()
+  [ "${REPLACE_CODEX_MCP:-0}" -eq 1 ] && foreign=(--foreign)
+  uv run --locked --no-sync --directory "$vault_root" python "$vault_root/scripts/codex_memory.py" \
+    config-replace --config "$config" --vault-root "$vault_root" ${foreign[@]+"${foreign[@]}"}
 }
 
 configure_codex_mcp() {
@@ -169,6 +182,10 @@ configure_codex_mcp() {
     add_codex_mcp_block "$vault_root" "$config"
     return
   fi
+  case "$state" in
+    stale|conflict) state="$(replace_codex_mcp "$vault_root" "$config")" || return 1 ;;
+  esac
+  CODEX_MCP_STATE="$state"
   codex_mcp_state_status "$state"
 }
 
@@ -628,11 +645,10 @@ if command -v codex &>/dev/null; then
     ok "Codex MCP config verified: $CODEX_CONFIG"
   else
     mcp_exit=$?
-    if [ "$mcp_exit" -eq 2 ]; then
-      warn "Existing Codex MCP entry conflicts with LLM-Wiki; config.toml was not changed. Merge manually."
-    else
-      warn "Codex MCP config could not be verified; config.toml was not changed."
-    fi
+    # The helper's own line for the state the entry was left in; none asks for a manual merge.
+    [ "$mcp_exit" -eq 2 ] || CODEX_MCP_STATE=unverified
+    warn "$(uv run --locked --no-sync --directory "$VAULT_ROOT" python "$VAULT_ROOT/scripts/codex_memory.py" \
+      config-advice --state "$CODEX_MCP_STATE")"
   fi
   CODEX_HOOKS="$HOME/.codex/hooks.json"
   case "$CODEX_HOOKS_STATE" in
@@ -782,8 +798,10 @@ case "$(adoption_plan "$ADOPTION_STATE" "$AGENTS_STOPPED")" in
     ;;
   *)
     SYNC_WARNING=1
-    warn "Reliability V3 state is '${ADOPTION_STATE}'; session capture is disabled until adoption runs:"
-    warn "  uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json"
+    # The check's own line says what the state means; the installer claims no more.
+    # See docs/research/2026-09-28-a-check-names-its-cause.md.
+    warn "$(uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --check --summary 2>>"$ADOPTION_ERR" || true)"
+    warn "  details: uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json"
     adoption_tail
     ;;
 esac
@@ -804,6 +822,19 @@ case "$MODELS_EXIT" in
   2) info "huggingface_hub is not installed; model weights are fetched once it is" ;;
   *) warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" ;;
 esac
+
+# A managed Pyright the operator installed earlier is validated, and repaired when
+# its receipt is from before the tree digest (`install_pyright.py` retires such an
+# install and reinstalls the pinned release). Nothing is installed where the operator
+# never installed it: that stays an explicit action.
+# See docs/research/2026-09-28-a-check-names-its-cause.md.
+if [ -d "$STATE_ROOT/cache/code-tools/pyright" ]; then
+  if PYRIGHT_REPORT="$(uv run --locked --no-sync python "$VAULT_ROOT/scripts/install_pyright.py" --state-root "$STATE_ROOT" 2>&1 >/dev/null)"; then
+    ok "Managed Pyright verified"
+  else
+    warn "Managed Pyright could not be verified or repaired: ${PYRIGHT_REPORT}"
+  fi
+fi
 
 # ─── 8b. Bounded runtime sync ──────────────────────────────────────
 
@@ -832,8 +863,9 @@ echo ""
 echo "=============================================="
 if [ "$SYNC_WARNING" -eq 1 ]; then
   echo -e "${YELLOW}  LLM-Wiki installed with warnings${NC}"
-  echo "  The runtime synchronization ran after every other step and named the checks that need"
-  echo "  attention (the doctor line above). For the state now: uv run --locked --no-sync python scripts/doctor.py"
+  echo "  The install completed; this is not a failure (a failure stops with [FAIL] and exit 1)."
+  echo "  The [WARN] lines above and the doctor line name what needs attention now."
+  echo "  For the state now: uv run --locked --no-sync python scripts/doctor.py"
 else
   echo -e "${GREEN}  LLM-Wiki installed successfully!${NC}"
 fi
