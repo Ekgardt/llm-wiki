@@ -56,3 +56,16 @@ block heading when the cut falls at a block start.
 than a part and loses nothing, and the day packs (both fail on the old splitter); entries
 that fit are cut between entries as before; a line without breaks is cut on a character
 boundary.
+
+## Follow-up: an oversized day fails alone
+
+Packing still refused the whole run when any one day's part did not fit: the refusal left
+`pack_compile_batches` and `_run` returned before any batch, the same shape the one-bad-day
+fix (audit 2026-09-27 A-3) removed for failures after packing. After the cut above no daily
+part outgrows the default budget, but a smaller configured window, or a prompt that grows,
+reaches the same refusal. `partition_packable` now measures each part first; a day with a
+part the budget cannot take is recorded like any failed batch (`compile_oversized_daily`
+plus a source failure naming the day), and the other days pack and compile as before.
+`pack_compile_batches` keeps its refusal for a caller that hands it an oversized day.
+Guard: `tests/test_one_oversized_day_does_not_hold_the_rest.py` — two days, a window that
+holds only the smaller; on the previous code the run compiled neither.

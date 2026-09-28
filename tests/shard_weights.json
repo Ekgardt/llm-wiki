@@ -555,6 +555,7 @@
   "test_one_limit_one_place.py": 0.19,
   "test_one_live_walk_one_parse.py": 0.2,
   "test_one_name_is_asked_past_the_candidate_bound.py": 1.75,
+  "test_one_oversized_day_does_not_hold_the_rest.py": 0.55,
   "test_one_page_cannot_close_the_vault.py": 0.23,
   "test_one_page_has_one_identity_in_the_telemetry.py": 0.01,
   "test_one_part_of_a_day_per_batch.py": 0.0,
