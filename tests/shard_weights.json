@@ -79,6 +79,7 @@
   "test_a_failing_nightly_is_visible.py": 0.08,
   "test_a_failure_in_the_night_is_named.py": 0.01,
   "test_a_failure_of_content_that_is_gone_is_retired.py": 5.39,
+  "test_a_fallback_names_its_cause.py": 0.06,
   "test_a_fence_reads_the_payloads_own_fields.py": 7.06,
   "test_a_fenced_answer_is_not_thrown_away.py": 0.01,
   "test_a_figure_we_supplied_is_not_a_fabricated_one.py": 0.01,

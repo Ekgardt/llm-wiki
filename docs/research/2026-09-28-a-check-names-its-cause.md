@@ -176,8 +176,8 @@ with its cause and what the product now does:
    this is not a failure, and that the `[WARN]` lines name what needs attention
    now.
 
-Neighbour found and not fixed: the adopted queue's claim still matches a fenced day
-by text (`instr(payload, date)`). The enqueue side moved to identity fields on
+Neighbour found and not fixed in this pass (fixed in the second pass below): the
+adopted queue's claim still matches a fenced day by text (`instr(payload, date)`). The enqueue side moved to identity fields on
 2026-09-18. A task that only mentions the fenced day's date waits for the fence to
 lift. The count now agrees with the claim, but the claim is still wider than the
 fence it serves.
@@ -198,3 +198,86 @@ Additional sources (fetched 2026-09-28):
   destination for processing", and "All redriven messages are considered new
   messages". That is why the redriven copy, not the parent, carries the
   outcome.
+
+## Second pass, same day: the answer paths and the fence neighbour
+
+Facts (read in the code, 2026-09-28):
+
+- The reranker answered `reranker_error` from two scorers, retrieval answered
+  `graph_error` and `reranker_error`, the graph neighbour boost returned `None`, a
+  navigation callback answered `NavigationStatus.ERROR` or set
+  `structural_failed`, the code graph fell back to regex parsing from four
+  handlers, and a failed language-server request was answered `Internal error`.
+  Every one dropped the exception. The class guard did not see them: it looked
+  only at a returned string or builder call.
+- The claim and the eligible count of both queues matched a fence with `instr`
+  over the payload text (the legacy count did not look at fences at all), while
+  the enqueue and the fence check had read identity fields since 2026-09-18.
+
+What changed:
+
+- Each fallback keeps its behaviour and names its cause. Retrieval and the
+  reranker record it through `search_memory.note_degradation`, read by
+  `vault_status.retrieval_degradations` (the channel the dense and generation
+  fallbacks already use). The code graph puts it in the parse result
+  (`parser_fallback_reason`) and in the call Jedi could not infer
+  (`semantic_error`); `path_coverage` says `grammar unavailable: <cause>`.
+  Navigation warnings read `symbol resolver failed: <ExceptionClass>`: the class
+  only, because the existing contract keeps every callback's exception text out of
+  the answer (`test_callback_exceptions_are_redacted_at_every_boundary`; a message
+  can quote any path, and `redact_lsp_text` removes only home and checkout roots).
+  The language server is still told only `Internal error`; the protocol's warning
+  callback is told the redacted cause. Uncertainty: production constructs
+  `LspProtocol` without a warning callback (`lsp_process._start_generation_protocol`),
+  so today that cause reaches no reader; wiring a sink is a separate change.
+- The guard now refuses a broad handler that does not read what it caught and
+  names a failure anywhere in its body (a failure string, a failure attribute, a
+  builder call, `raise ... from None`), and, in the four answer modules, any value
+  fallback. It accepts `traceback.format_exc`, `sys.exc_info` and
+  `logging.exception` as reading the exception, and a re-raise as carrying it.
+  Checked against the old files: it refuses all thirteen handlers above.
+- Both queues' claim and count call one SQL function,
+  `payload_references_source`, registered per connection from
+  `MemoryQueue._payload_references_source`, so SQL and the enqueue apply the same
+  rule. A task that only carries a timestamp of the fenced day is claimed and
+  counted; a task of the fenced source is neither.
+
+Alternatives weighed:
+
+- Guarding every broad handler in `scripts/`: 80 broad handlers (one a close
+  cleanup in retrieval) still drop what they caught without naming a failure (49 return
+  a default, 28 only pass or continue, 3 do something else) — hooks that must exit
+  0, best-effort cleanups, optional probes. Refusing them all at once would need 80 individual judgements or an
+  allowlist with no reasons, so the guard covers the answer modules and every
+  handler that names a failure; the rest is named here as not yet covered.
+- Filtering fenced tasks in Python after an unfenced `SELECT`: the claim would
+  have to loop and the count to read every ready payload, and SQL and Python would
+  again be two rules. A registered function keeps one predicate.
+- Putting the cause into the retrieval trace: the trace's reason fields are codes
+  under a schema (`^[a-z][a-z0-9_]*$`), which MCP clients read; the degradation
+  channel already carries causes, so no schema change was needed.
+
+Compromises and uncertainty: the degradation channel keeps the latest cause per
+kind in the process, not per query. A payload that fails to decode still counts
+as referencing every fence (the conservative answer, unchanged). The function
+is not part of any schema or trigger, so a connection without it (the sqlite3 CLI,
+another tool) can still open the database; only these queries require it.
+
+Sources (fetched 2026-09-28):
+- Ruff BLE001 blind-except (https://docs.astral.sh/ruff/rules/blind-except/):
+  flags `except BaseException` and `except Exception`; "Exceptions that are
+  re-raised will _not_ be flagged" and neither are those "logged with `exc_info`
+  enabled". The guard's exemptions follow the same two.
+- MITRE CWE-390, Detection of Error Condition Without Action
+  (https://cwe.mitre.org/data/definitions/390.html): "The product detects a
+  specific error, but takes no actions to handle the error"; mitigation: handle
+  each exception by fixing it, alerting, or terminating.
+- Python `sqlite3.Connection.create_function`
+  (https://docs.python.org/3/library/sqlite3.html): `deterministic=True` marks the
+  function deterministic, "which allows SQLite to perform additional
+  optimizations"; errors in user-defined function callbacks are logged as
+  unraisable exceptions. `_payload_references_source` answers every input without
+  raising (an unreadable payload answers True).
+- SQLite, Deterministic SQL Functions (https://www.sqlite.org/deterministic.html):
+  deterministic functions are required only in CHECK constraints, partial and
+  expression indexes and generated columns; none of those use this function.

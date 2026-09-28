@@ -8,8 +8,13 @@ nightly's work step failed on every pass until a capture worker ran (2026-09-28)
 
 from __future__ import annotations
 
+import os
 import sys
+from contextlib import closing
+from datetime import timedelta
 from pathlib import Path
+
+import pytest
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
@@ -70,21 +75,74 @@ def test_ordinary_work_is_still_counted_beside_a_capture(tmp_path: Path) -> None
     assert queue.count_eligible() == 1
 
 
-def test_a_task_under_a_source_fence_is_not_counted_while_the_fence_holds(
-    tmp_path: Path,
+@pytest.mark.parametrize("backend", ["legacy", "adopted"])
+def test_a_task_of_the_fenced_source_is_neither_counted_nor_claimed(
+    tmp_path: Path, backend: str
 ) -> None:
     """The class, not only the capture: whatever the claim skips, the count skips.
 
-    A task whose payload names a fenced day's date is skipped by the claim while
-    the fence holds; counting it failed the nightly's work step the same way
-    (2026-09-28, docs/research/2026-09-28-a-check-names-its-cause.md).
+    A task of a fenced day waits for its fence; counting it failed the nightly's
+    work step the same way (2026-09-28,
+    docs/research/2026-09-28-a-check-names-its-cause.md). `acquire_source_fence`
+    refuses a source a live task names, so the fence row is written the way that
+    method writes it, without its check: what is tested is the claim's own guard.
     """
-    queue = _queue(tmp_path)
-    queue.enqueue("query", 1, {"prompt": "written", "written_at": "2026-01-01T09:00:00Z"})
+    queue = _backend(tmp_path, backend)
+    queue.enqueue("compile", 1, {"daily_id": "2026-01-01"})
+    _FENCE_WRITERS[backend](queue, "2026-01-01", "c" * 64)
+
+    assert (queue.count_eligible(), queue.claim("worker", lease_seconds=60)) == (0, None)
+
+
+@pytest.mark.parametrize("backend", ["legacy", "adopted"])
+def test_a_task_that_only_mentions_the_fenced_day_is_counted_and_claimed(
+    tmp_path: Path, backend: str
+) -> None:
+    """A fence holds its source, not every payload that carries its date.
+
+    The claim and the count matched a fence with `instr` over the payload text, so
+    a task written on the fenced day was skipped and not counted, while the
+    enqueue and the fence check read identity fields only. Both now call that one
+    rule (2026-09-28).
+    """
+    queue = _backend(tmp_path, backend)
+    task_id = queue.enqueue(
+        "query", 1, {"prompt": "written", "written_at": "2026-01-01T09:00:00Z"}
+    )
     fence = queue.acquire_source_fence("2026-01-01", "c" * 64)
 
     counted = queue.count_eligible()
     claimed = queue.claim("worker", lease_seconds=60)
 
     queue.release_source_fence(fence.token)
-    assert (counted, claimed) == (0, None)
+    assert (counted, getattr(claimed, "id", None)) == (1, task_id)
+
+
+def _backend(tmp_path: Path, backend: str):
+    if backend == "adopted":
+        return _queue(tmp_path)
+    return memory_queue.MemoryQueue(tmp_path)
+
+
+def _legacy_fence(queue, daily_id: str, digest: str) -> None:
+    now = memory_queue._timestamp(memory_queue._utc_now())
+    later = memory_queue._timestamp(memory_queue._utc_now() + timedelta(hours=1))
+    with queue._connect() as connection:
+        memory_queue._insert_source_fence(
+            connection, (daily_id, digest, "f" * 64, os.getpid(), now, now, later)
+        )
+
+
+def _adopted_fence(queue, daily_id: str, digest: str) -> None:
+    process = operational_ownership.current_process_identity()
+    now = memory_queue._timestamp(memory_queue._utc_now())
+    later = memory_queue._timestamp(memory_queue._utc_now() + timedelta(hours=1))
+    values = (
+        memory_queue._daily_logical_path(daily_id), digest, "f" * 64,
+        process.pid, process.start_identity, now, now, later,
+    )
+    with closing(queue._connect()) as database, database:
+        memory_queue._insert_adopted_source_fence(database, values)
+
+
+_FENCE_WRITERS = {"legacy": _legacy_fence, "adopted": _adopted_fence}

@@ -4869,18 +4869,53 @@ def _take_task_lease(
     return changed == 1
 
 
+# What the legacy queue's claim may take, and therefore what its count names:
+# one predicate, as `_V3_WORK_CLAIMABLE` is for the adopted queue. Parameters:
+# max_attempts, now.
+_V2_WORK_CLAIMABLE = """state = 'ready' AND attempts < ? AND available_at <= ?
+    AND NOT EXISTS (
+        SELECT 1 FROM source_fences f
+        WHERE payload_references_source(tasks.payload_json, f.daily_id, f.source_digest)
+    )"""
+
+
+def _register_source_reference(connection: sqlite3.Connection) -> None:
+    """Give this connection the queue's one source-reference rule as SQL.
+
+    The claim and the eligible count select with SQL, and they matched a fence by
+    `instr` over the payload text: a task that merely carried a timestamp of the
+    fenced day was skipped and not counted, while the enqueue and the fence check
+    already read identity fields only. They now call the same rule the enqueue
+    does. See `docs/research/2026-09-28-a-check-names-its-cause.md`.
+    """
+    connection.create_function(
+        "payload_references_source", 3, _stored_payload_references_source, deterministic=True
+    )
+
+
+def _stored_payload_references_source(
+    payload: object, daily_id: object, source_digest: object
+) -> bool:
+    """`MemoryQueue._payload_references_source` for a stored payload and one fence."""
+    return MemoryQueue._payload_references_source(
+        _stored_payload_text(payload), str(daily_id), str(source_digest)
+    )
+
+
+def _stored_payload_text(payload: object) -> str:
+    """A payload column as text; undecodable blob bytes are replaced (`_task_payload_text`)."""
+    if isinstance(payload, bytes):
+        return payload.decode("utf-8", errors="replace")
+    return str(payload)
+
+
 def _next_unfenced_ready_task(
     connection: sqlite3.Connection, now: datetime, attempt_limit: int
 ) -> sqlite3.Row | None:
     """The next ready task whose source nobody is finalizing."""
+    _register_source_reference(connection)
     return connection.execute(
-        """SELECT * FROM tasks
-           WHERE state = 'ready' AND attempts < ? AND available_at <= ?
-             AND NOT EXISTS (
-                 SELECT 1 FROM source_fences f
-                 WHERE instr(tasks.payload_json, f.daily_id) > 0
-                    OR instr(tasks.payload_json, f.source_digest) > 0
-             )
+        f"""SELECT * FROM tasks WHERE {_V2_WORK_CLAIMABLE}
            ORDER BY priority DESC, available_at, created_at, rowid LIMIT 1""",
         (attempt_limit, _timestamp(now)),
     ).fetchone()
@@ -5287,7 +5322,7 @@ def _task_payload_text(row: sqlite3.Row) -> str:
     payload unreadable as JSON, and an unreadable payload counts as referencing
     every fenced source, which is the conservative answer at both call sites.
     """
-    return bytes(row["payload_blob"]).decode("utf-8", errors="replace")
+    return _stored_payload_text(bytes(row["payload_blob"]))
 
 
 def _record_cancelled_attempt(
@@ -7146,9 +7181,9 @@ class MemoryQueue:
         )
         now = _as_utc(self._clock())
         with self._connect() as connection:
+            _register_source_reference(connection)
             row = connection.execute(
-                """SELECT COUNT(*) FROM tasks
-                   WHERE state='ready' AND attempts < ? AND available_at <= ?""",
+                f"SELECT COUNT(*) FROM tasks WHERE {_V2_WORK_CLAIMABLE}",
                 (max_attempts, _timestamp(now)),
             ).fetchone()
         return int(row[0])
@@ -7255,8 +7290,9 @@ _V3_WORK_CLAIMABLE = """state='ready' AND attempts < ? AND available_at <= ?
     )
     AND NOT EXISTS (
         SELECT 1 FROM source_fences fence
-        WHERE instr(CAST(tasks.payload_blob AS TEXT), substr(fence.logical_path, 17, 10)) > 0
-           OR instr(CAST(tasks.payload_blob AS TEXT), fence.source_digest) > 0
+        WHERE payload_references_source(
+            tasks.payload_blob, substr(fence.logical_path, 17, 10), fence.source_digest
+        )
     )"""
 
 
@@ -7343,6 +7379,7 @@ class _QueueV3CandidateReader:
         waits for its fence; `work` claims neither, so neither is counted here.
         """
         with closing(self._connect()) as database:
+            _register_source_reference(database)
             row = database.execute(
                 f"SELECT COUNT(*) FROM tasks WHERE {_V3_WORK_CLAIMABLE}",
                 (max_attempts, _timestamp(_utc_now())),
@@ -11319,6 +11356,7 @@ class _QueueV3CandidateReader:
         self, database: sqlite3.Connection, now: datetime, max_attempts: int
     ) -> tuple[sqlite3.Row, PayloadValidation] | None:
         """The next ready task with a readable payload and attempts to spare."""
+        _register_source_reference(database)
         while True:
             row = database.execute(
                 f"""SELECT * FROM tasks WHERE {_V3_WORK_CLAIMABLE}
