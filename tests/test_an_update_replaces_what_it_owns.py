@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import doctor
@@ -43,7 +44,7 @@ class _Crash(BaseException):
 class _FailingSystemd(_FakeSystemd):
     """systemd that refuses the next `enable` once armed, noting what else was there."""
 
-    def __init__(self, witness: Path | None = None) -> None:
+    def __init__(self, witness: Callable[[], bool] | None = None) -> None:
         super().__init__()
         self.armed = False
         self.crash = False
@@ -60,7 +61,7 @@ class _FailingSystemd(_FakeSystemd):
         if not self.armed:
             return super()._enable(command)
         self.armed = False
-        self.witnessed.append(self.witness is not None and self.witness.exists())
+        self.witnessed.append(self.witness is not None and self.witness())
         return 1, b"refused\n"
 
 
@@ -89,7 +90,7 @@ def _schedule(tmp_path: Path, runner: _FakeSystemd, uv_dir: str):
     )
 
 
-def _install(tmp_path: Path, version: str, resource) -> dict:
+def _install(tmp_path: Path, version: str, resource, released=()) -> dict:
     return install_resources(
         state_root=tmp_path / "state",
         vault_root=tmp_path / "vault",
@@ -97,6 +98,7 @@ def _install(tmp_path: Path, version: str, resource) -> dict:
         scheduler_backend="systemd_user",
         resources=[resource],
         control_version=2,
+        released=released,
     )
 
 
@@ -163,7 +165,7 @@ def test_an_edited_unit_is_replaced_its_copy_kept_and_the_added_line_moves_to_a_
     new = _schedule(tmp_path, runner, "new")
 
     [takeover] = install_takeover.keep_changed_whole_files(tmp_path / "state", [new])
-    _install(tmp_path, "4.1.0", new)
+    _install(tmp_path, "4.1.0", new, install_takeover.drop_in_resources([takeover], [new]))
 
     kept = Path(takeover.kept) / _SERVICE
     assert (
@@ -269,6 +271,10 @@ def test_an_edited_launch_agent_is_replaced_and_its_copy_is_what_keeps_the_edit(
 
 @pytest.fixture
 def machine(tmp_path: Path, monkeypatch) -> dict[str, object]:
+    return _machine(tmp_path, monkeypatch)
+
+
+def _machine(tmp_path: Path, monkeypatch) -> dict[str, object]:
     """A POSIX machine whose scheduler is systemd, faked at its command boundary."""
     (tmp_path / "vault" / "scripts").mkdir(parents=True)
     (tmp_path / "vault" / "scripts" / "llm-wiki-memory-opencode.js").write_text(
@@ -276,7 +282,7 @@ def machine(tmp_path: Path, monkeypatch) -> dict[str, object]:
     )
     (tmp_path / "home").mkdir()
     plugin = install_control._opencode_plugin_destination(tmp_path / "home")
-    runner = _FailingSystemd(witness=plugin)
+    runner = _FailingSystemd(witness=plugin.exists)
     release = {"version": "4.0.0"}
     monkeypatch.setattr(install_control, "_selected_backend", lambda _mode: "systemd_user")
     monkeypatch.setattr(

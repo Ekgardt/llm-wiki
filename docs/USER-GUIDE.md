@@ -284,10 +284,13 @@ An update replaces the systemd units and launchd plists even if they were edited
 hand. It keeps a readable copy of the edited files under
 `run/install/displaced/<time>-<resource-id>/`, and `install_control.py rollback` puts
 them back. A line you added to a systemd unit is moved into
-`~/.config/systemd/user/<unit>.d/50-local.conf`, which the installer never touches, so
-the setting keeps working; the installer prints what it moved and anything it could not
-carry over (a changed line of ours, or an existing `50-local.conf`). Keep local settings
-in such a drop-in, for example:
+`~/.config/systemd/user/<unit>.d/50-local.conf`, so the setting keeps working; the
+installer prints what it moved and anything it could not carry over (a changed line of
+ours, or an existing `50-local.conf`, which it never touches). The drop-in is yours once
+the update commits: only `install_control.py rollback` of that same update removes it,
+so the restored unit does not run a moved line twice. Copies older than the setting
+`retention.config_backup_days` (90 days) are retired by the next install, except the one
+the current rollback point needs. Keep local settings in such a drop-in, for example:
 
 ```ini
 # ~/.config/systemd/user/llm-wiki-nightly.service.d/50-local.conf
@@ -295,8 +298,11 @@ in such a drop-in, for example:
 Environment=MEMORY_CLAUDE_MODEL=claude-sonnet-5
 ```
 
-A rerun that drops an agent integration writes the new set first and takes the dropped
-one back last; if anything fails, both are reverted.
+A rerun that drops an agent integration or moves the profile to another shell's file
+writes the new set first and takes the old one back last; if anything fails, both are
+reverted. A change to or from cron (or a Windows task) cannot work that way, because
+those cannot be read back: the installer says so, takes the old set back first, and puts
+it back if the new one fails.
 
 Inspect the control-plane state without mutation:
 
@@ -768,7 +774,9 @@ How long the vault keeps its own disposable history is a setting too (section
   reports under `logs/` and their step output;
 - `telemetry_days` (90) — retrieval telemetry;
 - `benchmark_run_days` (30) — benchmark run directories under `cache/benchmarks/`;
-- `config_backup_days` (90) — backups of agent configuration the installer rewrote.
+- `config_backup_days` (90) — backups of agent configuration the installer rewrote, and
+  the copies of edited units and plugin files under `run/install/displaced/` (a copy the
+  current rollback point needs is kept whatever its age).
 
 One more, section `[provider]`: `draft_ceiling_seconds` (600) is how long one compile
 draft or episode batch may wait for the model. Drafts measured 99 to 418 s on a loaded
