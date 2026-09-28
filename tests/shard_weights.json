@@ -160,6 +160,7 @@
   "test_a_project_context_page_has_a_command.py": 0.0,
   "test_a_project_is_a_directory_the_owner_works_in.py": 0.11,
   "test_a_project_named_con_still_gets_a_handoff.py": 0.01,
+  "test_a_protocol_warning_reaches_the_log.py": 0.08,
   "test_a_provider_call_fails_closed.py": 0.03,
   "test_a_prune_inside_its_step.py": 0.81,
   "test_a_prune_keeps_what_resolves_a_quarantine.py": 1.2,

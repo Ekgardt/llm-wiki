@@ -281,3 +281,34 @@ Sources (fetched 2026-09-28):
 - SQLite, Deterministic SQL Functions (https://www.sqlite.org/deterministic.html):
   deterministic functions are required only in CHECK constraints, partial and
   expression indexes and generated columns; none of those use this function.
+
+## Addendum (2026-09-28): the protocol warning reaches a log
+
+The first pass sent a failed server request's redacted cause to
+`LspProtocol`'s warning callback, and production built the protocol without one,
+so the cause, like every earlier protocol warning (an oversized frame, a
+diagnostic flood), was dropped. `lsp_process` now passes
+`_report_protocol_warning`, which prints `llm-wiki lsp: <message>` to stderr.
+
+Sources, read today:
+- MCP specification 2025-06-18, Transports, stdio: "The server MAY write UTF-8
+  strings to its standard error (stderr) for logging purposes. Clients MAY
+  capture, forward, or ignore this logging." and "MUST NOT write anything to its
+  stdout that is not a valid MCP message."
+  https://modelcontextprotocol.io/specification/2025-06-18/basic/transports
+- The Twelve-Factor App, XI Logs: a process writes its event stream unbuffered to
+  its standard stream and leaves routing to the environment. stdout is taken by
+  the MCP messages, so stderr is the stream left. https://12factor.net/logs
+- Python Logging HOWTO: a warning the caller cannot act on belongs to
+  `logger.warning()`; with no handler configured it goes to the last-resort
+  handler, which writes to `sys.stderr`.
+  https://docs.python.org/3/howto/logging.html
+
+Alternatives: `logging.getLogger(...).warning` reaches the same stderr today and
+could be routed later, but no LLM Wiki module configures logging and
+`mcp_server.py` already reports worker failures with `print(..., file=sys.stderr)`;
+one idiom per process was kept. A file under `logs/` would add a new log with a
+rotation obligation for a rare event. Trade-off: stderr is read only if the
+client keeps it (Claude Code writes MCP stderr to its own log).
+Guard: `tests/test_a_protocol_warning_reaches_the_log.py` refuses an
+`LspProtocol(...)` in `lsp_process.py` built without `warning_callback`.

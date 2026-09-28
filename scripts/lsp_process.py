@@ -14,6 +14,7 @@ import selectors
 import shutil
 import stat
 import subprocess as _subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -1986,6 +1987,11 @@ def _generation_handler_options(
     }
 
 
+def _report_protocol_warning(message: str) -> None:
+    """A protocol warning goes to stderr, the log an MCP stdio server may write."""
+    print(f"llm-wiki lsp: {message}", file=sys.stderr)
+
+
 def _start_generation_protocol(
     coordinator: _LifecycleCoordinator,
     generation: _Generation,
@@ -2002,6 +2008,7 @@ def _start_generation_protocol(
             fatal_callback=lambda reason: _queue_generation_failure(
                 coordinator, generation, reason
             ),
+            warning_callback=_report_protocol_warning,
             _startup_deadline=deadline,
             _drain_wake=coordinator.recovery_wake,
             **_generation_handler_options(coordinator),
