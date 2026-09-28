@@ -72,8 +72,12 @@ def _assert_docs_clean(relative_paths, check) -> None:
         check(relative_path)
 
 
+# A scope modifier (`$script:name`) names the variable after the colon.
+_PS_SCOPE = r"(?:(?:script|global|local|private|using):)?"
+
+
 def _powershell_variables(content: str) -> set[str]:
-    return set(re.findall(r"\$([A-Za-z_]\w*)", content))
+    return set(re.findall(r"\$" + _PS_SCOPE + r"([A-Za-z_]\w*)", content))
 
 
 def _powershell_parameter_names(content: str) -> set[str]:
@@ -87,7 +91,7 @@ def _powershell_parameter_names(content: str) -> set[str]:
 
 
 def _powershell_assigned_variables(content: str) -> set[str]:
-    assigned = set(re.findall(r"\$([A-Za-z_]\w*)\s*=", content))
+    assigned = set(re.findall(r"\$" + _PS_SCOPE + r"([A-Za-z_]\w*)\s*=", content))
     assigned |= _powershell_parameter_names(content)
     assigned |= set(re.findall(r"foreach\s*\(\s*\$([A-Za-z_]\w*)\s+in\b", content))
     return assigned
