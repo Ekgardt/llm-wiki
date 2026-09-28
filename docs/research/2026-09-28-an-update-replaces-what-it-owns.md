@@ -132,3 +132,29 @@ single-directory layout.
 ## Needs the owner's go-ahead
 
 Only D (moving code out of the vault). E stays within the current structure.
+
+## Addendum (2026-09-28, live update): our hook blocks from an older release are ours
+
+Observed: the first real update of this machine to this branch stopped in the
+scheduler step with a bare `install_resource_ownership_ambiguous`. A read-only
+comparison showed the resource: `claude-user-settings`, which this release first
+puts under the install transaction. `~/.claude/settings.json` held our own blocks
+from the release before: PreCompact still named `--delegate precompact_capture.py`,
+and PreToolUse/SubagentStart were not there yet. Ownership of a newly taken
+resource was recognised only as byte equality with the new release's blocks, so
+our older hooks read as someone else's. Claude-27 met the same refusal and was
+taken over with `--adopt claude-user-settings`.
+
+Rule, from the same sources as above: a package replaces an older version of a
+file it owns without asking (Debian Policy 10.7.3, conffiles: an unmodified
+conffile is replaced by the new version; RPM `%config`: an unchanged file is
+replaced, a changed one kept as `.rpmsave`/`.rpmnew`). Our projection of a shared
+settings file is by construction only blocks in which every command carries our
+marker (`merge_claude_settings.OUR_SCRIPT_MARKERS`, which keeps retired script
+names for exactly this reason) plus our env keys; a block that mixes ours and the
+user's is refused before recognition. So an older release's blocks are an older
+version of our own file. The one real ambiguity is a block serving another
+installation: `LLM_WIKI_ROOT`/`LLM_WIKI_STATE_ROOT` naming another vault. That is
+still refused, and every ownership refusal now names the resource, its path, and
+the way on (`ExplainedInstallError`), as drift refusals already did.
+Guard: `tests/test_our_older_hooks_are_ours.py` (both fail on the old code).

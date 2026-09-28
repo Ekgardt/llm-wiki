@@ -2166,12 +2166,21 @@ def _persist_resource_definition(install_root: Path, resource: ManagedResource) 
             _atomic_write(target, value)
 
 
+def _ambiguous(resource: ManagedResource) -> ExplainedInstallError:
+    """A file the installer cannot tell as its own, named with the way on."""
+    return ExplainedInstallError(
+        "install_resource_ownership_ambiguous",
+        f"{resource.resource_id} ({resource.locator}) holds content the installer cannot "
+        f"tell as its own; {_drift_next_step(resource)}",
+    )
+
+
 def _require_recognized(resource: ManagedResource, current: bytes | None) -> None:
     """A file we cannot tell ours is refused, unless it is taken as it is."""
     if current is None or _taken_as_is(resource):
         return
     if not resource.recognizes(current):
-        raise InstallControlError("install_resource_ownership_ambiguous")
+        raise _ambiguous(resource)
 
 
 def _resource_origin(resource: ManagedResource, current: bytes | None) -> bytes | None:
@@ -2184,7 +2193,7 @@ def _resource_record(install_root: Path, resource: ManagedResource) -> dict[str,
     _persist_resource_definition(install_root, resource)
     current = resource.read_owned()
     if current is not None and not resource.recognizes(current):
-        raise InstallControlError("install_resource_ownership_ambiguous")
+        raise _ambiguous(resource)
     origin = _resource_origin(resource, current)
     preimage = _write_preimage(install_root, origin) if origin is not None else None
     return {
@@ -3298,7 +3307,7 @@ def _released_records(
 def _released_record(install_root: Path, resource: ManagedResource) -> dict[str, object]:
     """A file this transaction creates and hands over at commit; one already there is not ours."""
     if resource.read_owned() is not None:
-        raise InstallControlError("install_resource_ownership_ambiguous")
+        raise _ambiguous(resource)
     metadata = {**resource.metadata, "_released_after_commit": True, "_retire_after_commit": True}
     return {
         "desired": _v2_snapshot(install_root, resource.desired),

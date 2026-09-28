@@ -667,6 +667,29 @@ def _write_family(
     _write_family_projection(path, current, replacement, metadata, family, finish)
 
 
+# The env keys that say which installation a hook block serves.
+_INSTALLATION_KEYS = ("LLM_WIKI_ROOT", "LLM_WIKI_STATE_ROOT")
+
+
+def _installation_env(projection: bytes) -> dict[str, object]:
+    env = _decode_object(projection).get("env")
+    return env if isinstance(env, dict) else {}
+
+
+def _names_this_installation(current: bytes, desired: bytes) -> bool:
+    """Our blocks from any release are ours; a block serving another vault is not.
+
+    The projection holds only blocks whose every command carries our marker (a
+    mixed block is refused before this) and our env keys, so an older release's
+    hooks are an earlier version of our own file, replaced on update as a package
+    replaces its unmodified conffile. Only roots naming another installation make
+    the owner ambiguous. See
+    `docs/research/2026-09-28-an-update-replaces-what-it-owns.md`.
+    """
+    have, want = _installation_env(current), _installation_env(desired)
+    return all(have.get(key, want.get(key)) == want.get(key) for key in _INSTALLATION_KEYS)
+
+
 def _hook_family_resource(
     *,
     resource_id: str,
@@ -685,7 +708,7 @@ def _hook_family_resource(
         desired=desired,
         read_owned=lambda: _family_projection(_read_config(path)[0], family),
         write_owned=lambda value: _write_family(path, value, metadata, family, finish),
-        recognizes=lambda current: current == desired,
+        recognizes=lambda current: _names_this_installation(current, desired),
         read_projections=lambda candidates: _family_projection_any(
             _read_config(path)[0], candidates, family
         ),
