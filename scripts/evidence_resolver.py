@@ -1042,11 +1042,57 @@ def _daily_entry_offsets(content: bytes) -> list[int]:
     return offsets
 
 
+# Where a single entry longer than a part is cut inside itself, best first: a
+# `## ` block start, a blank line, a line end. One transactional append can carry
+# a whole pre-compact summary: on 2026-09-27 one entry was 49 964 bytes, its part
+# exceeded the compile budget, and the refusal stopped every day's compile
+# (docs/research/2026-09-28-a-long-entry-is-cut-inside-itself.md). A day whose
+# entries all fit a part is cut exactly as before, so no existing receipt moves.
+_INNER_SEPARATORS = (b"\n## ", b"\n\n", b"\n")
+
+
+def _character_boundary(content: bytes, start: int, position: int) -> int:
+    """`position`, moved back off a UTF-8 continuation byte, never to `start`."""
+    while position - 1 > start and content[position] & 0xC0 == 0x80:
+        position -= 1
+    return position
+
+
+def _inner_cut(content: bytes, start: int) -> int:
+    """The latest good place, within one part of `start`, for a piece to end."""
+    window = content[start : start + MAX_DAILY_PART_BYTES]
+    for separator in _INNER_SEPARATORS:
+        found = window.rfind(separator)
+        if found > 0:
+            return start + found + 1
+    return _character_boundary(content, start, start + MAX_DAILY_PART_BYTES)
+
+
+def _inner_cuts(content: bytes, start: int, end: int) -> list[int]:
+    """Cuts that leave every piece of one entry no longer than a part; none when it fits."""
+    cuts: list[int] = []
+    while end - start > MAX_DAILY_PART_BYTES:
+        start = _inner_cut(content, start)
+        cuts.append(start)
+    return cuts
+
+
+def _cut_offsets(content: bytes) -> list[int]:
+    """Entry starts, plus the cuts inside any entry longer than a part, and the end."""
+    entries = [*_daily_entry_offsets(content), len(content)]
+    offsets = [entries[0]]
+    for start, end in zip(entries, entries[1:]):
+        offsets.extend(_inner_cuts(content, start, end))
+        offsets.append(end)
+    return offsets
+
+
 def _daily_part_bounds(content: bytes) -> list[tuple[int, int]]:
-    """The byte ranges this day is compiled in, split only where an entry ends."""
+    """The byte ranges this day is compiled in, split where an entry ends or, inside
+    an entry longer than a part, at its latest block, paragraph or line end."""
     if len(content) <= MAX_DAILY_PART_BYTES:
         return [(0, len(content))]
-    offsets = [*_daily_entry_offsets(content), len(content)]
+    offsets = _cut_offsets(content)
     bounds: list[tuple[int, int]] = []
     start = 0
     for index in range(1, len(offsets)):

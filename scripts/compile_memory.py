@@ -640,6 +640,50 @@ def _record_oversized_daily(logical_path: str) -> None:
         pass
 
 
+def _without_days(inputs: CompileInputs, days: set[str]) -> CompileInputs:
+    """These inputs with the named days removed, as parts and as sources."""
+    return replace(
+        inputs,
+        dailies=tuple(item for item in inputs.dailies if item.logical_path not in days),
+        sources=tuple(item for item in inputs.sources if item.logical_path not in days),
+    )
+
+
+def _only_day(inputs: CompileInputs, day: str) -> CompileInputs:
+    """One day's parts and source, for recording a failure against that day alone."""
+    others = {item.logical_path for item in inputs.dailies} - {day}
+    return _without_days(inputs, others)
+
+
+def partition_packable(
+    inputs: CompileInputs,
+    *,
+    model: str | None,
+    token_adapters: Mapping[str, TokenCounter] | None = None,
+) -> tuple[CompileInputs, tuple[CompileInputs, ...]]:
+    """The days the budget can take, and each day it cannot, apart.
+
+    A part that does not fit refused the whole pack, so one oversized day
+    stopped the compile of every other day in the run. The refused days now
+    fail alone and the rest pack as before. See
+    `docs/research/2026-09-28-a-long-entry-is-cut-inside-itself.md`.
+    """
+    budget = _compile_budget(model)
+    measure = _batch_measure(inputs, model, token_adapters)
+    refused = sorted(
+        {item.logical_path for item in inputs.dailies if measure({item.part_key}) > budget.available_input_tokens}
+    )
+    return _without_days(inputs, set(refused)), tuple(_only_day(inputs, day) for day in refused)
+
+
+def _refused_day_outcome(args: argparse.Namespace, day: CompileInputs) -> BatchOutcome:
+    """A day no part budget can take fails alone, recorded like any failed batch."""
+    path = day.dailies[0].logical_path
+    _record_oversized_daily(path)
+    refusal = ValueError(f"daily source exceeds compile input budget: {path}")
+    return BatchOutcome(_failed_compile(args, day, refusal))
+
+
 def pack_compile_batches(
     inputs: CompileInputs,
     *,
@@ -4588,12 +4632,13 @@ def _run(
     _announce_compile(args, dailies)
     inputs = snapshot_compile_inputs(dailies, compiled=_receipt_predicate(coordinator))
     try:
-        batches = pack_compile_batches(inputs, model=None)
+        packable, refused = partition_packable(inputs, model=None)
+        batches = pack_compile_batches(packable, model=None)
     except Exception as exc:  # noqa: BLE001 - provider/cache boundary is fail-closed
         _require_compile_active(deadline, cancelled)
         return _failed_compile(args, inputs, exc)
 
-    outcomes: list[BatchOutcome] = []
+    outcomes: list[BatchOutcome] = [_refused_day_outcome(args, day) for day in refused]
     for batch in batches:
         # A failed batch is recorded against its sources and the run goes on:
         # batches are independent snapshots, and stopping here held every later
