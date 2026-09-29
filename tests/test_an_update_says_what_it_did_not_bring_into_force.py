@@ -111,7 +111,7 @@ def test_a_shared_package_alone_chooses_nothing(checkout, monkeypatch) -> None:
     assert outcome["extras"] == _with_defaults()
 
 
-def test_the_sync_names_every_chosen_extra_in_one_inexact_call() -> None:
+def test_the_sync_names_every_chosen_extra_in_one_exact_call() -> None:
     command = self_update._sync_command(("reranker", "semantic"))
 
     assert command[: len(self_update.BASELINE_SYNC_COMMAND)] == self_update.BASELINE_SYNC_COMMAND

@@ -256,6 +256,7 @@
   "test_a_structural_answer_says_its_own_freshness.py": 0.0,
   "test_a_subagents_report_is_kept_with_its_session.py": 0.0,
   "test_a_sweep_says_what_it_could_not_do.py": 0.01,
+  "test_a_sync_removes_what_the_lock_no_longer_names.py": 0.22,
   "test_a_system_config_that_only_says_where_git_may_work.py": 0.01,
   "test_a_task_out_of_attempts_is_dead_not_ready.py": 0.01,
   "test_a_title_lifts_only_the_whole_question.py": 0.0,

@@ -103,7 +103,7 @@ MCP 属于 production 基线；`mcp-server` 保留为 compatibility alias。安�
 Pyright；在 Linux 上 torch 取自 PyTorch 的 CPU 构建。手动执行：
 
 ```bash
-uv sync --locked --no-default-groups --extra full
+uv sync --locked --no-default-groups --inexact --extra full
 uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120
 uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json
 ```

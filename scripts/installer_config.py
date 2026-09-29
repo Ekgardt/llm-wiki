@@ -9,6 +9,8 @@ import json
 import os
 import shlex
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -326,18 +328,51 @@ def uv_sync_arguments(root: Path, override: str | None) -> tuple[Path, list[str]
         raise ValueError(
             f"Selected uv project environment is not a virtual environment: {environment}"
         )
-    arguments = [
-        "--directory",
-        str(root),
-        "sync",
-        "--locked",
-        "--no-default-groups",
-        "--quiet",
-        *_extra_arguments(DEFAULT_EXTRAS),
-    ]
-    if (environment / "pyvenv.cfg").is_file():
-        arguments.append("--inexact")
-    return environment, arguments
+    arguments = ["--directory", str(root), "sync", "--locked", "--no-default-groups", "--quiet"]
+    return environment, [*arguments, *_selection_arguments(root, environment)]
+
+
+def _selection_arguments(root: Path, environment: Path) -> list[str]:
+    """A new environment gets the defaults; an existing one its whole selection, exactly.
+
+    An exact sync removes what the lock no longer names (2.7 GB of CUDA wheels on
+    the owner's vault), so it must name every extra and group the environment has;
+    only that environment's interpreter can see them. When it cannot answer, the
+    sync stays inexact and removes nothing it cannot account for.
+    See docs/research/2026-09-29-a-sync-removes-what-the-lock-no-longer-names.md.
+    """
+    if not (environment / "pyvenv.cfg").is_file():
+        return _extra_arguments(DEFAULT_EXTRAS)
+    named = _environment_selection(root, environment)
+    if named is None:
+        return [*_extra_arguments(DEFAULT_EXTRAS), "--inexact"]
+    return named
+
+
+# One interpreter start and one read of the installed distributions; measured under
+# a second on this machine (2026-09-29), so a minute only bounds a hung interpreter.
+SELECTION_TIMEOUT_SECONDS = 60
+
+
+def _environment_interpreter(environment: Path) -> Path:
+    windows = environment / "Scripts" / "python.exe"
+    return windows if windows.is_file() else environment / "bin" / "python"
+
+
+def _environment_selection(root: Path, environment: Path) -> list[str] | None:
+    """The environment's own `self_update --selection` arguments, or None when it has none.
+
+    Run by that interpreter, not imported: this module runs under the system Python,
+    which may be 3.10 without the TOML reader the selection needs.
+    """
+    command = [str(_environment_interpreter(environment)), str(root / "scripts" / "self_update.py"), "--selection", str(root)]
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=SELECTION_TIMEOUT_SECONDS, check=True)
+        return [str(argument) for argument in json.loads(completed.stdout)["arguments"]]
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as error:
+        print(f"installer_config: the environment could not name its extras ({type(error).__name__}); "
+              "the sync keeps what is installed", file=sys.stderr)
+        return None
 
 
 def selected_global_file(config_dir: Path) -> Path:

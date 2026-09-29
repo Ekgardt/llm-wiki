@@ -18,7 +18,7 @@ README_FILES = [
 ]
 SHARED_COMMANDS = (
     "uv sync --locked --no-default-groups",
-    "uv sync --locked --no-default-groups --extra full",
+    "uv sync --locked --no-default-groups --inexact --extra full",
     "uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120",
     "uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json",
 )
@@ -318,7 +318,7 @@ def test_all_readmes_share_locked_dependency_profiles_and_smoke_contract() -> No
     commands = (
         "uv sync --locked --no-default-groups",
         "uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120",
-        "uv sync --locked --no-default-groups --extra full",
+        "uv sync --locked --no-default-groups --inexact --extra full",
         "scripts/install_language_server.py --profile typescript",
         "uv sync --locked",
         "uv run --locked --no-sync pytest -q",

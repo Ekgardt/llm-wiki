@@ -111,7 +111,7 @@ code index) with Pyright for Python code; on Linux torch comes from PyTorch's CP
 build. By hand:
 
 ```bash
-uv sync --locked --no-default-groups --extra full
+uv sync --locked --no-default-groups --inexact --extra full
 uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120
 uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json
 ```
