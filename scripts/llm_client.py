@@ -67,7 +67,7 @@ from model_dlp import (
     require_safe_model_output,
 )
 from reliable_memory import canonical_json_bytes
-from secret_redact import redact_secrets
+from secret_redact import describe_error, redact_secrets
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -119,6 +119,9 @@ class LLMResult:
     structured_output: str
     usage: TokenUsage = field(default_factory=TokenUsage)
     input_token_count: TokenCount | None = None
+    # The redacted cause behind `failure_class` when an exception produced it:
+    # the class names what failed, this says why.
+    failure_detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -297,10 +300,22 @@ class _Transport(NamedTuple):
     policy: object
 
 
+class _Blocked(NamedTuple):
+    """A DLP failure class and the redacted cause that produced it."""
+
+    code: str
+    detail: str | None = None
+
+
+def _scanner_failure(exc: Exception) -> str:
+    """The failed scanner's exception class only: its message may quote the text it scanned."""
+    return type(exc).__name__
+
+
 def _protected_transport(
     system_prompt: str, prompt: str, schema: Mapping[str, object] | None
-) -> _Transport | str:
-    """Redacted inputs, or the failure class that blocks transport."""
+) -> _Transport | _Blocked:
+    """Redacted inputs, or the failure that blocks transport."""
     try:
         policy = load_policy()
         return _Transport(
@@ -309,10 +324,10 @@ def _protected_transport(
             redact_transport_value(schema, policy),
             policy,
         )
-    except DLPPolicyError:
-        return "dlp_policy_error"
-    except Exception:  # noqa: BLE001 - scanner failure must block transport
-        return "dlp_scan_error"
+    except DLPPolicyError as exc:
+        return _Blocked("dlp_policy_error", describe_error(exc))
+    except Exception as exc:  # noqa: BLE001 - scanner failure must block transport
+        return _Blocked("dlp_scan_error", _scanner_failure(exc))
 
 
 def _counted_tokens(
@@ -364,13 +379,13 @@ def _input_count(usage: TokenUsage, pre_call_count: TokenCount) -> TokenCount:
     return pre_call_count
 
 
-def _unsafe_output_failure(text: str, policy: object) -> str | None:
+def _unsafe_output_failure(text: str, policy: object) -> _Blocked | None:
     try:
         require_safe_model_output(text, policy)
     except DLPContentBlocked:
-        return "dlp_output_blocked"
-    except Exception:  # noqa: BLE001 - scanner failure must block publication
-        return "dlp_scan_error"
+        return _Blocked("dlp_output_blocked")
+    except Exception as exc:  # noqa: BLE001 - scanner failure must block publication
+        return _Blocked("dlp_scan_error", _scanner_failure(exc))
     return None
 
 
@@ -517,7 +532,9 @@ def _outcome_of(
         return LLMResult(descriptor, None, True, "empty_response", mode, usage, count)
     failure = _unsafe_output_failure(text, transport.policy)
     if failure is not None:
-        return LLMResult(descriptor, None, True, failure, mode, usage, count)
+        return LLMResult(
+            descriptor, None, True, failure.code, mode, usage, count, failure.detail
+        )
     return LLMResult(descriptor, text.strip(), True, None, mode, usage, count)
 
 
@@ -559,8 +576,10 @@ def _dispatched_call(
     transport = _protected_transport(
         _prompted_system(system_prompt, schema, mode), prompt, schema
     )
-    if isinstance(transport, str):
-        return LLMResult(descriptor, None, False, transport, mode)
+    if isinstance(transport, _Blocked):
+        return LLMResult(
+            descriptor, None, False, transport.code, mode, failure_detail=transport.detail
+        )
     native_schema_json = _native_schema_json(schema, mode)
     return _completed_call(
         descriptor,

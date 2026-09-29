@@ -613,7 +613,7 @@ def test_tool_capture_redacts_and_builds_envelope_before_append(monkeypatch, tmp
         calls.append(("build", kwargs))
         return build_event_envelope(**kwargs)
 
-    def observed_append(slug, session_id, tool, target, operation_id=None, agent=None):
+    def observed_append(slug, session_id, tool, target, operation_id=None, agent=None, budget_seconds=None):
         calls.append(("append", {"slug": slug, "session": session_id, "tool": tool,
                                  "target": target, "operation_id": operation_id,
                                  "agent": agent}))

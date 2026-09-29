@@ -19,6 +19,9 @@ from sync_memory import _run_process_tree
 DEFAULT_DEADLINE_SECONDS = 120.0
 MAX_CHILD_BYTES = 4 * 1024 * 1024
 MAX_ERROR_BYTES = 512
+# The end of doctor's stderr quoted in a failure: what fits in MAX_ERROR_BYTES after the
+# fixed text before it (about 90 bytes), so the cause is not cut off by the bound.
+STDERR_TAIL_CHARS = 400
 EXPECTED_TOOL_NAMES = (
     "recall",
     "read_page",
@@ -110,7 +113,7 @@ def _doctor_report(root: Path, state_root: Path, timeout: float) -> dict[str, ob
 
 def _checked_doctor_report(completed: subprocess.CompletedProcess) -> dict[str, object]:
     """The report, read before the exit code: an `error` exits 2 and must be named."""
-    report = _validate_doctor_report(_parsed_doctor_output(completed.stdout))
+    report = _validate_doctor_report(_parsed_doctor_output(completed))
     if _install_is_broken(report):
         raise SmokeFailure(_doctor_error_message(report))
     if completed.returncode != _EXPECTED_EXIT[report["overall_status"]]:
@@ -139,14 +142,20 @@ def _doctor_error_message(report: dict) -> str:
     )
 
 
-def _parsed_doctor_output(stdout: str) -> object:
-    encoded = stdout.encode("utf-8", errors="replace")
+def _parsed_doctor_output(completed: subprocess.CompletedProcess) -> object:
+    encoded = completed.stdout.encode("utf-8", errors="replace")
     if len(encoded) > MAX_CHILD_BYTES:
         raise SmokeFailure("Doctor output exceeded the install smoke bound")
     try:
-        return json.loads(stdout)
+        return json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
-        raise SmokeFailure("Doctor did not return valid JSON") from exc
+        raise SmokeFailure(f"Doctor did not return valid JSON ({_doctor_reply_cause(completed)})") from exc
+
+
+def _doctor_reply_cause(completed: subprocess.CompletedProcess) -> str:
+    """What doctor gave instead of a report: its exit code and the end of its stderr."""
+    tail = (completed.stderr or "").strip()[-STDERR_TAIL_CHARS:]
+    return f"exit {completed.returncode}; stderr: {tail or '(empty)'}"
 
 
 async def _mcp_tools(root: Path, state_root: Path, timeout: float) -> tuple[str, ...]:
@@ -265,6 +274,11 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=DEFAULT_DEADLINE_SECONDS,
     )
+    parser.add_argument(
+        "--report",
+        type=Path,
+        help="Write the JSON report to this file instead of stdout (the installers keep it in logs/).",
+    )
     args = parser.parse_args(argv)
     try:
         report = run_smoke(
@@ -276,8 +290,21 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(_bounded_error(error))
         return 1
     sys.stderr.write(_vault_findings_note(report.get("doctor", {})))
-    print(json.dumps(report, ensure_ascii=False, sort_keys=True, allow_nan=False))
+    _emit_report(json.dumps(report, ensure_ascii=False, sort_keys=True, allow_nan=False), args.report)
     return 0
+
+
+def _emit_report(encoded: str, destination: Path | None) -> None:
+    """The report is for a machine: stdout by default, a file when an installer asks.
+
+    An installer's operator reads the stderr lines; the whole report printed into
+    the terminal buried them (clig.dev: output that drowns what matters).
+    """
+    if destination is None:
+        print(encoded)
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(encoded + "\n", encoding="utf-8")
 
 
 def _vault_findings_note(doctor: dict) -> str:

@@ -2033,7 +2033,8 @@ def _run_graph_backend(
         )
     except (TimeoutError, GenerationSealChanged):
         raise
-    except Exception:  # noqa: BLE001 - a broken graph degrades one signal only
+    except Exception as exc:  # noqa: BLE001 - a broken graph degrades one signal only
+        _note_degradation("graph_backend", exc)
         return None, False, False, "graph_error"
     return _prepared_graph_outcome(
         raw_hits,
@@ -2388,7 +2389,8 @@ def _apply_reranking(
         trace.optional_reason = stopped.reason
     except TimeoutError:
         raise
-    except Exception:  # noqa: BLE001 - a failed reranker keeps the fused order
+    except Exception as exc:  # noqa: BLE001 - a failed reranker keeps the fused order
+        _note_degradation("reranker", exc)
         trace.fallback_reason = "reranker_error"
     return tuple(candidates)
 
@@ -4562,7 +4564,8 @@ def _neighbour_boost_or_none(
         return _neighbour_boost_hits(lexical_backend, filters)
     except TimeoutError:
         raise
-    except Exception:  # noqa: BLE001 - the graph signal degrades on its own
+    except Exception as exc:  # noqa: BLE001 - the graph signal degrades on its own
+        _note_degradation("graph_neighbours", exc)
         return None
 
 

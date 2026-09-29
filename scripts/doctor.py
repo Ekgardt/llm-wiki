@@ -38,7 +38,7 @@ from reliable_memory import (
     read_runtime_bytes,
     streamed_rows,
 )
-from secret_redact import describe_error
+from secret_redact import describe_error, describe_error_chain
 from settings import (
     DEFAULT_SOURCE,
     SettingsError,
@@ -2087,10 +2087,35 @@ def _queue_pending_work(states: dict[str, int], details: dict) -> bool:
 # weekly that would export them had not run since 09-13 (audit 2026-09-27 B-13,
 # docs/research/2026-09-27-a-dead-task-counts-until-it-is-resolved.md). The age
 # is shown, not used to hide.
+#
+# A dead task with a redrive that was not cancelled is resolved by that redrive: it
+# succeeded, it is queued again (and counted as ready), or it died and is counted
+# itself. Counting the parent too named 25 captures on 2026-09-28 whose redrives had
+# all been answered (docs/research/2026-09-28-a-check-names-its-cause.md).
 def _dead_backlog(rows: list[sqlite3.Row], now: datetime) -> tuple[int, int | None]:
-    """(dead tasks in the queue, age in days of the oldest)."""
-    moments = [_dead_moment(row) for row in rows if row["state"] == "dead"]
-    return len(moments), _oldest_age_days([moment for moment in moments if moment is not None], now)
+    """(dead tasks no live or finished redrive answers, age in days of the oldest)."""
+    answered = _redriven_ids(rows)
+    moments = [_dead_moment(row) for row in rows if _unanswered_dead(row, answered)]
+    return len(moments), _oldest_age_days(_known(moments), now)
+
+
+def _known(moments: list[datetime | None]) -> list[datetime]:
+    return [moment for moment in moments if moment is not None]
+
+
+def _unanswered_dead(row: sqlite3.Row, answered: set[str]) -> bool:
+    return row["state"] == "dead" and row["id"] not in answered
+
+
+def _redriven_ids(rows: list[sqlite3.Row]) -> set[str]:
+    """Tasks that a redrive other than a cancelled one names as its origin."""
+    if not rows or "redrive_of" not in rows[0].keys():
+        return set()
+    return {row["redrive_of"] for row in rows if _answers_its_origin(row)}
+
+
+def _answers_its_origin(row: sqlite3.Row) -> bool:
+    return bool(row["redrive_of"]) and row["state"] != "cancelled"
 
 
 def _oldest_age_days(moments: list[datetime], now: datetime) -> int | None:
@@ -2145,12 +2170,20 @@ def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
         details["budget_exhausted"] = True
     status = _queue_status(states, details, scan.unknown_state, scan.corrupt_metadata)
     _append_queue_deletion_codes(details)
-    message = (
-        "Queue state is healthy."
-        if status == "ok"
-        else "Queue state requires operator attention."
+    return _result("queue", status, _queue_message(status, details), details)
+
+
+def _queue_message(status: str, details: dict) -> str:
+    """What needs attention, by name: a vague line left the owner nothing to act on."""
+    if status == "ok":
+        return "Queue state is healthy."
+    dead = details.get("dead_unresolved")
+    if not dead:
+        return "Queue state requires operator attention."
+    return (
+        f"{dead} dead queue task(s) no redrive has answered, the oldest "
+        f"{details.get('oldest_dead_days')} day(s) old."
     )
-    return _result("queue", status, message, details)
 
 
 def _empty_archive_details() -> dict:
@@ -2956,6 +2989,15 @@ _PYRIGHT_ACTIONS = MappingProxyType(
         "pyright_repository_config_too_deep": (
             "flatten the repository's [tool.pyright] settings"
         ),
+        # Pyright starts only a regular `node` file on a local path whose parent
+        # directories are real directories: a symbolic link or a network path is
+        # refused, so what runs is the file that was checked. Named here because the
+        # code alone left the owner nothing to act on (2026-09-28).
+        "pyright_node_executable_unsafe": (
+            "the first `node` on PATH is a symbolic link, sits under a linked or "
+            "network directory, or is not a regular file; put a regular node binary "
+            "on a local path first on PATH"
+        ),
     }
 )
 _PYRIGHT_INSTALL_ACTION = (
@@ -3013,8 +3055,9 @@ def _pyright_check(
             "Pyright discovery did not complete before the deadline.",
             details,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - a health check names the cause and goes on
         details["status"] = "unsafe"
+        details["error"] = describe_error(exc)
         codes.append("pyright_unsafe")
         return _result(
             "pyright",
@@ -4737,11 +4780,22 @@ def _deferred_sentence(details: dict) -> str:
     )
 
 
+# The totals are cumulative and the verdict is about the last seven days
+# (`capture_diagnostics.CAPTURE_RECENT_SECONDS`): a degraded line that gave only the
+# total read as a count that keeps the install in warning forever. It says both.
+# See docs/research/2026-09-28-a-check-names-its-cause.md.
+def _recent_loss_message(lost: int, details: dict) -> str:
+    return (
+        f"{lost} capture(s) have been lost in total; the last at {details.get('last_at')}, "
+        f"within the last seven days.{_deferred_sentence(details)}"
+    )
+
+
 def _capture_loss_result(lost: int, live: bool, details: dict) -> dict:
     """The capture verdict, once the diagnostics themselves have been read."""
     suffix = _deferred_sentence(details)
     if live:
-        return _result("capture", "degraded", f"{lost} capture(s) were lost.{suffix}", details)
+        return _result("capture", "degraded", _recent_loss_message(lost, details), details)
     if lost:
         return _result(
             "capture",
@@ -4781,7 +4835,8 @@ def _tool_failure_check(state_root: Path, deadline: float) -> dict:
     return _result(
         "tools",
         "degraded",
-        f"{failed} tool call(s) or telemetry write(s) failed; see `logs/capture-failures.jsonl`.",
+        f"{failed} tool call(s) or telemetry write(s) have failed in total; the last at "
+        f"{details['last_at']}, within the last seven days. See `logs/capture-failures.jsonl`.",
         details,
     )
 
@@ -4919,22 +4974,42 @@ def _capture_check(root: Path, state_root: Path, deadline: float) -> dict:
             + state_size_hint(state_root),
             details,
         )
-    adoption = _adoption_state(root, state_root)
+    adoption, details["adoption_error"] = _adoption_state(root, state_root)
     details["adoption_state"] = adoption
-    if adoption not in {"adopted", "unknown"}:
-        return _result("capture", "degraded", _capture_disabled_message(adoption), details)
-    return _capture_loss_result(lost, live, details)
+    return _adoption_result(adoption, details) or _capture_loss_result(lost, live, details)
 
 
-def _adoption_state(root: Path, state_root: Path) -> str:
-    """The Reliability V3 adoption state, from the two records under run/, or unknown."""
-    from installed_memory_repair import inspect_installed_vault
+def _adoption_result(adoption: str, details: dict[str, Any]) -> dict | None:
+    """The capture verdict the adoption state decides, or None when it decides nothing."""
+    if adoption == "unreadable":
+        return _result("capture", "degraded", _adoption_unreadable_message(details), details)
+    if adoption in {"adopted", "unknown"}:
+        return None
+    return _result("capture", "degraded", _capture_disabled_message(adoption), details)
+
+
+def _adoption_state(root: Path, state_root: Path) -> tuple[str, str | None]:
+    """The Reliability V3 adoption state and the cause of a failed read, from run/."""
+    from installed_memory_repair import describe_failure, inspect_installed_vault
 
     try:
         report = inspect_installed_vault(root=root, state_root=state_root)
-    except Exception:  # noqa: BLE001 - a health check never raises
-        return "unknown"
-    return str(report.get("details", {}).get("adoption_state") or "unknown")
+    except Exception as exc:  # noqa: BLE001 - a health check never raises; it names the cause
+        return "unknown", describe_failure(exc)
+    details = report.get("details", {})
+    return str(details.get("adoption_state") or "unknown"), details.get("error")
+
+
+def _adoption_unreadable_message(details: dict[str, Any]) -> str:
+    """A busy or locked record is not a verdict on adoption: never say capture is disabled.
+
+    See docs/research/2026-09-28-a-check-names-its-cause.md.
+    """
+    return (
+        "The Reliability V3 records could not be read just now "
+        f"({details.get('adoption_error')}); this is not a finding that capture is "
+        "disabled. Run doctor again."
+    )
 
 
 def _capture_disabled_message(adoption: str) -> str:
@@ -5351,11 +5426,16 @@ def _unit_limit_verdict(home: Path) -> tuple[str, str] | None:
     stale = [kind for kind, limit in _installed_unit_limits(home).items() if limit != _expected_unit_limit(kind)]
     if not stale:
         return None
+    # The installer replaces units edited outside it, keeps the edited copy and moves a
+    # line added by hand into a drop-in, so rerunning it is the whole advice
+    # (docs/research/2026-09-28-an-update-replaces-what-it-owns.md).
     return (
         "degraded",
         "Installed maintenance units are older than this release ("
         + ", ".join(stale)
-        + " time limit); rerun the installer.",
+        + " time limit); rerun the installer. It replaces the units even if they were "
+        "edited by hand, keeps the edited copy under run/install/displaced/, and moves an "
+        "added setting into a drop-in (<unit>.d/50-local.conf).",
     )
 
 
@@ -6284,6 +6364,22 @@ def _integration_host_configs(
     }
 
 
+# Codex runs a hook only after a person approves it in Codex (`/hooks`); nothing an
+# installer writes stands in for that approval. Said once, in the words of the step,
+# instead of a reason code (2026-09-28, docs/research/2026-09-28-a-check-names-its-cause.md).
+_CODEX_TRUST_STEP = (
+    "Codex has not been told to trust the LLM-Wiki hooks: open Codex, run /hooks, and "
+    "trust the LLM-Wiki commands. Codex asks a person for this; the installer cannot."
+)
+_CODEX_TRUST_REASONS = frozenset({"runtime_hooks_untrusted", "runtime_hooks_modified"})
+
+
+def _codex_trust_message(reason: str, message: str) -> str:
+    if reason not in _CODEX_TRUST_REASONS:
+        return message
+    return f"{_CODEX_TRUST_STEP} {message}"
+
+
 def _codex_degraded_result(root: Path, home: Path, reason: str) -> dict[str, object]:
     wrapper = _codex_wrapper_configured(root, home)
     message = "Official Codex hooks are not verified and no capture fallback is configured."
@@ -6293,7 +6389,7 @@ def _codex_degraded_result(root: Path, home: Path, reason: str) -> dict[str, obj
         capture_mode = "wrapper-fallback-heartbeat-only"
     result: dict[str, object] = {
         "status": "degraded",
-        "message": message,
+        "message": _codex_trust_message(reason, message),
         "reason": reason,
         "capture_mode": capture_mode,
     }
@@ -8346,12 +8442,11 @@ def _adoption_check(root: Path, state_root: Path) -> dict:
     reported only the symptoms. This reads two small records and `lstat`s two
     paths, so no bound on `run/state.json` can hide it.
     """
-    from installed_memory_repair import (
-        ReliabilityV3ValidationError,
-        require_reliability_v3_adopted,
+    from installed_memory_repair import ReliabilityV3ValidationError
+    from markdown_transaction import (
+        _reliability_v3_records_present,
+        require_adopted_through_contention,
     )
-    from markdown_transaction import _reliability_v3_records_present
-    from secret_redact import describe_error_chain
 
     if not _reliability_v3_records_present(state_root):
         message = "Reliability V3 is not adopted here; writers use the legacy path."
@@ -8363,7 +8458,7 @@ def _adoption_check(root: Path, state_root: Path) -> dict:
         "quarantined_candidates": _quarantined_candidates(state_root),
     }
     try:
-        require_reliability_v3_adopted(root=root, state_root=state_root)
+        require_adopted_through_contention(Path(root), state_root)
     except ReliabilityV3ValidationError as exc:
         details.update(code=exc.code, cause=describe_error_chain(exc))
         message = _adoption_refusal_message(exc.code, details["cause"], strays)

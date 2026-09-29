@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import re
@@ -19,7 +20,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from daily_log_append import BREADCRUMB_APPEND_BUDGET_SECONDS
+from daily_log_append import BACKGROUND_APPEND_BUDGET_SECONDS, BREADCRUMB_APPEND_BUDGET_SECONDS
 from event_envelope import EventEnvelope, build_event_envelope
 from maybe_compile import spawn_compile_if_idle
 from memory_state import MAX_CAPTURE_INTENT_BYTES, ROOT, STATE_ROOT, spawn_detached, update_state
@@ -48,6 +49,12 @@ _BREADCRUMB_DELEGATE_TIMEOUT = BREADCRUMB_APPEND_BUDGET_SECONDS + DELEGATE_START
 DELEGATE_TIMEOUTS = {
     "user_prompt_capture.py": _BREADCRUMB_DELEGATE_TIMEOUT,
     "post_tool_capture.py": _BREADCRUMB_DELEGATE_TIMEOUT,
+}
+# A hook the host runs in the background (`async: true`) has no host limit to stay
+# under; its delegate gets the background append budget and the same start-up time
+# (docs/research/2026-09-29-a-tool-breadcrumb-waits-in-the-background.md).
+BACKGROUND_DELEGATE_TIMEOUTS = {
+    "post_tool_capture.py": BACKGROUND_APPEND_BUDGET_SECONDS + DELEGATE_STARTUP_SECONDS,
 }
 # The unattended queue drain's ceiling; the nightly step it runs in is bounded separately. basis unknown — value predates measurement; review when the nightly queue step reports this drain timing out.
 MAINTENANCE_DRAIN_TIMEOUT_SECONDS = 600
@@ -522,6 +529,7 @@ def _run_delegate(
     *,
     forward_stdout: bool = False,
     project_dir: Path | None = None,
+    background: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     if name not in DELEGATES:
         raise ValueError("invalid integration delegate")
@@ -529,7 +537,7 @@ def _run_delegate(
     if project_dir is not None:
         env["CLAUDE_PROJECT_DIR"] = str(project_dir)
     result = subprocess.run(
-        [sys.executable, str(SCRIPTS_DIR / name)],
+        [sys.executable, str(SCRIPTS_DIR / name), *_delivery_arguments(background)],
         cwd=str(ROOT),
         env=env,
         input=json.dumps(payload, ensure_ascii=False),
@@ -538,11 +546,21 @@ def _run_delegate(
         encoding="utf-8",
         errors="replace",
         check=False,
-        timeout=DELEGATE_TIMEOUTS.get(name, DELEGATE_TIMEOUT_SECONDS),
+        timeout=_delegate_timeout(name, background),
     )
     _forward_delegate_stdout(result, forward_stdout)
     _record_failed_delegate(name, result)
     return result
+
+
+def _delivery_arguments(background: bool) -> list[str]:
+    return ["--background"] if background else []
+
+
+def _delegate_timeout(name: str, background: bool) -> float:
+    if background and name in BACKGROUND_DELEGATE_TIMEOUTS:
+        return BACKGROUND_DELEGATE_TIMEOUTS[name]
+    return DELEGATE_TIMEOUTS.get(name, DELEGATE_TIMEOUT_SECONDS)
 
 
 def _record_failed_delegate(name: str, result: subprocess.CompletedProcess[str]) -> None:
@@ -2645,8 +2663,12 @@ def _ingest_post_tool(
     result: dict[str, Any],
     force_stub: bool,
     trigger: str | None,
+    *,
+    background: bool = False,
 ) -> None:
-    _run_delegate("post_tool_capture.py", payload, project_dir=project_dir)
+    _run_delegate(
+        "post_tool_capture.py", payload, project_dir=project_dir, background=background
+    )
 
 
 def _capture_path_is_beneath(path: Path, root: Path) -> bool:
@@ -3399,8 +3421,13 @@ def ingest_event(
     *,
     force_stub: bool = False,
     trigger: str | None = None,
+    background: bool = False,
 ) -> dict[str, Any]:
-    """Apply shared lifecycle persistence policy to a normalized envelope."""
+    """Apply shared lifecycle persistence policy to a normalized envelope.
+
+    `background` says the host runs this hook without waiting for it, so the tool
+    breadcrumb may wait out a writer the way a foreground hook cannot.
+    """
     _observe_checkpoint_fail_open(envelope)
     payload = _canonical_capture_payload(envelope)
     slug, project_dir = _project_context(envelope)
@@ -3408,7 +3435,7 @@ def ingest_event(
     handlers = {
         "session_start": _ingest_session_start,
         "user_prompt": _ingest_user_prompt,
-        "post_tool_use": _ingest_post_tool,
+        "post_tool_use": functools.partial(_ingest_post_tool, background=background),
         "pre_compact": _ingest_precompact,
         "session_end": _ingest_session_end,
     }
@@ -3424,6 +3451,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--event")
     parser.add_argument("--delegate")
     parser.add_argument("--checkpoint-type")
+    parser.add_argument("--background", action="store_true")
     parser.add_argument("--maintenance", action="store_true")
     parser.add_argument("--capture-worker", action="store_true")
     parser.add_argument("--running-capture", metavar="PAYLOAD_JSON")
@@ -3559,7 +3587,7 @@ def _dispatch_cli_event(
     if args.delegate and args.delegate != INGESTED_DELEGATES.get(envelope.event_type):
         _run_own_delegate(args, envelope)
         return None
-    result = ingest_event(envelope)
+    result = ingest_event(envelope, background=args.background)
     return _legacy_output(args.source, envelope.event_type, result)
 
 

@@ -864,6 +864,19 @@ def _server_request_result(handler, method: str, message: dict[str, Any]):
     return None
 
 
+def _server_request_failure(method: str, error: BaseException) -> str:
+    """Our warning for a server request we answered with `Internal error`.
+
+    The server is told only `Internal error`: it is an untrusted peer. Our own
+    warning channel is told which exception it was, redacted, so the cause is not
+    dropped. See `docs/research/2026-09-28-a-check-names-its-cause.md`.
+    """
+    from lsp_security import redact_lsp_text
+
+    cause = redact_lsp_text(f"{type(error).__name__}: {error}")
+    return f"server request {method} failed: {cause}"
+
+
 def _raise_cleanup_with_interruption(ownership_error, startup_error, interruption_source) -> None:
     try:
         raise ownership_error from startup_error
@@ -1788,7 +1801,7 @@ class LspProtocol:
         try:
             result = _server_request_result(handler, method, message)
             self._write_message({"jsonrpc": "2.0", "id": request_id, "result": result})
-        except BaseException:
+        except BaseException as exc:
             self._write_message(
                 {
                     "jsonrpc": "2.0",
@@ -1796,6 +1809,7 @@ class LspProtocol:
                     "error": {"code": -32603, "message": "Internal error"},
                 }
             )
+            self._warn(_server_request_failure(method, exc))
 
     def _warn_unknown_notification(self) -> None:
         callback: Callable[[str], None] | None = None

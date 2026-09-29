@@ -11,7 +11,6 @@ docs/research/2026-09-25-a-hook-stops-its-delegate-before-the-host-stops-it.md.
 
 from __future__ import annotations
 
-import argparse
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,7 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 @pytest.fixture
 def paths(monkeypatch) -> list[str]:
     taken: list[str] = []
-    monkeypatch.setattr(integration_adapter, "ingest_event", lambda envelope: taken.append("ingest") or {})
+    monkeypatch.setattr(integration_adapter, "ingest_event", lambda envelope, **_options: taken.append("ingest") or {})
     monkeypatch.setattr(integration_adapter, "_run_own_delegate", lambda args, envelope: taken.append("own"))
     return taken
 
@@ -40,7 +39,7 @@ def paths(monkeypatch) -> list[str]:
     ],
 )
 def test_a_named_delegate_takes_the_path_its_event_needs(paths, event, delegate, expected) -> None:
-    args = argparse.Namespace(source="claude", delegate=delegate)
+    args = integration_adapter._parser().parse_args(["--source", "claude", "--delegate", delegate])
 
     integration_adapter._dispatch_cli_event(args, SimpleNamespace(event_type=event))
 

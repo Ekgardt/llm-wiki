@@ -32,6 +32,7 @@ from reliable_memory import (
     validate_schema,
     validate_state_root,
 )
+from secret_redact import describe_error_chain
 
 if TYPE_CHECKING:
     from operational_ownership import OwnerLease
@@ -2294,17 +2295,65 @@ def _report(
     }
 
 
+# Failures that say the state could not be read at this moment, not that a record is
+# wrong: a live writer's lock, an interrupted read. On 2026-09-28 one of them during an
+# install was reported as `conflict` with no cause, and the installer told the owner
+# capture was off while a second read found the vault adopted. SQLite says busy or
+# locked by its result code (`SQLITE_BUSY` 5, `SQLITE_LOCKED` 6; the primary code is
+# the low byte of an extended one); Python 3.10 does not expose the code, so there
+# every `OperationalError` counts as busy, the earlier and wider reading.
+_UNREADABLE_NOW = (TimeoutError, BlockingIOError, InterruptedError)
+_SQLITE_BUSY_CODES = frozenset({5, 6})
+# Absolute paths in a cause name private directories; the report is printed and
+# pasted, so they are replaced, and the class and the rest of the message stay.
+# A quoted path (as `OSError` prints one) is taken whole, spaces included.
+_QUOTED_PATH = re.compile(r"'(?:[A-Za-z]:[\\/]|/)[^']*'")
+_ABSOLUTE_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|(?<![\w.])/)[^\s'\"]+")
+# How much of the cause a report carries: one readable line of `Class: message <- Cause`,
+# redacted; the full chain of two causes fits well inside it.
+MAX_INSPECTION_ERROR_CHARS = 600
+
+
 def inspect_installed_vault(*, root: Path, state_root: Path) -> dict[str, object]:
-    """Run bounded Reliability V3 validation without creating or mutating state."""
+    """Run bounded Reliability V3 validation without creating or mutating state.
+
+    A failure is reported with its cause, and a state that could not be read now
+    (`unreadable`) is told apart from records that disagree (`conflict`).
+    See docs/research/2026-09-28-a-check-names-its-cause.md.
+    """
     try:
         return _inspect_installed_vault(root=Path(root), state_root=Path(state_root))
-    except Exception:  # noqa: BLE001 - closed read-only inspection envelope
-        return _report(
-            mode="check",
-            status="error",
-            state="conflict",
-            blockers=["reliability_v3_record_invalid"],
-        )
+    except Exception as exc:  # noqa: BLE001 - read-only inspection reports its cause
+        return _failed_inspection(exc)
+
+
+def describe_failure(exc: BaseException) -> str:
+    """The redacted cause chain without absolute paths, bounded for a report line."""
+    quoted = _QUOTED_PATH.sub("'<path>'", describe_error_chain(exc))
+    described = _ABSOLUTE_PATH.sub("<path>", quoted)
+    return described[:MAX_INSPECTION_ERROR_CHARS]
+
+
+def _unreadable_now(exc: Exception) -> bool:
+    """Busy or locked now, as opposed to a record that is wrong."""
+    if isinstance(exc, _UNREADABLE_NOW):
+        return True
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    code = getattr(exc, "sqlite_errorcode", None)
+    return code is None or code & 0xFF in _SQLITE_BUSY_CODES
+
+
+def _failed_inspection(exc: Exception) -> dict[str, object]:
+    unreadable = _unreadable_now(exc)
+    report = _report(
+        mode="check",
+        status="error",
+        state="unreadable" if unreadable else "conflict",
+        blockers=["reliability_v3_state_unreadable" if unreadable else "reliability_v3_record_invalid"],
+    )
+    report["details"]["error"] = describe_failure(exc)
+    return report
 
 
 def _inspect_installed_vault(*, root: Path, state_root: Path) -> dict[str, object]:
@@ -2505,12 +2554,20 @@ def repair_installed_vault(
     )
 
 
+def _inspection_failure(inspection: dict[str, object]) -> str:
+    """The failed inspection's blockers and cause, so the adoption refusal says why."""
+    details = inspection.get("details", {})
+    codes = ", ".join(str(item.get("code")) for item in inspection.get("blockers", []))
+    cause = details.get("error") if isinstance(details, dict) else None
+    return f"Reliability V3 inspection failed: {codes}" + (f" ({cause})" if cause else "")
+
+
 def _apply_reliability_v3_adoption(*, root: Path, state_root: Path) -> bool:
     inspection = inspect_installed_vault(root=root, state_root=state_root)
     status = inspection.get("overall_status")
     state = inspection.get("details", {}).get("adoption_state")
     if status == "error":
-        raise ValueError("Reliability V3 inspection failed")
+        raise ValueError(_inspection_failure(inspection))
     if state == "adopted":
         return False
     _require_adoptable_state(state)

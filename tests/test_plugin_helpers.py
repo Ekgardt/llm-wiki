@@ -358,7 +358,7 @@ def test_lifecycle_cli_delegate_uses_shared_ingest_boundary(
     monkeypatch.setattr(
         integration_adapter,
         "ingest_event",
-        lambda event: calls.append(event) or {"capture_intent_ids": ["1" * 64]},
+        lambda event, **_options: calls.append(event) or {"capture_intent_ids": ["1" * 64]},
     )
     monkeypatch.setattr(
         integration_adapter,
@@ -367,7 +367,7 @@ def test_lifecycle_cli_delegate_uses_shared_ingest_boundary(
             AssertionError("lifecycle delegate bypassed shared ingestion")
         ),
     )
-    args = SimpleNamespace(source="claude", event=event_type, delegate=delegate)
+    args = SimpleNamespace(source="claude", event=event_type, delegate=delegate, background=False)
 
     assert integration_adapter._dispatch_cli_event(args, envelope) is None
     assert calls == [envelope]

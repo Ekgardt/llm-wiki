@@ -214,9 +214,9 @@ def test_parse_report_refuses_what_it_cannot_parse():
 
 def test_error_ranges_are_bounded_in_count():
     import path_coverage
-    from code_graph import _get_parser
+    from code_graph import _parser_attempt
 
-    parser = _get_parser("javascript")
+    parser, _cause = _parser_attempt("javascript")
     if parser is None:
         pytest.skip("tree-sitter javascript grammar unavailable")
     source = "".join(f"function f{i}( {{\n" for i in range(path_coverage.PARSE_ERROR_LIMIT + 5))

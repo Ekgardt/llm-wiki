@@ -303,6 +303,24 @@ def _ignored_environment(root: Path, override: str | None) -> str | None:
     return str(chosen)
 
 
+# The extras every install brings. The installer's models step fetches the e5
+# weights whenever their runtime is present, and the read path embeds with them;
+# a baseline-only sync left `onnxruntime` out, so the weights were never used and
+# doctor reported the missing runtime on every install. `semantic` costs about
+# 22 MB from uv.lock (onnxruntime 18.7 MB, tokenizers 3.3 MB; numpy and
+# huggingface-hub are already baseline). `reranker` stays the operator's choice:
+# torch alone is 526.6 MB plus about 800 MB of CUDA wheels on Linux.
+# `tests/test_the_installer_brings_the_runtime_of_every_model_it_fetches.py`
+# holds this to `install_models.pinned_models`; the nightly update keeps it
+# through `self_update.chosen_extras`.
+# See docs/research/2026-09-28-a-check-names-its-cause.md.
+DEFAULT_EXTRAS = ("semantic",)
+
+
+def _extra_arguments(extras: Sequence[str]) -> list[str]:
+    return [argument for extra in extras for argument in ("--extra", extra)]
+
+
 def uv_sync_arguments(root: Path, override: str | None) -> tuple[Path, list[str]]:
     root = Path(root).resolve()
     environment = resolve_uv_project_environment(root, override)
@@ -317,6 +335,7 @@ def uv_sync_arguments(root: Path, override: str | None) -> tuple[Path, list[str]
         "--locked",
         "--no-default-groups",
         "--quiet",
+        *_extra_arguments(DEFAULT_EXTRAS),
     ]
     if (environment / "pyvenv.cfg").is_file():
         arguments.append("--inexact")

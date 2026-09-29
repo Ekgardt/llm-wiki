@@ -118,7 +118,7 @@ REGISTRY: tuple[Setting, ...] = (
     Setting("retention", "report_bytes", 32 * MIB, "bytes", _REPORT_REASON + "; the only bound on the scheduler's own log"),
     Setting("retention", "telemetry_days", 90, "days", "retrieval telemetry is kept for the archive's 90 hot days"),
     Setting("retention", "benchmark_run_days", 30, "days", "a benchmark run directory is evidence for the report written from it"),
-    Setting("retention", "config_backup_days", 90, "days", "agent-config backups undo an installer rewrite; the archive's 90 hot days"),
+    Setting("retention", "config_backup_days", 90, "days", "agent-config backups and displaced owned files undo an installer rewrite; the archive's 90 hot days"),
     Setting("provider", "draft_ceiling_seconds", 600, "seconds", _DRAFT_CEILING_REASON),
     Setting("mcp", "retrieval_seconds", 14, "seconds", _RETRIEVAL_BUDGET_REASON, lower=5),
 )
