@@ -29,7 +29,10 @@ param(
     [switch]$ReplaceCodexMcp,
     # The operator takes over a file changed outside the installer as it is now;
     # see docs/research/2026-09-28-a-rollback-undoes-only-what-it-did.md.
-    [string[]]$Adopt = @()
+    [string[]]$Adopt = @(),
+    # The memory model, checked with one short call; without it the installer asks on
+    # a console. See docs/research/2026-09-29-the-installer-asks-which-model.md.
+    [string]$Model = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -319,6 +322,7 @@ if ($scriptDirectory -and (Test-Path -LiteralPath (Join-Path $scriptDirectory "p
     if ($ConfirmAllAgentsStopped) { $reexecArguments += "-ConfirmAllAgentsStopped" }
     if ($ReplaceCodexMcp) { $reexecArguments += "-ReplaceCodexMcp" }
     foreach ($resourceId in $Adopt) { $reexecArguments += @("-Adopt", $resourceId) }
+    if ($Model) { $reexecArguments += @("-Model", $Model) }
     try {
         & $hostExecutable @reexecArguments
         $nativeExit = $LASTEXITCODE
@@ -487,6 +491,22 @@ New-Item -ItemType Directory -Path "$STATE_ROOT\run" -Force | Out-Null
 New-Item -ItemType Directory -Path "$STATE_ROOT\logs" -Force | Out-Null
 New-Item -ItemType Directory -Path "$STATE_ROOT\cache" -Force | Out-Null
 Ok "LLM_WIKI_ROOT set (User scope); runtime at $STATE_ROOT\{run,logs,cache} (gitignored)"
+
+# --- 5a. Choose the memory model ---------------------------------
+
+# The provider's own list (Claude: each alias asked once); the answer is exported so
+# the install transaction persists it into the hooks' env and the scheduled tasks.
+Info "Choosing the model the memory pipeline calls..."
+$chooserArgs = @("run", "--locked", "--no-sync", "--directory", $VAULT_ROOT, "python",
+    (Join-Path $VAULT_ROOT "scripts\choose_model.py"), "--home", $env:USERPROFILE)
+if ($Model) { $chooserArgs += @("--model", $Model) }
+$modelChoice = (& uv @chooserArgs | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) { Fail "Model choice failed" }
+$modelAnswer = $modelChoice | ConvertFrom-Json
+if ($modelAnswer.variable -and $modelAnswer.model) {
+    Set-Item -Path "Env:$($modelAnswer.variable)" -Value $modelAnswer.model
+    Ok "Memory model: $($modelAnswer.model)"
+}
 
 # --- 6. Register Task Scheduler -----------------------------------
 

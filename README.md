@@ -121,6 +121,11 @@ runs it with `--apply --adopt-ownership-v3 --confirm-all-agents-stopped` to move
 runtime to its current database format; on a vault that already holds work it asks you
 to confirm that no agent is running first. It never deletes knowledge or `run/`.
 
+The installer asks which model the memory pipeline calls, from those your provider
+answers with (for Claude each of `sonnet`, `opus`, `haiku`, `fable` is asked once);
+Enter keeps the last choice. Without a terminal, `--model <name>` (`-Model` on
+Windows) sets it, else the last choice or the provider's default stays.
+
 Code navigation for another language is one command each, when you need it:
 
 ```bash

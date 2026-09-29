@@ -38,6 +38,10 @@ CODEX_MCP_STATE=unverified
 SCHEDULER_MODE=native
 EXPECT_SCHEDULER_VALUE=0
 EXPECT_ADOPT_VALUE=0
+EXPECT_MODEL_VALUE=0
+# `--model <name>`: the memory model, checked with one short call; without it the
+# installer asks on a terminal (docs/research/2026-09-29-the-installer-asks-which-model.md).
+MODEL_ARGS=()
 # `--adopt <resource-id>`: the operator takes over a file changed outside the installer as it
 # is now; see docs/research/2026-09-28-a-rollback-undoes-only-what-it-did.md.
 ADOPT_ARGS=()
@@ -63,6 +67,11 @@ for argument in "$@"; do
     EXPECT_ADOPT_VALUE=0
     continue
   fi
+  if [[ "$EXPECT_MODEL_VALUE" -eq 1 ]]; then
+    MODEL_ARGS=(--model "$argument")
+    EXPECT_MODEL_VALUE=0
+    continue
+  fi
   case "$argument" in
     --protect-push) PROTECT_PUSH=1 ;;
     --confirm-all-agents-stopped) AGENTS_STOPPED=1 ;;
@@ -71,11 +80,14 @@ for argument in "$@"; do
     --scheduler=*) SCHEDULER_MODE="${argument#--scheduler=}" ;;
     --adopt) EXPECT_ADOPT_VALUE=1 ;;
     --adopt=*) ADOPT_ARGS+=(--adopt "${argument#--adopt=}") ;;
+    --model) EXPECT_MODEL_VALUE=1 ;;
+    --model=*) MODEL_ARGS=(--model "${argument#--model=}") ;;
     *) fail "Unknown installer argument: $argument" ;;
   esac
 done
 [[ "$EXPECT_SCHEDULER_VALUE" -eq 0 ]] || fail "--scheduler requires native or cron"
 [[ "$EXPECT_ADOPT_VALUE" -eq 0 ]] || fail "--adopt requires a resource id"
+[[ "$EXPECT_MODEL_VALUE" -eq 0 ]] || fail "--model requires a model name"
 case "$SCHEDULER_MODE" in
   native|cron) ;;
   *) fail "--scheduler requires native or cron" ;;
@@ -579,6 +591,21 @@ if [ "$CLAUDE_SETTINGS" -eq 1 ]; then
 fi
 if [ "$CODEX_HOOKS_OWNED" -eq 1 ]; then
   IDE_HOOK_ARGS+=(--codex-hooks)
+fi
+
+# ─── 5a. Choose the memory model ───────────────────────────────────
+
+# The provider's own list (Claude: each alias asked once); the answer is exported so
+# the install transaction persists it into the hooks' env and the scheduler units.
+info "Choosing the model the memory pipeline calls..."
+MODEL_CHOICE="$(uv run --locked --no-sync --directory "$VAULT_ROOT" python \
+  "$VAULT_ROOT/scripts/choose_model.py" --home "$HOME" \
+  ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"})" || fail "Model choice failed"
+MODEL_VARIABLE="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["variable"])' "$MODEL_CHOICE")"
+MODEL_VALUE="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["model"])' "$MODEL_CHOICE")"
+if [ -n "$MODEL_VARIABLE" ] && [ -n "$MODEL_VALUE" ]; then
+  export "$MODEL_VARIABLE=$MODEL_VALUE"
+  ok "Memory model: $MODEL_VALUE"
 fi
 
 # ─── 6. Set up scheduled maintenance ────────────────────────────────

@@ -1,6 +1,11 @@
 # The installer asks which model
 
-Date: 2026-09-29. Status: decided; implemented in the same change.
+Date: 2026-09-29. Status: implemented (`scripts/choose_model.py`, step 5a of both installers).
+
+Not covered: OpenCode's model is set in OpenCode's own configuration and our client
+sends none, so the chooser names that instead of offering a list. The shape of
+`codex debug models` was not seen on a real Codex here; the reader accepts a list or
+an object holding `models`, with `slug`, `id`, `model` or `name`.
 
 ## The owner's requirement
 

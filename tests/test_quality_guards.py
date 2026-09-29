@@ -527,7 +527,7 @@ _ARCHITECTURE_REQUIRED = (
     "MCP READS + ACTIONS",
     "LLM BACKEND (CLASSIFY + COMPILE ONLY)",
     "5 backends including Ollama",
-    "### Optional semantic tier",
+    "### Semantic tier",
     "### Hybrid tier",
 )
 # The casefolded tuples are compared with the casefolded document.

@@ -113,6 +113,10 @@ uv run --locked --no-sync python scripts/repair_installed_memory.py --check --js
 当前的数据库格式；若知识库中已有工作，会先请你确认没有代理在运行。它从不删除知识
 或 `run/`。
 
+安装程序会询问记忆流水线调用哪个模型，只列出你的提供方能应答的模型（Claude 的
+`sonnet`、`opus`、`haiku`、`fable` 各试调一次）；按回车保留上次的选择。没有终端时，
+用 `--model <名称>`（Windows 上为 `-Model`）指定，否则保留上次的选择或提供方的默认模型。
+
 其他语言的代码导航按需安装，每种语言一条命令：
 
 ```bash

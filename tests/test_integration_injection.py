@@ -4345,10 +4345,11 @@ def test_install_scripts_generate_context(tmp_path):
                 ("session_start_context", install_sh, True),
                 ("sync-args", install_sh, True),
                 ("sync-args", install_ps1, True),
+                # The sync plan itself (--locked --no-default-groups --extra full) is
+                # pinned in tests/test_dependency_environments.py; the installers take it
+                # from `installer_config.py sync-args`.
                 ("--locked", install_sh, True),
-                ("--no-default-groups", install_sh, True),
                 ("--locked", install_ps1, True),
-                ("--no-default-groups", install_ps1, True),
             )
         )
         == []

@@ -706,6 +706,7 @@
   "test_the_install_checks_itself_last.py": 0.03,
   "test_the_installed_check_reads_every_row.py": 1.0,
   "test_the_installed_choice_of_provider_travels_whole.py": 0.01,
+  "test_the_installer_asks_which_model.py": 1.22,
   "test_the_installer_brings_the_runtime_of_every_model_it_fetches.py": 0.01,
   "test_the_installer_does_not_vouch_for_agents_it_cannot_see.py": 0.9,
   "test_the_installer_says_what_it_needs.py": 5.32,
