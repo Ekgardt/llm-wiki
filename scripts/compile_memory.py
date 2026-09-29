@@ -2740,15 +2740,24 @@ def _ledger_bytes(claims: list) -> bytes:
 
 
 def _merged_claims(existing: list, additions: list) -> list:
-    """Existing claims plus the new ones. A repeated id is a conflict."""
+    """Existing claims plus the new ones; a claim the page already holds is kept once.
+
+    The id is the date and the semantic fingerprint, so a day compiled again brings
+    its claims again under the same ids; the page's copy stays, as a repeat inside
+    one run is dropped. One id with another fingerprint is a real conflict.
+    """
     by_id = {str(item["id"]): item for item in existing}
     if len(by_id) != len(existing):
         raise ValueError("target ledger contains a duplicate claim id")
     for record in additions:
-        if str(record["id"]) in by_id:
-            raise ValueError("compile claim id already exists in target ledger")
-        by_id[str(record["id"])] = record
+        _admit_claim(by_id, record)
     return list(by_id.values())
+
+
+def _admit_claim(by_id: dict, record: Mapping[str, object]) -> None:
+    known = by_id.setdefault(str(record["id"]), record)
+    if known.get("fingerprint") != record.get("fingerprint"):
+        raise ValueError("compile claim id already exists in target ledger")
 
 
 def _with_claim_ledger(page: bytes, records: Sequence[Mapping[str, object]]) -> bytes:
