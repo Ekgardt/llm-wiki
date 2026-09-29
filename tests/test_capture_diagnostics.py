@@ -120,7 +120,7 @@ def test_tool_append_failure_is_recorded(monkeypatch):
     )
     monkeypatch.setattr(__import__("daily_log_append"), "append_daily", _raise_disk_full)
 
-    assert post_tool_capture._append_tool_tag("demo", "session", "Edit", "a.py") is False
+    assert post_tool_capture._append_tool_tag("demo", "session", "Edit", "a.py", budget_seconds=post_tool_capture._append_budget([])) is False
     assert recorded and recorded[0][0] == "post_tool_append"
     assert "OSError" in recorded[0][1]
 

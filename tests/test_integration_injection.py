@@ -1934,7 +1934,7 @@ def test_claude_outer_session_start_preserves_hook_output_contract(monkeypatch, 
     monkeypatch.setattr(
         integration_adapter,
         "ingest_event",
-        lambda _envelope: {"context": "combined context\n"},
+        lambda _envelope, **_options: {"context": "combined context\n"},
     )
     monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
 

@@ -259,6 +259,7 @@
   "test_a_system_config_that_only_says_where_git_may_work.py": 0.01,
   "test_a_task_out_of_attempts_is_dead_not_ready.py": 0.01,
   "test_a_title_lifts_only_the_whole_question.py": 0.0,
+  "test_a_tool_breadcrumb_waits_in_the_background.py": 8.06,
   "test_a_tool_call_in_the_vault_is_captured.py": 2.37,
   "test_a_tool_failure_is_not_a_lost_capture.py": 0.01,
   "test_a_tool_line_is_redacted_before_it_is_cut.py": 0.0,

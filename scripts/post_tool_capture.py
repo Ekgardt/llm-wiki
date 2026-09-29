@@ -180,13 +180,10 @@ def _append_tool_tag(
     operation_id: str | None = None,
     *,
     agent: str = "unknown",
+    budget_seconds: float,
 ) -> bool:
     try:
-        from daily_log_append import (
-            BREADCRUMB_APPEND_BUDGET_SECONDS,
-            append_daily,
-            append_deadline,
-        )
+        from daily_log_append import append_daily, append_deadline
 
         ts = local_now().strftime("%H:%M:%S")
         # One line, as the prompt breadcrumb: a line break in a path is not a line of the log.
@@ -201,7 +198,7 @@ def _append_tool_tag(
             session_id,
             block,
             operation_id=operation_id,
-            deadline=append_deadline(BREADCRUMB_APPEND_BUDGET_SECONDS),
+            deadline=append_deadline(budget_seconds),
         )
         return True
     except Exception as error:  # noqa: BLE001
@@ -295,7 +292,7 @@ def _finish_tool_operation(
         _complete_tool_operation(slug, tool_name, target, operation_id)
 
 
-def _capture_tool(hook: dict) -> None:
+def _capture_tool(hook: dict, budget_seconds: float) -> None:
     context = _tool_context(hook)
     if context is None:
         return
@@ -319,15 +316,25 @@ def _capture_tool(hook: dict) -> None:
         envelope.payload["target"],
         operation_id=operation_id,
         agent=envelope.agent or "unknown",
+        budget_seconds=budget_seconds,
     )
     _finish_tool_operation(
         appended, slug, tool_name, envelope.payload["target"], operation_id
     )
 
 
-def main() -> int:
+def _append_budget(arguments: list[str]) -> float:
+    """The background budget when the host does not wait for this hook, else the hook's."""
+    from daily_log_append import BACKGROUND_APPEND_BUDGET_SECONDS, BREADCRUMB_APPEND_BUDGET_SECONDS
+
+    if "--background" in arguments:
+        return BACKGROUND_APPEND_BUDGET_SECONDS
+    return BREADCRUMB_APPEND_BUDGET_SECONDS
+
+
+def main(arguments: list[str] | None = None) -> int:
     try:
-        _capture_tool(_read_hook_input())
+        _capture_tool(_read_hook_input(), _append_budget(sys.argv[1:] if arguments is None else arguments))
     except Exception as error:  # noqa: BLE001
         record_capture_failure(
             "post_tool_hook", f"{type(error).__name__}: {error}", error=error

@@ -88,7 +88,9 @@ def test_the_tool_breadcrumb_is_given_the_breadcrumb_budget(monkeypatch):
         lambda *_a, deadline=math.inf, **_k: seen.append(_remaining(deadline)),
     )
 
-    post_tool_capture._append_tool_tag("slug", "session", "Bash", "ls")
+    post_tool_capture._append_tool_tag(
+        "slug", "session", "Bash", "ls", budget_seconds=post_tool_capture._append_budget([])
+    )
 
     assert 0 < seen[0] <= daily_log_append.BREADCRUMB_APPEND_BUDGET_SECONDS
 
