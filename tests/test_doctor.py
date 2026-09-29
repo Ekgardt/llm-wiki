@@ -1655,10 +1655,13 @@ def test_run_doctor_uses_supplied_absolute_deadline_after_queue_delay(tmp_path, 
     )
     monkeypatch.setattr(doctor, "_filesystem_check", filesystem)
 
-    with pytest.raises(RuntimeError, match="deadline capture"):
-        doctor.run_doctor(root=root, state_root=state, deadline=50.0)
+    report = doctor.run_doctor(root=root, state_root=state, deadline=50.0)
 
-    assert captured == [50.0]
+    filesystem_check = next(check for check in report["checks"] if check["id"] == "filesystem")
+    assert (captured, filesystem_check["message"]) == (
+        [50.0],
+        "The filesystem check could not finish: RuntimeError: stop after deadline capture",
+    )
 
 
 def test_budget_exhaustion_degrades_overall_and_health_summary(tmp_path):

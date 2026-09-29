@@ -395,3 +395,17 @@ cannot be told after the fact: that is not established. The refusal now names th
 rule markers and their counts, never the matched text, as detect-secrets and
 gitleaks report a rule id with a finding (https://github.com/Yelp/detect-secrets,
 https://github.com/gitleaks/gitleaks). Guard: `tests/test_a_dlp_refusal_names_its_rule.py`.
+
+## Addendum (2026-09-29): the unexplained "not valid JSON" was a v3 queue owner
+
+The smoke's refusal now carries doctor's stderr, and the next live install named
+it: `_count_one_queue_owner` read `row["token"]` and raised `IndexError: No item
+with that key`. The adopted v3 `queue_ownership` table names its columns
+`owner_token`, `process_id` and `domain_role`; doctor read the legacy `token`,
+`pid` and `role`. The table has a row only while a queue worker holds its lease,
+which is why the failure came and went (85 clean runs on 2026-09-28, then a
+worker ran during the install). Doctor now reads the row by the schema it was
+written in, and — the class — every check runs isolated: one that raises becomes
+that check's own `error` naming the exception, and the report is still printed.
+Guards: `tests/test_doctor_reads_a_v3_queue_owner.py` (fails on the old code with
+the same IndexError).

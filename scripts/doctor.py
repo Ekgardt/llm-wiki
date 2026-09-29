@@ -1933,27 +1933,49 @@ def _count_queue_rows(
             details["deletion_codes"].append(code)
 
 
-def _count_owner_role(row: sqlite3.Row, details: dict) -> None:
-    if row["role"] == "worker":
+class _QueueOwnerColumns(NamedTuple):
+    token: str
+    pid: str
+    role: str
+
+
+# The legacy queue and the adopted v3 queue name the same owner facts differently;
+# reading the v3 row by the legacy names raised IndexError and doctor printed no
+# report whenever a v3 worker held the queue (2026-09-29, the installer's smoke).
+_LEGACY_QUEUE_OWNER = _QueueOwnerColumns("token", "pid", "role")
+_V3_QUEUE_OWNER = _QueueOwnerColumns("owner_token", "process_id", "domain_role")
+
+
+def _queue_owner_columns(row: sqlite3.Row) -> _QueueOwnerColumns:
+    if _V3_QUEUE_OWNER.token in row.keys():
+        return _V3_QUEUE_OWNER
+    return _LEGACY_QUEUE_OWNER
+
+
+def _count_owner_role(role: object, details: dict) -> None:
+    if role == "worker":
         details["live_workers"] += 1
-    if row["role"] == "migration":
+    if role == "migration":
         details["live_migrations"] += 1
 
 
-def _count_live_owner_role(row: sqlite3.Row, details: dict, now: datetime) -> None:
+def _count_live_owner_role(
+    row: sqlite3.Row, columns: _QueueOwnerColumns, details: dict, now: datetime
+) -> None:
     """Count the role of an owner row, when its lease is still live."""
-    if not _live_owner(row, now, pid_column="pid"):
+    if not _live_owner(row, now, pid_column=columns.pid):
         return
-    _count_owner_role(row, details)
+    _count_owner_role(row[columns.role], details)
 
 
 def _count_one_queue_owner(row: sqlite3.Row, details: dict, now: datetime) -> None:
-    if row["token"] is None:
+    columns = _queue_owner_columns(row)
+    if row[columns.token] is None:
         return
-    if not _owner_row_known(row, pid_column="pid"):
+    if not _owner_row_known(row, pid_column=columns.pid):
         details["deletion_codes"].append("queue_owner_state_unknown")
         return
-    _count_live_owner_role(row, details, now)
+    _count_live_owner_role(row, columns, details, now)
 
 
 def _count_queue_ownership(
@@ -8679,20 +8701,41 @@ def _collect_checks(
     2026-09-26 B-19, docs/research/2026-09-26-a-check-is-judged-when-it-ends.md).
     """
     runs = [
-        lambda: _environment_check(root_path, state_path),
-        lambda: _runtime_check(state_path),
-        lambda: _adoption_check(root_path, state_path),
-        lambda: _filesystem_check(state_path, deadline),
-        lambda: _transaction_check(state_path, generated_at, deadline, vault_root=root_path),
-        lambda: _queue_check(state_path, generated_at, deadline),
-        lambda: _archive_check(root_path, state_path, deadline),
-        lambda: _claim_check(root_path, state_path, deadline),
+        ("environment", lambda: _environment_check(root_path, state_path)),
+        ("runtime", lambda: _runtime_check(state_path)),
+        ("adoption", lambda: _adoption_check(root_path, state_path)),
+        ("filesystem", lambda: _filesystem_check(state_path, deadline)),
+        (
+            "transactions",
+            lambda: _transaction_check(state_path, generated_at, deadline, vault_root=root_path),
+        ),
+        ("queue", lambda: _queue_check(state_path, generated_at, deadline)),
+        ("archives", lambda: _archive_check(root_path, state_path, deadline)),
+        ("claims", lambda: _claim_check(root_path, state_path, deadline)),
     ]
     runs.extend(
-        _deferred_run(check_id, operation, deadline)
+        (check_id, _deferred_run(check_id, operation, deadline))
         for check_id, operation in _deferrable_checks(root_path, state_path, home_path, generated_at)
     )
-    return [_unfinished_when_late(run(), deadline) for run in runs]
+    return [_unfinished_when_late(_isolated(check_id, run), deadline) for check_id, run in runs]
+
+
+def _isolated(check_id: str, run) -> dict:
+    """A check that raised is that check's error, named; the others still report.
+
+    One unguarded check raised IndexError on a v3 queue owner and doctor printed
+    nothing at all, so the installer's smoke saw no report and stopped the update
+    (2026-09-29).
+    """
+    try:
+        return run()
+    except Exception as error:  # noqa: BLE001 - reported as the check's own error, with its cause
+        return _result(
+            check_id,
+            "error",
+            f"The {check_id} check could not finish: {describe_error(error)}",
+            {"exception": type(error).__name__},
+        )
 
 
 def _deferred_run(check_id: str, operation, deadline: float):
