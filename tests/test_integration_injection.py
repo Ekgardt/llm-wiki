@@ -2682,6 +2682,8 @@ def test_unix_installer_trusts_smoke_exit_status(
             set -euo pipefail
             RED='' GREEN='' YELLOW='' BLUE='' NC=''
             PATH="$(dirname "$0")/bin:$PATH"
+            # Defined before the smoke step in the real installer; the report goes under it.
+            STATE_ROOT="$(dirname "$0")/state"
             export PATH
             info() {{ echo "[INFO] $1"; }}
             ok() {{ echo "[OK] $1"; }}
@@ -2729,6 +2731,8 @@ def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
             # again while the trap sat behind two writes.
             export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS={_SMOKE_TIMEOUT_SECONDS}
             PATH="$(dirname "$0")/bin:$PATH"
+            # Defined before the smoke step in the real installer; the report goes under it.
+            STATE_ROOT="$(dirname "$0")/state"
             export PATH
             info() {{ :; }}
             ok() {{ : > passed.marker; }}
@@ -2802,6 +2806,8 @@ def test_unix_installer_signal_traps_cleanup_and_exit(tmp_path, signal_name, exp
             set -euo pipefail
             export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=30
             PATH="$(dirname "$0")/bin:$PATH"
+            # Defined before the smoke step in the real installer; the report goes under it.
+            STATE_ROOT="$(dirname "$0")/state"
             export PATH
             info() {{ :; }}
             ok() {{ :; }}
@@ -2892,6 +2898,8 @@ def test_unix_installer_signal_kills_complete_stubborn_test_tree(tmp_path):
             set -euo pipefail
             export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=30
             PATH="$(dirname "$0")/bin:$PATH"
+            # Defined before the smoke step in the real installer; the report goes under it.
+            STATE_ROOT="$(dirname "$0")/state"
             export PATH
             info() {{ :; }}
             ok() {{ :; }}
@@ -2969,6 +2977,8 @@ def test_unix_installer_initial_monitor_mode_cleans_stopped_test_tree(tmp_path):
             set -m
             export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=3
             PATH="$(dirname "$0")/bin:$PATH"
+            # Defined before the smoke step in the real installer; the report goes under it.
+            STATE_ROOT="$(dirname "$0")/state"
             export PATH
             info() {{ :; }}
             ok() {{ : > passed.marker; }}
@@ -3065,6 +3075,8 @@ def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(tmp_path, s
             set +m
             export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=3
             PATH="$(dirname "$0")/bin:$PATH"
+            # Defined before the smoke step in the real installer; the report goes under it.
+            STATE_ROOT="$(dirname "$0")/state"
             export PATH
             info() {{ :; }}
             ok() {{ : > passed.marker; }}
@@ -3425,6 +3437,8 @@ def test_windows_installer_trusts_smoke_exit_status(
         function Ok($msg) {{ Write-Output "[OK] $msg" }}
         function Warn($msg) {{ Write-Output "[WARN] $msg" }}
         function Fail($msg) {{ Write-Output "[FAIL] $msg"; exit 1 }}
+        # Defined before the smoke step in the real installer; the report goes under it.
+        $STATE_ROOT = {ps_literal(str(tmp_path / "state"))}
         {section}
         """
     )
@@ -3532,6 +3546,8 @@ def test_windows_installer_error_stops_native_child_and_later_steps(
         function Info($msg) {{ Write-Output "[INFO] $msg" }}
         function Ok($msg) {{ Write-Output "[OK] $msg" }}
         function Warn($msg) {{ Write-Output "[WARN] $msg" }}
+        # Defined before the smoke step in the real installer; the report goes under it.
+        $STATE_ROOT = {ps_literal(str(tmp_path / "state"))}
         {section}
         New-Item -ItemType File -Path {ps_literal(str(later))} | Out-Null
         """
