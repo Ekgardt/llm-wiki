@@ -66,3 +66,23 @@ def _one_extra_brings(runtime: tuple[str, ...]) -> bool:
 def test_every_pinned_model_has_its_runtime_in_one_declared_extra() -> None:
     orphaned = [model.repo_id for model in pinned_models() if not _one_extra_brings(model.runtime)]
     assert orphaned == []
+
+
+# Development tools, not components of the product: they stay out of `full`.
+_BENCHMARK_EXTRAS = {"lexical-benchmark", "retrieval-benchmark"}
+
+
+def test_full_brings_every_component_extra() -> None:
+    """The owner's requirement of 2026-09-29: an install brings every component.
+
+    A component extra added later and left out of `full` would be one more thing
+    an install silently lacks.
+    """
+    extras = set(PROJECT["optional-dependencies"])
+    reachable = {
+        name.strip()
+        for requirement in PROJECT["optional-dependencies"]["full"]
+        for name in SELF_REFERENCE.match(requirement)["extras"].split(",")
+    }
+
+    assert extras - _BENCHMARK_EXTRAS - {"full"} - reachable == set()

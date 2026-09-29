@@ -93,6 +93,18 @@ audit = [
 [tool.uv]
 required-version = "==0.12.3"
 
+# The reranker runs torch on the CPU; PyPI's Linux torch carries CUDA (about 800 MB
+# of nvidia-* wheels), so Linux takes PyTorch's CPU build. Explicit: this index
+# serves torch and nothing else. Windows and macOS builds on PyPI are already CPU.
+# See docs/research/2026-09-29-every-install-brings-every-component.md.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # `conftest.py` injects scripts/ into sys.path; no package install needed.

@@ -285,7 +285,7 @@ def sync_dependencies(root: Path | str) -> str:
     (audit 2026-09-26 B-24).
     """
     root = Path(root)
-    return _dependency_state(root, chosen_extras(root))
+    return _dependency_state(root, update_extras(root))
 
 
 def canonical_name(name: str) -> str:
@@ -385,6 +385,18 @@ def chosen_extras(root: Path) -> tuple[str, ...]:
     )
 
 
+def update_extras(root: Path) -> tuple[str, ...]:
+    """What an update syncs: every extra an install brings, and any the operator added.
+
+    Syncing only what was installed kept a vault updated by the nightly alone on the
+    components of the release it was first installed from; the default set grows
+    with the product (docs/research/2026-09-29-every-install-brings-every-component.md).
+    """
+    from installer_config import DEFAULT_EXTRAS
+
+    return tuple(sorted(set(DEFAULT_EXTRAS) | set(chosen_extras(root))))
+
+
 # What the installer renders owned resources from — units, plists, task settings,
 # agent hook blocks, the OpenCode plugin. A change here reaches an installed vault
 # only when the operator reruns the installer; a maintenance pass must not write
@@ -480,7 +492,7 @@ def _fast_forward_over(root: Path, fetched: str, copies: list[str]) -> None:
 def _merged_update(root: Path, head: str, fetched: str, copies: list[str]) -> dict:
     changed = _changed_paths(root, head, fetched)
     _fast_forward_over(root, fetched, copies)
-    extras = chosen_extras(root)
+    extras = update_extras(root)
     return _outcome(
         "updated",
         None,

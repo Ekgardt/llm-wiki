@@ -87,13 +87,15 @@ def test_the_background_delegate_is_stopped_after_its_own_budget() -> None:
 
 def test_only_the_tool_capture_hooks_run_in_the_background() -> None:
     """A hook that returns context to Claude (the prompt hook) must stay in the foreground."""
-    hooks = json.loads((ROOT / "integrations" / "claude-code" / "settings.json").read_text())["hooks"]
-    background = sorted(
-        event
-        for event, blocks in hooks.items()
-        for block in blocks
-        for hook in block["hooks"]
-        if hook.get("async") and "--background" in hook["command"]
-    )
+    background = sorted(event for event, hook in _shipped_hooks() if _runs_in_background(hook))
 
     assert background == ["PostToolUse", "PostToolUseFailure"]
+
+
+def _shipped_hooks() -> list[tuple[str, dict]]:
+    hooks = json.loads((ROOT / "integrations" / "claude-code" / "settings.json").read_text())["hooks"]
+    return [(event, hook) for event, blocks in hooks.items() for block in blocks for hook in block["hooks"]]
+
+
+def _runs_in_background(hook: dict) -> bool:
+    return bool(hook.get("async")) and "--background" in hook["command"]

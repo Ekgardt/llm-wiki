@@ -76,7 +76,7 @@ def test_fresh_install_is_locked_without_default_groups(tmp_path: Path) -> None:
         "--no-default-groups",
         "--quiet",
         "--extra",
-        "semantic",
+        "full",
     ]
 
 
@@ -97,7 +97,7 @@ def test_reinstall_is_locked_inexact_and_preserves_selected_extras(
         "--no-default-groups",
         "--quiet",
         "--extra",
-        "semantic",
+        "full",
     ]
 
 

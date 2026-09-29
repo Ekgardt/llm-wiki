@@ -106,10 +106,12 @@ what is healthy, degraded or broken, and what to run.
 ### Dependency profiles
 
 MCP is part of the production baseline; `mcp-server` remains a compatibility alias.
-The installer does this for you; by hand:
+The installer brings every component (the `full` extra: vector search, reranker,
+code index) with Pyright for Python code; on Linux torch comes from PyTorch's CPU
+build. By hand:
 
 ```bash
-uv sync --locked --no-default-groups
+uv sync --locked --no-default-groups --extra full
 uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120
 uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json
 ```
@@ -119,11 +121,10 @@ runs it with `--apply --adopt-ownership-v3 --confirm-all-agents-stopped` to move
 runtime to its current database format; on a vault that already holds work it asks you
 to confirm that no agent is running first. It never deletes knowledge or `run/`.
 
-Optional extras add to what is installed and keep what you already chose:
+Code navigation for another language is one command each, when you need it:
 
 ```bash
-uv sync --locked --no-default-groups --inexact --extra hybrid      # vectors + reranker
-uv sync --locked --no-default-groups --inexact --extra code-graph  # code index
+uv run --locked --no-sync python scripts/install_language_server.py --profile typescript     # or gopls, rust-analyzer
 ```
 
 Contributors install the development group and run the full regression suite:

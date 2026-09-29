@@ -851,14 +851,7 @@ case "$SYNC_EXIT" in
   *) fail "Runtime synchronization failed" ;;
 esac
 
-# ─── 9. Optional: semantic + hybrid search ─────────────────────────
-
-info "Optional: install hybrid search (BM25 + vector + reranker)?"
-info "  uv sync --locked --no-default-groups --inexact --extra hybrid"
-info "  uv sync --locked --no-default-groups --inexact --extra code-graph"
-info "  uv sync --locked --no-default-groups --inexact --extra reranker"
-
-# ─── 10. Print summary ─────────────────────────────────────────────
+# ─── 9. Print summary ─────────────────────────────────────────────
 
 echo ""
 echo "=============================================="
@@ -895,9 +888,7 @@ echo "  uv run --locked --no-sync python scripts/build_advisory.py              
 echo "  uv run --locked --no-sync python scripts/build_guardrails.py             # learned rules"
 echo "  uv run --locked --no-sync python benchmark/run_benchmark.py              # run benchmark"
 echo ""
-echo "MCP baseline: 12 local task-shaped tools (installed)"
-echo "Optional enhancements:"
-echo "  uv sync --locked --no-default-groups --inexact --extra hybrid"
-echo "  uv sync --locked --no-default-groups --inexact --extra code-graph"
-echo "  uv sync --locked --no-default-groups --inexact --extra reranker"
+echo "MCP: 12 local task-shaped tools; every component is installed, with Pyright for Python"
+echo "Code navigation in another language (one command each, when you need it):"
+echo "  uv run --locked --no-sync python scripts/install_language_server.py --profile <typescript|gopls|rust-analyzer>"
 echo ""

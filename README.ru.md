@@ -108,10 +108,12 @@ uv run python scripts/search_memory.py "auth"
 ### Профили зависимостей
 
 MCP входит в production-базу; `mcp-server` остаётся как compatibility alias.
-Установщик делает это сам; вручную:
+Установщик ставит все компоненты (дополнение `full`: поиск по смыслу, переранжирование,
+индекс кода) и Pyright для кода на Python; на Linux torch берётся из CPU-сборки
+PyTorch. Вручную:
 
 ```bash
-uv sync --locked --no-default-groups
+uv sync --locked --no-default-groups --extra full
 uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120
 uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json
 ```
@@ -122,11 +124,10 @@ uv run --locked --no-sync python scripts/repair_installed_memory.py --check --js
 работа, он сначала просит подтвердить, что ни один агент не запущен. Знания и `run/`
 она никогда не удаляет.
 
-Дополнения добавляются к установленному и сохраняют то, что вы уже выбрали:
+Навигация по коду на другом языке — по одной команде на язык, когда она нужна:
 
 ```bash
-uv sync --locked --no-default-groups --inexact --extra hybrid      # векторы + reranker
-uv sync --locked --no-default-groups --inexact --extra code-graph  # индекс кода
+uv run --locked --no-sync python scripts/install_language_server.py --profile typescript     # или gopls, rust-analyzer
 ```
 
 Разработчики ставят группу разработки и запускают полный регрессионный набор:

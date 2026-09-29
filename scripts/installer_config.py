@@ -303,18 +303,16 @@ def _ignored_environment(root: Path, override: str | None) -> str | None:
     return str(chosen)
 
 
-# The extras every install brings. The installer's models step fetches the e5
-# weights whenever their runtime is present, and the read path embeds with them;
-# a baseline-only sync left `onnxruntime` out, so the weights were never used and
-# doctor reported the missing runtime on every install. `semantic` costs about
-# 22 MB from uv.lock (onnxruntime 18.7 MB, tokenizers 3.3 MB; numpy and
-# huggingface-hub are already baseline). `reranker` stays the operator's choice:
-# torch alone is 526.6 MB plus about 800 MB of CUDA wheels on Linux.
+# The extras every install brings: all of them (`full` names semantic, hybrid,
+# code-graph, mcp-server and reranker), by the owner's requirement of 2026-09-29.
+# The models step fetches every pinned model whose runtime is present, so both the
+# e5 encoder and the reranker arrive; Linux takes torch's CPU build (pyproject.toml).
+# Language servers other than Pyright stay one explicit command per language.
 # `tests/test_the_installer_brings_the_runtime_of_every_model_it_fetches.py`
 # holds this to `install_models.pinned_models`; the nightly update keeps it
 # through `self_update.chosen_extras`.
-# See docs/research/2026-09-28-a-check-names-its-cause.md.
-DEFAULT_EXTRAS = ("semantic",)
+# See docs/research/2026-09-29-every-install-brings-every-component.md.
+DEFAULT_EXTRAS = ("full",)
 
 
 def _extra_arguments(extras: Sequence[str]) -> list[str]:

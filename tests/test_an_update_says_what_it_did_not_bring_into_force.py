@@ -68,13 +68,20 @@ def _advance(checkout: Path, *changed: str) -> dict:
     return self_update.update_checkout(checkout)
 
 
+def _with_defaults(*chosen: str) -> tuple[str, ...]:
+    """An update syncs every default extra as well as the ones the operator chose."""
+    from installer_config import DEFAULT_EXTRAS
+
+    return tuple(sorted(set(DEFAULT_EXTRAS) | set(chosen)))
+
+
 def test_an_extra_is_chosen_by_a_package_only_it_brings_under_its_canonical_name(checkout, monkeypatch) -> None:
     """`huggingface_hub` is how the environment spells `huggingface-hub`."""
     monkeypatch.setattr(self_update, "_installed_distributions", lambda: {"numpy": set(), "huggingface-hub": set()})
 
     outcome = _advance(checkout, "scripts/search_memory.py")
 
-    assert (outcome["status"], outcome["extras"], outcome["resources"]) == ("updated", ("semantic",), "current")
+    assert (outcome["status"], outcome["extras"], outcome["resources"]) == ("updated", _with_defaults("semantic"), "current")
 
 
 def test_an_aggregate_is_never_chosen_by_itself_but_its_parts_are(checkout, monkeypatch) -> None:
@@ -82,7 +89,7 @@ def test_an_aggregate_is_never_chosen_by_itself_but_its_parts_are(checkout, monk
 
     outcome = _advance(checkout, "uv.lock")
 
-    assert outcome["extras"] == ("reranker", "semantic")
+    assert outcome["extras"] == _with_defaults("reranker", "semantic")
 
 
 def test_a_package_another_extra_pulled_in_chooses_nothing(checkout, monkeypatch) -> None:
@@ -92,7 +99,7 @@ def test_a_package_another_extra_pulled_in_chooses_nothing(checkout, monkeypatch
 
     outcome = _advance(checkout, "uv.lock")
 
-    assert outcome["extras"] == ("reranker",)
+    assert outcome["extras"] == _with_defaults("reranker")
 
 
 def test_a_shared_package_alone_chooses_nothing(checkout, monkeypatch) -> None:
@@ -101,7 +108,7 @@ def test_a_shared_package_alone_chooses_nothing(checkout, monkeypatch) -> None:
 
     outcome = _advance(checkout, "uv.lock")
 
-    assert outcome["extras"] == ()
+    assert outcome["extras"] == _with_defaults()
 
 
 def test_the_sync_names_every_chosen_extra_in_one_inexact_call() -> None:
