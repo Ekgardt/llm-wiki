@@ -7074,17 +7074,6 @@ def _record_generation_recovery(
         )
 
 
-def _registered_generation_ids(catalog: object, generation_catalog) -> set[str]:
-    with closing(catalog._readonly()) as database:  # noqa: SLF001 - bounded repair
-        rows = database.execute(
-            "SELECT generation_id FROM generations LIMIT ?",
-            (generation_catalog.MAX_GENERATIONS + 1,),
-        ).fetchall()
-    if len(rows) > generation_catalog.MAX_GENERATIONS:
-        raise ValueError("generation catalog exceeds cleanup bound")
-    return {str(row[0]) for row in rows}
-
-
 def _cleanup_stop_reached(deadline: float, cancelled) -> bool:
     return bool(cancelled and cancelled()) or _deadline_reached(deadline)
 
@@ -7206,7 +7195,9 @@ def _repair_generation_catalog(
     catalog = generation_catalog.GenerationCatalog(state_root)
     active_before = _active_pointer_value(catalog)
     _record_generation_recovery(catalog, deadline, repaired, active_before)
-    registered = _registered_generation_ids(catalog, generation_catalog)
+    registered = set(catalog.registered_generation_ids(
+        deadline=deadline, cancelled=cancelled
+    ))
     removed = _cleanup_generation_orphans(
         catalog, generation_catalog, state_root, registered, deadline, cancelled
     )
