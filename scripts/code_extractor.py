@@ -40,7 +40,7 @@ class _CapturedSource(Protocol):
     record: _SourceRecord
     content: bytes
 
-EXTRACTOR_VERSION = "code-extractor/v18"  # v18: finite re-export walks and complete literal route matching
+EXTRACTOR_VERSION = "code-extractor/v19"  # v18: finite re-export walks and complete literal route matching
 # Syntax nodes walked between two deadline checks: the check is cheap, 256 keeps it
 # off the hot path while a stop is still heard within a fraction of a millisecond.
 _SYNTAX_STOP_INTERVAL = 256
@@ -429,11 +429,6 @@ def _sqlite_aliases(tree: ast.Module) -> set[str]:
     }
 
 
-# The `argument->parameter` text stored on one call edge: at most 8 pairs and 256
-# bytes, and a cut list ends in "+N more", so the reader sees what was left out. A
-# display bound on a stored label; basis unknown — value predates measurement.
-MAX_BINDINGS = 8
-MAX_BINDING_BYTES = 256
 _HTTP_CLIENT_MODULES = frozenset({"requests", "httpx"})
 _HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete"})
 
@@ -512,24 +507,12 @@ def _keyword_bindings(node: ast.Call, parameters: list[str]) -> list[str]:
 
 
 def _argument_bindings(node: ast.Call, target: Mapping[str, object]) -> str:
-    """`argument->parameter` pairs of one call, bounded in count and bytes."""
+    """Every proven `argument->parameter` pair in one source-bounded call."""
     parameters = _bound_parameters(target)
     pairs = _positional_bindings(node, parameters) + _keyword_bindings(node, parameters)
     if not pairs:
         return ""
-    return _bounded_bindings(pairs)
-
-
-def _bounded_bindings(pairs: list[str]) -> str:
-    kept = pairs[:MAX_BINDINGS]
-    text = ",".join(kept)
-    while len(text.encode("utf-8")) > MAX_BINDING_BYTES and kept:
-        kept.pop()
-        text = ",".join(kept)
-    remaining = len(pairs) - len(kept)
-    if not remaining:
-        return text
-    return f"{text}+{remaining} more".lstrip(",")
+    return ",".join(pairs)
 
 
 def _client_module(func: ast.expr, aliases: Mapping[str, tuple[str, str]]) -> str | None:

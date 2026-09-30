@@ -140,3 +140,29 @@ def test_invalid_context_budgets_remain_refused(vault, budget):
     assert mcp_server._validate_tool_arguments("get_context", {"slugs": SLUGS, "token_budget": budget})
     with pytest.raises(ValueError, match="token_budget"):
         mcp_server._get_context(SLUGS, token_budget=budget)
+
+
+def _write_context_pages(vault, slugs):
+    for slug in slugs:
+        (vault / "knowledge/notes" / f"{slug}.md").write_text(
+            f"---\ntype: concept\nstatus: active\n---\n# {slug}\n\nOne-sentence summary: Fact for {slug}.\n"
+        )
+
+
+def test_twenty_one_real_pages_fit_the_callers_existing_budget(vault):
+    slugs = [f"extra-{number}" for number in range(21)]
+    _write_context_pages(vault, slugs)
+    included = [f"compatibility-{number}-" + "x" * 65 for number in range(11)]
+    arguments = {"slugs": slugs, "include": included, "token_budget": 8192}
+    assert mcp_server._validate_tool_arguments("get_context", arguments) is None
+    answer = mcp_server._get_context(slugs, included, token_budget=8192)
+    assert answer["repo_map"] == sorted(f"knowledge/notes/{slug}.md" for slug in slugs)
+    assert answer["missing_slugs"] == []
+    assert answer["include"] == included
+    assert all(f"Fact for {slug}." in answer["text"] for slug in slugs)
+    assert answer_budget.estimate_tokens(answer) <= 8192
+
+
+def test_compatibility_metadata_cannot_overrun_the_callers_budget(vault):
+    with pytest.raises(ValueError, match="token_budget cannot hold"):
+        mcp_server._get_context(SLUGS, ["x" * 2000], token_budget=100)

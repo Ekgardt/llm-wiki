@@ -8,6 +8,13 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Update the locked PyJWT and virtualenv packages for current security advisories, with both dependency audit feeds retained.
+- Catalog registrations and activation history use the existing database byte budget instead of unexplained row ceilings; complete listings honor deadlines and cancellation during SQL execution.
+
+- Context page and compatibility lists use the existing caller budget instead of arbitrary count/length refusals.
+
+- Store every proven argument binding instead of cutting evidence after eight pairs or 256 bytes.
+
 - Graph name-prefix exclusions use one bound query parameter and no longer refuse valid lists after 32 entries.
 - Prompt and tool events enter durable capture before journal writes and follow-ups; complete linked evidence remains verifiable through terminal completion and search. Removed the replaced direct-write suppression module. Existing full-session readers remain supported.
 - Repeated historical evidence lookups reuse content-bound offsets within one operation; same-size edits still invalidate them. A fully compiled source retires its old failure only after all committed part receipts validate.

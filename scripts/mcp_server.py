@@ -85,12 +85,6 @@ MAX_MCP_TOTAL_EVIDENCE_BYTES = 256 * 1024
 MAX_MCP_QUERY_LENGTH = 8_192
 # A page slug is one file name: NAME_MAX, 255 bytes on ext4/APFS/NTFS.
 MAX_MCP_SLUG_LENGTH = 255
-# get_context's lists: pages per call, and the `include` list the tool still accepts
-# for compatibility and ignores (bounded so an ignored argument costs nothing). Basis
-# unknown: values predate measurement.
-MAX_MCP_CONTEXT_SLUGS = 20
-MAX_MCP_CONTEXT_INCLUDE = 10
-MAX_MCP_INCLUDE_LENGTH = 64
 # An error message returned to a client, after secret redaction: a display bound so a
 # failing tool never answers with a whole traceback.
 MAX_MCP_ERROR_CHARS = 256
@@ -696,16 +690,14 @@ TOOL_INPUT_SCHEMAS = {
             "slugs": {
                 "type": "array",
                 "minItems": 1,
-                "maxItems": MAX_MCP_CONTEXT_SLUGS,
                 "uniqueItems": True,
                 "items": {"type": "string", "maxLength": MAX_MCP_SLUG_LENGTH},
                 "description": "List of page slugs",
             },
             "include": {
                 "type": "array",
-                "maxItems": MAX_MCP_CONTEXT_INCLUDE,
                 "uniqueItems": True,
-                "items": {"type": "string", "maxLength": MAX_MCP_INCLUDE_LENGTH},
+                "items": {"type": "string"},
                 "description": "Accepted for compatibility and ignored; page content is already in `text`",
             },
             "token_budget": {
@@ -1517,21 +1509,17 @@ def _slug_exceeds_bound(slug) -> bool:
     return not isinstance(slug, str) or len(slug) > MAX_MCP_SLUG_LENGTH
 
 
-def _include_exceeds_bound(item) -> bool:
-    return not isinstance(item, str) or len(item) > MAX_MCP_INCLUDE_LENGTH
-
-
 def _require_context_slugs(slugs) -> None:
-    if not isinstance(slugs, list) or not 1 <= len(slugs) <= MAX_MCP_CONTEXT_SLUGS:
+    if not isinstance(slugs, list) or not slugs:
         raise ValueError("slugs exceed the MCP context bound")
     if any(_slug_exceeds_bound(slug) for slug in slugs):
         raise ValueError("slug exceeds the MCP context bound")
 
 
 def _require_context_include(include) -> None:
-    if not isinstance(include, list) or len(include) > MAX_MCP_CONTEXT_INCLUDE:
+    if not isinstance(include, list):
         raise ValueError("include exceeds the MCP context bound")
-    if any(_include_exceeds_bound(item) for item in include):
+    if any(not isinstance(item, str) for item in include):
         raise ValueError("include item exceeds the MCP context bound")
 
 

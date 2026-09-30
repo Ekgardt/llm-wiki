@@ -205,10 +205,12 @@ def _assert_query_and_slug_bounds(schemas) -> None:
 
 
 def _assert_context_array_bounds(slugs, include) -> None:
-    assert (slugs["minItems"], slugs["maxItems"], slugs["uniqueItems"]) == (1, 20, True)
+    assert (slugs["minItems"], slugs["uniqueItems"]) == (1, True)
+    assert "maxItems" not in slugs
     assert slugs["items"]["maxLength"] == 255
-    assert (include["maxItems"], include["uniqueItems"]) == (10, True)
-    assert include["items"]["maxLength"] == 64
+    assert include["uniqueItems"] is True
+    assert "maxItems" not in include
+    assert include["items"] == {"type": "string"}
 
 
 class TestToolDefinitions:
@@ -1208,12 +1210,14 @@ class TestHelperFunctions:
         package = mcp_server._get_context(["first", "first", "second"])
         assert package["missing_slugs"] == ["first", "second"]
         assert reads == []
-        with pytest.raises(ValueError, match="slugs"):
-            mcp_server._get_context([f"page-{index}" for index in range(21)])
+        requested = [f"page-{index}" for index in range(21)]
+        assert mcp_server._get_context(requested)["missing_slugs"] == sorted(requested)
         with pytest.raises(ValueError, match="slug"):
             mcp_server._get_context(["x" * 256])
+        included = [f"compatibility-{index}-" + "x" * 65 for index in range(11)]
+        assert mcp_server._get_context(["page"], included)["include"] == included
         with pytest.raises(ValueError, match="include"):
-            mcp_server._get_context(["page"], ["x" * 65])
+            mcp_server._get_context(["page"], [True])
 
     def test_recall_and_decisions_pass_distinct_source_tools(self, monkeypatch):
         import mcp_server
@@ -2759,10 +2763,8 @@ class TestHandleToolCall:
             ("get_decisions", {"query": "x" * 8193}),
             ("read_page", {"slug": "x" * 256}),
             ("get_context", {"slugs": []}),
-            ("get_context", {"slugs": [f"page-{index}" for index in range(21)]}),
+            ("get_context", {"slugs": ["page"], "include": [True]}),
             ("get_context", {"slugs": ["same", "same"]}),
-            ("get_context", {"slugs": ["page"], "include": [str(index) for index in range(11)]}),
-            ("get_context", {"slugs": ["page"], "include": ["x" * 65]}),
         ],
     )
     def test_retrieval_bounds_are_rejected_before_helper_dispatch(

@@ -1594,7 +1594,6 @@ def test_repeated_expired_discard_deadlines_do_not_consume_generation_rows(
     catalog = generation_catalog.GenerationCatalog(
         tmp_path / "state", clock=lambda: NOW, monotonic=monotonic
     )
-    monkeypatch.setattr(generation_catalog, "MAX_GENERATIONS", 2)
 
     for number in range(3):
         generation_id = f"expired-{number}"
@@ -2256,7 +2255,7 @@ def test_catalog_explicitly_closes_every_opened_connection(tmp_path, monkeypatch
                 connection.close()
 
 
-def test_catalog_row_ceilings_prevent_generation_and_history_growth(tmp_path, monkeypatch):
+def test_catalog_growth_uses_byte_budget_instead_of_row_ceilings(tmp_path, monkeypatch):
     import generation_catalog
 
     monkeypatch.setattr(generation_catalog, "MAX_GENERATIONS", 2, raising=False)
@@ -2264,25 +2263,15 @@ def test_catalog_row_ceilings_prevent_generation_and_history_growth(tmp_path, mo
     catalog = _catalog(tmp_path)
     for generation_id in ("gen-1", "gen-2", "gen-3"):
         _publish(catalog, generation_id)
-    catalog.register("gen-1")
-    catalog.register("gen-2")
-
-    with pytest.raises(ValueError, match="generation.*ceiling"):
-        catalog.register("gen-3")
+        catalog.register(generation_id)
     assert catalog.activate("gen-1", expected_active=None)
-    with pytest.raises(ValueError, match="history.*ceiling"):
-        catalog.activate("gen-2", expected_active="gen-1")
-
+    assert catalog.activate("gen-2", expected_active="gen-1")
+    assert catalog.activate("gen-3", expected_active="gen-2")
+    assert set(catalog.registered_generation_ids()) == {"gen-1", "gen-2", "gen-3"}
+    assert catalog.activated_generation_ids() == {"gen-1", "gen-2", "gen-3"}
     with closing(sqlite3.connect(catalog.catalog_path)) as database:
-        counts = (
-            database.execute("SELECT COUNT(*) FROM generations").fetchone()[0],
-            database.execute("SELECT COUNT(*) FROM activation_history").fetchone()[0],
-        )
-        pointer = database.execute(
-            "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
-        ).fetchone()[0]
-    assert counts == (2, 1)
-    assert pointer == "gen-1"
+        assert database.execute("SELECT COUNT(*) FROM activation_history").fetchone()[0] == 3
+    assert catalog.get_active()["generation_id"] == "gen-3"
 
 
 def test_catalog_byte_ceiling_rolls_back_large_generation_and_remains_reopenable(tmp_path):
@@ -2858,3 +2847,34 @@ def test_a_deep_verdict_answers_a_shallow_question_and_not_the_reverse(tmp_path)
     catalog._validated.update(shallow_only)  # noqa: SLF001
 
     assert catalog._remembered_validation((identifier, True), seal) is None  # noqa: SLF001
+
+
+def test_catalog_listing_interrupts_sql_before_first_row(tmp_path, monkeypatch):
+    catalog = _catalog(tmp_path)
+    _publish(catalog, "gen-1")
+    catalog.register("gen-1")
+    checks = []
+
+    def cancelled():
+        checks.append(True)
+        return len(checks) > 4
+
+    with pytest.raises(TimeoutError, match="cancelled"):
+        catalog.registered_generation_ids(cancelled=cancelled)
+    assert len(checks) == 5
+    assert catalog.registered_generation_ids() == ("gen-1",)
+
+
+def test_catalog_query_deadline_interrupts_sort_and_clears_progress(tmp_path):
+    import generation_catalog
+
+    monotonic = _Monotonic()
+    catalog = generation_catalog.GenerationCatalog(tmp_path / "state", monotonic=monotonic)
+    with closing(sqlite3.connect(":memory:")) as database:
+        database.row_factory = sqlite3.Row
+        database.execute("CREATE TABLE evidence(value INTEGER)")
+        database.executemany("INSERT INTO evidence VALUES (?)", [(3,), (1,), (2,)])
+        monotonic.value = 2.0
+        with pytest.raises(TimeoutError, match="deadline"):
+            catalog._catalog_rows(database, "SELECT value FROM evidence ORDER BY value", 1.0)
+        assert database.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 3

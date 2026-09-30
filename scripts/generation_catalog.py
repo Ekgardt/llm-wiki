@@ -152,13 +152,6 @@ MAX_GENERATION_CHILDREN = 4096
 # catalog. Basis unknown: value predates measurement; review when doctor reports the catalog
 # nearing it.
 MAX_CATALOG_BYTES = 256 * 1024 * 1024
-# Generation rows the catalog holds; reaching it refuses a new registration rather than dropping
-# one. Basis unknown: value predates measurement; review when pruning falls behind and the row
-# count nears it.
-MAX_GENERATIONS = 1024
-# Activation history rows; reaching it refuses rather than overwriting history. Basis unknown:
-# value predates measurement; review when the history row count nears it.
-MAX_ACTIVATION_HISTORY = 16384
 HASH_CHUNK_BYTES = IO_CHUNK_BYTES
 # A caller with a deadline gets whatever is left of it, capped here. A caller
 # without one waits out contention instead of surfacing `database is locked`:
@@ -2175,7 +2168,6 @@ class GenerationCatalog:
             (generation_id,),
         ).fetchone()
         _require_registration_match(row, encoded, digest)
-        self._require_registration_capacity(database, row)
         if not capability.revalidate():
             raise ValueError("generation changed before registration")
         self._insert_registration(
@@ -2188,10 +2180,6 @@ class GenerationCatalog:
             timestamp=timestamp,
         )
         self._check_deadline(deadline)
-
-    def _require_registration_capacity(self, database: sqlite3.Connection, row) -> None:
-        if row is None:
-            self._require_capacity(database, "generations", MAX_GENERATIONS, "generation")
 
     def _insert_registration(
         self,
@@ -2452,27 +2440,48 @@ class GenerationCatalog:
         with capability:
             return capability.revalidate()
 
-    @staticmethod
-    def _require_capacity(database: sqlite3.Connection, table: str, limit: int, label: str) -> None:
-        if limit < 1:
-            raise ValueError(f"{label} row ceiling must be positive")
-        count = database.execute(
-            f"SELECT COUNT(*) FROM (SELECT 1 FROM {table} LIMIT ?)",
-            (limit + 1,),
-        ).fetchone()[0]
-        if count >= limit:
-            raise ValueError(f"{label} row ceiling reached")
-
-    @staticmethod
-    def _bounded_rows(
+    def _catalog_rows(
+        self,
         database: sqlite3.Connection,
         query: str,
-        limit: int,
-        label: str,
+        deadline: float | None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> list[sqlite3.Row]:
-        rows = list(database.execute(query, (limit + 1,)))
-        if len(rows) > limit:
-            raise ValueError(f"{label} row ceiling exceeded")
+        stopped: list[TimeoutError] = []
+        progress = self._catalog_query_progress(deadline, cancelled, stopped)
+        # One is SQLite's minimum callback interval. This is scheduling, not a
+        # record quota: interrupt sorting as well as iteration at the caller's stop.
+        database.set_progress_handler(progress, 1)
+        try:
+            return self._collect_catalog_rows(database.execute(query), deadline, cancelled)
+        except sqlite3.OperationalError:
+            if stopped:
+                raise stopped[0] from None
+            raise
+        finally:
+            database.set_progress_handler(None, 0)
+
+    def _catalog_query_progress(self, deadline, cancelled, stopped):
+        if deadline is None and cancelled is None:
+            return None
+
+        def progress() -> int:
+            try:
+                self._check_deadline(deadline)
+                _check_cancelled(cancelled)
+            except TimeoutError as exc:
+                stopped.append(exc)
+                return 1
+            return 0
+
+        return progress
+
+    def _collect_catalog_rows(self, cursor, deadline, cancelled) -> list[sqlite3.Row]:
+        rows: list[sqlite3.Row] = []
+        for row in cursor:
+            self._check_deadline(deadline)
+            _check_cancelled(cancelled)
+            rows.append(row)
         return rows
 
     def _require_catalog_bytes(self, database: sqlite3.Connection) -> None:
@@ -2498,10 +2507,6 @@ class GenerationCatalog:
             (identifier,),
         ).fetchone()
         _require_registration_token(registered, registration_token)
-        if identifier != expected_active:
-            self._require_capacity(
-                database, "activation_history", MAX_ACTIVATION_HISTORY, "history"
-            )
         if not capability.revalidate():
             raise ValueError("generation changed before activation")
 
@@ -2726,11 +2731,11 @@ class GenerationCatalog:
         self._check_deadline(deadline)
         _check_cancelled(cancelled)
         with closing(self._readonly(deadline=deadline)) as database:
-            rows = self._bounded_rows(
+            rows = self._catalog_rows(
                 database,
-                "SELECT generation_id FROM generations LIMIT ?",
-                MAX_GENERATIONS,
-                "generation",
+                "SELECT generation_id FROM generations",
+                deadline,
+                cancelled,
             )
         return tuple(row["generation_id"] for row in rows)
 
@@ -2744,11 +2749,11 @@ class GenerationCatalog:
         self._check_deadline(deadline)
         _check_cancelled(cancelled)
         with closing(self._readonly(deadline=deadline)) as database:
-            rows = self._bounded_rows(
+            rows = self._catalog_rows(
                 database,
-                "SELECT DISTINCT generation_id FROM activation_history LIMIT ?",
-                MAX_ACTIVATION_HISTORY,
-                "history",
+                "SELECT DISTINCT generation_id FROM activation_history",
+                deadline,
+                cancelled,
             )
         return frozenset(row["generation_id"] for row in rows)
 
@@ -2829,18 +2834,18 @@ class GenerationCatalog:
             ).fetchone()
             if state is None:
                 raise ValueError("catalog active pointer is missing")
-            history_rows = self._bounded_rows(
+            history_rows = self._catalog_rows(
                 database,
-                "SELECT generation_id FROM activation_history ORDER BY sequence DESC LIMIT ?",
-                MAX_ACTIVATION_HISTORY,
-                "history",
+                "SELECT generation_id FROM activation_history ORDER BY sequence DESC",
+                deadline,
+                cancelled,
             )
             history = [row["generation_id"] for row in history_rows]
-            generation_rows = self._bounded_rows(
+            generation_rows = self._catalog_rows(
                 database,
-                "SELECT generation_id, parent_generation_id FROM generations LIMIT ?",
-                MAX_GENERATIONS,
-                "generation",
+                "SELECT generation_id, parent_generation_id FROM generations",
+                deadline,
+                cancelled,
             )
             parents = {row["generation_id"]: row["parent_generation_id"] for row in generation_rows}
         _check_cancelled(cancelled)
@@ -2957,13 +2962,11 @@ class GenerationCatalog:
     def _registered_rows(self, deadline: float | None) -> list[sqlite3.Row]:
         self._check_deadline(deadline)
         with closing(self._readonly(deadline=deadline)) as database:
-            return self._bounded_rows(
+            return self._catalog_rows(
                 database,
                 "SELECT generation_id, registered_at, manifest_json, manifest_sha256 "
-                "FROM generations ORDER BY registered_at DESC, generation_id DESC "
-                "LIMIT ?",
-                MAX_GENERATIONS,
-                "generation",
+                "FROM generations ORDER BY registered_at DESC, generation_id DESC",
+                deadline,
             )
 
     def _scoped_generation(
@@ -3175,9 +3178,6 @@ class GenerationCatalog:
         """Clearing the pointer has no target to check; repointing it does."""
         if selected_id is None:
             return
-        self._require_capacity(
-            database, "activation_history", MAX_ACTIVATION_HISTORY, "history"
-        )
         registered = database.execute(
             "SELECT manifest_json, manifest_sha256 FROM generations WHERE generation_id = ?",
             (selected_id,),
@@ -3341,11 +3341,10 @@ class GenerationCatalog:
 
     def _registered_identifiers(self, deadline: float | None) -> set[str]:
         with closing(self._readonly(deadline=deadline)) as database:
-            rows = self._bounded_rows(
+            rows = self._catalog_rows(
                 database,
-                "SELECT generation_id FROM generations LIMIT ?",
-                MAX_GENERATIONS,
-                "generation",
+                "SELECT generation_id FROM generations",
+                deadline,
             )
             return {row["generation_id"] for row in rows}
 
