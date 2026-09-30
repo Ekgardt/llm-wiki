@@ -64,7 +64,7 @@ if __name__ == "__main__" and os.environ.get("LLM_WIKI_MCP_WORKER") != "1":
 
     raise SystemExit(mcp_supervisor.main(sys.argv[1:]))
 
-from bounded_io import read_stable_bytes  # noqa: E402
+from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
 
 # A queue commit locks readers out for milliseconds; wait it out instead of
 # reporting a live queue as unreadable.
@@ -72,17 +72,11 @@ QUEUE_READ_BUSY_MS = 1_000
 # Bounds on what one tool call reads or accepts. The input bounds are published in
 # the tools' JSON schemas (`maxLength`, `maxItems`, `maximum`), so a client sees them
 # before calling, and a value past one is refused with an error, never cut.
-# A page read whole: the largest note on the installed vault on 2026-09-27 was about
-# 19 KB, so 4 MiB refuses only a file that is not a note (slugs cannot reach journals).
-MAX_MCP_PAGE_BYTES = 4 * 1024 * 1024
 # One cited evidence slice and all of an answer's slices together; past either the
 # answer fails by name rather than quoting a cut span. Basis unknown: values predate
 # measurement; review if grounded answers are refused for their evidence size.
 MAX_MCP_EVIDENCE_BYTES = 64 * 1024
 MAX_MCP_TOTAL_EVIDENCE_BYTES = 256 * 1024
-# A search question (characters). Basis unknown: value predates measurement; a
-# question is a sentence, so 8 192 only refuses a pasted document.
-MAX_MCP_QUERY_LENGTH = 8_192
 # A page slug is one file name: NAME_MAX, 255 bytes on ext4/APFS/NTFS.
 MAX_MCP_SLUG_LENGTH = 255
 # An error message returned to a client, after secret redaction: a display bound so a
@@ -625,7 +619,6 @@ TOOL_INPUT_SCHEMAS = {
         "properties": {
             "query": {
                 "type": "string",
-                "maxLength": MAX_MCP_QUERY_LENGTH,
                 "description": "Search query",
             },
             "limit": {
@@ -673,7 +666,6 @@ TOOL_INPUT_SCHEMAS = {
         "properties": {
             "query": {
                 "type": "string",
-                "maxLength": MAX_MCP_QUERY_LENGTH,
                 "description": "Optional filter query",
             },
             "limit": {
@@ -899,8 +891,8 @@ def _search_vault(
     Every tool that answers from the corpus comes through here, so each gets the
     same deadline reserve, lexical fallback and trace (audit 2026-09-26 C-10).
     """
-    if not isinstance(query, str) or len(query) > MAX_MCP_QUERY_LENGTH:
-        raise ValueError("query exceeds the MCP retrieval bound")
+    if not isinstance(query, str):
+        raise ValueError("query must be a string")
     operation_deadline = _search_deadline(deadline)
     # The hybrid run stops a reserved second early, so the lexical fallback has
     # time left to answer in (audit B-18,
@@ -1148,7 +1140,7 @@ def _page_content(page_path: Path):
     """Return the decoded page, or the error dict the caller must hand back."""
     try:
         return read_stable_bytes(
-            page_path, MAX_MCP_PAGE_BYTES, label="MCP page"
+            page_path, MAX_KNOWLEDGE_PAGE_BYTES, label="MCP page"
         ).decode("utf-8", errors="strict")
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         return {"error": f"Page read failed: {_safe_page_read_error(exc)}"}
@@ -1380,8 +1372,8 @@ def _decision_pages(candidates: list[dict], limit: int) -> list[dict]:
 def _require_decision_query(query) -> None:
     if query is None:
         return
-    if not isinstance(query, str) or len(query) > MAX_MCP_QUERY_LENGTH:
-        raise ValueError("query exceeds the MCP retrieval bound")
+    if not isinstance(query, str):
+        raise ValueError("query must be a string")
 
 
 def _is_decision_result(result: dict) -> bool:
@@ -4648,7 +4640,7 @@ def _safe_exception_text(error: BaseException, operation: str = "mcp") -> str:
 def _safe_page_read_error(error: BaseException) -> str:
     message = " ".join(str(error).split())
     allowed = {
-        f"MCP page exceeds {MAX_MCP_PAGE_BYTES} bytes",
+        f"MCP page exceeds {MAX_KNOWLEDGE_PAGE_BYTES} bytes",
         "MCP page parent must be a regular directory",
         "MCP page must be a regular non-symlink file",
         "MCP page changed before open",
@@ -5562,7 +5554,7 @@ def _changed_since(root: Path, path: Path, recorded: dict[str, str], built: int)
 
 def _file_sha256(path: Path) -> str | None:
     try:
-        return hashlib.sha256(read_stable_bytes(path, MAX_MCP_PAGE_BYTES, label="indexed source")).hexdigest()
+        return hashlib.sha256(read_stable_bytes(path, MAX_KNOWLEDGE_PAGE_BYTES, label="indexed source")).hexdigest()
     except (OSError, ValueError):
         return None
 

@@ -8,6 +8,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Retrieval accepts valid long strings under the caller deadline; MCP page reading and freshness hashing use the existing shared knowledge-page ceiling.
+
 - Fresh Python 3.10 installer planning no longer imports TOML settings before dependencies are provisioned; backup retention still validates the same settings when used.
 
 - Health observation uses the existing doctor owner and compares admission epochs before/after validation, so capture can persist during it. Intervening activity, database replacement, lost ownership and deadlines refuse quiescence; the offline exclusive fence remains unchanged.
