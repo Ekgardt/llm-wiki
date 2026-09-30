@@ -5402,24 +5402,24 @@ class MarkdownCoordinator:
 
     def _initialize_database(self) -> None:
         with self._connect() as database:
-            with begin_immediate(database):
-                database.executescript(_COORDINATOR_V2_SCHEMA_SQL)
-                _add_writer_owner_columns(database)
-                _add_operation_columns(database)
-                _add_transaction_columns(database)
-                _backfill_checkpoint_operations(database)
-                _add_checkpoint_columns(database)
-                database.execute(
-                    "INSERT OR IGNORE INTO project_checkpoint_attempts "
-                    "(project, sequence, attempt_number, operation_id, "
-                    "parent_operation_id, lease_token, fencing_epoch, transaction_id, "
-                    "state, created_at) "
-                    "SELECT project, sequence, attempt_number, operation_id, "
-                    "parent_operation_id, lease_token, fencing_epoch, transaction_id, "
-                    "state, ? FROM project_checkpoints WHERE operation_id IS NOT NULL",
-                    (_now(),),
-                )
-                self._backfill_parent_identities(database)
+            # executescript commits any pending transaction before its script.
+            database.executescript("BEGIN IMMEDIATE;\n" + _COORDINATOR_V2_SCHEMA_SQL)
+            _add_writer_owner_columns(database)
+            _add_operation_columns(database)
+            _add_transaction_columns(database)
+            _backfill_checkpoint_operations(database)
+            _add_checkpoint_columns(database)
+            database.execute(
+                "INSERT OR IGNORE INTO project_checkpoint_attempts "
+                "(project, sequence, attempt_number, operation_id, "
+                "parent_operation_id, lease_token, fencing_epoch, transaction_id, "
+                "state, created_at) "
+                "SELECT project, sequence, attempt_number, operation_id, "
+                "parent_operation_id, lease_token, fencing_epoch, transaction_id, "
+                "state, ? FROM project_checkpoints WHERE operation_id IS NOT NULL",
+                (_now(),),
+            )
+            self._backfill_parent_identities(database)
 
     def reserve_project_checkpoint(
         self,

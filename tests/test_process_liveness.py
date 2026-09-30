@@ -140,13 +140,13 @@ def test_a_reused_pid_is_dead_to_the_owner_that_recorded_its_identity(monkeypatc
     assert process_liveness.owner_alive(4242, identity) is True
 
 
-def test_non_linux_legacy_pid_only_probe_keeps_its_existing_behavior(monkeypatch) -> None:
-    """The Linux namespace correction does not change other platforms."""
+def test_non_linux_owner_without_birth_identity_is_preserved(monkeypatch) -> None:
+    """A local PID probe cannot establish an unidentified persisted owner's death."""
     monkeypatch.setattr(process_liveness, "_platform_system", lambda: "Darwin")
     monkeypatch.setattr(process_liveness, "process_state", lambda _pid: "dead")
 
-    assert process_liveness.owner_alive(4242) is False
-    assert process_liveness.owner_alive(4242, "") is False
+    assert process_liveness.owner_alive(4242) is True
+    assert process_liveness.owner_alive(4242, "") is True
 
 
 def test_an_unsettled_probe_leaves_the_owner_alive(monkeypatch) -> None:
@@ -170,3 +170,11 @@ def test_a_pid_beyond_the_platform_range_is_never_alive_by_guess() -> None:
     state = process_liveness.process_state(2**40)
     assert state in {"dead", "unknown"}
     assert process_liveness.pid_alive(2**40) is (state != "dead")
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Windows"])
+@pytest.mark.parametrize("identity", [None, ""])
+def test_owner_without_birth_identity_stays_unknown(system, identity, monkeypatch):
+    monkeypatch.setattr(process_liveness, "_platform_system", lambda: system)
+    monkeypatch.setattr(process_liveness, "process_state", lambda _pid: "dead")
+    assert process_liveness.recorded_process_state(4000000, identity) == "unknown"

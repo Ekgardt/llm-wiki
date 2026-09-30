@@ -295,7 +295,7 @@ def _record_scope_state(identity: str | None) -> str:
 
 def _compare_recorded_process(pid: object, identity: str | None, probe) -> str:
     if not identity:
-        return process_state(pid)
+        return "unknown"
     observed = probe(pid)
     if observed is None:
         return "dead"

@@ -360,16 +360,20 @@ def _environment_interpreter(environment: Path) -> Path:
 
 
 def _environment_selection(root: Path, environment: Path) -> list[str] | None:
-    """The environment's own `self_update --selection` arguments, or None when it has none.
-
-    Run by that interpreter, not imported: this module runs under the system Python,
-    which may be 3.10 without the TOML reader the selection needs.
-    """
-    command = [str(_environment_interpreter(environment)), str(root / "scripts" / "self_update.py"), "--selection", str(root)]
+    """Inspect the selected environment; parse project choices in the caller."""
+    inventory_script = (
+        "import sys,json;sys.path.insert(0,sys.argv[1]);"
+        "from self_update import _installed_distributions;"
+        "print(json.dumps(_installed_distributions(),default=sorted))"
+    )
+    command = [str(_environment_interpreter(environment)), "-c", inventory_script, str(root / "scripts")]
     try:
         completed = subprocess.run(command, capture_output=True, text=True, timeout=SELECTION_TIMEOUT_SECONDS, check=True)
-        return [str(argument) for argument in json.loads(completed.stdout)["arguments"]]
-    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as error:
+        from self_update import sync_selection
+
+        installed = {name: set(requires) for name, requires in json.loads(completed.stdout).items()}
+        return sync_selection(root, installed)["arguments"]
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, ImportError) as error:
         print(f"installer_config: the environment could not name its extras ({type(error).__name__}); "
               "the sync keeps what is installed", file=sys.stderr)
         return None

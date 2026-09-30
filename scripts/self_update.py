@@ -23,11 +23,6 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # pragma: no cover - 3.10 reads the same documents through tomli
-    import tomli as tomllib
-
 from secret_redact import describe_error
 
 # One `git fetch` of the nightly update; the update's time limit counts one fetch. basis unknown — value predates measurement; review when fetches time out on a working network.
@@ -349,6 +344,10 @@ def _pyproject(root: Path) -> dict:
     path = root / "pyproject.toml"
     if not path.is_file():
         return {}
+    if sys.version_info >= (3, 11):
+        import tomllib
+    else:  # pragma: no cover - Python 3.10 uses the provisioned TOML reader
+        import tomli as tomllib
     return tomllib.loads(path.read_text(encoding="utf-8"))
 
 
@@ -412,7 +411,7 @@ def chosen_groups(root: Path, installed: dict[str, set[str]] | None = None) -> t
     return tuple(sorted(group for group, names in exclusive.items() if _chosen_by_itself(names, groups[group], present)))
 
 
-def chosen_extras(root: Path) -> tuple[str, ...]:
+def chosen_extras(root: Path, installed: dict[str, set[str]] | None = None) -> tuple[str, ...]:
     """The extras the operator chose: those with a distribution only they bring installed.
 
     Nothing records the choice, so the environment is the record. The update syncs
@@ -420,7 +419,7 @@ def chosen_extras(root: Path) -> tuple[str, ...]:
     code that needs it. See
     `docs/research/2026-09-25-an-update-brings-the-extras-the-operator-chose.md`.
     """
-    installed = _installed_distributions()
+    installed = _installed_distributions() if installed is None else installed
     project = _project(root)
     own = _own_names(project)
     exclusive = _exclusive_names(project)
@@ -429,7 +428,7 @@ def chosen_extras(root: Path) -> tuple[str, ...]:
     )
 
 
-def update_extras(root: Path) -> tuple[str, ...]:
+def update_extras(root: Path, installed: dict[str, set[str]] | None = None) -> tuple[str, ...]:
     """What an update syncs: every extra an install brings, and any the operator added.
 
     Syncing only what was installed kept a vault updated by the nightly alone on the
@@ -438,17 +437,17 @@ def update_extras(root: Path) -> tuple[str, ...]:
     """
     from installer_config import DEFAULT_EXTRAS
 
-    return tuple(sorted(set(DEFAULT_EXTRAS) | set(chosen_extras(root))))
+    return tuple(sorted(set(DEFAULT_EXTRAS) | set(chosen_extras(root, installed))))
 
 
-def sync_selection(root: Path) -> dict[str, list[str]]:
+def sync_selection(root: Path, installed: dict[str, set[str]] | None = None) -> dict[str, list[str]]:
     """What an exact sync of this vault must name: the extras and the groups.
 
     One rule for the nightly update and the installer; the installer asks the
-    environment's own interpreter for it (`--selection`), because only that one
-    sees what is installed there.
+    environment's own interpreter for its distribution inventory, because only
+    that one sees what is installed there.
     """
-    extras, groups = update_extras(root), chosen_groups(root)
+    extras, groups = update_extras(root, installed), chosen_groups(root, installed)
     return {"extras": list(extras), "groups": list(groups), "arguments": list(selection_arguments(extras, groups))}
 
 
