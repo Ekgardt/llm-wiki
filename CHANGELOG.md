@@ -8,6 +8,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Health observation uses the existing doctor owner and compares admission epochs before/after validation, so capture can persist during it. Intervening activity, database replacement, lost ownership and deadlines refuse quiescence; the offline exclusive fence remains unchanged.
+
 - Reject NUL root paths before repair backend access on every Python/platform; qualify byte-preserving preimages, archive paths, lease timing and process-state fixtures on Windows.
 
 - Keep coordinator schema migrations inside the SQLite write transaction; inspect bare Python 3.10 environments without requiring their TOML parser; preserve persisted owners with unknown process birth identity on every platform.

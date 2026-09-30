@@ -2786,7 +2786,7 @@ def _run_deletion_check(
     except ReliabilityV3ValidationError as exc:
         return _deletion_snapshot([exc.code])
 
-    snapshot_deadline = min(deadline, time.monotonic() + 20.0)
+    snapshot_deadline = deadline
     if _deadline_reached(snapshot_deadline):
         return _deletion_snapshot(["run_deletion_state_unknown"])
     registry = OwnershipRegistry._from_adopted_database(  # noqa: SLF001
@@ -2794,9 +2794,10 @@ def _run_deletion_check(
         state_path / "run" / "markdown-transactions-v3.sqlite3",
     )
     try:
-        owner = registry.acquire("runtime-deletion-check", scope="global")
+        owner = registry.acquire("doctor", scope="global")
     except (OperationalOwnershipError, OSError, sqlite3.Error, ValueError) as exc:
         code = getattr(exc, "code", "runtime_deletion_check_unavailable")
+        code = {"owner_busy": "runtime_deletion_check_requires_quiescence"}.get(code, code)
         return _deletion_snapshot([str(code)])
 
     return _deletion_snapshot(
@@ -2830,13 +2831,93 @@ def _deletion_codes_with_owner(
     snapshot_deadline: float,
     validate,
 ) -> list[str]:
+    from operational_ownership import OperationalOwnershipError, heartbeat_owner
+
     codes: list[str] = []
     try:
-        codes = _observed_deletion_codes(
-            root_path, state_path, now, snapshot_deadline, owner, validate
-        )
+        with heartbeat_owner(owner, registry=registry):
+            codes = _validated_observation_codes(
+                registry, root_path, state_path, now, snapshot_deadline, owner, validate
+            )
+    except (OperationalOwnershipError, OSError, sqlite3.Error, TimeoutError, ValueError):
+        codes = ["run_deletion_state_unknown"]
     finally:
         _release_deletion_owner(registry, owner, codes)
+    return codes
+
+
+class _RuntimeObservationStamp(NamedTuple):
+    database_identity: tuple[str, str, str]
+    epochs_digest: bytes
+    other_owner: bool
+
+
+def _observation_database_identity(path: Path, state_root: Path) -> tuple[str, str, str]:
+    identity = reliable_memory.capture_runtime_file_identity(path, state_root=state_root)
+    return identity.platform, identity.volume, identity.file_id
+
+
+def _owner_epoch_bytes(row: sqlite3.Row) -> bytes:
+    from operational_ownership import _require_lease_epoch, _validate_role
+
+    _validate_role(row["role"])
+    _require_lease_epoch(row["last_epoch"])
+    return reliable_memory.canonical_json_bytes(list(row))
+
+
+def _observation_epoch_digest(database: sqlite3.Connection, deadline: float) -> bytes:
+    digest = hashlib.sha256()
+    rows = streamed_rows(
+        database,
+        "SELECT role,scope,last_epoch FROM maintenance_owner_epochs ORDER BY role,scope",
+        stop=lambda: _stop_at(deadline),
+    )
+    for row in rows:
+        digest.update(_owner_epoch_bytes(row))
+    return digest.digest()
+
+
+def _observation_other_owner(database: sqlite3.Connection, owner, deadline: float) -> bool:
+    from installed_memory_repair import _owner_matches
+
+    rows = streamed_rows(database, "SELECT * FROM maintenance_owners", stop=lambda: _stop_at(deadline))
+    return any(not _owner_matches(row, owner) for row in rows)
+
+
+def _require_observation_database(expected: tuple, actual: tuple) -> None:
+    if actual != expected:
+        raise ValueError("runtime observation database changed")
+
+
+def _runtime_observation_stamp(registry, owner, state_root: Path, deadline: float) -> _RuntimeObservationStamp:
+    from markdown_transaction import _COORDINATOR_V3_CONTRACT
+
+    _stop_at(deadline)
+    path = registry.database_path
+    identity = _observation_database_identity(path, state_root)
+    with closing(open_readonly_operational_db(
+        path, state_root, max_bytes=MAX_OPERATIONAL_DB_BYTES,
+        owner_only=True, contract=_COORDINATOR_V3_CONTRACT,
+    )) as database:
+        # One is SQLite's minimum callback interval, not a work/count ceiling.
+        database.set_progress_handler(lambda: _deadline_reached(deadline), 1)
+        database.execute("BEGIN")
+        registry.require(database, owner)
+        other_owner = _observation_other_owner(database, owner, deadline)
+        epochs_digest = _observation_epoch_digest(database, deadline)
+        _require_observation_database(identity, _observation_database_identity(path, state_root))
+    _stop_at(deadline)
+    return _RuntimeObservationStamp(identity, epochs_digest, other_owner)
+
+
+def _validated_observation_codes(registry, root_path, state_path, now, deadline, owner, validate) -> list[str]:
+    before = _runtime_observation_stamp(registry, owner, state_path, deadline)
+    if before.other_owner:
+        return ["runtime_deletion_check_requires_quiescence"]
+    codes = _observed_deletion_codes(root_path, state_path, now, deadline, owner, validate)
+    after = _runtime_observation_stamp(registry, owner, state_path, deadline)
+    if before != after:
+        codes.append("runtime_deletion_snapshot_changed")
     return codes
 
 

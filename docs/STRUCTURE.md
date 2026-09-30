@@ -433,7 +433,9 @@ migration removes them. Explicit offline repair retains the exact v2 database by
 replacements, and puts immutable JSON tombstones at the legacy active paths. Partial
 adoption disables v3 mutation and requires the vault to remain offline. After complete
 adoption, known v2 queue and transaction clients cannot open active v3 state. Doctor
-reports a protected quiescent snapshot only after complete adoption; before that it
+reports a protected quiescent snapshot only after complete adoption; a normal doctor
+owner admits capture while a before/after comparison of canonical admission epochs and
+physical database identity rejects intervening activity. Before complete adoption it
 reports an unconditional legacy-protocol blocker. The snapshot is not a durable deletion permit;
 `run/` deletion remains an offline operator action.
 
@@ -852,9 +854,13 @@ as a blocker. A complete validated
 tombstone/adoption set does not independently block otherwise eligible whole-`run/`
 deletion. Validated capture terminal records survive ordinary purge but cease to be
 independent blockers after 30 days; deleting the whole eligible runtime deliberately
-forfeits their replay suppression. Proposed Doctor acquires an admission gate while
-checking but reports only a quiescent snapshot; it does not authorize a later
-concurrent deletion. Deletion remains an offline operator action.
+forfeits their replay suppression. Doctor uses the existing shared `doctor` admission
+role and renews its lease under the caller deadline. It checks canonical owner epochs
+and physical database identity before and after validation, and refuses a quiescent
+verdict if another owner appears, the observation changes, ownership is lost or the
+deadline expires. It reports only a snapshot and never authorizes a later concurrent
+deletion. The exclusive `runtime-deletion-check` role still protects offline actions.
+See [health/capture qualification](research/2026-09-30-health-observation-does-not-refuse-capture.md).
 
 ## Forbidden at vault root
 

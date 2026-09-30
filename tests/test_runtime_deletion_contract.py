@@ -227,7 +227,7 @@ def test_protected_snapshot_releases_before_later_owner_admission(
 
 
 @pytest.mark.parametrize("role", CANONICAL_ROLES)
-def test_protected_snapshot_acquires_only_when_no_other_owner_exists(
+def test_observation_never_claims_quiescence_with_another_owner(
     tmp_path: Path,
     role: str,
 ) -> None:
@@ -329,7 +329,7 @@ def test_snapshot_excludes_only_its_exact_token_and_reports_orphan_projections(
         ).fetchone() == (0,)
 
 
-def test_protected_scan_fails_closed_before_30_second_lease_expiry(
+def test_observation_fails_closed_at_the_caller_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -359,7 +359,7 @@ def test_protected_scan_fails_closed_before_30_second_lease_expiry(
         state_root,
         datetime.now(timezone.utc),
         root=root,
-        deadline=float("inf"),
+        deadline=120.0,
     )
 
     assert observed_tokens and observed_tokens[0]
@@ -1611,3 +1611,122 @@ def test_queue_health_fails_closed_when_required_state_metadata_is_missing(tmp_p
 
     assert check["status"] == "error"
     assert "queue_state_corrupt" in check["details"]["deletion_codes"]
+
+
+def test_health_scan_accepts_a_complete_capture_and_refuses_quiescence(tmp_path, monkeypatch):
+    import doctor
+    import installed_memory_repair
+    from markdown_transaction import active_markdown_coordinator
+    from memory_queue import active_memory_queue
+
+    from tests.test_breadcrumb_storage import _bundle, _publish
+
+    root, state_root = _vault(tmp_path)
+    build_adopted_reliability_v3(root, state_root)
+    queue = active_memory_queue(root, state_root)
+    coordinator = active_markdown_coordinator(root, state_root)
+    validate = installed_memory_repair.validate_reliability_v3_runtime
+    publications = []
+
+    def scan(**kwargs):
+        publications.append(_publish(queue, coordinator))
+        return validate(**kwargs)
+
+    monkeypatch.setattr(installed_memory_repair, "validate_reliability_v3_runtime", scan)
+    result = doctor._run_deletion_check(state_root, datetime.now(timezone.utc), root=root)
+    assert len(publications) == 1
+    assert publications[0].registered is True
+    assert _bundle(state_root, publications[0].intent_id).content
+    assert result["quiescent"] is False
+    assert result["permit"] is False
+
+
+def test_health_scan_detects_an_owner_that_arrived_and_left(tmp_path, monkeypatch):
+    import doctor
+    import installed_memory_repair
+    from operational_ownership import OwnershipRegistry
+
+    root, state_root = _vault(tmp_path)
+    build_adopted_reliability_v3(root, state_root)
+    registry = OwnershipRegistry._from_adopted_database(
+        state_root, state_root / "run/markdown-transactions-v3.sqlite3"
+    )
+    admitted = []
+
+    def scan(**kwargs):
+        owner = registry.acquire("capture", scope="transient-input")
+        admitted.append(owner.token)
+        registry.release(owner)
+        return []
+
+    monkeypatch.setattr(installed_memory_repair, "validate_reliability_v3_runtime", scan)
+    result = doctor._run_deletion_check(state_root, datetime.now(timezone.utc), root=root)
+    assert admitted
+    assert result["quiescent"] is False
+    assert result["permit"] is False
+    assert {item["code"] for item in result["blockers"]} == {"runtime_deletion_snapshot_changed"}
+
+
+def test_observation_detects_database_replacement_with_the_same_epochs(tmp_path, monkeypatch):
+    import shutil
+
+    import doctor
+    import installed_memory_repair
+
+    root, state_root = _vault(tmp_path)
+    build_adopted_reliability_v3(root, state_root)
+    database_path = state_root / "run/markdown-transactions-v3.sqlite3"
+
+    def scan(**kwargs):
+        replacement = database_path.with_name("replacement.sqlite3")
+        shutil.copy2(database_path, replacement)
+        os.replace(replacement, database_path)
+        return []
+
+    monkeypatch.setattr(installed_memory_repair, "validate_reliability_v3_runtime", scan)
+    result = doctor._run_deletion_check(state_root, datetime.now(timezone.utc), root=root)
+    assert result["quiescent"] is False
+    assert {item["code"] for item in result["blockers"]} == {"runtime_deletion_snapshot_changed"}
+
+
+def test_observer_heartbeat_does_not_invalidate_an_otherwise_quiescent_scan(tmp_path, monkeypatch):
+    import doctor
+    import installed_memory_repair
+    from operational_ownership import OwnershipRegistry
+
+    root, state_root = _vault(tmp_path)
+    build_adopted_reliability_v3(root, state_root)
+    registry = OwnershipRegistry._from_adopted_database(
+        state_root, state_root / "run/markdown-transactions-v3.sqlite3"
+    )
+
+    def scan(**kwargs):
+        registry.heartbeat(kwargs["excluded_owner"])
+        return []
+
+    monkeypatch.setattr(installed_memory_repair, "validate_reliability_v3_runtime", scan)
+    result = doctor._run_deletion_check(state_root, datetime.now(timezone.utc), root=root)
+    assert result["quiescent"] is True
+    assert result["permit"] is False
+
+
+def test_real_exclusive_maintenance_still_refuses_breadcrumb_publication(tmp_path):
+    from markdown_transaction import active_markdown_coordinator
+    from memory_queue import active_memory_queue
+    from operational_ownership import OperationalOwnershipError, OwnershipRegistry
+
+    from tests.test_breadcrumb_storage import _publish
+
+    root, state_root = _vault(tmp_path)
+    build_adopted_reliability_v3(root, state_root)
+    queue = active_memory_queue(root, state_root)
+    coordinator = active_markdown_coordinator(root, state_root)
+    registry = OwnershipRegistry._from_adopted_database(
+        state_root, state_root / "run/markdown-transactions-v3.sqlite3"
+    )
+    owner = registry.acquire("runtime-deletion-check", scope="offline-operation")
+    try:
+        with pytest.raises(OperationalOwnershipError, match="runtime_deletion_check_active"):
+            _publish(queue, coordinator)
+    finally:
+        registry.release(owner)
