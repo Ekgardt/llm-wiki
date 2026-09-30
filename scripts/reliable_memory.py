@@ -68,6 +68,11 @@ DEFAULTS = ReliableMemoryDefaults()
 MAX_CAPTURE_DECISION_BYTES = 1024 * 1024
 
 
+def quote_sqlite_identifier(name: str) -> str:
+    """Encode one exact SQLite identifier, including its embedded quotes."""
+    return '"' + name.replace('"', '""') + '"'
+
+
 def _require_positive_int(name: str, value: object) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
@@ -684,9 +689,9 @@ def _contained_runtime_metadata(path: Path, state_root: Path) -> os.stat_result:
     root = Path(state_root).resolve(strict=True)
     try:
         path.parent.resolve(strict=True).relative_to(root)
-        return path.lstat()
     except (OSError, ValueError) as exc:
         raise PermissionError("runtime file is outside the configured state root") from exc
+    return path.lstat()
 
 
 def _require_bounded_regular_file(

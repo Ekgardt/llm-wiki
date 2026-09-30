@@ -777,6 +777,20 @@ def _page_after(after: bytes, ledger: Mapping[str, object], source_page: str) ->
     return _mark_page_superseded(after, source_page)
 
 
+def supersede_claims_in_page(
+    raw: bytes, mutations: Sequence[LifecycleTarget], path: str,
+) -> tuple[bytes, Mapping[str, object]]:
+    """Transform a verified ledger; the caller decides the final page status."""
+    targets = _grouped_targets(mutations).get(path, {})
+    match = CLAIM_LEDGER_RE.search(raw)
+    if match is None:
+        raise ValueError("lifecycle target has no canonical claim ledger")
+    ledger = json.loads(match[2])
+    _supersede_ledger_claims(ledger, targets, path)
+    after = raw[:match.start(2)] + canonical_json_bytes(ledger) + raw[match.end(2):]
+    return after, ledger
+
+
 class ContradictionPipeline:
     def __init__(
         self,
@@ -1195,13 +1209,7 @@ class ContradictionPipeline:
             self.vault / path, MAX_CLAIM_PAGE_BYTES, label="claim lifecycle page"
         )
         preconditions[path] = sha256_bytes(raw)
-        match = CLAIM_LEDGER_RE.search(raw)
-        if match is None:
-            raise ValueError("lifecycle target has no canonical claim ledger")
-        ledger = json.loads(match[2])
-        _supersede_ledger_claims(ledger, targets, path)
-        encoded = canonical_json_bytes(ledger)
-        after = raw[: match.start(2)] + encoded + raw[match.end(2) :]
+        after, ledger = supersede_claims_in_page(raw, tuple(targets.values()), path)
         return MarkdownChange.replace(
             path,
             _page_after(after, ledger, self.source_page),

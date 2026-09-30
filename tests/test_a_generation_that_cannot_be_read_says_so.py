@@ -8,6 +8,7 @@ inside the opening path. Research:
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -29,6 +30,7 @@ def _repository_with_a_generation(tmp_path, monkeypatch):
 
     repository = tmp_path / "repo"
     repository.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True, capture_output=True)
     (repository / "app.py").write_bytes(SOURCE)
     catalog = GenerationCatalog(tmp_path / "state")
     scope = resolve_repository_scope(repository)

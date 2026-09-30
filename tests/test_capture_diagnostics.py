@@ -6,9 +6,13 @@ one counter in `state.json`, surfaced in the SessionStart block.
 """
 from __future__ import annotations
 
+import io
 import json
 
 import pytest
+
+from tests.test_breadcrumb_worker import ingress as ingress
+from tests.test_capture_hooks import HOOKS, _hook_payload, _run_capture_with_stdin
 
 
 @pytest.fixture
@@ -68,6 +72,40 @@ def test_clean_state_produces_no_session_line(diagnostics):
     assert module.capture_failure_totals({"capture_failures": "broken"}) == {}
 
 
+@pytest.mark.parametrize("hook_name", ["user_prompt_capture", "post_tool_capture"])
+def test_closed_hook_input_is_reported_as_a_loss(hook_name, diagnostics, monkeypatch):
+    import importlib
+    import sys
+
+    module, state = diagnostics
+    hook = importlib.import_module(hook_name)
+    stream = io.StringIO("undelivered input")
+    stream.close()
+    monkeypatch.setattr(sys, "stdin", stream)
+    monkeypatch.setattr(sys, "argv", [hook_name])
+
+    assert hook.main() == 0  # Host continuation is independent of capture success.
+    assert sum(module.capture_failure_totals(state).values()) == 1
+    record = json.loads(module.FAILURE_LOG.read_text(encoding="utf-8"))
+    assert record["outcome"] == "lost"
+    assert "ValueError" in record["reason"]
+
+
+@pytest.mark.parametrize("hook_name", ["user_prompt_capture", "post_tool_capture"])
+def test_empty_hook_input_remains_a_valid_noop(hook_name, diagnostics, monkeypatch):
+    import importlib
+    import sys
+
+    module, state = diagnostics
+    hook = importlib.import_module(hook_name)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    monkeypatch.setattr(sys, "argv", [hook_name])
+
+    assert hook.main() == 0
+    assert module.capture_failure_totals(state) == {}
+    assert not module.FAILURE_LOG.exists()
+
+
 def test_trail_is_bounded(diagnostics, monkeypatch):
     module, _ = diagnostics
     monkeypatch.setattr(module, "MAX_FAILURE_LOG_BYTES", 400)
@@ -93,36 +131,22 @@ def test_reason_is_redacted(diagnostics):
     assert "AAAABBBBCCCC" not in written
 
 
-def test_prompt_append_failure_is_recorded(monkeypatch):
-    import user_prompt_capture
+@pytest.mark.parametrize('module_name,payload', HOOKS)
+def test_durable_publication_failure_is_recorded(ingress, monkeypatch, module_name, payload):
+    import breadcrumb_storage
 
+    module = __import__(module_name)
     recorded: list[tuple] = []
     monkeypatch.setattr(
-        user_prompt_capture,
+        module,
         "record_capture_failure",
         lambda kind, reason, **fields: recorded.append((kind, reason, fields)),
     )
-    monkeypatch.setattr(__import__("daily_log_append"), "append_daily", _raise_disk_full)
-
-    assert user_prompt_capture._append_prompt_tag("demo", "session", "hello") is False
-    assert recorded and recorded[0][0] == "user_prompt_append"
+    monkeypatch.setattr(breadcrumb_storage, 'publish_breadcrumb', _raise_disk_full)
+    assert _run_capture_with_stdin(module_name, _hook_payload(payload)) == 0
+    assert recorded[0][0].endswith('_hook')
     assert "OSError" in recorded[0][1]
-
-
-def test_tool_append_failure_is_recorded(monkeypatch):
-    import post_tool_capture
-
-    recorded: list[tuple] = []
-    monkeypatch.setattr(
-        post_tool_capture,
-        "record_capture_failure",
-        lambda kind, reason, **fields: recorded.append((kind, reason, fields)),
-    )
-    monkeypatch.setattr(__import__("daily_log_append"), "append_daily", _raise_disk_full)
-
-    assert post_tool_capture._append_tool_tag("demo", "session", "Edit", "a.py", budget_seconds=post_tool_capture._append_budget([])) is False
-    assert recorded and recorded[0][0] == "post_tool_append"
-    assert "OSError" in recorded[0][1]
+    assert ingress[1].claim_capture('failed', handler_versions=(2,)) is None
 
 
 def _raise_disk_full(*args, **kwargs):
@@ -189,6 +213,28 @@ def test_a_capture_lost_today_is_live_and_one_lost_last_month_is_not():
     assert capture_diagnostics.capture_failure_totals(old) == {"session_end": 1}
 
 
+def test_a_deferral_does_not_change_the_time_of_the_last_loss():
+    import capture_diagnostics as module
+
+    old = _recent_moment(30)
+    current = _recent_moment()
+    state = {}
+    module._bump_counter(state, {"kind": "session_end", "outcome": "lost", "at": old, "reason": "lost"})
+    module._bump_counter(state, {"kind": "session_end", "outcome": "deferred", "at": current, "reason": "retry"})
+    assert module.capture_failure_totals(state) == {"session_end": 1}
+    assert module.capture_deferred_totals(state) == {"session_end": 1}
+    assert module.last_capture_failure_at(state) == old
+    assert module.capture_failure_is_live(state) is False
+
+
+def test_a_different_kind_with_only_deferrals_does_not_refresh_a_loss():
+    import capture_diagnostics as module
+
+    old = _recent_moment(30)
+    state = {"capture_failures": {"session_end": {"count": 1, "last_at": old}}}
+    module._bump_counter(state, {"kind": "post_tool_append", "outcome": "deferred", "at": _recent_moment(), "reason": "retry"})
+    assert module.last_capture_failure_at(state) == old
+    assert module.capture_failure_is_live(state) is False
 def test_the_line_says_so_when_the_trail_is_missing(diagnostics):
     """The counters live in state.json; the trail is separate and best effort.
 

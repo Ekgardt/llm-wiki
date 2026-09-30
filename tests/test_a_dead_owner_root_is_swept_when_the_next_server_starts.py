@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 from lsp_process import LspProcess
+from process_liveness import process_start_identity
 
 from tests.slow_machine import SHORT_TIMEOUT
 
@@ -49,11 +50,13 @@ def _owner_record(nonce: str, pid: int) -> dict:
     }
 
 
-def _plant(parent: Path, nonce: str, pid: int, *, failed: bool = False) -> Path:
+def _plant(parent: Path, nonce: str, pid: int, *, failed: bool = False, identity=None) -> Path:
     """One owner root as an abrupt death leaves it, sealed launch tree and all."""
     root = parent / nonce
     root.mkdir(parents=True)
-    (root / "owner.json").write_bytes(_canonical(_owner_record(nonce, pid)))
+    record = _owner_record(nonce, pid)
+    record["owner_start_identity"] = identity
+    (root / "owner.json").write_bytes(_canonical(record))
     if failed:
         (root / "failure.json").write_bytes(_canonical({"code": "process_exited"}))
     launch = root / "launch-abcdef" / "dist"
@@ -65,21 +68,28 @@ def _plant(parent: Path, nonce: str, pid: int, *, failed: bool = False) -> Path:
     return root
 
 
-@pytest.fixture()
-def dead_pid() -> int:
+def finished_process() -> tuple[int, str]:
     """A process identifier this machine has finished with and reaped."""
-    child = subprocess.Popen([sys.executable, "-c", ""])
-    child.wait()
-    return child.pid
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+    identity = process_start_identity(child.pid)
+    child.communicate(timeout=SHORT_TIMEOUT)
+    assert identity is not None
+    return child.pid, identity
+
+
+@pytest.fixture()
+def dead_process() -> tuple[int, str]:
+    return finished_process()
 
 
 def test_a_dead_neighbour_is_swept_and_a_live_one_and_evidence_are_kept(
-    tmp_path: Path, dead_pid: int
+    tmp_path: Path, dead_process: tuple[int, str]
 ) -> None:
     parent = tmp_path / "lsp"
-    dead = _plant(parent, DEAD_NONCE, dead_pid)
+    pid, identity = dead_process
+    dead = _plant(parent, DEAD_NONCE, pid, identity=identity)
     kept = _plant(parent, LIVE_NONCE, os.getpid())
-    with_evidence = _plant(parent, "2" * 32, dead_pid, failed=True)
+    with_evidence = _plant(parent, "2" * 32, pid, failed=True, identity=identity)
 
     process = LspProcess.start(
         [sys.executable, "-c", _SERVER], cwd=tmp_path, owner_root=parent / OWNER_NONCE

@@ -3293,6 +3293,19 @@ def _exact_filename_rows(
     ).fetchall()
 
 
+_SESSION_SOURCE_PREFIX = "knowledge/raw/sessions/"
+
+
+def _generation_cohort_rows(connection, query, filters, values, limit, *, sessions):
+    operator = "LIKE" if sessions else "NOT LIKE"
+    return connection.execute(
+        f"SELECT {_GENERATION_CHUNK_COLUMNS}, bm25(chunks) AS rank FROM chunks "
+        f"WHERE chunks MATCH ?{filters} AND source_path {operator} ? "
+        "ORDER BY rank, chunk_order LIMIT ?",
+        [_fts_query(query), *values, _SESSION_SOURCE_PREFIX + "%", limit * 5],
+    ).fetchall()
+
+
 def _generation_matched_rows(
     connection: sqlite3.Connection,
     query: str,
@@ -3300,18 +3313,35 @@ def _generation_matched_rows(
     values: Sequence[object],
     limit: int,
 ) -> list[sqlite3.Row]:
-    """One BM25 over a chunk's title, text and — in a v2 artifact — its fact keys.
+    """Keep session evidence from evicting claim candidates before trust applies.
 
-    Key expansion, the shape LongMemEval measured as the good one: a turn is found under
-    the facts it states as well as under its text, and what the reader gets is still the
-    turn. The keys are a column of this table, so they are ranked on the same scale as the
-    text. Research: `docs/research/2026-09-17-one-table-one-scale-for-the-keys.md`.
+    Both tiers use the existing caller-derived overfetch; no fixed source quota
+    is introduced. They still share this generation's one FTS table and BM25
+    statistics, so paired quality measurements remain necessary.
     """
-    return connection.execute(
-        f"SELECT {_GENERATION_CHUNK_COLUMNS}, bm25(chunks) AS rank FROM chunks "
-        f"WHERE chunks MATCH ?{filters} ORDER BY rank, chunk_order LIMIT ?",
-        [_fts_query(query), *values, limit * 5],
-    ).fetchall()
+    rows = []
+    for sessions in (False, True):
+        rows.extend(_generation_cohort_rows(connection, query, filters, values, limit, sessions=sessions))
+    return rows
+
+
+def _session_evidence_hit(row: Mapping[str, object]) -> bool:
+    return str(row.get("path", "")).startswith(_SESSION_SOURCE_PREFIX)
+
+
+def _source_tier(rows: list[dict], sessions: bool) -> list[dict]:
+    return [row for row in rows if _session_evidence_hit(row) == sessions]
+
+
+def _admit_source_tiers(rows: list[dict], limit: int) -> list[dict]:
+    """Keep each caller-bounded pool, then preserve the engine's scored order.
+
+    Pool protection must not silently rank a weak claim above stronger evidence.
+    Final answer and explicit total candidate caps remain retrieval's contract.
+    """
+    selected = {id(row) for sessions in (False, True)
+                for row in _source_tier(rows, sessions)[:limit]}
+    return [row for row in rows if id(row) in selected]
 
 
 def _deduplicated_results(
@@ -3407,7 +3437,7 @@ def _generation_fts_search(
     filtered = apply_hard_filters(
         results, project=project, since=since, as_of=as_of, scope=scope
     )
-    return filtered[:limit]
+    return _admit_source_tiers(filtered, limit)
 
 
 def _vectors_match_manifest(
@@ -3667,7 +3697,7 @@ def _generation_vector_rows(
         cancelled=cancelled,
     )
     _check_generation_stop(deadline, cancelled)
-    return results[: limit * 3]
+    return _admit_source_tiers(results, limit * 3)
 
 
 def _generation_vectors_search(
@@ -4146,9 +4176,62 @@ def markdown_hits(
         deadline=deadline,
         cancelled=cancelled,
     )
+    hits.extend(_direct_breadcrumb_hits(
+        query, scope=scope, limit=limit, project=project, since=since,
+        as_of=as_of, deadline=deadline, cancelled=cancelled,
+    ))
+    hits.sort(key=lambda item: (-float(item["score"]), str(item["path"])))
     normalized_stem = _normalized_filename_stem(query)
     hits = _with_exact_page(hits, pages, normalized_stem, project=project, since=since, as_of=as_of)
     return _promoted_filename_first(hits, normalized_stem)
+
+
+def _breadcrumb_literal_row(chunk, terms: set[str]) -> dict | None:
+    """One physical, bounded chunk, never a whole multipart event in the answer."""
+    shared = terms & set(re.findall(r"\w+", chunk.text.casefold()))
+    if not shared:
+        return None
+    score = len(shared) * _chunk_weight(chunk.authority, chunk.type, chunk.text, chunk.source_path)
+    return {
+        "path": chunk.source_path, "candidate_id": chunk.id, "chunk_id": chunk.id,
+        "source_id": chunk.source_id, "source_sha256": chunk.source_sha256,
+        "span_sha256": chunk.span_sha256, "content": chunk.text,
+        "heading_ancestry": list(chunk.heading_ancestry),
+        "title": next(iter(chunk.heading_ancestry), Path(chunk.source_path).stem),
+        "score": score, "bm25_score": score, "project": chunk.project,
+        "type": chunk.type, "authority": chunk.authority, "confidence": chunk.confidence,
+        "status": chunk.status, "valid_from": chunk.valid_from, "valid_to": chunk.valid_to,
+        "timestamp": (chunk.valid_from or "")[:10], "language": chunk.language,
+        "fallback_reason": "no_active_generation", "partial": True,
+    }
+
+
+def _breadcrumb_literal_rows(snapshot, terms, deadline, cancelled) -> list[dict]:
+    rows = []
+    for chunk in snapshot.chunks:
+        _check_legacy_stop(deadline, cancelled)
+        row = _breadcrumb_literal_row(chunk, terms)
+        if row is not None:
+            rows.append(row)
+    return rows
+
+
+def _direct_breadcrumb_hits(
+    query, *, scope, limit, project, since, as_of, deadline, cancelled,
+) -> list[dict]:
+    """Reuse complete-source verification and chunking under the caller's deadline."""
+    from corpus_snapshot import collect_corpus
+
+    if scope in _NOTES_SCOPES:
+        return []
+    snapshot = collect_corpus(
+        ROOT, deadline=deadline, cancelled=cancelled,
+        pruned_directories=("knowledge/notes", "knowledge/projects"),
+    )
+    rows = _breadcrumb_literal_rows(snapshot, _evidence_terms(query), deadline, cancelled)
+    rows = apply_hard_filters(rows, project=project, since=since, as_of=as_of, scope=scope)
+    rows.sort(key=lambda row: (-float(row["score"]), row["path"], row["candidate_id"]))
+    return rows[:max(limit * 3, limit)]
 
 
 def _resolved_pages(

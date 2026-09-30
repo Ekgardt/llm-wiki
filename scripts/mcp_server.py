@@ -91,9 +91,6 @@ MAX_MCP_SLUG_LENGTH = 255
 MAX_MCP_CONTEXT_SLUGS = 20
 MAX_MCP_CONTEXT_INCLUDE = 10
 MAX_MCP_INCLUDE_LENGTH = 64
-# The largest token_budget a caller may ask get_context for. Basis unknown: value
-# predates measurement; review if a client's context window makes it too small.
-MAX_MCP_CONTEXT_TOKENS = 32_768
 # An error message returned to a client, after secret redaction: a display bound so a
 # failing tool never answers with a whole traceback.
 MAX_MCP_ERROR_CHARS = 256
@@ -713,9 +710,9 @@ TOOL_INPUT_SCHEMAS = {
             },
             "token_budget": {
                 "type": "integer",
-                "minimum": 256,
-                "maximum": MAX_MCP_CONTEXT_TOKENS,
+                "minimum": 1,
                 "default": 8192,
+                "description": "Estimated token allowance for the context package; MCP envelope and telemetry add overhead",
             },
         },
         "required": ["slugs"],
@@ -1056,16 +1053,19 @@ def _retrieval_trace(
     an empty result names the generation it searched; rows alone are the path
     for callers that predate the sink.
     """
-    if _carries_trace(reported, generation_key="corpus_generation"):
-        trace = _reported_trace(reported)
-    elif results and _carries_trace(results[0], generation_key="generation"):
-        trace = _row_trace(results[0])
-    else:
-        trace = _unreported_trace(query)
     from reliable_memory import validate_schema
 
+    trace = _selected_retrieval_trace(query, results, reported)
     validate_schema(trace, RETRIEVAL_TRACE_SCHEMA)
     return trace
+
+
+def _selected_retrieval_trace(query: str, results: list[dict], reported) -> dict:
+    if _carries_trace(reported, generation_key="corpus_generation"):
+        return _reported_trace(reported)
+    if results and _carries_trace(results[0], generation_key="generation"):
+        return _row_trace(results[0])
+    return _unreported_trace(query)
 
 
 def _read_page(
@@ -1537,9 +1537,9 @@ def _require_context_include(include) -> None:
 
 def _require_context_token_budget(token_budget) -> None:
     if isinstance(token_budget, bool) or not isinstance(token_budget, int):
-        raise ValueError("token_budget exceeds the MCP context bound")
-    if not 256 <= token_budget <= MAX_MCP_CONTEXT_TOKENS:
-        raise ValueError("token_budget exceeds the MCP context bound")
+        raise ValueError("token_budget must be a positive integer")
+    if token_budget < 1:
+        raise ValueError("token_budget must be a positive integer")
 
 
 def _validated_context_request(slugs, include, token_budget):
@@ -6418,27 +6418,24 @@ def _build_resource_definitions() -> list:
     ]
 
 
+def _resource_data(uri: str, deadline: float) -> dict:
+    if uri == HEALTH_RESOURCE_URI:
+        return _call_with_deadline(_vault_status, deadline=deadline)
+    if uri == CONTEXT_RESOURCE_URI:
+        return {
+            "overview": _call_with_deadline(_wiki_overview, deadline=deadline),
+            "status": _call_with_deadline(_vault_status, deadline=deadline),
+        }
+    return {"error": f"Unknown resource: {uri}"}
+
+
 def _handle_resource_read(uri: str, deadline: float | None = None) -> str:
     """Return one resource as a JSON text envelope."""
 
     operation_deadline = _operation_deadline(deadline)
     deadline_token = _OPERATION_DEADLINE.set(operation_deadline)
     try:
-        if uri == HEALTH_RESOURCE_URI:
-            data = _call_with_deadline(
-                _vault_status, deadline=operation_deadline
-            )
-        elif uri == CONTEXT_RESOURCE_URI:
-            data = {
-                "overview": _call_with_deadline(
-                    _wiki_overview, deadline=operation_deadline
-                ),
-                "status": _call_with_deadline(
-                    _vault_status, deadline=operation_deadline
-                ),
-            }
-        else:
-            data = {"error": f"Unknown resource: {uri}"}
+        data = _resource_data(uri, operation_deadline)
     except Exception as error:
         data = {"error": _safe_exception_text(error, f"mcp.resource:{uri}")}
     try:

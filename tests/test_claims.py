@@ -207,12 +207,16 @@ def test_validated_record_binds_fingerprint_observation_and_literal_hash(pipelin
     )
     for field in ("fingerprint", "observed_at", "evidence"):
         changed = json.loads(json.dumps(normalized.record))
-        if field == "evidence":
-            changed["evidence"]["sha256"] = "0" * 64
-        elif field == "observed_at":
-            changed[field] = "2026-01-02T04:05:06Z"
-        else:
+        def damage_record():
+            if field == "evidence":
+                changed["evidence"]["sha256"] = "0" * 64
+                return
+            if field == "observed_at":
+                changed[field] = "2026-01-02T04:05:06Z"
+                return
             changed[field] = "0" * 64
+
+        damage_record()
         with pytest.raises(ValueError):
             validate_claim_record(changed)
 

@@ -1303,25 +1303,61 @@ class _Discovery:
             return path.suffix.casefold() == ".md" and path.name not in EDITORIAL_NAMES
         if kind == "project":
             return path.name in PROJECT_FILES
-        return True
+        return kind != "session" or _is_breadcrumb_head(path)
 
 
 def _walk_knowledge(discovery: _Discovery, vault: Path) -> None:
     discovery.walk(vault / "knowledge/notes", "note")
     discovery.walk(vault / "knowledge/projects", "project")
-    # Session records are deliberately NOT collected. They are kept verbatim on
-    # disk, they are read by the nightly consolidation, and they are greppable —
-    # but they are not part of the retrieval corpus, because measurement says
-    # they take it over: importing 236 past sessions (about 10 MB of the same
-    # conversations the pages were compiled from) moved the vault stand from
-    # hit@5 0.7 to 0.0, and neither a below-neutral trust weight nor ordering
-    # compiled pages first brought it back past 0.4 — by then the decision page
-    # was no longer in the candidate pool at all.
-    #
-    # What would make them safe to index is a second tier consulted when the
-    # compiled pages do not answer, or a per-source quota in the pool. Neither is
-    # built, so the honest state is: kept, not indexed. See MEM-01 in
-    # docs/DEVELOPER-AUDIT-STATUS-2026-08-18.md.
+    # Ordinary sessions remain excluded: their import displaced claim pages in
+    # the measured vault stand. Only integrity-bound breadcrumb sources enter.
+    _walk_breadcrumbs(discovery, vault)
+
+
+def _is_breadcrumb_head(path: Path) -> bool:
+    from breadcrumb_evidence import is_breadcrumb_document
+
+    return path.name.endswith(".breadcrumb.md") and is_breadcrumb_document(path)
+
+
+def _breadcrumb_logical_path(relative: str) -> str:
+    from breadcrumb_evidence import archived_source_path
+
+    path = PurePosixPath(relative)
+    logical = "knowledge/raw/sessions/" + "/".join(path.parts[-2:])
+    if relative not in {logical, archived_source_path(logical)}:
+        raise ValueError("breadcrumb source has no canonical corpus location")
+    return logical
+
+
+def _breadcrumb_corpus_read(discovery: _Discovery, relative: str, archived: bool) -> bytes:
+    from breadcrumb_evidence import archived_source_path
+
+    _check_deadline(discovery.deadline)
+    physical = archived_source_path(relative) if archived else relative
+    if physical not in discovery.candidates:
+        discovery.add(discovery.vault / physical, "session")
+    return _candidate_bytes(discovery.candidates[physical], discovery.max_file_bytes, "breadcrumb corpus source")
+
+
+def _follow_breadcrumb(discovery: _Discovery, head: _Candidate) -> None:
+    from breadcrumb_evidence import restore_source
+
+    logical = _breadcrumb_logical_path(head.relative)
+    archived = logical != head.relative
+
+    def read(relative: str) -> bytes:
+        return _breadcrumb_corpus_read(discovery, relative, archived)
+
+    restore_source(logical, read)
+    _check_deadline(discovery.deadline)
+
+
+def _walk_breadcrumbs(discovery: _Discovery, vault: Path) -> None:
+    discovery.walk(vault / "knowledge/raw/sessions", "session")
+    heads = tuple(item for item in discovery.candidates.values() if item.kind == "session")
+    for head in heads:
+        _follow_breadcrumb(discovery, head)
 
 
 def is_memory_path(relative_path: str, code_roots: Iterable[str] = ()) -> bool:
@@ -1714,19 +1750,26 @@ def _metadata_language(frontmatter: Mapping[str, object]) -> str | None:
 _DAILY_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})\.md$")
 
 
-def _dated_by_name(candidate: _Candidate) -> str | None:
-    """A daily entry's date is the one in its file name — the one certain date about it.
+def _breadcrumb_date(candidate: _Candidate) -> str | None:
+    from breadcrumb_evidence import is_breadcrumb_document
 
-    Since 2026-09-09 that date is its `valid_from`, so the index's own
-    since/as-of window reaches daily entries and a question's dates can bound
-    a search. See `docs/research/2026-09-08-the-calendar-does-the-arithmetic.md`.
-    """
+    if not is_breadcrumb_document(candidate.path):
+        return None
+    return date.fromisoformat(PurePosixPath(candidate.relative).parent.name).isoformat()
+
+
+def _daily_date(relative: str) -> str | None:
+    match = _DAILY_DATE.search(relative)
+    return match.group(1) if match is not None else None
+
+
+def _dated_by_name(candidate: _Candidate) -> str | None:
+    """Daily names and verified breadcrumb directories bind occurrence days."""
+    if candidate.kind == "session":
+        return _breadcrumb_date(candidate)
     if candidate.kind != "daily":
         return None
-    match = _DAILY_DATE.search(candidate.relative)
-    if match is None:
-        return None
-    return match.group(1)
+    return _daily_date(candidate.relative)
 
 
 def _metadata(frontmatter: Mapping[str, object], candidate: _Candidate) -> SourceMetadata:
@@ -2474,10 +2517,14 @@ def _policy(
 
 
 def _candidate_content(candidate: _Candidate, policy: SnapshotPolicy, label: str) -> bytes:
+    return _candidate_bytes(candidate, policy.max_file_bytes, label)
+
+
+def _candidate_bytes(candidate: _Candidate, max_bytes: int, label: str) -> bytes:
     if candidate.content is not None:
         return candidate.content
     _verify_seal(candidate.seal)
-    content = _sealed_source_bytes(candidate.path, policy.max_file_bytes, label)
+    content = _sealed_source_bytes(candidate.path, max_bytes, label)
     _verify_seal(candidate.seal)
     return content
 

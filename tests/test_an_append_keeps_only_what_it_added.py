@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -158,3 +159,47 @@ def test_an_undone_append_recovers_at_every_crash_boundary(vault: Path, state_ro
     MarkdownCoordinator(vault, state_root).recover()
     expected = BEFORE + TAIL if killpoint in _UNDO_NOT_YET_WRITTEN else BEFORE
     assert (vault / PAGE).read_bytes() == expected
+
+
+def test_legacy_writer_records_its_process_identity(vault: Path, state_root: Path) -> None:
+    from operational_ownership import current_process_identity
+
+    coordinator = MarkdownCoordinator(vault, state_root)
+    identity = current_process_identity()
+    with coordinator.writer_gate():
+        with sqlite3.connect(coordinator.database_path) as database:
+            row = database.execute(
+                "SELECT process_id, process_start_identity FROM writer_owners"
+            ).fetchone()
+        assert row == (identity.pid, identity.start_identity)
+
+
+def test_old_writer_rows_are_not_given_an_invented_identity() -> None:
+    with sqlite3.connect(":memory:") as database:
+        database.row_factory = sqlite3.Row
+        database.execute("CREATE TABLE writer_owners (process_id INTEGER)")
+        database.execute("INSERT INTO writer_owners VALUES (123)")
+        markdown_transaction._add_writer_owner_columns(database)
+        markdown_transaction._add_writer_owner_columns(database)
+        row = database.execute("SELECT * FROM writer_owners").fetchone()
+        assert row["process_id"] == 123
+        assert row["process_start_identity"] is None
+
+
+def test_unavailable_writer_identity_creates_no_owner(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from operational_ownership import OperationalOwnershipError
+
+    coordinator = MarkdownCoordinator(vault, state_root)
+
+    def unavailable():
+        raise OperationalOwnershipError("identity_unavailable", "cannot identify this process")
+
+    monkeypatch.setattr("operational_ownership.current_process_identity", unavailable)
+    with pytest.raises(OperationalOwnershipError, match="cannot identify"):
+        with coordinator.writer_gate(wait_seconds=0):
+            pytest.fail("a writer without an identity entered the gate")
+    with sqlite3.connect(coordinator.database_path) as database:
+        assert database.execute("SELECT count(*) FROM writer_owners").fetchone()[0] == 0
+        assert database.execute("SELECT count(*) FROM writer_fences").fetchone()[0] == 0

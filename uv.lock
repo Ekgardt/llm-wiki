@@ -750,10 +750,24 @@ wheels = [
 ]
 
 [[package]]
+name = "lizard"
+version = "1.23.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pathspec" },
+    { name = "pygments" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5b/94/4967d0868e7db39a72fa2dbef9a798c4d661178f3836bfec58091606f0f3/lizard-1.23.0.tar.gz", hash = "sha256:ed75cd45f086a2f51d6be64b0149b71bda820f92f95e30898254528bb949f795", size = 92659, upload-time = "2026-06-02T06:17:27.383Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3b/d9/25e62cbb9c4077a2dabc73e5f34dc947887f4fe1526f53d2c0489abfc186/lizard-1.23.0-py2.py3-none-any.whl", hash = "sha256:e9111e35c8a5f2e00d55cab318fca3504622991417411ea16cf46874fb752f42", size = 100830, upload-time = "2026-06-02T06:17:26.076Z" },
+]
+
+[[package]]
 name = "llm-wiki"
 version = "5.0.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "defusedxml" },
     { name = "mcp" },
     { name = "pyyaml" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
@@ -845,6 +859,7 @@ audit = [
 dev = [
     { name = "jedi" },
     { name = "jsonschema" },
+    { name = "lizard" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -869,6 +884,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "defusedxml", specifier = "==0.7.1" },
     { name = "huggingface-hub", marker = "extra == 'semantic'", specifier = ">=0.34,<2" },
     { name = "jedi", marker = "extra == 'code-graph'", specifier = ">=0.19,<1" },
     { name = "jieba", marker = "extra == 'lexical-benchmark'", specifier = "==0.42.1" },
@@ -910,6 +926,7 @@ audit = [{ name = "pip-audit", specifier = ">=2.10.1,<3" }]
 dev = [
     { name = "jedi", specifier = ">=0.19,<1" },
     { name = "jsonschema", specifier = ">=4.26,<5" },
+    { name = "lizard", specifier = "==1.23.0" },
     { name = "numpy", specifier = ">=2.2.6,<3" },
     { name = "pre-commit", specifier = ">=4.5.1" },
     { name = "pytest", specifier = ">=8.0.0" },
@@ -1637,6 +1654,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/30/4b/90c937815137d43ce71ba043cd3566221e9df6b9c805f24b5d138c9d40a7/parso-0.8.7.tar.gz", hash = "sha256:eaaac4c9fdd5e9e8852dc778d2d7405897ec510f2a298071453e5e3a07914bb1", size = 401824, upload-time = "2026-05-01T23:13:02.138Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/99/5d/8268b644392ee874ee82a635cd0df1773de230bde356c38de28e298392cc/parso-0.8.7-py2.py3-none-any.whl", hash = "sha256:a8926eb2a1b915486941fdbd31e86a4baf88fe8c210f25f2f35ecec5b574ca1c", size = 107025, upload-time = "2026-05-01T23:12:58.867Z" },
+]
+
+[[package]]
+name = "pathspec"
+version = "1.1.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/5a/82/42f767fc1c1143d6fd36efb827202a2d997a375e160a71eb2888a925aac1/pathspec-1.1.1.tar.gz", hash = "sha256:17db5ecd524104a120e173814c90367a96a98d07c45b2e10c2f3919fff91bf5a", size = 135180, upload-time = "2026-04-27T01:46:08.907Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f1/d9/7fb5aa316bc299258e68c73ba3bddbc499654a07f151cba08f6153988714/pathspec-1.1.1-py3-none-any.whl", hash = "sha256:a00ce642f577bf7f473932318056212bc4f8bfdf53128c78bbd5af0b9b20b189", size = 57328, upload-time = "2026-04-27T01:46:07.06Z" },
 ]
 
 [[package]]

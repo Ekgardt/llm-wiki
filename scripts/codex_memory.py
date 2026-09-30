@@ -1083,8 +1083,11 @@ def _print_heartbeat(result: dict[str, Any], reason: str) -> None:
     print(f"Reason: {reason}")
 
 
-def _print_daily_tag(result: dict[str, Any], reason: str, session_id: str) -> None:
-    print(f"Daily log tagged for slug: {result.get('slug')}")
+def _print_daily_capture(result: dict[str, Any], reason: str, session_id: str) -> None:
+    if result["daily_log_written"]:
+        print(f"Daily log tagged for slug: {result.get('slug')}")
+    else:
+        print(f"Daily log not written for slug: {result.get('slug')}")
     print(f"Reason: {reason}")
     print(f"Session id: {session_id}")
     if result["flush_spawned"]:
@@ -1095,7 +1098,7 @@ def _print_daily_result(result: dict[str, Any], reason: str, session_id: str) ->
     if result["heartbeat_recorded"]:
         _print_heartbeat(result, reason)
         return
-    _print_daily_tag(result, reason, session_id)
+    _print_daily_capture(result, reason, session_id)
 
 
 def _daily_outcome(

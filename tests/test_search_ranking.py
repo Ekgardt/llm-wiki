@@ -402,7 +402,8 @@ def test_generation_readers_check_cancellation_during_work(tmp_path, operation):
                 search_memory._valid_generation_fts(
                     connection, manifest, cancelled=_cancel_after(2)
                 )
-            elif operation == "search":
+                return
+            if operation == "search":
                 search_memory._generation_fts_search(
                     "semantic",
                     manifest,
@@ -414,22 +415,22 @@ def test_generation_readers_check_cancellation_during_work(tmp_path, operation):
                     as_of=None,
                     cancelled=_cancel_after(2),
                 )
-            else:
-                search_memory._generation_vectors_search(
-                    "semantic",
-                    catalog,
-                    manifest,
-                    connection,
-                    embedder=lambda _texts: [[1.0, 0.0]],
-                    model_id="deterministic/model",
-                    model_revision="revision-1",
-                    scope="all",
-                    limit=10,
-                    project=None,
-                    since=None,
-                    as_of=None,
-                    cancelled=_cancel_after(2),
-                )
+                return
+            search_memory._generation_vectors_search(
+                "semantic",
+                catalog,
+                manifest,
+                connection,
+                embedder=lambda _texts: [[1.0, 0.0]],
+                model_id="deterministic/model",
+                model_revision="revision-1",
+                scope="all",
+                limit=10,
+                project=None,
+                since=None,
+                as_of=None,
+                cancelled=_cancel_after(2),
+            )
     finally:
         connection.close()
 

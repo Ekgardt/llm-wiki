@@ -63,6 +63,11 @@ function Get-ClaudeStatusLine {
     param([bool]$Automatic, [string]$McpState)
     if (-not $Automatic) { return "Claude Code: not wired (install transaction failed)" }
     if ($McpState -eq "current") { return "Claude Code: active automatic" }
+    return Get-ClaudeMcpRegistrationLine -McpState $McpState
+}
+
+function Get-ClaudeMcpRegistrationLine {
+    param([string]$McpState)
     if ($McpState -eq "elsewhere") { return "Claude Code: hooks active; MCP entry points at another vault" }
     return "Claude Code: hooks active; MCP server not registered"
 }
@@ -100,22 +105,30 @@ function Invoke-NativeCommand {
     if (@($ArgumentList | Where-Object { [string]::IsNullOrEmpty($_) }).Count -gt 0) {
         throw "$FilePath was given an empty argument; omit the flag instead"
     }
+    $result = @{ ExitCode = 0; Output = $null }
+    Invoke-NativeProcess -FilePath $FilePath -ArgumentList $ArgumentList -CaptureOutput:$CaptureOutput -Result $result
+    if ($AllowedExitCodes -notcontains $result.ExitCode) {
+        throw "$FilePath failed with exit code $($result.ExitCode)"
+    }
+    Write-NativeResult -Result $result -ReturnResult:$ReturnResult -CaptureOutput:$CaptureOutput
+}
+
+function Invoke-NativeProcess {
+    param([string]$FilePath, [string[]]$ArgumentList, [switch]$CaptureOutput, [hashtable]$Result)
     if ($CaptureOutput) {
         $output = @(& $FilePath @ArgumentList)
-    } else {
-        & $FilePath @ArgumentList
+        $Result.ExitCode = $LASTEXITCODE
+        $Result.Output = $output -join [Environment]::NewLine
+        return
     }
-    $nativeExit = $LASTEXITCODE
-    if ($AllowedExitCodes -notcontains $nativeExit) {
-        throw "$FilePath failed with exit code $nativeExit"
-    }
-    if ($ReturnResult) {
-        return [pscustomobject]@{
-            ExitCode = $nativeExit
-            Output = if ($CaptureOutput) { $output -join [Environment]::NewLine } else { $null }
-        }
-    }
-    if ($CaptureOutput) { return ($output -join [Environment]::NewLine) }
+    & $FilePath @ArgumentList
+    $Result.ExitCode = $LASTEXITCODE
+}
+
+function Write-NativeResult {
+    param([hashtable]$Result, [switch]$ReturnResult, [switch]$CaptureOutput)
+    if ($ReturnResult) { return [pscustomobject]$Result }
+    if ($CaptureOutput) { return $Result.Output }
 }
 # A failed fetch used to leave the directory `git init` had made, and the next
 # attempt stopped at "already exists" with no way forward. The directory is ours
@@ -227,20 +240,49 @@ function Install-CodexMcp(
     [string]$Config,
     [bool]$ReplaceForeign = $false
 ) {
+    $result = Get-CodexMcpInstallState -VaultRoot $VaultRoot -Config $Config -ReplaceForeign $ReplaceForeign
+    if ($result.ExitCode -ne 0) { return $result.ExitCode }
+    $script:codexMcpState = $result.State
+    if ($result.State -eq "absent") { return Add-CodexMcpEntry -VaultRoot $VaultRoot -Config $Config }
+    return Complete-CodexMcpInstall -State $result.State
+}
+
+function Complete-CodexMcpInstall {
+    param([string]$State)
+    if ($State -in @("equivalent", "replaced")) { return 0 }
+    return 2
+}
+
+function Get-CodexMcpInstallState {
+    param([string]$VaultRoot, [string]$Config, [bool]$ReplaceForeign)
     $state = (& uv run --locked --no-sync --directory $VaultRoot python (Join-Path $VaultRoot "scripts\codex_memory.py") `
         config-state --config $Config --vault-root $VaultRoot | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0) { return 1 }
+    if ($LASTEXITCODE -ne 0) { return @{ ExitCode = 1; State = $state } }
     if ($state -in @("stale", "conflict")) {
-        $replaceArguments = @("config-replace", "--config", $Config, "--vault-root", $VaultRoot)
-        if ($ReplaceForeign) { $replaceArguments += "--foreign" }
-        $state = (& uv run --locked --no-sync --directory $VaultRoot python (Join-Path $VaultRoot "scripts\codex_memory.py") `
-            @replaceArguments | Out-String).Trim()
-        if ($LASTEXITCODE -ne 0) { return 1 }
+        return Update-CodexMcpEntry -VaultRoot $VaultRoot -Config $Config -ReplaceForeign $ReplaceForeign
     }
-    $script:codexMcpState = $state
-    if ($state -in @("equivalent", "replaced")) { return 0 }
-    if ($state -ne "absent") { return 2 }
+    return @{ ExitCode = 0; State = $state }
+}
 
+function Update-CodexMcpEntry {
+    param([string]$VaultRoot, [string]$Config, [bool]$ReplaceForeign)
+    $replaceArguments = @("config-replace", "--config", $Config, "--vault-root", $VaultRoot)
+    if ($ReplaceForeign) { $replaceArguments += "--foreign" }
+    $state = (& uv run --locked --no-sync --directory $VaultRoot python (Join-Path $VaultRoot "scripts\codex_memory.py") `
+        @replaceArguments | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) { return @{ ExitCode = 1; State = $state } }
+    return @{ ExitCode = 0; State = $state }
+}
+
+function Get-CodexMcpSeparator {
+    param([string]$Existing)
+    if ([string]::IsNullOrEmpty($Existing)) { return "" }
+    if ($Existing.EndsWith("`n")) { return "`n" }
+    return "`n`n"
+}
+
+function Add-CodexMcpEntry {
+    param([string]$VaultRoot, [string]$Config)
     $directory = Split-Path $Config -Parent
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
     $tomlVault = $VaultRoot.Replace("\", "\\").Replace('"', '\"')
@@ -253,13 +295,7 @@ args = ["run", "--locked", "--no-sync", "--directory", "$tomlVault", "python", "
     if (Test-Path $Config) {
         Copy-Item -LiteralPath $Config -Destination "$Config.bak" -Force
         $existing = [System.IO.File]::ReadAllText($Config)
-        $separator = if ([string]::IsNullOrEmpty($existing)) {
-            ""
-        } elseif ($existing.EndsWith("`n")) {
-            "`n"
-        } else {
-            "`n`n"
-        }
+        $separator = Get-CodexMcpSeparator -Existing $existing
         [System.IO.File]::AppendAllText($Config, $separator + $block + "`n", $encoding)
     } else {
         [System.IO.File]::WriteAllText($Config, $block + "`n", $encoding)
@@ -701,8 +737,11 @@ $adoptCommand = "uv run --locked --no-sync python scripts/repair_installed_memor
 # which the repair resumes) is adopted only when the operator said so to the installer.
 # See docs/research/2026-09-17-the-installer-does-not-vouch-for-agents-it-cannot-see.md.
 function Get-AdoptionPlan([string]$State, [bool]$Confirmed) {
-    if ($State -eq "adopted") { return "adopted" }
-    if ($State -eq "fresh") { return "adopt" }
+    $ready = @{ adopted = "adopted"; fresh = "adopt" }
+    if ($ready.ContainsKey($State)) { return $ready[$State] }
+    return Get-ExistingAdoptionPlan -State $State -Confirmed $Confirmed
+}
+function Get-ExistingAdoptionPlan([string]$State, [bool]$Confirmed) {
     if ($State -notin @("upgrade-required", "partial")) { return "unknown" }
     if ($Confirmed) { return "adopt" }
     return "ask"

@@ -7,8 +7,8 @@ user (`EPERM`), an unexpected error, a platform without a probe. The one
 boolean the legacy locks need, `pid_alive`, treats doubt as alive, so a lock
 is never stolen on a guess.
 
-`process_start_identity` names the process rather than its number — the boot
-id and start ticks on Linux, the start time on macOS, the creation FILETIME on
+`process_start_identity` names the process rather than its number — the host,
+boot, PID/time namespaces and start ticks on Linux, the start time on macOS, the creation FILETIME on
 Windows — so a reused PID is not mistaken for the owner that died. It lives
 here, beside the PID probe and with no dependency of its own, because every
 lock file that records it (`run/state.json.lock`, `run/maintenance.lock`,
@@ -16,13 +16,15 @@ lock file that records it (`run/state.json.lock`, `run/maintenance.lock`,
 registry would cost the coordinator's whole module tree.
 `owner_alive(pid, identity)` is the one question those locks ask.
 Research: docs/research/2026-09-11-one-answer-to-is-this-process-alive.md,
-docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
+docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md,
+docs/research/2026-09-29-a-hidden-process-is-not-a-dead-owner.md
 """
 
 from __future__ import annotations
 
 import ctypes
 import errno
+import hmac
 import os
 import platform
 import re
@@ -35,6 +37,13 @@ _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 # /proc/<pid>/stat is one line of 52 numeric fields and a comm of at most 16 bytes (proc(5)),
 # about 1 KiB at most; 8 KiB bounds the read.
 _MAX_PROCESS_STAT_BYTES = 8192
+# Shared with persisted ownership validation; a scoped identity includes a full
+# SHA-256 host key, boot ID, PID/time namespace handles and start ticks.
+MAX_START_IDENTITY_CHARS = 512
+_LINUX_SCOPED_IDENTITY = re.compile(
+    r"linux-v2:([0-9a-f]{64}|-):([0-9a-f-]{16,64}):([0-9]+):([0-9]+):"
+    r"([0-9]+\.[0-9]+|none):([1-9][0-9]*)"
+)
 
 
 class ProcessIdentityUnavailable(OSError):
@@ -104,7 +113,7 @@ def _posix_process_state(pid: int) -> str:
 
 
 def process_state(pid: object) -> str:
-    """`alive`, `dead` or `unknown` for a PID; anything but a positive int is unknown."""
+    """Probe a local PID; persisted owners must use `recorded_process_state`."""
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         return "unknown"
     if sys.platform == "win32":
@@ -196,6 +205,7 @@ def _linux_boot_id() -> str:
 
 
 def _linux_process_start_identity(pid: int) -> str | None:
+    scope = _linux_observer_scope()
     try:
         raw = _read_bounded_system_file(
             Path(f"/proc/{pid}/stat"), _MAX_PROCESS_STAT_BYTES
@@ -206,7 +216,116 @@ def _linux_process_start_identity(pid: int) -> str | None:
     if fields[0] in {b"Z", b"X", b"x"}:
         return None
     start_ticks = _linux_start_ticks(fields)
-    return f"linux:{_linux_boot_id()}:{start_ticks}"
+    return ":".join(("linux-v2", *scope, str(start_ticks)))
+
+
+def _linux_machine_key() -> str:
+    """Optional host continuity, without publishing the confidential machine ID."""
+    try:
+        raw = _read_bounded_system_file(Path("/etc/machine-id"), 33).rstrip(b"\n")
+    except OSError:
+        return "-"
+    if not re.fullmatch(rb"[0-9a-f]{32}", raw) or raw == b"0" * 32:
+        return "-"
+    return hmac.digest(b"LLM Wiki Linux ownership host v2", raw, "sha256").hex()
+
+
+def _linux_namespace_scope() -> tuple[str, str]:
+    """Require procfs and getpid() to use the same PID coordinates."""
+    if _linux_procfs_pids() != [str(os.getpid()).encode("ascii")]:
+        raise ProcessIdentityUnavailable("procfs uses a different PID namespace")
+    observer = Path("/proc/self/ns/pid").stat()
+    return str(observer.st_dev), str(observer.st_ino)
+
+
+def _linux_procfs_pids() -> list[bytes]:
+    """NStgid runs from procfs's PID namespace to our active namespace."""
+    with Path("/proc/self/status").open("rb") as stream:
+        for line in stream:
+            if line.startswith(b"NStgid:"):
+                return line.split()[1:]
+    raise ProcessIdentityUnavailable("procfs PID namespace coordinates unavailable")
+
+
+def _linux_time_scope() -> str:
+    """Procfs start ticks include the reader's time-namespace boot offset."""
+    try:
+        namespace = Path("/proc/self/ns/time").stat()
+    except FileNotFoundError:
+        return "none"
+    return f"{namespace.st_dev}.{namespace.st_ino}"
+
+
+def _linux_observer_scope() -> tuple[str, str, str, str, str]:
+    return _linux_machine_key(), _linux_boot_id(), *_linux_namespace_scope(), _linux_time_scope()
+
+
+def _linux_record_scope_state(identity: str) -> str:
+    record = _LINUX_SCOPED_IDENTITY.fullmatch(identity)
+    if record is None:
+        return "unknown"
+    recorded = record.groups()[:5]
+    observed = _linux_observer_scope()
+    if recorded[0] != observed[0]:
+        return "unknown"
+    return _linux_same_host_scope_state(recorded, observed)
+
+
+def _linux_same_host_scope_state(recorded: tuple, observed: tuple) -> str:
+    if recorded[1] != observed[1]:
+        return _linux_reboot_state(recorded[0])
+    if recorded[2:] != observed[2:]:
+        return "unknown"
+    return "comparable"
+
+
+def _linux_reboot_state(host: str) -> str:
+    if host == "-":
+        return "unknown"
+    return "dead"
+
+
+def _record_scope_state(identity: str | None) -> str:
+    if _platform_system() == "Linux":
+        return _linux_record_scope_state(identity or "")
+    if identity and identity.startswith("linux"):
+        return "unknown"
+    return "comparable"
+
+
+def _compare_recorded_process(pid: object, identity: str | None, probe) -> str:
+    if not identity:
+        return process_state(pid)
+    observed = probe(pid)
+    if observed is None:
+        return "dead"
+    return _compare_observed_identity(observed, identity)
+
+
+def _compare_observed_identity(observed: str, recorded: str) -> str:
+    if observed == recorded:
+        return "alive"
+    if recorded.startswith("linux-v2:"):
+        return _compare_linux_start(observed, recorded)
+    return "dead"
+
+
+def _compare_linux_start(observed: str, recorded: str) -> str:
+    if observed.rsplit(":", 1)[0] != recorded.rsplit(":", 1)[0]:
+        return "unknown"
+    return "dead"
+
+
+def recorded_process_state(pid: object, identity: str | None, *, probe=None) -> str:
+    """A stored PID is meaningful only in its recorded observation scope."""
+    try:
+        _require_pid(pid)
+        scope = _record_scope_state(identity)
+        if scope != "comparable":
+            return scope
+        return _compare_recorded_process(pid, identity, probe or process_start_identity)
+    except (OSError, ValueError):
+        return "unknown"
 
 
 def _windows_process_api(kernel32: object) -> tuple[object, object, object, object]:
@@ -374,22 +493,7 @@ def process_start_identity(pid: int) -> str | None:
 def owner_alive(pid: object, start_identity: str | None = None) -> bool:
     """Whether the process that took a lock still holds it; doubt says yes.
 
-    With the identity the owner recorded, a PID the operating system has since
-    handed to somebody else reads as dead — which is the whole point of writing
-    it down. Without one (a lock file from before this release) the answer is
-    the PID probe, exactly as it was.
+    Linux legacy records lack a PID namespace and cannot prove death. Scoped
+    records preserve same-namespace exit/reuse detection and safe reboot recovery.
     """
-    if not start_identity:
-        return pid_alive(pid)
-    observed, settled = _observed_identity(pid)
-    if not settled:
-        return True
-    return observed == start_identity
-
-
-def _observed_identity(pid: object) -> tuple[str | None, bool]:
-    """(the identity this PID carries now, whether the probe settled it)."""
-    try:
-        return (process_start_identity(pid), True)
-    except (OSError, PermissionError, ValueError):
-        return (None, False)
+    return recorded_process_state(pid, start_identity) != "dead"

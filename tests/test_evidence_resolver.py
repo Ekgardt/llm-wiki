@@ -332,6 +332,49 @@ def _long_day(entries: int, *, filler: int = 400) -> bytes:
     return "".join(parts).encode()
 
 
+def test_repeated_historical_evidence_reuses_search_but_checks_current_bytes(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import Mock
+
+    import evidence_resolver as module
+
+    original = b"## [evt-1] event\nretained evidence\n"
+    grown = original + b"\n## [evt-2] later\nmore evidence\n"
+    path = vault / "knowledge/daily/2026-01-02.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(grown)
+    start = original.index(b"retained")
+    reference = _reference("2026-01-02", original, "evt-1", start, len(original) - 1)
+    search = Mock(wraps=module.compile_part_slice)
+    monkeypatch.setattr(module, "compile_part_slice", search)
+    resolver = module.EvidenceResolver(vault)
+
+    assert resolver.resolve(reference).bytes == b"retained evidence"
+    assert resolver.resolve(reference).bytes == b"retained evidence"
+    assert search.call_count == 1
+    identity = path.stat()
+    path.write_bytes(grown.replace(b"retained", b"tampered", 1))
+    os.utime(path, ns=(identity.st_atime_ns, identity.st_mtime_ns))
+    with pytest.raises(module.EvidenceResolutionError, match="hash mismatch"):
+        resolver.resolve(reference)
+    assert search.call_count == 2
+
+
+def test_cached_part_still_checks_each_evidence_block(vault: Path) -> None:
+    from evidence_resolver import EvidenceResolutionError, EvidenceResolver
+
+    original = b"## [evt-1] event\nretained evidence\n"
+    path = vault / "knowledge/daily/2026-01-02.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(original + b"\n## [evt-2] later\nmore evidence\n")
+    start = original.index(b"retained")
+    resolver = EvidenceResolver(vault)
+    resolver.resolve(_reference("2026-01-02", original, "evt-1", start, len(original) - 1))
+    with pytest.raises(EvidenceResolutionError):
+        resolver.resolve(_reference("2026-01-02", original, "evt-2", start, len(original) - 1))
+
+
 def test_evidence_from_one_compile_part_resolves_after_the_day_grows(vault: Path) -> None:
     """A page is written from one part; every later reader must still find those bytes."""
     from evidence_resolver import (

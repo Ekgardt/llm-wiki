@@ -1,0 +1,74 @@
+"""Deterministic handler 2 on the existing fenced capture worker."""
+from __future__ import annotations
+
+import json
+
+import breadcrumb_decision
+import breadcrumb_evidence
+import breadcrumb_storage
+import breadcrumb_terminal
+import flush_memory
+from reliable_memory import sha256_bytes
+
+
+def _receipt(queue, coordinator, lease, active, fences, bundle):
+    encoded = breadcrumb_decision.decision_bytes(bundle)
+    indexed = queue.indexed_capture_decision(
+        task_id=lease.id, intent_id=active.intent_id, stage="flush",
+        active_link_digest=active.active_digest,
+    )
+    if indexed is not None and indexed.decision_sha256 != sha256_bytes(encoded):
+        raise ValueError("breadcrumb receipt conflicts with its accepted input")
+    held = flush_memory._held_by_this_task(
+        queue, coordinator, lease, active, fences, indexed, encoded,
+    )
+    return held, json.loads(encoded)
+
+
+def _prior_journal(coordinator, plan):
+    operation_id = plan["operation_id"]
+    with coordinator._connect() as database:
+        rows = database.execute(
+            'SELECT id, operation_id FROM "transaction" WHERE state=\'committed\' '
+            'AND (operation_id=? OR operation_id GLOB ?)',
+            (operation_id, operation_id + ":cas:*"),
+        ).fetchall()
+    records = [row for row in rows if breadcrumb_terminal._operation_id_matches(row["operation_id"], operation_id)]
+    if len(records) > 1:
+        raise ValueError("breadcrumb has multiple committed journal transactions")
+    if not records:
+        return None
+    return coordinator._record(records[0]["id"])
+
+
+def _journal(queue, coordinator, lease, intent_fence, owner, decision, record):
+    active = queue.active_capture_binding(None, lease.id)
+    plan = record["operation_plan"][0]
+    prior = _prior_journal(coordinator, plan)
+    if prior is None:
+        return flush_memory._commit_capture_markdown(
+            queue, coordinator, lease, active, intent_fence, owner, decision, record,
+        )
+    breadcrumb_terminal.require_journal_transaction(queue, active, plan, prior)
+    return active, prior
+
+
+def _deliver(queue, coordinator, lease, active, fences, bundle):
+    task_fence, intent_fence, owner = fences
+    flush_memory._ensure_capture_results_directory(queue)
+    decision, record = _receipt(queue, coordinator, lease, active, fences, bundle)
+    breadcrumb_evidence.publish_source(queue, coordinator, lease, intent_fence, owner, bundle)
+    sealed, transaction = _journal(
+        queue, coordinator, lease, intent_fence, owner, decision, record,
+    )
+    disposition = flush_memory._capture_markdown_disposition(transaction, decision)
+    return flush_memory._publish_capture_terminal(
+        queue, lease, sealed, task_fence, intent_fence, owner, decision, disposition,
+    )
+
+
+def process_breadcrumb(queue, coordinator, lease, active, task_fence, intent_fence, owner):
+    """The enclosing capture worker renews all authority; no model is called."""
+    intent_id, _path, digest = flush_memory._capture_intent_reference(lease, active)
+    bundle = breadcrumb_storage.load_bound_bundle(queue.state_root, intent_id, digest)
+    return _deliver(queue, coordinator, lease, active, (task_fence, intent_fence, owner), bundle)

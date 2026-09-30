@@ -709,7 +709,7 @@ def _owner_pid_live(pid: object, identity: object = None) -> bool:
     if not isinstance(pid, int) or pid <= 0:
         return False
     if not isinstance(identity, str):
-        return _pid_alive(pid)
+        return process_liveness.owner_alive(pid)
     return process_liveness.owner_alive(pid, identity)
 
 
@@ -2088,7 +2088,32 @@ def _scan_queue_database(
         details["dead_unresolved"], details["oldest_dead_days"] = _dead_backlog(rows, now)
         _count_queue_side_tables(database, tables, details, now)
         _validate_queue_results(state_root, references, result_hashes, details)
+        _validate_capture_sources(database, tables, state_root, deadline, details)
         return _QueueScan(None, unknown_state, corrupt_metadata)
+
+
+def _validate_capture_sources(database, tables, state_root, deadline, details) -> None:
+    from breadcrumb_storage import inspect_pending_sources
+    from installed_memory_repair import _capture_intent_blockers, describe_failure
+
+    if "capture_intents" not in tables:
+        return
+    verified: set[str] = set()
+    try:
+        codes = _capture_intent_blockers(database, state_root, deadline, verified=verified)
+        pending = inspect_pending_sources(state_root, verified, deadline=deadline)
+    except (OSError, sqlite3.Error, ValueError, KeyError, RuntimeError) as error:
+        details["capture_intent_error"] = describe_failure(error)
+        raise ValueError("capture evidence could not be verified") from error
+    details["deletion_codes"].extend(sorted(codes))
+    _record_pending_capture_health(pending, details)
+
+
+def _record_pending_capture_health(pending: dict, details: dict) -> None:
+    details["capture_pending_complete"] = pending["complete"]
+    details["capture_incomplete"] = pending["incomplete"]
+    if any(pending.values()):
+        details["deletion_codes"].append("capture_intent_retained")
 
 
 def _queue_error_state(
@@ -2100,7 +2125,9 @@ def _queue_error_state(
 
 
 def _queue_pending_work(states: dict[str, int], details: dict) -> bool:
-    return bool(states["ready"] or states["leased"] or states["blocked"] or details.get("dead_unresolved"))
+    counts = [states[key] for key in ("ready", "leased", "blocked")]
+    counts.extend(details.get(key, 0) for key in ("dead_unresolved", "capture_pending_complete", "capture_incomplete"))
+    return any(counts)
 
 
 # A dead task is work that did not happen, whatever its age, until it is redriven
@@ -2185,7 +2212,7 @@ def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
     except (OSError, PermissionError, sqlite3.Error, TimeoutError, ValueError):
         details["read_error"] = True
         details["deletion_codes"].append("queue_state_unreadable")
-        return _result("queue", "error", "Queue state is unreadable.", details)
+        return _result("queue", "error", _queue_read_error_message(details), details)
     if scan.result is not None:
         return scan.result
     if time.monotonic() >= deadline:
@@ -2195,10 +2222,29 @@ def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
     return _result("queue", status, _queue_message(status, details), details)
 
 
+def _queue_read_error_message(details: dict) -> str:
+    capture_error = details.get("capture_intent_error")
+    if capture_error:
+        return f"Capture evidence cannot be verified: {capture_error}"
+    return "Queue state is unreadable."
+
+
 def _queue_message(status: str, details: dict) -> str:
     """What needs attention, by name: a vague line left the owner nothing to act on."""
     if status == "ok":
         return "Queue state is healthy."
+    return _capture_pending_message(details) or _queue_backlog_message(details)
+
+
+def _capture_pending_message(details: dict) -> str | None:
+    complete = details.get("capture_pending_complete", 0)
+    incomplete = details.get("capture_incomplete", 0)
+    if complete or incomplete:
+        return f"Capture publication: {complete} complete pending record(s), {incomplete} incomplete record(s); retained for recovery."
+    return None
+
+
+def _queue_backlog_message(details: dict) -> str:
     dead = details.get("dead_unresolved")
     if not dead:
         return "Queue state requires operator attention."
@@ -2812,10 +2858,8 @@ _LSP_OWNER_FIELDS = {
 # Written since 2026-09-25 when the platform can name a process start (audit C-39).
 _LSP_OWNER_OPTIONAL_FIELDS = {"owner_start_identity"}
 _LSP_LEASE_OPTIONAL_FIELDS = {"manager_start_identity", "server_start_identity"}
-# The writer's bound (lsp_process._MAX_START_IDENTITY_CHARS). The longest identity
-# process_liveness builds is Linux's `linux:<36-char boot id>:<start ticks>`, under
-# 70 characters, so a longer value is not one this runtime wrote.
-_LSP_START_IDENTITY_CHARS = 128
+# Use the writer's canonical bound, including scoped Linux identities.
+_LSP_START_IDENTITY_CHARS = process_liveness.MAX_START_IDENTITY_CHARS
 _LSP_LEASE_FIELDS = {
     "expires_at",
     "generation_nonce",
@@ -3892,24 +3936,12 @@ def _lsp_records_match(
     return _lsp_start_within_window(owner, now, heartbeat_at)
 
 
-def _valid_lsp_pid(pid: object) -> bool:
-    return isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
-
-
-def _lease_still_live(
-    matching: bool, expires_at: datetime | None, now: datetime, pids: tuple
-) -> bool:
-    if not matching or expires_at is None or expires_at <= now:
-        return False
-    return all(_valid_lsp_pid(pid) for pid in pids)
-
-
-def _lsp_pid_states(pids: tuple, deadline: float) -> list[str]:
+def _lsp_pid_states(processes: tuple, deadline: float) -> list[str]:
     states: list[str] = []
-    for pid in pids:
+    for pid, identity in processes:
         _require_lsp_deadline(deadline)
         try:
-            pid_state = _lsp_pid_state(pid)
+            pid_state = _lsp_pid_state(pid, identity)
         finally:
             _require_lsp_deadline(deadline)
         states.append(pid_state)
@@ -3925,7 +3957,7 @@ def _lsp_pid_liveness(
         return _LspLiveness(False, heartbeat_at, True, _deadline_reached(deadline))
     except Exception:  # noqa: BLE001
         return _LspLiveness(False, heartbeat_at, True, False)
-    live = all(state == "alive" for state in pid_states)
+    live = any(state == "alive" for state in pid_states)
     return _LspLiveness(live, heartbeat_at, "unknown" in pid_states, False)
 
 
@@ -3937,15 +3969,30 @@ def _lsp_liveness(
     deadline: float,
 ) -> _LspLiveness:
     """Whether this owner still holds live processes, and what that cost to learn."""
-    if not isinstance(owner, dict) or not isinstance(lease, dict):
-        return _LspLiveness(False, None, False, False)
-    heartbeat_at = _parse_lsp_timestamp(lease.get("heartbeat_at"))
-    matching = _lsp_records_match(owner, lease, entry_name, now, heartbeat_at)
-    pids = (lease.get("manager_pid"), lease.get("server_pid"))
-    expires_at = _parse_lsp_timestamp(lease.get("expires_at"))
-    if not _lease_still_live(matching, expires_at, now, pids):
-        return _LspLiveness(False, heartbeat_at, not matching, False)
-    return _lsp_pid_liveness(pids, heartbeat_at, deadline)
+    if not isinstance(owner, dict):
+        return _LspLiveness(False, None, True, False)
+    heartbeat_at = _lsp_heartbeat(lease)
+    processes = _lsp_recorded_processes(owner, lease)
+    result = _lsp_pid_liveness(processes, heartbeat_at, deadline)
+    if isinstance(lease, dict) and not _lsp_records_match(owner, lease, entry_name, now, heartbeat_at):
+        return result._replace(unreadable=True)
+    return result
+
+
+def _lsp_heartbeat(lease: dict | None) -> datetime | None:
+    if not isinstance(lease, dict):
+        return None
+    return _parse_lsp_timestamp(lease.get("heartbeat_at"))
+
+
+def _lsp_recorded_processes(owner: dict, lease: dict | None) -> tuple:
+    recorded = ((owner.get("owner_pid"), owner.get("owner_start_identity")),)
+    if not isinstance(lease, dict):
+        return recorded
+    return recorded + (
+        (lease.get("manager_pid"), lease.get("manager_start_identity")),
+        (lease.get("server_pid"), lease.get("server_start_identity")),
+    )
 
 
 def _failure_time_invalid(owner: dict, failure: dict, now: datetime) -> bool:
@@ -4039,7 +4086,7 @@ def _record_failure_evidence(
 ) -> bool:
     if "failure.json" in child_names:
         return _record_explicit_failure(record, codes, failure, owner, entry_name, now)
-    if record["live"]:
+    if not record["processes_dead"]:
         return False
     _record_crash_evidence(record, codes, owner, heartbeat_at, now)
     return False
@@ -4059,6 +4106,9 @@ def _read_lsp_owner(snapshot: tuple, now: datetime, deadline: float) -> _LspOwne
     )
     liveness = _lsp_liveness(owner, lease, entry_name, now, deadline)
     record["live"] = liveness.live
+    # Only positive death may imply a crash; explicit failure evidence is
+    # validated below before publishing the final deletion-relevant verdict.
+    record["processes_dead"] = _lsp_death_proven(liveness, unreadable, liveness.stop)
     if liveness.live:
         codes.append("lsp_owner_live")
     failure_unreadable = _record_failure_evidence(
@@ -4073,7 +4123,12 @@ def _read_lsp_owner(snapshot: tuple, now: datetime, deadline: float) -> _LspOwne
     )
     stop = liveness.stop or _deadline_reached(deadline)
     unreadable = unreadable or liveness.unreadable or failure_unreadable
+    record["processes_dead"] = _lsp_death_proven(liveness, unreadable, stop)
     return _LspOwnerReading(record, codes, unreadable, stop)
+
+
+def _lsp_death_proven(liveness: _LspLiveness, unreadable: bool, stop: bool) -> bool:
+    return not (liveness.live or liveness.unreadable or unreadable or stop)
 
 
 def _scan_lsp_owners(
@@ -5377,6 +5432,7 @@ def _scheduler_check(
         "last_nightly_date": state.get("last_nightly_date"),
         "last_nightly_status": state.get("last_nightly_status", "unknown"),
         "last_nightly_skip": state.get("last_nightly_skip"),
+        "nightly_deferred_compile": state.get("nightly_deferred_compile"),
         "state_error": state_error,
     }
     if state_error in {"budget", "oversized"}:
@@ -5413,11 +5469,13 @@ _UPDATE_ATTENTION = {
     ("status", "error"): "The nightly code update failed; see the nightly log.",
     ("reason", "fetch_failed"): "The nightly code update could not fetch the remote.",
     ("reason", "not_on_default_branch"): (
-        "The vault is not on its default branch, so the nightly never updates it."
+        "The last nightly code update was skipped because the vault was not on its default branch."
     ),
-    ("reason", "diverged_branch"): "The vault's branch has diverged from the remote.",
+    ("reason", "diverged_branch"): (
+        "The last nightly code update was skipped because the vault's branch had diverged from the remote."
+    ),
     ("reason", "local_changes_conflict"): (
-        "A local change stops the nightly code update; see the nightly log."
+        "The last nightly code update was stopped by a conflicting local change; see the nightly log."
     ),
     ("dependencies", "stale"): (
         "The code was updated but its dependencies were not synced; the nightly syncs "
@@ -5694,6 +5752,12 @@ def _nightly_freshness_result(
     state: dict, status: object, last_date: str, now: datetime, details: dict
 ) -> dict:
     """Whether a recorded, non-failed nightly run is still current."""
+    if state.get("nightly_deferred_compile"):
+        return _result(
+            "scheduler", "degraded",
+            "Compile-dependent nightly maintenance was deferred; completion is not verified.",
+            details,
+        )
     if _nightly_is_current(state, status, last_date, now):
         return _result("scheduler", "ok", "Nightly maintenance is current.", details)
     return _result("scheduler", "degraded", _stale_nightly_message(state), details)
@@ -6524,8 +6588,8 @@ def _repair_runtime(state_root: Path, repaired: list[dict]) -> None:
             repaired.append({"action": "create_runtime_directory", "directory": relative})
 
 
-def _lsp_pid_state(pid: int) -> str:
-    return process_liveness.process_state(pid)
+def _lsp_pid_state(pid: int, identity: str | None = None) -> str:
+    return process_liveness.recorded_process_state(pid, identity)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -8754,14 +8818,24 @@ def _mark_repair_deferred(check: dict) -> None:
 def _mark_repair_failed(check: dict, errors: list[str]) -> None:
     check["status"] = "error"
     check["message"] = f"{check['id'].title()} repair failed."
+    check["details"].pop("repair_deferred", None)
     check["details"]["repair_errors"] = errors
+
+
+def _repair_errors_for_check(check_id: str, errors: dict[str, list[str]]) -> list[str]:
+    """Repair action names and health check names are not always identical."""
+    matched = []
+    for action, reasons in errors.items():
+        if check_id in _DEFERRED_BY_ACTION.get(action, {action}):
+            matched.extend(reasons)
+    return matched
 
 
 def _apply_repair_outcomes(checks: list[dict], context: _RepairContext) -> None:
     for check in checks:
         if check["id"] in context.repair_deferred:
             _mark_repair_deferred(check)
-        errors = context.repair_errors.get(check["id"])
+        errors = _repair_errors_for_check(check["id"], context.repair_errors)
         if errors:
             _mark_repair_failed(check, errors)
 

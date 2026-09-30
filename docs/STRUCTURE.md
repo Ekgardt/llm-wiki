@@ -350,6 +350,58 @@ decision record, and deterministic transaction adoption before any provider retr
 Exact replay uses stable source event identity plus complete redacted-input digest;
 an identity collision with different bytes fails closed.
 
+### Durable breadcrumb repair contract (2026-09-29; installed 2026-09-30)
+
+For this repair the owner delegated decisions to the agent under the nine mandatory
+development laws. The selected contract is recorded privately in
+`knowledge/notes/durable-breadcrumb-delivery-decision.md`; research and qualification
+requirements are in `docs/research/2026-09-29-breadcrumb-durability-proposal.md`.
+The storage, deterministic worker, terminal/purge proof and recovery components
+are implemented. Host adapters and compatibility hook scripts publish through the
+common durable ingress before follow-ups. The running vault adopted these producers
+on 2026-09-30 under the existing quiescence fence, after the full candidate suite
+passed. A real Codex tool event passed complete terminal/source/journal verification.
+The qualified retrieval and answer-cost evidence, and its limits, are recorded in
+`docs/research/2026-09-30-durable-capture-installation.md`.
+
+Prompt/tool events use distinct versioned manifests and integrity-linked parts
+inside the existing `run/capture-intents/` layout. The manifest becomes ready only
+after complete durable publication. Existing v1 session readers remain supported.
+The worker processes breadcrumbs deterministically without a model. Before terminal
+completion, it publishes the complete redacted event as immutable linked raw-source
+Markdown inside the existing private `knowledge/raw/sessions/<date>/` tree and
+commits the journal entry for the original occurrence day. A short journal reference
+cannot authorize deletion of the only complete copy in runtime. Terminal proof and
+purge validation bind permanent evidence, the input and the journal transaction.
+Parts obey existing encoded-record and Markdown-reader contracts; no new logical
+event-size or part-count ceiling is introduced. Readers, recovery, diagnostics and
+cleanup must be qualified before producer cutover under the existing maintenance
+fence. No new runtime root, database, daemon, MCP tool or dependency is introduced.
+
+Both worker and nightly recovery discover complete pending manifests before
+database indexing and preserve supported v1 session dispatch. Indexed recovery
+advances past failed rows without a failed-row prefix cap. Read-only diagnostics
+verify full linked evidence, distinguish complete pending from incomplete
+publication, and report inaccessible directories. Inspection observes its caller
+deadline and releases each SQLite metadata read before checking source files.
+The replaced direct-append and state-based content/time suppression functions are
+removed from the installed product, including the now-unused capture_operation module.
+The two hook script entrypoints and historical --background/--delegate arguments
+remain compatible because existing installed host configurations still name them.
+Supported v1 session readers remain necessary for retained session records/tasks.
+
+Only complete verified breadcrumb heads and their integrity-linked parts join the
+existing session source kind in the corpus; ordinary session dumps and orphan
+parts remain excluded. Search and its no-generation fallback return physical
+chunks with verifiable source hashes and byte spans. Reranker admission uses
+semantic scores when available; provenance still weighs the final model score.
+Mixed primary/event pools use sequential scoring with separate cost observations
+and the same semaphore and caller deadline. No output quota or larger default
+request budget is introduced. Three paired answer tasks reached all new facts in
+one call each; a separately tested smaller caller budget retained those answers.
+This small fixture does not qualify a globally smaller answer window or prove
+billed token savings.
+
 Compile authority is `compile-receipt/v3`. V3 receipt filenames are
 `knowledge/daily/receipts/v3-<source-identity-sha256>.md`; source identity hashes
 canonical logical path plus content digest. Every receipt binds a sorted batch
@@ -597,7 +649,9 @@ or nonzero active state remains fail-closed.
   knowledge-review, knowledge-qa-file-back, contradict-check,
   crystallize-playbook, bridge-promote-insight, session-memory-compile,
   session-memory-review).
-- `rules/` — 3 rule files (wiki-files, raw-files, output-files).
+- `rules/` — 4 rule files (wiki-files, raw-files, output-files, development-laws).
+  `development-laws.md` preserves the user's nine mandatory development laws verbatim;
+  both `AGENTS.md` and `CLAUDE.md` require reading and following them.
 - `integrations/` — thin host wiring: claude-code (settings.json) and codex
   (hooks.json). MCP is the common read/action interface.
   Obsidian is an optional Markdown viewer and requires no bundled integration.

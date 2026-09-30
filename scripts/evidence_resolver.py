@@ -1191,12 +1191,29 @@ def _slice_at(content: bytes, starts: list[int], digest: str) -> bytes | None:
     return None
 
 
+def _historical_part_offsets(content: bytes, source_digest: str) -> tuple[int, int] | None:
+    part = compile_part_slice(content, source_digest)
+    if part is None:
+        return None
+    start = content.find(part)
+    return start, start + len(part)
+
+
+def _part_at_offsets(content: bytes, offsets: tuple[int, int] | None) -> bytes | None:
+    if offsets is None:
+        return None
+    return content[offsets[0]:offsets[1]]
+
+
 class EvidenceResolver:
     def __init__(self, vault: Path, *, state_root: Path | None = None):
         self.vault = Path(vault).resolve(strict=True)
         self.state_root = state_root
         self.daily_root = self.vault / "knowledge" / "daily"
         self.archive_root = self.daily_root / "archive"
+        # Operation-local offsets only. Every lookup re-reads and hashes the
+        # source; even a same-size edit with restored timestamps invalidates it.
+        self._part_offsets: dict[Path, tuple[str, dict[str, tuple[int, int] | None]]] = {}
 
     def resolve(self, reference: EvidenceRef | str) -> ResolvedEvidence:
         ref = EvidenceRef.parse(reference) if isinstance(reference, str) else reference
@@ -1209,12 +1226,25 @@ class EvidenceResolver:
         return self._resolve_flat(ref, content, flat)
 
     def _resolve_flat(self, ref: EvidenceRef, content: bytes, flat: Path):
-        if sha256_bytes(content) == ref.source_sha256:
+        current_digest = sha256_bytes(content)
+        if current_digest == ref.source_sha256:
             return self._slice(ref, content, flat, "flat")
-        part = compile_part_slice(content, ref.source_sha256)
+        part = self._historical_part(flat, content, current_digest, ref.source_sha256)
         if part is None:
             raise EvidenceResolutionError("flat daily source hash mismatch")
         return self._slice(ref, part, flat, "flat-part")
+
+    def _historical_part(
+        self, flat: Path, content: bytes, current_digest: str, source_digest: str
+    ) -> bytes | None:
+        cached = self._part_offsets.get(flat)
+        if cached is None or cached[0] != current_digest:
+            cached = (current_digest, {})
+            self._part_offsets[flat] = cached
+        offsets = cached[1]
+        if source_digest not in offsets:
+            offsets[source_digest] = _historical_part_offsets(content, source_digest)
+        return _part_at_offsets(content, offsets[source_digest])
 
     def resolve_bytes(
         self,

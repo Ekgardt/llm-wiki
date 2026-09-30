@@ -1733,7 +1733,9 @@ class LspProtocol:
         pending.responded_at = responded_at
         if pending.terminal is None:
             self._commit_response_locked(key, pending, responded_at)
-        elif pending.terminal in {"cancelled", "timed_out"}:
+            pending.completed.set()
+            return
+        if pending.terminal in {"cancelled", "timed_out"}:
             self._forget_as_cancelled_locked(key)
         pending.completed.set()
 

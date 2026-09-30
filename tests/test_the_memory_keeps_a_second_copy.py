@@ -139,3 +139,62 @@ def test_the_destination_is_outside_the_vault_by_default() -> None:
 
     assert snapshot_knowledge.DEFAULT_SNAPSHOT_ROOT.resolve() != ROOT.resolve()
     assert ROOT.resolve() not in snapshot_knowledge.DEFAULT_SNAPSHOT_ROOT.resolve().parents
+
+
+@pytest.mark.parametrize("relative", [".", "knowledge", "nested/copy", ".."])
+def test_overlapping_snapshot_roots_preserve_the_source(tmp_path, relative):
+    vault = _vault(tmp_path, alpha="irreplaceable")
+    with pytest.raises(snapshot_knowledge.SnapshotFailed, match="overlap"):
+        snapshot_knowledge.take_snapshot(vault, vault / relative)
+    assert (vault / "knowledge/notes/alpha.md").read_text() == "irreplaceable"
+
+
+def test_a_symlink_alias_cannot_hide_overlap(tmp_path):
+    vault = _vault(tmp_path, alpha="irreplaceable")
+    alias = tmp_path / "alias"
+    alias.symlink_to(vault, target_is_directory=True)
+    with pytest.raises(snapshot_knowledge.SnapshotFailed, match="overlap"):
+        snapshot_knowledge.take_snapshot(vault, alias)
+    assert (vault / "knowledge/notes/alpha.md").read_text() == "irreplaceable"
+
+
+def test_a_remote_is_refused_before_replacing_the_copy(tmp_path):
+    vault = _vault(tmp_path, alpha="before")
+    root = tmp_path / "snapshots"
+    snapshot_knowledge.take_snapshot(vault, root)
+    _git(root, "remote", "add", "origin", str(tmp_path / "elsewhere"))
+    (vault / "knowledge/notes/alpha.md").write_text("after")
+    with pytest.raises(snapshot_knowledge.SnapshotFailed, match="remote"):
+        snapshot_knowledge.take_snapshot(vault, root)
+    assert (root / "knowledge/notes/alpha.md").read_text() == "before"
+
+
+def test_an_unrelated_repository_is_not_adopted(tmp_path):
+    vault = _vault(tmp_path, alpha="private")
+    root = tmp_path / "unrelated"
+    root.mkdir()
+    _git(root, "init", "--quiet")
+    with pytest.raises(snapshot_knowledge.SnapshotFailed, match="snapshot repository"):
+        snapshot_knowledge.take_snapshot(vault, root)
+    assert not (root / "knowledge").exists()
+
+
+def test_untracked_files_are_not_added_to_the_snapshot(tmp_path):
+    vault = _vault(tmp_path, alpha="before")
+    root = tmp_path / "snapshots"
+    snapshot_knowledge.take_snapshot(vault, root)
+    (root / "unrelated.txt").write_text("not memory")
+    (vault / "knowledge/notes/alpha.md").write_text("after")
+    snapshot_knowledge.take_snapshot(vault, root)
+    assert "unrelated.txt" not in _git(root, "ls-tree", "-r", "--name-only", "HEAD")
+
+
+def test_staged_foreign_files_are_refused_without_committing_them(tmp_path):
+    vault = _vault(tmp_path, alpha="private")
+    root = tmp_path / "snapshots"
+    snapshot_knowledge.take_snapshot(vault, root)
+    (root / "unrelated.txt").write_text("not memory")
+    _git(root, "add", "unrelated.txt")
+    with pytest.raises(snapshot_knowledge.SnapshotFailed, match="outside knowledge"):
+        snapshot_knowledge.take_snapshot(vault, root)
+    assert "unrelated.txt" in _git(root, "diff", "--cached", "--name-only")

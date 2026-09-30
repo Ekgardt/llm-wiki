@@ -69,6 +69,7 @@ from contradiction_pipeline import (  # noqa: E402
     ContradictionPipeline,
     StaleLifecycleTarget,
     default_secondary_search,
+    supersede_claims_in_page,
 )
 from evidence_resolver import (  # noqa: E402
     MAX_DAILY_PART_BYTES,  # noqa: F401 - re-exported: callers read the writer's bound here
@@ -351,9 +352,9 @@ class CompileInputs:
     dailies: tuple[DailySnapshot, ...]
     sources: tuple[SourceSnapshot, ...]
     targets: tuple[TargetSnapshot, ...]
-    # The vault files read whole, before any model call. `sources` is narrowed
-    # to what one prompt has room for; these are what is on disk, so the writer
-    # can say whether a file it replaces existed without asking the budget.
+    # The complete original vault context, even when `sources` is narrowed for
+    # a prompt. Publication rereads derived index/log targets under its writer
+    # gate; this model-input snapshot remains immutable.
     vault_files: tuple[SourceSnapshot, ...] = ()
 
 
@@ -676,12 +677,12 @@ def partition_packable(
     return _without_days(inputs, set(refused)), tuple(_only_day(inputs, day) for day in refused)
 
 
-def _refused_day_outcome(args: argparse.Namespace, day: CompileInputs) -> BatchOutcome:
+def _refused_day_outcome(day: CompileInputs) -> BatchOutcome:
     """A day no part budget can take fails alone, recorded like any failed batch."""
     path = day.dailies[0].logical_path
     _record_oversized_daily(path)
     refusal = ValueError(f"daily source exceeds compile input budget: {path}")
-    return BatchOutcome(_failed_compile(args, day, refusal))
+    return BatchOutcome(_record_failed_batch(day, refusal))
 
 
 def pack_compile_batches(
@@ -1593,7 +1594,9 @@ def _assert_external_work_allowed(coordinator: MarkdownCoordinator) -> None:
     coordinator.assert_external_work_allowed()
     with coordinator._connect() as database:
         owner = database.execute(
-            "SELECT owner_token FROM writer_owners WHERE gate_name = 'global'"
+            "SELECT owner_token FROM writer_owners "
+            "WHERE gate_name = 'global' AND process_id = ?",
+            (os.getpid(),),
         ).fetchone()
     if owner is not None:
         raise RuntimeError("external LLM work is forbidden during persisted writer ownership")
@@ -3597,12 +3600,28 @@ class _ApplyPlan:
         if target is None:
             raise ValueError("replace target was absent from snapshot")
         update = _update_section(semantic, references, self.completed_at)
-        page = _with_claim_ledger(target.content.rstrip() + update, claims)
+        original = self._updated_claim_history(path, target.content)
+        page = _with_claim_ledger(original.rstrip() + update, claims)
         self.changes.append(
             MarkdownChange.replace(path, page, max_before_bytes=MAX_AFTER_IMAGE_BYTES)
         )
         self.preconditions[path] = target.sha256
         return page
+
+    def _updated_claim_history(self, path: str, content: bytes) -> bytes:
+        mutations = tuple({
+            mutation for assessment in self._assessments_for(path)
+            for mutation in assessment.lifecycle_mutations if mutation.page == path
+        })
+        if not mutations:
+            return content
+        return supersede_claims_in_page(content, mutations, path)[0]
+
+    def _remaining_claim_assessments(self, source_page: str, assessments: Sequence[object]) -> tuple[object, ...]:
+        updated = {str(item["path"]) for item in self.operations if item["kind"] == "replace"}
+        return tuple(
+            _without_updated_lifecycle(item, updated & {source_page}) for item in assessments
+        )
 
     def _created_page(
         self,
@@ -3673,7 +3692,7 @@ class _ApplyPlan:
         for pipeline, assessments in self.claim_groups:
             try:
                 changes, preconditions, candidate_paths = pipeline.plan_changes(
-                    assessments
+                    self._remaining_claim_assessments(pipeline.source_page, assessments)
                 )
             except StaleLifecycleTarget:
                 return self._commit_quarantine()
@@ -3705,9 +3724,10 @@ class _ApplyPlan:
     def _append_index_and_log(self) -> None:
         from rebuild_memory_index import build_index_bytes
 
-        base_notes = {item.logical_path: item.content for item in self.inputs.targets}
-        index_bytes = build_index_bytes(ROOT, self.pending, base=base_notes)
-        sources = self._vault_sources()
+        # Both derived targets are materialized under the existing writer gate.
+        # Source/target-note snapshots still govern the semantic changes.
+        sources = self._publication_sources()
+        index_bytes = build_index_bytes(ROOT, self.pending)
         self._append_vault_file(
             "knowledge/index.md", index_bytes, sources, MAX_INDEX_BYTES
         )
@@ -3735,20 +3755,13 @@ class _ApplyPlan:
         ).encode()
         return _append_log_bytes(fresh, self._log_entry())
 
-    def _vault_sources(self) -> dict[str, object]:
-        """What is on disk outranks what one prompt had room to carry.
-
-        A vault file that did not fit the context budget is absent from
-        `sources`, and reading the write precondition from there once told the
-        transaction to create a file that already existed.
-        """
-        sources: dict[str, object] = {
-            item.logical_path: item for item in self.inputs.sources
-        }
-        sources.update(
-            {item.logical_path: item for item in self.inputs.vault_files}
+    def _publication_sources(self) -> dict[str, SourceSnapshot]:
+        """Current derived-file before-images; prepare still checks their hashes."""
+        snapshots = (
+            _snapshot(path, label="compile publication target")
+            for path in (INDEX, LOG) if path.exists()
         )
-        return sources
+        return {item.logical_path: item for item in snapshots}
 
     def _append_vault_file(
         self,
@@ -3838,7 +3851,9 @@ class _ApplyPlan:
         # naming the derived identity, because their own readers recompute it
         # from the record; the committed attempt is found through that identity.
         attempt_id, self.parent_transaction_id = (
-            self.coordinator.attempt_operation_id(self.operation_id)
+            self.coordinator.attempt_operation_id(
+                self.operation_id, deadline=self.deadline, cancelled=self.cancelled
+            )
         )
         transaction = self.coordinator.prepare(
             self.changes,
@@ -3933,6 +3948,11 @@ def _claim_lifecycle(record: Mapping[str, object], quarantined: set[str]) -> obj
     if str(record["id"]) in quarantined:
         return "quarantined"
     return record["lifecycle"]
+
+
+def _without_updated_lifecycle(assessment: object, updated: set[str]) -> object:
+    remaining = tuple(mutation for mutation in assessment.lifecycle_mutations if mutation.page not in updated)
+    return replace(assessment, lifecycle_mutations=remaining)
 
 
 def _require_unclaimed_path(known: set[str], path: str) -> None:
@@ -4576,7 +4596,7 @@ def _acquire_compile_lock(spawn_token: str | None = None) -> tuple[str | None, s
     Research: docs/research/2026-09-10-a-lock-lives-as-long-as-its-process-not-thirty-minutes.md
     """
     try:
-        if maybe_compile._try_claim_lock():
+        if maybe_compile._claim_lock():
             return (_claim_direct_lock(), "claimed")
         if _spawned_lock_is_ours(maybe_compile, spawn_token):
             return (SPAWNED_LOCK, "spawned")
@@ -4631,7 +4651,7 @@ def _run(
     coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT)
     dailies = select_dailies(args, state, coordinator=coordinator)
     _repair_compile_mirror(coordinator)
-    _retire_stale_source_failures(coordinator.state_root)
+    _retire_stale_source_failures(coordinator.state_root, coordinator=coordinator)
     _require_compile_active(deadline, cancelled)
     if not dailies:
         print("compile_memory: no changed daily logs; nothing to do.")
@@ -4645,9 +4665,10 @@ def _run(
         batches = pack_compile_batches(packable, model=None)
     except Exception as exc:  # noqa: BLE001 - provider/cache boundary is fail-closed
         _require_compile_active(deadline, cancelled)
-        return _failed_compile(args, inputs, exc)
+        failed = BatchOutcome(_record_failed_batch(inputs, exc))
+        return _finish_run(args, [failed])
 
-    outcomes: list[BatchOutcome] = [_refused_day_outcome(args, day) for day in refused]
+    outcomes: list[BatchOutcome] = [_refused_day_outcome(day) for day in refused]
     for batch in batches:
         # A failed batch is recorded against its sources and the run goes on:
         # batches are independent snapshots, and stopping here held every later
@@ -4668,9 +4689,11 @@ def _run(
 
 
 def _finish_run(args: argparse.Namespace, outcomes: Sequence[BatchOutcome]) -> int:
-    """Exit 1 when any batch failed (its failure is already recorded), else mark the run ok."""
+    """Finalize only after every batch has stopped using the compile lock."""
     failed = [item for item in outcomes if item.status != 0]
     if failed:
+        error = str(load_state().get("last_compile_error", "one or more compile batches failed"))
+        _mark_finished(args.trigger, "error", error, outcomes=outcomes)
         print(f"compile_memory: {len(failed)} batch(es) failed; the rest: {_outcome_sentence(outcomes)}.")
         return 1
     _mark_ok_unless_dry(args, outcomes=outcomes)
@@ -4685,19 +4708,25 @@ def _announce_compile(args: argparse.Namespace, dailies: Sequence[Path]) -> None
         print(f"  - {path.relative_to(ROOT).as_posix()}")
 
 
-def _failed_compile(
-    args: argparse.Namespace,
+def _record_failed_batch(
     inputs: CompileInputs,
     exc: BaseException,
     *,
     prefix: str = "",
 ) -> int:
-    """Record the failure against every source in the batch; the run reports it at the end."""
+    """Record a batch failure without finishing or unlocking the active run."""
     error = f"{type(exc).__name__}: {exc}"
     _record_compile_source_failures(inputs, STATE_ROOT, error_code=type(exc).__name__)
     print(f"compile_memory: FAILED — {prefix}{error}")
-    _mark_finished(args.trigger, "error", error)
+    _record_batch_error(error)
     return 1
+
+
+def _record_batch_error(error: str) -> None:
+    def remember(state: dict) -> None:
+        state["last_compile_error"] = error[:500]
+
+    update_state(remember)
 
 
 def _run_batch(
@@ -4719,7 +4748,7 @@ def _run_batch(
         )
     except Exception as exc:  # noqa: BLE001 - provider/cache boundary is fail-closed
         _require_compile_active(deadline, cancelled)
-        return BatchOutcome(_failed_compile(args, batch.inputs, exc))
+        return BatchOutcome(_record_failed_batch(batch.inputs, exc))
 
     _require_compile_active(deadline, cancelled)
     if args.dry_run:
@@ -4768,7 +4797,7 @@ def _apply_batch(
         return _still_quarantined_outcome(already)
     except Exception as exc:  # noqa: BLE001 - no diagnostic state is a commit receipt
         return BatchOutcome(
-            _failed_compile(args, batch.inputs, exc, prefix="transaction not committed: ")
+            _record_failed_batch(batch.inputs, exc, prefix="transaction not committed: ")
         )
     _require_compile_active(deadline, cancelled)
     _record_batch_diagnostics(batch, result, args, coordinator)
@@ -4908,7 +4937,9 @@ def _record_compile_source_failures(
         )
 
 
-def _retire_stale_source_failures(state_root: Path) -> None:
+def _retire_stale_source_failures(
+    state_root: Path, *, coordinator: MarkdownCoordinator | None = None
+) -> None:
     """Retire every failure row whose digest the file no longer has (audit B-15).
 
     A daily log only grows, so a failure of older bytes can never be cleared by a
@@ -4916,18 +4947,23 @@ def _retire_stale_source_failures(state_root: Path) -> None:
     for ever. See `docs/research/2026-09-25-a-failure-of-content-that-is-gone-is-retired.md`.
     """
     queue = active_or_legacy_memory_queue(ROOT, state_root)
+    coordinator = coordinator or active_or_legacy_coordinator(ROOT, state_root)
     current: dict[str, frozenset[str]] = {}
     for logical_path, digest in queue.source_failure_keys():
         if logical_path not in current:
-            current[logical_path] = _current_source_digests(logical_path)
+            current[logical_path] = _current_source_digests(logical_path, coordinator=coordinator)
         if digest not in current[logical_path]:
             queue.clear_source_failure(logical_path, digest)
 
 
-def _current_source_digests(logical_path: str) -> frozenset[str]:
-    """The digests a compile of this file would record: the whole and each part."""
+def _current_source_digests(
+    logical_path: str, *, coordinator: MarkdownCoordinator | None = None
+) -> frozenset[str]:
+    """Unresolved source digests; committed receipts resolve the whole and every part."""
     content = _readable_daily(ROOT / logical_path)
     if content is None:
+        return frozenset()
+    if coordinator is not None and daily_is_compiled(logical_path, content, _receipt_predicate(coordinator)):
         return frozenset()
     parts = {sha256_bytes(content[start:end]) for start, end in _daily_part_bounds(content)}
     return frozenset({sha256_bytes(content), *parts})

@@ -4,7 +4,7 @@ Date: 2026-09-29. Status: implemented in the same change.
 
 ## What was found (live vault, read-only)
 
-- `/home/user/llm-wiki/.venv` held 2.7 GB of `nvidia-*` CUDA wheels, installed
+- The installed vault's `.venv` held 2.7 GB of `nvidia-*` CUDA wheels, installed
   2026-08-21 by the PyPI torch. `uv.lock` names none of them since torch comes from
   the explicit PyTorch CPU index on Linux
   (`docs/research/2026-09-29-every-install-brings-every-component.md`).

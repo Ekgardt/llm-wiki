@@ -552,6 +552,15 @@ def test_download_refreshes_remaining_deadline_on_socket_before_every_read(
         parent.close()
 
 
+def _send_drip_body(server, release_body, stop) -> None:
+    if not release_body.wait(1.0):
+        return
+    for value in b"12345678":
+        if stop.wait(0.1):
+            return
+        server.sendall(bytes((value,)))
+
+
 def test_download_real_http_response_drip_feed_honors_absolute_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -563,27 +572,19 @@ def test_download_real_http_response_drip_feed_honors_absolute_deadline(
     client, server = socket.socketpair()
     release_body = threading.Event()
     stop = threading.Event()
+    server_errors: list[OSError] = []
 
     def serve() -> None:
         try:
-            server.sendall(
-                b"HTTP/1.1 200 OK\r\n"
-                b"Content-Length: 8\r\n"
-                b"Connection: close\r\n\r\n"
-            )
-            if not release_body.wait(1.0):
-                return
-            for value in b"12345678":
-                if stop.wait(0.1):
-                    return
-                server.sendall(bytes((value,)))
-        except OSError:
-            pass
+            _send_drip_body(server, release_body, stop)
+        except OSError as exc:
+            if not stop.is_set():
+                server_errors.append(exc)
+        finally:
+            server.close()
 
     worker = threading.Thread(target=serve, name="pyright-drip-server", daemon=True)
-    worker.start()
     response = http.client.HTTPResponse(client)
-    response.begin()
     response.url = PYRIGHT_PACKAGE_URL
 
     def open_url(*args: object, **kwargs: object) -> http.client.HTTPResponse:
@@ -593,19 +594,47 @@ def test_download_real_http_response_drip_feed_honors_absolute_deadline(
     monkeypatch.setattr(installer_module, "_open_pinned_url", open_url)
     started = time.monotonic()
     try:
+        server.sendall(
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Length: 8\r\n"
+            b"Connection: close\r\n\r\n"
+        )
+        worker.start()
+        response.begin()
+        started = time.monotonic()
         with pytest.raises(TimeoutError):
             installer_module._download_artifact(destination, started + 0.25)
     finally:
         stop.set()
+        response.close()
         client.close()
         server.close()
-        worker.join(timeout=SHORT_TIMEOUT)
+        if worker.ident is not None:
+            worker.join(timeout=SHORT_TIMEOUT)
         elapsed = time.monotonic() - started
         destination.cleanup()
         parent.close()
 
     assert not worker.is_alive()
+    assert server_errors == []
     assert 0.15 <= elapsed < 0.55
+
+
+def test_drip_fixture_reports_socket_refusal_without_waiting_for_a_response(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    client, server = socket.socketpair()
+    client.settimeout(SHORT_TIMEOUT)
+    refused = Mock(wraps=server)
+    refused.sendall.side_effect = PermissionError("socket send refused")
+    monkeypatch.setattr(socket, "socketpair", lambda: (client, refused))
+    try:
+        with pytest.raises(PermissionError, match="socket send refused"):
+            test_download_real_http_response_drip_feed_honors_absolute_deadline(tmp_path, monkeypatch)
+        assert (client.fileno(), server.fileno()) == (-1, -1)
+    finally:
+        client.close()
+        server.close()
 
 
 def test_download_rejects_response_without_callable_read1_before_body(
@@ -1275,13 +1304,17 @@ def test_dead_or_pid_reused_install_lock_is_reclaimed(
     parent_path = tmp_path / "pyright"
     parent_path.mkdir()
     lock_path = parent_path / ".install-pyright-lock"
+    recorded = installer_module._process_start_identity(os.getpid())
+    observed = None
+    if observed_process_start is not None:
+        observed = recorded.rsplit(":", 1)[0] + ":1234567890123456789"
     lock_path.write_bytes(
-        _lock_metadata(pid=424242, process_start="original-process")
+        _lock_metadata(pid=424242, process_start=recorded)
     )
     monkeypatch.setattr(
         installer_module,
         "_process_start_identity",
-        lambda pid: observed_process_start if pid == 424242 else "current-process",
+        lambda pid: observed if pid == 424242 else recorded,
         raising=False,
     )
     parent = installer_module._open_absolute_directory(parent_path, writable=True)
@@ -1340,13 +1373,14 @@ def test_concurrent_stale_lock_reclaimers_have_one_winner(
 ) -> None:
     parent_path = tmp_path / "pyright"
     parent_path.mkdir()
+    recorded = installer_module._process_start_identity(os.getpid())
     (parent_path / ".install-pyright-lock").write_bytes(
-        _lock_metadata(pid=424242, process_start="dead-process")
+        _lock_metadata(pid=424242, process_start=recorded)
     )
     monkeypatch.setattr(
         installer_module,
         "_process_start_identity",
-        lambda pid: None if pid == 424242 else "current-process",
+        lambda pid: None if pid == 424242 else recorded,
         raising=False,
     )
 

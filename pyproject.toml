@@ -3,6 +3,7 @@ name = "llm-wiki"
 version = "5.0.0"
 requires-python = ">=3.10"
 dependencies = [
+    "defusedxml==0.7.1",
     "mcp>=1.29,<2",
     # The canonical frontmatter reader (corpus_snapshot) needs it on every install. See
     # docs/research/2026-09-14-a-base-install-can-search.md.
@@ -83,6 +84,7 @@ dev = [
     "pytest>=8.0.0",
     "pyyaml>=6.0.3,<7",
     "ruff>=0.6.0",
+    "lizard==1.23.0",
 ]
 # Not installed by default: CI syncs it alone to audit the lock for known
 # vulnerabilities (docs/research/2026-09-27-the-lock-is-audited.md).

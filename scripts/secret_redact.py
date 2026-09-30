@@ -115,8 +115,6 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # A scheme starts where no scheme character precedes it: `\b` let the scheme run
     # start at every dot of `a.a.a…` and rescan it, 6.7 s on 40 KB (audit 2026-09-27 B-6).
     (re.compile(r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://[^\s/:@]+:)(?!\d+@)[^\s/]+(@)"), r"\1[REDACTED]\2"),
-    # `curl -u user:password`: the part after the first colon.
-    (re.compile(r"(?<![\w-])((?:-u|--user)(?:\s+|=)[^\s:]+:)(?!\$)[^\s]+"), r"\1[REDACTED]"),
     # `--password=X`, `--password X` (docker login, podman, many CLIs).
     (re.compile(r"(?<![\w-])(--password(?:=|[^\S\r\n]+))(?![$-])[^\s]+"), r"\1[REDACTED]"),
     # MySQL's `-pPASSWORD`, `sshpass -p` and `docker login -p` are redacted by
@@ -133,6 +131,30 @@ _PASSWORD_COMMAND = re.compile(
 _FLAG_VALUE = r"(?:'[^'\r\n]*'|\"[^\"\r\n]*\"|\S+)"
 _ATTACHED_PASSWORD = re.compile(r"(?<!\S)(-p)(?![\s$])" + _FLAG_VALUE)
 _ANY_PASSWORD = re.compile(r"(?<!\S)(-p(?:[^\S\r\n]+)?)(?![\s$-])" + _FLAG_VALUE)
+
+# Options belong to their command: `date -u +%H:%M:%S` is not credentials.
+# Quoted shell operators remain in the command; unquoted ones end its region.
+# See docs/research/2026-09-29-a-user-flag-belongs-to-its-command.md.
+_CURL_COMMAND = re.compile(
+    r"(?<![\w.-])(?i:curl(?:\.exe)?)[\"']?(?=\s)"
+    r"(?:\\\r?\n|`\r?\n|'[^'\r\n]*(?:'|$)|\"[^\"\r\n]*(?:\"|$)|[^'\";&|\r\n])*"
+)
+_CURL_USER = re.compile(r"(?<![\w-])(?:-u|--user)(?:[^\S\r\n]+|=)" + _FLAG_VALUE)
+
+
+def _curl_credentials(match: re.Match[str]) -> str:
+    value = match.group()
+    prefix, colon, password = value.partition(":")
+    if not colon or password.startswith("$"):
+        return value
+    closing = ""
+    if password.endswith(("'", '"')):
+        closing = password[-1]
+    return prefix + ":[REDACTED]" + closing
+
+
+def _curl_command(match: re.Match[str]) -> str:
+    return _CURL_USER.sub(_curl_credentials, match.group())
 
 
 def _command_line(line: str) -> str:
@@ -400,7 +422,9 @@ def redact_secrets(text: str) -> str:
     # `_PATTERNS`, so `token=sk-…` collapsed to `token=[REDACTED]` and never to
     # `token=[REDACTED_API_KEY]`. Splitting them into their own pass must not
     # renumber that — the marker is asserted, hashed and stored downstream.
-    return _redact_high_entropy(_redact_command_passwords(_redact_patterns(_redact_named_values(text))))
+    return _redact_high_entropy(_redact_command_passwords(_CURL_COMMAND.sub(
+        _curl_command, _redact_patterns(_redact_named_values(text))
+    )))
 
 
 # --- structured values ------------------------------------------------------

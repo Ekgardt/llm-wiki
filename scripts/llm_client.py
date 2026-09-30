@@ -870,6 +870,27 @@ def _is_literal_loopback_endpoint(endpoint: str) -> bool:
     return hostname in {"127.0.0.1", "::1"}
 
 
+class _RejectProviderRedirects(urllib.request.HTTPRedirectHandler):
+    """A provider response cannot authorize a different destination or method."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        fp.close()
+        raise urllib.error.HTTPError(req.full_url, code, "provider_redirect_refused", None, None)
+
+
+def open_provider_request(request: urllib.request.Request, *, timeout: float):
+    """Keep the approved request's destination; literal loopback never uses a proxy.
+
+    Remote endpoints retain configured proxies and standard TLS verification.
+    This opener is local to the request, not a process-wide urllib replacement.
+    See docs/research/2026-09-29-provider-transport-keeps-the-approved-destination.md.
+    """
+    handlers: list[urllib.request.BaseHandler] = [_RejectProviderRedirects()]
+    if _is_literal_loopback_endpoint(request.full_url):
+        handlers.append(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(*handlers).open(request, timeout=timeout)
+
+
 # ---------------------------------------------------------------------------
 # Liveness probes (cheap, before attempting real call)
 # ---------------------------------------------------------------------------
@@ -897,7 +918,7 @@ def _opencode_request(url: str, *, method: str = "GET", body: bytes | None = Non
 
 
 def _opencode_healthy() -> bool:
-    with urllib.request.urlopen(_opencode_request(f"{_opencode_base()}/global/health"), timeout=1.0) as resp:
+    with open_provider_request(_opencode_request(f"{_opencode_base()}/global/health"), timeout=1.0) as resp:
         payload = json.loads(resp.read().decode("utf-8") or "{}")
     return isinstance(payload, dict) and payload.get("healthy") is True
 
@@ -946,7 +967,7 @@ def _probe_ollama(descriptor: ProviderDescriptor) -> bool:
         return False
     try:
         request = urllib.request.Request(_ollama_api_url(descriptor._endpoint, "tags"))
-        with urllib.request.urlopen(request, timeout=1.0) as response:
+        with open_provider_request(request, timeout=1.0) as response:
             return _ollama_tags_answer(descriptor, response)
     except (
         json.JSONDecodeError,
@@ -1272,7 +1293,7 @@ def _framed_system_text(system_prompt: str) -> str:
 
 def _opencode_post(url: str, payload: Mapping[str, object]) -> object:
     request = _opencode_request(url, method="POST", body=json.dumps(payload).encode("utf-8"))
-    with urllib.request.urlopen(request, timeout=_timeout_s()) as response:
+    with open_provider_request(request, timeout=_timeout_s()) as response:
         raw = response.read().decode("utf-8")
     if not raw:
         return None
@@ -1325,9 +1346,10 @@ def _is_text_part(part: object) -> bool:
 def _opencode_delete(base: str, session_id: str) -> None:
     try:
         request = _opencode_request(f"{base}/session/{session_id}", method="DELETE")
-        urllib.request.urlopen(request, timeout=5.0)
-    except (urllib.error.URLError, OSError):
-        pass
+        with open_provider_request(request, timeout=5.0):
+            return
+    except (urllib.error.URLError, OSError) as error:
+        print(f"llm_client: OpenCode session cleanup failed: {describe_error(error)}", file=sys.stderr)
 
 
 def _opencode_answer(base: str, session_id: str, prompt: str, system_prompt: str):
@@ -1781,7 +1803,7 @@ def _call_openai(
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=_timeout_s()) as response:
+    with open_provider_request(request, timeout=_timeout_s()) as response:
         data = json.loads(response.read().decode("utf-8"))
     return BackendResponse(
         data["choices"][0]["message"]["content"], _parse_http_usage(data)
@@ -1882,7 +1904,7 @@ def _ollama_model_context(descriptor: ProviderDescriptor) -> int | None:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=OLLAMA_SHOW_TIMEOUT_S) as response:
+        with open_provider_request(request, timeout=OLLAMA_SHOW_TIMEOUT_S) as response:
             data = json.loads(response.read(1024 * 1024).decode("utf-8"))
     except (OSError, ValueError, urllib.error.URLError):
         return None
@@ -1957,7 +1979,7 @@ def _call_ollama(
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=_timeout_s()) as resp:
+    with open_provider_request(req, timeout=_timeout_s()) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     _require_unfilled_window(data, num_ctx, int(descriptor.inference_settings["max_tokens"]))
     return BackendResponse(data["message"]["content"], _parse_ollama_usage(data))

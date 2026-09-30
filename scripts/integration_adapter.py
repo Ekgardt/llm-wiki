@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import functools
 import json
 import os
 import re
@@ -11,15 +10,17 @@ import secrets
 import stat
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
 from typing import Any
 
+from capture_diagnostics import record_hook_error
 from daily_log_append import BACKGROUND_APPEND_BUDGET_SECONDS, BREADCRUMB_APPEND_BUDGET_SECONDS
 from event_envelope import EventEnvelope, build_event_envelope
 from maybe_compile import spawn_compile_if_idle
@@ -112,7 +113,6 @@ def build_session_start_context(slug: str | None = None) -> Sequence[Any]:
     return build_context_items(slug)
 
 
-OCCURRENCE_EVENTS = EVENTS - {"user_prompt"}
 CHECKPOINT_SIGNAL_FIELDS = frozenset(
     {
         "checkpoint_type",
@@ -180,7 +180,7 @@ def _safe_string(value: str | None) -> str | None:
 
 
 def _source_event_id(raw: Mapping[str, Any]) -> str | None:
-    return _first_string(
+    candidates = (
         raw.get("source_event_id"),
         raw.get("occurrence_id"),
         raw.get("event_id"),
@@ -189,6 +189,7 @@ def _source_event_id(raw: Mapping[str, Any]) -> str | None:
         raw.get("toolCallID"),
         raw.get("callID"),
     )
+    return next((value for value in candidates if isinstance(value, str) and value), None)
 
 
 def _session(source: str, raw: Mapping[str, Any]) -> str | None:
@@ -250,7 +251,10 @@ def _opencode_arguments(raw: Mapping[str, Any]) -> object:
     arguments = raw.get("args")
     if isinstance(arguments, Mapping):
         return arguments
-    return raw.get("input")
+    arguments = raw.get("input")
+    if isinstance(arguments, Mapping):
+        return arguments
+    return raw.get("tool_input")
 
 
 def _tool_target(raw_name: str, target: str) -> str:
@@ -429,7 +433,7 @@ def _normalize_payload_delta(payload: dict[str, Any]) -> None:
 
 
 def _copy_occurrence(payload: dict[str, Any], event: str, raw: Mapping[str, Any]) -> None:
-    if event in OCCURRENCE_EVENTS and isinstance(raw.get("occurrence_id"), str):
+    if event in EVENTS and isinstance(raw.get("occurrence_id"), str):
         payload["occurrence_id"] = raw["occurrence_id"]
 
 
@@ -474,6 +478,7 @@ def normalize_event(
     _apply_compaction_default(payload, event)
 
     source_time = occurred_at or _parse_timestamp(projected.get("timestamp"))
+    _breadcrumb_time_origin(payload, event, source_time)
     return build_event_envelope(
         event_type=event,
         payload=payload,
@@ -496,6 +501,11 @@ def normalize_event(
     )
 
 
+def _breadcrumb_time_origin(payload: dict, event: str, source_time: datetime | None) -> None:
+    if event in {"user_prompt", "post_tool_use"}:
+        payload["capture_time_origin"] = "acceptance" if source_time is None else "host"
+
+
 def normalize_occurrence_event(
     source: str,
     event: str,
@@ -506,12 +516,7 @@ def normalize_occurrence_event(
 ) -> EventEnvelope:
     """Assign missing occurrence identity once at the outer adapter boundary."""
     normalized_raw = raw
-    if (
-        event in OCCURRENCE_EVENTS
-        and occurred_at is None
-        and raw.get("timestamp") is None
-        and _source_event_id(raw) is None
-    ):
+    if event in EVENTS and _source_event_id(raw) is None:
         normalized_raw = dict(raw)
         normalized_raw["occurrence_id"] = str(uuid.uuid4())
     return normalize_event(
@@ -1958,15 +1963,8 @@ def _checkpoint_log_kind(error: BaseException) -> str:
 
 
 def _log_hook_error(kind: str, message: str) -> None:
-    """One line in the hook failure log; a hook never fails its host over its diagnostics."""
-    try:
-        log_path = STATE_ROOT / "logs" / "hook-errors.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
-        with log_path.open("a", encoding="utf-8") as stream:
-            stream.write(f"[{timestamp}] {kind}: {message}\n")
-    except OSError:
-        pass
+    """One line in the hook failure log; a hook never fails its host over diagnostics."""
+    record_hook_error(STATE_ROOT, kind, message)
 
 
 def _log_checkpoint_error(error: BaseException) -> None:
@@ -2448,8 +2446,8 @@ def _catch_up_missed_nightly() -> None:
         from session_start_context import maybe_spawn_nightly_catchup
 
         maybe_spawn_nightly_catchup()
-    except Exception:  # noqa: BLE001 - maintenance is best effort, like its neighbours
-        pass
+    except Exception as error:  # noqa: BLE001 - report without breaking session startup
+        _log_hook_error("session-start nightly catch-up", describe_error(error))
 
 
 def _recover_project_handoff(slug: str | None, project_dir: Path | None) -> Sequence[Any]:
@@ -2636,39 +2634,6 @@ def _ingest_session_start(
         code_graph=_code_graph_reminder(project_dir),
     )
     _write_session_start_debug(result["context"])
-
-
-def _ingest_user_prompt(
-    envelope: EventEnvelope,
-    payload: dict[str, Any],
-    slug: str | None,
-    project_dir: Path | None,
-    result: dict[str, Any],
-    force_stub: bool,
-    trigger: str | None,
-) -> None:
-    _run_delegate(
-        "user_prompt_capture.py",
-        payload,
-        forward_stdout=True,
-        project_dir=project_dir,
-    )
-
-
-def _ingest_post_tool(
-    envelope: EventEnvelope,
-    payload: dict[str, Any],
-    slug: str | None,
-    project_dir: Path | None,
-    result: dict[str, Any],
-    force_stub: bool,
-    trigger: str | None,
-    *,
-    background: bool = False,
-) -> None:
-    _run_delegate(
-        "post_tool_capture.py", payload, project_dir=project_dir, background=background
-    )
 
 
 def _capture_path_is_beneath(path: Path, root: Path) -> bool:
@@ -3055,6 +3020,68 @@ def _remove_verified_pending(path: Path, state_root: Path, expected_sha256: str)
     fsync_directory(path.parent)
 
 
+def _publication_heartbeat_interval(owner) -> float:
+    from markdown_transaction import INTENT_FENCE_SECONDS
+
+    # Same policy as the existing capture worker: renew within one third of
+    # the shortest authority lifetime, and respect the owner's own interval.
+    return min(owner.heartbeat_seconds, INTENT_FENCE_SECONDS / 3)
+
+
+class _CapturePublicationKeepAlive:
+    """Keep both publication claims live and verify them before returning."""
+
+    def __init__(self, registry, coordinator, owner, fence) -> None:
+        from markdown_transaction import INTENT_FENCE_SECONDS
+        from reliable_memory import DEFAULTS
+
+        self._registry, self._coordinator = registry, coordinator
+        self._owner, self._fence = owner, fence
+        self._interval = _publication_heartbeat_interval(owner)
+        self._lease_seconds = min(owner.ttl_seconds, INTENT_FENCE_SECONDS)
+        self._attempt_seconds = 2 * DEFAULTS.markdown_busy_ms / 1_000
+        self._held_since = time.monotonic()
+        self._stop = threading.Event()
+        self._failure: BaseException | None = None
+        self._thread = threading.Thread(target=self._run, name="capture-publication-keepalive", daemon=True)
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, *_exc) -> None:
+        self._stop.set()
+        # Exceptional exit also releases the outer authority scopes. Finish
+        # any in-flight renewal before either exit path can release them.
+        self._thread.join()
+        if exc_type is None:
+            self._require_finished()
+            self._require_live()
+
+    def _require_finished(self) -> None:
+        if self._failure is not None:
+            raise self._failure
+
+    def _require_live(self) -> None:
+        from markdown_transaction import _require_live_intent_fence
+
+        with self._coordinator._connect() as database:
+            self._registry.require(database, self._owner)
+            _require_live_intent_fence(database, self._fence, datetime.now(timezone.utc))
+
+    def _renew(self) -> None:
+        self._owner = self._registry.heartbeat(self._owner)
+        self._coordinator.heartbeat_intent_fence(self._fence, self._owner)
+
+    def _run(self) -> None:
+        from lease_renewal import renew_until_stopped
+
+        self._failure = renew_until_stopped(
+            self._renew, interval=self._interval, lease_seconds=self._lease_seconds,
+            attempt_seconds=self._attempt_seconds, held_since=self._held_since, stop=self._stop,
+        )
+
+
 @contextmanager
 def _capture_publication_fence(queue: object, coordinator: object, intent_id: str):
     registry = queue.ownership_registry()
@@ -3062,7 +3089,8 @@ def _capture_publication_fence(queue: object, coordinator: object, intent_id: st
     try:
         fence = coordinator.acquire_intent_fence(intent_id, mode="capture", owner=owner)
         try:
-            yield owner, fence
+            with _CapturePublicationKeepAlive(registry, coordinator, owner, fence):
+                yield owner, fence
         finally:
             coordinator.release_intent_fence(fence)
     finally:
@@ -3078,14 +3106,16 @@ def _publish_capture_files_and_task(
     intent_sha256: str,
     pending_relative: str,
     ready_relative: str,
+    handler_version: int = CAPTURE_HANDLER_VERSION,
 ) -> None:
     from reliable_memory import publish_runtime_file
 
-    pending = Path(STATE_ROOT) / pending_relative
-    ready = Path(STATE_ROOT) / ready_relative
+    state_root = Path(queue.state_root)
+    pending = state_root / pending_relative
+    ready = state_root / ready_relative
     with _capture_publication_fence(queue, coordinator, intent_id) as (owner, fence):
         publish_runtime_file(
-            pending, payload, state_root=Path(STATE_ROOT), create_only=True, mode=0o600
+            pending, payload, state_root=state_root, create_only=True, mode=0o600
         )
         queue.index_capture_intent_pending(
             intent_id=intent_id,
@@ -3095,7 +3125,7 @@ def _publish_capture_files_and_task(
             byte_size=len(payload),
         )
         publish_runtime_file(
-            ready, payload, state_root=Path(STATE_ROOT), create_only=True, mode=0o600
+            ready, payload, state_root=state_root, create_only=True, mode=0o600
         )
         queue.mark_capture_intent_ready(
             intent_id=intent_id,
@@ -3104,10 +3134,9 @@ def _publish_capture_files_and_task(
             intent_sha256=intent_sha256,
             byte_size=len(payload),
         )
-        _remove_verified_pending(pending, Path(STATE_ROOT), intent_sha256)
         queue.enqueue_capture_task_replay_safe(
             "flush",
-            CAPTURE_HANDLER_VERSION,
+            handler_version,
             {
                 "intent_id": intent_id,
                 "intent_path": ready_relative,
@@ -3119,6 +3148,7 @@ def _publish_capture_files_and_task(
             capture_fence=fence,
             owner=owner,
         )
+        _remove_verified_pending(pending, state_root, intent_sha256)
 
 
 def _publish_durable_capture_intent(
@@ -3416,6 +3446,61 @@ def _ingest_session_end(
         _cleanup_transient_transcript(transient_path)
 
 
+def _breadcrumb_input(envelope: EventEnvelope) -> dict:
+    data = envelope.to_dict()
+    for field in ("event_id", "content_hash", "occurred_at", "captured_at"):
+        data.pop(field)
+    return data
+
+
+def _publish_event_breadcrumb(envelope: EventEnvelope):
+    from breadcrumb_storage import publish_breadcrumb
+    from markdown_transaction import active_markdown_coordinator
+    from memory_queue import active_memory_queue
+
+    vault, state_root = Path(ROOT).resolve(strict=True), Path(STATE_ROOT).resolve(strict=True)
+    queue = active_memory_queue(vault, state_root)
+    coordinator = active_markdown_coordinator(vault, state_root)
+    scope = {"host": envelope.agent, "session": envelope.session,
+             "worktree": envelope.worktree, "kind": envelope.event_type,
+             "occurrence": envelope.source_event_id or str(uuid.uuid4())}
+    return publish_breadcrumb(
+        queue, coordinator, scope, _breadcrumb_input(envelope),
+        occurred_at=envelope.occurred_at, accepted_at=envelope.captured_at,
+        time_origin=envelope.payload.get("capture_time_origin", "acceptance"),
+    )
+
+
+def _after_breadcrumb(envelope: EventEnvelope, payload: dict, result: dict) -> None:
+    _observe_checkpoint_fail_open(envelope)
+    slug, _project_dir = _project_context(envelope)
+    result["slug"] = slug
+    if envelope.event_type == "user_prompt":
+        from user_prompt_capture import after_prompt_capture
+
+        after_prompt_capture(payload, slug)
+
+
+def _after_breadcrumb_safely(envelope: EventEnvelope, payload: dict, result: dict) -> None:
+    try:
+        _after_breadcrumb(envelope, payload, result)
+    except Exception as error:
+        result["post_capture_error"] = describe_error(error)
+        _log_hook_error("accepted breadcrumb follow-up", result["post_capture_error"])
+
+
+def _ingest_breadcrumb_event(envelope: EventEnvelope) -> dict:
+    publication = _publish_event_breadcrumb(envelope)
+    payload = _canonical_capture_payload(envelope)
+    result = _ingest_result(None, payload)
+    result.update(capture_durable=True, capture_registered=publication.registered,
+                  capture_registration_error=publication.registration_error)
+    _record_capture_intent(result, publication.intent_id)
+    _wake_capture_worker(result, publication.intent_id)
+    _after_breadcrumb_safely(envelope, payload, result)
+    return result
+
+
 def ingest_event(
     envelope: EventEnvelope,
     *,
@@ -3428,14 +3513,14 @@ def ingest_event(
     `background` says the host runs this hook without waiting for it, so the tool
     breadcrumb may wait out a writer the way a foreground hook cannot.
     """
+    if envelope.event_type in {"user_prompt", "post_tool_use"}:
+        return _ingest_breadcrumb_event(envelope)
     _observe_checkpoint_fail_open(envelope)
     payload = _canonical_capture_payload(envelope)
     slug, project_dir = _project_context(envelope)
     result = _ingest_result(slug, payload)
     handlers = {
         "session_start": _ingest_session_start,
-        "user_prompt": _ingest_user_prompt,
-        "post_tool_use": functools.partial(_ingest_post_tool, background=background),
         "pre_compact": _ingest_precompact,
         "session_end": _ingest_session_end,
     }
@@ -3480,7 +3565,8 @@ def _run_active_capture_worker_once() -> int:
     coordinator = active_markdown_coordinator(vault, state_root)
     process_missing = partial(process_new_capture, queue, coordinator)
     work = partial(
-        run_capture_worker_once, queue, coordinator, process_missing=process_missing
+        run_capture_worker_once, queue, coordinator, process_missing=process_missing,
+        handler_versions=(1, 2),
     )
     _drain_capture_work(work)
     return 0

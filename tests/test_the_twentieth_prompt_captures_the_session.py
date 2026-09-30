@@ -19,6 +19,7 @@ from tests.adopted_capture_vault import (  # noqa: E402
     host_transcript,
     intent_summaries,
 )
+from tests.test_breadcrumb_worker import ingress as ingress  # noqa: E402
 
 
 def _delegate_payload(raw: dict) -> dict:
@@ -47,7 +48,6 @@ def _submit_prompts(module, monkeypatch, tmp_path, hook: dict, count: int) -> li
     vault = tmp_path / "vault"
     vault.mkdir(exist_ok=True)
     monkeypatch.setattr(module, "ROOT", vault)
-    monkeypatch.setattr(module, "_append_prompt_tag", lambda *_a, **_k: False)
     monkeypatch.setattr(module, "spawn_detached", lambda args: started.append(args) or 1)
     for index in range(count):
         text = json.dumps(dict(hook, prompt=f"a meaningful prompt number {index}"))
@@ -56,7 +56,7 @@ def _submit_prompts(module, monkeypatch, tmp_path, hook: dict, count: int) -> li
     return started
 
 
-def test_the_twentieth_prompt_starts_one_running_capture(monkeypatch, tmp_path):
+def test_the_twentieth_prompt_starts_one_running_capture(monkeypatch, tmp_path, ingress):
     import user_prompt_capture
 
     project = tmp_path / "project"
@@ -89,7 +89,7 @@ def test_the_twentieth_prompt_starts_one_running_capture(monkeypatch, tmp_path):
     ]
 
 
-def test_twenty_prompts_without_a_transcript_start_nothing(monkeypatch, tmp_path):
+def test_twenty_prompts_without_a_transcript_start_nothing(monkeypatch, tmp_path, ingress):
     import user_prompt_capture
 
     project = tmp_path / "project"

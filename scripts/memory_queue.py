@@ -46,6 +46,7 @@ from reliable_memory import (
     fsync_file,
     open_operational_db,
     open_readonly_operational_db,
+    quote_sqlite_identifier,
     read_runtime_bytes,
     restricted_relative_path,
     run_resumable_migration,
@@ -1166,7 +1167,7 @@ def _drop_schema_object(
             "queue v3 candidate has an unsupported schema object",
         )
     with begin_immediate(database):
-        database.execute(f'DROP {keyword} "{name}"')
+        database.execute(f'DROP {keyword} {quote_sqlite_identifier(name)}')
 
 
 def _drop_unexpected_objects(
@@ -1188,7 +1189,7 @@ def _drop_unexpected_objects(
 def _table_is_populated(database: sqlite3.Connection, name: str) -> bool:
     """An unreadable table counts as populated; we must not rebuild it blind."""
     try:
-        row = database.execute(f'SELECT 1 FROM "{name}" LIMIT 1').fetchone()
+        row = database.execute(f'SELECT 1 FROM {quote_sqlite_identifier(name)} LIMIT 1').fetchone()
     except sqlite3.DatabaseError:
         return True
     return row is not None
@@ -1289,7 +1290,9 @@ def _validate_queue_v2_schema_objects(database: sqlite3.Connection) -> None:
 
 
 def _queue_v2_columns(database: sqlite3.Connection, table: str) -> set[str]:
-    return {str(row["name"]) for row in database.execute(f'PRAGMA table_info("{table}")')}
+    return {str(row["name"]) for row in database.execute(
+        f'PRAGMA table_info({quote_sqlite_identifier(table)})'
+    )}
 
 
 # Which bucket each payload key contributes a source-identity string to.
@@ -2914,6 +2917,7 @@ class _CapturePurgeEvidence:
     intent: _CapturePurgeArtifact
     decisions: tuple[_CapturePurgeArtifact, ...]
     terminal_path: str
+    sources: tuple[_CapturePurgeArtifact, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -3880,6 +3884,20 @@ def _check_capture_intent_size(byte_size: object) -> None:
         raise ValueError("intent byte size is invalid")
     if not 1 <= byte_size <= _MAX_QUEUE_PAYLOAD_BYTES:
         raise ValueError("intent byte size is invalid")
+
+
+def _capture_scan_cursor(after: tuple[str, str] | None) -> tuple[str, str]:
+    if after is None:
+        return "", ""
+    if not isinstance(after, tuple) or len(after) != 2:
+        raise ValueError("capture scan cursor must contain timestamp and identity")
+    return _capture_cursor_text(after[0]), _capture_cursor_text(after[1])
+
+
+def _capture_cursor_text(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("capture scan cursor fields must be text")
+    return value
 
 
 def _check_capture_intent_descriptor(
@@ -5535,10 +5553,10 @@ class MemoryQueue:
 
     @classmethod
     def _from_v3_candidate(
-        cls, path: Path, *, state_root: Path
+        cls, path: Path, *, state_root: Path, vault: Path | None = None
     ) -> _QueueV3CandidateReader:
         validate_queue_v3_database(path, state_root=state_root)
-        return _QueueV3CandidateReader(Path(path))
+        return _QueueV3CandidateReader(Path(path), vault=state_root if vault is None else vault)
 
     def __init__(
         self,
@@ -6649,6 +6667,8 @@ class MemoryQueue:
         )
 
     def _delete_stale_source_fences(self, connection: sqlite3.Connection) -> None:
+        import process_liveness
+
         now = _as_utc(self._clock())
         rows = connection.execute(
             "SELECT token, owner_pid, expires_at FROM source_fences"
@@ -6656,7 +6676,7 @@ class MemoryQueue:
         for row in rows:
             expires_at = _parse_timestamp(str(row["expires_at"]))
             expired = expires_at is None or expires_at <= now
-            if expired or not _pid_is_alive(int(row["owner_pid"])):
+            if expired or not process_liveness.owner_alive(int(row["owner_pid"])):
                 connection.execute(
                     "DELETE FROM source_fences WHERE token=?", (row["token"],)
                 )
@@ -7304,11 +7324,12 @@ class _QueueV3CandidateReader:
     `active_or_legacy_memory_queue` hands every caller once adoption is in force.
     """
 
-    def __init__(self, path: Path, *, coordinator_path: Path | None = None) -> None:
+    def __init__(self, path: Path, *, coordinator_path: Path | None = None, vault: Path | None = None) -> None:
         self.db_path = Path(path)
         self.state_root = self.db_path.parent.parent
         self.results_dir = self.state_root / "run" / "queue-results"
         self.coordinator_path = coordinator_path
+        self.vault = None if vault is None else Path(vault).resolve(strict=True)
 
     def ownership_registry(self):
         from operational_ownership import OwnershipRegistry
@@ -7829,7 +7850,7 @@ class _QueueV3CandidateReader:
         return task_id
 
     def ready_capture_intents_without_task(
-        self, limit: int
+        self, limit: int, *, after: tuple[str, str] | None = None,
     ) -> list[dict[str, object]]:
         """Ready intents that no task was ever created for, oldest first.
 
@@ -7840,6 +7861,7 @@ class _QueueV3CandidateReader:
         """
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
             raise ValueError("limit must be a positive integer")
+        cursor = _capture_scan_cursor(after)
         with closing(self._connect()) as database:
             rows = database.execute(
                 """SELECT intent.intent_id,intent.relative_path,
@@ -7849,14 +7871,15 @@ class _QueueV3CandidateReader:
                      ON link.intent_id=intent.intent_id
                    WHERE intent.publication_state='ready'
                      AND link.intent_id IS NULL
+                     AND (intent.updated_at, intent.intent_id) > (?, ?)
                    ORDER BY intent.updated_at ASC, intent.intent_id ASC
                    LIMIT ?""",
-                (limit,),
+                (*cursor, limit),
             ).fetchall()
         return [dict(row) for row in rows]
 
     def pending_capture_intents(
-        self, limit: int, older_than: str | None = None
+        self, limit: int, older_than: str | None = None, *, after: tuple[str, str] | None = None,
     ) -> list[dict[str, object]]:
         """Intents still half-published, oldest first; read-only like the query above.
 
@@ -7868,15 +7891,17 @@ class _QueueV3CandidateReader:
         """
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
             raise ValueError("limit must be a positive integer")
+        cursor = _capture_scan_cursor(after)
         with closing(self._connect()) as database:
             rows = database.execute(
                 """SELECT intent_id,relative_path,intent_sha256,byte_size,updated_at
                    FROM capture_intents
                    WHERE publication_state='pending'
                      AND (? IS NULL OR updated_at < ?)
+                     AND (updated_at, intent_id) > (?, ?)
                    ORDER BY updated_at ASC, intent_id ASC
                    LIMIT ?""",
-                (older_than, older_than, limit),
+                (older_than, older_than, *cursor, limit),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -9033,7 +9058,7 @@ class _QueueV3CandidateReader:
         *,
         binding: CaptureTaskBinding,
         decisions: list[dict[str, str]],
-    ) -> None:
+    ) -> CaptureTaskBinding:
         expected_keys = {
             "schema_version",
             "intent_id",
@@ -9059,14 +9084,64 @@ class _QueueV3CandidateReader:
         )
         if identity != expected_identity or not isinstance(processing, dict):
             raise QueueOperationError("capture_terminal_invalid")
-        expected_processing = {
-            "kind": "task",
-            "task_id": binding.task_id,
-            "active_link_digest": binding.active_digest,
-        }
-        if processing != expected_processing:
-            raise QueueOperationError("capture_terminal_invalid")
+        proven = self._terminal_proof_binding(record, binding)
         self._require_capture_terminal_disposition(record, decisions)
+        self._require_versioned_capture_proof(proven, record)
+        return proven
+
+    @staticmethod
+    def _terminal_processing_of(binding: CaptureTaskBinding) -> dict[str, str]:
+        return {"kind": "task", "task_id": binding.task_id, "active_link_digest": binding.active_digest}
+
+    def _terminal_proof_binding(self, record: Mapping[str, object], binding: CaptureTaskBinding) -> CaptureTaskBinding:
+        processing = record.get("processing_binding")
+        if processing == self._terminal_processing_of(binding):
+            return binding
+        if not isinstance(processing, dict):
+            raise QueueOperationError("capture_terminal_invalid")
+        return self._inherited_terminal_binding(processing, binding)
+
+    def _inherited_terminal_binding(self, processing: dict, binding: CaptureTaskBinding) -> CaptureTaskBinding:
+        task_id = processing.get("task_id")
+        with closing(self._connect()) as database:
+            ancestors = _redrive_ancestors(database, binding.task_id)
+            if not isinstance(task_id, str) or task_id not in ancestors:
+                raise QueueOperationError("capture_terminal_invalid")
+            parent = self.active_capture_binding(database, task_id)
+        self._require_terminal_ancestor(parent, binding, processing)
+        return parent
+
+    def _require_terminal_ancestor(self, parent: CaptureTaskBinding, child: CaptureTaskBinding, processing: dict) -> None:
+        actual = (parent.intent_id, parent.intent_sha256, parent.handler_version, parent.seal_digest is not None, processing)
+        expected = (child.intent_id, child.intent_sha256, child.handler_version, True, self._terminal_processing_of(parent))
+        if actual != expected:
+            raise QueueOperationError("capture_terminal_invalid")
+
+    def _adopt_terminal_seal(
+        self, database: sqlite3.Connection, binding: CaptureTaskBinding, proven: CaptureTaskBinding, now: datetime,
+    ) -> None:
+        if binding.task_id == proven.task_id:
+            return
+        decision = self.indexed_capture_decision(
+            task_id=proven.task_id, intent_id=proven.intent_id, stage="flush",
+            active_link_digest=proven.active_digest,
+        )
+        if decision is None:
+            raise QueueOperationError("capture_terminal_invalid")
+        self._require_inherited_decision_row(database, decision, binding.task_id, binding.active_digest)
+        self._insert_inherited_seal(database, decision, binding.task_id, binding.active_digest, now)
+
+    def _require_versioned_capture_proof(self, binding: CaptureTaskBinding, record: Mapping[str, object]) -> None:
+        if binding.handler_version == 1:
+            return
+        if binding.handler_version != 2:
+            raise QueueOperationError("capture_terminal_handler_unsupported")
+        from breadcrumb_terminal import require_terminal_proof
+
+        try:
+            require_terminal_proof(self, binding, record)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise QueueOperationError("breadcrumb_terminal_unverified") from exc
 
     def _require_capture_terminal_owner(
         self,
@@ -9251,7 +9326,8 @@ class _QueueV3CandidateReader:
             if binding.active_digest != active_link_digest or binding.intent_id != intent_id:
                 raise QueueOperationError("capture_link_conflicted")
             decisions = self._capture_terminal_decisions(database, intent_id)
-            self._require_capture_terminal_record(record, binding=binding, decisions=decisions)
+            proven = self._require_capture_terminal_record(record, binding=binding, decisions=decisions)
+            self._adopt_terminal_seal(database, binding, proven, now)
             self._commit_capture_terminal_row(
                 database,
                 row,
@@ -10377,10 +10453,14 @@ class _QueueV3CandidateReader:
                        AND fencing_epoch=?""",
                     (task_id, fence.token, fence.epoch),
                 ).fetchone()
-            if current is not None:
-                self.release_task_fence(fence)
-            elif task is not None:
-                raise QueueOperationError("task_fence_lost")
+            self._release_corrupt_purge_fence(fence, current, task)
+
+    def _release_corrupt_purge_fence(self, fence, current, task) -> None:
+        if current is not None:
+            self.release_task_fence(fence)
+            return
+        if task is not None:
+            raise QueueOperationError("task_fence_lost")
 
     def _capture_terminal_file(
         self, intent_id: str
@@ -10395,11 +10475,9 @@ class _QueueV3CandidateReader:
             raise QueueOperationError("capture_terminal_invalid")
         return value, raw
 
-    @staticmethod
     def _require_capture_terminal_identity(
-        record: Mapping[str, object], task_id: str, binding: CaptureTaskBinding
-    ) -> None:
-        processing = record.get("processing_binding")
+        self, record: Mapping[str, object], task_id: str, binding: CaptureTaskBinding
+    ) -> CaptureTaskBinding:
         disposition = record.get("disposition")
         actual = (
             set(record),
@@ -10422,16 +10500,12 @@ class _QueueV3CandidateReader:
             binding.intent_sha256,
             True,
         )
-        expected_processing = {
-            "kind": "task",
-            "task_id": task_id,
-            "active_link_digest": binding.active_digest,
-        }
         allowed = {"markdown_committed", "no_durable_content", "operator_discard"}
-        if actual != expected or processing != expected_processing:
+        if actual != expected or task_id != binding.task_id:
             raise QueueOperationError("capture_terminal_invalid")
         if not isinstance(disposition, dict) or disposition.get("kind") not in allowed:
             raise QueueOperationError("capture_terminal_invalid")
+        return self._terminal_proof_binding(record, binding)
 
     @staticmethod
     def _require_capture_terminal_database_binding(
@@ -10468,10 +10542,11 @@ class _QueueV3CandidateReader:
         if binding.intent_id is None or binding.intent_sha256 is None:
             raise QueueOperationError("capture_intent_unresolved")
         record, raw = self._capture_terminal_file(binding.intent_id)
-        self._require_capture_terminal_identity(record, task_id, binding)
+        proven = self._require_capture_terminal_identity(record, task_id, binding)
         self._require_capture_terminal_database_binding(
             database, task_id, binding, raw
         )
+        self._require_versioned_capture_proof(proven, record)
         return record
 
     def _capture_terminal_blocker(
@@ -10613,6 +10688,22 @@ class _QueueV3CandidateReader:
             intent,
             decisions,
             f"run/queue-results/capture-{intent_id}.json",
+            self._capture_purge_source_paths(binding),
+        )
+
+    def _capture_purge_source_paths(self, binding: CaptureTaskBinding) -> tuple[_CapturePurgeArtifact, ...]:
+        if binding.handler_version == 1:
+            return ()
+        from breadcrumb_storage import _stored_manifest, load_bundle, runtime_source_records
+
+        manifest = _stored_manifest(self.state_root, binding.intent_id)
+        bundle = load_bundle(self.state_root, manifest)
+        return tuple(
+            self._capture_purge_artifact(
+                binding.task_id, relative, sha256_bytes(data),
+                max_bytes=_MAX_QUEUE_PAYLOAD_BYTES, error_code="breadcrumb_source_changed",
+            )
+            for relative, data in runtime_source_records(self.state_root, bundle)
         )
 
     @staticmethod
@@ -11384,25 +11475,32 @@ class _QueueV3CandidateReader:
 
     @staticmethod
     def _validate_capture_claim(
-        owner: str, lease_seconds: int, max_attempts: int
+        owner: str, lease_seconds: int, max_attempts: int,
+        handler_versions: tuple[int, ...],
     ) -> None:
         _check_claim_arguments(owner, lease_seconds, max_attempts)
+        if not handler_versions:
+            raise ValueError("capture claim requires supported handler versions")
+        for version in handler_versions:
+            _require_bounded_int(version, 1, 2_147_483_647, "invalid capture handler version")
 
     @staticmethod
     def _capture_claim_row(
-        database: sqlite3.Connection, max_attempts: int, now: datetime
+        database: sqlite3.Connection, max_attempts: int, now: datetime,
+        handler_versions: tuple[int, ...],
     ) -> sqlite3.Row | None:
+        placeholders = ",".join("?" for _version in handler_versions)
         return database.execute(
-            """SELECT task.* FROM tasks AS task
+            f"""SELECT task.* FROM tasks AS task
                JOIN capture_task_links AS link ON link.task_id=task.id
                WHERE task.state='ready' AND task.kind='flush'
-                 AND task.handler_version=1 AND task.attempts<?
+                 AND task.handler_version IN ({placeholders}) AND task.attempts<?
                  AND task.available_at<=?
                  AND (SELECT COUNT(*) FROM attempt_history AS history
                       WHERE history.task_id=task.id)<?
                ORDER BY task.priority DESC,task.available_at,task.created_at,task.id
                LIMIT 1""",
-            (max_attempts, _timestamp(now), _MAX_RUNTIME_ATTEMPTS),
+            (*handler_versions, max_attempts, _timestamp(now), _MAX_RUNTIME_ATTEMPTS),
         ).fetchone()
 
     def _lease_capture_row(
@@ -11459,11 +11557,12 @@ class _QueueV3CandidateReader:
         *,
         lease_seconds: int = DEFAULTS.queue_lease_seconds,
         max_attempts: int = DEFAULTS.queue_max_attempts,
+        handler_versions: tuple[int, ...] = (1,),
     ) -> QueueLease | None:
-        self._validate_capture_claim(owner, lease_seconds, max_attempts)
+        self._validate_capture_claim(owner, lease_seconds, max_attempts, handler_versions)
         now = _utc_now()
         with closing(self._connect()) as database, begin_immediate(database):
-            row = self._capture_claim_row(database, max_attempts, now)
+            row = self._capture_claim_row(database, max_attempts, now, handler_versions)
             if row is None:
                 return None
             return self._lease_capture_row(
@@ -12320,7 +12419,7 @@ class _QueueV3CandidateReader:
     def _require_capture_purge_manifest_hashes(
         value: Mapping[str, object],
     ) -> None:
-        if value["kind"] not in {"intent", "decision"}:
+        if value["kind"] not in {"intent", "decision", "source"}:
             raise QueueOperationError("export_verification_failed")
         try:
             _require_lower_sha256(str(value["intent_id"]), "intent_id")
@@ -12378,27 +12477,23 @@ class _QueueV3CandidateReader:
         key: tuple[str, str, str],
         items: list[tuple[str, _CapturePurgeArtifact]],
     ) -> _CapturePurgeEvidence:
-        intents, decisions = _QueueV3CandidateReader._partition_capture_purge_artifacts(
+        intents, decisions, sources = _QueueV3CandidateReader._partition_capture_purge_artifacts(
             items
         )
         _QueueV3CandidateReader._require_unique_capture_purge_paths(items, intents)
         task_id, intent_id, terminal_path = key
         return _CapturePurgeEvidence(
-            task_id, intent_id, intents[0], decisions, terminal_path
+            task_id, intent_id, intents[0], decisions, terminal_path, sources
         )
 
     @staticmethod
     def _partition_capture_purge_artifacts(
         items: list[tuple[str, _CapturePurgeArtifact]],
-    ) -> tuple[tuple[_CapturePurgeArtifact, ...], tuple[_CapturePurgeArtifact, ...]]:
-        intents: list[_CapturePurgeArtifact] = []
-        decisions: list[_CapturePurgeArtifact] = []
+    ) -> tuple[tuple[_CapturePurgeArtifact, ...], ...]:
+        grouped: dict[str, list[_CapturePurgeArtifact]] = {"intent": [], "decision": [], "source": []}
         for kind, artifact in items:
-            if kind == "intent":
-                intents.append(artifact)
-                continue
-            decisions.append(artifact)
-        return tuple(intents), tuple(decisions)
+            grouped[kind].append(artifact)
+        return tuple(tuple(grouped[kind]) for kind in ("intent", "decision", "source"))
 
     @staticmethod
     def _require_unique_capture_purge_paths(
@@ -12485,7 +12580,7 @@ class _QueueV3CandidateReader:
         return tuple(
             artifact
             for item in evidence
-            for artifact in (item.intent, *item.decisions)
+            for artifact in (item.intent, *item.decisions, *item.sources)
         )
 
     def _require_existing_ordinary_purge_files(
@@ -12622,15 +12717,10 @@ class _QueueV3CandidateReader:
         manifest: list[dict[str, str]] = []
         for evidence in plan.capture_evidence:
             _require_active(deadline, cancelled)
-            manifest.append(
-                self._publish_capture_purge_artifact(
-                    staging, evidence, evidence.intent, kind="intent"
-                )
-            )
-            for decision in evidence.decisions:
+            for kind, artifact in self._tagged_capture_purge_artifacts(evidence):
                 manifest.append(
                     self._publish_capture_purge_artifact(
-                        staging, evidence, decision, kind="decision"
+                        staging, evidence, artifact, kind=kind
                     )
                 )
         capture_dir = staging / "capture-artifacts"
@@ -12638,13 +12728,21 @@ class _QueueV3CandidateReader:
             fsync_directory(capture_dir)
         return manifest
 
+    @staticmethod
+    def _tagged_capture_purge_artifacts(evidence: _CapturePurgeEvidence):
+        yield "intent", evidence.intent
+        for artifact in evidence.decisions:
+            yield "decision", artifact
+        for artifact in evidence.sources:
+            yield "source", artifact
+
     def _publish_capture_purge_artifact(
         self,
         staging: Path,
         evidence: _CapturePurgeEvidence,
         artifact: _CapturePurgeArtifact,
         *,
-        kind: Literal["intent", "decision"],
+        kind: Literal["intent", "decision", "source"],
     ) -> dict[str, str]:
         data = read_runtime_bytes(
             self.state_root / artifact.source_path,
@@ -12986,7 +13084,7 @@ class _QueueV3CandidateReader:
     def _unlink_capture_purge_artifacts(
         self, export: Path, evidence: _CapturePurgeEvidence
     ) -> None:
-        for artifact in (evidence.intent, *evidence.decisions):
+        for artifact in (evidence.intent, *evidence.decisions, *evidence.sources):
             self._unlink_capture_purge_artifact(export, evidence.task_id, artifact)
 
     def _unlink_capture_purge_artifact(
@@ -13177,7 +13275,7 @@ _QUEUE_V2_ADDED_COLUMNS = (
 
 def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
     """The column names a table currently has."""
-    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    rows = connection.execute(f"PRAGMA table_info({quote_sqlite_identifier(table)})").fetchall()
     return {str(row["name"]) for row in rows}
 
 
@@ -13309,7 +13407,7 @@ def _v3_queue_for_cli() -> _QueueV3CandidateReader:
         return active_memory_queue(_vault_root(), state_root)
     return MemoryQueue._from_v3_candidate(
         state_root / "run" / "queue-v3.candidate.sqlite3",
-        state_root=state_root,
+        state_root=state_root, vault=_vault_root(),
     )
 
 
@@ -13328,7 +13426,7 @@ def active_memory_queue(vault: Path, state_root: Path) -> _QueueV3CandidateReade
     coordinator_path = state / "run" / "markdown-transactions-v3.sqlite3"
     require_queue_v3_openable(queue_path, state_root=state)
     return _QueueV3CandidateReader(
-        queue_path, coordinator_path=coordinator_path
+        queue_path, coordinator_path=coordinator_path, vault=resolved_vault
     )
 
 

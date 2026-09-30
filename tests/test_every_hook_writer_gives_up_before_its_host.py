@@ -61,40 +61,6 @@ def _remaining(deadline: float) -> float:
     return deadline - time.monotonic()
 
 
-def test_the_prompt_breadcrumb_is_given_the_breadcrumb_budget(monkeypatch):
-    import user_prompt_capture
-
-    seen: list[float] = []
-    # By name: the hook imports the module at call time, and another test file may have
-    # reloaded it since this file imported its own copy.
-    monkeypatch.setattr(
-        "daily_log_append.append_daily",
-        lambda *_a, deadline=math.inf, **_k: seen.append(_remaining(deadline)),
-    )
-
-    user_prompt_capture._append_prompt_tag("slug", "session", "what did we decide")
-
-    assert 0 < seen[0] <= daily_log_append.BREADCRUMB_APPEND_BUDGET_SECONDS
-
-
-def test_the_tool_breadcrumb_is_given_the_breadcrumb_budget(monkeypatch):
-    import post_tool_capture
-
-    seen: list[float] = []
-    # By name: the hook imports the module at call time, and another test file may have
-    # reloaded it since this file imported its own copy.
-    monkeypatch.setattr(
-        "daily_log_append.append_daily",
-        lambda *_a, deadline=math.inf, **_k: seen.append(_remaining(deadline)),
-    )
-
-    post_tool_capture._append_tool_tag(
-        "slug", "session", "Bash", "ls", budget_seconds=post_tool_capture._append_budget([])
-    )
-
-    assert 0 < seen[0] <= daily_log_append.BREADCRUMB_APPEND_BUDGET_SECONDS
-
-
 def test_the_session_end_tag_is_given_the_lifecycle_budget(monkeypatch, tmp_path):
     import session_end_project_tag
 

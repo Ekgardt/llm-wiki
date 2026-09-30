@@ -438,13 +438,15 @@ stop_test_process() {
   send_signal TERM "$testPid"
   send_signal CONT "$testPid"
 }
+stop_live_test_tree() {
+  if ! test_tree_alive; then return; fi
+  if test_group_is_own; then stop_test_group; else stop_test_process; fi
+}
 stop_test_child() {
   if [ -z "$testPid" ]; then
     return
   fi
-  if test_tree_alive; then
-    if test_group_is_own; then stop_test_group; else stop_test_process; fi
-  fi
+  stop_live_test_tree
   if wait "$testPid" 2>/dev/null; then :; fi
   testPid=""
   testPgid=""

@@ -30,6 +30,8 @@ import pytest
 
 from tests.powershell_literal import ps_literal
 from tests.slow_machine import SHORT_TIMEOUT
+from tests.test_breadcrumb_storage import _bundle
+from tests.test_breadcrumb_worker import ingress as ingress
 
 ROOT = Path(__file__).resolve().parent.parent
 # Session start must answer from the projection instead of recomputing the
@@ -293,22 +295,8 @@ def test_installed_plugin_captures_without_an_inherited_environment(tmp_path: Pa
     assert f"{root}/scripts" in " ".join(calls[0]["args"])
 
 
-def test_user_prompt_ingestion_runs_prompt_capture_once(monkeypatch):
-    _ensure_scripts_on_path()
-    import integration_adapter
-
-    calls = []
-    monkeypatch.setattr(integration_adapter, "_observe_checkpoint_fail_open", lambda event: None)
-    monkeypatch.setattr(
-        integration_adapter,
-        "_project_context",
-        lambda event: ("demo", Path("D:/project")),
-    )
-    monkeypatch.setattr(
-        integration_adapter,
-        "_run_delegate",
-        lambda name, payload, **kwargs: calls.append((name, payload, kwargs)),
-    )
+def test_user_prompt_ingestion_runs_prompt_capture_once(ingress):
+    integration_adapter, queue, _coordinator = ingress
     envelope = integration_adapter.normalize_event(
         "opencode",
         "user_prompt",
@@ -320,12 +308,11 @@ def test_user_prompt_ingestion_runs_prompt_capture_once(monkeypatch):
         },
     )
 
-    integration_adapter.ingest_event(envelope)
-
-    # Feedback candidates were retired on 2026-09-25; the prompt reaches compile
-    # through the daily log.
-    assert [name for name, _, _ in calls] == ["user_prompt_capture.py"]
-    assert calls[0][1]["prompt"] == "Preserve this request"
+    result = integration_adapter.ingest_event(envelope)
+    content = json.loads(_bundle(queue.state_root, result["capture_intent_ids"][0]).content)
+    assert content["payload"]["prompt"] == "Preserve this request"
+    assert queue.claim_capture("once", handler_versions=(2,)) is not None
+    assert queue.claim_capture("twice", handler_versions=(2,)) is None
 
 
 def test_normalization_preserves_only_available_checkpoint_signals():
@@ -3195,6 +3182,7 @@ def test_unix_installer_sigttin_wait_status_enters_bounded_group_cleanup(tmp_pat
         "stop_test_group",
         "stop_test_process",
         "test_tree_alive",
+        "stop_live_test_tree",
         "stop_test_child",
         "stop_test_timer",
         "wait_test_child",
@@ -3286,6 +3274,7 @@ def test_unix_installer_signal_trap_restores_initial_monitor_mode(tmp_path):
         "stop_test_group",
         "stop_test_process",
         "test_tree_alive",
+        "stop_live_test_tree",
         "stop_test_child",
         "stop_test_timer",
         "handle_test_signal",
@@ -3343,7 +3332,7 @@ def test_unix_installer_cleanup_targets_group_with_term_then_kill(tmp_path):
     bash = _require_bash()
     source = (ROOT / "install.sh").read_text(encoding="utf-8")
     functions = _shell_functions(
-        source, "send_signal", "test_group_is_own", "stop_test_group", "stop_test_process", "test_tree_alive", "stop_test_child"
+        source, "send_signal", "test_group_is_own", "stop_test_group", "stop_test_process", "test_tree_alive", "stop_live_test_tree", "stop_test_child"
     )
     runner = tmp_path / "exercise-cleanup.sh"
     runner.write_text(
@@ -3695,12 +3684,16 @@ def test_windows_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scena
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
             {ps_literal(str(source))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
-        $fn = $ast.Find({{ param($node)
-            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -eq 'Install-CodexMcp'
-        }}, $true)
-        if ($null -eq $fn) {{ throw 'Install-CodexMcp missing' }}
-        Invoke-Expression $fn.Extent.Text
+        foreach ($name in @('Install-CodexMcp', 'Complete-CodexMcpInstall',
+            'Get-CodexMcpInstallState', 'Update-CodexMcpEntry',
+            'Get-CodexMcpSeparator', 'Add-CodexMcpEntry')) {{
+            $fn = $ast.Find({{ param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq $name
+            }}, $true)
+            if ($null -eq $fn) {{ throw "$name missing" }}
+            Invoke-Expression $fn.Extent.Text
+        }}
         function uv {{
             $all = @($args)
             $index = [Array]::IndexOf($all, 'config-state')
@@ -4611,7 +4604,8 @@ def test_windows_scheduler_status_accepts_only_the_registered_contract(tmp_path)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         foreach ($name in @(
             'Get-LLMWikiLimitHours', 'New-LLMWikiScheduledAction', 'Test-LLMWikiTaskSpec',
-            'Test-LLMWikiScheduledTasks'
+            'Test-LLMWikiScheduledTasks', 'Test-LLMWikiTaskAction', 'Test-LLMWikiTaskSchedule',
+            'Test-LLMWikiTaskIdentity', 'Write-LLMWikiTaskStatus', 'Test-LLMWikiTaskRegistration'
         )) {{
             $fn = $ast.Find({{ param($node)
                 $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and

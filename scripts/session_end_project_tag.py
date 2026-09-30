@@ -11,8 +11,8 @@ user-level hook **skips** when the current directory is inside the vault — the
 vault's own capture already handles that case with richer content.
 
 Contract (hard requirements, mirrors session_start_project_state.py):
-    * Must exit 0 on ANY error. Breaking a session-end is worse than a
-      missing log entry.
+    * Failed tagging or acknowledgement exits 1. Session continuation belongs
+      to the lifecycle adapter, separately from delegate success.
     * Must no-op if LLM_WIKI_ROOT is unset.
     * Reads the SessionEnd payload (session_id, transcript_path, reason)
       from stdin when available — forwards metadata into the daily entry.
@@ -38,7 +38,6 @@ import os
 import re
 import sys
 import traceback
-from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 
@@ -50,6 +49,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 SLUG_UNSAFE_RE = re.compile(r"[\s_/\\:*?\"<>|]+")
 
+from capture_diagnostics import record_hook_error  # noqa: E402
 from daily_log_append import append_deadline, locked_append  # noqa: E402
 from event_envelope import canonical_agent  # noqa: E402
 from iso_time import local_now  # noqa: E402
@@ -79,18 +79,11 @@ def _resolve_state_root() -> Path | None:
 
 
 def _safe_write_error(err: str) -> None:
-    """Best-effort error log."""
+    """Keep the hook available when its diagnostic destination is unavailable."""
     try:
-        state_root = _resolve_state_root()
-        if state_root is None:
-            return
-        log_path = state_root / "logs" / "hook-errors.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().astimezone().isoformat(timespec="seconds")
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(f"[{ts}] session_end_project_tag: {err}\n")
-    except Exception:  # noqa: BLE001
-        pass
+        record_hook_error(_resolve_state_root(), "session_end_project_tag", err)
+    except Exception:  # noqa: BLE001 - resolving the diagnostic root can itself fail
+        return
 
 
 def _base_slug(project_dir: Path) -> str:
@@ -307,24 +300,23 @@ def _tag_session() -> bool:
 
 
 def _report(written: bool) -> None:
-    """Say on stdout whether a line was written; the exit code stays 0 either way.
+    """Acknowledge a completed write or intentional skip, including output flush.
 
     A skip (no vault root, a session inside the vault, a session started in `$HOME`)
     used to be indistinguishable from a write, so `codex_memory daily-log` printed
     "Daily log tagged" for a day nothing was tagged in. See
     `docs/research/2026-09-17-the-six-capture-corrections-the-first-round-left.md`.
     """
-    with suppress(OSError, ValueError):
-        print(json.dumps({"daily_log_written": written}, ensure_ascii=False))
+    print(json.dumps({"daily_log_written": written}, ensure_ascii=False), flush=True)
 
 
 def main() -> int:
-    written = False
     try:
         written = _tag_session()
+        _report(written)
     except Exception:  # noqa: BLE001
         _safe_write_error("unhandled:\n" + traceback.format_exc())
-    _report(written)
+        return 1
     return 0
 
 

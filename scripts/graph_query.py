@@ -2,7 +2,7 @@
 
 CODE-01, roadmap 2026-08-18 section 12: parity with codebase-memory-mcp's
 `query_graph`, without exposing a query language. The query is a closed JSON
-pipeline — one start filter, at most `MAX_HOPS` edge hops, one limit — so
+pipeline — one start filter, caller-specified edge hops, one limit — so
 there is no injection surface and every step runs against the engine's own
 row, work, and deadline ceilings. The engine refuses silent truncation by
 raising (`query row ceiling exceeded`, measured 2026-08-28); this module
@@ -16,14 +16,11 @@ import json
 import time
 from pathlib import Path
 
-# Edge hops one query may chain; a fourth is refused by name. Basis unknown: value
-# predates measurement; each hop multiplies the rows one step may fan out to.
-MAX_HOPS = 3
 # Largest page a graph query accepts; navigation answers accept 100.
 MAX_LIMIT = 200
 # Default row count of a graph query page; navigation answers default to 10.
 DEFAULT_LIMIT = 50
-# The query text (untrusted input), refused past 4 KiB; a pipeline of one filter, three
+# The query text (untrusted input), refused past 4 KiB; a pipeline of one filter, several
 # hops and a limit is a few hundred bytes. Basis: a guard, not a fit.
 MAX_QUERY_BYTES = 4096
 # One node's expansion in one hop: past either ceiling the engine refuses that node,
@@ -116,8 +113,6 @@ def _validated_hops(document: dict) -> list[dict]:
     hops = document.get("hops", [])
     if not isinstance(hops, list):
         raise ValueError("'hops' must be a list")
-    if len(hops) > MAX_HOPS:
-        raise ValueError(f"at most {MAX_HOPS} hops are served")
     return [_validated_hop(hop, index) for index, hop in enumerate(hops)]
 
 
@@ -233,6 +228,7 @@ def _executed_hops(
     refusals: list[dict] = []
     truncated = False
     for index, hop in enumerate(plan["hops"]):
+        _check_deadline(deadline)
         frontier, refused = _expanded_frontier(graph, frontier, hop, deadline)
         frontier, cut = _bounded_frontier(frontier, plan["limit"])
         truncated = truncated or cut
@@ -270,6 +266,7 @@ def run_graph_query(directory: Path, query_text: str, deadline: float) -> dict:
     """CODE-01: one bounded start-then-hops pipeline over the active generation."""
     from code_graph import _active_evidence_graph
 
+    _check_deadline(deadline)
     plan = parse_graph_query(query_text)
     graph = _active_evidence_graph(directory)
     if graph is None:

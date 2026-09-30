@@ -115,7 +115,7 @@ def _codex_models(_descriptor: llm_client.ProviderDescriptor) -> list[str]:
 
 
 def _fetched_json(request: urllib.request.Request) -> object:
-    with urllib.request.urlopen(request, timeout=LISTING_TIMEOUT_SECONDS) as response:
+    with llm_client.open_provider_request(request, timeout=LISTING_TIMEOUT_SECONDS) as response:
         return json.loads(response.read(MAX_LISTING_BYTES).decode("utf-8"))
 
 

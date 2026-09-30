@@ -311,7 +311,8 @@ class CheckpointReducer:
         dirty = event.get("dirty")
         if dirty is True and self.dirty_since is None:
             self.dirty_since = current_time
-        elif dirty is False:
+            return _dirty_active(dirty, self.dirty_since)
+        if dirty is False:
             self.dirty_since = None
             self.dirty_thresholds.clear()
         return _dirty_active(dirty, self.dirty_since)
@@ -762,6 +763,14 @@ def _validated_journal_event(
     validate_schema(event, _SCHEMA)
     if event["project"] != slug or event["sequence"] <= previous:
         raise ValueError("project journal sequence or slug is invalid")
+    return event
+
+
+def _validated_checkpoint_record(text: str, slug: str, sequence: int) -> dict[str, object]:
+    """Check stored payload syntax and bind it to its actual checkpoint row."""
+    event = _validated_journal_event(text, slug, sequence - 1)
+    if event["sequence"] != sequence:
+        raise ValueError("checkpoint event sequence differs from its stored row")
     return event
 
 
@@ -2553,11 +2562,11 @@ class ProjectStore:
         slug = _require_slug(slug)
         with self.coordinator._connect() as database:
             rows = database.execute(
-                "SELECT event_json FROM project_checkpoints WHERE project = ? "
+                "SELECT sequence, event_json FROM project_checkpoints WHERE project = ? "
                 "AND state = 'committed' ORDER BY sequence",
                 (slug,),
             ).fetchall()
-        return [json.loads(row[0]) for row in rows]
+        return [_validated_checkpoint_record(row[1], slug, row[0]) for row in rows]
 
     def rebuild_journal(self, slug: str) -> dict[str, object]:
         """Write the journal and its projection back from the committed checkpoints.
@@ -2696,7 +2705,7 @@ class ProjectStore:
         writer_wait_seconds: float | None = None,
     ) -> CheckpointReceipt:
         slug = row.project
-        event = json.loads(row.event_json)
+        event = _validated_checkpoint_record(row.event_json, slug, row.sequence)
         with self.coordinator._connect() as database:
             self.coordinator._check_project_head(database, slug, row.sequence)
         lease = self.heartbeat(lease)

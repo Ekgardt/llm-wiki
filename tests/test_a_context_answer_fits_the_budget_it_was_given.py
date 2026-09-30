@@ -7,6 +7,8 @@ bounded only the text, counted at one token per byte, while the cost block count
 from __future__ import annotations
 
 import json
+import time
+import tracemalloc
 from pathlib import Path
 
 import answer_budget
@@ -81,3 +83,60 @@ def test_a_budget_the_item_list_cannot_fit_is_refused_not_exceeded(vault: Path, 
 
     with pytest.raises(ValueError, match="token_budget cannot hold"):
         mcp_server._get_context(SLUGS, token_budget=400)
+
+
+def _unexpected_model_call(*args, **kwargs):
+    pytest.fail("packing an explicit context request must not call a model")
+
+
+@pytest.mark.parametrize("budget", [8192, 32_768, 32_769, 65_536, 1_000_000])
+def test_a_caller_budget_is_an_allowance_not_a_fixed_server_ceiling(vault, monkeypatch, budget):
+    import llm_client
+
+    monkeypatch.setattr(llm_client, "call_llm_result", _unexpected_model_call)
+    arguments = {"slugs": SLUGS, "token_budget": budget}
+    assert mcp_server._validate_tool_arguments("get_context", arguments) is None
+    tracemalloc.start()
+    started = time.perf_counter()
+    try:
+        answer = mcp_server._get_context(SLUGS, token_budget=budget)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    elapsed = time.perf_counter() - started
+    ordinary = mcp_server._get_context(SLUGS, token_budget=8192)
+
+    assert answer["text"] == ordinary["text"]
+    assert answer["items"] == ordinary["items"]
+    assert answer["missing_slugs"] == []
+    assert answer_budget.estimate_tokens(answer) <= budget
+    print(f"budget={budget} elapsed={elapsed:.6f}s peak_python_bytes={peak}")
+
+
+def test_a_tiny_positive_budget_is_refused_for_actual_answer_size(vault):
+    assert mcp_server._validate_tool_arguments("get_context", {"slugs": SLUGS, "token_budget": 1}) is None
+    with pytest.raises(ValueError, match="token_budget cannot hold"):
+        mcp_server._get_context(SLUGS, token_budget=1)
+
+
+def test_a_larger_requested_budget_can_return_more_real_evidence(vault):
+    sections = [f"## Section {index}\n\n" + "actual-source-evidence " * 30 for index in range(200)]
+    (vault / "knowledge/notes/large.md").write_text(
+        "---\ntype: concept\n---\n# Large evidence\n\n" + "\n\n".join(sections), encoding="utf-8"
+    )
+
+    # Ask for room for the complete selected evidence and response metadata;
+    # 65,536 was too small for this fixture's complete evidence package.
+    answer = mcp_server._get_context(["large"], token_budget=200_000)
+
+    assert 32_768 < answer_budget.estimate_tokens(answer) <= 200_000
+    assert "actual-source-evidence" in answer["text"]
+    assert answer["repo_map"] == ["knowledge/notes/large.md"]
+    assert answer["missing_slugs"] == []
+
+
+@pytest.mark.parametrize("budget", [True, False, 0, -1, 1.5, "65536"])
+def test_invalid_context_budgets_remain_refused(vault, budget):
+    assert mcp_server._validate_tool_arguments("get_context", {"slugs": SLUGS, "token_budget": budget})
+    with pytest.raises(ValueError, match="token_budget"):
+        mcp_server._get_context(SLUGS, token_budget=budget)

@@ -56,6 +56,7 @@ from reliable_memory import (
     open_operational_db,
     open_readonly_operational_db,
     publish_runtime_file,
+    quote_sqlite_identifier,
     read_runtime_bytes,
     restricted_relative_path,
     run_resumable_migration,
@@ -690,8 +691,6 @@ def _coordinator_v3_statements() -> tuple[MigrationStatement, ...]:
     )
 
 
-# A quarantined attempt may be followed by another, but a hundred of them is an
-# operator's problem rather than something to keep numbering.
 # How long a settled transaction keeps its before and after images.
 #
 # It was thirty days in four separate places, and nothing called `prune`, so on
@@ -762,10 +761,6 @@ _PRUNABLE_TRANSACTION_IDS = 'SELECT id FROM "transaction" WHERE ' + _PRUNABLE_TR
 # candidates were read is kept.
 _PRUNE_ONE_TRANSACTION = 'DELETE FROM "transaction" WHERE id = ? AND ' + _PRUNABLE_TRANSACTION
 
-# How many `#<n>` retry ordinals one refused operation may take before the search for
-# a free one stops. Basis unknown: value predates measurement; review when an
-# operation is refused for exhausting it.
-MAX_ATTEMPT_ORDINAL = 100
 
 
 def _kept_family_patterns() -> tuple[str, ...]:
@@ -810,7 +805,9 @@ def _coordinator_migration_error(
 def _coordinator_table_columns(
     database: sqlite3.Connection, table: str
 ) -> tuple[str, ...]:
-    return tuple(str(row[1]) for row in database.execute(f'PRAGMA table_info("{table}")'))
+    return tuple(str(row[1]) for row in database.execute(
+        f'PRAGMA table_info({quote_sqlite_identifier(table)})'
+    ))
 
 
 def _coordinator_table_exists(database: sqlite3.Connection, table: str) -> bool:
@@ -906,7 +903,7 @@ def _coordinator_schema_populated(
 def _table_has_rows(database: sqlite3.Connection, name: str) -> bool:
     try:
         return (
-            database.execute(f'SELECT 1 FROM "{name}" LIMIT 1').fetchone() is not None
+            database.execute(f'SELECT 1 FROM {quote_sqlite_identifier(name)} LIMIT 1').fetchone() is not None
         )
     except sqlite3.DatabaseError:
         return True
@@ -929,7 +926,7 @@ def _drop_objects_of_kind(
     keyword = kind.upper()
     for name in _object_names_of_kind(objects, kind):
         with begin_immediate(database):
-            database.execute(f'DROP {keyword} "{name}"')
+            database.execute(f'DROP {keyword} {quote_sqlite_identifier(name)}')
 
 
 def _object_names_of_kind(objects: list[tuple[str, str]], kind: str) -> list[str]:
@@ -2356,7 +2353,7 @@ def _preparer_alive(artifact_root: Path, owner_pid: object) -> bool:
         return False
     recorded = _recorded_preparer(artifact_root)
     if recorded is None or recorded[0] != owner_pid:
-        return _pid_alive(owner_pid)
+        return process_liveness.owner_alive(owner_pid)
     from operational_ownership import ProcessIdentity, process_identity_state
 
     identity = ProcessIdentity(pid=recorded[0], start_identity=recorded[1])
@@ -2907,7 +2904,9 @@ _COORDINATOR_V2_SCHEMA_SQL = """
 
 
 def _table_column_names(database: sqlite3.Connection, table: str) -> set[str]:
-    return {row["name"] for row in database.execute(f"PRAGMA table_info({table})")}
+    return {row["name"] for row in database.execute(
+        f"PRAGMA table_info({quote_sqlite_identifier(table)})"
+    )}
 
 
 def _add_column_if_missing(
@@ -2916,7 +2915,10 @@ def _add_column_if_missing(
     """Databases from earlier stages are widened in place, never rebuilt."""
     if name in _table_column_names(database, table):
         return
-    database.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+    database.execute(
+        f"ALTER TABLE {quote_sqlite_identifier(table)} "
+        f"ADD COLUMN {quote_sqlite_identifier(name)} {declaration}"
+    )
 
 
 def _add_writer_owner_columns(database: sqlite3.Connection) -> None:
@@ -2924,19 +2926,20 @@ def _add_writer_owner_columns(database: sqlite3.Connection) -> None:
         ("heartbeat_at", "TEXT"),
         ("expires_at", "TEXT"),
         ("fencing_epoch", "INTEGER"),
+        ("process_start_identity", "TEXT"),
     ):
         _add_column_if_missing(database, "writer_owners", name, declaration)
 
 
 def _add_operation_columns(database: sqlite3.Connection) -> None:
     for name in ("parent_device", "parent_inode"):
-        _add_column_if_missing(database, '"operation"', name, "INTEGER")
+        _add_column_if_missing(database, "operation", name, "INTEGER")
 
 
 def _add_transaction_columns(database: sqlite3.Connection) -> None:
     for name in ("parent_transaction_id", "error_code", "artifacts_pruned_at"):
-        _add_column_if_missing(database, '"transaction"', name, "TEXT")
-    _add_column_if_missing(database, '"transaction"', "owner_pid", "INTEGER")
+        _add_column_if_missing(database, "transaction", name, "TEXT")
+    _add_column_if_missing(database, "transaction", "owner_pid", "INTEGER")
 
 
 def _add_checkpoint_columns(database: sqlite3.Connection) -> None:
@@ -4301,14 +4304,71 @@ def _classify_settled_append(
     if record is None:
         return "retry"
     if _nothing_to_compare(coordinator, record):
-        return "advance"
+        return _pruned_append_or_advance(coordinator, record, relative, block)
     return _classify_comparable_append(coordinator, record, relative, block)
+
+
+def _block_offsets(content: bytes, block: bytes):
+    if not block:
+        return
+    position = content.find(block)
+    while position >= 0:
+        yield position
+        position = content.find(block, position + 1)
+
+
+def _append_prefix_before_matches(operation: MarkdownOperation, position: int, digest) -> bool:
+    if operation.kind == "create":
+        return position == 0 and operation.before_hash == ABSENT
+    return digest.hexdigest() == operation.before_hash
+
+
+def _append_prefix_hashes_match(operation: MarkdownOperation, position: int, digest, block: bytes) -> bool:
+    if not _append_prefix_before_matches(operation, position, digest):
+        return False
+    after = digest.copy()
+    after.update(block)
+    return after.hexdigest() == operation.after_hash
+
+
+def committed_append_content_matches(record: TransactionRecord, relative: str, block: bytes, content: bytes) -> bool:
+    """Prove the original append from retained hashes, even after undo pruning."""
+    if record.state != "committed" or not _single_operation_on(record, relative):
+        return False
+    return _committed_block_matches(record.operations[0], block, content)
+
+
+def _committed_block_matches(operation: MarkdownOperation, block: bytes, content: bytes) -> bool:
+    digest, hashed = hashlib.sha256(), 0
+    for position in _block_offsets(content, block):
+        digest.update(content[hashed:position])
+        hashed = position
+        if _append_prefix_hashes_match(operation, position, digest, block):
+            return True
+    return False
+
+
+def _pruned_append_or_advance(coordinator, record, relative: str, block: bytes) -> _AppendAttemptResult:
+    if record.state != "committed" or not record.operations:
+        return "advance"
+    content = coordinator._read_target(coordinator._target(relative))
+    if content is None:
+        return "advance"
+    return _classify_pruned_content(record, relative, block, content)
+
+
+def _classify_pruned_content(record, relative: str, block: bytes, content: bytes) -> _AppendAttemptResult:
+    if committed_append_content_matches(record, relative, block, content):
+        return record
+    if block and block in content:
+        raise OperationBoundElsewhereError("pruned append conflicts with retained hash evidence")
+    return "advance"
 
 
 def _nothing_to_compare(
     coordinator: MarkdownCoordinator, record: TransactionRecord
 ) -> bool:
-    """A record that cannot prove a duplicate: the next candidate id carries the write.
+    """A record without comparable undo images needs current-content proof.
 
     Either its images are gone with the undo window, or it was recovered before it
     planned anything (its writer died inside `prepare`) and so wrote nothing.
@@ -5805,7 +5865,10 @@ class MarkdownCoordinator:
             return None
         return self._record(row["id"])
 
-    def attempt_operation_id(self, operation_id: str) -> tuple[str, str | None]:
+    def attempt_operation_id(
+        self, operation_id: str, *, deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> tuple[str, str | None]:
         """The id this attempt must use, and the quarantined one it follows.
 
         A key is never reused for a different payload — that refusal stays. What
@@ -5816,16 +5879,22 @@ class MarkdownCoordinator:
 
         An unchanged payload still resolves to the same id, so crash resume and
         ordinary idempotency are untouched.
+        Search uses the caller's deadline, or the existing writer-wait budget
+        when none is supplied; retained refusals never exhaust a numeric quota.
         """
+        selected_deadline = time.monotonic() + _WRITER_WAIT_SECONDS if deadline is None else deadline
         candidate = operation_id
         parent: str | None = None
-        for ordinal in range(2, MAX_ATTEMPT_ORDINAL + 2):
+        ordinal = 2
+        while True:
+            self._require_operation_active(selected_deadline, cancelled)
             record = self._record_for_operation_id(candidate)
+            self._require_operation_active(selected_deadline, cancelled)
             if record is None or record.state != "quarantined":
                 return candidate, parent
             parent = record.id
             candidate = f"{operation_id}#{ordinal}"
-        raise ValueError("operation has exhausted its quarantined retry ordinals")
+            ordinal += 1
 
     def _existing_bound_record(
         self, operation_id: str, request_hash: str
@@ -7993,6 +8062,9 @@ class MarkdownCoordinator:
     def _install_legacy_owner(
         self, database: sqlite3.Connection, owner_token: str
     ) -> int:
+        from operational_ownership import current_process_identity
+
+        identity = current_process_identity()
         fence = database.execute(
             "SELECT last_epoch FROM writer_fences WHERE gate_name = 'global'"
         ).fetchone()
@@ -8008,16 +8080,17 @@ class MarkdownCoordinator:
         database.execute(
             "INSERT INTO writer_owners "
             "(gate_name, owner_token, process_id, thread_id, acquired_at, "
-            "heartbeat_at, expires_at, fencing_epoch) "
-            "VALUES ('global', ?, ?, ?, ?, ?, ?, ?)",
+            "heartbeat_at, expires_at, fencing_epoch, process_start_identity) "
+            "VALUES ('global', ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 owner_token,
-                os.getpid(),
+                identity.pid,
                 threading.get_ident(),
                 heartbeat,
                 heartbeat,
                 expires,
                 fencing_epoch,
+                identity.start_identity,
             ),
         )
         return fencing_epoch

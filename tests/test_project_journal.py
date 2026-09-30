@@ -2154,3 +2154,54 @@ def test_a_deleted_project_directory_is_rebuilt_from_its_committed_checkpoints(
     assert _state_body(store.render_state(rebuilt, _validated=True)) == _state_body(expected_state)
     store.checkpoint("demo", checkpoint_event("evt-4", "rb:event-4"), "agent-a")
     assert len(project_journal.parse_journal_events("demo", journal.read_bytes())) == 4
+
+
+def _corrupt_checkpoint(store: ProjectStore, replacement: dict) -> None:
+    _checkpoints(store, 1)
+    _replace_checkpoint_payload(store, replacement)
+
+
+def _replace_checkpoint_payload(store: ProjectStore, replacement: dict) -> None:
+    with store.coordinator._connect() as database:
+        event = json.loads(database.execute(
+            "SELECT event_json FROM project_checkpoints WHERE project='demo' AND sequence=1"
+        ).fetchone()[0])
+        event.update(replacement)
+        database.execute(
+            "UPDATE project_checkpoints SET event_json=? WHERE project='demo' AND sequence=1",
+            (canonical_json_bytes(event).decode(),),
+        )
+        database.commit()
+
+
+@pytest.mark.parametrize("replacement", [{"project": "other"}, {"sequence": 2}, {"delta": []}])
+def test_committed_checkpoint_reader_rejects_corrupt_payload(project_store, replacement):
+    _corrupt_checkpoint(project_store, replacement)
+    with pytest.raises((ValueError, SchemaValidationError)):
+        project_store.committed_events("demo")
+
+
+@pytest.mark.parametrize("replacement", [{"project": "other"}, {"sequence": 2}, {"delta": []}])
+def test_rebuild_refuses_corrupt_checkpoint_without_replacing_markdown(
+    project_store, vault, replacement
+):
+    _corrupt_checkpoint(project_store, replacement)
+    paths = [vault / "knowledge/projects/demo" / name for name in ("journal.md", "state.md")]
+    before = [path.read_bytes() for path in paths]
+    with pytest.raises((ValueError, SchemaValidationError)):
+        project_store.rebuild_journal("demo")
+    assert [path.read_bytes() for path in paths] == before
+
+
+@pytest.mark.parametrize("replacement", [{"project": "other"}, {"sequence": 2}, {"delta": []}])
+def test_pending_checkpoint_recovery_refuses_corrupt_payload(project_store, vault, replacement):
+    lease = project_store.acquire_lease("demo", "test-recovery")
+    try:
+        project_store._reserve("demo", checkpoint_event(), lease)
+    finally:
+        project_store._release(lease)
+    _replace_checkpoint_payload(project_store, replacement)
+    with pytest.raises((ValueError, SchemaValidationError)):
+        project_store.recover("demo")
+    assert not (vault / "knowledge/projects/demo/journal.md").exists()
+    assert not (vault / "knowledge/projects/demo/state.md").exists()

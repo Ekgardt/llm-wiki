@@ -409,3 +409,15 @@ written in, and — the class — every check runs isolated: one that raises bec
 that check's own `error` naming the exception, and the report is still printed.
 Guards: `tests/test_doctor_reads_a_v3_queue_owner.py` (fails on the old code with
 the same IndexError).
+
+## Addendum (2026-09-29): a busy transaction or queue store is not a finding
+
+The same live install ended with the final doctor saying "Transaction state is
+unreadable." as an `error`, naming no cause, while this session's test run and
+hooks were writing. The transaction and queue checks caught every read failure
+and answered one fixed sentence. They now name the cause (`describe_error`) and,
+when it is SQLite contention (the writers' own `_transient_adoption_contention`
+rule; SQLITE_BUSY is transient per https://www.sqlite.org/rescode.html), grade it
+`degraded` with "could not be read just now ... Run doctor again", as the capture
+check already does; `run/` deletion stays refused either way. Guard:
+`tests/test_a_busy_store_is_not_a_finding.py` (both fail on the old code).

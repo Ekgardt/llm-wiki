@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Graph name-prefix exclusions use one bound query parameter and no longer refuse valid lists after 32 entries.
+- Prompt and tool events enter durable capture before journal writes and follow-ups; complete linked evidence remains verifiable through terminal completion and search. Removed the replaced direct-write suppression module. Existing full-session readers remain supported.
+- Repeated historical evidence lookups reuse content-bound offsets within one operation; same-size edits still invalidate them. A fully compiled source retires its old failure only after all committed part receipts validate.
+- Valid long re-export chains, long literal route paths and graph pipelines beyond three steps retain their evidence; cycles and caller deadlines remain enforced. Short technical terms no longer bypass citation relevance. Test timing refuses a failed pytest run instead of replacing weights with partial results.
+- Compile retry-ordinal search follows retained refusal history under the caller's deadline and cancellation instead of permanently exhausting after 100 quarantined attempts; committed siblings and parent evidence remain intact.
+
 ### Changed
 - The three READMEs are rewritten to match the code as it is: removed features (loop detector, agent timeline, feedback capture) and the unverifiable comparison table are gone; the agents, hooks, search, maintenance, backup and code navigation are described as they work today.
 

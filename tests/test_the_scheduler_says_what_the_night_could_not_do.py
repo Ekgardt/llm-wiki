@@ -8,6 +8,9 @@ docs/research/2026-09-25-the-scheduler-says-what-the-night-could-not-do.md.
 
 from __future__ import annotations
 
+import json
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import doctor
@@ -37,6 +40,32 @@ def test_a_recorded_update_that_needs_the_operator_is_named(record, expected) ->
     verdict = doctor._update_verdict(record)
 
     assert (verdict is None, expected is None or expected in verdict[1]) == (expected is None, True)
+
+
+@pytest.mark.parametrize(
+    ("reason", "message"),
+    [
+        (
+            "not_on_default_branch",
+            "The last nightly code update was skipped because the vault was not on its default branch.",
+        ),
+        (
+            "diverged_branch",
+            "The last nightly code update was skipped because the vault's branch had diverged from the remote.",
+        ),
+        (
+            "local_changes_conflict",
+            "The last nightly code update was stopped by a conflicting local change; see the nightly log.",
+        ),
+    ],
+)
+def test_a_past_branch_skip_is_not_presented_as_a_current_branch_probe(reason, message) -> None:
+    verdict = doctor._update_verdict({
+        "status": "skipped", "reason": reason,
+        "at": "2026-09-29T12:01:24+00:00",
+    })
+
+    assert verdict == ("degraded", message)
 
 
 def test_units_older_than_the_release_are_named(tmp_path: Path, monkeypatch) -> None:
@@ -69,3 +98,45 @@ def test_one_table_sets_every_scheduler_limit() -> None:
 
     assert install_control.WINDOWS_TASK_LIMIT_HOURS == hours
     assert install_control.SYSTEMD_START_LIMITS == {kind: f"{value}h" for kind, value in hours.items()}
+
+
+@pytest.mark.parametrize("compile_status", ["running", "ok", "failed"])
+def test_deferred_maintenance_is_not_reported_as_complete(tmp_path, compile_status) -> None:
+    from tests.test_doctor import _build_root
+
+    root, state_root, home = _build_root(tmp_path)
+    state = {
+        "last_nightly_date": "2026-09-29",
+        "last_nightly_status": "success",
+        "last_compile_status": compile_status,
+        "nightly_deferred_compile": "2026-09-29T13:15:42+00:00",
+    }
+    path = state_root / "run" / "state.json"
+    before = json.dumps(state)
+    path.write_text(before, encoding="utf-8")
+
+    result = doctor._scheduler_check(
+        root, state_root, datetime(2026, 9, 29, tzinfo=timezone.utc),
+        time.monotonic() + 10, home,
+    )
+
+    assert result["status"] == "degraded"
+    assert "deferred" in result["message"]
+    assert "Nightly maintenance is current" not in result["message"]
+    assert result["details"]["nightly_deferred_compile"] == state["nightly_deferred_compile"]
+    assert path.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize(
+    ("status", "deferred", "expected"),
+    [("failed", "2026-09-29T13:15:42+00:00", "error"), ("success", None, "ok")],
+)
+def test_deferred_diagnostics_preserve_failure_and_completed_run_status(status, deferred, expected) -> None:
+    state = {
+        "last_nightly_date": "2026-09-29", "last_nightly_status": status,
+        "nightly_deferred_compile": deferred,
+    }
+
+    result = doctor._nightly_result(state, datetime(2026, 9, 29, tzinfo=timezone.utc), {})
+
+    assert result["status"] == expected

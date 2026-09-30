@@ -14,15 +14,19 @@ import capture_diagnostics
 import post_tool_capture
 import user_prompt_capture
 
+from tests.test_breadcrumb_worker import ingress as ingress
+from tests.test_capture_hooks import _published_content
+
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 
 
-def test_a_tool_call_made_inside_the_vault_has_a_context() -> None:
-    hook = {"tool_name": "Edit", "tool_input": {"file_path": "scripts/x.py"}, "cwd": str(post_tool_capture.ROOT)}
+def test_a_tool_call_made_inside_the_vault_is_durably_captured(ingress) -> None:
+    import json
 
-    context = post_tool_capture._tool_context(hook)
-
-    assert context is not None and context[0] == "Edit"
+    hook = {"tool_name": "Edit", "tool_input": {"file_path": "scripts/x.py"}, "cwd": str(ingress[1].vault)}
+    post_tool_capture._capture_tool(hook)
+    payload = json.loads(_published_content(ingress[1]))['payload']
+    assert payload['tool_name'] == 'Edit' and payload['target'] == 'scripts/x.py'
 
 
 def test_the_capture_hooks_record_failures_with_the_real_recorder() -> None:

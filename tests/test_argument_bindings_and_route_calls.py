@@ -93,6 +93,14 @@ def _extract(**files: bytes):
     )
 
 
+def test_a_long_literal_client_path_keeps_its_route_edge():
+    path = "/" + "segment/" * 80
+    service = f"from fastapi import APIRouter\nrouter = APIRouter()\n@router.get({path!r})\ndef handler():\n    return 1\n".encode()
+    client = f"import requests\ndef fetch():\n    return requests.get({path!r})\n".encode()
+    result = _extract(service=service, client=client)
+    assert len(_edges(result, "HTTP_CALLS")) == 1
+
+
 def _edges(result, edge_type: str) -> list[dict]:
     return [item for item in result.assertions if item["edge_type"] == edge_type]
 

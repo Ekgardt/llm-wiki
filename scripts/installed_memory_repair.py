@@ -19,6 +19,7 @@ import memory_queue
 from bounded_io import read_stable_bytes
 from install_control import validate_install_state
 from reliable_memory import (
+    OPERATIONAL_SCAN_BATCH_ROWS,
     OperationalDatabaseContract,
     canonical_json_bytes,
     capture_runtime_file_identity,
@@ -1213,16 +1214,33 @@ def _queue_table_blockers(
 
 
 def _capture_intent_blockers(
-    database: sqlite3.Connection, state_root: Path, deadline: float
+    database: sqlite3.Connection, state_root: Path, deadline: float, *, verified: set[str] | None = None,
 ) -> set[str]:
     blockers: set[str] = set()
-    for row in _scanned_rows(database, "SELECT * FROM capture_intents", deadline=deadline):
+    for row in _capture_intent_rows(database, deadline):
         blockers.add("capture_intent_retained")
-        _validate_capture_intent(row, state_root)
+        _validate_capture_intent(row, state_root, deadline=deadline)
+        if verified is not None:
+            verified.add(str(row["intent_id"]))
     return blockers
 
 
-def _validate_capture_intent(row: sqlite3.Row, state_root: Path) -> None:
+def _capture_intent_rows(database: sqlite3.Connection, deadline: float) -> Iterator[sqlite3.Row]:
+    """Finish each bounded SELECT before source I/O can delay a writer's commit."""
+    after = ""
+    while True:
+        _check_deadline(deadline)
+        rows = database.execute(
+            "SELECT * FROM capture_intents WHERE intent_id > ? ORDER BY intent_id LIMIT ?",
+            (after, OPERATIONAL_SCAN_BATCH_ROWS),
+        ).fetchall()
+        if not rows:
+            return
+        after = str(rows[-1]["intent_id"])
+        yield from rows
+
+
+def _validate_capture_intent(row: sqlite3.Row, state_root: Path, *, deadline: float) -> None:
     relative = row["relative_path"]
     if not _valid_capture_path(relative):
         raise ValueError("capture intent path is invalid")
@@ -1233,6 +1251,18 @@ def _validate_capture_intent(row: sqlite3.Row, state_root: Path) -> None:
         owner_only=True,
     )
     _require_capture_payload(payload, row)
+    _require_capture_document(payload, row, state_root, deadline)
+
+
+def _require_capture_document(payload: bytes, row: sqlite3.Row, state_root: Path, deadline: float) -> None:
+    from capture_adoption import verified_capture_handler
+
+    _check_deadline(deadline)
+    try:
+        verified_capture_handler(state_root, dict(row), payload, deadline=deadline)
+    except (KeyError, TypeError, RuntimeError) as error:
+        raise ValueError("capture intent format or identity is invalid") from error
+    _check_deadline(deadline)
 
 
 def _require_capture_payload(payload: bytes, row: sqlite3.Row) -> None:
@@ -1797,11 +1827,12 @@ def _positive_pid(value: str) -> int:
 
 def _require_process_absent(pid: int, identity: str) -> None:
     """A marker's PID given to another process since is not its owner (C-12)."""
-    from operational_ownership import process_start_identity
+    from process_liveness import recorded_process_state
 
-    observed = process_start_identity(pid)
-    if observed is not None and (not identity or observed == identity):
-        raise ValueError("live legacy owner blocks offline adoption")
+    state = recorded_process_state(pid, identity)
+    if state != "dead":
+        label = {"alive": "live", "unknown": "unknown"}[state]
+        raise ValueError(f"{label} legacy owner blocks offline adoption")
 
 
 def _reject_leased_v2_tasks(path: Path, state_root: Path) -> None:

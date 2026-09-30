@@ -979,15 +979,17 @@ def _packed_context(evidence: list[GroundedEvidence], index_text: str, budget: o
     return rendered
 
 
-# Words shorter than three characters (articles, particles) carry no evidence for a citation's
-# relevance; CJK is matched by bigrams instead. Basis unknown: value predates measurement; review
-# when a relevance check misses a real short term.
-_RELEVANCE_MIN_TOKEN_LENGTH = 3
 # Function words carry no evidence, so sharing only these proves nothing.
+# Token length does not distinguish these from technical terms such as C, Go,
+# IP and R. See docs/research/2026-09-30-short-terms-are-evidence.md.
 _RELEVANCE_STOPWORDS = frozenset(
     {
         "and", "are", "but", "для", "for", "from", "has", "have", "not", "the",
         "that", "this", "was", "were", "with", "что", "как", "это", "или",
+        "a", "an", "as", "at", "be", "by", "do", "if", "in", "is", "it",
+        "no", "of", "on", "or", "so", "to", "us", "we",
+        "вы", "да", "до", "за", "из", "и", "к", "ко", "ли", "мы", "на",
+        "не", "ни", "но", "о", "об", "от", "по", "с", "со", "у", "я",
     }
 )
 
@@ -998,7 +1000,7 @@ def _content_tokens(text: str) -> set[str]:
     words = {
         token
         for token in re.findall(r"\w+", lowered, flags=re.UNICODE)
-        if len(token) >= _RELEVANCE_MIN_TOKEN_LENGTH and token not in _RELEVANCE_STOPWORDS
+        if token not in _RELEVANCE_STOPWORDS
     }
     ideographs = re.findall(r"[\u3400-\u9fff]", lowered)
     return words | {a + b for a, b in zip(ideographs, ideographs[1:])}

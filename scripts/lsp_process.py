@@ -45,7 +45,8 @@ from lsp_protocol import (
     _ProtocolStartupCleanupError,
 )
 from lsp_security import redact_lsp_text, redact_private_key_blocks
-from process_liveness import owner_alive, process_start_identity, process_state
+from process_liveness import MAX_START_IDENTITY_CHARS as _MAX_START_IDENTITY_CHARS
+from process_liveness import owner_alive, process_start_identity
 
 ProcessTree = _lsp_process_tree.ProcessTree
 
@@ -1097,7 +1098,8 @@ class _OwnerDirectory:
         with self._close_lock:
             if label == "owner" and self.owner_handle == handle:
                 self.owner_handle = None
-            elif label == "parent" and self.parent_handle == handle:
+                return
+            if label == "parent" and self.parent_handle == handle:
                 self.parent_handle = -1
 
     def _release_handle(self, label: str, handle: int | None) -> BaseException | None:
@@ -6682,9 +6684,6 @@ _MAX_SWEPT_OWNER_ROOTS = 128
 # Entries of run/lsp/ the sweep looks at before stopping; a vault holds tens. Value predates
 # measurement.
 _MAX_SCANNED_OWNER_ENTRIES = 4096
-# A process start identity (platform, boot id, start tick) is 52 characters on this host
-# (2026-09-27); 128 refuses a record that is not one.
-_MAX_START_IDENTITY_CHARS = 128
 
 
 def _add_start_identity(record: dict, field: str, pid: int) -> None:
@@ -6792,8 +6791,6 @@ def _owner_root_is_dead(root: Path) -> bool:
 
 def _process_is_gone(pid: int, identity: str | None) -> bool:
     """Proven dead: gone, or its pid now names a process that started later."""
-    if identity is None:
-        return process_state(pid) == "dead"
     return not owner_alive(pid, identity)
 
 

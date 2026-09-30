@@ -67,6 +67,22 @@ CONTENTION_OWNERSHIP_CODES = frozenset({"owner_busy"})
 SQLITE_CONTENTION_CODES = frozenset({5, 6})
 
 
+def record_hook_error(state_root: Path | None, kind: str, message: str) -> bool:
+    """Append a redacted diagnostic; report failure without changing the hook outcome."""
+    if state_root is None:
+        return False
+    try:
+        line = " ".join(redact_secrets(f"{kind}: {message}").split())
+        log_path = state_root / "logs" / "hook-errors.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        with log_path.open("a", encoding="utf-8") as stream:
+            stream.write(f"[{timestamp}] {line}\n")
+        return True
+    except Exception:  # noqa: BLE001 - diagnostics must not replace the primary failure
+        return False
+
+
 def _sqlite_contention(error: BaseException) -> bool:
     code = getattr(error, "sqlite_errorcode", None)
     return isinstance(code, int) and (code & 0xFF) in SQLITE_CONTENTION_CODES
@@ -377,9 +393,16 @@ def _bump_counter(state: dict, record: dict[str, str]) -> None:
         "count": int(entry.get("count", 0)) + 1,
         "deferred": deferred,
         "last_at": record["at"],
+        "last_loss_at": _loss_moment_after(entry, record),
         "last_reason": record["reason"],
     }
     _drop_oldest_kinds(counters)
+
+
+def _loss_moment_after(entry: dict, record: dict[str, str]) -> str:
+    if record["outcome"] == "lost":
+        return record["at"]
+    return _recorded_moment(entry)
 
 
 def _drop_oldest_kinds(counters: dict) -> None:
@@ -516,11 +539,15 @@ def _trail_pointer() -> str:
 def _recorded_moment(entry: object) -> str:
     if not isinstance(entry, dict):
         return ""
-    return str(entry.get("last_at", ""))
+    if _lost_count(entry) == 0:
+        return ""
+    # Older counters did not distinguish a last loss from a last deferral.
+    # Keep that historical timestamp conservatively, without fabricating one.
+    return str(entry.get("last_loss_at", entry.get("last_at", "")))
 
 
 def last_capture_failure_at(state: dict) -> str:
-    """The most recent moment a capture kind was recorded, or an empty string."""
+    """The most recent recorded loss; a later deferral cannot refresh it."""
     return _last_moment(_counter_entries(state))
 
 

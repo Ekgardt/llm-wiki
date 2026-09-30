@@ -15,7 +15,7 @@ The suite is the **full regression suite**. Highlights:
 | `test_context_noise.py` | Technical noise (`Trigger:`, `Transcript:`, `Project root:`, session-id UUIDs) stripped from SessionStart-injected context; useful signal preserved; ≤4KB cap. |
 | `test_slugify.py` | Unicode-safe slugify for Cyrillic questions; punct-only / emoji-only inputs get deterministic hash suffix instead of colliding. |
 | `test_session_end_skip.py` | SessionEnd hook skips vault cwd (delegates to project-level hook) and skips $HOME (not a project); writes tagged entry for normal non-vault cwd. |
-| `test_capture_hooks.py` | Exit-0 invariants on capture hooks, MIN_PROMPT_CHARS / SIGNIFICANT_TOOLS filters, vault-internal skip, rate-limit window. |
+| `test_capture_hooks.py` | Durable prompt/tool ingress, complete redacted occurrences, replay, short meaningful actions, publication failure and prompt counters. |
 | `test_flush_classification.py` | FLUSH_MAJOR/MINOR/OK classification + tier gating of `maybe_trigger_compile`. |
 | `test_graph_neighbors.py` | Triple-RRF fusion weights + graph-neighbor boost resolution. |
 | `test_guardrails.py` | Correction/preference collection, project filter, dedup, formatting. |

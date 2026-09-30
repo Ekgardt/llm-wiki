@@ -75,6 +75,7 @@ def test_a_memory_question_is_not_answered_from_a_code_generation(tmp_path):
     catalog = _catalog(tmp_path)
     root = tmp_path / "checkout"
     root.mkdir()
+    _git(root, "init", "-q")
     _registered_code_generation(catalog, "gen-code", root, named=True)
     scope = resolve_repository_scope(root)
 
@@ -91,6 +92,7 @@ def test_a_generation_built_before_the_field_still_says_it_holds_code(tmp_path):
     catalog = _catalog(tmp_path)
     root = tmp_path / "checkout"
     root.mkdir()
+    _git(root, "init", "-q")
     _registered_code_generation(catalog, "gen-old", root, named=False)
 
     identifier, _manifest = catalog.code_generation_for_repository(

@@ -56,6 +56,9 @@ jobs:
       - run: uv sync --locked --only-group audit
       - run: uv export --locked --all-extras --all-groups --no-emit-project --format requirements-txt -o "${{ runner.temp }}/locked-requirements.txt"
       - run: uv run --locked --no-sync pip-audit --requirement "${{ runner.temp }}/locked-requirements.txt" --disable-pip --progress-spinner off
+      # PyPI cannot name the vendor's +cpu torch build. Keep that feed, and
+      # query exact local versions through OSV; collection failures must fail CI.
+      - run: uv run --locked --no-sync pip-audit --requirement "${{ runner.temp }}/locked-requirements.txt" --disable-pip --vulnerability-service osv --strict --progress-spinner off
 
   lint:
     name: timing::focused::lint
@@ -78,11 +81,14 @@ jobs:
       - run: uv run --locked --no-sync python scripts/lint_memory.py --scope all --fail-on-findings --allowed-categories orphan_daily_logs missing_backlinks missing_sources_section temporal_validity
       - run: node --check scripts/llm-wiki-memory-opencode.js
       - run: bash -n install.sh
+      - name: Native PowerShell parser is available
+        run: pwsh -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()'
+      - name: Function complexity and branch shapes
+        run: uv run --locked --no-sync pytest tests/test_a_function_holds_two_ifs.py tests/test_shell_functions_stay_simple.py tests/test_powershell_functions_stay_simple.py tests/test_javascript_branch_shapes.py -q
       # Nothing parsed PowerShell and nothing ran shellcheck: a syntax error in
       # install.ps1 reached a release, and install.sh was never checked beyond
-      # `bash -n`. The owner's complexity gate stays out: it is machine-local
-      # tooling under ~/.claude, not part of this repository. The shell's own
-      # complexity is measured by tests/test_shell_functions_stay_simple.py.
+      # `bash -n`. Repository-owned complexity checks now run above, including
+      # the native PowerShell AST. The machine-local gate is supplementary.
       # See docs/research/2026-09-17-the-remaining-ci-gaps-of-the-third-audit.md
       # and docs/research/2026-09-27-shell-functions-are-measured-too.md.
       - run: shellcheck install.sh

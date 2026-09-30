@@ -198,30 +198,21 @@ def test_a_stale_lock_is_retired_only_while_it_holds_the_judged_bytes(tmp_path):
 
 
 def test_a_dead_state_lock_is_retired_and_a_live_one_waited_out(tmp_path, monkeypatch):
-    """A lock with no identity line: the PID probe, then the 30 s rule.
-
-    The probe is substituted where the operating system is actually asked,
-    `process_liveness.process_state` — the seam
-    `test_the_three_legacy_locks_ask_the_same_probe` uses. It used to be
-    substituted at `memory_state._is_pid_alive`, which `_owner_alive` stopped
-    calling when a lock learned to name its process, so this test asked the real
-    machine whether PID 777 was running and passed only where it was not. It is
-    not, here; on a Windows runner it was, and the lock stayed.
-
-    The live half is asserted too, which the name promised and the body did not.
-    """
+    """Compare valid same-scope identities, preserving both live and reused PID cases."""
     import memory_state
     import process_liveness
 
     lock = tmp_path / "state.json.lock"
     monkeypatch.setattr(memory_state, "LOCK_FILE", lock)
     monkeypatch.setattr(memory_state, "_lock_age", lambda: memory_state._STALE_LOCK_SECONDS + 1)
-    lock.write_bytes(b"777")
-    monkeypatch.setattr(process_liveness, "process_state", lambda _pid: "alive")
+    identity = process_liveness.process_start_identity(os.getpid())
+    lock.write_bytes(f"{os.getpid()}\n{identity}\n".encode())
     memory_state._await_lock_turn(deadline=time.time() + 0.2, poll=0.01)
     waited_out = lock.exists()
 
-    monkeypatch.setattr(process_liveness, "process_state", lambda _pid: "dead")
+    from tests.process_identity_fixture import reused_current_process_identity
+
+    lock.write_bytes(f"{os.getpid()}\n{reused_current_process_identity()}\n".encode())
     memory_state._await_lock_turn(deadline=time.time() + 5, poll=0.01)
 
     assert (waited_out, lock.exists()) == (True, False)
