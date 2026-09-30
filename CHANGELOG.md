@@ -8,6 +8,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Checkpoint reducer caches retain every project that fits the existing state byte budget, avoiding duplicate admission caused by a separate 128-entry eviction.
+
 - Retrieval accepts valid long strings under the caller deadline; MCP page reading and freshness hashing use the existing shared knowledge-page ceiling.
 
 - Fresh Python 3.10 installer planning no longer imports TOML settings before dependencies are provisioned; backup retention still validates the same settings when used.

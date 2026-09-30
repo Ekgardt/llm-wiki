@@ -160,9 +160,8 @@ def load_state() -> dict[str, Any]:
 # growth shows up as eviction rather than as a blind spot.
 MAX_STATE_TARGET_BYTES = 192 * 1024
 
-# The maps that grow with use: dedupe memory and per-project reducers. Each is
-# already capped by entry count, but an entry is not a fixed size, so the count
-# caps alone never bounded the file.
+# The maps that grow with use: dedupe memory and per-project reducer caches.
+# Entries have varying encoded sizes; the shared byte budget bounds the file.
 _TRIMMABLE_STATE_KEYS = (
     "tool_capture_dedupe",
     "prompt_capture_dedupe",

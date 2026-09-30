@@ -1551,18 +1551,6 @@ def _claims_match(queue: Sequence[Mapping[str, object]], owner: str) -> bool:
     return all(item.get("claim_owner") == owner for item in queue)
 
 
-# Reducer entries kept in hook state, oldest dropped first (9af9bb4c), so the state file stays
-# bounded. Basis unknown: value predates measurement; review when a vault runs more than 128
-# active projects.
-MAX_CHECKPOINT_REDUCERS = 128
-
-
-def _trim_reducers(reducers: dict[str, object]) -> None:
-    """Back to the bound, oldest first: one commit can add more than one reducer."""
-    while len(reducers) > MAX_CHECKPOINT_REDUCERS:
-        reducers.pop(next(iter(reducers)))
-
-
 def _commit_pending_state(
     state: dict[str, Any],
     queue_key: str,
@@ -1580,7 +1568,6 @@ def _commit_pending_state(
     del queue[: len(selected)]
     state.get(INFLIGHT_STATE_KEY, {}).pop(queue_key, None)
     _release_claims(state, queue_key, owner)
-    _trim_reducers(reducers)
 
 
 def _commit_pending(
