@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from reliable_memory import fsync_directory
-from settings import setting_value
 
 # Configuration backups kept per file beside the age setting and MAX_BACKUP_BYTES; the newest is
 # always kept. Basis unknown: value predates measurement; review when an operator needs an older
@@ -246,6 +245,10 @@ def _expired_backup(
 def _prune_expired(
     backups: list[tuple[Path, os.stat_result]], protected: Path
 ) -> None:
+    # Installer sync planning runs before Python 3.10 receives its TOML dependency.
+    # Only real backup retention reads operator settings, after provisioning.
+    from settings import setting_value
+
     cutoff = time.time() - setting_value("retention.config_backup_days") * _DAY_SECONDS
     for item in list(backups):
         if _expired_backup(item, protected, cutoff) and len(backups) > 1:

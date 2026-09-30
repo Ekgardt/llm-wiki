@@ -8,6 +8,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Fresh Python 3.10 installer planning no longer imports TOML settings before dependencies are provisioned; backup retention still validates the same settings when used.
+
 - Health observation uses the existing doctor owner and compares admission epochs before/after validation, so capture can persist during it. Intervening activity, database replacement, lost ownership and deadlines refuse quiescence; the offline exclusive fence remains unchanged.
 
 - Reject NUL root paths before repair backend access on every Python/platform; qualify byte-preserving preimages, archive paths, lease timing and process-state fixtures on Windows.

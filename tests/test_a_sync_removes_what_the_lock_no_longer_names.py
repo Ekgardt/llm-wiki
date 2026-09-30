@@ -54,3 +54,31 @@ def test_the_installer_asks_the_environment_and_syncs_exactly(tmp_path: Path) ->
 
     expected = [argument for extra in sorted(DEFAULT_EXTRAS) for argument in ("--extra", extra)]
     assert ("--inexact" in arguments, arguments[6:]) == (False, [*expected, "--group", "dev"])
+
+
+def test_a_fresh_installer_plans_sync_before_toml_dependencies_exist(tmp_path: Path) -> None:
+    script = """
+import importlib.abc
+import json
+import runpy
+import sys
+class NoToml(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in {"tomli", "tomllib"}:
+            raise ModuleNotFoundError(fullname)
+sys.meta_path.insert(0, NoToml())
+sys.path.insert(0, sys.argv[1])
+sys.argv = ["installer_config.py", "sync-args", "--root", sys.argv[2]]
+runpy.run_module("installer_config", run_name="__main__")
+"""
+    completed = subprocess.run(
+        [sys.executable, "-S", "-c", script, str(ROOT / "scripts"), str(tmp_path)],
+        capture_output=True, text=True, timeout=LONG_TIMEOUT, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    import json
+
+    plan = json.loads(completed.stdout)
+    assert plan["environment"] == str(tmp_path / ".venv")
+    assert "--locked" in plan["arguments"]
+    assert "--inexact" not in plan["arguments"]
