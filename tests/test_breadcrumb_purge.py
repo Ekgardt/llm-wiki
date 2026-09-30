@@ -28,7 +28,7 @@ def _completed(root):
 
 def _runtime_sources(root):
     directory = root / "run/capture-intents"
-    return {str(path.relative_to(root)): path.read_bytes() for path in directory.rglob("*") if path.is_file()}
+    return {path.relative_to(root).as_posix(): path.read_bytes() for path in directory.rglob("*") if path.is_file()}
 
 
 def _assert_export_preserves_sources(root, export, before):

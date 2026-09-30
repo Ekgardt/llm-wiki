@@ -93,20 +93,23 @@ def test_the_same_vault_reads_adopted_once_the_writer_is_gone(
     assert _summary(root, state_root) == "Reliability V3 is adopted; session capture is enabled."
 
 
-def _null_byte_cause() -> str:
-    """The running Python's own words for a path with a NUL (they differ by version)."""
-    try:
-        Path("vault\x00name").resolve()
-    except ValueError as error:
-        return f"ValueError: {error}"
-    raise AssertionError("a NUL in a path no longer raises ValueError")
-
-
 def test_the_repair_command_names_what_stopped_it(tmp_path: Path) -> None:
     printed = io.StringIO()
     with contextlib.redirect_stdout(printed):
         code = repair_installed_memory.main(["--root", "vault\x00name", "--summary"])
     assert (code, printed.getvalue().strip()) == (
         2,
-        f"Reliability V3 state is 'unknown'. Cause: repair_backend_error; {_null_byte_cause()}",
+        "Reliability V3 state is 'unknown'. Cause: repair_backend_error; ValueError: embedded null byte",
     )
+
+
+@pytest.mark.parametrize("argument", ["--root", "--state-root"])
+def test_nul_path_is_rejected_even_when_resolution_is_permissive(tmp_path, monkeypatch, argument):
+    monkeypatch.setattr(Path, "resolve", lambda self, **kwargs: self)
+    monkeypatch.setattr(repair_installed_memory, "inspect_installed_vault", lambda **kwargs: {"overall_status": "ok"})
+    arguments = ["--root", str(tmp_path), "--summary", argument, "vault\x00name"]
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed):
+        code = repair_installed_memory.main(arguments)
+    assert code == 2
+    assert "ValueError: embedded null byte" in printed.getvalue()

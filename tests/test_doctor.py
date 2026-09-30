@@ -2938,7 +2938,7 @@ def test_doctor_rejects_a_lease_belonging_to_another_owner(
         heartbeat_at=now - timedelta(seconds=5),
         expires_at=now + timedelta(seconds=25),
     )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(doctor, "_lsp_pid_state", lambda _pid, _identity=None: "dead")
 
     codes = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))["details"][
         "codes"
@@ -2997,7 +2997,7 @@ def test_doctor_lsp_rejects_lease_heartbeat_before_owner_start(tmp_path, monkeyp
         heartbeat_at=now - timedelta(minutes=2),
         expires_at=now + timedelta(seconds=25),
     )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(doctor, "_lsp_pid_state", lambda _pid, _identity=None: "dead")
 
     check = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))
 

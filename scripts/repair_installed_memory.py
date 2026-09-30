@@ -103,11 +103,18 @@ def _run_repair(args, root_input: str, mode_name: str) -> tuple[str, dict, str]:
     return status, report, payload
 
 
+def _resolved_path(value: str | Path) -> Path:
+    """NUL is outside both POSIX and Windows filesystem path contracts."""
+    if "\x00" in str(value):
+        raise ValueError("embedded null byte")
+    return Path(value).resolve()
+
+
 def _repair_report(args, root_input: str) -> dict:
-    root = Path(root_input).resolve()
-    state_root = Path(
+    root = _resolved_path(root_input)
+    state_root = _resolved_path(
         args.state_root or os.environ.get("LLM_WIKI_STATE_ROOT", root)
-    ).resolve()
+    )
     if args.apply:
         return repair_installed_vault(
             root=root,

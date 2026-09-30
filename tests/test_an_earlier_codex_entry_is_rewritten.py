@@ -22,6 +22,7 @@ except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib
 
 import codex_memory
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 EARLIER = (
@@ -36,9 +37,9 @@ EARLIER = (
 FOREIGN = '[mcp_servers.llm-wiki]\ncommand = "node"\nargs = ["my-wiki.js"]\n'
 
 
-def _config(tmp_path: Path, text: str) -> Path:
+def _config(tmp_path: Path, text: str, newline: str = "\n") -> Path:
     config = tmp_path / "config.toml"
-    config.write_text(text, encoding="utf-8")
+    config.write_bytes(text.replace("\n", newline).encode("utf-8"))
     return config
 
 
@@ -46,8 +47,10 @@ def _preimages(config: Path) -> list[bytes]:
     return [path.read_bytes() for path in config.parent.glob("config.toml.bak-llm-wiki-*")]
 
 
-def test_an_entry_this_product_wrote_earlier_is_rewritten_with_its_preimage(tmp_path: Path) -> None:
-    config = _config(tmp_path, EARLIER)
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_an_entry_this_product_wrote_earlier_is_rewritten_with_its_preimage(tmp_path: Path, newline: str) -> None:
+    config = _config(tmp_path, EARLIER, newline)
+    original = config.read_bytes()
     assert codex_memory.codex_mcp_config_state(config, ROOT) == "stale"
 
     outcome = codex_memory.replace_codex_mcp_entry(config, ROOT, foreign=False)
@@ -55,7 +58,7 @@ def test_an_entry_this_product_wrote_earlier_is_rewritten_with_its_preimage(tmp_
     rewritten = config.read_text(encoding="utf-8")
     assert (outcome, codex_memory.codex_mcp_config_state(config, ROOT)) == ("replaced", "equivalent")
     _assert_the_rest_is_kept(rewritten)
-    assert _preimages(config) == [EARLIER.encode("utf-8")]
+    assert _preimages(config) == [original]
 
 
 def _assert_the_rest_is_kept(rewritten: str) -> None:
@@ -67,15 +70,17 @@ def _assert_the_rest_is_kept(rewritten: str) -> None:
     assert kept == ({"command": "other"}, True, True)
 
 
-def test_the_operators_entry_is_replaced_only_when_asked(tmp_path: Path) -> None:
-    config = _config(tmp_path, FOREIGN)
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_the_operators_entry_is_replaced_only_when_asked(tmp_path: Path, newline: str) -> None:
+    config = _config(tmp_path, FOREIGN, newline)
+    original = config.read_bytes()
 
     refused = codex_memory.replace_codex_mcp_entry(config, ROOT, foreign=False)
     unchanged = config.read_text(encoding="utf-8")
     replaced = codex_memory.replace_codex_mcp_entry(config, ROOT, foreign=True)
 
     assert (refused, unchanged, replaced) == ("refused-foreign", FOREIGN, "replaced")
-    assert _preimages(config) == [FOREIGN.encode("utf-8")]
+    assert _preimages(config) == [original]
 
 
 def test_an_inline_entry_is_not_rewritten(tmp_path: Path) -> None:
@@ -107,9 +112,9 @@ def test_the_installer_rewrites_an_earlier_entry_and_reports_it_verified(tmp_pat
         + '\nuv() {\n  while [[ $# -gt 0 && $1 != config-state && $1 != config-replace ]]; do shift; done\n'
         + '  "$TEST_PYTHON" "$TEST_VAULT/scripts/codex_memory.py" "$@"\n}\n'
         + 'configure_codex_mcp "$TEST_VAULT" "$TEST_CONFIG"\n',
-        encoding="utf-8",
+        encoding="utf-8", newline="\n",
     )
-    env = {**os.environ, "TEST_VAULT": str(ROOT), "TEST_PYTHON": sys.executable, "TEST_CONFIG": str(config)}
+    env = {**os.environ, "TEST_VAULT": ROOT.as_posix(), "TEST_PYTHON": Path(sys.executable).as_posix(), "TEST_CONFIG": config.as_posix()}
 
     result = subprocess.run(["bash", str(runner)], env=env, capture_output=True, text=True, timeout=60, check=False)
 
