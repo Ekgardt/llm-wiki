@@ -4753,6 +4753,8 @@ def _checked_generation(
     cancelled,
     state: dict,
 ) -> dict:
+    from corpus_snapshot import CorpusCapacityExceeded
+
     early, active = _catalog_active_generation(
         catalog_path, state_root, deadline, state
     )
@@ -4765,10 +4767,32 @@ def _checked_generation(
     manifest, seal = _validated_generation_manifest(
         generation_path, state_root, deadline, state
     )
-    facts = _generation_facts(
-        root, state_root, generation_path, manifest, max_sources, deadline, cancelled
-    )
+    try:
+        facts = _generation_facts(
+            root, state_root, generation_path, manifest, max_sources, deadline, cancelled
+        )
+    except CorpusCapacityExceeded as error:
+        return _generation_capacity_refusal(active, manifest, error)
     return _generation_health_result(active, manifest, seal, catalog_info, now, facts)
+
+
+def _generation_capacity_refusal(active: str, manifest: dict, error) -> dict:
+    return _generation_result(
+        "degraded",
+        "Live corpus exceeded its configured budget; freshness is unverified. " + str(error),
+        catalog="valid",
+        active_generation=active,
+        generation_schema=manifest.get("graph_schema_version"),
+        capacity_exceeded=True,
+        limit_name=error.setting,
+        configured_limit=error.limit,
+        observed_minimum=error.observed,
+        freshness="unknown",
+        partial=True,
+        repairable=False,
+        recommended_action="review_corpus_budget",
+        **_vector_fields(manifest),
+    )
 
 
 def _generation_source_limit(max_sources: int | None, root: Path) -> int:

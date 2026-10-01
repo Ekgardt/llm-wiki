@@ -136,6 +136,16 @@ class CorpusChanged(RuntimeError):
     """Live corpus membership or content differs from a captured snapshot."""
 
 
+class CorpusCapacityExceeded(ValueError):
+    """A configured resource budget refused a complete live-corpus snapshot."""
+
+    def __init__(self, setting: str, limit: int, observed: int, message: str) -> None:
+        self.setting = setting
+        self.limit = limit
+        self.observed = observed
+        super().__init__(message)
+
+
 @dataclass(frozen=True, slots=True)
 class SourceMetadata:
     type: str
@@ -1005,7 +1015,10 @@ class _Discovery:
         self._count_bytes(content)
         self.candidates[relative] = _Candidate(path, relative, kind, project, seal, content)
         if len(self.candidates) > self.max_files:
-            raise ValueError(f"corpus file limit exceeded; {raise_hint('corpus.max_files')}")
+            raise CorpusCapacityExceeded(
+                "corpus.max_files", self.max_files, len(self.candidates),
+                f"corpus file limit exceeded; {raise_hint('corpus.max_files')}",
+            )
 
     def _require_unseen(self, relative: str) -> None:
         if relative in self.candidates:
@@ -1016,7 +1029,10 @@ class _Discovery:
             return
         self.total_bytes += len(content)
         if self.total_bytes > self.max_total_bytes:
-            raise ValueError(f"corpus total byte limit exceeded; {raise_hint('corpus.max_total_bytes')}")
+            raise CorpusCapacityExceeded(
+                "corpus.max_total_bytes", self.max_total_bytes, self.total_bytes,
+                f"corpus total byte limit exceeded; {raise_hint('corpus.max_total_bytes')}",
+            )
 
     def walk(self, root: Path, kind: str) -> None:
         if not root.exists():
@@ -2615,7 +2631,10 @@ class _Capture:
     def _count_bytes(self, size: int) -> None:
         self.total += size
         if self.total > self.policy.max_total_bytes:
-            raise ValueError(f"corpus total byte limit exceeded; {raise_hint('corpus.max_total_bytes')}")
+            raise CorpusCapacityExceeded(
+                "corpus.max_total_bytes", self.policy.max_total_bytes, self.total,
+                f"corpus total byte limit exceeded; {raise_hint('corpus.max_total_bytes')}",
+            )
 
     def _store(
         self,

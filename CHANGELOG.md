@@ -8,6 +8,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Distinguish configured live-corpus capacity refusals from immutable index corruption; report unverified freshness without raising limits or hiding malformed artifacts.
+
 - Retire all eligible own-call transcripts within the existing deadline instead of stopping at 2000 files; preserve files when classification exhausts that deadline.
 
 - Retry a refused permanent breadcrumb source as a linked new transaction attempt while retaining create-only publication and current capture fences.
