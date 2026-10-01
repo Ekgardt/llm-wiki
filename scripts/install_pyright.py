@@ -43,6 +43,7 @@ from pinned_download import (
 from pinned_download import open_pinned_url as _open_pinned_url
 from process_liveness import recorded_process_state
 from reliable_memory import (
+    _initialize_probe_directory,
     _set_owner_only,
     _sqlite_lock_probe,
     canonical_json_bytes,
@@ -772,6 +773,8 @@ def _validate_installer_state_root(path: Path, deadline: float) -> None:
     path.mkdir(parents=True, exist_ok=True)
     _check_deadline(deadline)
     _set_owner_only(path, 0o700)
+    _check_deadline(deadline)
+    _initialize_probe_directory(path)
     _check_deadline(deadline)
     lock_supported = _sqlite_lock_probe(path, deadline=deadline)
     _check_deadline(deadline)

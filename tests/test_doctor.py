@@ -602,6 +602,7 @@ def test_filesystem_health_runs_bounded_probe_and_leaves_no_artifacts(tmp_path, 
 
     state_root = tmp_path / "state"
     state_root.mkdir()
+    (state_root / "run").mkdir()
     before = _snapshot(tmp_path)
     calls = []
     real_probe = reliable_memory._sqlite_lock_probe
@@ -620,7 +621,7 @@ def test_filesystem_health_runs_bounded_probe_and_leaves_no_artifacts(tmp_path, 
         bool(calls) and calls[0][0] == state_root,
         calls[0][1] != float("inf"),
         _snapshot(tmp_path) == before,
-        list(state_root.glob(".llm-wiki-lock-probe-*")),
+        list(state_root.rglob(".llm-wiki-lock-probe-*")),
     ) == ("ok", True, True, True, [])
 
 

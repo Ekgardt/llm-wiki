@@ -165,6 +165,18 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 | `$LLM_WIKI_DLP_POLICY` | Unset | Optional absolute path to an external bounded-literal/fingerprint policy. Invalid or digest-mismatched required policy fails closed. |
 | `$LLM_WIKI_<SECTION>_<KEY>` | Unset | One run's override of a registered limit in `scripts/settings.py` (for example `LLM_WIKI_CORPUS_MAX_FILES`); beats `llm-wiki.toml`. An invalid value stops the caller with its name. |
 
+### SQLite locking probe (approved 2026-10-01)
+
+The temporary two-connection SQLite locking probe belongs in the existing
+`run/` directory of the configured runtime root, on the same filesystem.
+It must not create temporary files at the vault root: doing so changes the
+root identity while the corpus reader verifies its sealed ancestor chain.
+Runtime initialization creates `run/` before probing. A read-only health check
+with no `run/` reports the probe unavailable and creates no directory.
+Unsafe linked/reparse paths or a different filesystem are refused. The probe
+keeps actual SQLite locking verification and removes only its own files.
+No persistent database, runtime directory, setting, daemon, or tool is added.
+
 ### Operator limits (`llm-wiki.toml`, 2026-09-27)
 
 Limits that depend on the vault and the machine are declared once in

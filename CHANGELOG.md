@@ -8,6 +8,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Keep temporary SQLite locking probes in the existing runtime `run/` and avoid redundant chmod, so diagnostics and cooperating writers do not invalidate the sealed vault root.
+
 - Corpus collection and knowledge extraction defaults share the existing discovery entry budget, avoiding separate 10,000-source refusals while preserving explicit operator limits.
 
 - Archive and restore pages within the existing Markdown transaction target budget instead of a separate unmeasured read ceiling.

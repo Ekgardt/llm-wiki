@@ -383,17 +383,75 @@ def _run_lock_probe(
     return _second_writer_is_blocked(second)
 
 
+def _require_probe_component(path: Path) -> None:
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or _windows_reparse_point(path):
+        raise PermissionError("locking probe path must contain only real directories")
+
+
+def _require_probe_root_chain(root: Path) -> None:
+    for component in (root, *root.parents):
+        _require_probe_component(component)
+
+
+def _probe_directory(root: Path) -> Path:
+    root = root.absolute()
+    _require_probe_root_chain(root)
+    directory = root / "run"
+    _require_probe_component(directory)
+    if directory.lstat().st_dev != root.lstat().st_dev:
+        raise PermissionError("locking probe must use the runtime root filesystem")
+    return directory
+
+
+def _initialize_probe_directory(root: Path) -> None:
+    _require_probe_root_chain(root.absolute())
+    (root / "run").mkdir(exist_ok=True)
+    _set_owner_only(_probe_directory(root), 0o700)
+
+
+def _probe_directory_identity(directory: Path) -> tuple[int, int, int]:
+    info = directory.lstat()
+    return info.st_dev, info.st_ino, info.st_mode
+
+
+def _require_same_probe_directory(root: Path, identity: tuple[int, int, int]) -> None:
+    if _probe_directory_identity(_probe_directory(root)) != identity:
+        raise PermissionError("locking probe directory changed")
+
+
+def _contained_lock_probe(root, probe, identity, deadline, connections) -> bool | None:
+    _require_same_probe_directory(root, identity)
+    result = _run_lock_probe(probe, deadline, connections)
+    _require_same_probe_directory(root, identity)
+    return result
+
+
+def _cleanup_lock_probe(probe, connections, root, identity) -> None:
+    _close_probe_connections(connections)
+    if probe is None:
+        return
+    try:
+        _require_same_probe_directory(root, identity)
+    except OSError:
+        return  # The original directory is no longer owned at this path.
+    _remove_probe_files(probe)
+
+
 def _sqlite_lock_probe(root: Path, *, deadline: float = float("inf")) -> bool | None:
-    """Return lock support, or ``None`` when a bounded probe cannot complete."""
-    probe = root / f".llm-wiki-lock-probe-{secrets.token_hex(16)}.sqlite3"
+    """Probe existing run/ without changing the sealed vault root."""
+    probe = None
+    identity = None
     connections: list[sqlite3.Connection] = []
     try:
-        return _run_lock_probe(probe, deadline, connections)
+        directory = _probe_directory(root)
+        identity = _probe_directory_identity(directory)
+        probe = directory / f".llm-wiki-lock-probe-{secrets.token_hex(16)}.sqlite3"
+        return _contained_lock_probe(root, probe, identity, deadline, connections)
     except (OSError, sqlite3.Error):
         return None
     finally:
-        _close_probe_connections(connections)
-        _remove_probe_files(probe)
+        _cleanup_lock_probe(probe, connections, root, identity)
 
 
 _CLOUD_DIRECTORY_NAMES = frozenset(
@@ -425,7 +483,9 @@ def validate_state_root(path: Path) -> None:
     _require_local_non_reparse_root(path)
     _warn_if_cloud_synchronized(path)
     path.mkdir(parents=True, exist_ok=True)
+    _require_probe_root_chain(path.absolute())
     _set_owner_only(path, 0o700)
+    _initialize_probe_directory(path)
     if _sqlite_lock_probe(path) is not True:
         raise UnsafeStateRoot(f"state root failed the SQLite two-connection locking probe: {path}")
 
@@ -436,6 +496,8 @@ def _owner_permissions_supported(path: Path) -> bool:
 
 def _chmod_or_warn(path: Path, mode: int) -> bool:
     """Apply `mode`; False (with the warning) when the filesystem has no permission bits."""
+    if stat.S_IMODE(path.stat().st_mode) == mode:
+        return True
     try:
         path.chmod(mode)
     except OSError as exc:

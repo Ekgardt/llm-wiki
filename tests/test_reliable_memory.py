@@ -749,7 +749,8 @@ def test_concurrent_state_root_validation_uses_unique_probe_databases(tmp_path, 
     assert results == [None] * 64
     probes = {path for path in connected_paths if path.name.startswith(".llm-wiki-lock-probe-")}
     assert len(probes) == 64
-    assert not list(root.glob(".llm-wiki-lock-probe-*"))
+    assert {path.parent for path in probes} == {root / "run"}
+    assert not list(root.rglob(".llm-wiki-lock-probe-*"))
 
 
 def _posix_locks_on_inode(inode: int) -> int:
