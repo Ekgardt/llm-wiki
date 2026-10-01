@@ -5010,7 +5010,7 @@ def test_symlinked_lsp_owner_parent_fails_closed_without_mutating_target(
     outside = state_root.parent / "outside-lsp"
     outside.mkdir()
     lsp_parent = state_root / "run/lsp"
-    lsp_parent.parent.mkdir()
+    lsp_parent.parent.mkdir(exist_ok=True)
     try:
         lsp_parent.symlink_to(outside, target_is_directory=True)
     except OSError:

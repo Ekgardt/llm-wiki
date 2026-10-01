@@ -390,8 +390,12 @@ def _require_probe_component(path: Path) -> None:
 
 
 def _require_probe_root_chain(root: Path) -> None:
-    for component in (root, *root.parents):
-        _require_probe_component(component)
+    from bounded_io import _acceptable_ancestor
+
+    _require_probe_component(root)
+    for parent in root.parents:
+        if not _acceptable_ancestor(parent):
+            raise PermissionError("locking probe ancestor is not trusted")
 
 
 def _probe_directory(root: Path) -> Path:

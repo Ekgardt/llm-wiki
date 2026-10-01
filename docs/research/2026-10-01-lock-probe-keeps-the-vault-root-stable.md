@@ -15,8 +15,9 @@ requested mode already applied, another unnecessary metadata mutation.
 The shared probe now uses the existing `run/` on the same device. Runtime
 initialization, including the language-server installer, prepares that directory.
 Read-only diagnostics do not create an absent `run/`; the probe then reports
-unavailable. Directory ancestors must be real directories; symlinks and Windows
-reparse paths are refused. The directory identity is checked before and after
+unavailable. The root and `run/` must be real directories. Ancestors use the existing
+bounded-read policy: only verified system-owned symlinks to directories are
+accepted; user-controlled links and Windows reparse paths are refused. The directory identity is checked before and after
 the locking test, and cleanup declines a replaced directory. Permission
 hardening verifies an already-correct mode without another chmod. These checks
 retain the existing trusted-local-filesystem operating boundary; they do not

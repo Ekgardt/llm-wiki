@@ -8,6 +8,8 @@ import corpus_snapshot
 import pytest
 import reliable_memory
 
+from tests.slow_machine import SHORT_TIMEOUT
+
 
 def test_real_probe_preserves_the_sealed_vault_root(tmp_path):
     (tmp_path / "run").mkdir()
@@ -60,7 +62,7 @@ def test_real_probe_keeps_two_connections_and_cleans_only_its_files(tmp_path, mo
         return original(database, *args, **kwargs)
 
     monkeypatch.setattr(reliable_memory.sqlite3, "connect", observe)
-    assert reliable_memory._sqlite_lock_probe(tmp_path, deadline=time.monotonic() + 5) is True
+    assert reliable_memory._sqlite_lock_probe(tmp_path, deadline=time.monotonic() + SHORT_TIMEOUT) is True
     assert len(calls) == 2
     assert calls[0] == calls[1]
     assert calls[0].parent == runtime
@@ -118,3 +120,38 @@ def test_revalidation_does_not_chmod_an_already_private_root(tmp_path, monkeypat
     monkeypatch.setattr(Path, "chmod", observe)
     reliable_memory.validate_state_root(tmp_path)
     assert tmp_path not in calls
+
+
+@pytest.mark.skipif(os.name == "nt", reason="system-owned ancestors are POSIX policy")
+def test_probe_reuses_the_approved_system_owned_ancestor_policy(tmp_path, monkeypatch):
+    import bounded_io
+
+    real = tmp_path / "real"
+    real.mkdir()
+    root = real / "vault"
+    (root / "run").mkdir(parents=True)
+    link = tmp_path / "system-link"
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks unavailable")
+    monkeypatch.setattr(bounded_io, "_system_symlink", lambda candidate: candidate == link)
+    assert reliable_memory._sqlite_lock_probe(link / "vault") is True
+    assert list((root / "run").iterdir()) == []
+
+
+def test_probe_refuses_an_ancestor_the_shared_policy_does_not_trust(tmp_path, monkeypatch):
+    import bounded_io
+
+    real = tmp_path / "real"
+    real.mkdir()
+    root = real / "vault"
+    (root / "run").mkdir(parents=True)
+    link = tmp_path / "user-link"
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks unavailable")
+    monkeypatch.setattr(bounded_io, "_system_symlink", lambda candidate: False)
+    assert reliable_memory._sqlite_lock_probe(link / "vault") is None
+    assert list((root / "run").iterdir()) == []
