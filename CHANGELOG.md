@@ -8,6 +8,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Archive and restore pages within the existing Markdown transaction target budget instead of a separate unmeasured read ceiling.
+
 - Preserve redacted causes of refused runtime observations and distinguish live-source verification failures from immutable generation corruption; deletion remains blocked.
 
 - Write byte-exact capacity fixtures on Windows and record measured shard weights for new regression files.

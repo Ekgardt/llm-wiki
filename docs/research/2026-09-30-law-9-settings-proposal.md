@@ -57,6 +57,8 @@ still requires no configuration and listing effective values retains provenance.
 
 ## Exact mapping
 
+Historical table update, 2026-10-01: `archive_stale.MAX_ARCHIVE_PAGE_BYTES` was removed; archive/restore reuse the existing transaction target budget. Its proposed setting below was never introduced. See [the installed correction](2026-10-01-archive-pages-use-the-transaction-budget.md).
+
 | Existing declaration | Proposed setting | Initial value to approve |
 |---|---|---|
 | `access_tracking.MAX_EVENTS_PER_PAGE_EXPORT` | `limits.access_tracking_max_events_per_page_export` | `1_000` |

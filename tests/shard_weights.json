@@ -357,7 +357,7 @@
   "test_archive_daily_bagit.py": 249.33,
   "test_archive_recency_signal.py": 36.9,
   "test_archive_sessions.py": 1.42,
-  "test_archive_stale.py": 4.7,
+  "test_archive_stale.py": 3.24,
   "test_argument_bindings_and_route_calls.py": 0.02,
   "test_audit_fixes.py": 2.99,
   "test_audit_runtime_contracts.py": 0.06,
