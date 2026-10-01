@@ -1412,10 +1412,13 @@ PENDING_CLAIM_WINDOW = 100
 def _debounce_due(
     items: Sequence[Mapping[str, object]],
     reducers: Mapping[str, CheckpointReducer],
+    *,
+    now: datetime | None = None,
 ) -> tuple[int | None, CheckpointDecision | None, bool]:
     """Flush the newest item when any pending delta is due, else keep waiting."""
     latest = datetime.fromisoformat(str(items[-1]["occurred_at"]))
-    due = _any_delta_due(items, reducers, latest) or len(items) >= (
+    observed = max(latest, now or latest)
+    due = _any_delta_due(items, reducers, observed) or len(items) >= (
         MAX_PENDING_CHECKPOINT_ITEMS
     )
     if due:
@@ -1428,12 +1431,14 @@ def _resolve_debounce(
     reducers: Mapping[str, CheckpointReducer],
     index: int | None,
     decision: CheckpointDecision | None,
+    *,
+    now: datetime | None = None,
 ) -> tuple[int | None, CheckpointDecision | None, bool]:
     if index is not None:
         return index, decision, False
     if not _any_pending_delta(items):
         return None, None, False
-    return _debounce_due(items, reducers)
+    return _debounce_due(items, reducers, now=now)
 
 
 def _any_pending_delta(items: Sequence[Mapping[str, object]]) -> bool:
@@ -1632,13 +1637,15 @@ def _checkpoint_plan(
     items: list[dict[str, object]],
     reducer_states: dict[str, object],
     inflight: Mapping[str, object],
+    *,
+    now: datetime | None = None,
 ):
     """The batch to write: the in-flight one when it still heads the queue, else a fresh plan."""
     replayed = _inflight_plan(items, reducer_states, inflight)
     if replayed is not None:
         return replayed
     reducers, decisions, index, decision = _observe_until_checkpoint(items, reducer_states)
-    index, decision, waiting = _resolve_debounce(items, reducers, index, decision)
+    index, decision, waiting = _resolve_debounce(items, reducers, index, decision, now=now)
     if waiting:
         return None
     return _batch_plan(items, reducer_states, reducers, decisions, index, decision)
@@ -1708,11 +1715,13 @@ def _drain_project_checkpoint_once(
     owner: str,
     writer_wait_seconds: float | None,
     state_lock_seconds: float = PENDING_STATE_LOCK_SECONDS,
+    *,
+    now: datetime | None = None,
 ) -> bool:
     claimed = _claim_pending(queue_key, owner, state_lock_seconds)
     if claimed is None:
         return False
-    plan = _checkpoint_plan(*claimed)
+    plan = _checkpoint_plan(*claimed, now=now)
     if plan is None:
         _release_pending_claims(queue_key, owner, state_lock_seconds)
         return False
@@ -1740,10 +1749,11 @@ def _drain_project_checkpoints(
     writer_wait_seconds: float | None = None,
     state_lock_seconds: float = PENDING_STATE_LOCK_SECONDS,
     deadline: float | None = None,
+    now: datetime | None = None,
 ) -> None:
     owner = f"{os.getpid()}:{secrets.token_hex(8)}"
     while _drain_project_checkpoint_once(
-        slug, queue_key, owner, writer_wait_seconds, state_lock_seconds
+        slug, queue_key, owner, writer_wait_seconds, state_lock_seconds, now=now
     ):
         if deadline is not None and time.monotonic() >= deadline:
             return
@@ -1804,6 +1814,7 @@ def _drain_one_backlog(slug: str, deadline: float, failed: dict[str, str]) -> in
             slug,
             state_lock_seconds=BACKLOG_STATE_LOCK_SECONDS,
             deadline=deadline,
+            now=datetime.now(timezone.utc),
         )
     except Exception as error:  # noqa: BLE001
         failed[slug] = _bounded_checkpoint_error(error)

@@ -361,6 +361,9 @@ def _validate_active_database_reference(
             contract=contract,
         )
     ) as database:
+        # Every invariant must observe one read transaction; autocommit lets an
+        # exclusive writer interrupt validation between its separate checks.
+        database.execute("BEGIN")
         complete = _database_schema_complete(database_name, database)
         integrity = database.execute("PRAGMA integrity_check").fetchall()
         foreign_keys = database.execute("PRAGMA foreign_key_check").fetchall()

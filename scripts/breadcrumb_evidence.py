@@ -195,19 +195,27 @@ def _source_already_matches(vault: Path, relative: str, document: bytes) -> bool
 
 
 def _create_source_document(coordinator, owner, relative: str, document: bytes, preconditions: dict) -> None:
-    from markdown_transaction import ABSENT, mutate_owned_knowledge
-
     if _source_already_matches(coordinator.vault, relative, document):
         return
     operation_id = "breadcrumb-source:" + sha256_bytes(canonical_json_bytes({
         "path": relative, "sha256": sha256_bytes(document),
     }))
-    transaction = mutate_owned_knowledge(
-        coordinator, owner, operation_id,
-        {_source_target(coordinator.vault, relative): document},
-        preconditions={**preconditions, relative: ABSENT},
-    )
-    _require_exact(transaction.state, "committed")
+    _commit_source_attempt(coordinator, owner, operation_id, relative, document, preconditions)
+
+
+def _commit_source_attempt(coordinator, owner, operation_id, relative, document, preconditions):
+    from markdown_transaction import ABSENT, MarkdownChange
+
+    with coordinator.writer_gate(owner=owner):
+        coordinator.ensure_target_parent(relative)
+        attempt_id, parent = coordinator.attempt_operation_id(operation_id)
+        transaction = coordinator.prepare(
+            [MarkdownChange.create(relative, document)], operation_id=attempt_id,
+            preconditions={**preconditions, relative: ABSENT},
+            _parent_transaction_id=parent,
+        )
+        committed = coordinator.apply(transaction.id)
+        _require_exact(committed.state, "committed")
 
 
 def _bound_source_manifest(active, bundle) -> dict:

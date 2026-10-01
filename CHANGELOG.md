@@ -8,6 +8,20 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Retire all eligible own-call transcripts within the existing deadline instead of stopping at 2000 files; preserve files when classification exhausts that deadline.
+
+- Retry a refused permanent breadcrumb source as a linked new transaction attempt while retaining create-only publication and current capture fences.
+
+- Validate adopted database invariants in one explicit read transaction, preventing a writer from interrupting validation between schema and integrity checks.
+
+- Cumulative failure counters retain earlier kinds instead of silently dropping their totals when a thirty-third kind is recorded.
+
+- Retain observed checkpoint event identities while they fit the shared state byte budget, avoiding replay admission caused by a separate 256-entry eviction.
+
+- Unattended checkpoint recovery advances an idle project's debounce with the maintenance observation clock while preserving event timestamps, retained evidence and replay/claim fences.
+
+- Configuration backup retention keeps recent verified preimages under the existing age and byte controls instead of deleting the eleventh small copy.
+
 - Checkpoint reducer caches retain every project that fits the existing state byte budget, avoiding duplicate admission caused by a separate 128-entry eviction.
 
 - Retrieval accepts valid long strings under the caller deadline; MCP page reading and freshness hashing use the existing shared knowledge-page ceiling.

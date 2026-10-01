@@ -275,8 +275,6 @@ class CheckpointReducer:
         if event_id in self.observed_event_ids:
             return True
         self.observed_event_ids[event_id] = None
-        while len(self.observed_event_ids) > 256:
-            self.observed_event_ids.pop(next(iter(self.observed_event_ids)))
         return False
 
     def _decide(

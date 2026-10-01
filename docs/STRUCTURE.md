@@ -193,12 +193,12 @@ back. A no-op merge creates no backup.
 
 Only files with the destination's exact `.bak-llm-wiki-` prefix are owned by this
 retention contract. After changed configuration is published and verified, each
-integration retains at most 10 backups, no backup older than 90 days when a newer
+integration retains no backup older than the configured retention age (90 days by default) when a newer
 restore point exists, and at most 100 MiB in aggregate when older files can be
 removed. The newest verified or sole preimage is never deleted. These files preserve
 bytes only, not owner, ACL, alternate streams, or complete filesystem metadata. They
 are not runtime state and do not replace private-vault backup/restore. See
-`knowledge/notes/integration-config-backup-retention-decision.md`.
+`knowledge/notes/integration-config-backup-retention-decision.md`. The redundant ten-copy cap was removed on 2026-09-30; see `docs/research/2026-09-30-backup-retention-uses-age-and-bytes.md`.
 
 ## Approved audit-closure boundary
 

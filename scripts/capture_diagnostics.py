@@ -11,9 +11,9 @@ Every failure lands here:
 * one bounded JSONL trail (`logs/capture-failures.jsonl`) carrying the reason,
 * one counter per failure kind in `state.json` for the health surfaces.
 
-Both are bounded: the trail is trimmed to the newest entries under a byte cap,
-and the counter map keeps the most recent kinds only. Recording is itself
-best-effort — diagnostics must never become the reason a hook fails.
+The trail is trimmed to the newest entries under a byte cap. Cumulative counters
+retain every trusted producer kind; cache pressure must not erase health history.
+Recording is itself best-effort — diagnostics must never become the reason a hook fails.
 """
 from __future__ import annotations
 
@@ -42,9 +42,6 @@ FAILURE_LOG = REPORTS_DIR / "capture-failures.jsonl"
 # measurement; review when a burst of failures pushes a day's records out before doctor reads
 # them.
 MAX_FAILURE_LOG_BYTES = 256 * 1024
-# Failure kinds counted in hook state; past it the least recently seen kind is dropped so the
-# state file stays bounded. The live state counts 5 kinds (2026-09-27).
-MAX_FAILURE_KINDS = 32
 # A failure reason is redacted, then cut to one bounded line of the capture-failure log (itself
 # capped by MAX_FAILURE_LOG_BYTES). Live reasons reach this cap (logs/capture-failures.jsonl,
 # 2026-09-27), so long ones are cut; Basis unknown: value predates measurement; review when a cut
@@ -396,22 +393,12 @@ def _bump_counter(state: dict, record: dict[str, str]) -> None:
         "last_loss_at": _loss_moment_after(entry, record),
         "last_reason": record["reason"],
     }
-    _drop_oldest_kinds(counters)
 
 
 def _loss_moment_after(entry: dict, record: dict[str, str]) -> str:
     if record["outcome"] == "lost":
         return record["at"]
     return _recorded_moment(entry)
-
-
-def _drop_oldest_kinds(counters: dict) -> None:
-    """Keep the most recently seen kinds so the counter map stays bounded."""
-    if len(counters) <= MAX_FAILURE_KINDS:
-        return
-    ranked = sorted(counters.items(), key=lambda kv: str(kv[1].get("last_at", "")))
-    for kind, _ in ranked[: len(counters) - MAX_FAILURE_KINDS]:
-        counters.pop(kind, None)
 
 
 def hook_object(raw: str, kind: str) -> dict:

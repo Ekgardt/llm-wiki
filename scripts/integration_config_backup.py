@@ -12,12 +12,8 @@ from pathlib import Path
 
 from reliable_memory import fsync_directory
 
-# Configuration backups kept per file beside the age setting and MAX_BACKUP_BYTES; the newest is
-# always kept. Basis unknown: value predates measurement; review when an operator needs an older
-# backup.
-MAX_BACKUPS = 10
 # Backups older than the setting `retention.config_backup_days` (90 by default) go,
-# the newest always kept; the count and byte bounds hold alongside.
+# the newest always kept; the existing byte budget holds alongside.
 MAX_BACKUP_BYTES = 100 * 1024 * 1024
 _DAY_SECONDS = 86_400
 _UNSET = object()
@@ -258,7 +254,7 @@ def _prune_expired(
 
 def _over_backup_limits(backups: list[tuple[Path, os.stat_result]]) -> bool:
     total_bytes = sum(metadata.st_size for _, metadata in backups)
-    return len(backups) > MAX_BACKUPS or total_bytes > MAX_BACKUP_BYTES
+    return total_bytes > MAX_BACKUP_BYTES
 
 
 def _oldest_unprotected(

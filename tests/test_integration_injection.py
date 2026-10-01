@@ -2169,7 +2169,7 @@ def test_codex_hook_merge_prunes_owned_backups_but_keeps_newest_and_unrelated(tm
 
     backups = list(tmp_path.glob("hooks.json.bak-llm-wiki-*"))
     assert not old.exists()
-    assert len(backups) <= 10
+    assert sum(path.stat().st_size for path in backups) <= 100 * 1024 * 1024
     assert original in [path.read_bytes() for path in backups]
     assert unrelated.read_bytes() == b"keep"
 

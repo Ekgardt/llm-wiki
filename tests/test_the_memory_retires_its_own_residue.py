@@ -69,3 +69,35 @@ def test_the_nightly_runs_the_retirer_after_the_lsp_evidence_step() -> None:
 
     assert labels.index("own_calls") == labels.index("lsp_evidence") + 1
     assert step.command[-1].endswith("retire_own_call_transcripts.py")
+
+
+def test_all_2001_own_transcripts_are_eligible_before_the_deadline(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    projects = tmp_path / "projects"
+    for index in range(2001):
+        _transcript(projects / "-vault" / f"{index}.jsonl", "sdk-cli", str(vault))
+    monkeypatch.setattr(retirer.time, "monotonic", lambda: 0.0)
+
+    assert retirer.retire(projects, vault) == (2001, 0)
+    assert not list(projects.glob("*/*.jsonl"))
+
+
+def test_a_transcript_checked_after_deadline_is_kept(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    projects = tmp_path / "projects"
+    own = _transcript(projects / "-vault" / "own.jsonl", "sdk-cli", str(vault))
+    clock = [0.0]
+    original = retirer.is_own_call
+
+    def check_and_expire(path, roots):
+        result = original(path, roots)
+        clock[0] = retirer.SCAN_BUDGET_SECONDS + 1.0
+        return result
+
+    monkeypatch.setattr(retirer.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(retirer, "is_own_call", check_and_expire)
+
+    assert retirer.retire(projects, vault) == (0, 0)
+    assert own.is_file()

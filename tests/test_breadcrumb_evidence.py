@@ -134,3 +134,42 @@ def test_source_read_with_time_remaining_keeps_full_evidence(tmp_path, monkeypat
     _fake_reader_clock(monkeypatch)
 
     assert evidence.read_permanent_source(tmp_path, head, deadline=12.0) == content
+
+
+def test_a_refused_source_can_retry_without_erasing_the_refusal(tmp_path):
+    from markdown_transaction import MarkdownChange, TransactionFailure
+    from reliable_memory import canonical_json_bytes, sha256_bytes
+
+    from tests.test_queue_v3_capture_links import _coordinator, _queue
+
+    _queue(tmp_path)
+    coordinator = _coordinator(tmp_path)
+    relative = "knowledge/raw/sessions/2026-09-29/retry.md"
+    (coordinator.vault / relative).parent.mkdir(parents=True, exist_ok=True)
+    document = b"---\ntype: raw-source\n---\ncomplete evidence\n"
+    operation = "breadcrumb-source:" + sha256_bytes(canonical_json_bytes({
+        "path": relative, "sha256": sha256_bytes(document),
+    }))
+    gate = coordinator.vault / "knowledge/notes/source-gate.md"
+    gate.parent.mkdir(parents=True, exist_ok=True)
+    gate.write_bytes(b"accepted")
+    with coordinator.writer_gate() as owner:
+        refused = coordinator.prepare(
+            [MarkdownChange.create(relative, document)], operation_id=operation,
+            preconditions={"knowledge/notes/source-gate.md": sha256_bytes(b"accepted")},
+        )
+        gate.write_bytes(b"new accepted version")
+        with pytest.raises(TransactionFailure, match="precondition"):
+            coordinator.apply(refused.id)
+        assert coordinator._record(refused.id).state == "quarantined"
+        assert not (coordinator.vault / relative).exists()
+        evidence._create_source_document(coordinator, owner, relative, document, {})
+        evidence._create_source_document(coordinator, owner, relative, document, {})
+    assert (coordinator.vault / relative).read_bytes() == document
+    assert coordinator._record(refused.id).state == "quarantined"
+    with coordinator._connect() as database:
+        committed = database.execute(
+            'SELECT parent_transaction_id FROM "transaction" WHERE state=\'committed\' '
+            'AND operation_id LIKE ?', (operation + "%",),
+        ).fetchall()
+    assert [row[0] for row in committed] == [refused.id]
