@@ -1686,7 +1686,7 @@ def test_observation_detects_database_replacement_with_the_same_epochs(tmp_path,
     monkeypatch.setattr(installed_memory_repair, "validate_reliability_v3_runtime", scan)
     result = doctor._run_deletion_check(state_root, datetime.now(timezone.utc), root=root)
     assert result["quiescent"] is False
-    assert {item["code"] for item in result["blockers"]} == {"runtime_deletion_snapshot_changed"}
+    assert {item["code"] for item in result["blockers"]} == {"runtime_deletion_snapshot_changed"}, result
 
 
 def test_observer_heartbeat_does_not_invalidate_an_otherwise_quiescent_scan(tmp_path, monkeypatch):

@@ -8,6 +8,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Preserve redacted causes of refused runtime observations and distinguish live-source verification failures from immutable generation corruption; deletion remains blocked.
+
+- Write byte-exact capacity fixtures on Windows and record measured shard weights for new regression files.
+
 - Foreground prompt checkpoint follow-up tries writer admission without waiting beyond the host timeout; contended handoffs remain pending for existing recovery.
 
 - Replay a stale pending capture descriptor from its exact verified ready bytes when another publisher has completed it; preserve fences, full-source validation and one original task.

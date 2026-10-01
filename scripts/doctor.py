@@ -2740,17 +2740,14 @@ def _observed_deletion_codes(
     owner: object,
     validate_reliability_v3_runtime,
 ) -> list[str]:
-    try:
-        codes = _snapshot_deletion_codes(
-            root_path,
-            state_path,
-            now,
-            snapshot_deadline,
-            owner,
-            validate_reliability_v3_runtime,
-        )
-    except (OSError, PermissionError, sqlite3.Error, TimeoutError, ValueError):
-        codes = ["run_deletion_state_unknown"]
+    codes = _snapshot_deletion_codes(
+        root_path,
+        state_path,
+        now,
+        snapshot_deadline,
+        owner,
+        validate_reliability_v3_runtime,
+    )
     if _deadline_reached(snapshot_deadline):
         codes.append("run_deletion_state_unknown")
     return codes
@@ -2800,17 +2797,12 @@ def _run_deletion_check(
         code = {"owner_busy": "runtime_deletion_check_requires_quiescence"}.get(code, code)
         return _deletion_snapshot([str(code)])
 
-    return _deletion_snapshot(
-        _deletion_codes_with_owner(
-            registry,
-            owner,
-            root_path,
-            state_path,
-            now,
-            snapshot_deadline,
-            validate_reliability_v3_runtime,
-        )
+    diagnostics: dict[str, str] = {}
+    codes = _deletion_codes_with_owner(
+        registry, owner, root_path, state_path, now, snapshot_deadline,
+        validate_reliability_v3_runtime, diagnostics=diagnostics,
     )
+    return {**_deletion_snapshot(codes), **diagnostics}
 
 
 def _release_deletion_owner(registry, owner, codes: list[str]) -> None:
@@ -2830,8 +2822,11 @@ def _deletion_codes_with_owner(
     now: datetime,
     snapshot_deadline: float,
     validate,
+    *,
+    diagnostics: dict[str, str] | None = None,
 ) -> list[str]:
     from operational_ownership import OperationalOwnershipError, heartbeat_owner
+    from secret_redact import describe_error
 
     codes: list[str] = []
     try:
@@ -2839,8 +2834,10 @@ def _deletion_codes_with_owner(
             codes = _validated_observation_codes(
                 registry, root_path, state_path, now, snapshot_deadline, owner, validate
             )
-    except (OperationalOwnershipError, OSError, sqlite3.Error, TimeoutError, ValueError):
+    except (OperationalOwnershipError, OSError, sqlite3.Error, TimeoutError, ValueError) as error:
         codes = ["run_deletion_state_unknown"]
+        if diagnostics is not None:
+            diagnostics["observation_error"] = describe_error(error)
     finally:
         _release_deletion_owner(registry, owner, codes)
     return codes
@@ -4533,6 +4530,26 @@ def _extraction_faults(
     )
 
 
+class _LiveCorpusUnverified(RuntimeError):
+    """Live-source collection failed after immutable artifacts were validated."""
+
+
+def _collect_generation_live_corpus(root, policy, max_sources, deadline):
+    from corpus_snapshot import CorpusCapacityExceeded, CorpusChanged, collect_corpus
+    from secret_redact import describe_error
+
+    try:
+        return collect_corpus(
+            root, daily_paths=policy["daily_paths"], code_roots=policy["code_roots"],
+            include_historical=policy["include_historical"], as_of=policy["as_of"],
+            max_files=max_sources, deadline=deadline,
+        )
+    except (CorpusCapacityExceeded, TimeoutError):
+        raise
+    except (CorpusChanged, OSError, ValueError) as error:
+        raise _LiveCorpusUnverified(describe_error(error)) from error
+
+
 def _generation_facts(
     root: Path,
     state_root: Path,
@@ -4552,21 +4569,13 @@ def _generation_facts(
     )
     policy = source_manifest["policy"]
 
-    from corpus_snapshot import COLLECTOR_VERSION, EXTRACTOR_VERSION, collect_corpus
+    from corpus_snapshot import COLLECTOR_VERSION, EXTRACTOR_VERSION
     from repository_scope import resolve_repository_scope
 
     repository_scope = resolve_repository_scope(
         root, deadline=deadline, cancelled=cancelled
     )
-    snapshot = collect_corpus(
-        root,
-        daily_paths=policy["daily_paths"],
-        code_roots=policy["code_roots"],
-        include_historical=policy["include_historical"],
-        as_of=policy["as_of"],
-        max_files=max_sources,
-        deadline=deadline,
-    )
+    snapshot = _collect_generation_live_corpus(root, policy, max_sources, deadline)
     return _GenerationFacts(
         delta=_source_delta(source_manifest, snapshot),
         unresolved=_unresolved_observations(generation_path, state_root, deadline),
@@ -4773,7 +4782,20 @@ def _checked_generation(
         )
     except CorpusCapacityExceeded as error:
         return _generation_capacity_refusal(active, manifest, error)
+    except _LiveCorpusUnverified as error:
+        return _generation_live_source_refusal(active, manifest, error)
     return _generation_health_result(active, manifest, seal, catalog_info, now, facts)
+
+
+def _generation_live_source_refusal(active: str, manifest: dict, error) -> dict:
+    return _generation_result(
+        "error", "Live corpus could not be verified; freshness is unknown. " + str(error),
+        catalog="valid", active_generation=active,
+        generation_schema=manifest.get("graph_schema_version"),
+        live_corpus_state="unverified", validation_error=str(error),
+        freshness="unknown", partial=True, repairable=False,
+        recommended_action="review_live_corpus", **_vector_fields(manifest),
+    )
 
 
 def _generation_capacity_refusal(active: str, manifest: dict, error) -> dict:

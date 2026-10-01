@@ -58,7 +58,7 @@ def test_code_bytes_report_the_same_typed_capacity_refusal(tmp_path):
     root, _state = _vault(tmp_path)
     scripts = root / "scripts"
     scripts.mkdir()
-    (scripts / "large.py").write_text("#" + "x" * 2048 + "\n")
+    (scripts / "large.py").write_bytes(("#" + "x" * 2048 + "\n").encode("ascii"))
 
     with pytest.raises(ValueError) as caught:
         corpus_snapshot.collect_corpus(
@@ -77,7 +77,7 @@ def test_deferred_source_read_reports_the_same_capacity_refusal(tmp_path):
 
     root, _state = _vault(tmp_path)
     page = root / "knowledge" / "notes" / "large.md"
-    page.write_text("#" + "x" * 2048 + "\n")
+    page.write_bytes(("#" + "x" * 2048 + "\n").encode("ascii"))
     snapshot = corpus_snapshot.collect_corpus(root)
     policy = replace(snapshot.policy, max_total_bytes=1024)
     reader = corpus_snapshot._Capture(policy, time.monotonic() + LONG_TIMEOUT, None)
