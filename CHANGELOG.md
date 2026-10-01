@@ -8,6 +8,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Corpus collection and knowledge extraction defaults share the existing discovery entry budget, avoiding separate 10,000-source refusals while preserving explicit operator limits.
+
 - Archive and restore pages within the existing Markdown transaction target budget instead of a separate unmeasured read ceiling.
 
 - Preserve redacted causes of refused runtime observations and distinguish live-source verification failures from immutable generation corruption; deletion remains blocked.

@@ -25,7 +25,7 @@ from bounded_io import (
 )
 from code_languages import language_for_path
 from page_status import is_retired
-from settings import raise_hint, setting_value
+from settings import MAX_CORPUS_INSPECTED_ENTRIES, raise_hint, setting_value
 from vault_editorial import EDITORIAL_NAMES
 
 COLLECTOR_VERSION = "corpus-collector/v1"
@@ -38,10 +38,6 @@ COLLECTOR_VERSION = "corpus-collector/v1"
 EXTRACTOR_VERSION = "markdown-heading-extractor/v4"
 
 MAX_CORPUS_FILE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
-# Directory entries one corpus collection may inspect before it refuses, a bound on a
-# walk over a tree the user controls. Basis unknown: value predates measurement; the
-# live vault holds about 1 185 entries (2026-09-27). Review when a vault nears it.
-MAX_CORPUS_INSPECTED_ENTRIES = 50_000
 # Directories one corpus collection walks; the live knowledge tree has 76 (2026-09-27). A vault-
 # size bound like `corpus.max_files`; review when it becomes a setting.
 MAX_CORPUS_DIRECTORIES = 5_000

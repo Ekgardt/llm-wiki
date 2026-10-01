@@ -17,17 +17,17 @@ import settings
 from corpus_snapshot import collect_corpus
 
 ROOT = Path(__file__).resolve().parents[1]
-# The constants the registry replaced, with the values a vault without a file keeps.
+# Registry defaults. Corpus/extraction share the existing discovery entry budget.
 REPLACED = {
     "index.max_pages": 2_000,
     "index.max_total_bytes": 32 * 1024 * 1024,
     "compile.max_sources": 2_000,
     "compile.max_total_source_bytes": 32 * 1024 * 1024,
-    "corpus.max_files": 10_000,
+    "corpus.max_files": 50_000,
     "corpus.max_total_bytes": 64 * 1024 * 1024,
     "claims.max_pages": 10_000,
     "claims.max_total_bytes": 32 * 1024 * 1024,
-    "extraction.max_sources": 10_000,
+    "extraction.max_sources": 50_000,
     "search.max_pages": 10_000,
     "impact.max_note_files": 2_000,
     "impact.max_total_note_bytes": 32 * 1024 * 1024,
@@ -88,7 +88,7 @@ def _vault(tmp_path: Path, notes: int, toml: str | None = None) -> Path:
     return tmp_path
 
 
-def test_without_a_file_every_ceiling_is_the_constant_it_replaced(tmp_path: Path) -> None:
+def test_without_a_file_every_ceiling_has_its_declared_default(tmp_path: Path) -> None:
     values = settings.effective(tmp_path, environ={})
     assert {name: item.value for name, item in values.items()} == REPLACED
     assert {item.source for item in values.values()} == {settings.DEFAULT_SOURCE}

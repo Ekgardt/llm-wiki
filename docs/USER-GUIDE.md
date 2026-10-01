@@ -745,16 +745,19 @@ when it would touch a locally modified file, and the nightly commit of the
 pushes either; it provides no persistent daemon, cloud
 service, remote queue/cache, or SQLite knowledge source.
 
-### Limits you can raise (`llm-wiki.toml`)
+### Limits you can configure (`llm-wiki.toml`)
 
 A few pipelines hold their whole input in memory, so each stops at a size ceiling:
 the index rebuild and the compile at 2 000 pages or 32 MiB, the search corpus at
-10 000 files or 64 MiB, and a few more. When your vault grows past one, the pipeline
+50 000 files or 64 MiB, and a few more. The default file and extraction-source
+counts share the existing directory-entry budget; they no longer add a separate
+10 000-source cutoff. Explicit smaller file/environment overrides still apply. When your vault grows past one, the pipeline
 stops with a message that names the setting to raise, for example
 `raise corpus.max_files in llm-wiki.toml or LLM_WIKI_CORPUS_MAX_FILES`. `doctor`
 warns earlier, once the vault is at 80 % of a ceiling.
 
-To raise one, create `llm-wiki.toml` in the vault root (it is gitignored):
+To select a different budget, create `llm-wiki.toml` in the vault root (it is
+gitignored). This example selects a smaller file budget than the default:
 
 ```toml
 [corpus]
