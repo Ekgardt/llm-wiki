@@ -337,3 +337,88 @@ def test_has_pending_work_true_when_daily_not_in_state(fake_env):
     state_file.write_text("{}", encoding="utf-8")
 
     assert fake_env._has_pending_work() is True
+
+
+@pytest.mark.parametrize('closed', [False, True])
+def test_service_compile_moves_to_its_own_scope(fake_env, monkeypatch, closed):
+    monkeypatch.setattr(sys, 'platform', 'linux')
+    monkeypatch.setenv('INVOCATION_ID', 'service-invocation')
+    # Instantiate the public systemd template with a synthetic numeric UID.
+    manager = f'user@{1000}.service'
+    hierarchy = f'0::/user.slice/{manager}/app.slice/nightly.service\n'
+    monkeypatch.setattr(Path, 'read_text', lambda *a, **kw: hierarchy)
+    command = fake_env._compile_command('owner-token', closed)
+    assert command[:5] == ['systemd-run', '--user', '--scope', '--quiet', '--']
+    assert command[5:7] == [sys.executable, str(fake_env.COMPILE_SCRIPT)]
+    assert command[command.index('--lock-token') + 1] == 'owner-token'
+    assert ('--closed-days-only' in command) == closed
+
+
+@pytest.mark.parametrize('platform,invocation', [('linux', ''), ('darwin', 'service'), ('win32', 'service')])
+def test_non_service_compile_keeps_native_launch(fake_env, monkeypatch, platform, invocation):
+    monkeypatch.setattr(sys, 'platform', platform)
+    monkeypatch.setenv('INVOCATION_ID', invocation)
+    assert fake_env._compile_command('token', False)[:2] == [sys.executable, str(fake_env.COMPILE_SCRIPT)]
+
+
+def test_launch_is_recorded_before_async_manager_can_fail(fake_env, monkeypatch):
+    monkeypatch.setattr(fake_env, '_has_pending_work', lambda *_: True)
+    observed = []
+    writes = []
+    original_update = fake_env.update_state
+
+    def update(mutate):
+        writes.append(fake_env._read_lock())
+        original_update(mutate)
+
+    monkeypatch.setattr(fake_env, 'update_state', update)
+
+    def spawn(*args, **kwargs):
+        observed.append(fake_env.load_state())
+        return 12345
+
+    monkeypatch.setattr(fake_env, 'spawn_detached', spawn)
+    assert fake_env.spawn_compile_if_idle()[0]
+    assert writes[0]['pid'] == os.getpid()
+    assert observed[0]['last_compile_status'] == 'starting'
+    assert observed[0]['last_compile_started_at']
+    assert observed[0]['last_compile_started_trigger'] == 'auto'
+
+
+def test_launch_record_failure_does_not_start_an_untracked_compile(fake_env, monkeypatch):
+    monkeypatch.setattr(fake_env, '_has_pending_work', lambda *_: True)
+    calls = []
+    monkeypatch.setattr(fake_env, 'spawn_detached', lambda *a, **kw: calls.append(a))
+
+    def fail(_mutate):
+        raise OSError('state write refused')
+
+    monkeypatch.setattr(fake_env, 'update_state', fail)
+    spawned, reason = fake_env.spawn_compile_if_idle()
+    assert not spawned
+    assert 'state write refused' in reason
+    assert calls == []
+    assert not fake_env.LOCK_FILE.exists()
+
+
+def test_system_cron_does_not_require_a_user_manager(fake_env, monkeypatch):
+    monkeypatch.setattr(sys, 'platform', 'linux')
+    monkeypatch.setenv('INVOCATION_ID', 'cron-service')
+    monkeypatch.setattr(Path, 'read_text', lambda *a, **kw: '0::/system.slice/cron.service\n')
+    assert fake_env._compile_command('token', False)[:2] == [sys.executable, str(fake_env.COMPILE_SCRIPT)]
+
+
+def test_scope_inspection_failure_releases_parent_claim(fake_env, monkeypatch):
+    monkeypatch.setattr(fake_env, '_has_pending_work', lambda *_: True)
+    calls = []
+    monkeypatch.setattr(fake_env, 'spawn_detached', lambda *a, **kw: calls.append(a))
+
+    def refuse(*args):
+        raise PermissionError('cgroup unreadable')
+
+    monkeypatch.setattr(fake_env, '_compile_command', refuse)
+    spawned, reason = fake_env.spawn_compile_if_idle()
+    assert not spawned
+    assert 'cgroup unreadable' in reason
+    assert calls == []
+    assert not fake_env.LOCK_FILE.exists()

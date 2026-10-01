@@ -3515,7 +3515,7 @@ def _may_displace(
     return inside_count.get(_source_key(chunk), 0) >= 2
 
 
-def _displaceable(
+def _repeated_displaceable(
     inside: Sequence[RetrievalCandidate], admitted: frozenset[str], wanted: int
 ) -> list[RetrievalCandidate]:
     """The last chunks of the window a pulled chunk may take the place of.
@@ -3536,6 +3536,16 @@ def _displaceable(
     return list(reversed(chosen))
 
 
+def _displaceable(
+    inside: Sequence[RetrievalCandidate], admitted: frozenset[str], wanted: int
+) -> list[RetrievalCandidate]:
+    """Prefer redundant chunks; unselected unique sources may yield to missing coverage."""
+    chosen = _repeated_displaceable(inside, admitted, wanted)
+    remaining = _without(list(reversed(inside)), admitted | _ids_of(chosen))
+    chosen.extend(remaining[:wanted - len(chosen)])
+    return _only(inside, _ids_of(chosen))
+
+
 def _pulled_into_window(
     candidates: Sequence[RetrievalCandidate], admitted: frozenset[str], limit: int
 ) -> tuple[RetrievalCandidate, ...]:
@@ -3543,8 +3553,8 @@ def _pulled_into_window(
 
     Admitted chunks already inside keep their place, the pulled ones come in
     behind the kept ones in lane order, the displaced ones follow, and nothing
-    is dropped: `_capped` still cuts the window last. When more is admitted
-    than can be displaced, the lane-last of the pulled stay outside.
+    is dropped: `_capped` still cuts the window last. Repeated sources yield
+    first; an unselected unique source cannot veto missing question coverage.
     """
     inside, outside = list(candidates[:limit]), list(candidates[limit:])
     displaced = _displaceable(inside, admitted, len(_only(outside, admitted)))
@@ -3583,8 +3593,8 @@ def _cover_then_fill(
     """One chunk from every source that covers a distinct part of the question, then the fill.
 
     Four properties, each pinned by a test: a pool holding one source comes out
-    unchanged; a pool that fits the window comes out unchanged; a source's only
-    chunk inside the window is never displaced; a source's chunks keep their
+    unchanged; a pool that fits the window comes out unchanged; a chunk selected
+    for question coverage is never displaced; a source's chunks keep their
     order, except the one chunk admitted for coverage, which is the lane-best
     whenever the lane-best covers as much.
     """

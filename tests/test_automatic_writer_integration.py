@@ -442,9 +442,12 @@ def _executable_of(command):
     return command
 
 
-def _assert_no_git(command, *args, **kwargs):
-    assert str(_executable_of(command)).casefold() not in {"git", "git.exe"}
-    return SimpleNamespace(returncode=0, stdout="", stderr="")
+def _without_git(run):
+    def guarded(command, *args, **kwargs):
+        assert str(_executable_of(command)).casefold() not in {"git", "git.exe"}
+        return run(command, *args, **kwargs)
+
+    return guarded
 
 
 def _assert_boundary_use(entrypoint: str, module_name: str, calls: list, secret: str) -> None:
@@ -473,7 +476,7 @@ def test_task14_actual_entrypoint_delegates_without_git(entrypoint, tmp_path, mo
         calls.append((args, kwargs))
         return SimpleNamespace(id="tx", state="committed", preconditions={})
 
-    monkeypatch.setattr(subprocess, "run", _assert_no_git)
+    monkeypatch.setattr(subprocess, "run", _without_git(subprocess.run))
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
 

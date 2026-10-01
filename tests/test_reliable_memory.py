@@ -632,9 +632,9 @@ def test_darwin_mount_query_is_bounded(monkeypatch):
 
 
 def test_owner_permission_errors_are_not_suppressed(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        reliable_memory, "_owner_permissions_supported", lambda path: True, raising=False
-    )
+    # Exercise the POSIX backend explicitly; Windows admission has native ACL tests.
+    monkeypatch.setattr(reliable_memory, "_harden_runtime_owner_only", reliable_memory._set_owner_only)
+    monkeypatch.setattr(reliable_memory, "_owner_permissions_supported", lambda path: True)
 
     def deny_chmod(self, mode):
         raise PermissionError("denied")
@@ -647,9 +647,9 @@ def test_owner_permission_errors_are_not_suppressed(tmp_path, monkeypatch):
 def test_owner_mode_must_match_after_chmod(tmp_path, monkeypatch):
     root = tmp_path / "state"
     root.mkdir(mode=0o755)
-    monkeypatch.setattr(
-        reliable_memory, "_owner_permissions_supported", lambda path: True, raising=False
-    )
+    # Exercise the POSIX backend explicitly; Windows admission has native ACL tests.
+    monkeypatch.setattr(reliable_memory, "_harden_runtime_owner_only", reliable_memory._set_owner_only)
+    monkeypatch.setattr(reliable_memory, "_owner_permissions_supported", lambda path: True)
     monkeypatch.setattr(Path, "chmod", lambda self, mode: None)
     with pytest.raises(PermissionError, match="owner-only"):
         validate_state_root(root)
@@ -768,3 +768,16 @@ def test_reopening_an_operational_database_keeps_existing_locks(tmp_path: Path) 
 
     assert before > 0
     assert after == before
+
+
+@pytest.mark.parametrize("outside", [False, True])
+def test_missing_runtime_file_preserves_presence_and_boundary_errors(tmp_path, outside):
+    root = tmp_path / "state"
+    root.mkdir()
+    path = root / "missing.json"
+    expected = FileNotFoundError
+    if outside:
+        path = tmp_path / "missing.json"
+        expected = PermissionError
+    with pytest.raises(expected):
+        reliable_memory.read_runtime_bytes(path, root, max_bytes=1024)

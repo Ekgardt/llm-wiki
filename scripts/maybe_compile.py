@@ -1,8 +1,7 @@
 """Concurrency-safe compile trigger.
 
 Checks if compile is needed and no other compile is running, then spawns
-compile_memory.py in a detached background process. The caller never
-blocks — this script returns immediately (under 100ms).
+compile_memory.py in a detached background process. The caller waits only for lock and launch bookkeeping, not for compilation.
 
 Lock mechanism:
 - Writes a PID file at $LLM_WIKI_STATE_ROOT/run/compile.pid
@@ -15,7 +14,7 @@ Lock mechanism:
 This is the ONLY entry point that should be called from hooks/wrappers/
 schedulers. It guarantees:
   1. At most one compile runs at any time.
-  2. Never blocks the caller (fire-and-forget).
+  2. Does not wait for compilation (fire-and-forget).
   3. Quick exit if nothing to compile (state.json hash check).
   4. Clears a stale lock (crashed compile, killed process) by process liveness, never by age.
 
@@ -46,6 +45,7 @@ from memory_state import (  # noqa: E402
     load_state,
     retire_stale_lock,
     spawn_detached,
+    update_state,
 )
 
 COMPILE_SCRIPT = ROOT / "scripts" / "compile_memory.py"
@@ -363,7 +363,41 @@ def _compile_command(placeholder: str, closed_days_only: bool) -> list[str]:
     ]
     if closed_days_only:
         command.append("--closed-days-only")
-    return command
+    return _independent_compile_command(command)
+
+
+def _independent_compile_command(command: list[str]) -> list[str]:
+    """setsid does not detach a compiler from its parent service's cgroup."""
+    if not sys.platform.startswith("linux") or not os.environ.get("INVOCATION_ID"):
+        return command
+    if not _in_user_service():
+        return command
+    return ["systemd-run", "--user", "--scope", "--quiet", "--", *command]
+
+
+def _in_user_service() -> bool:
+    membership = Path("/proc/self/cgroup").read_text(encoding="utf-8")
+    return any(_user_service_path(line.rsplit(":", 1)[-1]) for line in membership.splitlines())
+
+
+def _user_service_path(value: str) -> bool:
+    parts = value.strip().split("/")
+    return parts[-1].endswith(".service") and any(
+        part.startswith("user@") and part.endswith(".service") for part in parts
+    )
+
+
+def _record_compile_launch() -> None:
+    """Persist the attempt before an asynchronous manager can refuse entry."""
+    started = datetime.now().isoformat()
+
+    def mutate(state: dict) -> None:
+        state["last_compile_started_at"] = started
+        state["last_compile_started_trigger"] = "auto"
+        state["last_compile_status"] = "starting"
+        state.pop("last_compile_error", None)
+
+    update_state(mutate)
 
 
 def _spawn_claimed(closed_days_only: bool = False) -> tuple[bool, bool, str]:
@@ -371,8 +405,15 @@ def _spawn_claimed(closed_days_only: bool = False) -> tuple[bool, bool, str]:
     # child's proof that the lock it finds was written for it — whether it
     # looks before or after the PID below is replaced.
     placeholder = lock_owner_token() or ""
+    try:
+        _write_lock(os.getpid(), token=placeholder)
+        command = _compile_command(placeholder, closed_days_only)
+        _record_compile_launch()
+    except Exception as exc:  # noqa: BLE001 - never launch an unrecorded attempt
+        _clear_lock(placeholder)
+        return (False, False, f"launch preparation failed: {exc}")
     pid = spawn_detached(
-        _compile_command(placeholder, closed_days_only),
+        command,
         stdout_path=LOG_OUT,
         stderr_path=LOG_ERR,
     )

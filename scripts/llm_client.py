@@ -1377,6 +1377,7 @@ def _codex_command(codex_bin: str, model: str | None, reasoning: str, out_path: 
     command = [
         codex_bin,
         "exec",
+        "--ephemeral",
         "--skip-git-repo-check",
         "--sandbox",
         "read-only",
@@ -1492,11 +1493,44 @@ def provider_environment() -> dict[str, str]:
     return environment
 
 
+def _codex_server_name(server: object) -> str:
+    if not isinstance(server, dict):
+        raise ValueError("Codex MCP inventory entry is not an object")
+    name = server.get("name")
+    if not isinstance(name, str) or not name:
+        raise ValueError("Codex MCP inventory has no server name")
+    return name
+
+
+def _codex_mcp_setting(raw: bytes | str) -> str:
+    servers = json.loads(raw)
+    if not isinstance(servers, list):
+        raise ValueError("Codex MCP inventory is not a list")
+    entries = [json.dumps(_codex_server_name(server)) + "={enabled=false}" for server in servers]
+    return "mcp_servers={" + ",".join(entries) + "}"
+
+
+def _isolated_codex_command(command: list[str], neutral: str) -> list[str]:
+    """Keep provider/auth config; disable discovered MCP only for this text call.
+
+    Empty mcp_servers={} merges with the user's table and disables nothing.
+    Ask the CLI for its effective names, including profiles, then override each
+    enabled field. Inline quoted keys preserve names containing dots. Never log
+    inventory transport settings, which may contain credentials.
+    """
+    inventory = _run_cli(
+        [command[0], "mcp", "list", "--json"], capture_output=True,
+        cwd=neutral, env=provider_environment(),
+    )
+    _require_codex_exited_cleanly(inventory)
+    return [*command, "-c", _codex_mcp_setting(inventory.stdout)]
+
+
 def _codex_last_message(command: list[str], prompt_path: str, out_path: str) -> str:
     with open(prompt_path, "rb") as stdin_handle, provider_cwd() as neutral:
         try:
             result = _run_cli(
-                command,
+                _isolated_codex_command(command, neutral),
                 stdin=stdin_handle,
                 capture_output=True,
                 cwd=neutral,

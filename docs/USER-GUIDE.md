@@ -758,7 +758,17 @@ Section `[mcp]`: `retrieval_seconds` (14) is the time an MCP `recall` or
 `get_decisions` answer may take, so the cross-encoder reranker fits in it: warm, it took
 a median 3.5 s and a 95th percentile 5.7 s on four idle cores. On a slower or busy
 machine the answer comes back without the rerank more often; raise it there. Every
-other tool keeps 10 s.
+other tool keeps 10 s unless noted below.
+
+`doctor_seconds` (10) controls the complete MCP doctor status call. Health scans
+all current ledgers and retained artifacts; one active vault needed 10–11 s even
+after redundant scans were removed, motivating a local setting of 16. Measure again
+after substantial history growth or host changes. `doctor_return_seconds` (1)
+reserves time inside that budget for the child to serialize and return its report:
+a measured scan returned 0.239 s after its check deadline. The reserve never takes
+more than half the remaining call time. Incomplete checks stay explicitly
+unfinished; error and degraded reports are returned without being made healthy.
+Doctor mutations keep their existing 10 s operation contract.
 
 Other limits are not settings: they are protocol values, safety bounds on input, or
 the timing a lease and its heartbeat share. Each states its reason where it is defined,

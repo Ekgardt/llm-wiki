@@ -657,6 +657,37 @@ def test_lint_skips_claim_json_in_prose_scan_but_resolves_claim_evidence(
     assert (clean, len(findings), "hash mismatch" in findings[0], broken) == (([], []), 1, True, (True, True))
 
 
+def test_lint_reuses_historical_search_across_prose_and_claim_checks(
+    pipeline, tmp_path: Path, monkeypatch,
+) -> None:
+    import evidence_resolver
+    import lint_memory
+
+    normalized = pipeline.normalize(
+        pipeline.verify_literal(pipeline.extract(pipeline.split_blocks(source_bytes())[0], raw_claim())[0])
+    )
+    page = tmp_path / "knowledge/notes/claim.md"
+    page.parent.mkdir(parents=True)
+    page.write_bytes(ledger_page(normalized.record))
+    daily = tmp_path / "knowledge/daily/2026-01-02.md"
+    daily.write_bytes(source_bytes() + b"\n## [05:06:07] later\nnew content\n")
+    monkeypatch.setattr(lint_memory, "ROOT", tmp_path)
+    monkeypatch.setattr(lint_memory, "NOTES", page.parent)
+    monkeypatch.setattr(lint_memory, "VAULT", tmp_path)
+    searched = []
+    original = evidence_resolver.compile_part_slice
+
+    def search(content, digest, **kwargs):
+        searched.append(digest)
+        return original(content, digest, **kwargs)
+
+    monkeypatch.setattr(evidence_resolver, "compile_part_slice", search)
+    result = lint_memory._page_checks("notes", [page], tmp_path / "index.md", 200)
+    assert result["invalid_evidence"] == []
+    assert result["invalid_claim_schema"] == []
+    assert searched == [sha(source_bytes())]
+
+
 def test_lint_candidate_location_and_project_claim_page_selection(
     pipeline, tmp_path: Path, monkeypatch
 ) -> None:

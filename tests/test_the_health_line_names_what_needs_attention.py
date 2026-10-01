@@ -35,7 +35,7 @@ def test_a_healthy_vault_says_so():
 def test_refused_attempts_are_named_and_counted():
     message = doctor._transaction_message(dict(STATES), 9, False, _details(9))
 
-    assert "9 refused attempt(s) whose work never happened" in message
+    assert "9 refused attempt(s) awaiting recovery or operator review" in message
     assert message.endswith(".")
 
 
@@ -54,7 +54,7 @@ def test_both_kinds_are_named_together():
     message = doctor._transaction_message(states, 5, False, _details(3))
 
     assert "2 transaction(s) still unsettled" in message
-    assert "3 refused attempt(s) whose work never happened" in message
+    assert "3 refused attempt(s) awaiting recovery or operator review" in message
 
 
 def test_a_state_this_runtime_does_not_define_is_named():

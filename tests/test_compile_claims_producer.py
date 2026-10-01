@@ -196,6 +196,41 @@ def test_a_drafted_candidate_becomes_a_record_bound_to_the_source_bytes(vault):
     }
 
 
+@pytest.mark.parametrize("quote", ["maintenance lease", "expires after 30 seconds."])
+def test_widened_quote_keeps_claim_text_hash_and_plan_in_agreement(vault, quote):
+    root, _state_root = vault
+    import compile_memory
+    from claims import validate_claim_record
+
+    inputs = compile_memory.snapshot_compile_inputs([_daily(root)])
+    operation = _operation([_candidate()])
+    operation["evidence"] = [_evidence(quote)]
+    derived = compile_memory._with_derived_claims([operation], inputs)
+    record = derived[0]["claims"][0]
+    validate_claim_record(record)
+    assert record["text"] == record["evidence"]["text"] == QUOTE
+    assert record["evidence"]["sha256"] == sha256_bytes(QUOTE.encode())
+    plan = compile_memory._normalize_plan(derived, inputs)
+    compile_memory.validate_compile_plan(plan, inputs)
+    content = json.loads(plan["operations"][0]["content"])
+    assert content["claims"][0]["evidence"]["text"] == QUOTE
+
+
+def test_widened_quote_is_also_forwarded_to_the_critic_without_claims(vault):
+    root, _state_root = vault
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([_daily(root)])
+    operation = _operation()
+    operation["evidence"] = [_evidence("maintenance lease")]
+    normalized, bindings = compile_memory._validate_semantic_operation(operation, inputs)
+    cited = compile_memory._cited_evidence(normalized, bindings)
+    assert cited[0]["quoted_text"] == QUOTE
+    assert cited[0]["quote_sha256"] == sha256_bytes(QUOTE.encode())
+    repeated, repeated_bindings = compile_memory._validate_semantic_operation(normalized, inputs)
+    assert (repeated, repeated_bindings) == (normalized, bindings)
+
+
 def test_the_derived_record_survives_the_plan_validator(vault):
     root, _state_root = vault
     import compile_memory
@@ -385,7 +420,8 @@ def test_a_claim_binds_to_the_part_of_a_split_day_that_holds_its_quote(vault):
 # --- 5. end to end: the ledger the index reads back ------------------------
 
 
-def test_a_drafted_claim_reaches_the_page_ledger_and_the_claim_index(vault):
+@pytest.mark.parametrize("quote", [QUOTE, "maintenance lease"])
+def test_a_drafted_claim_reaches_the_page_ledger_and_the_claim_index(vault, quote):
     root, state_root = vault
     import compile_memory
     from claims import ClaimIndex
@@ -393,8 +429,10 @@ def test_a_drafted_claim_reaches_the_page_ledger_and_the_claim_index(vault):
 
     daily = _daily(root)
     inputs = compile_memory.snapshot_compile_inputs([daily])
+    operation = _operation([_candidate()])
+    operation["evidence"] = [_evidence(quote)]
     operations = compile_memory._with_derived_claims(
-        compile_memory._draft_operations(_draft([_operation([_candidate()])])), inputs
+        compile_memory._draft_operations(_draft([operation])), inputs
     )
     plan = compile_memory._normalize_plan(operations, inputs)
 

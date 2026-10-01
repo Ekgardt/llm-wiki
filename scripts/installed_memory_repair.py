@@ -40,6 +40,7 @@ _SCHEMA_DIR = Path(__file__).with_name("schemas")
 _TOMBSTONE_SCHEMA = _SCHEMA_DIR / "operational-db-tombstone-v1.json"
 _MIGRATION_SCHEMA = _SCHEMA_DIR / "reliability-v3-migration-v1.json"
 _ADOPTION_SCHEMA = _SCHEMA_DIR / "reliability-v3-adoption-v1.json"
+_WAL_ADOPTION_SCHEMA = _SCHEMA_DIR / "reliability-v3-adoption-v2.json"
 # Bounded reads of the adoption's own JSON records; each is refused past its bound,
 # never cut. Measured 2026-09-27 on the installed vault: a tombstone is 487-541
 # bytes, the migration record 1 333 and the adoption record 2 507, so 4 KiB and
@@ -50,13 +51,12 @@ _MAX_RECORD_BYTES = 64 * 1024
 # candidate and one retired file per database (four), so 32 means a broken run
 # directory. Past it the listing sets its overflow flag and the check refuses.
 _MAX_OPERATION_ARTIFACTS = 32
-# The same bounds as doctor.MAX_OPERATIONAL_DB_BYTES and MAX_RUNTIME_ENTRIES, whose
-# comments give their basis: both read the same databases and directories. Repeated
-# because doctor imports this module lazily to stay importable without the queue and
-# transaction modules; keep the pairs equal. A scan past a bound raises, never judges
-# from entries unseen. Table rows have no count cap: they are streamed (`_scanned_rows`).
+# The same database bound as doctor.MAX_OPERATIONAL_DB_BYTES, whose
+# comment gives its basis. Repeated because doctor imports this module lazily
+# to stay importable without the queue and transaction modules; keep the pair equal.
+# Runtime directories use the caller deadline, not an activity-dependent count cap.
+# Table rows are likewise streamed (`_scanned_rows`).
 _MAX_OPERATIONAL_DB_BYTES = 256 * 1024 * 1024
-_MAX_RUNTIME_ENTRIES = 10_000
 # The same bound as memory_state.MAX_CAPTURE_INTENT_BYTES (the hook writes intents
 # under it); not imported because memory_state resolves the live state root at
 # import time. The largest intent on the installed vault on 2026-09-27 was 977 392
@@ -359,9 +359,12 @@ def _validate_active_database_reference(
             contract=contract,
         )
     ) as database:
+        database.execute("BEGIN")
         complete = _database_schema_complete(database_name, database)
         integrity = database.execute("PRAGMA integrity_check").fetchall()
         foreign_keys = database.execute("PRAGMA foreign_key_check").fetchall()
+        if database_name == "coordinator":
+            markdown_transaction._require_v3_logical_invariants(database)
         observed = {
             "application_id": database.execute("PRAGMA application_id").fetchone()[0],
             "user_version": database.execute("PRAGMA user_version").fetchone()[0],
@@ -516,12 +519,26 @@ def _database_record_name(item: object) -> str:
     return name
 
 
-def _expected_schema_digests() -> dict[str, str]:
+def _expected_schema_digests(schema: Path = _ADOPTION_SCHEMA) -> dict[str, str]:
     return {
         "queue_schema_sha256": memory_queue.QUEUE_V3_SCHEMA_SHA256,
         "coordinator_schema_sha256": markdown_transaction.COORDINATOR_V3_SCHEMA_SHA256,
-        "adoption_schema_sha256": sha256_bytes(_ADOPTION_SCHEMA.read_bytes()),
+        "adoption_schema_sha256": sha256_bytes(schema.read_bytes()),
     }
+
+
+def _adoption_schema(record: dict[str, object]) -> Path:
+    schemas = record.get("schemas")
+    if not isinstance(schemas, dict):
+        raise ValueError("adoption schema digests missing")
+    supported = {
+        sha256_bytes(path.read_bytes()): path
+        for path in (_ADOPTION_SCHEMA, _WAL_ADOPTION_SCHEMA)
+    }
+    try:
+        return supported[schemas.get("adoption_schema_sha256")]
+    except (KeyError, TypeError) as exc:
+        raise ValueError("adoption schema digest is unsupported") from exc
 
 
 def _require_adoption_sources(
@@ -553,7 +570,7 @@ def _require_adoption_sources(
     installation and fails closed; a changed one is an ordinary update.
     """
     schemas = adoption.get("schemas")
-    if not isinstance(schemas, dict) or schemas != _expected_schema_digests():
+    if not isinstance(schemas, dict) or schemas != _expected_schema_digests(_adoption_schema(adoption)):
         raise ValueError("adoption schema digests changed")
     if _kind(root / "scripts" / "integration_adapter.py") != "file":
         raise ValueError("installed integration is missing")
@@ -971,6 +988,14 @@ def require_reliability_v3_adopted(
 
 
 def _load_complete_adoption(*, root: Path, state_root: Path) -> dict[str, object]:
+    from reliable_memory import require_no_journal_migration
+
+    require_no_journal_migration(state_root)
+    return _read_complete_adoption(root=root, state_root=state_root)
+
+
+def _read_complete_adoption(*, root: Path, state_root: Path) -> dict[str, object]:
+    """Full validation, also used under the offline journal-migration fence."""
     vault = root.resolve(strict=True)
     state = state_root.absolute()
     paths = _paths(state)
@@ -983,7 +1008,7 @@ def _load_complete_adoption(*, root: Path, state_root: Path) -> dict[str, object
         paths["migration"], state, schema=_MIGRATION_SCHEMA, max_bytes=_MAX_RECORD_BYTES
     )
     adoption = _read_record(
-        paths["adoption"], state, schema=_ADOPTION_SCHEMA, max_bytes=_MAX_RECORD_BYTES
+        paths["adoption"], state, schema=_adoption_schema(migration), max_bytes=_MAX_RECORD_BYTES
     )
     return _validate_complete_adoption(
         root=vault,
@@ -1071,19 +1096,20 @@ def _scan_bounded_entries(
     directory: Path, *, state_root: Path, deadline: float
 ) -> list[Path]:
     entries: list[Path] = []
+    resolved_root = state_root.resolve(strict=True)
     with os.scandir(directory) as scanned:
         for entry in scanned:
             _check_deadline(deadline)
-            if len(entries) >= _MAX_RUNTIME_ENTRIES:
-                raise ValueError("runtime artifact scan exceeded its bound")
-            entries.append(_contained_runtime_entry(entry.path, state_root))
+            entries.append(_contained_runtime_entry(entry.path, resolved_root))
+    if state_root.resolve(strict=True) != resolved_root:
+        raise PermissionError("runtime state root changed during observation")
     return entries
 
 
-def _contained_runtime_entry(value: str, state_root: Path) -> Path:
+def _contained_runtime_entry(value: str, resolved_root: Path) -> Path:
     path = Path(value)
     try:
-        path.resolve(strict=True).relative_to(state_root.resolve(strict=True))
+        path.resolve(strict=True).relative_to(resolved_root)
     except (OSError, ValueError) as exc:
         raise PermissionError("runtime artifact escaped the state root") from exc
     return path
@@ -1274,11 +1300,13 @@ def validate_coordinator_v3_runtime(
     blockers: set[str] = set()
     try:
         state = Path(state_root)
+        entries = _artifact_entries(state, deadline)
+        artifact_ids = _artifact_ids(entries)
         database_blockers, known, retained = _coordinator_database_blockers(
-            state, now, deadline, excluded_owner
+            state, now, deadline, excluded_owner, artifact_ids
         )
         blockers.update(database_blockers)
-        blockers.update(_transaction_artifact_blockers(state, deadline, known, retained))
+        blockers.update(_transaction_artifact_blockers(entries, artifact_ids, known, retained))
     except TimeoutError:
         raise
     except (OSError, PermissionError, sqlite3.Error, ValueError):
@@ -1291,6 +1319,7 @@ def _coordinator_database_blockers(
     now: datetime,
     deadline: float,
     excluded_owner: OwnerLease | None,
+    artifact_ids: set[str],
 ) -> tuple[set[str], set[str], set[str]]:
     path = state_root / "run" / "markdown-transactions-v3.sqlite3"
     with contextlib.closing(
@@ -1308,12 +1337,12 @@ def _coordinator_database_blockers(
             database, state_root, now, deadline
         )
         blockers.update(transaction_blockers)
-        known |= _recorded_transactions(database, _artifact_ids(state_root, deadline) - known)
+        known |= _recorded_transactions(database, artifact_ids - known)
     return blockers, known, retained
 
 
-def _artifact_ids(state_root: Path, deadline: float) -> set[str]:
-    return {_transaction_artifact_id(entry) for entry in _artifact_entries(state_root, deadline) if not _staged_prune(entry)}
+def _artifact_ids(entries: list[Path]) -> set[str]:
+    return {_transaction_artifact_id(entry) for entry in entries if not _staged_prune(entry)}
 
 
 def _artifact_entries(state_root: Path, deadline: float) -> list[Path]:
@@ -1446,13 +1475,12 @@ def _validate_abort_receipt(
 
 
 def _transaction_artifact_blockers(
-    state_root: Path,
-    deadline: float,
+    entries: list[Path],
+    artifact_ids: set[str],
     known: set[str],
     retained: set[str],
 ) -> set[str]:
-    artifact_ids = _artifact_ids(state_root, deadline)
-    staged = any(_staged_prune(entry) for entry in _artifact_entries(state_root, deadline))
+    staged = any(_staged_prune(entry) for entry in entries)
     findings = (
         (staged, "transaction_prune_interrupted"),
         (bool(retained & artifact_ids), "transaction_artifact_retained"),
@@ -2298,13 +2326,32 @@ def inspect_installed_vault(*, root: Path, state_root: Path) -> dict[str, object
     """Run bounded Reliability V3 validation without creating or mutating state."""
     try:
         return _inspect_installed_vault(root=Path(root), state_root=Path(state_root))
-    except Exception:  # noqa: BLE001 - closed read-only inspection envelope
+    except Exception as error:  # noqa: BLE001 - closed read-only inspection envelope
+        return _inspection_failure(error)
+
+
+def _inspection_failure(error: Exception) -> dict[str, object]:
+    if _database_contention(error):
         return _report(
-            mode="check",
-            status="error",
-            state="conflict",
-            blockers=["reliability_v3_record_invalid"],
+            mode="check", status="error", state="busy",
+            blockers=["operational_database_busy"],
         )
+    return _report(
+        mode="check", status="error", state="conflict",
+        blockers=["reliability_v3_record_invalid"],
+    )
+
+
+def _database_contention(error: Exception) -> bool:
+    if not isinstance(error, sqlite3.OperationalError):
+        return False
+    code = getattr(error, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return code & 0xFF in (5, 6)  # SQLite's stable BUSY and LOCKED primary codes.
+    # Python 3.10 predates sqlite_errorcode; recognize only SQLite's lock errors.
+    return str(error) in {
+        "database is locked", "database table is locked", "database schema is locked",
+    }
 
 
 def _inspect_installed_vault(*, root: Path, state_root: Path) -> dict[str, object]:
@@ -2453,7 +2500,7 @@ def _inspect_adopted(
     if _kind(paths["adoption"]) != "file":
         raise ValueError("adoption record path has the wrong kind")
     adoption = _read_record(
-        paths["adoption"], state, schema=_ADOPTION_SCHEMA, max_bytes=_MAX_RECORD_BYTES
+        paths["adoption"], state, schema=_adoption_schema(migration), max_bytes=_MAX_RECORD_BYTES
     )
     _validate_complete_adoption(
         root=vault,

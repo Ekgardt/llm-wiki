@@ -49,6 +49,42 @@ def test_failure_is_recorded_in_trail_and_counter(diagnostics):
     assert state["capture_failures"]["user_prompt_append"]["count"] == 1
 
 
+def _writer_timeout():
+    private_payload = "session-content-must-not-be-logged"
+    assert private_payload
+    raise TimeoutError("transaction mutation deadline or cancellation reached")
+
+
+def _adoption_timeout():
+    raise TimeoutError("transaction mutation deadline or cancellation reached")
+
+
+@pytest.mark.parametrize("failure", [_writer_timeout, _adoption_timeout])
+def test_failure_call_path_identifies_stage_without_payload(diagnostics, failure):
+    module, _ = diagnostics
+    try:
+        failure()
+    except TimeoutError as error:
+        module.record_capture_failure("post_tool_append", str(error), error=error)
+
+    written = module.FAILURE_LOG.read_text(encoding="utf-8")
+    entry = json.loads(written)
+    frames = entry["call_path"].split(" > ")
+    assert frames[-1].split(":")[0] == failure.__name__
+    assert frames[-1].split(":")[1].isdigit()
+    assert "session-content-must-not-be-logged" not in written
+    assert __file__ not in written
+    assert "raise TimeoutError" not in written
+
+
+@pytest.mark.parametrize("error", [None, TimeoutError("not raised")])
+def test_failure_without_traceback_keeps_empty_call_path(diagnostics, error):
+    module, _ = diagnostics
+    module.record_capture_failure("post_tool_append", "timeout", error=error)
+    entry = json.loads(module.FAILURE_LOG.read_text(encoding="utf-8"))
+    assert entry["call_path"] == ""
+
+
 def test_counter_accumulates_and_surfaces_a_session_line(diagnostics):
     module, state = diagnostics
 
@@ -57,7 +93,7 @@ def test_counter_accumulates_and_surfaces_a_session_line(diagnostics):
 
     assert module.capture_failure_totals(state) == {"post_tool_append": 3}
     line = module.capture_failure_line(state)
-    assert "3 capture(s) lost" in line
+    assert "3 capture failure event(s)" in line
     assert "post_tool_append 3" in line
 
 
@@ -150,7 +186,7 @@ def test_session_start_shows_lost_captures(monkeypatch):
 
     block = session_start_context.metacognitive_block()
 
-    assert "2 capture(s) lost" in block
+    assert "2 capture failure event(s)" in block
 
 
 def test_session_start_stops_naming_a_loss_that_stopped_happening(monkeypatch):
@@ -173,7 +209,7 @@ def test_session_start_stops_naming_a_loss_that_stopped_happening(monkeypatch):
 
     block = session_start_context.metacognitive_block()
 
-    assert "capture(s) lost" not in block
+    assert "capture failure event(s)" not in block
 
 
 def test_a_capture_lost_today_is_live_and_one_lost_last_month_is_not():

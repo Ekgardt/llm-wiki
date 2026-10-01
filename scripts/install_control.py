@@ -4536,6 +4536,18 @@ def _inactive_install_health_for_schema(
 
 
 def _validate_install_records(install_root: Path) -> dict[str, object]:
+    from operational_journal_migration import journal_migration_pending
+
+    if journal_migration_pending(install_root):
+        codes = ["operational_journal_migration_pending"]
+        return _install_health("pending", "error", codes, codes)
+    return _validate_standard_install_records(install_root)
+
+
+def _validate_standard_install_records(install_root: Path) -> dict[str, object]:
+    from operational_journal_migration import retained_journal_entries
+
+    retained_journal_entries(install_root)
     manifest = _optional_install_record(install_root / "manifest.json", "install-manifest/")
     transaction = _optional_install_record(
         install_root / "transaction.json", "install-transaction/"
@@ -4548,10 +4560,19 @@ def _validate_install_records(install_root: Path) -> dict[str, object]:
 
 
 def _empty_install_root_health(install_root: Path) -> dict[str, object]:
-    entries = {entry.name for entry in install_root.iterdir()}
+    from operational_journal_migration import retained_journal_entries
+
+    retained = retained_journal_entries(install_root)
+    entries = {entry.name for entry in install_root.iterdir()} - retained
     if entries <= {"install.lock", "preimages", "scheduler"}:
-        return _install_health("absent", "ok", [], [])
+        return _journal_only_install_health(retained)
     raise InstallControlError("install_artifact_state_unknown")
+
+
+def _journal_only_install_health(retained: set[str]) -> dict[str, object]:
+    if retained:
+        return _install_health("absent", "ok", [], ["install_manifest_retained"])
+    return _install_health("absent", "ok", [], [])
 
 
 def _install_root_kind(install_root: Path) -> str:

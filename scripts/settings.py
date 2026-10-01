@@ -121,6 +121,8 @@ REGISTRY: tuple[Setting, ...] = (
     Setting("retention", "config_backup_days", 90, "days", "agent-config backups undo an installer rewrite; the archive's 90 hot days"),
     Setting("provider", "draft_ceiling_seconds", 600, "seconds", _DRAFT_CEILING_REASON),
     Setting("mcp", "retrieval_seconds", 14, "seconds", _RETRIEVAL_BUDGET_REASON, lower=5),
+    Setting("mcp", "doctor_seconds", 10, "seconds", "full current health and runtime validation; tune to measured ledger/artifact size, not just model latency", lower=2),
+    Setting("mcp", "doctor_return_seconds", 1, "seconds", "return the health report before the caller deadline; a bounded scan returned 0.239s past its check budget on 2026-10-01"),
 )
 _BY_NAME = {setting.name: setting for setting in REGISTRY}
 _SECTIONS = frozenset(setting.section for setting in REGISTRY)

@@ -55,7 +55,7 @@ def test_the_repairs_after_a_failed_one_still_run(tmp_path: Path) -> None:
     assert "catalog is unreadable" in context.repair_errors["generations"][0]
 
 
-def test_the_failed_repair_is_named_and_its_checks_marked_deferred(
+def test_the_failed_repair_is_named_without_claiming_lock_contention(
     tmp_path: Path,
 ) -> None:
     """Filed under `runtime`, a generation fault read as a runtime fault."""
@@ -67,7 +67,7 @@ def test_the_failed_repair_is_named_and_its_checks_marked_deferred(
     assert (
         "runtime" in context.repair_errors,
         context.repair_deferred,
-    ) == (False, {"generation"})
+    ) == (False, set())
 
 
 @pytest.mark.parametrize(
@@ -129,3 +129,32 @@ def test_the_index_lock_is_released_even_when_the_fence_was_lost(
         guard.cleanup(lambda: released.append("lock"))
 
     assert released == ["lock"]
+
+
+@pytest.mark.parametrize('action, check_id', [
+    ('runtime', 'runtime'), ('transactions', 'transactions'), ('queue', 'queue'),
+    ('indexes', 'claims'), ('archives', 'archives'), ('generations', 'generation'),
+])
+def test_repair_exception_reaches_its_public_check(tmp_path: Path, action: str, check_id: str) -> None:
+    context = _context(tmp_path)
+    check = doctor._result(check_id, 'ok', 'Original check passed.', {})
+
+    doctor._repair_or_record(action, _raises(ValueError('catalog is unreadable')), context)
+    doctor._apply_repair_outcomes([check], context)
+
+    assert check['status'] == 'error'
+    assert check['message'] == f'{check_id.title()} repair failed.'
+    assert 'catalog is unreadable' in check['details']['repair_errors'][0]
+    assert not check['details'].get('repair_deferred', False)
+
+
+def test_busy_repair_owner_remains_deferred_without_an_invented_error(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    check = doctor._result('generation', 'ok', 'Original check passed.', {})
+    doctor._defer_all_repairs(context)
+
+    doctor._apply_repair_outcomes([check], context)
+
+    assert check['status'] == 'degraded'
+    assert check['details'] == {'repair_deferred': True}
+    assert 'another owner' in check['message']

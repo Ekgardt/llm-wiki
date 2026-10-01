@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from functools import partial
@@ -105,6 +105,8 @@ def build_session_start_context(slug: str | None = None) -> Sequence[Any]:
     return build_context_items(slug)
 
 
+# Prompt occurrence identity belongs in source_event_id, not in its payload:
+# the prompt payload hash is also the existing content-based rate-limit key.
 OCCURRENCE_EVENTS = EVENTS - {"user_prompt"}
 CHECKPOINT_SIGNAL_FIELDS = frozenset(
     {
@@ -500,8 +502,7 @@ def normalize_occurrence_event(
     """Assign missing occurrence identity once at the outer adapter boundary."""
     normalized_raw = raw
     if (
-        event in OCCURRENCE_EVENTS
-        and occurred_at is None
+        occurred_at is None
         and raw.get("timestamp") is None
         and _source_event_id(raw) is None
     ):
@@ -1389,10 +1390,12 @@ PENDING_CLAIM_WINDOW = 100
 def _debounce_due(
     items: Sequence[Mapping[str, object]],
     reducers: Mapping[str, CheckpointReducer],
+    observed_at: datetime | None = None,
 ) -> tuple[int | None, CheckpointDecision | None, bool]:
     """Flush the newest item when any pending delta is due, else keep waiting."""
     latest = datetime.fromisoformat(str(items[-1]["occurred_at"]))
-    due = _any_delta_due(items, reducers, latest) or len(items) >= (
+    decision_time = latest if observed_at is None else max(latest, observed_at)
+    due = _any_delta_due(items, reducers, decision_time) or len(items) >= (
         MAX_PENDING_CHECKPOINT_ITEMS
     )
     if due:
@@ -1405,12 +1408,13 @@ def _resolve_debounce(
     reducers: Mapping[str, CheckpointReducer],
     index: int | None,
     decision: CheckpointDecision | None,
+    observed_at: datetime | None = None,
 ) -> tuple[int | None, CheckpointDecision | None, bool]:
     if index is not None:
         return index, decision, False
     if not _any_pending_delta(items):
         return None, None, False
-    return _debounce_due(items, reducers)
+    return _debounce_due(items, reducers, observed_at)
 
 
 def _any_pending_delta(items: Sequence[Mapping[str, object]]) -> bool:
@@ -1622,13 +1626,14 @@ def _checkpoint_plan(
     items: list[dict[str, object]],
     reducer_states: dict[str, object],
     inflight: Mapping[str, object],
+    observed_at: datetime | None = None,
 ):
     """The batch to write: the in-flight one when it still heads the queue, else a fresh plan."""
     replayed = _inflight_plan(items, reducer_states, inflight)
     if replayed is not None:
         return replayed
     reducers, decisions, index, decision = _observe_until_checkpoint(items, reducer_states)
-    index, decision, waiting = _resolve_debounce(items, reducers, index, decision)
+    index, decision, waiting = _resolve_debounce(items, reducers, index, decision, observed_at)
     if waiting:
         return None
     return _batch_plan(items, reducer_states, reducers, decisions, index, decision)
@@ -1698,11 +1703,12 @@ def _drain_project_checkpoint_once(
     owner: str,
     writer_wait_seconds: float | None,
     state_lock_seconds: float = PENDING_STATE_LOCK_SECONDS,
+    observed_at: datetime | None = None,
 ) -> bool:
     claimed = _claim_pending(queue_key, owner, state_lock_seconds)
     if claimed is None:
         return False
-    plan = _checkpoint_plan(*claimed)
+    plan = _checkpoint_plan(*claimed, observed_at=observed_at)
     if plan is None:
         _release_pending_claims(queue_key, owner, state_lock_seconds)
         return False
@@ -1730,10 +1736,11 @@ def _drain_project_checkpoints(
     writer_wait_seconds: float | None = None,
     state_lock_seconds: float = PENDING_STATE_LOCK_SECONDS,
     deadline: float | None = None,
+    observed_at: datetime | None = None,
 ) -> None:
     owner = f"{os.getpid()}:{secrets.token_hex(8)}"
     while _drain_project_checkpoint_once(
-        slug, queue_key, owner, writer_wait_seconds, state_lock_seconds
+        slug, queue_key, owner, writer_wait_seconds, state_lock_seconds, observed_at
     ):
         if deadline is not None and time.monotonic() >= deadline:
             return
@@ -1794,6 +1801,7 @@ def _drain_one_backlog(slug: str, deadline: float, failed: dict[str, str]) -> in
             slug,
             state_lock_seconds=BACKLOG_STATE_LOCK_SECONDS,
             deadline=deadline,
+            observed_at=datetime.now().astimezone(),
         )
     except Exception as error:  # noqa: BLE001
         failed[slug] = _bounded_checkpoint_error(error)
@@ -2699,6 +2707,70 @@ def _require_stable_transcript(before: os.stat_result, after: os.stat_result) ->
         raise ValueError("capture transcript changed while it was read")
 
 
+def _require_transcript_growth(before: os.stat_result, after: os.stat_result) -> None:
+    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        raise ValueError("capture transcript changed while it was read")
+    if after.st_size <= before.st_size:
+        raise ValueError("capture transcript changed while it was read")
+
+
+def _verified_capture_windows(
+    descriptor: int,
+    before: os.stat_result,
+    spans: Sequence[tuple[int, int]],
+    windows: list[bytes],
+) -> None:
+    """Accept growth only when the original windows match a stable second read."""
+    after = os.fstat(descriptor)
+    try:
+        _require_stable_transcript(before, after)
+    except ValueError:
+        _require_transcript_growth(before, after)
+    verified = [_read_transcript_edge(descriptor, offset, size) for offset, size in spans]
+    _require_stable_transcript(after, os.fstat(descriptor))
+    if verified != windows:
+        raise ValueError("capture transcript changed while it was read")
+
+
+def _read_capture_windows(
+    path: Path, span_builder: Callable[[int], Sequence[tuple[int, int]]]
+) -> tuple[list[bytes], int]:
+    from bounded_io import (
+        _file_identity,
+        _require_opened_identity,
+        _require_regular_file,
+        _require_safe_ancestors,
+        _require_same_file_at_path,
+    )
+
+    label = "capture transcript"
+    _require_safe_ancestors(path, label, None)
+    before = path.lstat()
+    _require_regular_file(path, before, label)
+    spans = span_builder(before.st_size)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        _require_opened_identity(descriptor, _file_identity(before), label)
+        windows = [_read_transcript_edge(descriptor, offset, size) for offset, size in spans]
+        _verified_capture_windows(descriptor, before, spans, windows)
+        _require_same_file_at_path(path, _file_identity(before), label)
+        return windows, before.st_size
+    finally:
+        os.close(descriptor)
+
+
+def _transcript_prefix_span(size: int, limit: int) -> tuple[tuple[int, int], ...]:
+    if size > limit:
+        raise ValueError(f"capture transcript exceeds {limit} bytes")
+    return ((0, size),)
+
+
+def _transcript_edge_spans(size: int, side: int) -> tuple[tuple[int, int], ...]:
+    scan = min(side * EDGE_SCAN_WINDOWS, size // 2)
+    return ((0, scan), (size - scan, scan))
+
+
 # How far past its window an edge of a long transcript is searched for turns. A
 # session's head can be all `file-history-snapshot` records; measured on this
 # machine on 2026-09-26, two of six transcripts over the capture bound held no
@@ -2710,17 +2782,9 @@ EDGE_SCAN_WINDOWS = 16
 
 def _read_transcript_edges(path: Path, side: int) -> tuple[bytes, bytes, int]:
     """Head and tail of a transcript too large to hold whole, each of its turns."""
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
-    try:
-        before = os.fstat(descriptor)
-        scan = min(side * EDGE_SCAN_WINDOWS, before.st_size // 2)
-        head = _read_transcript_edge(descriptor, 0, scan)
-        tail = _read_transcript_edge(descriptor, before.st_size - scan, scan)
-        _require_stable_transcript(before, os.fstat(descriptor))
-    finally:
-        os.close(descriptor)
-    return _turns_head(head, side), _turns_tail(tail, side), before.st_size
+    windows, size = _read_capture_windows(path, lambda size: _transcript_edge_spans(size, side))
+    head, tail = windows
+    return _turns_head(head, side), _turns_tail(tail, side), size
 
 
 def _turn_lines(lines: Iterable[bytes], side: int) -> list[bytes]:
@@ -2812,11 +2876,10 @@ def _capture_transcript_text(path: Path, limit: int = MAX_CAPTURE_EVIDENCE_BYTES
     `limit` is the bound this read keeps to; it is lowered when the text grew too
     much inside its JSON record (`_fitting_capture_record`).
     """
-    from bounded_io import read_stable_bytes
-
     if path.stat().st_size > limit:
         return _capture_excerpt_text(path, limit)
-    return _evidence_text(read_stable_bytes(path, limit, label="capture transcript"))
+    windows, _size = _read_capture_windows(path, lambda size: _transcript_prefix_span(size, limit))
+    return _evidence_text(windows[0])
 
 
 def _capture_path_evidence(
@@ -2910,20 +2973,17 @@ def _capture_source_record(
 
 
 def _encoded_capture_record(source: Mapping[str, object]) -> tuple[dict[str, object], bytes]:
-    from reliable_memory import canonical_json_bytes, sha256_bytes, validate_schema
+    from reliable_memory import (
+        canonical_json_bytes,
+        capture_intent_identity,
+        sha256_bytes,
+        validate_schema,
+    )
 
     evidence = source["evidence"]
     complete_digest = sha256_bytes(canonical_json_bytes(dict(source)))
     chunk_digest = sha256_bytes(canonical_json_bytes(evidence))
-    identity = {
-        "schema_version": "capture-intent/v1",
-        "source_occurrence_id": source["source_occurrence_id"],
-        "source_event_id": source["source_event_id"],
-        "occurred_at": source["occurred_at"],
-        "checkpoint_reason": source["checkpoint_reason"],
-        "chunk_index": source["chunk_index"],
-        "chunk_sha256": chunk_digest,
-    }
+    identity = capture_intent_identity(source, chunk_digest)
     intent_id = sha256_bytes(canonical_json_bytes(identity))
     record = {
         "schema_version": "capture-intent/v1",
@@ -3593,6 +3653,8 @@ def _run_cli_event(args: argparse.Namespace) -> dict[str, object] | None:
         return None
     raw = _apply_checkpoint_arg(_read_hook_input(), args.checkpoint_type)
     envelope = normalize_occurrence_event(args.source, args.event, raw)
+    args.capture_event_id = envelope.event_id
+    args.capture_session_id = envelope.session
     return _dispatch_cli_event(args, envelope)
 
 
@@ -3668,6 +3730,8 @@ def _record_cli_capture_failure(
             f"adapter_{_failed_operation(args)}",
             describe_error_chain(error),
             error=error,
+            event_id=getattr(args, "capture_event_id", None),
+            session_id=getattr(args, "capture_session_id", None),
         )
     except Exception:  # noqa: BLE001 - a lost trace must not lose the session
         pass

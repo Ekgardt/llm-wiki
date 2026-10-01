@@ -56,3 +56,40 @@ while keeping the failed unit visible for diagnosis — here the source-failure 
 
 - `scripts/compile_memory.py`
 - `tests/test_one_bad_day_does_not_hold_the_rest.py`
+
+## Follow-up qualification, 2026-09-29
+
+The independent-batch loop still called `_mark_finished` from `_failed_compile`.
+That changed the whole run to `error` and removed its PID lock while later batches
+were still running. A real pass stopped waiting for the compiler at its first
+validation failure; the compiler continued publishing afterwards without its lock.
+The missing lock, live process, scheduler timestamps and call chain distinguish
+this from a slow provider or an expired wait budget.
+
+Each failed batch now records its own durable source failure and carries its error
+in `BatchOutcome`. Only the end of the batch loop records the aggregate failure and
+releases the run lock. Packing failure and process-level exceptions still finish
+the entire run. A dry run records no source failure. Receipts and validation are
+unchanged, so resumed runs retain committed parts and retry pending parts.
+
+Reviewed primary references on 2026-09-29:
+
+- [Python fcntl](https://docs.python.org/3/library/fcntl.html): lock acquisition,
+  release and contention are distinct operations; an arbitrary exception is not
+  evidence that another owner holds a lock.
+- [Linux flock(2)](https://man7.org/linux/man-pages/man2/flock.2.html): ownership
+  lifetime and explicit release govern exclusion. This is an analogy for the
+  existing portable PID/token lock, not a claim that it is a kernel flock.
+- [SQLite rollback locking](https://www.sqlite.org/lockingv3.html): transaction
+  boundaries and lock lifetime are part of concurrency correctness; the product
+  continues to use its existing rollback-journal coordination contract.
+
+Alternatives: stopping at the first failed batch regresses independent progress;
+reacquiring the lock after each failure introduces an exclusion gap; replacing the
+cross-platform lock adds unrelated migration and compatibility work. Retaining
+one owner until the run ends is the smallest correction of the existing contract.
+No new dependency, retry limit, path, environment contract or runtime component.
+
+Regressions distinguish the old and corrected behavior using a real PID lock and
+run state, and verify aggregate failure after mixed failed/successful outcomes.
+Existing resumed-receipt, cancellation, MCP-entry and scheduler tests remain gates.

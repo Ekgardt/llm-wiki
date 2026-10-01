@@ -36,7 +36,8 @@ class _Recorder:
     def __call__(self, *args, **kwargs):
         self.cwds.append(kwargs.get("cwd"))
         self.commands.append(list(args[0]))
-        return subprocess.CompletedProcess(args=args or ("x",), returncode=0, stdout="", stderr="")
+        stdout = "[]" if list(args[0])[1:3] == ["mcp", "list"] else ""
+        return subprocess.CompletedProcess(args=args or ("x",), returncode=0, stdout=stdout, stderr="")
 
 
 @pytest.fixture
@@ -96,7 +97,7 @@ def test_the_codex_call_runs_outside_the_vault(
     prompt = tmp_path / "prompt.txt"
     prompt.write_text("hello", encoding="utf-8")
     llm_client._codex_last_message(["codex"], str(prompt), str(tmp_path / "out.txt"))
-    assert [_is_outside_the_vault(cwd) for cwd in recorder.cwds] == [True]
+    assert [_is_outside_the_vault(cwd) for cwd in recorder.cwds] == [True, True]
 
 
 @pytest.mark.parametrize("model", [None, "gpt-5.6-sol"])
@@ -106,8 +107,54 @@ def test_internal_codex_does_not_capture_its_own_classifier_session(
     monkeypatch.setattr(llm_client, "_find_codex_binary", lambda: "/usr/bin/codex")
     descriptor = replace(_descriptor(), provider="codex", model=model)
     llm_client._call_codex(descriptor, "Classify this captured session", "Classifier")
-    command, = recorder.commands
+    command, = [cmd for cmd in recorder.commands if cmd[1] == "exec"]
     offset = command.index("features.hooks=false")
     assert command[offset - 1] == "-c"
     assert command[command.index("--sandbox") + 1] == "read-only"
     assert command[:2] == ["/usr/bin/codex", "exec"]
+
+
+def test_internal_codex_disables_discovered_mcp_only_for_its_call(monkeypatch, tmp_path):
+    import json
+
+    calls = []
+    prompt = tmp_path / "prompt.txt"
+    output = tmp_path / "out.txt"
+    prompt.write_text("already supplied material")
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        if command[1:3] == ["mcp", "list"]:
+            return subprocess.CompletedProcess(command, 0, json.dumps([
+                {"name": "wiki.with.dots", "enabled": True},
+                {"name": "other", "enabled": False},
+            ]), "")
+        output.write_text("{\"answer\":true}")
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+
+    monkeypatch.setattr(llm_client, "_run_cli", run)
+    command = llm_client._codex_command("codex", "gpt-6-luna", "max", str(output))
+    assert llm_client._codex_last_message(command, str(prompt), str(output)) == '{"answer":true}'
+    assert calls[0][0] == ["codex", "mcp", "list", "--json"]
+    executed = calls[1][0]
+    assert 'mcp_servers={"wiki.with.dots"={enabled=false},"other"={enabled=false}}' in executed
+    assert "--ignore-user-config" not in executed
+    assert "--ephemeral" in executed
+    assert "gpt-6-luna" in executed and "model_reasoning_effort=max" in executed
+    assert all(_is_outside_the_vault(options["cwd"]) for _, options in calls)
+
+
+@pytest.mark.parametrize("inventory", ['{}', '[{}]', '[null]', '[{"name":""}]', 'not json'])
+def test_invalid_codex_inventory_fails_before_model_call(monkeypatch, tmp_path, inventory):
+    calls = []
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("private input")
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, inventory, "")
+
+    monkeypatch.setattr(llm_client, "_run_cli", run)
+    with pytest.raises(ValueError):
+        llm_client._codex_last_message(["codex", "exec"], str(prompt), str(tmp_path / "out"))
+    assert calls == [["codex", "mcp", "list", "--json"]]

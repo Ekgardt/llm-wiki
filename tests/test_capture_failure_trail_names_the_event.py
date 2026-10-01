@@ -54,13 +54,15 @@ def test_an_unparsed_argv_is_not_confused_with_a_missing_event() -> None:
 
 def test_the_trail_records_the_worker_label(monkeypatch) -> None:
     """End to end through the recorder the adapter actually calls."""
-    recorded: list[tuple[str, str, BaseException | None]] = []
+    recorded: list[tuple] = []
     import capture_diagnostics
 
     monkeypatch.setattr(
         capture_diagnostics,
         "record_capture_failure",
-        lambda kind, reason, *, error=None: recorded.append((kind, reason, error)),
+        lambda kind, reason, *, error=None, event_id=None, session_id=None: recorded.append(
+            (kind, reason, error, event_id, session_id)
+        ),
     )
     error = RuntimeError("intent_fence_lost")
 
@@ -68,4 +70,4 @@ def test_the_trail_records_the_worker_label(monkeypatch) -> None:
 
     # The exception itself travels with the record, so the outcome (lost or
     # deferred by a writer race) is decided by its type, not its text.
-    assert recorded == [("adapter_capture_worker", "RuntimeError: intent_fence_lost", error)]
+    assert recorded == [("adapter_capture_worker", "RuntimeError: intent_fence_lost", error, None, None)]

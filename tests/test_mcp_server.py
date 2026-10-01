@@ -2395,10 +2395,31 @@ class TestHandleToolCall:
 
         _assert_late_failure_stderr(capsys.readouterr().err, sensitive)
 
+    def test_doctor_status_isolated_from_the_model_interpreter(self, tmp_path, monkeypatch):
+        import doctor
+        import mcp_server
+
+        from tests.test_doctor import _build_root
+
+        root, state_root, _home = _build_root(tmp_path)
+        (state_root / "run" / "queue.sqlite3").write_bytes(b"not a SQLite database")
+
+        def unavailable_in_model_interpreter(**kwargs):
+            raise AssertionError("health ran inside the model interpreter")
+
+        monkeypatch.setattr(doctor, "run_doctor", unavailable_in_model_interpreter)
+        result = mcp_server._doctor_status({
+            "root": root, "state_root": state_root,
+            "deadline": time.monotonic() + SHORT_TIMEOUT, "limit": 30,
+        })
+
+        assert result["counts"]["error"] > 0
+        assert result["overall_status"] == "error"
+        assert "transactions" in result["ids"]
+
     def test_doctor_receives_exact_handler_deadline_after_dispatch_delay(
         self, monkeypatch
     ):
-        import doctor
         import mcp_server
 
         now = [100.0]
@@ -2425,13 +2446,58 @@ class TestHandleToolCall:
 
         monkeypatch.setattr(mcp_server, "time", Clock)
         monkeypatch.setattr(mcp_server, "_validate_tool_arguments", delayed_validate)
-        monkeypatch.setattr(doctor, "run_doctor", run_doctor)
+        monkeypatch.setattr(mcp_server, "_run_doctor_process", run_doctor)
 
         envelope = json.loads(self._run("doctor", {"action": "status"}))
 
         assert envelope["data"]["overall_status"] == "ok"
         assert captured[0]["deadline"] == 100.0 + mcp_server.MCP_OPERATION_SECONDS
         assert "time_budget_seconds" not in captured[0]
+
+    def test_doctor_process_preserves_roots_deadline_and_error_report(self, tmp_path, monkeypatch):
+        import mcp_server
+
+        deadline = time.monotonic() + SHORT_TIMEOUT
+        seen = {}
+        report = {"overall_status": "error", "checks": [], "counts": {"error": 1}}
+
+        def run(command, **kwargs):
+            seen.update(command=command, **kwargs)
+            return subprocess.CompletedProcess(command, 2, json.dumps(report), "")
+
+        monkeypatch.setattr(mcp_server.subprocess, "run", run)
+        actual = mcp_server._run_doctor_process(
+            root=tmp_path / "vault", state_root=tmp_path / "state", deadline=deadline,
+        )
+
+        assert actual == report
+        assert seen["command"][-2] == "--deadline"
+        assert deadline - 1.0 <= float(seen["command"][-1]) < deadline
+        assert seen["command"][0] == sys.executable
+        assert 0 < seen["timeout"] <= SHORT_TIMEOUT
+        assert seen["env"]["LLM_WIKI_ROOT"] == str(tmp_path / "vault")
+        assert seen["env"]["LLM_WIKI_STATE_ROOT"] == str(tmp_path / "state")
+        assert seen["env"]["PYTHONIOENCODING"] == "utf-8"
+
+    def test_doctor_process_timeout_is_an_operation_timeout(self, tmp_path, monkeypatch):
+        import mcp_server
+
+        def expired(command, **kwargs):
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+        monkeypatch.setattr(mcp_server.subprocess, "run", expired)
+        with pytest.raises(TimeoutError, match="doctor process reached"):
+            mcp_server._run_doctor_process(
+                root=tmp_path, state_root=tmp_path, deadline=time.monotonic() + SHORT_TIMEOUT,
+            )
+
+    @pytest.mark.parametrize("returncode,stdout", [(1, '{"overall_status":"ok"}'), (0, "broken JSON")])
+    def test_doctor_process_rejects_crashed_or_invalid_reports(self, returncode, stdout):
+        import mcp_server
+
+        completed = subprocess.CompletedProcess(["doctor"], returncode, stdout, "")
+        with pytest.raises((ValueError, RuntimeError)):
+            mcp_server._doctor_process_report(completed)
 
     def test_recall_exposes_validated_planner_trace_and_component_generation(self, monkeypatch):
         import mcp_server

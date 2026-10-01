@@ -127,3 +127,33 @@ its `owner.json` is gone — a prepare that failed before inserting its row. The
 nightly `_remove_unnamed_artifact_roots` retires such a root once it is an hour old.
 The earlier count of 70 came from listing after the copy, which the doctor note above
 already suspected; nothing is lost and nothing needs a new mechanism.
+
+## Runtime directory growth (2026-09-30 follow-up)
+
+Installed queue-results exceeded 10,000 entries. Doctor counted exactly 10,000
+and reported artifact_truncated; installed runtime inspection used the same
+unmeasured count ceiling and called the state unreadable. Retained successful
+captures are legitimate evidence, not files to delete to satisfy a health limit.
+
+Graph and source inspection followed capture terminal/decision publication into
+queue-results, doctor counting and transaction artifact comparison, and installed
+runtime deletion checks. Both checks already carry monotonic deadlines. Choose
+whole listings under those existing deadlines, preserving containment/type checks
+and explicit incomplete results. No new setting, storage location, or runtime
+contract is introduced. Raising the count ceiling merely moves the same failure;
+deleting valid evidence weakens retention. The archive's separate bag-selection
+policy is not changed by this runtime-directory repair.
+
+Primary sources checked 2026-09-30:
+- Python os.scandir documentation: iterator enumeration, arbitrary order and
+  unspecified visibility of concurrent changes; do not infer absence from a
+  prefix. https://docs.python.org/3/library/os.html#os.scandir
+- Linux readdir manual: stream traversal returns successive entries until the end;
+  ordering is filesystem-dependent. https://man7.org/linux/man-pages/man3/readdir.3.html
+- Google SRE, Handling Overload: propagate deadlines and stop work once its
+  resource budget expires. https://sre.google/sre-book/handling-overload/
+
+The retained identifier set is necessary for ledger/filesystem reconciliation;
+queue counting needs no independent record cap. An expired deadline, unsafe entry,
+or I/O error remains a refusal, never a successful partial scan. Tests cross the
+old 10,000 boundary and retain deadline and path-safety failures.

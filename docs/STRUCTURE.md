@@ -309,6 +309,11 @@ existing `run/queue-results/` proves committed Markdown, validated no-durable-co
 or explicit operator discard. Queue enqueue alone never permits intent deletion.
 Provider-derived `capture-decision/v1` records are published in `queue-results/`
 before side effects and reused after crashes.
+On adopted vaults, prompt and tool breadcrumbs use the same durable intent,
+queue, transaction and terminal path. Their `capture-breadcrumb-decision/v1`
+records describe deterministic appends without a model call. The original
+timestamp and bytes survive retry; see
+`docs/research/2026-09-30-breadcrumbs-survive-a-busy-writer.md`.
 Legacy `cache/transient-transcripts/` files are recovery input only; new capture work
 is not written to disposable cache.
 
@@ -359,8 +364,20 @@ reports an unconditional legacy-protocol blocker. The snapshot is not a durable 
 
 Operational migrations execute individual statements under explicit transactions,
 verify their complete invariant on every startup, and remain restartable after any
-statement. Operational databases remain rollback-journal, `synchronous=FULL`, local
-filesystem only, and no WAL. The listed v3 paths remain unavailable to normal runtime
+statement. Operational databases remain local-filesystem-only with `synchronous=FULL`.
+The owner authorized qualified WAL preparation for the two adopted v3 databases
+on 2026-09-30; this is not evidence of live cutover. The target preserves journal
+mode during ordinary opens and rejects unsafe SQLite versions and sidecars.
+Migration must quiesce canonical owners, durably coordinate both database modes
+with their adoption manifest, and resume or roll back after interruption.
+Migration evidence belongs under the existing `run/install/` directory. A private
+`operational-journal-pending.json` retains the immutable source records and target
+mode, blocking normal admission until verified completion. Completed evidence is
+retained as `operational-journal-<digest>.json` for recovery/audit. Adoption v2 pins
+WAL; immutable v1 remains necessary for unmigrated vaults and DELETE rollback.
+SQLite online backup and staged restore must pass before live migration.
+Other databases retain rollback-journal mode. See
+`knowledge/notes/operational-wal-preparation-20260930.md`. The listed v3 paths remain unavailable to normal runtime
 mutation until offline adoption, producer, replay, terminal, recovery, purge, and
 complexity verification pass. See
 `knowledge/notes/v4-reliability-contracts-decision.md` and
@@ -803,3 +820,14 @@ any of these appearing.
 
 Never skip steps 1-2. Architectural improvisation is the root cause of the
 most expensive bugs in this project's history.
+
+### Operator review of refused compile drafts
+
+`scripts/review_refused_compile.py TRANSACTION_ID --actor ACTOR --reason REASON`
+records an explicitly reviewed rejection of an entirely unapplied, quarantined
+compile. Review all intended output before invoking it. It writes an immutable
+`operator-review.json` beside that transaction's existing `plan.json`, binding
+its request and plan hashes. Doctor reports it as a reviewed rejection, never
+as a successful publication. Sources, quarantines and after-images stay retained;
+this command neither creates compile receipts nor permits runtime deletion.
+Automatic capture and compilation do not invoke this command.

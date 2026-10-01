@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
 
 try:
     import tomllib
@@ -34,6 +36,27 @@ def test_reranker_extra_owns_every_direct_import() -> None:
     names = {re.split(r"[<>=!~;\s\[]", value, maxsplit=1)[0].casefold() for value in reranker}
 
     assert names == {"tokenizers", "torch", "transformers"}
+
+
+def _exported_reranker_requirements() -> str:
+    return subprocess.run(
+        ["uv", "export", "--locked", "--no-default-groups", "--extra", "reranker",
+         "--no-hashes", "--no-emit-project"],
+        cwd=ROOT, check=True, capture_output=True, text=True,
+    ).stdout
+
+
+def _linux_torch_requirements(exported: str) -> list[Requirement]:
+    torch = [Requirement(line) for line in exported.splitlines() if line.startswith("torch==")]
+    return [requirement for requirement in torch if requirement.marker.evaluate({"sys_platform": "linux"})]
+
+
+def test_locked_cpu_reranker_does_not_install_cuda_dependencies() -> None:
+    exported = _exported_reranker_requirements()
+    selected = _linux_torch_requirements(exported)
+    assert len(selected) == 1
+    assert "+cpu" in str(selected[0].specifier)
+    assert not re.search(r"^(nvidia-|triton==)", exported, re.MULTILINE)
 
 
 def test_semantic_extra_owns_every_import_of_the_encoder() -> None:

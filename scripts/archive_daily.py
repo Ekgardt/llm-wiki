@@ -413,7 +413,8 @@ class DailyArchiver:
         """Every compile part of the day with its receipt, and what any part lacks."""
         parts: list[CompiledPart] = []
         reasons: list[str] = []
-        for start, end in _daily_part_bounds(content):
+        compiled = lambda digest: not self._receipt_reasons(logical_path, digest)[1]  # noqa: E731
+        for start, end in _daily_part_bounds(content, compiled):
             digest = sha256_bytes(content[start:end])
             receipt, part_reasons = self._receipt_reasons(logical_path, digest)
             parts.append(CompiledPart(start, end, digest, receipt))

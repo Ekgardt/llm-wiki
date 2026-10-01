@@ -479,8 +479,8 @@ def _fast_forward_over(root: Path, fetched: str, copies: list[str]) -> None:
 
 def _merged_update(root: Path, head: str, fetched: str, copies: list[str]) -> dict:
     changed = _changed_paths(root, head, fetched)
-    _fast_forward_over(root, fetched, copies)
     extras = chosen_extras(root)
+    _fast_forward_over(root, fetched, copies)
     return _outcome(
         "updated",
         None,

@@ -32,6 +32,100 @@ CANONICAL_ROLES = (
 )
 
 
+@pytest.mark.parametrize("role", ("capture", "project"))
+def test_retained_runtime_observation_admits_concurrent_capture(
+    tmp_path: Path, monkeypatch, role: str,
+) -> None:
+    import doctor
+    import installed_memory_repair
+    from operational_ownership import OwnershipRegistry
+
+    root, state_root = _vault(tmp_path)
+    build_adopted_reliability_v3(root, state_root)
+    retained = state_root / "run/queue-results/retained.json"
+    retained.parent.mkdir(parents=True)
+    retained.write_text("{}", encoding="utf-8")
+    registry = OwnershipRegistry._from_adopted_database(
+        state_root, state_root / "run/markdown-transactions-v3.sqlite3",
+    )
+    original = installed_memory_repair.validate_reliability_v3_runtime
+    admitted = []
+
+    def observe(**kwargs):
+        writer = registry.acquire(role, scope="concurrent-capture")
+        admitted.append(writer.role)
+        registry.release(writer)
+        return original(**kwargs)
+
+    monkeypatch.setattr(installed_memory_repair, "validate_reliability_v3_runtime", observe)
+    result = doctor._run_deletion_check(
+        state_root, datetime.now(timezone.utc), root=root,
+        collected={"queue": {"details": {"deletion_codes": ["queue_result_retained"]}}},
+    )
+
+    assert admitted == [role]
+    assert {"code": "queue_result_retained"} in result["blockers"]
+    assert result["quiescent"] is False
+    assert result["permit"] is False
+
+
+def test_expired_retention_observation_rechecks_under_exclusive_owner(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import doctor
+    import installed_memory_repair
+
+    root, state_root = _vault(tmp_path)
+    build_adopted_reliability_v3(root, state_root)
+    original = installed_memory_repair.validate_reliability_v3_runtime
+    owners = []
+
+    def observe(**kwargs):
+        owners.append(kwargs["excluded_owner"])
+        return original(**kwargs)
+
+    monkeypatch.setattr(installed_memory_repair, "validate_reliability_v3_runtime", observe)
+    result = doctor._run_deletion_check(
+        state_root, datetime.now(timezone.utc), root=root,
+        collected={"queue": {"details": {"deletion_codes": ["queue_result_retained"]}}},
+    )
+
+    assert len(owners) == 2
+    assert owners[0] is None
+    assert owners[1].role == "runtime-deletion-check"
+    assert result == {
+        "schema_version": "run-deletion-snapshot/v1",
+        "quiescent": True,
+        "permit": False,
+        "offline_action_required": True,
+        "blockers": [],
+    }
+
+
+def test_unreadable_retention_observation_never_proves_quiescence(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import doctor
+    import installed_memory_repair
+
+    root, state_root = _vault(tmp_path)
+    build_adopted_reliability_v3(root, state_root)
+
+    def unreadable(**kwargs):
+        assert kwargs["excluded_owner"] is None
+        raise ValueError("concurrent artifact changed")
+
+    monkeypatch.setattr(installed_memory_repair, "validate_reliability_v3_runtime", unreadable)
+    result = doctor._run_deletion_check(
+        state_root, datetime.now(timezone.utc), root=root,
+        collected={"queue": {"details": {"deletion_codes": ["queue_result_retained"]}}},
+    )
+
+    assert result["blockers"] == [{"code": "run_deletion_state_unknown"}]
+    assert result["quiescent"] is False
+    assert result["permit"] is False
+
+
 
 def _transaction_db(state_root: Path, now: datetime) -> Path:
     database = state_root / "run/markdown-transactions.sqlite3"

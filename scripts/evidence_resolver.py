@@ -6,7 +6,8 @@ import json
 import os
 import re
 import stat
-from collections.abc import Mapping
+from bisect import bisect_left, bisect_right
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -732,7 +733,7 @@ def _require_recorded_parts(spans: list[tuple[int, int]], payload: bytes) -> Non
         starts[:1] == [0] and ends[-1:] == [len(payload)],
         starts[1:] == ends[:-1],
         all(map(int.__lt__, starts, ends)),
-        set(starts) <= set(_daily_entry_offsets(payload)),
+        set(starts) <= set(_slice_offsets(payload)),
     )
     if not all(checks):
         raise EvidenceResolutionError("archive compile parts are not the day's parts")
@@ -1009,11 +1010,11 @@ def _require_bag_immutable(
 # evidence no reader could resolve.
 MAX_DAILY_PART_BYTES = 16 * 1024
 
-# How many parts a bounded day can split into. A part may be one short entry cut
-# off by a long one, but two neighbours always hold more than one part's bytes,
-# so the count stays under two per MAX_DAILY_PART_BYTES of the day. The archive
-# manifest v2 schema carries the same number as its `maxItems`.
-MAX_COMPILE_PARTS = 2 * (MAX_DAILY_BYTES // MAX_DAILY_PART_BYTES) + 1
+# The archive manifest schema carries this derived bound as its maxItems.
+# Preserving old marker-part boundaries can leave a short neighbour beside
+# each newly split oversized part. The old partition has at most 2N+1 parts;
+# splitting oversized members adds fewer than 2N parts (N = bytes / target).
+MAX_COMPILE_PARTS = 4 * (MAX_DAILY_BYTES // MAX_DAILY_PART_BYTES) + 1
 
 # What separates one captured entry from the next in a daily log.
 _DAILY_ENTRY_MARKER = b"<!-- llm-wiki-operation:"
@@ -1042,19 +1043,54 @@ def _daily_entry_offsets(content: bytes) -> list[int]:
     return offsets
 
 
-def _daily_part_bounds(content: bytes) -> list[tuple[int, int]]:
-    """The byte ranges this day is compiled in, split only where an entry ends."""
+def _marker_part_bounds(content: bytes) -> list[tuple[int, int]]:
+    """The persisted marker-only partition, retained to recognize old receipts."""
     if len(content) <= MAX_DAILY_PART_BYTES:
         return [(0, len(content))]
     offsets = [*_daily_entry_offsets(content), len(content)]
+    return _pack_entry_offsets(offsets)
+
+
+def _pack_entry_offsets(offsets: list[int]) -> list[tuple[int, int]]:
+    """Greedily pack entries, retaining the exact boundary bytes."""
     bounds: list[tuple[int, int]] = []
-    start = 0
+    start = offsets[0]
     for index in range(1, len(offsets)):
         if offsets[index] - start > MAX_DAILY_PART_BYTES and offsets[index - 1] > start:
             bounds.append((start, offsets[index - 1]))
             start = offsets[index - 1]
-    bounds.append((start, len(content)))
+    bounds.append((start, offsets[-1]))
     return bounds
+
+
+def _daily_part_bounds(
+    content: bytes, compiled: Callable[[str], bool] | None = None,
+) -> list[tuple[int, int]]:
+    """Split oversized uncommitted parts at either writer's entry boundaries.
+
+    Existing marker-sized parts and committed oversized parts keep their exact
+    identity. This lets an interrupted old run resume without repeating success.
+    """
+    return [
+        span
+        for start, end in _marker_part_bounds(content)
+        for span in _expanded_part_bounds(content, start, end, compiled)
+    ]
+
+
+def _expanded_part_bounds(
+    content: bytes, start: int, end: int, compiled: Callable[[str], bool] | None,
+) -> list[tuple[int, int]]:
+    if end - start <= MAX_DAILY_PART_BYTES:
+        return [(start, end)]
+    if compiled is not None and compiled(sha256_bytes(content[start:end])):
+        return [(start, end)]
+    offsets = _part_entry_offsets(content, start, end)
+    return _pack_entry_offsets(offsets)
+
+
+def _part_entry_offsets(content: bytes, start: int, end: int) -> list[int]:
+    return [start, *(offset for offset in _slice_offsets(content) if start < offset < end), end]
 
 
 def _entry_ends(content: bytes, offset: int) -> range:
@@ -1080,10 +1116,8 @@ def _entry_ends(content: bytes, offset: int) -> range:
 def _slice_offsets(content: bytes) -> list[int]:
     """Every place an entry begins, of either kind.
 
-    Deliberately not `_daily_entry_offsets`: that one defines how a day is
-    split for compilation (`_daily_part_bounds`), and that split must keep
-    meaning what it meant. This one only widens the search for a slice that
-    already exists.
+    Marker-only offsets are also retained for recognizing previously committed
+    parts. Both writers' boundaries are valid for new splits and historical reads.
     """
     offsets = set(_daily_entry_offsets(content))
     position = content.find(_DAILY_BLOCK_MARKER)
@@ -1093,27 +1127,20 @@ def _slice_offsets(content: bytes) -> list[int]:
     return sorted(offsets)
 
 
-def _slice_boundaries(content: bytes, start: int) -> list[int]:
-    """Where a historical slice beginning at `start` could have ended.
-
-    The end of the file is always a candidate, even when a day carries more
-    entries than the scan is allowed to try: the whole tail is the one slice a
-    compile part is most likely to have been.
-
-    Sorted and deduplicated because `_slice_from` hashes forward from one
-    candidate to the next and needs them ascending.
-    """
+def _slice_ends(content: bytes) -> list[int]:
+    """Compute historical end candidates once for the whole day's search."""
     ends: set[int] = set()
     for offset in _slice_offsets(content):
-        if offset > start:
-            ends.update(end for end in _entry_ends(content, offset) if end > start)
-    return [*sorted(ends)[: MAX_EVIDENCE_SLICE_CANDIDATES - 1], len(content)]
+        ends.update(_entry_ends(content, offset))
+    return sorted(ends)
 
 
-def _slice_from(content: bytes, start: int, digest: str) -> bytes | None:
+def _slice_from(content: bytes, start: int, digest: str, ends: list[int]) -> bytes | None:
+    first = bisect_right(ends, start)
+    boundaries = [*ends[first:first + MAX_EVIDENCE_SLICE_CANDIDATES - 1], len(content)]
     running = hashlib.sha256()
     cursor = start
-    for boundary in _slice_boundaries(content, start):
+    for boundary in boundaries:
         running.update(content[cursor:boundary])
         cursor = boundary
         if running.hexdigest() == digest:
@@ -1121,7 +1148,9 @@ def _slice_from(content: bytes, start: int, digest: str) -> bytes | None:
     return None
 
 
-def compile_part_slice(content: bytes, digest: str) -> bytes | None:
+def compile_part_slice(
+    content: bytes, digest: str, *, reference: EvidenceRef | None = None,
+) -> bytes | None:
     """The exact bytes one compile part held, in a day that has grown since.
 
     A page is written from one part of a day, so its evidence names that part's
@@ -1133,16 +1162,45 @@ def compile_part_slice(content: bytes, digest: str) -> bytes | None:
     present verbatim and in place, which is the append-only argument a
     transparency log makes with a consistency proof (RFC 6962).
     """
-    return _slice_at(content, [start for start, _end in _daily_part_bounds(content)], digest)
+    starts = _slice_offsets(content)
+    if reference is not None:
+        starts = _reference_first_starts(content, starts, reference)
+    return _slice_at(content, starts, digest)
+
+
+def _reference_first_starts(content: bytes, starts: list[int], ref: EvidenceRef) -> list[int]:
+    """Use the locator to order work, never to replace the digest proof."""
+    preferred: set[int] = set()
+    for block_id, start, end in daily_entries(content):
+        if block_id == ref.block_id:
+            preferred.update(_containing_part_starts(starts, start, end, ref))
+    return sorted(preferred) + [start for start in starts if start not in preferred]
+
+
+def _containing_part_starts(starts: list[int], start: int, end: int, ref: EvidenceRef) -> list[int]:
+    lower = bisect_left(starts, start - ref.byte_start)
+    upper = bisect_right(starts, end - ref.byte_end)
+    return starts[lower:upper]
 
 
 def _slice_at(content: bytes, starts: list[int], digest: str) -> bytes | None:
     """The first entry-aligned slice, from one of these part starts, whose bytes hash to `digest`."""
+    ends = _slice_ends(content)
     for start in starts:
-        found = _slice_from(content, start, digest)
+        found = _slice_from(content, start, digest, ends)
         if found is not None:
             return found
     return None
+
+
+def _reusable_flat_parts(
+    previous: bytes, current: bytes, parts: dict[str, bytes | None],
+) -> dict[str, bytes | None]:
+    if current == previous:
+        return parts
+    if current.startswith(previous):
+        return {digest: part for digest, part in parts.items() if part is not None}
+    return {}
 
 
 class EvidenceResolver:
@@ -1151,6 +1209,7 @@ class EvidenceResolver:
         self.state_root = state_root
         self.daily_root = self.vault / "knowledge" / "daily"
         self.archive_root = self.daily_root / "archive"
+        self._flat_parts: dict[Path, tuple[bytes, dict[str, bytes | None]]] = {}
 
     def resolve(self, reference: EvidenceRef | str) -> ResolvedEvidence:
         ref = EvidenceRef.parse(reference) if isinstance(reference, str) else reference
@@ -1163,12 +1222,25 @@ class EvidenceResolver:
         return self._resolve_flat(ref, content, flat)
 
     def _resolve_flat(self, ref: EvidenceRef, content: bytes, flat: Path):
-        if sha256_bytes(content) == ref.source_sha256:
+        current_digest = sha256_bytes(content)
+        if current_digest == ref.source_sha256:
             return self._slice(ref, content, flat, "flat")
-        part = compile_part_slice(content, ref.source_sha256)
+        part = self._flat_part(flat, content, ref)
         if part is None:
             raise EvidenceResolutionError("flat daily source hash mismatch")
         return self._slice(ref, part, flat, "flat-part")
+
+    def _flat_part(
+        self, flat: Path, content: bytes, ref: EvidenceRef,
+    ) -> bytes | None:
+        """Reuse proven slices after verified append; changed bytes invalidate them."""
+        previous, parts = self._flat_parts.get(flat, (b"", {}))
+        parts = _reusable_flat_parts(previous, content, parts)
+        self._flat_parts[flat] = (content, parts)
+        source_digest = ref.source_sha256
+        if source_digest not in parts:
+            parts[source_digest] = compile_part_slice(content, source_digest, reference=ref)
+        return parts[source_digest]
 
     def resolve_bytes(
         self,

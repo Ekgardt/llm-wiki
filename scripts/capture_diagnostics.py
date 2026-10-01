@@ -109,7 +109,9 @@ def is_contention(error: BaseException) -> bool:
 # a worker that fails leaves them for the next worker or for adoption: its failure
 # is retried work, never a lost capture, whatever it raised. See
 # `docs/research/2026-09-14-a-worker-that-failed-lost-no-capture.md`.
-DURABLE_WORK_KINDS = frozenset({"adapter_capture_worker"})
+# breadcrumb_dispatch is emitted only after re-reading and validating retained
+# immutable source bytes; an attempted publication alone never earns this label.
+DURABLE_WORK_KINDS = frozenset({"adapter_capture_worker", "breadcrumb_dispatch"})
 
 # Failures recorded in the same trail that are not captures: an MCP tool call
 # that raised, a telemetry write that failed. Counting them as lost captures
@@ -416,6 +418,18 @@ def _object_or_recorded(value: object, kind: str) -> dict:
     return {}
 
 
+def _failure_call_path(error: BaseException | None) -> str:
+    """Identify the failing stage without locals, source text, or file paths."""
+    if error is None:
+        return ""
+    frames: list[str] = []
+    frame = error.__traceback__
+    while frame is not None:
+        frames.append(f"{frame.tb_frame.f_code.co_name}:{frame.tb_lineno}")
+        frame = frame.tb_next
+    return " > ".join(frames)
+
+
 def record_capture_failure(
     kind: str,
     reason: str,
@@ -423,6 +437,7 @@ def record_capture_failure(
     error: BaseException | None = None,
     slug: str | None = None,
     session_id: str | None = None,
+    event_id: str | None = None,
 ) -> None:
     """Record one failed capture. Never raises — diagnostics never break a hook.
 
@@ -430,6 +445,9 @@ def record_capture_failure(
     deferred by a writer race; without it, a failure is a loss.
     """
     record = _failure_record(kind, reason, slug, session_id, _outcome_of(error, kind))
+    record["call_path"] = _failure_call_path(error)
+    if event_id:
+        record["event_id"] = redact_secrets(str(event_id))
     written: list[bool] = []
 
     def _under_the_state_lock(state: dict) -> None:
@@ -572,7 +590,7 @@ def _recent_loss(totals: dict[str, int], moment: str, now: datetime | None) -> b
 
 
 def capture_failure_line(state: dict) -> str:
-    """One SessionStart line naming lost captures, empty when nothing was lost.
+    """One SessionStart line naming failed attempts, not inferred unique losses.
 
     The count is cumulative and nothing clears it on its own, so the line has to
     say when this last happened. Without that, a loss fixed months ago reads
@@ -581,12 +599,13 @@ def capture_failure_line(state: dict) -> str:
     if not capture_failure_is_live(state):
         return ""
     totals = capture_failure_totals(state)
-    lost = sum(totals.values())
+    failures = sum(totals.values())
     detail = ", ".join(f"{kind} {count}" for kind, count in sorted(totals.items()))
     last_at = last_capture_failure_at(state)
     when = f", last at {last_at}" if last_at else ""
     return (
-        f"- **Capture**: ⚠️ {lost} capture(s) lost ({detail}{when}) — "
+        f"- **Capture**: ⚠️ {failures} capture failure event(s) ({detail}{when}); "
+        "retries are included, unique losses are not established — "
         f"{_trail_pointer()} Retire with "
         f"`uv run python scripts/capture_diagnostics.py --clear`."
     )

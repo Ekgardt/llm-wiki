@@ -126,8 +126,8 @@ def test_a_pool_that_fits_the_window_is_untouched() -> None:
     )
 
 
-def test_a_source_with_one_chunk_in_the_window_keeps_its_place() -> None:
-    """Only a chunk of a source that keeps another chunk inside is ever displaced."""
+def test_unique_sources_yield_only_when_repeats_cannot_make_room_for_coverage() -> None:
+    """Prefer removing a repeat, but do not protect irrelevant unique sources."""
     alone = (_chunk("Session two", 200), "nothing here")
     starved = [(_chunk("Session one", 0), "needle"), alone, (_chunk("Session three", 300), "thread")]
     roomy = [(_chunk("Session one", 0), "needle"), (_chunk("Session one", 100), "needle"), alone,
@@ -136,7 +136,8 @@ def test_a_source_with_one_chunk_in_the_window_keeps_its_place() -> None:
     kept = _ordered(starved, "needle thread", 2)
     made_room = _ordered(roomy, "needle thread", 3)
 
-    assert _ids(kept) == _ids(chunk for chunk, _ in starved)
+    assert _ids(kept[:2]) == _ids([starved[0][0], starved[2][0]])
+    assert _ids(kept[2:]) == _ids([alone[0]])
     assert [item.heading_path[0] for item in made_room[:3]] == ["Session one", "Session two", "Session three"]
 
 

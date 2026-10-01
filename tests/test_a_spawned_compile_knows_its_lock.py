@@ -103,3 +103,23 @@ def test_an_empty_lock_older_than_the_window_is_removed(lock_file) -> None:
 
     assert state[0] == "stale"
     assert not lock_file.exists()
+
+
+def test_direct_compile_reclaims_a_proven_dead_owner(lock_file):
+    import subprocess
+
+    with subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.read()"],
+        stdin=subprocess.PIPE,
+    ) as child:
+        maybe_compile._write_lock(child.pid)
+        child.communicate(timeout=10)
+    assert maybe_compile._lock_state()[0] == "stale"
+
+    token, reason = compile_memory._acquire_compile_lock()
+
+    assert token is not None and reason == "claimed"
+    assert maybe_compile._read_lock()["pid"] == os.getpid()
+    assert maybe_compile.lock_owner_token() == token
+    compile_memory._release_compile_lock(token)
+    assert not lock_file.exists()

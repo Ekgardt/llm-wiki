@@ -490,6 +490,13 @@ def test_secondary_search_context_is_retrieval_only_and_cannot_mutate():
     # A page a search found is not a claim: it contradicts nothing (audit A-13).
     assert (result.recommendation, result.lifecycle_mutations) == ("keep-both", ())
     assert result.evidence[0]["retrieval_only"] is True
+    without_context = pipeline.assess(claim("red"), include_retrieval_evidence=False)
+    assert (
+        without_context.contradiction_class,
+        without_context.recommendation,
+        without_context.lifecycle_mutations,
+    ) == (result.contradiction_class, result.recommendation, result.lifecycle_mutations)
+    assert without_context.evidence == ()
 
 
 def test_secondary_search_over_another_vault_scans_that_vault_only(tmp_path, monkeypatch):

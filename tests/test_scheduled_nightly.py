@@ -463,3 +463,71 @@ def _missing_report_lines(tmp_path) -> list[str]:
 def _lint_artifact(tmp_path) -> str:
     artifact = next((tmp_path / "logs" / "maintenance").glob("*-lint-*.err.log"))
     return artifact.read_text(encoding="utf-8")
+
+
+def _health_order_fixture(tmp_path, monkeypatch, state):
+    import doctor
+    import memory_state
+    import scheduled_nightly
+    import session_start_context
+
+    _redirected_night(tmp_path, monkeypatch)
+    memory_state.save_state(state)
+    monkeypatch.setattr(session_start_context, 'STATE_ROOT', tmp_path)
+    monkeypatch.setattr(scheduled_nightly, '_require_nightly_owner', lambda owner: None)
+    monkeypatch.setattr(scheduled_nightly, '_run_steps', lambda *args: 0)
+    monkeypatch.setattr(scheduled_nightly, '_refresh_generation', lambda log: 0)
+    monkeypatch.setattr(scheduled_nightly, '_compact_telemetry', lambda log: None)
+    measured = []
+
+    def measure(**kwargs):
+        status = memory_state.load_state()['last_nightly_status']
+        measured.append(status)
+        return {'overall_status': status, 'checks': []}
+
+    monkeypatch.setattr(doctor, 'run_doctor', measure)
+    return scheduled_nightly, session_start_context, measured
+
+
+@pytest.mark.parametrize('failures,expected', [(0, 'success'), (1, 'failed')])
+def test_stored_health_observes_this_nightly_result(tmp_path, monkeypatch, failures, expected):
+    nightly, context, measured = _health_order_fixture(
+        tmp_path, monkeypatch, {'last_nightly_status': 'previous'}
+    )
+
+    def completed_pass(*args):
+        log = nightly.StepLog(lambda line: None)
+        return nightly._post_compile_pass(None, log) + failures
+
+    monkeypatch.setattr(nightly, '_nightly_pass', completed_pass)
+
+    assert nightly._run_nightly_body(ownership=None) == failures
+    assert measured == [expected]
+    assert context._stored_health_report()[0]['overall_status'] == expected
+
+
+def test_stored_health_preserves_a_deferred_night(tmp_path, monkeypatch):
+    nightly, context, measured = _health_order_fixture(
+        tmp_path, monkeypatch,
+        {'last_nightly_status': 'previous', 'nightly_deferred_compile': 'saved-start'},
+    )
+    monkeypatch.setattr(nightly, '_nightly_pass', lambda *args: 0)
+
+    assert nightly._run_nightly_body(ownership=None) == 0
+    assert measured == ['deferred']
+    assert context._stored_health_report()[0]['overall_status'] == 'deferred'
+
+
+def test_stored_health_follows_a_failed_nightly_exception(tmp_path, monkeypatch):
+    nightly, context, measured = _health_order_fixture(
+        tmp_path, monkeypatch, {'last_nightly_status': 'success'}
+    )
+
+    def interrupted(*args):
+        raise RuntimeError('step failed')
+
+    monkeypatch.setattr(nightly, '_nightly_pass', interrupted)
+    with pytest.raises(RuntimeError, match='step failed'):
+        nightly._run_nightly_body(ownership=None)
+    assert measured == ['failed']
+    assert context._stored_health_report()[0]['overall_status'] == 'failed'

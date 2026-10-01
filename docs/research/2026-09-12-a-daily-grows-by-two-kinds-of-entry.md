@@ -66,3 +66,35 @@ slice ends at a capture block.
   reason.
 
 Files: `scripts/evidence_resolver.py`, `tests/test_evidence_resolver.py`.
+
+## 2026-09-30: retain verified historical slices during append
+
+A live structural lint spent several minutes in `_slice_from`, confirmed by
+py-spy. The resolver cached historical searches, but invalidated every result
+whenever a capture appended to the same daily. A regression first resolved a
+real historical reference, appended another entry, and failed on the old code
+because it repeated the digest search. This establishes redundant work, not a
+claim that it explains every slow operation or capture timeout.
+
+Keep one immutable source-byte snapshot per daily in the existing resolver
+cache. Reuse successful searches only when freshly read bytes start with the
+entire previous snapshot. Equal content also preserves negative results;
+append invalidates negative results because the missing part may now exist.
+Replacement, truncation and deletion retain normal validation/refusal. Every
+reference still passes block and byte-span checks. No persistent format,
+acceptance rule, runtime path, dependency or numeric limit changes.
+
+Alternatives: keeping the digest-only cache repeats quadratic searches during
+active capture; trusting file metadata misses edits; retaining negative results
+across append hides newly available evidence. The selected change spends one
+source-byte snapshot per daily for the resolver lifetime to avoid redundant
+searches, while comparing actual bytes rather than timestamps.
+
+Primary sources checked on 2026-09-30: [Python immutable bytes and startswith]
+(https://docs.python.org/3/library/stdtypes.html#bytes), [RFC 9162 consistency
+proofs](https://www.rfc-editor.org/rfc/rfc9162.html), and [NIST SHA-256 standard]
+(https://csrc.nist.gov/pubs/fips/180-4/upd1/final). RFC 9162 supersedes the older
+RFC 6962 cited in the implementation; neither implies that a raw prefix
+comparison is a Merkle proof. The invariant here is direct byte equality of
+the previously verified prefix. Python runtime is 3.14.6; no runtime upgrade
+is needed. Relevant evidence, claims and entry-boundary tests: 60 passed.

@@ -220,8 +220,10 @@ def test_check_is_default_dry_run_and_actions_are_ordered(tmp_path, monkeypatch)
     assert (bool(calls), _all_dry_run(calls)) == (True, True)
 
 
-def test_dependency_action_checks_lock_and_baseline_environment(tmp_path):
+@pytest.mark.parametrize("clock", [time.monotonic, lambda: 2040.001], ids=["live", "rounding-boundary"])
+def test_dependency_action_checks_lock_and_baseline_environment(tmp_path, monkeypatch, clock):
     sync_memory = _load_sync_memory()
+    monkeypatch.setattr(sync_memory, "time", SimpleNamespace(monotonic=clock))
     (tmp_path / "pyproject.toml").write_text(
         '[project]\ndependencies = ["mcp>=1.29,<2"]\n'
         '[project.optional-dependencies]\nmcp-server = []\n',
@@ -1117,3 +1119,30 @@ def test_sync_has_no_git_or_knowledge_mutation_code():
     forbidden = ("git ", "knowledge/", "knowledge\\", "write_text(", "write_bytes(", "[project.scripts]")
 
     assert [item for item in forbidden if item in source] == []
+
+
+def test_text_cli_keeps_the_generation_failure_reason(monkeypatch, capsys):
+    import sync_memory
+
+    report = {
+        'mode': 'apply', 'overall_status': 'error',
+        'actions': [{'id': 'indexes', 'status': 'error',
+                     'message': 'Evidence generation refresh failed.',
+                     'details': {'reason': 'PermissionError: synthetic artifact denied'}}],
+    }
+    monkeypatch.setattr(sync_memory, 'run_sync', lambda **kwargs: report)
+    assert sync_memory.main(['--apply']) == 2
+    assert 'PermissionError: synthetic artifact denied' in capsys.readouterr().out
+
+
+def test_generation_error_detail_survives_sync_and_text_cli(tmp_path, monkeypatch, capsys):
+    import sync_memory
+
+    outcome = sync_memory.doctor._value_error_outcome(ValueError('synthetic source checksum mismatch'), [])
+    monkeypatch.setattr(sync_memory.doctor, 'run_generation_maintenance', lambda **kwargs: outcome)
+    action = sync_memory._run_generation_builder(root=tmp_path, state_root=tmp_path, timeout=30)
+    report = {'mode': 'apply', 'overall_status': 'error', 'actions': [action]}
+    monkeypatch.setattr(sync_memory, 'run_sync', lambda **kwargs: report)
+    assert sync_memory.main(['--apply']) == 2
+    assert 'synthetic source checksum mismatch' in capsys.readouterr().out
+    assert action['details']['diagnostics'] == outcome['details']

@@ -132,26 +132,33 @@ def _record_nightly_result(today: str, failures: int, error: str | None = None) 
         claim = state.get("nightly_catchup_claim", {})
         if claim.get("date") == today:
             state.pop("nightly_catchup_claim", None)
-        if failures:
-            state["last_nightly_status"] = "failed"
-            state["last_nightly_failure"] = {
-                "date": today,
-                "failed_at": timestamp,
-                "failures": failures,
-                **({"error": error} if error else {}),
-            }
-        else:
-            state["last_nightly_status"] = "success"
-            state["last_nightly_date"] = today
-            # The date alone cannot say whether a 03:00 run is late; the health
-            # check needs an instant to measure an interval against.
-            state["last_nightly_at"] = timestamp
-            # From the first scheduled night on, a weekly is due; doctor measures a
-            # weekly that never completed against this (audit 2026-09-27 B-15).
-            state.setdefault("weekly_due_since", timestamp)
-            state.pop("last_nightly_failure", None)
+        _persist_nightly_result(state, today, timestamp, failures, error)
 
     update_state(_mutate)
+
+
+def _persist_nightly_result(state, today, timestamp, failures, error) -> None:
+    if failures:
+        state["last_nightly_status"] = "failed"
+        state["last_nightly_failure"] = _nightly_failure_record(today, timestamp, failures, error)
+        return
+    if state.get(DEFERRED_COMPILE_KEY):
+        state["last_nightly_status"] = "deferred"
+        state["last_nightly_deferred_at"] = timestamp
+        return
+    state["last_nightly_status"] = "success"
+    state["last_nightly_date"] = today
+    state["last_nightly_at"] = timestamp
+    state.setdefault("weekly_due_since", timestamp)
+    state.pop("last_nightly_failure", None)
+    state.pop("last_nightly_deferred_at", None)
+
+
+def _nightly_failure_record(today, timestamp, failures, error) -> dict:
+    record = {"date": today, "failed_at": timestamp, "failures": failures}
+    if error:
+        record["error"] = error
+    return record
 
 
 def _record_nightly_skip(today: str, reason: str) -> None:
@@ -580,7 +587,7 @@ def _compile_died_this_pass(state: dict, started_before: str | None) -> bool:
     started = state.get("last_compile_started_at")
     if not started or str(started) == started_before:
         return False
-    return state.get("last_compile_status") == "running" and not _compile_running()
+    return state.get("last_compile_status") in {"starting", "running"} and not _compile_running()
 
 
 def _last_compile_finished() -> str | None:
@@ -642,9 +649,6 @@ def _post_compile_pass(run_step, log) -> int:
     log.step("compacting retrieval telemetry...")
     _compact_telemetry(log)
 
-    # one full health report, read at session start instead of measured there.
-    log.step("writing the health report...")
-    _write_health_report(log)
     return failures
 
 
@@ -796,7 +800,11 @@ def _prune_reports(log) -> None:
 
 
 def _nightly_steps(run_step, log, _ownership: OwnerLease | None = None) -> int:
-    failures = _run_steps(run_step, log, _intake_steps())
+    resumed = _resume_deferred_post_compile(run_step, log)
+    if resumed is not None:
+        return resumed
+    failures = _report_deferred_loss(log)
+    failures += _run_steps(run_step, log, _intake_steps())
 
     # The compile step must not be skipped just because a hook-triggered one runs.
     _wait_for_compile_idle(log)
@@ -810,7 +818,6 @@ def _nightly_steps(run_step, log, _ownership: OwnerLease | None = None) -> int:
         # is unknown, and the steps that read its output wait for the next
         # pass. Counting it as a failure turned a slow healthy night red (#21).
         log("WARNING: compile still running past the wait bound — lint/index/graph deferred to the next pass")
-        log("  a service manager that owns this pass (systemd) stops that compile when the pass exits")
         _remember_deferred_compile(log)
         return failures
     failures += _report_compile_outcome(log, before, started_before) + _report_deferred_loss(log)
@@ -820,11 +827,62 @@ def _nightly_steps(run_step, log, _ownership: OwnerLease | None = None) -> int:
 DEFERRED_COMPILE_KEY = "nightly_deferred_compile"
 
 
+def _finished_deferred_compile() -> dict | None:
+    state = _safe_state()
+    if not _has_finished_deferred_work(state) or _compile_running():
+        return None
+    return state
+
+
+def _has_finished_deferred_work(state: dict) -> bool:
+    return bool(
+        state.get(DEFERRED_COMPILE_KEY)
+        and state.get("last_compile_finished_at")
+        and state.get("last_compile_status") in {"ok", "error"}
+    )
+
+
+def _deferred_compile_error(state: dict) -> str | None:
+    if state[DEFERRED_COMPILE_KEY] != state.get("last_compile_started_at"):
+        return "deferred compile outcome was superseded before follow-up"
+    return _recorded_compile_error(state, None)
+
+
+def _report_resumed_compile(state: dict, log) -> int:
+    error = _deferred_compile_error(state)
+    if error is None:
+        return 0
+    log(f"  compile: FAILED — {error}")
+    return 1
+
+
+def _complete_deferred_post_compile(expected: object) -> None:
+    def complete(state: dict) -> None:
+        if state.get(DEFERRED_COMPILE_KEY) != expected:
+            raise RuntimeError("deferred compile changed during post-compile work")
+        state.pop(DEFERRED_COMPILE_KEY)
+
+    update_state(complete)
+
+
+def _resume_deferred_post_compile(run_step, log) -> int | None:
+    state = _finished_deferred_compile()
+    if state is None:
+        return None
+    expected = state[DEFERRED_COMPILE_KEY]
+    log.step("resuming deferred post-compile work before new inputs...")
+    compile_failures = _report_resumed_compile(state, log)
+    post_failures = _post_compile_pass(run_step, log)
+    if not post_failures:
+        _complete_deferred_post_compile(expected)
+    return compile_failures + post_failures
+
+
 def _remember_deferred_compile(log) -> None:
     """Keep the deferred compile's start stamp, so the next pass can miss it.
 
-    Under systemd the unit ends here and the compile ends with it; the loss used
-    to be invisible, because the next pass compares against its own start stamp.
+    The compiler owns an independent scope under systemd. If that process dies,
+    its absent outcome must remain visible to the next pass.
     Research: docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
     """
     started = _last_compile_started()
@@ -840,16 +898,20 @@ def _report_deferred_loss(log) -> int:
     """Report a compile a previous pass deferred that never recorded an outcome."""
     state = _safe_state()
     deferred = state.get(DEFERRED_COMPILE_KEY)
-    if not deferred:
+    if not deferred or _compile_running():
         return 0
-    lost = str(deferred) == str(state.get("last_compile_started_at") or "") and (
-        state.get("last_compile_status") == "running"
-    )
+    lost = _deferred_outcome_missing(state, deferred)
     _forget_deferred_compile(log)
     if not lost:
         return 0
     log(f"  compile: FAILED — a compile deferred at {deferred} never finished")
     return 1
+
+
+def _deferred_outcome_missing(state: dict, deferred: object) -> bool:
+    return str(deferred) == str(state.get("last_compile_started_at") or "") and (
+        state.get("last_compile_status") in {"starting", "running"}
+    )
 
 
 def _forget_deferred_compile(log) -> None:
@@ -942,6 +1004,9 @@ def _run_nightly_body(
         raise
     finally:
         _record_result_quietly(today, failures, _terminal_error(terminal_error, fence))
+        # Session start must read the committed outcome of this pass.
+        # Measure once, after success, failure or deferral has been persisted.
+        _write_health_report(print)
 
 
 def _nightly_pass(
@@ -960,8 +1025,14 @@ def _nightly_pass(
     failures += int(not _housekeeping(log, "pruning", _prune_reports))
     # An update is never a reason to fail the night; its failure is named only.
     _housekeeping(log, "update", _update_code)
-    log(f"=== Nightly pass complete (failures={failures}) ===")
+    log(_nightly_completion_line(failures))
     return failures
+
+
+def _nightly_completion_line(failures: int) -> str:
+    if _safe_state().get(DEFERRED_COMPILE_KEY):
+        return f"=== Nightly post-compile work deferred (failures={failures}) ==="
+    return f"=== Nightly pass complete (failures={failures}) ==="
 
 
 def _housekeeping(log, label: str, step) -> bool:

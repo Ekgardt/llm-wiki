@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import hashlib
 import json
 import os
@@ -29,8 +30,11 @@ from operational_ownership import (
 from reliable_memory import (
     _harden_runtime_owner_only,
     canonical_json_bytes,
+    capture_runtime_file_identity,
     fsync_directory,
     fsync_file,
+    open_operational_db,
+    publish_runtime_file,
     sha256_bytes,
 )
 
@@ -599,7 +603,21 @@ def _validated_databases(
         raise
     except (OSError, PermissionError, sqlite3.Error, ValueError) as exc:
         raise BackupError("database_validation_failed") from exc
+    _settle_snapshot_sidecars(coordinator_path)
+    _settle_snapshot_sidecars(queue_path)
     return coordinator, queue
+
+
+def _settle_snapshot_sidecars(path: Path) -> None:
+    """Close a private snapshot cleanly after read-only WAL validation.
+
+    Read-only SQLite connections can leave empty WAL/SHM files. Let SQLite
+    checkpoint and remove them; never unlink a potentially live journal.
+    """
+    with contextlib.closing(open_operational_db(path, busy_ms=0)) as database:
+        result = database.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if result[0] != 0:
+            raise BackupError("snapshot_checkpoint_busy")
 
 
 def _database_manifest_entry(
@@ -949,6 +967,7 @@ def _write_image_manifest(
     deadline: float,
 ) -> None:
     created_at = now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    databases = _database_manifest(image)
     manifest = {
         "schema_version": "private-vault-backup/v1",
         "created_at": created_at,
@@ -960,7 +979,7 @@ def _write_image_manifest(
             _entry_manifest(entry)
             for entry in _scan_tree(image, prefix="", deadline=deadline)
         ],
-        "databases": _database_manifest(image),
+        "databases": databases,
     }
     manifest_path = image / "manifest.json"
     with manifest_path.open("xb") as stream:
@@ -1612,11 +1631,19 @@ def _same_bytes(source: Path, destination: Path) -> bool:
     return _hash_file(source, float("inf")) == _hash_file(destination, float("inf"))
 
 
-def _destination_state(source: Path, destination: Path) -> str:
+def _destination_state(source: Path, destination: Path, image: Path) -> str:
     """`absent`, `identical`, or `conflict` for one destination."""
     if not destination.exists() and not destination.is_symlink():
         return "absent"
-    if destination.is_file() and _same_bytes(source, destination):
+    if destination.is_file():
+        return _existing_destination_state(source, destination, image)
+    return "conflict"
+
+
+def _existing_destination_state(source: Path, destination: Path, image: Path) -> str:
+    if _same_bytes(source, destination):
+        return "identical"
+    if _same_rebound_adoption(source, destination, image):
         return "identical"
     return "conflict"
 
@@ -1630,7 +1657,7 @@ def _planned_publication(
     """
     grouped: dict[str, list[tuple[Path, Path]]] = {"absent": [], "identical": [], "conflict": []}
     for source, destination in pairs:
-        grouped[_destination_state(source, destination)].append((source, destination))
+        grouped[_destination_state(source, destination, image)].append((source, destination))
     _refuse_conflicts(grouped["conflict"], image)
     return grouped["absent"], len(grouped["identical"])
 
@@ -1651,11 +1678,19 @@ def _refuse_conflicts(conflicts: list[tuple[Path, Path]], image: Path) -> None:
 def _write_new(source: Path, destination: Path) -> None:
     """Create exclusively and make it durable: the file and the entry that names it."""
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with open(destination, "xb") as handle:
-        handle.write(source.read_bytes())
-        handle.flush()
-        os.fsync(handle.fileno())
-    fsync_directory(destination.parent)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(destination, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            _harden_runtime_owner_only(destination, 0o600)
+            handle.write(source.read_bytes())
+            handle.flush()
+            os.fsync(handle.fileno())
+        fsync_directory(destination.parent)
+    except BaseException:
+        destination.unlink()
+        fsync_directory(destination.parent)
+        raise
 
 
 def _write_or_refuse(source: Path, destination: Path, image: Path) -> None:
@@ -1667,7 +1702,7 @@ def _write_or_refuse(source: Path, destination: Path, image: Path) -> None:
 
 
 def _write_all_or_none(
-    pairs: list[tuple[Path, Path]], deadline: float, image: Path
+    pairs: list[tuple[Path, Path]], deadline: float, image: Path, finalize
 ) -> None:
     """Every file, or none: a failure part-way removes what this run created."""
     written: list[Path] = []
@@ -1676,10 +1711,73 @@ def _write_all_or_none(
             _deadline(deadline)
             _write_or_refuse(source, destination, image)
             written.append(destination)
+        finalize()
     except BaseException:
         for path in written:
             path.unlink(missing_ok=True)
         raise
+
+
+def _rebound_adoption(source: Path, state: Path) -> dict:
+    import installed_memory_repair as repair
+
+    record = json.loads(source.read_bytes())
+    repair.validate_schema(record, repair._adoption_schema(record))
+    rebound = copy.deepcopy(record)
+    specs = {spec.name: spec for spec in repair._DATABASE_SPECS}
+    for database in rebound["databases"]:
+        _rebind_database_artifacts(database, specs[database["database"]], state)
+    return rebound
+
+
+def _rebind_database_artifacts(record: dict, spec, state: Path) -> None:
+    import installed_memory_repair as repair
+
+    paths = {"active": spec.active_path, "tombstone": spec.legacy_path,
+             "retired": spec.retired_path}
+    for field in (set(record) & paths.keys()):
+        identity = capture_runtime_file_identity(state / paths[field], state_root=state)
+        record[field]["identity"] = repair._identity_value(identity)
+
+
+def _same_rebound_adoption(source: Path, destination: Path, image: Path) -> bool:
+    if source != image / "state/run/reliability-v3-adopted.json":
+        return False
+    try:
+        expected = canonical_json_bytes(_rebound_adoption(source, destination.parent.parent))
+        return destination.read_bytes() == expected
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def _validate_rebound_adoption(root: Path, state: Path, adoption: dict) -> None:
+    import installed_memory_repair as repair
+
+    paths = repair._paths(state)
+    migration = repair._read_record(paths["migration"], state,
+        schema=repair._MIGRATION_SCHEMA, max_bytes=repair._MAX_RECORD_BYTES)
+    artifacts, overflow = repair._operation_artifacts(paths["run"])
+    if overflow:
+        raise BackupError("restore_operation_artifact_overflow")
+    repair._validate_complete_adoption(root=root, state_root=state, paths=paths,
+        migration=migration, adoption=adoption, operation_artifacts=artifacts)
+
+
+def _bind_published_adoption(image: Path, root: Path, state: Path) -> None:
+    _harden_runtime_owner_only(state / "run", 0o700)
+    source = image / "state/run/reliability-v3-adopted.json"
+    target = state / "run/reliability-v3-adopted.json"
+    rebound = _rebound_adoption(source, state)
+    _validate_rebound_adoption(root, state, rebound)
+    payload = canonical_json_bytes(rebound)
+    current = target.read_bytes()
+    if current == payload:
+        return
+    if current != source.read_bytes():
+        raise BackupError("restore_adoption_conflict")
+    publish_runtime_file(target, payload, state_root=state, create_only=False,
+        expected=capture_runtime_file_identity(target, state_root=state),
+        expected_sha256=sha256_bytes(current))
 
 
 def publish_restored_image(
@@ -1703,8 +1801,10 @@ def publish_restored_image(
     _validate_restored_image(staged, expected_manifest_sha256, deadline=deadline)
     pairs = _publication_targets(staged, Path(vault_root).resolve(), Path(state_root).resolve())
     to_write, identical = _planned_publication(pairs, staged)
-    _write_all_or_none(to_write, deadline, staged)
-    _harden_runtime_owner_only(Path(state_root).resolve() / "run", 0o700)
+    _write_all_or_none(
+        to_write, deadline, staged,
+        lambda: _bind_published_adoption(staged, Path(vault_root), Path(state_root)),
+    )
     return {
         "schema_version": "private-vault-publish-receipt/v1",
         "manifest_sha256": expected_manifest_sha256,

@@ -342,7 +342,6 @@ def test_the_capture_worker_adopts_before_it_claims(
     queue = _queue(tmp_path)
     coordinator = _coordinator(tmp_path)
     orphan = _publish_ready_intent(tmp_path, queue, coordinator, b"worker-adopts")
-    monkeypatch.setattr(flush_memory, "STATE_ROOT", tmp_path)
 
     flush_memory.run_capture_worker_once(
         queue, coordinator, process_missing=lambda *args: None
@@ -358,7 +357,6 @@ def test_a_failing_sweeper_never_stops_the_worker(
 
     queue = _queue(tmp_path)
     coordinator = _coordinator(tmp_path)
-    monkeypatch.setattr(flush_memory, "STATE_ROOT", tmp_path)
 
     def _explode(*args, **kwargs):
         raise RuntimeError("sweeper down")

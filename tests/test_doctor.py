@@ -434,6 +434,29 @@ def test_environment_reports_missing_root_layout_and_python(tmp_path, monkeypatc
     assert check["details"]["vault_root"]["status"] == "error"
 
 
+def test_cli_preserves_an_inherited_absolute_deadline(monkeypatch):
+    import doctor
+
+    seen = {}
+
+    def record(**kwargs):
+        seen.update(kwargs)
+        return {"overall_status": "ok", "repaired": [], "checks": []}
+
+    monkeypatch.setattr(doctor, "run_doctor", record)
+    assert doctor.main(["--deadline", "123.5", "--time-budget", "45"]) == 0
+    assert seen["deadline"] == 123.5
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_cli_rejects_a_nonfinite_inherited_deadline(value, capsys):
+    import doctor
+
+    with pytest.raises(SystemExit):
+        doctor.main([f"--deadline={value}"])
+    assert "finite monotonic timestamp" in capsys.readouterr().err
+
+
 def test_the_cli_accepts_a_larger_time_budget_and_refuses_an_impossible_one(
     tmp_path,
     monkeypatch,
@@ -1661,6 +1684,46 @@ def test_run_doctor_uses_supplied_absolute_deadline_after_queue_delay(tmp_path, 
     assert captured == [50.0]
 
 
+def test_core_checks_do_not_start_after_an_earlier_check_spends_the_deadline(tmp_path, monkeypatch):
+    import doctor
+
+    clock = [40.0]
+
+    def environment(*args):
+        clock[0] = 51.0
+        return doctor._result("environment", "ok", "ok", {})
+
+    def unexpected_runtime(*args):
+        raise AssertionError("runtime work started after the deadline")
+
+    monkeypatch.setattr(doctor.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(doctor, "_environment_check", environment)
+    monkeypatch.setattr(doctor, "_runtime_check", unexpected_runtime)
+    monkeypatch.setattr(doctor, "_deferrable_checks", lambda *args: ())
+    checks = doctor._collect_checks(tmp_path, tmp_path, tmp_path, datetime.now(timezone.utc), 50.0)
+    assert checks[0]["status"] == "ok"
+    assert {item["id"] for item in checks[1:]} == {
+        "runtime", "adoption", "filesystem", "transactions", "queue", "archives", "claims",
+    }
+    assert all(item["details"]["budget_exhausted"] for item in checks[1:])
+    assert all(item["status"] == "degraded" for item in checks[1:])
+
+
+def test_expired_deletion_observation_does_not_reopen_adoption(tmp_path, monkeypatch):
+    import doctor
+    import installed_memory_repair
+
+    def unexpected_adoption(**kwargs):
+        raise AssertionError("adoption work started after the deadline")
+
+    monkeypatch.setattr(installed_memory_repair, "require_reliability_v3_adopted", unexpected_adoption)
+    monkeypatch.setattr(doctor.time, "monotonic", lambda: 51.0)
+    snapshot = doctor._run_deletion_check(tmp_path, datetime.now(timezone.utc), deadline=50.0)
+    assert snapshot["permit"] is False
+    assert snapshot["quiescent"] is False
+    assert snapshot["blockers"] == [{"code": "run_deletion_state_unknown"}]
+
+
 def test_budget_exhaustion_degrades_overall_and_health_summary(tmp_path):
     from doctor import degraded_summary, run_doctor
 
@@ -2133,7 +2196,9 @@ def test_run_doctor_executes_lsp_check_after_budget_exhaustion(tmp_path, monkeyp
 
     assert calls == [deadline]
     assert _check(report, "lsp")["details"]["codes"] == ["lsp_state_unreadable"]
-    assert report["run_deletion"]["blockers"] == [{"code": "legacy_protocol_unquiesced"}]
+    assert report["run_deletion"]["blockers"] == [{"code": "run_deletion_state_unknown"}]
+    assert report["run_deletion"]["permit"] is False
+    assert report["run_deletion"]["quiescent"] is False
 
 
 def test_doctor_reports_mismatched_pyright(tmp_path, monkeypatch) -> None:
@@ -3648,7 +3713,7 @@ def test_lost_captures_are_reported_as_a_degraded_capture_check(tmp_path):
     check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "capture")
 
     assert check["status"] == "degraded"
-    assert check["details"]["lost"] == 3
+    assert check["details"]["failure_events"] == 3
     assert check["details"]["kinds"] == {"session_end": 2, "pre_compact": 1}
     assert "capture-failures.jsonl" in check["details"]["trail"]
     del home
@@ -3683,7 +3748,7 @@ def test_a_loss_that_stopped_happening_returns_the_capture_check_to_green(tmp_pa
     check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "capture")
 
     assert check["status"] == "ok"
-    assert check["details"]["lost"] == 2
+    assert check["details"]["failure_events"] == 2
     assert check["details"]["live"] is False
     del home
 
@@ -3697,7 +3762,7 @@ def test_a_vault_without_lost_captures_reports_the_capture_check_as_ok(tmp_path)
     check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "capture")
 
     assert check["status"] == "ok"
-    assert check["details"]["lost"] == 0
+    assert check["details"]["failure_events"] == 0
     del home
 
 def _stubbed_maintenance(doctor, monkeypatch, releases: list[object]) -> None:
@@ -4341,7 +4406,7 @@ def test_deferred_writes_are_reported_beside_lost_captures_not_as_them(tmp_path)
     check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "capture")
 
     assert check["status"] == "ok"
-    assert check["details"]["lost"] == 0
+    assert check["details"]["failure_events"] == 0
     assert check["details"]["deferred"] == 17
     assert "17 write(s) were deferred by a writer race" in check["message"]
     del home
@@ -4368,6 +4433,108 @@ def test_the_claim_check_names_the_cause_the_pages_and_the_repair() -> None:
     assert "6 claim(s) cite daily bytes that no longer resolve" in result["message"]
     assert "knowledge/notes/alarm-thresholds.md, knowledge/notes/verify-first.md" in result["message"]
     assert "doctor.py --repair" in result["message"]
+
+
+@pytest.mark.parametrize(
+    ("role", "counter", "blocker"),
+    [
+        ("queue-worker", "live_workers", "queue_worker_live"),
+        ("queue-operator", "live_operators", "queue_operator_live"),
+    ],
+)
+def test_doctor_reads_an_active_v3_queue_owner(tmp_path, role, counter, blocker):
+    import doctor
+    from memory_queue import active_memory_queue
+
+    root, state_root, _home = _build_root(tmp_path)
+    _adopt(root, state_root)
+    queue = active_memory_queue(root, state_root)
+
+    with queue.queue_owner(role=role, scope="doctor-regression"):
+        check = doctor._queue_check(
+            state_root, datetime.now(timezone.utc), time.monotonic() + GENEROUS_BUDGET_SECONDS
+        )
+
+    assert check["status"] == "ok"
+    assert check["details"][counter] == 1
+    assert blocker in check["details"]["deletion_codes"]
+    released = doctor._queue_check(
+        state_root, datetime.now(timezone.utc), time.monotonic() + GENEROUS_BUDGET_SECONDS
+    )
+    assert released["details"][counter] == 0
+    assert blocker not in released["details"]["deletion_codes"]
+
+
+def _queue_parent_marker(state_root, role):
+    from operational_ownership import MarkerIdentity
+    from reliable_memory import capture_runtime_file_identity, sha256_bytes
+
+    if role == "doctor":
+        return None
+    name = "compile.pid" if role == "compile" else "maintenance.lock"
+    path = state_root / "run" / name
+    payload = f"{os.getpid()}\n".encode("ascii")
+    path.write_bytes(payload)
+    return MarkerIdentity(
+        relative_path=path.relative_to(state_root).as_posix(),
+        sha256=sha256_bytes(payload),
+        file_identity=capture_runtime_file_identity(path, state_root=state_root),
+        pid=os.getpid(),
+    )
+
+
+@pytest.mark.parametrize("parent_role", ["compile", "doctor", "nightly", "weekly"])
+def test_doctor_counts_the_queue_role_of_a_nested_owner(tmp_path, parent_role):
+    import doctor
+    from memory_queue import active_memory_queue
+
+    root, state_root, _home = _build_root(tmp_path)
+    _adopt(root, state_root)
+    queue = active_memory_queue(root, state_root)
+    registry = queue.ownership_registry()
+    parent = registry.acquire(
+        parent_role, scope="global", marker=_queue_parent_marker(state_root, parent_role)
+    )
+    try:
+        with queue.queue_owner(role="queue-worker", scope="worker", parent=parent):
+            check = doctor._queue_check(
+                state_root, datetime.now(timezone.utc), time.monotonic() + GENEROUS_BUDGET_SECONDS
+            )
+    finally:
+        registry.release(parent)
+
+    assert check["status"] == "ok"
+    assert check["details"]["live_workers"] == 1
+    assert "queue_worker_live" in check["details"]["deletion_codes"]
+
+
+@pytest.mark.parametrize("role,counter", [("worker", "live_workers"), ("migration", "live_migrations")])
+def test_doctor_still_reports_pre_adoption_queue_owners(tmp_path, role, counter):
+    import doctor
+
+    now = datetime.now(timezone.utc)
+    with sqlite3.connect(":memory:") as database:
+        database.row_factory = sqlite3.Row
+        database.execute("CREATE TABLE queue_ownership(role, token, pid, expires_at)")
+        database.execute(
+            "INSERT INTO queue_ownership VALUES (?, 'held', ?, ?)",
+            (role, os.getpid(), (now + timedelta(minutes=1)).isoformat()),
+        )
+        details, _states = doctor._empty_queue_details()
+        doctor._count_queue_ownership(database, {"queue_ownership"}, details, now)
+
+    assert details[counter] == 1
+    assert details["deletion_codes"] == []
+
+
+def test_doctor_rejects_an_incomplete_queue_owner_projection():
+    import doctor
+
+    with sqlite3.connect(":memory:") as database:
+        database.row_factory = sqlite3.Row
+        row = database.execute("SELECT 'held' AS owner_token").fetchone()
+        with pytest.raises(ValueError, match="queue owner columns are incomplete"):
+            doctor._queue_owner_observation(row)
 
 
 def test_an_adopted_vault_owes_no_v2_queue_migration(tmp_path, monkeypatch):

@@ -52,3 +52,17 @@ Files: `scripts/doctor.py`,
 - The archive repair records `recover_archives` only when at least one archive was
   actually recovered, and says how many.
 - No path, environment variable or contract changes.
+
+## Public error projection correction, 2026-09-29
+
+The action names `generations` and `indexes` differ from their public check IDs
+`generation` and `claims`. `_apply_repair_outcomes` looked up the latter in a map
+keyed by the former, losing the exception and reporting an invented lock refusal.
+Other action failures showed both an error and a contradictory deferred flag.
+The existing action-to-check mapping now projects errors to the correct checks;
+a failed action no longer enters the set reserved for actual owner contention.
+
+Regression coverage exercises all six action/check pairs, plus genuine contention
+and continued execution after an independent failure. Old code fails all six error
+projection cases. This fixes misleading diagnostics; it does not establish the
+cause of an earlier intermittent generation-rebuild failure.

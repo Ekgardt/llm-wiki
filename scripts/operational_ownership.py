@@ -682,11 +682,13 @@ class OwnershipRegistry:
         state_root: Path,
         database_path: Path,
         *,
+        journal_migration: bool = False,
         clock: Callable[[], datetime] = utc_now,
         process_probe: Callable[[ProcessIdentity], ProcessState] = process_identity_state,
     ) -> OwnershipRegistry:
         """Open a coordinator already validated by the adoption boundary."""
         instance = cls.__new__(cls)
+        instance._journal_migration = journal_migration
         instance.state_root = Path(state_root)
         instance.database_path = Path(database_path)
         instance._clock = clock
@@ -700,6 +702,7 @@ class OwnershipRegistry:
             self.database_path,
             busy_ms=DEFAULTS.markdown_busy_ms,
             contract=_COORDINATOR_CONTRACT,
+            journal_migration=getattr(self, "_journal_migration", False),
         )
 
     def _validate_marker(
@@ -927,6 +930,9 @@ class OwnershipRegistry:
         if request.role == "runtime-deletion-check":
             self._require_quiescence(database, request, now)
             return
+        from reliable_memory import require_no_journal_migration
+
+        require_no_journal_migration(self.state_root)
         deletion = database.execute(
             "SELECT * FROM maintenance_owners WHERE role='runtime-deletion-check'"
         ).fetchone()

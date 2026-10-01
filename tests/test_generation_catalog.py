@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from tests.slow_machine import SHORT_TIMEOUT
+from tests.test_repository_scope import _repository
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS) not in sys.path:
@@ -70,6 +71,51 @@ def _catalog(tmp_path: Path):
 
     state_root = tmp_path / "state"
     return generation_catalog.GenerationCatalog(state_root, clock=lambda: NOW)
+
+
+def _emulate_acl_propagation(monkeypatch, catalog) -> None:
+    import markdown_transaction
+    import reliable_memory
+
+    original = reliable_memory._harden_runtime_owner_only
+    parent = catalog.catalog_path.parent
+
+    def harden(path, mode):
+        if path == parent:
+            return markdown_transaction._harden_windows_acl(path)
+        return original(path, mode)
+
+    def command(argv):
+        import subprocess
+
+        if len(argv) > 2:
+            for path in catalog.generations_path.rglob("*"):
+                path.chmod(path.stat().st_mode)
+        listing = f"{parent} DOMAIN\\user:(OI)(CI)(F)\n"
+        return subprocess.CompletedProcess(argv, 0, listing, "")
+
+    monkeypatch.setattr(reliable_memory, "_harden_runtime_owner_only", harden)
+    monkeypatch.setattr(markdown_transaction, "_windows_acl_identity", lambda: "DOMAIN\\user")
+    monkeypatch.setattr(markdown_transaction, "_run_acl_command", command)
+    monkeypatch.setattr(markdown_transaction, "_windows_dacl_protected", lambda path: True, raising=False)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="uses POSIX chmod to model metadata propagation")
+def test_registration_does_not_reapply_a_correct_parent_acl(tmp_path, monkeypatch):
+    catalog = _catalog(tmp_path)
+    _publish(catalog, "acl-stable")
+    _emulate_acl_propagation(monkeypatch, catalog)
+
+    assert catalog.register("acl-stable")["generation_id"] == "acl-stable"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native inherited ACL metadata")
+def test_windows_registration_keeps_inherited_artifacts_unchanged(tmp_path):
+    catalog = _catalog(tmp_path)
+    _publish(catalog, "acl-stable")
+
+    assert catalog.register("acl-stable")["generation_id"] == "acl-stable"
+    assert catalog.register("acl-stable")["generation_id"] == "acl-stable"
 
 
 def _publish(
@@ -1954,6 +2000,26 @@ def test_read_only_catalog_rejects_write_transactions(tmp_path):
             raise AssertionError("read-only transaction body must not run")
 
 
+def _independent_repository_scopes(tmp_path):
+    from repository_scope import resolve_repository_scope
+
+    requested_repository = tmp_path / "requested"
+    foreign_repository = tmp_path / "foreign"
+    _repository(requested_repository)
+    _repository(foreign_repository)
+    requested_scope = resolve_repository_scope(requested_repository)
+    foreign_scope = resolve_repository_scope(foreign_repository)
+    assert requested_scope.repository_id != foreign_scope.repository_id
+    return requested_scope, foreign_scope
+
+
+def _activate_requested_then_foreign(catalog):
+    for generation_id in ("requested", "active"):
+        catalog.register(generation_id)
+    assert catalog.activate("requested", expected_active=None)
+    assert catalog.activate("active", expected_active="requested")
+
+
 @pytest.mark.parametrize("active_binding", ["foreign", "unbound"])
 def test_get_active_for_repository_answers_from_its_own_generation_without_mutation(
     tmp_path, active_binding
@@ -1968,14 +2034,7 @@ def test_get_active_for_repository_answers_from_its_own_generation_without_mutat
     history are not mutated. `..._returns_none_without_its_own_generation`
     below keeps the refusal where it still applies.
     """
-    from repository_scope import resolve_repository_scope
-
-    requested_repository = tmp_path / "requested"
-    foreign_repository = tmp_path / "foreign"
-    requested_repository.mkdir()
-    foreign_repository.mkdir()
-    requested_scope = resolve_repository_scope(requested_repository)
-    foreign_scope = resolve_repository_scope(foreign_repository)
+    requested_scope, foreign_scope = _independent_repository_scopes(tmp_path)
     catalog = _catalog(tmp_path)
     _publish(catalog, "requested", repository_scope=requested_scope.as_dict())
     _publish(
@@ -1986,10 +2045,7 @@ def test_get_active_for_repository_answers_from_its_own_generation_without_mutat
             foreign_scope.as_dict() if active_binding == "foreign" else None
         ),
     )
-    for generation_id in ("requested", "active"):
-        catalog.register(generation_id)
-    assert catalog.activate("requested", expected_active=None)
-    assert catalog.activate("active", expected_active="requested")
+    _activate_requested_then_foreign(catalog)
     (catalog.generations_path / "active/search.sqlite3").write_bytes(b"corrupt")
     with closing(sqlite3.connect(catalog.catalog_path)) as database:
         before = (
@@ -2015,14 +2071,7 @@ def test_get_active_for_repository_answers_from_its_own_generation_without_mutat
 
 def test_get_active_for_repository_returns_none_without_its_own_generation(tmp_path):
     """The refusal that survives CODE-03: nothing registered for this repository."""
-    from repository_scope import resolve_repository_scope
-
-    requested_repository = tmp_path / "requested"
-    foreign_repository = tmp_path / "foreign"
-    requested_repository.mkdir()
-    foreign_repository.mkdir()
-    requested_scope = resolve_repository_scope(requested_repository)
-    foreign_scope = resolve_repository_scope(foreign_repository)
+    requested_scope, foreign_scope = _independent_repository_scopes(tmp_path)
     catalog = _catalog(tmp_path)
     _publish(catalog, "active", repository_scope=foreign_scope.as_dict())
     catalog.register("active")

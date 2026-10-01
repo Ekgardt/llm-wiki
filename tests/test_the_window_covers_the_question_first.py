@@ -142,7 +142,7 @@ def test_the_selection_stops_at_zero_gain() -> None:
     assert _window(pool, "needle", 2) == [pool[0][0].candidate_id, pool[1][0].candidate_id]
 
 
-def test_more_admitted_than_can_be_displaced_leaves_the_lane_last_outside() -> None:
+def test_a_question_larger_than_the_window_keeps_remaining_sources_in_the_tail() -> None:
     """One displaceable repeat inside, two covering sources outside: the lane-first comes in."""
     pool = [
         _turn(DAY_ONE, 0, "alpha"), _turn(DAY_ONE, 100, "alpha"),
@@ -152,3 +152,19 @@ def test_more_admitted_than_can_be_displaced_leaves_the_lane_last_outside() -> N
     ordered = retrieval._cover_then_fill([c for c, _ in pool], _meta(pool), "alpha beta gamma", 2)
 
     assert [item.relative_path for item in ordered] == [DAY_ONE, DAY_TWO, DAY_ONE, DAY_FAR]
+
+
+def test_distinct_pages_do_not_prevent_covering_missing_question_terms() -> None:
+    pool = [
+        (_chunk(f"knowledge/notes/page-{i}.md", "Lesson", 0), {"content": text})
+        for i, text in enumerate(("alpha", "alpha again", "alpha again", "beta", "gamma"))
+    ]
+    candidates = [chunk for chunk, _ in pool]
+    ordered = retrieval._visible_order(candidates, _meta(pool), "alpha beta gamma", "alpha beta gamma", 3)
+    assert set(_window(pool, "alpha beta gamma", 3)) == {
+        pool[0][0].candidate_id, pool[3][0].candidate_id, pool[4][0].candidate_id,
+    }
+    assert set(ordered[:3]) == {
+        pool[0][0], pool[3][0], pool[4][0],
+    }
+    assert set(ordered) == set(candidates)

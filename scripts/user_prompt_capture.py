@@ -216,7 +216,7 @@ def _write_advisory_output(advisory: str) -> None:
 def _append_prompt_tag(
     slug: str, session_id: str, preview: str, operation_id: str | None = None
 ) -> bool:
-    """Append a one-line breadcrumb to today's daily log."""
+    """Durably capture a breadcrumb; adopted vaults append it asynchronously."""
     try:
         from daily_log_append import (
             BREADCRUMB_APPEND_BUDGET_SECONDS,
@@ -228,6 +228,10 @@ def _append_prompt_tag(
         # One line: a newline in the prompt started a real daily-log entry
         # (docs/research/2026-09-26-an-evidence-span-names-its-own-block.md).
         safe = " ".join(redact_secrets(preview).split())[:MAX_PROMPT_PREVIEW]
+        from breadcrumb_capture import queue_breadcrumb
+
+        if queue_breadcrumb("user_prompt", slug, session_id, {"preview": safe}, operation_id):
+            return True
         block = (
             f"- `[{ts}] prompt | {session_id[:8]} | {slug}` "
             f"{safe}"

@@ -1410,7 +1410,10 @@ class _ArtifactScan:
 
     def _verify(self, path_text: str, size: int, digest: str, **stop: object) -> None:
         artifact_path = self.generation_path.joinpath(*PurePosixPath(path_text).parts)
-        actual_digest = self._verified_digest(artifact_path, path_text, size, **stop)
+        try:
+            actual_digest = self._verified_digest(artifact_path, path_text, size, **stop)
+        except FileNotFoundError as error:
+            raise ValueError(f"artifact is missing: {path_text}") from error
         if actual_digest != digest:
             raise ValueError(f"artifact has wrong hash: {path_text}")
         self.digests[path_text] = actual_digest

@@ -37,7 +37,7 @@
     "source_event_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "occurred_at": {"$ref": "#/$defs/nullable_text"},
     "host": {"type": "string", "minLength": 1, "maxLength": 64},
-    "event": {"enum": ["session_end", "pre_compact"]},
+    "event": {"enum": ["session_end", "pre_compact", "user_prompt", "post_tool_use"]},
     "session": {"$ref": "#/$defs/nullable_text"},
     "project_slug": {"$ref": "#/$defs/nullable_text"},
     "worktree": {"$ref": "#/$defs/nullable_text"},

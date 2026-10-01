@@ -44,3 +44,35 @@ skipping whole records safe.
 - `scripts/integration_adapter.py`
 - `scripts/session_evidence.py`
 - `tests/test_a_long_session_keeps_its_first_turns.py`
+
+## Native replacement evidence (2026-10-01)
+
+Windows CI on commit `8046f245` failed both replacement cases inside the
+test's `Path.replace`, before the capture reader could check the path identity.
+The reader holds its `os.open` descriptor until its `finally` closes it;
+`_read_capture_windows` refers to byte windows, not a Windows-only reader.
+CBM traces and the current source confirm that transcript capture uses this
+reader and then verifies both the bytes and the identity at the path.
+
+The native contracts differ. Microsoft documents that an open handle without
+`FILE_SHARE_DELETE` prevents deletion or renaming until it closes. Linux permits
+renaming while the old descriptor remains valid. Python exposes the underlying
+rename operation and its possible errors. Sources checked on 2026-10-01:
+
+- [Microsoft CreateFileW sharing modes](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)
+- [Linux rename(2)](https://man7.org/linux/man-pages/man2/rename.2.html)
+- [Python os.replace](https://docs.python.org/3/library/os.html#os.replace)
+
+Keep the successful-replacement rejection cases on POSIX with their original
+`changed|replaced` assertion. On Windows, separately assert that replacement is
+refused while reading, the original identity and bytes survive, and capture
+returns the unchanged result. The same replacement must succeed after capture
+returns, proving that the refusal was tied to the open descriptor rather than
+permanent directory permissions. Run both small and windowed transcripts.
+Truncation and rewrite rejection remain cross-platform.
+
+Broadening the error regex would incorrectly count the test fixture's OS refusal
+as evidence of the reader's identity check. Faking a successful replacement on
+Windows would also miss the native contract. No production validation changes
+are needed. Ruff, Lizard (maximum CCN 2 in the affected tests and callbacks), and
+AST checks pass locally; the new native Windows cases still require Windows CI.

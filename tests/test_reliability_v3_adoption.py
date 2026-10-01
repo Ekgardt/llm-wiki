@@ -25,6 +25,49 @@ from reliable_memory import (
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 
 
+@pytest.mark.parametrize("warm", [False, True])
+def test_each_coordinator_open_checks_integrity_once(tmp_path, monkeypatch, warm):
+    import installed_memory_repair
+
+    root, state_root = _vault(tmp_path)
+    build_adopted_reliability_v3(root, state_root)
+    markdown_transaction._ADOPTION_VALIDATION_CACHE.clear()
+    if warm:
+        markdown_transaction.active_markdown_coordinator(root, state_root)
+    statements = []
+    original = markdown_transaction.open_readonly_operational_db
+
+    def traced(path, *args, **kwargs):
+        connection = original(path, *args, **kwargs)
+        if path.name == "markdown-transactions-v3.sqlite3":
+            connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(markdown_transaction, "open_readonly_operational_db", traced)
+    monkeypatch.setattr(installed_memory_repair, "open_readonly_operational_db", traced)
+    markdown_transaction.active_markdown_coordinator(root, state_root)
+    assert statements.count("PRAGMA integrity_check") == 1
+    assert statements.count("PRAGMA foreign_key_check") == 1
+
+
+@pytest.mark.parametrize("warm", [False, True])
+def test_cold_and_warm_coordinator_open_refuse_logical_corruption(tmp_path, warm):
+    root, state_root = _vault(tmp_path)
+    build_adopted_reliability_v3(root, state_root)
+    coordinator = markdown_transaction.active_markdown_coordinator(root, state_root)
+    coordinator.prepare(
+        [markdown_transaction.MarkdownChange.create("knowledge/notes/unpublished.md", b"# Unpublished\n")],
+        operation_id="logical-corruption-fixture",
+    )
+    with sqlite3.connect(coordinator.database_path) as database:
+        database.execute("PRAGMA ignore_check_constraints=ON")
+        database.execute("UPDATE operation SET position = -1")
+    if not warm:
+        markdown_transaction._ADOPTION_VALIDATION_CACHE.clear()
+    with pytest.raises((RuntimeError, sqlite3.DatabaseError), match="invariant failed"):
+        markdown_transaction.active_markdown_coordinator(root, state_root)
+
+
 def _vault(tmp_path: Path) -> tuple[Path, Path]:
     root = tmp_path / "vault"
     state_root = tmp_path / "state"
@@ -432,3 +475,61 @@ def test_adopted_inspection_rejects_stale_schema_or_integration_digest(
 
     assert report["overall_status"] == "error"
     assert report["blockers"] == [{"code": "reliability_v3_record_invalid"}]
+
+
+def _pending_commit(stack, path):
+    blocker = stack.enter_context(contextlib.closing(sqlite3.connect(path, timeout=0)))
+    blocker.execute("BEGIN")
+    blocker.execute("SELECT name FROM sqlite_master").fetchall()
+    writer = stack.enter_context(contextlib.closing(sqlite3.connect(path, timeout=0)))
+    version = writer.execute("PRAGMA user_version").fetchone()[0]
+    writer.execute("BEGIN IMMEDIATE")
+    writer.execute(f"PRAGMA user_version={version}")
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        writer.commit()
+
+
+@pytest.mark.parametrize("target", ["queue", "coordinator"])
+def test_adoption_validation_keeps_its_read_snapshot_during_pending_commit(
+    tmp_path, monkeypatch, target
+):
+    import installed_memory_repair
+
+    root, state_root = _vault(tmp_path)
+    build_adopted_reliability_v3(root, state_root)
+    names = {"queue": "queue-v3.sqlite3", "coordinator": "markdown-transactions-v3.sqlite3"}
+    original = installed_memory_repair._database_schema_complete
+    with contextlib.ExitStack() as stack:
+        def concurrent_commit(name, connection):
+            result = original(name, connection)
+            if name == target:
+                _pending_commit(stack, state_root / "run" / names[name])
+            return result
+
+        monkeypatch.setattr(installed_memory_repair, "_database_schema_complete", concurrent_commit)
+        require_reliability_v3_adopted(root=root, state_root=state_root)
+    monkeypatch.setattr(installed_memory_repair, "_database_schema_complete", original)
+    require_reliability_v3_adopted(root=root, state_root=state_root)
+
+
+@pytest.mark.parametrize("module,prefix,filename", [
+    (memory_queue, "queue", "queue-v3.sqlite3"),
+    (markdown_transaction, "coordinator", "markdown-transactions-v3.sqlite3"),
+])
+def test_direct_validation_keeps_snapshot_during_pending_commit(
+    tmp_path, monkeypatch, module, prefix, filename
+):
+    root, state_root = _vault(tmp_path)
+    build_adopted_reliability_v3(root, state_root)
+    path = state_root / "run" / filename
+    name = f"_{prefix}_v3_schema_complete"
+    original = getattr(module, name)
+    with contextlib.ExitStack() as stack:
+        def concurrent_commit(connection):
+            result = original(connection)
+            _pending_commit(stack, path)
+            return result
+
+        monkeypatch.setattr(module, name, concurrent_commit)
+        report = getattr(module, f"validate_{prefix}_v3_database")(path, state_root=state_root)
+    assert report["integrity_check"] == "ok"

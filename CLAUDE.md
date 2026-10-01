@@ -123,7 +123,11 @@ owner is live. Deleting eligible committed artifacts loses undo history.
 
 **Stage 2 operational contract:** Markdown remains authoritative; runtime SQLite
 is coordination/derived state, never a knowledge source. Operational databases use
-rollback-journal, `synchronous=FULL`, and no WAL on the current SQLite runtime. They
+`synchronous=FULL`. On 2026-09-30 the owner authorized preparation and qualification
+of WAL for the two adopted v3 coordination databases. Cutover requires a SQLite
+runtime with the WAL-reset fix, validated sidecars, recoverable offline migration,
+and backup/restore qualification. Other databases retain rollback-journal mode.
+Ordinary opens must never change journal modes. All operational databases
 require a local filesystem with correct locking. Network/cloud-synchronized runtime
 roots are unsupported; cloud detection is best-effort. External editors may briefly
 see a mixed tree, and hash/CAS guarantees apply only to cooperating transaction-API

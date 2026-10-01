@@ -68,3 +68,35 @@ Why not the alternatives:
 Files: `scripts/llm_client.py`, `scripts/backfill_sessions.py`,
 `tests/test_llm_descriptors.py`, `tests/test_a_memory_call_leaves_no_session.py`,
 `docs/research/2026-09-14-a-memory-call-leaves-no-session.md`.
+
+## Codex parity, 2026-09-30
+
+The same text-service boundary was incomplete in the Codex backend: its command
+suppressed lifecycle hooks and used a neutral directory, but inherited configured
+MCP servers and persisted its internal session. The effective installed inventory
+contained four enabled servers, including this memory service itself. An empty
+`mcp_servers={}` override did not remove them: the CLI merges that table.
+
+Before each internal call, query `codex mcp list --json` in the same neutral
+working directory and provider environment. Override each returned name's
+`enabled` field with an inline TOML table; quoted keys preserve dotted names.
+A missing, malformed or failed inventory refuses the call before sending the
+prompt. Never print transport settings or credentials. Add `--ephemeral` to the
+internal exec command. Keep user provider/auth configuration, model and reasoning,
+read-only sandbox, and hook suppression. No interactive configuration is changed.
+
+The installed CLI confirmed all four entries disabled with the populated override.
+The old-code regression starts exec without inventory/isolation; the corrected
+path preserves GPT-6 Luna/max and rejects malformed inventories. A real benign
+JSON transformation using the candidate returned the expected object in 8.257 s.
+This is functional evidence, not a paired whole-compile speedup measurement.
+
+Current primary documentation checked 2026-09-30:
+- https://learn.chatgpt.com/docs/config-file/config-reference — per-server enabled
+  fields and scoped command-line configuration.
+- https://learn.chatgpt.com/docs/developer-commands?surface=cli — ephemeral exec;
+  ignoring all user configuration would also lose provider configuration.
+
+This closes the existing provider isolation contract for Codex; it does not fix
+retrieval relevance or prove recovery of every old failed capture. Old transcripts
+remain subject to source provenance/retention checks, not blanket removal.

@@ -21,6 +21,11 @@ the operation is a `create` (a `replace` would overwrite whatever is there
 now), the target does not exist today, the recorded after-image still hashes
 to what the plan recorded, and the path is under `knowledge/`. Anything else
 is left alone and reported. On a vault with nothing owed it does nothing.
+
+Compile receipts are transaction authority, not ordinary pages. A batch that
+contains one is refused before any write: only its original compile transaction
+may establish completion. Replaying receipt bytes under a repair identity would
+make the next compile reject the receipt as corrupt.
 """
 
 from __future__ import annotations
@@ -42,6 +47,7 @@ from markdown_transaction import (  # noqa: E402
 )
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
 from reliable_memory import sha256_bytes  # noqa: E402
+from review_refused_compile import review_allows_replay  # noqa: E402
 
 KNOWLEDGE = "knowledge/"
 # A race is an accident and may be replayed. A DLP refusal is a decision: the
@@ -111,7 +117,10 @@ def _owed_pages(directory: Path, vault: Path) -> list[tuple[str, bytes]]:
 
 def _collect(coordinator, vault: Path) -> list[tuple[str, str, bytes]]:
     with coordinator._connect() as database:  # noqa: SLF001
-        identifiers = _quarantined_ids(database)
+        identifiers = [
+            identifier for identifier in _quarantined_ids(database)
+            if review_allows_replay(database, identifier, coordinator.state_root)
+        ]
     found = []
     for identifier in identifiers:
         directory = coordinator.transaction_root / identifier
@@ -120,7 +129,17 @@ def _collect(coordinator, vault: Path) -> list[tuple[str, str, bytes]]:
     return found
 
 
+def _require_page_replay(owed: list[tuple[str, str, bytes]]) -> None:
+    for _, path, _ in owed:
+        if Path(path).is_relative_to("knowledge/daily/receipts"):
+            raise ValueError(
+                "Compile receipts require the original compile transaction; "
+                "resume compilation instead of replaying receipt files."
+            )
+
+
 def _restore(vault: Path, owed: list[tuple[str, str, bytes]]) -> None:
+    _require_page_replay(owed)
     for identifier, path, content in owed:
         record = mutate_knowledge(
             f"repair-refused-create:{identifier}:{sha256_bytes(content)}",

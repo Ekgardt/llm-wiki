@@ -54,3 +54,52 @@ defaulted.
   `tests/test_the_weekly_task_outlasts_its_pass.py`,
   `tests/test_a_changed_task_setting_reaches_an_installed_machine.py`
 - `.github/workflows/tests.yml`
+
+## Follow-up, 2026-10-01: measured drift and a quadratic security scan
+
+PR 52 head `f384b51d`, CI run `36873543509`, retained all 36 JUnit/progress
+artifacts. Windows Python 3.10/3.12 shard 3 reached the existing 60-minute job
+deadline. The other Windows shards completed. Full file coverage alone did not
+keep the old costs current: operational-journal migration was weighted 18.77 s
+but measured 513.7 s; breadcrumb delivery was weighted 11.66 s but measured
+367.2 s. Replaying the old partition with the new per-file maxima puts 4649.3 s
+on shard 3, against 2368.5–2915.4 s on the others.
+
+That imbalance was not the whole cause. Python 3.10's progress file ends at
+`test_only_daily_archiver_has_directory_publication_exception`, absent from its
+interrupted JUnit; the same test took 299.675 s on Python 3.11. Each assignment
+called `ast.get_source_segment` on the whole module again. The security scanner
+now reuses `code_extractor._line_offsets`: encode once, locate Python newline
+boundaries once, slice by AST UTF-8 byte offsets. The original invariant and its
+assertion are unchanged. Replacing it with a regex, dropping files, unparsing
+the AST, or raising the timeout would change its meaning or hide its cost.
+
+The existing refresh command consumed all 36 reports, including other operating
+systems so Windows skips do not erase their costs. It retains every one of 811
+test files and gives four predicted totals of 3197.0 s. Interrupted reports are
+partial observations, not complete runs; maxima also include complete runs of
+the same files. The security file's old measured cost is conservative until its
+new native measurements arrive. No timeout, shard count, or security requirement
+changed, and these predictions are not a Windows pass.
+
+Validation: the real repository scan took 52.09 s before and 4.31 s after on the
+same local interpreter. All 62 security tests pass. A regression counts repeated
+whole-source work rather than imposing a machine-dependent timing threshold:
+the old helper returns the correct text but scans 153 characters for a 51-character
+module, failing the one-scan bound; the new helper passes. Text extraction agrees
+with the standard library for Unicode byte columns, multiline assignments/calls,
+tabs/form feeds, and LF/CRLF/CR. Positive and negative publication cases remain
+checked. Final full native CI, especially Windows, is still required.
+
+Primary sources checked on 2026-10-01:
+
+- [Python AST locations and source segments](https://docs.python.org/3/library/ast.html#ast.get_source_segment):
+  AST columns are UTF-8 byte offsets, not character indices; location semantics
+  constrain the equivalent extractor. The local standard-library implementation
+  also confirms repeated line splitting.
+- [pytest duration reporting](https://docs.pytest.org/en/stable/how-to/usage.html#profiling-test-execution-duration):
+  use retained per-test measurements and JUnit data instead of inferring a hang
+  from a job's overall elapsed time.
+- [GitHub job timeout contract](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idtimeout-minutes):
+  the job deadline cancels unfinished work. Preserve the existing bound and fix
+  the measured work and partition rather than declaring cancellation a test pass.

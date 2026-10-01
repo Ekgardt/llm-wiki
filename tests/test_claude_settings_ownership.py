@@ -96,6 +96,18 @@ def test_installing_twice_writes_the_same_bytes(tmp_path: Path, user_settings: P
     assert user_settings.read_bytes() == first
 
 
+@pytest.mark.parametrize("key", _hooks_module().PROVIDER_ENV_KEYS)
+def test_every_persisted_provider_field_is_owned_and_removed(tmp_path, user_settings, monkeypatch, key):
+    for name in _hooks_module().PROVIDER_ENV_KEYS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(key, "codex" if key == "MEMORY_LLM_PROVIDER" else "configured")
+    resource = _resource(tmp_path)
+    resource.write_owned(resource.desired)
+    assert resource.read_owned() == resource.desired
+    resource.write_owned(None)
+    assert _settings(tmp_path)["env"] == {"EDITOR": "vim"}
+
+
 def test_uninstall_takes_back_our_hooks_and_our_env(tmp_path: Path, user_settings: Path) -> None:
     resource = _resource(tmp_path)
     resource.write_owned(resource.desired)

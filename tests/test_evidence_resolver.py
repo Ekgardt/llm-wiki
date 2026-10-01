@@ -405,3 +405,55 @@ def test_a_slice_that_ends_at_a_capture_block_still_resolves(vault: Path) -> Non
 
     assert (result.bytes, result.source_sha256) == (quote, _sha(compiled))
     assert result.location == "flat-part"
+
+
+def test_historical_lookup_tries_the_referenced_entry_before_unrelated_entries(vault, monkeypatch):
+    import evidence_resolver as evidence
+
+    day = _long_day(300)
+    part_start = day.index(b"<!-- llm-wiki-operation: op-250 -->")
+    part_end = day.index(b"<!-- llm-wiki-operation: op-252 -->")
+    part = day[part_start:part_end]
+    quote_start = part.index(b"quote-251")
+    reference = evidence.EvidenceRef(
+        "2026-01-02", _sha(part), "evt-251", quote_start, quote_start + 9,
+    )
+    daily = vault / "knowledge/daily/2026-01-02.md"
+    daily.write_bytes(day)
+    attempted = []
+    original = evidence._slice_from
+
+    def record(content, start, digest, ends):
+        attempted.append(start)
+        return original(content, start, digest, ends)
+
+    monkeypatch.setattr(evidence, "_slice_from", record)
+    assert evidence.EvidenceResolver(vault).resolve(reference).bytes == b"quote-251"
+    assert attempted == [part_start]
+
+
+def test_reference_hint_keeps_digest_search_complete_for_repeated_ids(vault):
+    import evidence_resolver as evidence
+
+    first = b"## [10:00:00] first\nwrong quote\n"
+    part = b"## [10:00:00] second\nright quote\n"
+    day = first + part + b"## [11:00:00] later\nappended\n"
+    (vault / "knowledge/daily/2026-01-02.md").write_bytes(day)
+    start = part.index(b"right quote")
+    reference = evidence.EvidenceRef("2026-01-02", _sha(part), "10:00:00", start, start + 11)
+    assert evidence.EvidenceResolver(vault).resolve(reference).bytes == b"right quote"
+
+
+def test_invalid_reference_hint_does_not_poison_digest_cache(vault):
+    import evidence_resolver as evidence
+
+    part = b"## [10:00:00] first\nright quote\n"
+    day = part + b"## [11:00:00] later\nappended\n"
+    (vault / "knowledge/daily/2026-01-02.md").write_bytes(day)
+    start = part.index(b"right quote")
+    invalid = evidence.EvidenceRef("2026-01-02", _sha(part), "missing", start, start + 11)
+    valid = evidence.EvidenceRef("2026-01-02", _sha(part), "10:00:00", start, start + 11)
+    resolver = evidence.EvidenceResolver(vault)
+    with pytest.raises(evidence.EvidenceResolutionError, match="block is ambiguous or missing"):
+        resolver.resolve(invalid)
+    assert resolver.resolve(valid).bytes == b"right quote"

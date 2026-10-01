@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 
 import compile_memory
+import pytest
 
 LOGICAL_PATH = "knowledge/daily/2026-09-20.md"
 DAY = (
@@ -63,3 +64,40 @@ def test_the_model_cannot_supply_a_derived_field() -> None:
     validated, _ = compile_memory._validate_semantic_operation({**OPERATION, "project": "someone-else"}, _inputs())
 
     assert validated["project"] == "llm-wiki"
+
+
+@pytest.mark.parametrize("action", ["create", "update"])
+@pytest.mark.parametrize("field", ["title", "summary", "body_markdown"])
+def test_model_prose_cannot_publish_an_unbound_daily_reference(action: str, field: str) -> None:
+    operation = {**OPERATION, "action": action, field: "See `daily:2026-09-20 10:00:00`."}
+
+    with pytest.raises(ValueError, match="evidence reference is not canonical"):
+        compile_memory._validate_semantic_operation(operation, _inputs())
+
+
+def test_evidence_description_cannot_smuggle_a_malformed_reference() -> None:
+    evidence = [{**OPERATION["evidence"][0], "claim": "See `daily:2026-09-20 10:00:00`."}]
+
+    with pytest.raises(ValueError, match="evidence reference is not canonical"):
+        compile_memory._validate_semantic_operation({**OPERATION, "evidence": evidence}, _inputs())
+
+
+def test_a_canonical_prose_reference_must_resolve_in_the_compile_snapshot() -> None:
+    _operation, bindings = compile_memory._validate_semantic_operation(dict(OPERATION), _inputs())
+    reference = bindings[0]["reference"].replace(hashlib.sha256(DAY).hexdigest(), "0" * 64)
+
+    with pytest.raises(ValueError, match="source is absent from the snapshot"):
+        compile_memory._validate_semantic_operation({**OPERATION, "body_markdown": f"See `{reference}`."}, _inputs())
+
+
+def test_bound_prose_references_survive_revalidation_unchanged() -> None:
+    inputs = _inputs()
+    _operation, bindings = compile_memory._validate_semantic_operation(dict(OPERATION), inputs)
+    body = f"See `{bindings[0]['reference']}`."
+    operation = {**OPERATION, "body_markdown": body}
+
+    once, _ = compile_memory._validate_semantic_operation(operation, inputs)
+    twice, _ = compile_memory._validate_semantic_operation(once, inputs)
+
+    assert once["body_markdown"] == body
+    assert twice == once

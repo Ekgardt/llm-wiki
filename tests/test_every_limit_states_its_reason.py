@@ -42,6 +42,8 @@ REPLACED = {
     # Not a replaced constant: recall and get_decisions had MCP_OPERATION_SECONDS (10 s);
     # 14 s is the budget measured for the reranker (B-9).
     "mcp.retrieval_seconds": 14,
+    "mcp.doctor_seconds": 10,
+    "mcp.doctor_return_seconds": 1,
 }
 RETIRED_NAMES = (
     "MAX_PAGE_COUNT",
@@ -174,6 +176,27 @@ def test_doctor_reports_an_invalid_file_as_an_error(tmp_path: Path) -> None:
     check = doctor._settings_check(tmp_path)
     assert check["status"] == "error"
     assert "index.max_pages" in check["message"]
+
+
+@pytest.mark.parametrize(("key", "ceiling"), [("max_pages", 4), ("max_total_bytes", 400)])
+def test_claim_capacity_counts_the_same_pages_as_the_claim_reader(tmp_path, key, ceiling):
+    from claim_tree_manifest import snapshot_claim_tree_with_content
+
+    notes = tmp_path / "knowledge/notes"
+    project = tmp_path / "knowledge/projects/example"
+    notes.mkdir(parents=True)
+    project.mkdir(parents=True)
+    for path in (notes / "note.md", project / "state.md", project / "context.md"):
+        path.write_bytes(b"x" * 100)
+    (project / "journal.md").write_bytes(b"history" * 1000)
+    (tmp_path / settings.SETTINGS_FILE_NAME).write_text(f"[claims]\n{key} = {ceiling}\n")
+    _, contents = snapshot_claim_tree_with_content(tmp_path)
+    assert (len(contents), sum(map(len, contents.values()))) == (3, 300)
+    check = doctor._settings_check(tmp_path)
+    assert f"claims.{key}" not in check["details"]["near_ceiling"]
+    (notes / "second.md").write_bytes(b"y" * 100)
+    check = doctor._settings_check(tmp_path)
+    assert check["details"]["near_ceiling"][f"claims.{key}"]["used"] == ceiling
 
 
 def _is_number(node: ast.AST) -> bool:

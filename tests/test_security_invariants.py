@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from code_extractor import _line_offsets
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
@@ -61,11 +62,20 @@ def _names_daily_archive(line: str) -> bool:
 
 
 def _assignment_sources(source: str, tree: ast.AST) -> list[str]:
-    return [
-        ast.get_source_segment(source, node) or ""
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.Assign, ast.AnnAssign))
-    ]
+    assignments = [node for node in ast.walk(tree) if isinstance(node, (ast.Assign, ast.AnnAssign))]
+    return _source_segments(source, assignments)
+
+
+def _source_segments(source: str, nodes) -> list[str]:
+    content = source.encode("utf-8")
+    offsets = _line_offsets(content)
+    return [_node_source(content, offsets, node) for node in nodes]
+
+
+def _node_source(content: bytes, offsets: tuple[int, ...], node) -> str:
+    start = offsets[node.lineno - 1] + node.col_offset
+    end = offsets[node.end_lineno - 1] + node.end_col_offset
+    return content[start:end].decode("utf-8")
 
 
 def _archive_assignment(source: str, tree: ast.AST) -> bool:
@@ -73,10 +83,44 @@ def _archive_assignment(source: str, tree: ast.AST) -> bool:
 
 
 def _archive_rename(source: str, renames: list[ast.Call]) -> bool:
-    return any(
-        _mentions_daily_archive(ast.get_source_segment(source, call) or "")
-        for call in renames
-    )
+    return any(_mentions_daily_archive(text) for text in _source_segments(source, renames))
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+def test_archive_source_segments_preserve_python_byte_offsets(newline):
+    source = newline.join([
+        'prefix = "До"; daily_archive: str = "архив"',
+        'value = (',
+        '    "daily\tarchive\f"',
+        '    "ещё"',
+        ')',
+        'target.rename("daily-archive/данные")',
+    ])
+    tree = ast.parse(source)
+    nodes = [node for node in ast.walk(tree) if isinstance(node, (ast.Assign, ast.AnnAssign, ast.Call))]
+    assert _source_segments(source, nodes) == [ast.get_source_segment(source, node) for node in nodes]
+
+
+def test_archive_assignment_scan_does_not_rescan_the_module_for_each_node():
+    source = 'prefix = "До"; daily_archive = "one"\nother = "two"\n'
+    tree = ast.parse(source)
+    with patch.object(ast, "get_source_segment", wraps=ast.get_source_segment) as extract:
+        assert _assignment_sources(source, tree) == ['prefix = "До"', 'daily_archive = "one"', 'other = "two"']
+    # At most one whole-source scan: this bound is work per module, not wall time.
+    assert sum(len(call.args[0]) for call in extract.call_args_list) <= len(source)
+
+
+@pytest.mark.parametrize(("source", "expected"), [
+    ('target = root / "daily" / "archive"\ntarget.rename(other)\n', True),
+    ('target.rename("daily-archive/данные")\n', True),
+    ('daily = "data"\narchive = "other"\ntarget.rename(other)\n', False),
+    ('target = "safe"  # daily archive\ntarget.rename(other)\n', False),
+    ('target = root / "daily" / "archive"\n', False),
+])
+def test_archive_publication_scan_keeps_positive_and_negative_guards(tmp_path, source, expected):
+    module = tmp_path / "publisher.py"
+    module.write_text(source, encoding="utf-8")
+    assert _publishes_daily_archive(module) is expected
 
 
 def _publishes_daily_archive(path: Path) -> bool:

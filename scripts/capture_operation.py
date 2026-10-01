@@ -36,9 +36,9 @@ def _count_dropped_write(error: BaseException) -> None:
 def _fallback_operation_id(
     prefix: str, key: str, source_event_id: str | None
 ) -> str:
-    occurrence = source_event_id or uuid.uuid4().hex
-    digest = hashlib.sha256(f"{prefix}\0{key}\0{occurrence}".encode()).hexdigest()
-    return f"{prefix}:fallback:{digest}"
+    if source_event_id is not None:
+        return _operation_id(prefix, key, source_event_id)
+    return _operation_id(f"{prefix}:fallback", key, None)
 
 
 def _is_recent(previous: str | None, now: datetime, rate_limit_seconds: int) -> bool:

@@ -116,3 +116,23 @@ def test_only_a_race_is_replayable_never_a_dlp_refusal():
     )
 
     assert repair._quarantined_ids(database) == ["raced"]
+
+
+def test_receipt_replay_refuses_whole_batch_before_any_write(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import pytest
+
+    writes = []
+    def publish(*args, **kwargs):
+        writes.append(args)
+        return SimpleNamespace(state="committed")
+
+    monkeypatch.setattr(repair, "mutate_knowledge", publish)
+    owed = [
+        ("page", "knowledge/notes/owed.md", PAGE),
+        ("receipt", "knowledge/daily/receipts/v3-source.md", b"receipt"),
+    ]
+    with pytest.raises(ValueError, match="original compile transaction"):
+        repair._restore(tmp_path, owed)
+    assert writes == []

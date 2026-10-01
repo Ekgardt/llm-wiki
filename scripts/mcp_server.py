@@ -44,6 +44,7 @@ import itertools
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -264,7 +265,16 @@ def _recall_operation_seconds(arguments: dict) -> float:
     return QA_DEADLINE_SECONDS
 
 
+def _doctor_operation_seconds(arguments: dict) -> float:
+    if arguments.get("action") != "status":
+        return MCP_OPERATION_SECONDS
+    from settings import setting_value
+
+    return float(setting_value("mcp.doctor_seconds"))
+
+
 _TOOL_BUDGETS = {
+    "doctor": _doctor_operation_seconds,
     "get_architecture": _architecture_operation_seconds,
     "recall": _recall_operation_seconds,
     "get_decisions": _retrieval_operation_seconds,
@@ -3863,10 +3873,43 @@ def _doctor_report_codes(report: dict) -> list:
     return codes
 
 
-def _doctor_status(context: dict) -> dict:
-    from doctor import run_doctor
+def _doctor_process_report(completed: subprocess.CompletedProcess) -> dict:
+    report = json.loads(completed.stdout)
+    expected = {"ok": 0, "degraded": 1, "error": 2}[report["overall_status"]]
+    if completed.returncode != expected:
+        raise RuntimeError("doctor process exit does not match its health report")
+    return report
 
-    report = run_doctor(
+
+def _doctor_check_deadline(deadline: float) -> float:
+    from settings import setting_value
+
+    remaining = max(0.0, deadline - time.monotonic())
+    reserve = min(float(setting_value("mcp.doctor_return_seconds")), remaining / 2)
+    return deadline - reserve
+
+
+def _run_doctor_process(*, root: Path, state_root: Path, deadline: float) -> dict:
+    """Run health outside the model interpreter, within the original deadline."""
+    _check_deadline(deadline)
+    environment = dict(os.environ, LLM_WIKI_ROOT=str(root), LLM_WIKI_STATE_ROOT=str(state_root))
+    environment["PYTHONIOENCODING"] = "utf-8"
+    command = [
+        sys.executable, str(Path(__file__).with_name("doctor.py")),
+        "--json", "--deadline", repr(_doctor_check_deadline(deadline)),
+    ]
+    try:
+        completed = subprocess.run(
+            command, env=environment, capture_output=True, encoding="utf-8",
+            timeout=max(0.0, deadline - time.monotonic()), check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise TimeoutError("doctor process reached the operation deadline") from error
+    return _doctor_process_report(completed)
+
+
+def _doctor_status(context: dict) -> dict:
+    report = _run_doctor_process(
         root=context["root"],
         state_root=context["state_root"],
         deadline=context["deadline"],

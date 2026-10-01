@@ -533,6 +533,71 @@ def test_short_advisory_refresh_includes_page_and_stale_counts(tmp_path, monkeyp
 
 # ---------------------------------------------------------------------------
 # PostToolUse capture — post_tool_capture.py
+
+
+@pytest.mark.parametrize("phase", ["claim", "complete"])
+@pytest.mark.shipped_append_budgets
+def test_tool_bookkeeping_returns_before_delegate_timeout_with_live_state_lock(
+    tmp_path, monkeypatch, phase
+):
+    import daily_log_append
+    import integration_adapter
+    import memory_state
+    import post_tool_capture
+
+    state_dir = tmp_path / "locked-state"
+    state_dir.mkdir()
+    lock_file = state_dir / "state.json.lock"
+    owner = str(os.getpid())
+    lock_file.write_text(owner, encoding="utf-8")
+    monkeypatch.setattr(memory_state, "STATE_DIR", state_dir)
+    monkeypatch.setattr(memory_state, "STATE_FILE", state_dir / "state.json")
+    monkeypatch.setattr(memory_state, "LOCK_FILE", lock_file)
+    monkeypatch.setattr(post_tool_capture, "update_state", memory_state.update_state)
+    actions = {
+        "claim": lambda: post_tool_capture._claim_tool_operation(
+            "project", "Edit", "a.py", source_event_id="event-a"
+        ),
+        "complete": lambda: post_tool_capture._complete_tool_operation(
+            "project", "Edit", "a.py", "post-tool:already-committed"
+        ),
+    }
+    started = time.perf_counter()
+    result = actions[phase]()
+    elapsed = time.perf_counter() - started
+
+    budget = daily_log_append.BREADCRUMB_APPEND_BUDGET_SECONDS + integration_adapter.DELEGATE_STARTUP_SECONDS
+    assert elapsed < budget
+    assert lock_file.read_text(encoding="utf-8") == owner
+    lock_file.unlink()
+    assert result == actions[phase]()
+
+
+def test_tool_event_is_written_while_bookkeeping_state_is_locked(
+    tmp_path, monkeypatch, isolated_capture_state
+):
+    import memory_state
+    import post_tool_capture
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setattr(post_tool_capture, "ROOT", vault)
+    monkeypatch.setattr(post_tool_capture, "_compute_slug_from_cwd", lambda _cwd: "project")
+    memory_state.STATE_DIR.mkdir(parents=True)
+    memory_state.LOCK_FILE.write_text(str(os.getpid()), encoding="utf-8")
+    payload = {
+        "tool_name": "Edit",
+        "tool_input": {"filePath": "src/locked.py"},
+        "session_id": "locked-session",
+        "cwd": str(tmp_path),
+        "event_id": "locked-event",
+    }
+
+    assert _run_capture_with_stdin("post_tool_capture", payload) == 0
+    daily = next((vault / "knowledge" / "daily").glob("*.md"))
+    content = daily.read_text(encoding="utf-8")
+    assert (content.count("src/locked.py"), content.count("llm-wiki-operation:")) == (1, 1)
 # ---------------------------------------------------------------------------
 
 
@@ -1126,5 +1191,3 @@ def _queue_capture_tasks(state_root: Path) -> list[dict]:
         connection.row_factory = sqlite3.Row
         rows = connection.execute("SELECT * FROM tasks").fetchall()
     return [{key: str(row[key]) for key in row.keys()} for row in rows]
-
-

@@ -10,6 +10,7 @@ import stat
 import threading
 import time
 from contextlib import closing, contextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,8 @@ from markdown_transaction import MarkdownChange, MarkdownCoordinator  # noqa: E4
 from reliable_memory import sha256_bytes  # noqa: E402
 
 from tests.slow_machine import LONG_TIMEOUT
+
+pytestmark = pytest.mark.filterwarnings("error::pytest.PytestUnhandledThreadExceptionWarning")
 
 
 class _LockedClock:
@@ -37,6 +40,15 @@ class _LockedClock:
 
 @pytest.fixture
 def archive_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, Path]:
+    import memory_queue
+
+    # These fixtures test serialization across deliberately paused transactions,
+    # not the production 5 s refusal. The SQLite wait must share the test's hang
+    # bound, including slow Windows ACL/fsync work before the archive releases it.
+    monkeypatch.setattr(
+        memory_queue, "DEFAULTS",
+        replace(memory_queue.DEFAULTS, queue_busy_ms=int(LONG_TIMEOUT * 1000)),
+    )
     root = tmp_path / "vault"
     state_root = tmp_path / "state"
     state_root.mkdir()

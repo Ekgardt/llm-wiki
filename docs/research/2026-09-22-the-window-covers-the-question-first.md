@@ -93,8 +93,8 @@ pinned by a test:
 - a pool holding one source comes out unchanged (there is nobody to cover for);
 - a pool whose sources all hold a place already comes out unchanged, the sharpest case
   being a pool that fits the window;
-- a source's only chunk is never deferred by the rule's own choice: only a chunk of a
-  source that keeps another chunk inside the window is ever displaced;
+- repeated sources yield first; when those cannot make room, a unique source not
+  selected for question coverage yields before a selected source does;
 - a source's chunks keep their order, except the one chunk admitted for coverage, which
   is its lane-best whenever the lane-best covers as much — so with equal coverage the
   order is exactly the lane's.
@@ -209,3 +209,42 @@ bootstrap on the decide halves of both stands, no type losing more than 1.5 poin
 refusal errors reported. The baseline arm is the commit before this change; the stand's
 LoCoMo rows must first carry `answer_session_ids` derived from `locomo_evidence` before its
 session coverage can be read at all.
+
+
+## 2026-09-30: distinct pages must not veto question coverage
+
+The installed pipeline page-diversifies candidates before applying coverage. The
+old displacement guard protected every unique page, so a window of unrelated
+unique pages could reject all candidates selected to cover missing query terms.
+The graph traced `_visible_order` through `_cover_then_fill` and
+`_pulled_into_window` to `_displaceable`; source inspection confirmed the guard.
+An alpha/beta/gamma regression fails on the previous implementation: three
+distinct alpha pages occupy the window while beta and gamma remain outside.
+
+Research checked on 2026-09-30:
+- [Elasticsearch RRF](https://www.elastic.co/docs/reference/elasticsearch/rest-apis/reciprocal-rank-fusion)
+  separates rank fusion and final result size; changing rank weights would not
+  correct the downstream coverage veto.
+- [Carbonell and Goldstein, MMR](https://www.cs.cmu.edu/~jgc/publication/The_Use_MMR_Diversity_Based_LTMIR_1998.pdf)
+  balances relevance and redundancy rather than protecting every unique source.
+- [Qdrant hybrid queries](https://qdrant.tech/documentation/search/hybrid-queries/)
+  documents candidate prefetch followed by fusion; it supplies context for keeping
+  candidate retrieval separate from final selection, not a mandate for this policy.
+
+Choose the smallest correction to the existing selector: displace redundant
+chunks first, then the last unselected unique chunks if needed. Admitted coverage
+chunks remain protected; every displaced candidate remains in the tail. A unique
+page can consequently move outside the visible window when it adds no selected
+question coverage. This replaces the old unconditional uniqueness veto, including
+its contradictory test expectation; the duplicate-preference assertion remains.
+No additional model, dependency, budget, schema, arbitrary limit, or parallel
+implementation is introduced. Larger result windows merely hide the failure;
+rank-weight retuning and replacing the selector with MMR are broader changes
+without evidence of necessity for this defect. Python remains 3.14.6 locally.
+
+Validation: 220 related retrieval and benchmark-harness tests passed, with three
+existing skips. This is not a model-quality benchmark. A private replay of the
+same fresh generation's lexical candidates and fusion metadata on Russian and
+English WAL recovery questions includes the expected page in the new top five;
+the old selector omits it. Full installed hybrid retrieval still needs its own
+check; this does not establish universal relevance or fix reranker admission.

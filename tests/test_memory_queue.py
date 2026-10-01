@@ -2082,10 +2082,13 @@ def test_deferred_compile_failure_retries_then_dies(
     task_id = queue.enqueue("compile", 1, {})
     calls: list[list[str]] = []
 
+    real_run = subprocess.run
+
     def failed_run(command, **kwargs):
-        del kwargs
         calls.append(command)
-        return subprocess.CompletedProcess(command, 1)
+        if any("compile_memory.py" in str(part) for part in command):
+            return subprocess.CompletedProcess(command, 1)
+        return real_run(command, **kwargs)
 
     monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     monkeypatch.setattr(memory_queue, "_queue", lambda **kwargs: queue)

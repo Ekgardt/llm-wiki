@@ -270,8 +270,10 @@ def _complete_one_pending(
     """
     from integration_adapter import _publish_capture_files_and_task
 
-    payload = _verified_intent_bytes(state_root, record)
+    payload = _pending_intent_bytes(state_root, record)
     intent_id = str(record["intent_id"])
+    if _already_recorded_breadcrumb(coordinator, state_root, record, payload):
+        return intent_id
     _publish_capture_files_and_task(
         queue,
         coordinator,
@@ -284,6 +286,87 @@ def _complete_one_pending(
     return intent_id
 
 
+def _pending_intent_bytes(state_root: Path, record: dict[str, Any]) -> bytes:
+    """A concurrent publisher may have moved the exact retained bytes to ready."""
+    try:
+        return _verified_intent_bytes(state_root, record)
+    except FileNotFoundError:
+        ready = {**record, "relative_path": _ready_relative_path(record)}
+        return _verified_intent_bytes(state_root, ready)
+
+
+def _already_recorded_breadcrumb(coordinator, state_root, row, payload) -> bool:
+    """A pre-database retry must still recognize the old synchronous receipt."""
+    if not row.get("unindexed"):
+        return False
+    from breadcrumb_capture import _legacy_recorded, is_breadcrumb
+    from flush_memory import _decode_capture_intent
+    from integration_adapter import _remove_verified_pending
+
+    record = _decode_capture_intent(payload)
+    recorded = is_breadcrumb(record) and _legacy_recorded(
+        coordinator.vault, coordinator, record["source_occurrence_id"]
+    )
+    if not recorded:
+        return False
+    _remove_verified_pending(state_root / row["relative_path"], state_root, row["intent_sha256"])
+    return True
+
+
+def _unindexed_pending_record(path: Path, state_root: Path) -> dict[str, Any]:
+    from flush_memory import _decode_capture_intent, _require_capture_intent_identity
+    from integration_adapter import _capture_relative_paths
+    from reliable_memory import read_runtime_bytes, sha256_bytes
+
+    payload = read_runtime_bytes(path, state_root, max_bytes=MAX_CAPTURE_INTENT_BYTES, owner_only=True)
+    record = _decode_capture_intent(payload)
+    _require_capture_intent_identity(record)
+    expected, _ = _capture_relative_paths(record["intent_id"])
+    if path.relative_to(state_root).as_posix() != expected:
+        raise ValueError("pending capture filename differs from its identity")
+    return {
+        "intent_id": record["intent_id"], "relative_path": expected,
+        "intent_sha256": sha256_bytes(payload), "byte_size": len(payload), "unindexed": True,
+    }
+
+
+def _unindexed_pending_window(queue, state_root: Path, count: int):
+    records = []
+    for path in sorted((state_root / "run/capture-intents/pending").glob("*/*.json")):
+        record = _unindexed_pending_candidate(queue, path, state_root)
+        if record is not None:
+            records.append(record)
+        if len(records) >= count:
+            break
+    return records
+
+
+def _unindexed_pending_candidate(queue, path: Path, state_root: Path):
+    try:
+        return _eligible_unindexed_pending(queue, path, state_root)
+    except FileNotFoundError:
+        return None
+    except Exception as error:  # one invalid file must not hide later durable inputs
+        return {"intent_id": path.stem, "discovery_error": error}
+
+
+def _eligible_unindexed_pending(queue, path: Path, state_root: Path):
+    recorded = queue.capture_intent_record(path.stem)
+    if recorded is None:
+        return _unindexed_pending_record(path, state_root)
+    if recorded["publication_state"] != "ready":
+        return None
+    return {**recorded, "relative_path": path.relative_to(state_root).as_posix()}
+
+
+def _pending_window(queue, reader, state_root: Path, cutoff: str, count: int):
+    recorded = reader(count, cutoff)
+    remaining = count - len(recorded)
+    if remaining < 1:
+        return recorded
+    return recorded + _unindexed_pending_window(queue, state_root, remaining)
+
+
 def _complete_pending_batch(
     queue: object,
     coordinator: object,
@@ -294,6 +377,8 @@ def _complete_pending_batch(
     for record in records:
         outcome["examined"] += 1
         try:
+            if "discovery_error" in record:
+                raise record["discovery_error"]
             intent_id = _complete_one_pending(queue, coordinator, state_root, record)
         except Exception as error:  # noqa: BLE001 - one bad record must not stop the pass
             outcome["skipped"].append(_skip(record, error))
@@ -309,7 +394,7 @@ def complete_pending_capture_intents(
     limit: int = MAX_ADOPTED_INTENTS_PER_PASS,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Finish intents whose publisher died before it could mark them ready.
+    """Relay durable ingress and finish interrupted indexed publications.
 
     Never raises for a single bad record, exactly as adoption does: a record whose
     bytes moved, or whose publisher still holds the fence, is a named skip.
@@ -321,7 +406,7 @@ def complete_pending_capture_intents(
     cutoff = _stale_pending_cutoff(now)
 
     def window(count: int) -> list[dict[str, Any]]:
-        return reader(count, cutoff)
+        return _pending_window(queue, reader, Path(state_root), cutoff, count)
 
     def batch(records: list[dict[str, Any]], result: dict[str, Any]) -> None:
         _complete_pending_batch(queue, coordinator, Path(state_root), records, result)

@@ -138,7 +138,7 @@
     "compile_parts": {
       "type": "array",
       "minItems": 2,
-      "maxItems": 2049,
+      "maxItems": 4097,
       "items": {
         "type": "object",
         "required": [

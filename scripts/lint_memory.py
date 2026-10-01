@@ -190,9 +190,17 @@ def _resolve_link(target: str, search_roots: list[Path]) -> Path | None:
     return _resolve_bare_link(stripped, search_roots)
 
 
-def check_evidence_references(pages: list[Path]) -> list[str]:
+def _selected_resolver(resolver: EvidenceResolver | None) -> EvidenceResolver:
+    if resolver is None:
+        return EvidenceResolver(ROOT, state_root=STATE_ROOT)
+    return resolver
+
+
+def check_evidence_references(
+    pages: list[Path], *, resolver: EvidenceResolver | None = None,
+) -> list[str]:
     """Resolve every canonical logical evidence reference and fail closed."""
-    resolver = EvidenceResolver(ROOT, state_root=STATE_ROOT)
+    resolver = _selected_resolver(resolver)
     findings: list[str] = []
     for page in pages:
         try:
@@ -703,9 +711,11 @@ def _page_label(page: Path) -> str:
         return Path(page).as_posix()
 
 
-def check_claim_schemas(pages: list[Path]) -> list[str]:
+def check_claim_schemas(
+    pages: list[Path], *, resolver: EvidenceResolver | None = None,
+) -> list[str]:
     """Validate canonical claim ledgers and quarantined inbox candidates."""
-    resolver = EvidenceResolver(ROOT, state_root=STATE_ROOT)
+    resolver = _selected_resolver(resolver)
     findings: list[str] = []
     for page in pages:
         try:
@@ -1135,6 +1145,7 @@ def _page_checks(
     """Every per-page check for one scope, already labelled."""
     tree = _unique_by_resolved_path(list(_iter_tree_md(NOTES)))
     search_roots = [VAULT, NOTES]
+    resolver = EvidenceResolver(ROOT, state_root=STATE_ROOT)
     results = {
         "broken_wikilinks": check_broken_links(tree, search_roots),
         "orphan_pages": check_orphans_against_index(pages, index),
@@ -1148,8 +1159,8 @@ def _page_checks(
         "invalid_supersede_chain": check_invalid_supersede_chain(pages),
         "orphan_gaps": check_orphan_gaps(pages),
         "temporal_validity": check_temporal_validity(pages),
-        "invalid_evidence": check_evidence_references(pages),
-        "invalid_claim_schema": check_claim_schemas(pages),
+        "invalid_evidence": check_evidence_references(pages, resolver=resolver),
+        "invalid_claim_schema": check_claim_schemas(pages, resolver=resolver),
     }
     return {name: _labelled(label, items) for name, items in results.items()}
 

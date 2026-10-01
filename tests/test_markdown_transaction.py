@@ -1561,7 +1561,7 @@ def test_windows_acl_hardening_verifies_owner_only_success(tmp_path: Path, monke
     monkeypatch.setattr(markdown_transaction, "_windows_acl_identity", lambda: "DOMAIN\\user")
     monkeypatch.setattr(markdown_transaction, "_run_acl_command", successful)
     markdown_transaction._harden_windows_acl(path)
-    hardening = calls[0]
+    hardening = calls[1]
     # The groups every Windows install grants by default, removed by SID.
     removed = (
         "*S-1-3-4",
@@ -1575,7 +1575,37 @@ def test_windows_acl_hardening_verifies_owner_only_success(tmp_path: Path, monke
         hardening[0].casefold(),
         {"DOMAIN\\user:(F)", "/remove:g"} <= set(hardening),
         set(removed) <= set(hardening),
-    ) == (2, "icacls", True, True)
+    ) == (3, "icacls", True, True)
+
+
+@pytest.mark.parametrize("protected", [True, False])
+def test_correct_windows_acl_is_only_reapplied_when_unprotected(tmp_path, monkeypatch, protected):
+    path = tmp_path / "private"
+    path.mkdir()
+    calls = []
+
+    def run(command):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "private DOMAIN\\user:(OI)(CI)(F)\n", "")
+
+    monkeypatch.setattr(markdown_transaction, "_run_acl_command", run)
+    monkeypatch.setattr(markdown_transaction, "_windows_acl_identity", lambda: "DOMAIN\\user")
+    monkeypatch.setattr(markdown_transaction, "_windows_dacl_protected", lambda path: protected)
+    markdown_transaction._harden_windows_acl(path)
+
+    assert any("/grant:r" in command for command in calls) is (not protected)
+
+
+@pytest.mark.parametrize("entry", [
+    "DOMAIN\\user:(I)(OI)(CI)(F)",
+    "DOMAIN\\user:(F)",
+    "OTHERDOMAIN\\user:(OI)(CI)(F)",
+    "DOMAIN\\user:(OI)(CI)(F)\n OTHER\\guest:(R)",
+])
+def test_windows_acl_shortcut_rejects_different_or_inherited_permissions(entry):
+    result = subprocess.CompletedProcess([], 0, f"private {entry}\n", "")
+
+    assert not markdown_transaction._exact_windows_acl(result, "DOMAIN\\user", "DOMAIN\\user:(OI)(CI)(F)")
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows ACL identity")
@@ -1592,9 +1622,9 @@ def test_windows_acl_hardening_failure_is_not_silently_accepted(tmp_path: Path, 
 def test_windows_acl_failure_aborts_transaction_preparation(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    coordinator = MarkdownCoordinator(vault, state_root)
     denied = subprocess.CompletedProcess(["icacls"], 5, b"", b"access denied")
     monkeypatch.setattr(markdown_transaction, "_run_acl_command", lambda command: denied)
-    coordinator = MarkdownCoordinator(vault, state_root)
     with pytest.raises(PermissionError, match="owner-only ACL"):
         coordinator.prepare(
             [MarkdownChange.create("knowledge/notes/new.md", b"new")],

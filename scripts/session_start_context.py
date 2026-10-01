@@ -931,6 +931,8 @@ def _nightly_line() -> str:
     """
     state = _nightly_state()
     status = state.get("last_nightly_status")
+    if status == "deferred":
+        return "**Nightly post-compile work is deferred.** Compilation must finish before indexing and health refresh.\n"
     if status != "failed":
         return ""
     date = state.get("last_nightly_date") or "never"

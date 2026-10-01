@@ -853,12 +853,15 @@ class ContradictionPipeline:
         candidates: Sequence[IndexedClaim] | None = None,
         benchmark_gate: bool = False,
         commit: bool = True,
+        include_retrieval_evidence: bool = True,
     ) -> ClaimAssessment:
         if not isinstance(claim, NormalizedClaim):
             raise TypeError("claim must be normalized")
         claim_tree_manifest = self._claim_tree_manifest(commit)
         resolved = tuple(self._candidates_for(claim, candidates))
-        retrieval_context = self._retrieval_context(claim, resolved)
+        retrieval_context = self._retrieval_context(
+            claim, resolved, enabled=include_retrieval_evidence
+        )
         outcomes, evaluation_lineage = self._candidate_outcomes(
             claim, resolved, benchmark_gate
         )
@@ -895,9 +898,11 @@ class ContradictionPipeline:
         return self.claim_index.candidates(claim)
 
     def _retrieval_context(
-        self, claim: NormalizedClaim, candidates: Sequence[IndexedClaim]
+        self, claim: NormalizedClaim, candidates: Sequence[IndexedClaim], *, enabled: bool
     ) -> tuple[Mapping[str, object], ...]:
-        """Bounded fallback context when the verified ledger offers no candidate."""
+        """Optional evidence for readers; it never changes a lifecycle decision."""
+        if not enabled:
+            return ()
         if candidates or self.secondary_search is None:
             return ()
         return tuple(self.secondary_search(str(claim.record["text"]), 5))[:5]
@@ -1088,13 +1093,17 @@ class ContradictionPipeline:
         self.coordinator.apply(transaction.id)
 
     def plan_changes(
-        self, assessments: Sequence[ClaimAssessment]
+        self, assessments: Sequence[ClaimAssessment], *,
+        pending_pages: Mapping[str, bytes] | None = None,
     ) -> tuple[list[MarkdownChange], dict[str, object], tuple[str, ...]]:
-        changes, preconditions, created, _present = self.plan_candidate_changes(assessments)
+        changes, preconditions, created, _present = self.plan_candidate_changes(
+            assessments, pending_pages=pending_pages
+        )
         return changes, preconditions, created
 
     def plan_candidate_changes(
-        self, assessments: Sequence[ClaimAssessment]
+        self, assessments: Sequence[ClaimAssessment], *,
+        pending_pages: Mapping[str, bytes] | None = None,
     ) -> tuple[list[MarkdownChange], dict[str, object], tuple[str, ...], tuple[str, ...]]:
         """Changes, preconditions, candidates to create, and candidates already on disk.
 
@@ -1111,7 +1120,7 @@ class ContradictionPipeline:
         for assessment in ordered:
             self._plan_candidate(assessment, changes, created, present)
         mutations = {mutation for assessment in ordered for mutation in assessment.lifecycle_mutations}
-        lifecycle_changes, preconditions = self._lifecycle_changes(sorted(mutations))
+        lifecycle_changes, preconditions = self._lifecycle_changes(sorted(mutations), pending_pages)
         changes.extend(lifecycle_changes)
         return changes, preconditions, tuple(created), tuple(present)
 
@@ -1171,7 +1180,7 @@ class ContradictionPipeline:
             raise RuntimeError("candidate parent creation requires writer ownership")
 
     def _lifecycle_changes(
-        self, mutations: Sequence[LifecycleTarget]
+        self, mutations: Sequence[LifecycleTarget], pending_pages: Mapping[str, bytes] | None,
     ) -> tuple[list[MarkdownChange], dict[str, object]]:
         grouped = _grouped_targets(mutations)
         changes = []
@@ -1181,7 +1190,7 @@ class ContradictionPipeline:
                 item.canonical() for item in sorted(mutations)
             ]
         for path, targets in grouped.items():
-            changes.append(self._lifecycle_change(path, targets, preconditions))
+            changes.append(self._lifecycle_change(path, targets, preconditions, pending_pages))
         return changes, preconditions
 
     def _lifecycle_change(
@@ -1189,24 +1198,64 @@ class ContradictionPipeline:
         path: str,
         targets: Mapping[str, LifecycleTarget],
         preconditions: dict[str, object],
+        pending_pages: Mapping[str, bytes] | None,
     ) -> MarkdownChange:
         """Supersede every named claim on one page, refusing any drifted identity."""
         raw = read_stable_bytes(
             self.vault / path, MAX_CLAIM_PAGE_BYTES, label="claim lifecycle page"
         )
         preconditions[path] = sha256_bytes(raw)
-        match = CLAIM_LEDGER_RE.search(raw)
-        if match is None:
-            raise ValueError("lifecycle target has no canonical claim ledger")
-        ledger = json.loads(match[2])
-        _supersede_ledger_claims(ledger, targets, path)
-        encoded = canonical_json_bytes(ledger)
-        after = raw[: match.start(2)] + encoded + raw[match.end(2) :]
-        return MarkdownChange.replace(
-            path,
-            _page_after(after, ledger, self.source_page),
-            max_before_bytes=MAX_CLAIM_PAGE_BYTES,
+        after = _composed_lifecycle_page(
+            raw, (pending_pages or {}).get(path, raw), targets, path, self.source_page
         )
+        return MarkdownChange.replace(
+            path, after, max_before_bytes=MAX_CLAIM_PAGE_BYTES,
+        )
+
+
+def _lifecycle_ledger(content: bytes) -> tuple[re.Match, dict]:
+    match = CLAIM_LEDGER_RE.search(content)
+    if match is None:
+        raise ValueError("lifecycle target has no canonical claim ledger")
+    return match, json.loads(match[2])
+
+
+def _composed_lifecycle_page(
+    original: bytes, pending: bytes, targets: Mapping[str, LifecycleTarget],
+    path: str, source_page: str,
+) -> bytes:
+    """Validate disk identities, then apply their transitions to our own writes."""
+    _, before = _lifecycle_ledger(original)
+    _, after = _lifecycle_ledger(original)
+    _supersede_ledger_claims(after, targets, path)
+    match, combined = _lifecycle_ledger(pending)
+    _merge_lifecycle_records(combined, before, after, targets)
+    encoded = canonical_json_bytes(combined)
+    content = pending[:match.start(2)] + encoded + pending[match.end(2):]
+    return _page_after(content, combined, source_page)
+
+
+def _merge_lifecycle_records(combined, before, after, targets) -> None:
+    originals = _ledger_records_by_id(before)
+    updated = _ledger_records_by_id(after)
+    found = set()
+    for record in combined["claims"]:
+        claim_id = str(record["id"])
+        if claim_id in targets:
+            _merge_lifecycle_record(record, originals[claim_id], updated[claim_id])
+            found.add(claim_id)
+    if found != set(targets):
+        raise StaleLifecycleTarget("pending lifecycle target claim identity is missing")
+
+
+def _ledger_records_by_id(ledger: dict) -> dict:
+    return {str(item["id"]): item for item in ledger["claims"]}
+
+
+def _merge_lifecycle_record(record: dict, original: dict, updated: dict) -> None:
+    if record not in (original, updated):
+        raise StaleLifecycleTarget("pending lifecycle target claim identity changed")
+    record.update(updated)
 
 
 def _frontmatter_newline(content: bytes) -> bytes:

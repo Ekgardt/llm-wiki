@@ -47,3 +47,18 @@ Files: `scripts/compile_memory.py`,
   `last_compile_refused_reason`.
 - The caller's MCP deadline and cancellation still bound the run; the ceiling bounds one
   provider call inside it. No contract, path or environment variable changes.
+
+## Stale-owner parity, 2026-09-30
+
+After stopping a scheduled compile, its PID/identity was proven dead on the host,
+but direct compile refused the leftover lock. The direct/in-process entry called
+`_try_claim_lock` (creation only), while the spawner used `_claim_lock`, which
+first retires only bytes judged stale under the existing exclusive steal guard.
+Use that same claim path for direct and MCP compilation. Live owners, in-progress
+PID-0 placeholders and spawned tokens keep their existing refusal/ownership rules.
+
+A regression creates a lock for an actual child process while it is alive, waits
+for that child to exit, and verifies a direct compile can claim/release the lock.
+The old direct path refused with a null handle. Existing live-owner and spawned
+placeholder tests remain unchanged. This reuses the established lock protocol;
+no force-steal, delay or new lock implementation is introduced.

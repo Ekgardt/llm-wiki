@@ -93,6 +93,18 @@ audit = [
 [tool.uv]
 required-version = "==0.12.3"
 
+# The production reranker runs CPU int8 inference. Its extra must not replace
+# an installed CPU torch with a CUDA distribution during a locked update.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "reranker", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # `conftest.py` injects scripts/ into sys.path; no package install needed.

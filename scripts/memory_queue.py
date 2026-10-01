@@ -2232,6 +2232,7 @@ def validate_queue_v3_database(
     """Validate one unpublished or active queue v3 database fail-closed."""
     _require_inside_state_root(Path(path), Path(state_root))
     with closing(_open_queue_v3_readonly(Path(path), Path(state_root))) as database:
+        database.execute("BEGIN")
         if not _queue_v3_schema_complete(database):
             raise _migration_error(
                 "queue_v3_schema_incomplete", "queue v3 schema is incomplete"
@@ -7793,6 +7794,14 @@ class _QueueV3CandidateReader:
                 (limit,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def capture_intent_record(self, intent_id: str) -> dict[str, object] | None:
+        """The authoritative publication row, including a ready row during recovery."""
+        with closing(self._connect()) as database:
+            row = database.execute(
+                "SELECT * FROM capture_intents WHERE intent_id=?", (intent_id,)
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def pending_capture_intents(
         self, limit: int, older_than: str | None = None
