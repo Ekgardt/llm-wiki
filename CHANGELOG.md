@@ -8,6 +8,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Foreground prompt checkpoint follow-up tries writer admission without waiting beyond the host timeout; contended handoffs remain pending for existing recovery.
+
+- Replay a stale pending capture descriptor from its exact verified ready bytes when another publisher has completed it; preserve fences, full-source validation and one original task.
+
 - Distinguish configured live-corpus capacity refusals from immutable index corruption; report unverified freshness without raising limits or hiding malformed artifacts.
 
 - Retire all eligible own-call transcripts within the existing deadline instead of stopping at 2000 files; preserve files when classification exhausts that deadline.

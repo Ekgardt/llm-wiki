@@ -263,6 +263,15 @@ def _ready_relative_path(record: dict[str, Any]) -> str:
     )
 
 
+def _pending_or_ready_intent_bytes(state_root: Path, record: dict[str, Any]) -> bytes:
+    """A publisher may finish and remove pending after the sweep selected it."""
+    try:
+        return _verified_intent_bytes(state_root, record)
+    except FileNotFoundError:
+        ready_record = {**record, "relative_path": _ready_relative_path(record)}
+        return _verified_intent_bytes(state_root, ready_record)
+
+
 def _complete_one_pending(
     queue: object, coordinator: object, state_root: Path, record: dict[str, Any]
 ) -> str:
@@ -275,7 +284,7 @@ def _complete_one_pending(
     """
     from integration_adapter import _publish_capture_files_and_task
 
-    payload = _verified_intent_bytes(state_root, record)
+    payload = _pending_or_ready_intent_bytes(state_root, record)
     handler_version = verified_capture_handler(state_root, record, payload)
     intent_id = str(record["intent_id"])
     _publish_capture_files_and_task(
