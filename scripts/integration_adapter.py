@@ -2695,19 +2695,75 @@ def _require_stable_transcript(before: os.stat_result, after: os.stat_result) ->
 EDGE_SCAN_WINDOWS = 16
 
 
-def _read_transcript_edges(path: Path, side: int) -> tuple[bytes, bytes, int]:
-    """Head and tail of a transcript too large to hold whole, each of its turns."""
+def _transcript_file_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+        getattr(info, "st_file_attributes", 0),
+    )
+
+
+def _require_transcript_identity(before: os.stat_result, after: os.stat_result) -> None:
+    if _transcript_file_identity(before) != _transcript_file_identity(after):
+        raise PermissionError("capture transcript identity changed while it was read")
+    if after.st_size < before.st_size:
+        raise ValueError("capture transcript shrank while it was read")
+
+
+def _transcript_ranges(size: int, whole_limit: int | None, side: int) -> tuple[tuple[int, int], ...]:
+    if whole_limit is not None and size <= whole_limit:
+        return ((0, size),)
+    scan = min(side * EDGE_SCAN_WINDOWS, size // 2)
+    return ((0, scan), (size - scan, scan))
+
+
+def _read_transcript_ranges(descriptor: int, ranges: tuple[tuple[int, int], ...]) -> tuple[bytes, ...]:
+    pieces = tuple(_read_transcript_edge(descriptor, offset, length) for offset, length in ranges)
+    if tuple(map(len, pieces)) != tuple(length for _, length in ranges):
+        raise ValueError("capture transcript ended before its snapshot was read")
+    return pieces
+
+
+def _require_transcript_growth_or_stability(before: os.stat_result, after: os.stat_result) -> None:
+    _require_transcript_identity(before, after)
+    if after.st_size == before.st_size:
+        _require_stable_transcript(before, after)
+
+
+def _verify_transcript_ranges(
+    descriptor: int, before: os.stat_result,
+    ranges: tuple[tuple[int, int], ...], pieces: tuple[bytes, ...],
+) -> None:
+    after = os.fstat(descriptor)
+    _require_transcript_growth_or_stability(before, after)
+    if _read_transcript_ranges(descriptor, ranges) != pieces:
+        raise ValueError("capture transcript content changed while it was read")
+    verified = os.fstat(descriptor)
+    _require_transcript_growth_or_stability(after, verified)
+
+
+def _read_transcript_snapshot(
+    path: Path, whole_limit: int | None, side: int,
+) -> tuple[tuple[bytes, ...], int]:
+    """Verify retained ranges of the initial file size; appended bytes wait for the next capture."""
+    from bounded_io import _require_regular_file, _require_safe_ancestors
+
+    _require_safe_ancestors(path, "capture transcript", None)
+    before = path.lstat()
+    _require_regular_file(path, before, "capture transcript")
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
     try:
-        before = os.fstat(descriptor)
-        scan = min(side * EDGE_SCAN_WINDOWS, before.st_size // 2)
-        head = _read_transcript_edge(descriptor, 0, scan)
-        tail = _read_transcript_edge(descriptor, before.st_size - scan, scan)
-        _require_stable_transcript(before, os.fstat(descriptor))
+        opened = os.fstat(descriptor)
+        _require_transcript_identity(before, opened)
+        ranges = _transcript_ranges(opened.st_size, whole_limit, side)
+        pieces = _read_transcript_ranges(descriptor, ranges)
+        _verify_transcript_ranges(descriptor, opened, ranges, pieces)
+        current = path.lstat()
+        _require_regular_file(path, current, "capture transcript")
+        _require_transcript_identity(opened, current)
     finally:
         os.close(descriptor)
-    return _turns_head(head, side), _turns_tail(tail, side), before.st_size
+    return pieces, opened.st_size
 
 
 def _turn_lines(lines: Iterable[bytes], side: int) -> list[bytes]:
@@ -2763,13 +2819,9 @@ def _capture_excerpt_marker(dropped: int) -> str:
     return f"\n{capture_gap_line(dropped)}\n"
 
 
-def _capture_excerpt_text(path: Path, limit: int) -> str:
-    """A bounded excerpt that says, in the evidence itself, what it dropped."""
-    head, tail, size = _read_transcript_edges(path, limit // 2)
+def _render_capture_excerpt(head: bytes, tail: bytes, size: int) -> str:
     dropped = size - len(head) - len(tail)
-    return (
-        _evidence_text(head) + _capture_excerpt_marker(dropped) + _evidence_text(tail)
-    )
+    return _evidence_text(head) + _capture_excerpt_marker(dropped) + _evidence_text(tail)
 
 
 def _evidence_text(data: bytes) -> str:
@@ -2799,11 +2851,14 @@ def _capture_transcript_text(path: Path, limit: int = MAX_CAPTURE_EVIDENCE_BYTES
     `limit` is the bound this read keeps to; it is lowered when the text grew too
     much inside its JSON record (`_fitting_capture_record`).
     """
-    from bounded_io import read_stable_bytes
+    from bounded_io import _require_byte_limit
 
-    if path.stat().st_size > limit:
-        return _capture_excerpt_text(path, limit)
-    return _evidence_text(read_stable_bytes(path, limit, label="capture transcript"))
+    _require_byte_limit(limit)
+    pieces, size = _read_transcript_snapshot(path, limit, limit // 2)
+    if size <= limit:
+        return _evidence_text(pieces[0])
+    head, tail = pieces
+    return _render_capture_excerpt(_turns_head(head, limit // 2), _turns_tail(tail, limit // 2), size)
 
 
 def _capture_path_evidence(

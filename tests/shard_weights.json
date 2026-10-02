@@ -412,6 +412,7 @@
   "test_capture_inspection_writer.py": 3.4,
   "test_capture_intent_adoption.py": 5.18,
   "test_capture_publication_with_busy_writer.py": 1.98,
+  "test_capture_reads_a_growing_transcript.py": 0.02,
   "test_capture_recovery_fairness.py": 5.0,
   "test_capture_renewal_boundaries.py": 32.54,
   "test_capture_renewal_shutdown.py": 0.44,
