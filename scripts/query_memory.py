@@ -1698,7 +1698,7 @@ class _AnswerPass:
         _check_deadline(self.deadline)
         self.passes.append(note)
         system_prompt = _qa_system_prompt()
-        question_block = "<question>\n" + self.question.strip() + "\n</question>\n" + note
+        question_block = _question_block(self.question, note)
         fixed_tokens = len((system_prompt + question_block).encode("utf-8"))
         context = build_grounded_context(
             self.captured,
@@ -1715,6 +1715,10 @@ class _AnswerPass:
         _require_prompt_fits(system_prompt + prompt, self.budget)
         raw = _provider_response(self.generator, prompt, system_prompt, self.deadline)
         return verify_grounded_answer(_parsed_answer(raw), context, vault=self.vault), context
+
+
+def _question_block(question: str, note: str = "") -> str:
+    return "<question>\n" + question.strip() + "\n</question>\n" + note
 
 
 def grounded_qa(
@@ -1742,6 +1746,8 @@ def grounded_qa(
     answer policy can be measured; the product never asks for it.
     """
     _require_bounded_question(question)
+    selected_budget = budget or _qa_budget()
+    _require_prompt_fits(_qa_system_prompt() + _question_block(question), selected_budget)
     selected_deadline = _resolved_deadline(deadline)
     _check_deadline(selected_deadline)
     selected_profile = _resolved_profile(profile, question)
@@ -1754,7 +1760,7 @@ def grounded_qa(
         Path(vault),
         snapshot or _answer_corpus(Path(vault), selected_deadline),
         selected_profile,
-        budget or _qa_budget(),
+        selected_budget,
         generator,
         selected_deadline,
     )
@@ -2411,8 +2417,8 @@ def _write_cited_events(question: str, profile: str, paths: Sequence[str]) -> No
 
 
 def _require_bounded_question(question: object) -> None:
-    if not isinstance(question, str) or not question.strip() or len(question) > 16_384:
-        raise GroundedQAError("question must be a bounded non-empty string")
+    if not isinstance(question, str) or not question.strip():
+        raise GroundedQAError("question must be a non-empty string")
 
 
 def _resolved_deadline(deadline: float | None) -> float:
