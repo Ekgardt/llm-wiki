@@ -3472,7 +3472,8 @@ def _publish_event_breadcrumb(envelope: EventEnvelope):
 
 
 def _after_breadcrumb(envelope: EventEnvelope, payload: dict, result: dict) -> None:
-    _observe_checkpoint_fail_open(envelope)
+    # The complete occurrence is durable. Its existing queue worker performs
+    # the recoverable project transaction before completing the capture.
     slug, _project_dir = _project_context(envelope)
     result["slug"] = slug
     if envelope.event_type == "user_prompt":
@@ -3496,8 +3497,8 @@ def _ingest_breadcrumb_event(envelope: EventEnvelope) -> dict:
     result.update(capture_durable=True, capture_registered=publication.registered,
                   capture_registration_error=publication.registration_error)
     _record_capture_intent(result, publication.intent_id)
-    _wake_capture_worker(result, publication.intent_id)
     _after_breadcrumb_safely(envelope, payload, result)
+    _wake_capture_worker(result, publication.intent_id)
     return result
 
 

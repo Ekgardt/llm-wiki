@@ -136,12 +136,12 @@ def test_ingress_persists_before_checkpoint_and_survives_worker_launch_failure(i
         assert len(ready) == 1
         observed.append(event.event_id)
 
-    monkeypatch.setattr(adapter, "_observe_checkpoint_fail_open", observe)
+    monkeypatch.setattr(adapter, "_observe_project_checkpoint", observe)
     event = _ingress_event(adapter, kind)
     result = adapter.ingest_event(event)
     identity = result["capture_intent_ids"][0]
 
-    assert observed == [event.event_id]
+    assert observed == []
     assert result["capture_durable"] is True
     assert result["flush_spawned"] is False
     content = json.loads(_bundle(queue.state_root, identity).content)
@@ -149,6 +149,7 @@ def test_ingress_persists_before_checkpoint_and_survives_worker_launch_failure(i
     work = partial(flush_memory.run_capture_worker_once, queue, coordinator,
                    process_missing=partial(flush_memory.process_new_capture, queue, coordinator), handler_versions=(1, 2))
     assert work() is not None
+    assert observed == [event.event_id]
     assert work() is None
     assert (queue.vault / "knowledge/daily/2026-09-29.md").is_file()
 
