@@ -18,6 +18,7 @@ $LLM_WIKI_STATE_ROOT/logs/nightly-YYYY-MM-DD.md.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
@@ -1160,7 +1161,8 @@ def record_scheduled_failure(today: str, exc: BaseException) -> None:
         print(f"scheduled_nightly: could not record failure: {failure}", file=sys.stderr)
 
 
-def main() -> int:
+def main(argv: list[str] | tuple[str, ...] = ()) -> int:
+    argparse.ArgumentParser(description=__doc__).parse_args(argv)
     today = datetime.now().strftime("%Y-%m-%d")
     try:
         fence = take_scheduled_fence("nightly")
@@ -1180,4 +1182,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

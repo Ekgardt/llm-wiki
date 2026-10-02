@@ -709,3 +709,27 @@ def test_lint_candidate_location_and_project_claim_page_selection(
         [item.name for item in selected],
         len(lint_memory.check_claim_schemas(selected)),
     ) == ([], True, ["context.md", "state.md"], 2)
+
+
+def test_claim_rebuild_uses_the_existing_database_open_boundary(tmp_path, monkeypatch):
+    import importlib
+    import sys
+    import types
+
+    import claims
+    import reliable_memory
+
+    (tmp_path / "knowledge/notes").mkdir(parents=True)
+    previous_surface = types.ModuleType("reliable_memory")
+    previous_surface.__dict__.update(vars(reliable_memory))
+    del previous_surface.validate_database_directory
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setitem(sys.modules, "reliable_memory", previous_surface)
+            importlib.reload(claims)
+            index = claims.ClaimIndex(tmp_path, vault=tmp_path)
+            index.rebuild([])
+            assert index.path.is_file()
+            assert not (index.path.parent / "run").exists()
+    finally:
+        importlib.reload(claims)

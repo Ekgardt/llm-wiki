@@ -8,6 +8,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Scheduled maintenance now answers help and rejects unknown arguments before taking ownership; claims reuse the established database-open boundary during live updates.
+
 - Database-parent locking checks no longer create nested runtime directories in backup images; preserve platform-specific seal verification and installer cleanup.
 
 - Keep temporary SQLite locking probes in the existing runtime `run/` and avoid redundant chmod, so diagnostics and cooperating writers do not invalidate the sealed vault root.

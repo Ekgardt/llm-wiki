@@ -18,6 +18,7 @@ Designed to run unattended. Logs to $LLM_WIKI_STATE_ROOT/logs/weekly-YYYY-MM-DD.
 """
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 import threading
@@ -345,8 +346,9 @@ def run_weekly(
         return _run_weekly_body(ownership=ownership, fence=lost)
 
 
-def main() -> int:
+def main(argv: list[str] | tuple[str, ...] = ()) -> int:
     """The weekly fence: canonical on an adopted vault, the legacy marker otherwise."""
+    argparse.ArgumentParser(description=__doc__).parse_args(argv)
     from operational_ownership import OperationalOwnershipError
     from secret_redact import describe_error_chain
 
@@ -367,4 +369,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))
