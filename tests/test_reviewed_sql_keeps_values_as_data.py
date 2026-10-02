@@ -18,10 +18,12 @@ def identifier(request):
 
 def test_blackboard_resource_and_project_are_literal_values(identifier):
     with closing(sqlite3.connect(":memory:")) as database:
+        database.row_factory = sqlite3.Row
         database.execute("CREATE TABLE blackboard_claims(project TEXT, resource TEXT)")
         rows = [(identifier, identifier), (identifier, "other"), ("other", identifier)]
         database.executemany("INSERT INTO blackboard_claims VALUES (?, ?)", rows)
-        assert blackboard._busy_claim_rows(database, identifier, (identifier,)) == [rows[0]]
+        found = blackboard._busy_claim_rows(database, identifier, (identifier,))
+        assert [tuple(row) for row in found] == [rows[0]]
         assert database.execute("SELECT COUNT(*) FROM blackboard_claims").fetchone()[0] == 3
 
 

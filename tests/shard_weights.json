@@ -701,7 +701,7 @@
   "test_retrieval_telemetry.py": 13.16,
   "test_retrieval_v2_benchmark.py": 52.55,
   "test_reused_vectors_match_their_seal.py": 0.07,
-  "test_reviewed_sql_keeps_values_as_data.py": 0.04,
+  "test_reviewed_sql_keeps_values_as_data.py": 0.05,
   "test_rotation_keeps_every_open_blocker.py": 11.26,
   "test_runtime_deletion_contract.py": 10.59,
   "test_runtime_state_is_reclaimed.py": 0.15,
