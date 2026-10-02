@@ -17,6 +17,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Grounded answers preserve automatic semantic retrieval when no profile is supplied, including dense signals for graph queries; explicit caller profiles keep their declared behavior.
+
 - Grounded questions use the existing complete prompt window rather than a separate character ceiling; oversized prompts refuse before query analysis and fitting questions remain whole.
 
 - Grounded answers reuse the verified published corpus and safely recheck selected current Markdown; cached citation paths and line numbers must match their source, and changed sources, redirected paths and expired deadlines remain refusals.

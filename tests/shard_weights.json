@@ -100,6 +100,7 @@
   "test_a_generation_that_cannot_be_read_says_so.py": 2.37,
   "test_a_gone_top_level_folder_does_not_stop_the_index.py": 7.26,
   "test_a_green_main_tags_its_version.py": 1.43,
+  "test_a_grounded_answer_keeps_automatic_search.py": 0.06,
   "test_a_grounded_question_uses_the_shared_window.py": 2.59,
   "test_a_grounded_recall_has_the_time_it_needs.py": 0.0,
   "test_a_hit_is_named_by_its_page.py": 0.0,
