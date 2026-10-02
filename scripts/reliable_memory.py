@@ -783,15 +783,31 @@ def _contained_runtime_metadata(path: Path, state_root: Path) -> os.stat_result:
 
 
 def _require_bounded_regular_file(
-    path: Path, metadata: os.stat_result, max_bytes: int
+    path: Path, metadata: os.stat_result, max_bytes: int | None
 ) -> None:
     if (
         stat.S_ISLNK(metadata.st_mode)
         or _windows_reparse_point(path)
         or not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_size > max_bytes
     ):
         raise PermissionError("runtime file must be a bounded regular file")
+    _require_file_size_budget(metadata.st_size, max_bytes)
+
+
+
+def _require_file_size_budget(size: int, max_bytes: int | None) -> None:
+    """SQLite metadata opens need no whole-file byte budget."""
+    if max_bytes is None:
+        return
+    if size > max_bytes:
+        raise PermissionError("runtime file must be a bounded regular file")
+
+
+def _require_nonnegative_file_budget(max_bytes: int | None) -> None:
+    if max_bytes is None:
+        return
+    if max_bytes < 0:
+        raise ValueError("max_bytes must be non-negative")
 
 
 def _require_windows_owner_only(path: Path) -> None:
@@ -814,12 +830,11 @@ def _validated_runtime_metadata(
     path: Path,
     state_root: Path,
     *,
-    max_bytes: int,
+    max_bytes: int | None,
     owner_only: bool,
 ) -> os.stat_result:
     """Validate a bounded regular runtime file from metadata alone."""
-    if max_bytes < 0:
-        raise ValueError("max_bytes must be non-negative")
+    _require_nonnegative_file_budget(max_bytes)
     metadata = _contained_runtime_metadata(path, state_root)
     _require_bounded_regular_file(path, metadata, max_bytes)
     if owner_only:
@@ -865,7 +880,7 @@ def validate_operational_db_file(
     path: Path,
     state_root: Path,
     *,
-    max_bytes: int,
+    max_bytes: int | None,
     owner_only: bool = False,
 ) -> os.stat_result:
     """Validate an operational database without opening a second descriptor.
@@ -967,7 +982,7 @@ def open_readonly_operational_db(
     path: Path,
     state_root: Path,
     *,
-    max_bytes: int,
+    max_bytes: int | None,
     owner_only: bool = False,
     busy_ms: int = 0,
     contract: OperationalDatabaseContract | None = None,
@@ -996,7 +1011,7 @@ def _opened_readonly_operational_db(
     path: Path,
     state_root: Path,
     *,
-    max_bytes: int,
+    max_bytes: int | None,
     owner_only: bool,
     busy_ms: int,
     contract: OperationalDatabaseContract | None,

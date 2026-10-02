@@ -276,7 +276,7 @@ def _validate_artifact_reference(
     expected_path: Path,
     state_root: Path,
     mutable: bool,
-    max_bytes: int,
+    max_bytes: int | None,
 ) -> bytes | None:
     artifact = _require_artifact_record(record, expected_path, state_root)
     actual_identity = capture_runtime_file_identity(expected_path, state_root=state_root)
@@ -344,13 +344,13 @@ def _active_database_snapshot(record: dict[str, object], *, database_name: str, 
         expected_path=path,
         state_root=state_root,
         mutable=True,
-        max_bytes=_MAX_OPERATIONAL_DB_BYTES,
+        max_bytes=None,
     )
     with contextlib.closing(
         open_readonly_operational_db(
             path,
             state_root,
-            max_bytes=_MAX_OPERATIONAL_DB_BYTES,
+            max_bytes=None,
             owner_only=True,
             contract=_database_contract(database_name),
         )

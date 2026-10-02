@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Keep capture admission available when a valid operational SQLite database grows beyond the health-check whole-file read ceiling.
+
 - Separate normal capture admission from complete retained-history certification, preserve full diagnostic checks, and invalidate cached admission when either adopted database file is replaced.
 
 
