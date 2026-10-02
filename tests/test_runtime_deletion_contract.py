@@ -1278,7 +1278,7 @@ def test_deletion_blocks_source_state_and_any_partial_database_error(
 
     class BrokenAfterRows:
         def __enter__(self):
-            self.database = real(path, state_root, max_bytes=doctor.MAX_OPERATIONAL_DB_BYTES)
+            self.database = real(path, state_root, max_bytes=None)
             return self
 
         def __exit__(self, *args):

@@ -52,11 +52,9 @@ _MAX_RECORD_BYTES = 64 * 1024
 # candidate and one retired file per database (four), so 32 means a broken run
 # directory. Past it the listing sets its overflow flag and the check refuses.
 _MAX_OPERATION_ARTIFACTS = 32
-# The same bounds as doctor.MAX_OPERATIONAL_DB_BYTES and MAX_RUNTIME_ENTRIES, whose
-# comments give their basis: both read the same databases and directories. Repeated
-# because doctor imports this module lazily to stay importable without the queue and
-# transaction modules; keep the pairs equal. A scan past a bound raises, never judges
-# from entries unseen. Table rows have no count cap: they are streamed (`_scanned_rows`).
+# Whole-file artifact reads remain byte-bounded; mutable adopted SQLite
+# admission instead validates identity/schema through page-based reads.
+# Runtime entry traversal keeps the same bound as doctor.MAX_RUNTIME_ENTRIES.
 _MAX_OPERATIONAL_DB_BYTES = 256 * 1024 * 1024
 _MAX_RUNTIME_ENTRIES = 10_000
 # The same bound as memory_state.MAX_CAPTURE_INTENT_BYTES (the hook writes intents

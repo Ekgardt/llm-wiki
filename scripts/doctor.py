@@ -97,11 +97,8 @@ MAX_LOCK_BYTES = 4096
 # vault on 2026-09-27 was 12 143 bytes, so 8 MiB is a guard on an untrusted file,
 # about 690 times a real one; refused past it, never cut.
 MAX_QUEUE_RESULT_BYTES = 8 * 1024 * 1024
-# An operational SQLite database doctor opens read-only; past it the check reports it
-# rather than reading. The same bound is repeated in installed_memory_repair. Basis:
-# a guard against reading an unbounded file into a health check; the live transaction
-# database was 62 MiB on 2026-09-26 (audit 2026-09-27 B-2), so review past ~200 MiB.
-MAX_OPERATIONAL_DB_BYTES = 256 * 1024 * 1024
+# SQLite opens page data on demand. Health scans use their existing deadline and
+# streamed rows; a whole-file byte ceiling is not a query resource budget.
 # Rows one health read takes from a small operational table (owners, leases, queue
 # ownership, queue and archive-index rows). A table past it is reported with its
 # `*_unknown`/`*_truncated` code and refuses `run/` deletion; nothing is judged from
@@ -596,7 +593,7 @@ def _readonly_database(
     path: Path,
     state_root: Path,
     *,
-    max_bytes: int = MAX_OPERATIONAL_DB_BYTES,
+    max_bytes: int | None = None,
     deadline: float | None = None,
 ) -> sqlite3.Connection:
     return open_readonly_operational_db(
@@ -2893,7 +2890,7 @@ def _runtime_observation_stamp(registry, owner, state_root: Path, deadline: floa
     path = registry.database_path
     identity = _observation_database_identity(path, state_root)
     with closing(open_readonly_operational_db(
-        path, state_root, max_bytes=MAX_OPERATIONAL_DB_BYTES,
+        path, state_root, max_bytes=None,
         owner_only=True, contract=_COORDINATOR_V3_CONTRACT,
     )) as database:
         # One is SQLite's minimum callback interval, not a work/count ceiling.
