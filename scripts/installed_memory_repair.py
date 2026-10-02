@@ -22,6 +22,7 @@ from reliable_memory import (
     OPERATIONAL_SCAN_BATCH_ROWS,
     OperationalDatabaseContract,
     canonical_json_bytes,
+    capture_operational_database_identity,
     capture_runtime_file_identity,
     durable_publish_file,
     open_readonly_operational_db,
@@ -277,7 +278,8 @@ def _validate_artifact_reference(
     max_bytes: int | None,
 ) -> bytes | None:
     artifact = _require_artifact_record(record, expected_path, state_root)
-    actual_identity = capture_runtime_file_identity(expected_path, state_root=state_root)
+    identity_reader = capture_operational_database_identity if mutable else capture_runtime_file_identity
+    actual_identity = identity_reader(expected_path, state_root=state_root)
     _validate_artifact_identity(artifact, actual_identity, mutable)
     if mutable:
         return None

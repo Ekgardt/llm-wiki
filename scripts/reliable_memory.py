@@ -1119,6 +1119,22 @@ def capture_runtime_file_identity(
     target = Path(path)
     root = Path(state_root).resolve(strict=True)
     metadata = validate_runtime_file(target, root, max_bytes=1 << 50)
+    return _runtime_identity_from_metadata(target, metadata)
+
+
+def capture_operational_database_identity(
+    path: Path, *, state_root: Path
+) -> RuntimeFileIdentity:
+    """Identify a live database without closing a non-SQLite descriptor."""
+    target = Path(path)
+    root = Path(state_root).resolve(strict=True)
+    metadata = validate_operational_db_file(target, root, max_bytes=None)
+    return _runtime_identity_from_metadata(target, metadata)
+
+
+def _runtime_identity_from_metadata(
+    target: Path, metadata: os.stat_result
+) -> RuntimeFileIdentity:
     on_windows = os.name == "nt"
     names = _windows_runtime_identity_names(target) if on_windows else None
     current = target.stat(follow_symlinks=False)

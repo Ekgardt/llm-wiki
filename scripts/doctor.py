@@ -2903,7 +2903,7 @@ class _RuntimeObservationStamp(NamedTuple):
 
 
 def _observation_database_identity(path: Path, state_root: Path) -> tuple[str, str, str]:
-    identity = reliable_memory.capture_runtime_file_identity(path, state_root=state_root)
+    identity = reliable_memory.capture_operational_database_identity(path, state_root=state_root)
     return identity.platform, identity.volume, identity.file_id
 
 

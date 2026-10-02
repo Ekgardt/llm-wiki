@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Preserve live SQLite locks when adoption and Doctor inspect operational database identity.
+
 - Keep corpus source seals valid during unrelated directory entry changes while preserving source-file, replacement, permission and ownership checks.
 
 - Keep capture admission and health SQLite queries available as valid operational databases grow; retain file safety, deadlines and deletion safeguards.
