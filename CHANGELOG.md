@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Let durable Claude and Codex prompt/tool capture use the host budget instead of an unsupported five-second cutoff.
+
 - Preserve live SQLite locks when adoption and Doctor inspect operational database identity.
 
 - Keep corpus source seals valid during unrelated directory entry changes while preserving source-file, replacement, permission and ownership checks.

@@ -419,6 +419,7 @@
   "test_capture_renewal_boundaries.py": 32.54,
   "test_capture_renewal_shutdown.py": 0.44,
   "test_capture_terminal.py": 8.44,
+  "test_capture_uses_the_host_budget.py": 20.81,
   "test_capture_worker_dispatch.py": 15.65,
   "test_capture_worker_fails_instead_of_abandoning.py": 11.78,
   "test_capture_worker_reclaims_leases.py": 4.65,
