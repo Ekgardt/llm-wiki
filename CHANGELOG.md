@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Keep corpus source seals valid during unrelated directory entry changes while preserving source-file, replacement, permission and ownership checks.
+
 - Keep capture admission and health SQLite queries available as valid operational databases grow; retain file safety, deadlines and deletion safeguards.
 
 - Separate normal capture admission from complete retained-history certification, preserve full diagnostic checks, and invalidate cached admission when either adopted database file is replaced.

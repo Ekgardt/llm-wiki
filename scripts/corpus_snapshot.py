@@ -261,6 +261,8 @@ class _PathIdentity:
     size: int
     ctime_ns: int
     attributes: int
+    uid: int
+    gid: int
 
 
 def _sha256(content: bytes) -> str:
@@ -634,15 +636,25 @@ _SEAL_ATTRIBUTES = 0x10 | 0x400  # FILE_ATTRIBUTE_DIRECTORY, _REPARSE_POINT
 
 
 def _identity(path: Path, info: os.stat_result) -> _PathIdentity:
+    size, ctime_ns = _identity_content_fields(info)
     return _PathIdentity(
         path=path,
         device=info.st_dev,
         inode=info.st_ino,
         mode=info.st_mode,
-        size=info.st_size,
-        ctime_ns=info.st_ctime_ns,
+        size=size,
+        ctime_ns=ctime_ns,
+        uid=getattr(info, "st_uid", 0),
+        gid=getattr(info, "st_gid", 0),
         attributes=(getattr(info, "st_file_attributes", 0) or 0) & _SEAL_ATTRIBUTES,
     )
+
+
+def _identity_content_fields(info: os.stat_result) -> tuple[int, int]:
+    """Directory entries may change without replacing the directory itself."""
+    if stat.S_ISDIR(info.st_mode):
+        return 0, 0
+    return info.st_size, info.st_ctime_ns
 
 
 def _seal_path(
@@ -782,7 +794,7 @@ def _open_sealed_posix_path(
 
 def _identity_delta(expected: _PathIdentity, current: _PathIdentity) -> str:
     """Name the fields that moved, so the refusal can be acted on."""
-    fields = ("device", "inode", "mode", "size", "ctime_ns", "attributes")
+    fields = ("device", "inode", "mode", "size", "ctime_ns", "attributes", "uid", "gid")
     changed = [
         f"{name}: {getattr(expected, name)} -> {getattr(current, name)}"
         for name in fields
