@@ -76,7 +76,11 @@ def test_published_chunk_cannot_override_markdown_authority(published):
     assert actual.status == original.sources[0].metadata.status
 
 
-@pytest.mark.parametrize("column,value", [(21, "forged text"), (8, 1000000)])
+@pytest.mark.parametrize("column,value", [
+    (21, "forged text"), (8, 1000000),
+    (3, "knowledge/notes/another.md"), (5, "knowledge/notes/another.md"),
+    (9, 999), (10, 999),
+])
 def test_published_chunk_must_match_actual_source_bytes(published, column, value):
     _vault, original, _catalog = published
     row = list(search_memory._generation_chunk_row(original.chunks[0], 0))

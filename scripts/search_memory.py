@@ -2546,19 +2546,25 @@ def _published_sources(directory, verified, deadline):
 
 
 def _published_chunks(catalog, manifest, sources, deadline):
+    from corpus_snapshot import _newline_offsets
+
     connection = _generation_connection(catalog, manifest, deadline=deadline)
     if connection is None:
         raise ValueError("published corpus chunks could not be verified")
     chunks = []
+    line_indexes = {}
     with closing(connection), _generation_sqlite_guard(connection, deadline, None):
         for row in connection.execute(_FTS_CHUNK_SELECT):
             _check_generation_stop(deadline, None)
-            chunks.append(_published_chunk(row, sources[row[2]], manifest))
+            source = sources[row[2]]
+            if row[2] not in line_indexes:
+                line_indexes[row[2]] = _newline_offsets(source.content)
+            chunks.append(_published_chunk(row, source, manifest, line_indexes[row[2]]))
     return tuple(chunks)
 
 
-def _require_published_span(row, source, manifest):
-    from corpus_snapshot import canonical_chunk_id
+def _require_published_span(row, source, manifest, offsets):
+    from corpus_snapshot import _line_at, canonical_chunk_id
 
     start, end = row[7:9]
     if not 0 <= start <= end <= len(source.content):
@@ -2569,15 +2575,21 @@ def _require_published_span(row, source, manifest):
         byte_start=start, byte_end=end, span_sha256=hashlib.sha256(span).hexdigest(),
         extractor_version=manifest["extractor_version"],
     )
-    expected = (expected_id, source.record.sha256, hashlib.sha256(span).hexdigest(), span.decode("utf-8"))
-    if (row[0], row[4], row[11], row[21]) != expected:
+    expected = (
+        expected_id, source.record.relative_path, source.record.sha256,
+        source.record.relative_path, _line_at(offsets, start), _line_at(offsets, end),
+        hashlib.sha256(span).hexdigest(), span.decode("utf-8"),
+    )
+    if (row[0], row[3], row[4], row[5], row[9], row[10], row[11], row[21]) != expected:
         raise ValueError("published chunk differs from its verified source bytes")
 
 
-def _published_chunk(row, source, manifest):
-    from corpus_snapshot import RetrievalChunk
+def _published_chunk(row, source, manifest, offsets=None):
+    from corpus_snapshot import RetrievalChunk, _newline_offsets
 
-    _require_published_span(row, source, manifest)
+    if offsets is None:
+        offsets = _newline_offsets(source.content)
+    _require_published_span(row, source, manifest, offsets)
     metadata = source.metadata
     return RetrievalChunk(
         id=row[0], source_id=row[2], source_path=row[3], source_sha256=row[4],

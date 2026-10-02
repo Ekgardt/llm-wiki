@@ -17,7 +17,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Grounded answers reuse the verified published corpus and safely recheck selected current Markdown; changed sources, redirected paths and expired deadlines remain refusals.
+- Grounded answers reuse the verified published corpus and safely recheck selected current Markdown; cached citation paths and line numbers must match their source, and changed sources, redirected paths and expired deadlines remain refusals.
 
 - Measure claim health against its actual note and project-state inputs, excluding project journals; keep the claim reader’s overflow checks.
 

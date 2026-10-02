@@ -309,7 +309,7 @@
   "test_an_answer_names_the_commit_it_read.py": 0.02,
   "test_an_answer_says_how_old_its_index_is.py": 0.03,
   "test_an_answer_that_landed_at_the_deadline_is_kept.py": 0.48,
-  "test_an_answer_uses_the_published_corpus.py": 3.68,
+  "test_an_answer_uses_the_published_corpus.py": 6.0,
   "test_an_answer_without_a_provider_is_not_fresh.py": 0.0,
   "test_an_append_behind_a_stale_attempt_gives_up_in_time.py": 13.39,
   "test_an_append_keeps_only_what_it_added.py": 4.22,
