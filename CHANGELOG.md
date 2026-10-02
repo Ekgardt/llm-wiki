@@ -8,6 +8,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Database-parent locking checks no longer create nested runtime directories in backup images; preserve platform-specific seal verification and installer cleanup.
+
 - Keep temporary SQLite locking probes in the existing runtime `run/` and avoid redundant chmod, so diagnostics and cooperating writers do not invalidate the sealed vault root.
 
 - Corpus collection and knowledge extraction defaults share the existing discovery entry budget, avoiding separate 10,000-source refusals while preserving explicit operator limits.

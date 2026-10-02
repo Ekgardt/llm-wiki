@@ -541,7 +541,7 @@
   "test_install_control.py": 15.96,
   "test_install_lock_contention.py": 0.01,
   "test_install_models.py": 0.14,
-  "test_install_pyright.py": 1.59,
+  "test_install_pyright.py": 1.66,
   "test_install_smoke.py": 1.24,
   "test_installer_bootstrap.py": 14.42,
   "test_installer_config.py": 1.17,

@@ -419,8 +419,9 @@ def _probe_directory_identity(directory: Path) -> tuple[int, int, int]:
     return info.st_dev, info.st_ino, info.st_mode
 
 
-def _require_same_probe_directory(root: Path, identity: tuple[int, int, int]) -> None:
-    if _probe_directory_identity(_probe_directory(root)) != identity:
+def _require_same_probe_directory(directory: Path, identity: tuple[int, int, int]) -> None:
+    _require_probe_root_chain(directory)
+    if _probe_directory_identity(directory) != identity:
         raise PermissionError("locking probe directory changed")
 
 
@@ -444,18 +445,27 @@ def _cleanup_lock_probe(probe, connections, root, identity) -> None:
 
 def _sqlite_lock_probe(root: Path, *, deadline: float = float("inf")) -> bool | None:
     """Probe existing run/ without changing the sealed vault root."""
+    try:
+        directory = _probe_directory(root)
+    except OSError:
+        return None
+    return _sqlite_directory_lock_probe(directory, deadline=deadline)
+
+
+def _sqlite_directory_lock_probe(directory: Path, *, deadline: float = float("inf")) -> bool | None:
+    """Probe the database's actual directory without creating another runtime root."""
     probe = None
     identity = None
     connections: list[sqlite3.Connection] = []
     try:
-        directory = _probe_directory(root)
+        _require_probe_root_chain(directory.absolute())
         identity = _probe_directory_identity(directory)
         probe = directory / f".llm-wiki-lock-probe-{secrets.token_hex(16)}.sqlite3"
-        return _contained_lock_probe(root, probe, identity, deadline, connections)
+        return _contained_lock_probe(directory, probe, identity, deadline, connections)
     except (OSError, sqlite3.Error):
         return None
     finally:
-        _cleanup_lock_probe(probe, connections, root, identity)
+        _cleanup_lock_probe(probe, connections, directory, identity)
 
 
 _CLOUD_DIRECTORY_NAMES = frozenset(
@@ -481,17 +491,29 @@ def _warn_if_cloud_synchronized(path: Path) -> None:
     )
 
 
-def validate_state_root(path: Path) -> None:
-    """Fail closed when a runtime root lacks known-safe local lock semantics."""
+def _prepare_local_database_directory(path: Path) -> Path:
     path = Path(path)
     _require_local_non_reparse_root(path)
     _warn_if_cloud_synchronized(path)
     path.mkdir(parents=True, exist_ok=True)
     _require_probe_root_chain(path.absolute())
     _set_owner_only(path, 0o700)
+    return path
+
+
+def validate_state_root(path: Path) -> None:
+    """Fail closed when a runtime root lacks known-safe local lock semantics."""
+    path = _prepare_local_database_directory(path)
     _initialize_probe_directory(path)
     if _sqlite_lock_probe(path) is not True:
         raise UnsafeStateRoot(f"state root failed the SQLite two-connection locking probe: {path}")
+
+
+def validate_database_directory(path: Path) -> None:
+    """Validate a database parent; only a state-root initializer creates run/."""
+    path = _prepare_local_database_directory(path)
+    if _sqlite_directory_lock_probe(path) is not True:
+        raise UnsafeStateRoot(f"database directory failed the SQLite two-connection locking probe: {path}")
 
 
 def _owner_permissions_supported(path: Path) -> bool:
@@ -551,7 +573,7 @@ def open_operational_db(
     """Open an owner-restricted rollback-journal operational database."""
     _require_operational_open_arguments(busy_ms, contract, initialize_contract)
     path = Path(path)
-    validate_state_root(path.parent)
+    validate_database_directory(path.parent)
     expected = _operational_db_identity(path)
     connection = sqlite3.connect(
         path,

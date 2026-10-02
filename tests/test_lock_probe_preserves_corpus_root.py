@@ -16,8 +16,7 @@ def test_real_probe_preserves_the_sealed_vault_root(tmp_path):
     seal = corpus_snapshot._identity(tmp_path, tmp_path.lstat())
     assert reliable_memory._sqlite_lock_probe(tmp_path) is True
     assert corpus_snapshot._identity(tmp_path, tmp_path.lstat()) == seal
-    descriptor = corpus_snapshot._open_descriptor_chain((seal,), changed_error=PermissionError)
-    os.close(descriptor)
+    corpus_snapshot._verify_seal((seal,), changed_error=PermissionError)
     assert list((tmp_path / "run").iterdir()) == []
 
 
@@ -155,3 +154,11 @@ def test_probe_refuses_an_ancestor_the_shared_policy_does_not_trust(tmp_path, mo
     monkeypatch.setattr(bounded_io, "_system_symlink", lambda candidate: False)
     assert reliable_memory._sqlite_lock_probe(link / "vault") is None
     assert list((root / "run").iterdir()) == []
+
+
+def test_database_open_does_not_create_a_nested_runtime_directory(tmp_path):
+    runtime = tmp_path / "run"
+    runtime.mkdir()
+    with reliable_memory.open_operational_db(runtime / "work.sqlite3", busy_ms=0):
+        assert not (runtime / "run").exists()
+    assert not list(runtime.glob(".llm-wiki-lock-probe-*"))

@@ -48,3 +48,25 @@ replaced-directory cleanup ownership, preservation of unrelated files, and
 avoiding redundant chmod. Related tests retain permission and locking failures.
 A successful code regression does not by itself establish a fresh installed
 memory generation; that requires a separate actual rebuild and verification.
+
+## CI qualification follow-up — 2026-10-02
+
+The full-platform run exposed an actual shared-call defect: database opening
+passed the database parent (`run/`) to the state-root initializer, which created
+`run/run/`. A real backup therefore carried an unwanted empty directory.
+The unchanged publication assertion failed with `(2, 2, (1, 1), False)` rather
+than `(1, 1, (1, 0), False)`. A new actual-database test also failed before repair.
+
+State-root initialization and database-parent validation now share preparation
+but remain distinct operations. The former prepares existing `run/`; the latter
+probes the actual database parent and creates no extra directory. Claims use the
+same database-parent validation. Both still require the real two-connection
+SQLite exclusion test, safe ancestors and verified directory ownership. This
+adds no runtime layout, setting or resource limit.
+
+The Windows repeated-cleanup test now removes the initialized empty `run/` with
+`rmdir`, retaining handle-count, exact failure and complete parent cleanup
+assertions. The root-seal regression calls the common seal verifier instead of
+opening a POSIX directory descriptor directly on Windows. Its root identity,
+actual SQLite exclusion and exact absence of residual probe files remain checked.
+Windows execution must still be confirmed by CI; Linux success is not its proof.

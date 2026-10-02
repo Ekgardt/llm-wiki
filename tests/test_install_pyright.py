@@ -1698,6 +1698,7 @@ def test_windows_parent_flush_failures_release_handles_for_repeated_cleanup(
             assert _error_code(error) == "pyright_install_fsync_failed"
             assert calls == failed_creation
             shutil.rmtree(state_root / "cache")
+            (state_root / "run").rmdir()
             state_root.rmdir()
             state_root.parent.rmdir()
 
