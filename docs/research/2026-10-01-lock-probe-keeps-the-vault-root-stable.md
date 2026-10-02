@@ -70,3 +70,13 @@ assertions. The root-seal regression calls the common seal verifier instead of
 opening a POSIX directory descriptor directly on Windows. Its root identity,
 actual SQLite exclusion and exact absence of residual probe files remain checked.
 Windows execution must still be confirmed by CI; Linux success is not its proof.
+
+An additional Windows 3.14 CI test exposed a fixture prerequisite: `copy2`
+does not preserve the copied database's owner-only Windows DACL. A database
+replacement test therefore hit the real security refusal before its intended
+identity-change check. The replacement is now hardened through the existing
+platform-aware helper and validated as an owner-only bounded database before
+publication. The exact snapshot-change blocker assertion remains unchanged.
+This corrects test setup; runtime permissions and deletion checks are unchanged.
+The Windows failure log is retained; local qualification alone is not Windows
+qualification.

@@ -1672,6 +1672,7 @@ def test_observation_detects_database_replacement_with_the_same_epochs(tmp_path,
 
     import doctor
     import installed_memory_repair
+    from reliable_memory import _harden_runtime_owner_only, validate_operational_db_file
 
     root, state_root = _vault(tmp_path)
     build_adopted_reliability_v3(root, state_root)
@@ -1680,6 +1681,9 @@ def test_observation_detects_database_replacement_with_the_same_epochs(tmp_path,
     def scan(**kwargs):
         replacement = database_path.with_name("replacement.sqlite3")
         shutil.copy2(database_path, replacement)
+        # copy2 carries POSIX mode bits, but does not preserve a Windows DACL.
+        _harden_runtime_owner_only(replacement, 0o600)
+        validate_operational_db_file(replacement, state_root, max_bytes=replacement.stat().st_size)
         os.replace(replacement, database_path)
         return []
 
