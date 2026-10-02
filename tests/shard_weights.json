@@ -600,6 +600,7 @@
   "test_no_task_is_claimed_to_be_killed.py": 0.85,
   "test_nothing_half_written_is_left_behind.py": 7.41,
   "test_nothing_private_reaches_the_public_repository.py": 4.28,
+  "test_okf_migration_binds_content_to_its_source_snapshot.py": 0.19,
   "test_one_answer_or_none.py": 0.0,
   "test_one_bad_day_does_not_hold_the_rest.py": 0.22,
   "test_one_bad_generation_does_not_stop_the_prune.py": 0.51,

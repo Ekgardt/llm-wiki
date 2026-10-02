@@ -8,6 +8,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- OKF migration derives text and its precondition from one stable source snapshot within the existing Markdown target budget, replacing its separate read ceiling.
+
 - Codex installer configuration-status commands emit LF on every platform, so Bash can recognize native Windows output and rewrite the earlier owned entry.
 
 - Compiled claims use the exact verified source span when evidence is widened, keeping literal text and its digest consistent without weakening validation.
