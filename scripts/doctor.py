@@ -5092,8 +5092,8 @@ _CEILING_SCOPES = {
     "search.max_pages": ("notes",),
     "impact.max_note_files": ("notes",),
     "impact.max_total_note_bytes": ("notes",),
-    "claims.max_pages": ("notes", "projects"),
-    "claims.max_total_bytes": ("notes", "projects"),
+    "claims.max_pages": ("claims",),
+    "claims.max_total_bytes": ("claims",),
     "compile.max_sources": ("compile",),
     "compile.max_total_source_bytes": ("compile",),
     "corpus.max_files": ("notes", "projects", "daily"),
@@ -5111,6 +5111,7 @@ def _markdown_size(directory: Path) -> tuple[int, int]:
 def _vault_sizes(root: Path) -> dict[str, tuple[int, int]]:
     sizes = {name: _markdown_size(root / "knowledge" / name) for name in ("notes", "projects", "daily")}
     sizes["compile"] = _compile_sources_size(root)
+    sizes["claims"] = _claim_sources_size(root)
     return sizes
 
 
@@ -5118,6 +5119,13 @@ def _compile_sources_size(root: Path) -> tuple[int, int]:
     from compile_memory import compile_scope_paths
 
     files = compile_scope_paths(root)
+    return len(files), sum(path.stat().st_size for path in files)
+
+
+def _claim_sources_size(root: Path) -> tuple[int, int]:
+    from claim_tree_manifest import claim_scope_paths
+
+    files = claim_scope_paths(root)
     return len(files), sum(path.stat().st_size for path in files)
 
 

@@ -415,6 +415,7 @@
   "test_ci_policy.py": 0.61,
   "test_ci_runs_a_reinstall_and_a_pass.py": 0.08,
   "test_ci_timing_report.py": 1.92,
+  "test_claim_ceiling_counts_only_claim_pages.py": 0.09,
   "test_claim_schemas.py": 0.02,
   "test_claims.py": 0.61,
   "test_claude_settings_ownership.py": 0.62,
