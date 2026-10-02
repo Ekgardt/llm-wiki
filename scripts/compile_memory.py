@@ -72,6 +72,7 @@ from contradiction_pipeline import (  # noqa: E402
     supersede_claims_in_page,
 )
 from evidence_resolver import (  # noqa: E402
+    MAX_DAILY_BYTES,
     MAX_DAILY_PART_BYTES,  # noqa: F401 - re-exported: callers read the writer's bound here
     EvidenceRef,
     EvidenceResolver,
@@ -139,7 +140,8 @@ VALIDATION_RETRIES = 2
 
 COMPILER_VERSION = "2.0.0"
 NORMALIZATION_VERSION = "normalize-v2"
-# One daily log the compile reads; the evidence graph's source bound is 16 GiB.
+# Generic compile context pages; numerical basis remains under audit.
+# Daily readers use the existing archive contract and total compile budget.
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
 MAX_PROVIDER_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_OPERATIONS = 100
@@ -412,6 +414,12 @@ def _logical_path(path: Path) -> str:
     return path.relative_to(ROOT).as_posix()
 
 
+def _read_daily_source(path: Path) -> bytes:
+    """Use the existing daily evidence contract within the total source budget."""
+    budget = min(MAX_DAILY_BYTES, setting_value("compile.max_total_source_bytes", ROOT))
+    return read_stable_bytes(path, budget, label="daily source")
+
+
 def _snapshot(path: Path, *, label: str = "compile source") -> SourceSnapshot:
     content = read_stable_bytes(path, MAX_SOURCE_BYTES, label=label)
     return SourceSnapshot(_logical_path(path), content, sha256_bytes(content))
@@ -433,7 +441,7 @@ def snapshot_compile_inputs(
     budget = _SourceBudget(sources)
 
     for path in sorted(map(Path, paths), key=lambda item: item.as_posix()):
-        content = read_stable_bytes(path, MAX_SOURCE_BYTES, label="daily source")
+        content = _read_daily_source(path)
         logical = _logical_path(path)
         dailies.extend(_daily_parts(logical, content, compiled))
         budget.add(SourceSnapshot(logical, content, sha256_bytes(content)))
@@ -4197,7 +4205,7 @@ def _record_receipt_owners(owners: dict[str, str], path: Path) -> None:
 
 def _readable_daily(path: Path) -> bytes | None:
     try:
-        return read_stable_bytes(path, MAX_SOURCE_BYTES, label="daily source")
+        return _read_daily_source(path)
     except (OSError, ValueError):
         return None
 
@@ -4284,7 +4292,7 @@ def _explicit_daily(path: Path, coordinator: MarkdownCoordinator) -> list[Path]:
         raise SystemExit(
             f"compile_memory: --file must be an existing .md daily log: {path}"
         )
-    content = read_stable_bytes(path, MAX_SOURCE_BYTES, label="daily source")
+    content = _read_daily_source(path)
     logical_path = path.relative_to(ROOT).as_posix()
     if daily_is_compiled(logical_path, content, _receipt_predicate(coordinator)):
         return []
@@ -4311,7 +4319,7 @@ def _compiled_hashes(state: dict) -> dict:
 def _daily_already_compiled(
     path: Path, compiled_hashes: dict, coordinator: MarkdownCoordinator
 ) -> bool:
-    content = read_stable_bytes(path, MAX_SOURCE_BYTES, label="daily source")
+    content = _read_daily_source(path)
     logical_path = path.relative_to(ROOT).as_posix()
     if daily_is_compiled(logical_path, content, _receipt_predicate(coordinator)):
         return True
@@ -4826,9 +4834,7 @@ def _transactional_owner(
 def _whole_daily_digest(logical_path: str, compiled) -> str | None:
     """The digest of the file itself, once every part of it has a receipt."""
     try:
-        content = read_stable_bytes(
-            ROOT / logical_path, MAX_SOURCE_BYTES, label="daily source"
-        )
+        content = _read_daily_source(ROOT / logical_path)
     except (OSError, ValueError):
         return None
     if not daily_is_compiled(logical_path, content, compiled):

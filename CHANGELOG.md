@@ -8,6 +8,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Daily compile readers share the existing daily-evidence byte contract and respect the configured total source budget, preserving complete parts above the older separate read bound.
+
 - Scheduled maintenance now answers help and rejects unknown arguments before taking ownership; claims reuse the established database-open boundary during live updates.
 
 - Database-parent locking checks no longer create nested runtime directories in backup images; preserve platform-specific seal verification and installer cleanup.

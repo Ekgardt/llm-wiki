@@ -458,6 +458,7 @@
   "test_coverage_survives_the_budget.py": 0.01,
   "test_daily_entry_boundary.py": 0.03,
   "test_daily_heading_reader.py": 2.82,
+  "test_daily_readers_share_the_archive_contract.py": 0.1,
   "test_daily_result_reporting.py": 0.01,
   "test_dead_code_and_dependencies_answer_truthfully.py": 7.35,
   "test_dead_code_answer_default_budget.py": 0.3,
