@@ -8,6 +8,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Codex installer configuration-status commands emit LF on every platform, so Bash can recognize native Windows output and rewrite the earlier owned entry.
+
 - Compiled claims use the exact verified source span when evidence is widened, keeping literal text and its digest consistent without weakening validation.
 
 - Blackboard descriptions, signals, resource sets, and claim JSON use the existing journal budget; resource lookups avoid SQL variable-count ceilings while preserving current database identity constraints.

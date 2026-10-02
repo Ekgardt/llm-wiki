@@ -1172,13 +1172,18 @@ def command_config_advice(args: argparse.Namespace) -> int:
     return 0
 
 
+def _write_config_status(status: str) -> None:
+    """Machine-readable installer states use LF on every host, including Windows."""
+    sys.stdout.buffer.write((status + "\n").encode("utf-8"))
+
+
 def command_config_replace(args: argparse.Namespace) -> int:
-    print(replace_codex_mcp_entry(Path(args.config), Path(args.vault_root), foreign=args.foreign))
+    _write_config_status(replace_codex_mcp_entry(Path(args.config), Path(args.vault_root), foreign=args.foreign))
     return 0
 
 
 def command_config_state(args: argparse.Namespace) -> int:
-    print(codex_mcp_config_state(Path(args.config), Path(args.vault_root)))
+    _write_config_status(codex_mcp_config_state(Path(args.config), Path(args.vault_root)))
     return 0
 
 

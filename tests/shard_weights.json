@@ -431,6 +431,7 @@
   "test_code_parity_stand.py": 0.85,
   "test_code_tool_deadlines.py": 1.14,
   "test_codex_capture_hooks.py": 0.01,
+  "test_codex_config_status_has_a_platform_independent_newline.py": 0.02,
   "test_codex_hooks_ownership.py": 0.51,
   "test_codex_probe_transport.py": 0.48,
   "test_codex_rendered_hooks.py": 0.08,
