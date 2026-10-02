@@ -171,11 +171,6 @@ CLAIM_RECORD_SCHEMA = json.loads(LEDGER_SCHEMA.read_text(encoding="utf-8"))[
 # `"fingerprint": "a1b2c3d4e5f6a1b2..."` and a `block:` naming a hex prefix
 # instead of a time — and the whole two-page plan died on it. See
 # `docs/research/2026-08-28-who-computes-a-claims-provenance.md`.
-# The plan's schema asks for at most this many claims per page (`maxItems`), so the
-# cap repeats the request; a claim past it is reported like any other drop
-# (`_report_dropped_claim`). Basis of the number unknown — review when pages
-# routinely reach it, which the drop log counts.
-MAX_CLAIMS_PER_OPERATION = 8
 CLAIM_CANDIDATE_SCHEMA = {
     "type": "object",
     "required": ["evidence_index", "subject", "relation", "value"],
@@ -245,7 +240,7 @@ RAW_PLAN_SCHEMA = {
                         }
                     },
                     "related": {"type": "array", "items": {"type": "string", "maxLength": 200, "pattern": "^\\[\\[[^\\r\\n]+\\]\\]$"}},
-                    "claims": {"type": "array", "maxItems": MAX_CLAIMS_PER_OPERATION, "items": CLAIM_CANDIDATE_SCHEMA},
+                    "claims": {"type": "array", "items": CLAIM_CANDIDATE_SCHEMA},
                 },
                 "additionalProperties": False
             }
@@ -1490,15 +1485,7 @@ def _admitted_candidates(claims: object, slug: str) -> list[object]:
     if not isinstance(claims, list):
         _report_dropped_claim(slug, "claims is not an array")
         return []
-    kept = [item for item in claims if _claim_candidate_admitted(item, slug)]
-    return _within_the_claim_cap(kept, slug)
-
-
-def _within_the_claim_cap(kept: list[object], slug: str) -> list[object]:
-    """The first claims the schema allows; each one past it is reported as dropped."""
-    for index in range(MAX_CLAIMS_PER_OPERATION, len(kept)):
-        _report_dropped_claim(slug, f"claim {index + 1} is past the {MAX_CLAIMS_PER_OPERATION} a page may carry")
-    return kept[:MAX_CLAIMS_PER_OPERATION]
+    return [item for item in claims if _claim_candidate_admitted(item, slug)]
 
 
 def _claim_candidate_admitted(candidate: object, slug: str) -> bool:

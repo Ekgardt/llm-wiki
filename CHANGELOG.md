@@ -6,6 +6,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Preserve every verified compile claim within the existing whole-response and page byte budgets instead of dropping claims after an unexplained per-page count of eight.
+
+
 - Tool-event project checkpoints try the existing writer once and retain a durable pending handoff when another writer is active, matching prompt capture without outwaiting the synchronous host. Regression verifies later recovery and immediate uncontended publication.
 
 
