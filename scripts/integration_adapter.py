@@ -1977,12 +1977,9 @@ def _observe_checkpoint_fail_open(envelope: EventEnvelope) -> None:
                 envelope, writer_wait_seconds=SESSION_START_RECOVERY_SECONDS
             )
             return
-        if envelope.event_type == "user_prompt":
-            # The host waits for this hook. Try the writer once; the persisted
-            # checkpoint stays pending for a later actor when another writer owns it.
-            _observe_project_checkpoint(envelope, writer_wait_seconds=0.0)
-            return
-        _observe_project_checkpoint(envelope)
+        # The host waits for every synchronous hook. Try the writer once;
+        # the durable checkpoint stays pending for the backlog recovery actor.
+        _observe_project_checkpoint(envelope, writer_wait_seconds=0.0)
     except Exception as exc:  # noqa: BLE001
         _log_checkpoint_error(exc)
 

@@ -1,4 +1,4 @@
-"""Durable prompt capture must not wait a second writer's lease for its handoff."""
+"""Durable hook capture must not wait another writer for its project handoff."""
 import threading
 import time
 
@@ -29,7 +29,8 @@ def _configure(tmp_path, monkeypatch):
     return state_root, project, coordinator
 
 
-def test_prompt_keeps_its_checkpoint_pending_without_waiting_past_host(tmp_path, monkeypatch):
+@pytest.mark.parametrize("event", ["user_prompt", "post_tool_use"])
+def test_capture_keeps_its_checkpoint_pending_without_waiting_past_host(tmp_path, monkeypatch, event):
     state_root, project, coordinator = _configure(tmp_path, monkeypatch)
     held, release = threading.Event(), threading.Event()
     writer = threading.Thread(target=_hold_writer, args=(coordinator, held, release))
@@ -40,8 +41,9 @@ def test_prompt_keeps_its_checkpoint_pending_without_waiting_past_host(tmp_path,
         return False
 
     monkeypatch.setattr(adapter, "_wake_capture_worker", wake)
-    envelope = adapter.normalize_occurrence_event("claude", "user_prompt", {
-        "prompt": "continue", "cwd": str(project), "session_id": "prompt-gate",
+    envelope = adapter.normalize_occurrence_event("claude", event, {
+        "prompt": "continue", "tool_name": "Bash",
+        "tool_input": {"command": "pwd"}, "cwd": str(project), "session_id": "prompt-gate",
         "event_id": "prompt-gate", "task_completed": True,
     })
     started = time.monotonic()
@@ -60,11 +62,13 @@ def test_prompt_keeps_its_checkpoint_pending_without_waiting_past_host(tmp_path,
     assert ProjectStore(adapter.ROOT, state_root).read_journal("demo")
 
 
-def test_uncontended_prompt_still_commits_its_checkpoint(tmp_path, monkeypatch):
+@pytest.mark.parametrize("event", ["user_prompt", "post_tool_use"])
+def test_uncontended_capture_still_commits_its_checkpoint(tmp_path, monkeypatch, event):
     state_root, project, _coordinator = _configure(tmp_path, monkeypatch)
     monkeypatch.setattr(adapter, "_wake_capture_worker", lambda *_args: False)
-    envelope = adapter.normalize_occurrence_event("claude", "user_prompt", {
-        "prompt": "continue", "cwd": str(project), "session_id": "free-gate",
+    envelope = adapter.normalize_occurrence_event("claude", event, {
+        "prompt": "continue", "tool_name": "Bash",
+        "tool_input": {"command": "pwd"}, "cwd": str(project), "session_id": "free-gate",
         "event_id": "free-gate", "task_completed": True,
     })
     result = adapter.ingest_event(envelope)

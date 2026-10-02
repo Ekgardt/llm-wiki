@@ -6,6 +6,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Tool-event project checkpoints try the existing writer once and retain a durable pending handoff when another writer is active, matching prompt capture without outwaiting the synchronous host. Regression verifies later recovery and immediate uncontended publication.
+
+
 ### Fixed
 
 - Compile related links share the existing complete response and page budgets; the earlier-interface import regression runs in its own process to preserve claim class identities across the full suite.
