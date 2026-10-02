@@ -97,6 +97,7 @@
   "test_a_fresh_install_adopts_the_queue.py": 0.13,
   "test_a_fresh_line_belongs_to_the_symbol_it_names.py": 1.33,
   "test_a_function_holds_two_ifs.py": 26.71,
+  "test_a_generation_snapshot_uses_the_writer_gate.py": 2.93,
   "test_a_generation_that_cannot_be_read_says_so.py": 2.37,
   "test_a_gone_top_level_folder_does_not_stop_the_index.py": 7.26,
   "test_a_green_main_tags_its_version.py": 1.43,

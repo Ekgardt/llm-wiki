@@ -21,6 +21,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Generation collection now uses its existing canonical Markdown writer fence and cancellation; doctor repair preserves the same coordinator.
+
 - Grounded answers preserve automatic semantic retrieval when no profile is supplied, including dense signals for graph queries; explicit caller profiles keep their declared behavior.
 
 - Grounded questions use the existing complete prompt window rather than a separate character ceiling; oversized prompts refuse before query analysis and fitting questions remain whole.

@@ -7961,6 +7961,8 @@ def _build_or_refresh_generation(
             code_roots=VAULT_CODE_ROOTS if code_roots is None else code_roots,
             max_files=max_sources,
             deadline=deadline,
+            coordinator=coordinator,
+            cancelled=cancelled,
         )
     if len(snapshot.sources) > max_sources:
         raise ValueError("corpus source limit exceeded")
@@ -8455,6 +8457,7 @@ def _repair_generations_action(guard: Any, context: _RepairContext) -> None:
         cancelled=guard.cancelled,
         max_sources=setting_value("corpus.max_files", context.root_path),
         force_rebuild=True,
+        coordinator=guard.coordinator,
     )
     _record_generation_rebuild(result, context)
 
