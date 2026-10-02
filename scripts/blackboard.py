@@ -60,19 +60,13 @@ from reliable_memory import begin_immediate  # noqa: E402
 from secret_redact import redact_structure  # noqa: E402
 
 PROJECTS_DIR = ROOT / "knowledge" / "projects"
-# Resources one blackboard claim may name (caller input); a claim over more is refused. Basis
-# unknown: value predates measurement; review when a real claim needs more.
-_MAX_RESOURCES = 64
-# One claimed resource is a path or a name; 512 bytes bounds caller input and a longer one is
-# refused. Basis unknown: value predates measurement; review when a real resource name is refused.
+# Caller text and claim JSON use the existing transaction target budget. The
+# complete journal record is checked by append_knowledge before ownership is
+# acquired; separate field/count ceilings rejected otherwise storable claims.
+# These two lengths are also CHECK constraints in the currently adopted v3
+# database. Keep claim admission aligned until an explicitly approved database
+# migration removes them; Python-only removal fails after writing the request.
 _MAX_RESOURCE_BYTES = 512
-# A task, message or resolution is caller input written to a shared journal; a longer one is
-# refused, not cut. Security bound on untrusted input. Basis unknown: value predates measurement;
-# review when a real task description is refused.
-_MAX_TASK_BYTES = 4096
-# An agent name is an identifier, not prose; 128 bytes bounds caller input and a longer name is
-# refused. Basis unknown: value predates measurement; review when a host's real agent names come
-# near it.
 _MAX_AGENT_BYTES = 128
 # A claim's TTL is caller input: at least one second so the claim is observable at all.
 _MIN_TTL_SECONDS = 1
@@ -186,6 +180,8 @@ def _append_jsonl(
     path: Path, record: dict, operation_id: str | None = None
 ) -> None:
     block = (json.dumps(redact_structure(record), ensure_ascii=False) + "\n").encode("utf-8")
+    if len(block) > MAX_KNOWLEDGE_TARGET_BYTES:
+        raise ValueError("blackboard record exceeds its size limit")
     append_knowledge(operation_id, path, block)
 
 
@@ -259,12 +255,19 @@ def _read_jsonl(path: Path) -> list[dict]:
     return _read_jsonl_snapshot((path,))[path]
 
 
-def _bounded_text(value: object, name: str, max_bytes: int) -> str:
+def _journal_text(value: object, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must be a non-empty string")
     normalized = unicodedata.normalize("NFC", value)
-    if len(normalized.encode("utf-8")) > max_bytes:
+    if len(normalized.encode("utf-8")) > MAX_KNOWLEDGE_TARGET_BYTES:
         raise ValueError(f"{name} exceeds its size limit")
+    return normalized
+
+
+def _claim_agent_text(value: object) -> str:
+    normalized = _journal_text(value, "agent")
+    if len(normalized.encode("utf-8")) > _MAX_AGENT_BYTES:
+        raise ValueError("agent exceeds its size limit")
     return normalized
 
 
@@ -302,8 +305,8 @@ def _require_resource_sequence(resources: object) -> Sequence[str]:
 
 def _normalize_resources(resources: Sequence[str]) -> tuple[str, ...]:
     resources = _require_resource_sequence(resources)
-    if not 1 <= len(resources) <= _MAX_RESOURCES:
-        raise ValueError("blackboard resource set must be bounded and non-empty")
+    if not resources:
+        raise ValueError("blackboard resource set must be non-empty")
     normalized = tuple(sorted(_normalize_resource(item) for item in resources))
     if len(normalized) != len(set(normalized)):
         raise ValueError("blackboard resource set contains duplicates")
@@ -350,14 +353,15 @@ def _claim_rows(
 def _busy_claim_rows(
     database: sqlite3.Connection, project: str, resources: tuple[str, ...]
 ) -> list[sqlite3.Row]:
-    placeholders = ",".join("?" for _resource in resources)
-    return list(
-        database.execute(
-            "SELECT * FROM blackboard_claims WHERE project=? "
-            f"AND resource IN ({placeholders}) ORDER BY resource",
-            (project, *resources),
-        )
-    )
+    # Two bound parameters per indexed lookup, independent of the caller's
+    # resource count and the platform's SQLITE_LIMIT_VARIABLE_NUMBER.
+    rows = []
+    for resource in resources:
+        rows.extend(database.execute(
+            "SELECT * FROM blackboard_claims WHERE project=? AND resource=?",
+            (project, resource),
+        ))
+    return sorted(rows, key=lambda row: row["resource"])
 
 
 def _next_claim_epoch(
@@ -529,8 +533,8 @@ def claim_task(
     current = _utc_now(now)
     claim = _new_claim(
         slug,
-        _bounded_text(task, "task", _MAX_TASK_BYTES),
-        _bounded_text(agent, "agent", _MAX_AGENT_BYTES),
+        _journal_text(task, "task"),
+        _claim_agent_text(agent),
         _normalize_resources(resources),
         _require_ttl(ttl_seconds),
         current,
@@ -984,9 +988,9 @@ def send_signal(project: str, from_agent: str, to_agent: str, message: str) -> N
     slug = _sanitize_project(project)
     signals_file = _bb_dir(slug) / "signals.jsonl"
     record = {
-        "from": _bounded_text(from_agent, "from_agent", _MAX_AGENT_BYTES),
-        "to": _bounded_text(to_agent, "to_agent", _MAX_AGENT_BYTES),
-        "message": _bounded_text(message, "message", _MAX_TASK_BYTES),
+        "from": _journal_text(from_agent, "from_agent"),
+        "to": _journal_text(to_agent, "to_agent"),
+        "message": _journal_text(message, "message"),
         "at": _timestamp(_utc_now(None)),
     }
     _append_jsonl(signals_file, record)
@@ -1022,14 +1026,14 @@ def resolve_conflict(
     project: str, conflict_id: str, *, agent: str, resolution: str
 ) -> None:
     slug = _sanitize_project(project)
-    identity = _bounded_text(conflict_id, "conflict_id", 128)
+    identity = _require_hex(conflict_id, "conflict_id")
     if identity not in {record["conflict_id"] for record in detect_conflicts(slug)}:
         raise KeyError(identity)
     record = {
         "kind": "resolution",
         "conflict_id": identity,
-        "agent": _bounded_text(agent, "agent", _MAX_AGENT_BYTES),
-        "resolution": _bounded_text(resolution, "resolution", _MAX_TASK_BYTES),
+        "agent": _journal_text(agent, "agent"),
+        "resolution": _journal_text(resolution, "resolution"),
         "at": _timestamp(_utc_now(None)),
     }
     _append_once(
@@ -1069,8 +1073,8 @@ def _claim_from_payload(payload: object) -> BlackboardClaim:
     return BlackboardClaim(
         project=_sanitize_project(str(payload["project"])),
         claim_id=_require_hex(payload["claim_id"], "claim_id"),
-        task=_bounded_text(payload["task"], "task", _MAX_TASK_BYTES),
-        agent=_bounded_text(payload["agent"], "agent", _MAX_AGENT_BYTES),
+        task=_journal_text(payload["task"], "task"),
+        agent=_claim_agent_text(payload["agent"]),
         resources=resources,
         lease_token=_require_hex(payload["lease_token"], "lease_token"),
         resource_epochs=epochs,
@@ -1081,8 +1085,8 @@ def _claim_from_payload(payload: object) -> BlackboardClaim:
 
 
 def _claim_from_json(value: str) -> BlackboardClaim:
-    raw = sys.stdin.read() if value == "-" else value
-    if len(raw.encode("utf-8")) > 16384:
+    raw = sys.stdin.read(MAX_KNOWLEDGE_TARGET_BYTES + 1) if value == "-" else value
+    if len(raw.encode("utf-8")) > MAX_KNOWLEDGE_TARGET_BYTES:
         raise ValueError("blackboard claim JSON exceeds its size limit")
     try:
         return _claim_from_payload(json.loads(raw))

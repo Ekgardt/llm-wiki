@@ -8,6 +8,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Blackboard descriptions, signals, resource sets, and claim JSON use the existing journal budget; resource lookups avoid SQL variable-count ceilings while preserving current database identity constraints.
+
 - Daily compile readers share the existing daily-evidence byte contract and respect the configured total source budget, preserving complete parts above the older separate read bound.
 
 - Scheduled maintenance now answers help and rejects unknown arguments before taking ownership; claims reuse the established database-open boundary during live updates.

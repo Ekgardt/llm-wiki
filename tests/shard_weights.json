@@ -369,6 +369,7 @@
   "test_benchmark.py": 0.01,
   "test_bitemporal_claims.py": 0.09,
   "test_blackboard.py": 299.02,
+  "test_blackboard_inputs_use_the_journal_contract.py": 7.4,
   "test_blackboard_release_retry.py": 87.19,
   "test_bootstrap_publication.py": 0.41,
   "test_both_installers_read_the_claude_file_alike.py": 0.1,
