@@ -252,7 +252,7 @@
   "test_a_slug_without_its_articles_names_the_same_page.py": 0.01,
   "test_a_smoke_checks_the_install_not_the_vault.py": 0.0,
   "test_a_snapshot_says_when_it_last_looked.py": 1.05,
-  "test_a_source_seal_survives_unrelated_directory_entries.py": 0.04,
+  "test_a_source_seal_survives_unrelated_directory_entries.py": 0.08,
   "test_a_span_is_cut_between_characters.py": 0.03,
   "test_a_spawned_compile_knows_its_lock.py": 0.12,
   "test_a_spent_attempt_keeps_its_state.py": 1.75,

@@ -12,7 +12,7 @@ def sealed_source(tmp_path: Path):
     parent.mkdir(parents=True)
     source = parent / "source.md"
     source.write_text("# Verified source\nUnchanged source bytes.\n")
-    return root, parent, source, c._seal_path(root, source, target_directory=False, max_components=8)
+    return root, parent, source, c._seal_path(root, source, target_directory=False, max_components=len(source.relative_to(root).parts))
 
 
 @pytest.mark.parametrize("operation", ["create", "publish"])
@@ -27,7 +27,7 @@ def test_an_unrelated_sibling_does_not_change_the_sealed_source(tmp_path: Path, 
     assert source.read_bytes() == before
 
 
-@pytest.mark.parametrize("operation", ["replace", "permissions"])
+@pytest.mark.parametrize("operation", ["replace", pytest.param("permissions", marks=pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits; Windows uses ACLs"))])
 def test_real_ancestor_replacement_or_permission_change_is_still_refused(tmp_path: Path, operation: str):
     _root, parent, source, seal = sealed_source(tmp_path)
     before = source.read_bytes()
