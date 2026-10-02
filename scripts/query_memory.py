@@ -563,7 +563,7 @@ def build_grounded_context(
         deadline,
     )
     evidence, stale = _authoritative_evidence(
-        compiled, sources, snapshot.corpus_sha256, vault, _ReadingOrder.of(selected), _pruner(question)
+        compiled, sources, snapshot.corpus_sha256, vault, _ReadingOrder.of(selected), _pruner(question), deadline
     )
     offered = len(evidence)
     prompt_context = _packed_context(evidence, index_text, active_budget)
@@ -880,11 +880,15 @@ def _pruner(question: str | None):
     return _Pruner(question, _sentence_encoder())
 
 
-def _source_is_unchanged(source: object, vault: Path) -> bool:
-    """Whether the file still holds the bytes the snapshot captured."""
+def _source_is_unchanged(source: object, vault: Path, *, deadline: float | None = None) -> bool:
+    """A safe, bounded live read still holds the bytes the snapshot captured."""
+    from corpus_snapshot import CorpusChanged, read_current_source
+
     try:
-        live = (Path(vault) / source.record.relative_path).read_bytes()
-    except OSError:
+        live = read_current_source(vault, source.record, deadline=deadline)
+    except TimeoutError:
+        raise
+    except (OSError, ValueError, CorpusChanged):
         return False
     return hashlib.sha256(live).hexdigest() == source.record.sha256
 
@@ -903,14 +907,16 @@ class _FreshSources:
     it affordable at query time.
     """
 
-    def __init__(self, vault: Path) -> None:
+    def __init__(self, vault: Path, deadline: float | None = None) -> None:
         self.vault = vault
+        self.deadline = deadline
         self.verdicts: dict[str, bool] = {}
 
     def holds(self, source: object) -> bool:
+        _check_optional_deadline(self.deadline)
         path = source.record.relative_path
         if path not in self.verdicts:
-            self.verdicts[path] = _source_is_unchanged(source, self.vault)
+            self.verdicts[path] = _source_is_unchanged(source, self.vault, deadline=self.deadline)
         return self.verdicts[path]
 
     @property
@@ -939,6 +945,7 @@ def _authoritative_evidence(
     vault: Path,
     order: _ReadingOrder | None = None,
     pruner: _Pruner | None = None,
+    deadline: float | None = None,
 ) -> tuple[list[GroundedEvidence], tuple[str, ...]]:
     """One entry per distinct authoritative span, numbered in reading order.
 
@@ -947,7 +954,7 @@ def _authoritative_evidence(
     the model a session shuffled; `order` puts each entry's pieces back in byte
     order behind the entry retrieval ranked before it.
     """
-    fresh = _FreshSources(vault)
+    fresh = _FreshSources(vault, deadline)
     pairs = _quotable_pairs(compiled, sources, fresh)
     if order is not None:
         pairs.sort(key=lambda pair: order.rank(pair[0]))
@@ -1581,15 +1588,13 @@ def _answer_of_surviving_claims(
 
 
 def _answer_corpus(vault: Path, deadline: float) -> object:
-    """Capture the same corpus the candidates were retrieved from.
-
-    Retrieval searches a published generation; capturing a different corpus
-    here once meant candidates failed to resolve into a source and the answer
-    refused itself while search had just returned the right page. One corpus
-    definition, read from the same place the builder reads it.
-    """
+    """Use the published capture; selected sources are rechecked before prompts."""
     from corpus_snapshot import VAULT_CODE_ROOTS, collect_corpus
+    from search_memory import published_corpus
 
+    published = published_corpus(vault, deadline=deadline)
+    if published is not None:
+        return published
     return collect_corpus(vault, code_roots=VAULT_CODE_ROOTS, deadline=deadline)
 
 

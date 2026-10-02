@@ -2451,6 +2451,143 @@ def _generation_authoritative_sources(
     return sources
 
 
+
+_ANSWER_CORPUS_ARTIFACTS = ("evidence.sqlite3", "search.sqlite3", "source-manifest.json")
+
+
+def published_corpus(vault: Path, *, deadline: float) -> CorpusSnapshot | None:
+    """The verified published read model; selected live sources still need rechecking."""
+    from repository_scope import resolve_repository_scope
+
+    catalog_path = STATE_ROOT / "cache/evidence-graph/catalog.sqlite3"
+    if not catalog_path.exists():
+        return None
+    catalog = GenerationCatalog(STATE_ROOT, catalog_path=catalog_path)
+    scope = resolve_repository_scope(vault, deadline=deadline)
+    manifest = catalog.get_active_for_repository(scope, deadline=deadline)
+    if manifest is None:
+        return None
+    return _published_corpus(catalog, manifest, vault, deadline)
+
+
+def _published_corpus(catalog, manifest, vault, deadline):
+    seal = _generation_consumption_seal(
+        catalog, manifest, _ANSWER_CORPUS_ARTIFACTS, deadline=deadline
+    )
+    if seal is None:
+        raise ValueError("published corpus could not be sealed")
+    directory = catalog.generations_path / manifest["generation_id"]
+    snapshot = _read_published_corpus(catalog, directory, manifest, vault, deadline)
+    if not _generation_consumption_unchanged(
+        catalog, manifest, _ANSWER_CORPUS_ARTIFACTS, seal, deadline=deadline
+    ):
+        from corpus_snapshot import CorpusChanged
+
+        raise CorpusChanged("published corpus changed during read")
+    return snapshot
+
+
+def _read_published_corpus(catalog, directory, manifest, vault, deadline):
+    header = _validated_source_manifest(
+        directory, manifest, state_root=STATE_ROOT, deadline=deadline, cancelled=None
+    )
+    verified = _generation_authoritative_sources(
+        directory, manifest, state_root=STATE_ROOT, deadline=deadline, cancelled=None
+    )
+    sources = _published_sources(directory, verified, deadline)
+    chunks = _published_chunks(catalog, manifest, sources, deadline)
+    return CorpusSnapshot(
+        tuple(sources.values()), chunks, manifest["source_manifest_sha256"],
+        _published_policy(header["policy"], vault), header["collector"], header["extractor"],
+    )
+
+
+def _published_policy(fields, vault):
+    import corpus_snapshot as corpus
+
+    return corpus._policy(
+        **fields, approved_code_roots=corpus.APPROVED_CODE_ROOTS,
+        max_files=setting_value("corpus.max_files", vault),
+        max_file_bytes=corpus.MAX_CORPUS_FILE_BYTES,
+        max_total_bytes=setting_value("corpus.max_total_bytes", vault),
+        max_entries=corpus.MAX_CORPUS_INSPECTED_ENTRIES,
+        max_directories=corpus.MAX_CORPUS_DIRECTORIES, max_depth=corpus.MAX_CORPUS_DEPTH,
+    )
+
+
+def _published_sources(directory, verified, deadline):
+    """Retain recorded source fields; derive claim authority from verified Markdown."""
+    from dataclasses import replace
+
+    from corpus_snapshot import SourceRecord, canonical_captured_source
+
+    evidence = directory / "evidence.sqlite3"
+    validate_runtime_file(evidence, STATE_ROOT, max_bytes=16 * 1024 * 1024 * 1024)
+    uri = f"{evidence.resolve(strict=True).as_uri()}?mode=ro&immutable=1"
+    sources = {}
+    with closing(sqlite3.connect(uri, uri=True, timeout=0)) as database:
+        with _generation_sqlite_guard(database, deadline, None):
+            rows = database.execute(
+                "SELECT source_id,relative_path,sha256,size,media_type,language,git_oid "
+                "FROM source ORDER BY relative_path,source_id"
+            )
+            for row in rows:
+                _check_generation_stop(deadline, None)
+                record = SourceRecord(*row)
+                captured = canonical_captured_source(
+                    source_id=record.logical_id, source_path=record.relative_path,
+                    source_sha256=record.sha256, content=verified[record.logical_id]["content"],
+                    deadline=deadline,
+                )
+                sources[record.logical_id] = replace(captured, record=record)
+    if set(sources) != set(verified):
+        raise ValueError("published source membership changed during read")
+    return sources
+
+
+def _published_chunks(catalog, manifest, sources, deadline):
+    connection = _generation_connection(catalog, manifest, deadline=deadline)
+    if connection is None:
+        raise ValueError("published corpus chunks could not be verified")
+    chunks = []
+    with closing(connection), _generation_sqlite_guard(connection, deadline, None):
+        for row in connection.execute(_FTS_CHUNK_SELECT):
+            _check_generation_stop(deadline, None)
+            chunks.append(_published_chunk(row, sources[row[2]], manifest))
+    return tuple(chunks)
+
+
+def _require_published_span(row, source, manifest):
+    from corpus_snapshot import canonical_chunk_id
+
+    start, end = row[7:9]
+    if not 0 <= start <= end <= len(source.content):
+        raise ValueError("published chunk span is outside its source")
+    span = source.content[start:end]
+    expected_id = canonical_chunk_id(
+        source_id=source.record.logical_id, source_path=source.record.relative_path,
+        byte_start=start, byte_end=end, span_sha256=hashlib.sha256(span).hexdigest(),
+        extractor_version=manifest["extractor_version"],
+    )
+    expected = (expected_id, source.record.sha256, hashlib.sha256(span).hexdigest(), span.decode("utf-8"))
+    if (row[0], row[4], row[11], row[21]) != expected:
+        raise ValueError("published chunk differs from its verified source bytes")
+
+
+def _published_chunk(row, source, manifest):
+    from corpus_snapshot import RetrievalChunk
+
+    _require_published_span(row, source, manifest)
+    metadata = source.metadata
+    return RetrievalChunk(
+        id=row[0], source_id=row[2], source_path=row[3], source_sha256=row[4],
+        parent_page=row[5], heading_ancestry=tuple(json.loads(row[6])),
+        byte_start=row[7], byte_end=row[8], line_start=row[9], line_end=row[10],
+        span_sha256=row[11], text=row[21], type=metadata.type, project=metadata.project,
+        authority=metadata.authority, confidence=metadata.confidence, status=metadata.status,
+        valid_from=metadata.valid_from, valid_to=metadata.valid_to, language=row[19],
+    )
+
 def _reproducible_by_this_extractor(manifest: Mapping[str, object]) -> bool:
     """Only this extractor's own chunks can be re-derived and compared."""
     import corpus_snapshot

@@ -2403,17 +2403,11 @@ def _canonical_source_record(
     )
 
 
-def canonical_retrieval_chunks(
-    *,
-    source_id: str,
-    source_path: str,
-    source_sha256: str,
-    content: bytes,
-    extractor_version: str = EXTRACTOR_VERSION,
-    deadline: float | None = None,
-    cancelled: Callable[[], bool] | None = None,
-) -> tuple[RetrievalChunk, ...]:
-    """Reconstruct every canonical chunk field from authoritative source bytes."""
+def _canonical_captured_head(
+    source_id: str, source_path: str, source_sha256: str, content: bytes,
+    deadline: float | None, cancelled: Callable[[], bool] | None,
+) -> tuple[CapturedSource, int, bool]:
+    """Metadata comes from the captured Markdown, never from index metadata."""
     path = PurePosixPath(source_path)
     _require_canonical_source(source_id, source_path, path, content, source_sha256)
     kind, project = _source_kind(path)
@@ -2432,10 +2426,38 @@ def canonical_retrieval_chunks(
         candidate=candidate,
         searchable_start=searchable_start,
     )
+    return CapturedSource(source, metadata, content), searchable_start, is_markdown
+
+
+def canonical_captured_source(
+    *, source_id: str, source_path: str, source_sha256: str, content: bytes,
+    deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
+) -> CapturedSource:
+    """Reconstruct source metadata from its exact hash-verified captured bytes."""
+    captured, _start, _markdown = _canonical_captured_head(
+        source_id, source_path, source_sha256, content, deadline, cancelled
+    )
+    return captured
+
+
+def canonical_retrieval_chunks(
+    *,
+    source_id: str,
+    source_path: str,
+    source_sha256: str,
+    content: bytes,
+    extractor_version: str = EXTRACTOR_VERSION,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> tuple[RetrievalChunk, ...]:
+    """Reconstruct every canonical chunk field from authoritative source bytes."""
+    captured, searchable_start, is_markdown = _canonical_captured_head(
+        source_id, source_path, source_sha256, content, deadline, cancelled
+    )
     return _chunks(
-        source,
-        metadata,
-        content,
+        captured.record,
+        captured.metadata,
+        captured.content,
         searchable_start,
         heading_enabled=is_markdown,
         extractor_version=extractor_version,
@@ -2658,6 +2680,48 @@ class _Capture:
             raise ValueError("corpus chunk row ceiling exceeded")
         self.chunks.extend(source_chunks)
 
+
+
+
+def read_current_source(
+    vault: Path, record: SourceRecord, *, deadline: float | None = None,
+) -> bytes:
+    """Re-read one selected source through the collector's safe file boundary.
+
+    Its captured size is the byte bound: a larger replacement cannot have the
+    same bytes. The ancestor count is the exact selected path, not a new cap.
+    """
+    _check_processing_stop(deadline, None)
+    root = Path(vault).resolve(strict=True)
+    relative = PurePosixPath(record.relative_path)
+    normalized = unicodedata.normalize("NFC", relative.as_posix())
+    if not _valid_source_path(record.relative_path, relative, normalized):
+        raise ValueError("selected source path is not normalized relative POSIX")
+    path = root.joinpath(*relative.parts)
+    content = _read_current_source(root, path, record.size, len(relative.parts))
+    _check_processing_stop(deadline, None)
+    return content
+
+
+def _read_current_source(root, path, size, components):
+    if os.name == "posix":
+        return _read_current_posix_source(root, path, size, components)
+    seal = _seal_source_file(root, path, components)
+    content = _sealed_source_bytes(path, size, "selected current source")
+    _verify_seal(seal)
+    return content
+
+
+def _read_current_posix_source(root, path, size, components):
+    seal, descriptor = _open_sealed_posix_path(
+        root, path, target_directory=False, max_components=components
+    )
+    try:
+        content = _read_bounded_descriptor(descriptor, size)
+        _verify_seal(seal)
+        return content
+    finally:
+        os.close(descriptor)
 
 def _require_stable_membership(
     candidates: tuple[_Candidate, ...], current: tuple[_Candidate, ...]
