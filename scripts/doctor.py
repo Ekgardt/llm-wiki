@@ -481,17 +481,40 @@ def _count_legacy_queue_entries(
 def _count_queue_artifact_directory(
     state_root: Path, relative: str, key: str, deadline: float, details: dict
 ) -> None:
-    entries, truncated, error = _bounded_runtime_entries(
-        state_root / relative,
-        state_root,
-        limit=MAX_RUNTIME_ENTRIES,
-        deadline=deadline,
+    count, truncated, error = _runtime_artifact_count(
+        state_root / relative, state_root, deadline
     )
-    details[key] = len(entries)
+    details[key] = count
     details["artifact_truncated"] |= truncated
     details["artifact_error"] |= error
-    if _any_irregular_entry(entries, state_root):
-        details["artifact_error"] = True
+
+
+def _runtime_artifact_count(
+    directory: Path, root: Path, deadline: float
+) -> tuple[int, bool, bool]:
+    kind, _ = _safe_kind(directory, root)
+    if kind == "missing":
+        return 0, False, False
+    if kind != "directory":
+        return 0, False, True
+    return _scanned_artifact_count(directory, root, deadline)
+
+
+def _scanned_artifact_count(
+    directory: Path, root: Path, deadline: float
+) -> tuple[int, bool, bool]:
+    count = 0
+    error = False
+    try:
+        with os.scandir(directory) as scanned:
+            for entry in scanned:
+                if _deadline_reached(deadline):
+                    return count, True, error
+                count += 1
+                error = error or _safe_kind(Path(entry.path), root)[0] != "regular"
+    except OSError:
+        return count, False, True
+    return count, False, error
 
 
 def _append_queue_artifact_codes(details: dict) -> None:
@@ -1689,8 +1712,8 @@ def _transaction_check(
 
 
 _QUEUE_COUNT_QUERIES = {
-    "source_failures": "SELECT 1 FROM source_failures LIMIT ?",
-    "source_fences": "SELECT 1 FROM source_fences LIMIT ?",
+    "source_failures": "SELECT COUNT(*) FROM source_failures",
+    "source_fences": "SELECT COUNT(*) FROM source_fences",
 }
 
 
@@ -1703,6 +1726,16 @@ class _QueueScan(NamedTuple):
     result: dict | None
     unknown_state: bool
     corrupt_metadata: bool
+
+
+class _QueueTaskScan(NamedTuple):
+    unknown_state: bool
+    corrupt_metadata: bool
+    references: set[str]
+    result_hashes: dict[str, object]
+    retained: bool
+    dead_unresolved: int
+    oldest_dead_days: int | None
 
 
 def _empty_queue_details() -> tuple[dict, dict[str, int]]:
@@ -1848,22 +1881,25 @@ def _scan_one_task_row(
 
 
 def _scan_queue_tasks(
-    rows: list[sqlite3.Row],
+    rows: Iterator[sqlite3.Row],
     *,
     now: datetime,
     deadline: float,
     details: dict,
     states: dict[str, int],
-) -> tuple[bool, bool, set[str], dict[str, object]]:
+) -> _QueueTaskScan:
     codes: set[str] = set()
     capabilities: set[str] = set()
     references: set[str] = set()
     result_hashes: dict[str, object] = {}
     unknown_state = False
     corrupt_metadata = False
+    retained = False
+    backlog: list[dict[str, object]] = []
     for row in rows:
-        if _deadline_reached(deadline):
-            raise TimeoutError("queue check deadline")
+        _queue_scan_stop(deadline)
+        retained = True
+        _remember_task_backlog(row, backlog)
         verdict = _scan_one_task_row(
             row,
             now=now,
@@ -1878,28 +1914,51 @@ def _scan_queue_tasks(
         corrupt_metadata = corrupt_metadata or verdict.corrupt
     details["codes"] = sorted(set(details["codes"]) | codes)
     details["capabilities"] = sorted(capabilities)
-    return unknown_state, corrupt_metadata, references, result_hashes
+    dead, oldest = _dead_backlog(backlog, now)
+    return _QueueTaskScan(
+        unknown_state, corrupt_metadata, references, result_hashes,
+        retained, dead, oldest,
+    )
 
 
-def _bounded_task_rows(database: sqlite3.Connection, details: dict) -> list[sqlite3.Row]:
-    rows = database.execute(
-        "SELECT * FROM tasks ORDER BY state IN ('succeeded', 'dead', 'cancelled'), rowid DESC LIMIT ?",
-        (MAX_OPERATIONAL_ROWS + 1,),
-    ).fetchall()
-    if len(rows) <= MAX_OPERATIONAL_ROWS:
-        return rows
-    details["codes"].append("queue_scan_truncated")
-    details["deletion_codes"].append("queue_state_unknown")
-    return rows[:MAX_OPERATIONAL_ROWS]
+def _queue_scan_stop(deadline: float) -> None:
+    if _deadline_reached(deadline):
+        raise TimeoutError("queue check deadline")
+
+
+def _remember_task_backlog(
+    row: sqlite3.Row, backlog: list[dict[str, object]]
+) -> None:
+    if row["state"] == "dead" or _has_answering_redrive(row):
+        backlog.append(_task_backlog_projection(row))
+
+
+def _has_answering_redrive(row: sqlite3.Row) -> bool:
+    if "redrive_of" not in row.keys():
+        return False
+    return _answers_its_origin(row)
+
+
+def _task_backlog_projection(row: sqlite3.Row) -> dict[str, object]:
+    return {
+        key: row[key] for key in ("id", "state", "updated_at", "redrive_of")
+        if key in row.keys()
+    }
+
+
+def _queue_task_rows(database: sqlite3.Connection) -> Iterator[sqlite3.Row]:
+    return iter(database.execute(
+        "SELECT * FROM tasks ORDER BY state IN ('succeeded', 'dead', 'cancelled'), rowid DESC"
+    ))
 
 
 def _append_queue_scan_codes(
-    details: dict, unknown_state: bool, corrupt_metadata: bool, rows: list
+    details: dict, unknown_state: bool, corrupt_metadata: bool, retained: bool
 ) -> None:
     ordered = (
         (unknown_state, "queue_state_unknown"),
         (corrupt_metadata, "queue_state_corrupt"),
-        (bool(rows), "queue_task_retained"),
+        (retained, "queue_task_retained"),
     )
     for flagged, code in ordered:
         if flagged:
@@ -1913,21 +1972,13 @@ def _count_queue_rows(
     *,
     table: str,
     retained_code: str,
-    unknown_code: str,
 ) -> None:
     if table not in tables:
         return
-    rows = database.execute(
-        _QUEUE_COUNT_QUERIES[table], (MAX_OPERATIONAL_ROWS + 1,)
-    ).fetchall()
-    details[table] = len(rows)
-    ordered = (
-        (bool(rows), retained_code),
-        (len(rows) > MAX_OPERATIONAL_ROWS, unknown_code),
-    )
-    for flagged, code in ordered:
-        if flagged:
-            details["deletion_codes"].append(code)
+    count = database.execute(_QUEUE_COUNT_QUERIES[table]).fetchone()[0]
+    details[table] = count
+    if count:
+        details["deletion_codes"].append(retained_code)
 
 
 class _QueueOwnerColumns(NamedTuple):
@@ -1976,21 +2027,19 @@ def _count_one_queue_owner(row: sqlite3.Row, details: dict, now: datetime) -> No
 
 
 def _count_queue_ownership(
-    database: sqlite3.Connection, tables: set[str], details: dict, now: datetime
+    database: sqlite3.Connection, tables: set[str], details: dict, now: datetime,
+    deadline: float,
 ) -> None:
     if "queue_ownership" not in tables:
         return
-    rows = database.execute(
-        "SELECT * FROM queue_ownership LIMIT ?", (MAX_OPERATIONAL_ROWS + 1,)
-    ).fetchall()
-    if len(rows) > MAX_OPERATIONAL_ROWS:
-        details["deletion_codes"].append("queue_owner_state_unknown")
-    for row in rows[:MAX_OPERATIONAL_ROWS]:
+    for row in database.execute("SELECT * FROM queue_ownership"):
+        _queue_scan_stop(deadline)
         _count_one_queue_owner(row, details, now)
 
 
 def _count_queue_side_tables(
-    database: sqlite3.Connection, tables: set[str], details: dict, now: datetime
+    database: sqlite3.Connection, tables: set[str], details: dict, now: datetime,
+    deadline: float,
 ) -> None:
     _count_queue_rows(
         database,
@@ -1998,7 +2047,6 @@ def _count_queue_side_tables(
         details,
         table="source_failures",
         retained_code="queue_source_failure_retained",
-        unknown_code="queue_source_failure_state_unknown",
     )
     _count_queue_rows(
         database,
@@ -2006,9 +2054,8 @@ def _count_queue_side_tables(
         details,
         table="source_fences",
         retained_code="queue_source_fence_retained",
-        unknown_code="queue_source_fence_state_unknown",
     )
-    _count_queue_ownership(database, tables, details, now)
+    _count_queue_ownership(database, tables, details, now, deadline)
 
 
 def _queue_result_bytes(state_root: Path, reference: str) -> bytes | None:
@@ -2036,8 +2083,10 @@ def _validate_queue_results(
     references: set[str],
     result_hashes: dict[str, object],
     details: dict,
+    deadline: float,
 ) -> None:
     for reference in references:
+        _queue_scan_stop(deadline)
         raw = _queue_result_bytes(state_root, reference)
         expected = result_hashes.get(reference)
         if raw is None or not isinstance(expected, str):
@@ -2077,16 +2126,21 @@ def _scan_queue_database(
                 False,
                 False,
             )
-        rows = _bounded_task_rows(database, details)
-        unknown_state, corrupt_metadata, references, result_hashes = _scan_queue_tasks(
-            rows, now=now, deadline=deadline, details=details, states=states
+        tasks = _scan_queue_tasks(
+            _queue_task_rows(database), now=now, deadline=deadline,
+            details=details, states=states
         )
-        _append_queue_scan_codes(details, unknown_state, corrupt_metadata, rows)
-        details["dead_unresolved"], details["oldest_dead_days"] = _dead_backlog(rows, now)
-        _count_queue_side_tables(database, tables, details, now)
-        _validate_queue_results(state_root, references, result_hashes, details)
+        _append_queue_scan_codes(
+            details, tasks.unknown_state, tasks.corrupt_metadata, tasks.retained
+        )
+        details["dead_unresolved"] = tasks.dead_unresolved
+        details["oldest_dead_days"] = tasks.oldest_dead_days
+        _count_queue_side_tables(database, tables, details, now, deadline)
+        _validate_queue_results(
+            state_root, tasks.references, tasks.result_hashes, details, deadline
+        )
         _validate_capture_sources(database, tables, state_root, deadline, details)
-        return _QueueScan(None, unknown_state, corrupt_metadata)
+        return _QueueScan(None, tasks.unknown_state, tasks.corrupt_metadata)
 
 
 def _validate_capture_sources(database, tables, state_root, deadline, details) -> None:
@@ -2138,7 +2192,9 @@ def _queue_pending_work(states: dict[str, int], details: dict) -> bool:
 # succeeded, it is queued again (and counted as ready), or it died and is counted
 # itself. Counting the parent too named 25 captures on 2026-09-28 whose redrives had
 # all been answered (docs/research/2026-09-28-a-check-names-its-cause.md).
-def _dead_backlog(rows: list[sqlite3.Row], now: datetime) -> tuple[int, int | None]:
+def _dead_backlog(
+    rows: Sequence[Mapping[str, object] | sqlite3.Row], now: datetime
+) -> tuple[int, int | None]:
     """(dead tasks no live or finished redrive answers, age in days of the oldest)."""
     answered = _redriven_ids(rows)
     moments = [_dead_moment(row) for row in rows if _unanswered_dead(row, answered)]
@@ -2149,18 +2205,18 @@ def _known(moments: list[datetime | None]) -> list[datetime]:
     return [moment for moment in moments if moment is not None]
 
 
-def _unanswered_dead(row: sqlite3.Row, answered: set[str]) -> bool:
+def _unanswered_dead(row: Mapping[str, object] | sqlite3.Row, answered: set[str]) -> bool:
     return row["state"] == "dead" and row["id"] not in answered
 
 
-def _redriven_ids(rows: list[sqlite3.Row]) -> set[str]:
+def _redriven_ids(rows: Sequence[Mapping[str, object] | sqlite3.Row]) -> set[str]:
     """Tasks that a redrive other than a cancelled one names as its origin."""
     if not rows or "redrive_of" not in rows[0].keys():
         return set()
     return {row["redrive_of"] for row in rows if _answers_its_origin(row)}
 
 
-def _answers_its_origin(row: sqlite3.Row) -> bool:
+def _answers_its_origin(row: Mapping[str, object] | sqlite3.Row) -> bool:
     return bool(row["redrive_of"]) and row["state"] != "cancelled"
 
 
@@ -2170,7 +2226,7 @@ def _oldest_age_days(moments: list[datetime], now: datetime) -> int | None:
     return (now - min(moments)).days
 
 
-def _dead_moment(row: sqlite3.Row) -> datetime | None:
+def _dead_moment(row: Mapping[str, object] | sqlite3.Row) -> datetime | None:
     if "updated_at" not in row.keys():
         return None
     return _parse_utc(row["updated_at"])

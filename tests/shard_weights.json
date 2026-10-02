@@ -189,6 +189,7 @@
   "test_a_question_finds_pages_without_a_generation.py": 0.01,
   "test_a_question_is_answered_by_its_own_kind_of_generation.py": 5.64,
   "test_a_question_searches_inside_its_own_dates.py": 0.05,
+  "test_a_queue_health_scan_has_no_row_ceiling.py": 1.99,
   "test_a_queued_entry_resolves_its_dates.py": 6.79,
   "test_a_quote_is_checked_by_string_not_by_a_model.py": 0.01,
   "test_a_quoted_bracket_is_not_a_link.py": 0.02,

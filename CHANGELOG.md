@@ -21,6 +21,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Queue health streams all retained task and owner facts, counts source records and modern artifacts completely within its deadline, and preserves result and deletion checks beyond the old row ceiling.
+
 - Generation collection now uses its existing canonical Markdown writer fence and cancellation; doctor repair preserves the same coordinator.
 
 - Grounded answers preserve automatic semantic retrieval when no profile is supplied, including dense signals for graph queries; explicit caller profiles keep their declared behavior.
