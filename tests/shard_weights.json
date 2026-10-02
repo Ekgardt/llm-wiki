@@ -858,6 +858,7 @@
   "test_what_was_mentioned_together.py": 0.11,
   "test_who_calls_is_node_scoped.py": 2.08,
   "test_whole_graph_aggregates.py": 5.51,
+  "test_widened_claim_preserves_its_verified_literal.py": 0.02,
   "test_wikilinks_tracked.py": 0.1,
   "test_windows_handles_keep_their_width_and_their_error.py": 0.02,
   "test_windows_workspace.py": 0.25,

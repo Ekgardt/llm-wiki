@@ -2405,8 +2405,9 @@ def _derived_claim(
     if not isinstance(candidate, Mapping):
         raise ValueError("compile claim candidate must be an object")
     item = _claim_evidence_item(operation, candidate.get("evidence_index"))
-    date, timestamp, quote = _require_evidence_fields(item)
+    date, timestamp, _quote = _require_evidence_fields(item)
     binding = _evidence_binding(item, inputs)
+    quote = _verified_claim_quote(binding, inputs)
     semantic = _semantic_payload(_proposed_semantics(candidate, date))
     fingerprint = sha256_bytes(canonical_json_bytes(semantic))
     return {
@@ -2432,6 +2433,20 @@ def _derived_claim(
         "links": [],
         "extractor_version": CLAIM_EXTRACTOR_VERSION,
     }
+
+
+def _verified_claim_quote(binding: Mapping[str, str], inputs: CompileInputs) -> str:
+    """The exact span already verified by the shared evidence binder.
+
+    The binder can widen a partial quote to its whole source line. Both the
+    record text and its hash must refer to that same span, not the model's
+    shorter original quote.
+    """
+    reference = EvidenceRef.parse(binding["reference"])
+    source = _daily_for_evidence(inputs, reference.daily_id, reference.source_sha256)
+    if source is None:
+        raise ValueError("compile claim evidence source is absent from the snapshot")
+    return source.content[reference.byte_start:reference.byte_end].decode("utf-8", errors="strict")
 
 
 def _proposed_semantics(

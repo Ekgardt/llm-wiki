@@ -8,6 +8,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Compiled claims use the exact verified source span when evidence is widened, keeping literal text and its digest consistent without weakening validation.
+
 - Blackboard descriptions, signals, resource sets, and claim JSON use the existing journal budget; resource lookups avoid SQL variable-count ceilings while preserving current database identity constraints.
 
 - Daily compile readers share the existing daily-evidence byte contract and respect the configured total source budget, preserving complete parts above the older separate read bound.
