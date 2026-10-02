@@ -1344,13 +1344,12 @@ def _get_decisions(
     docs/research/2026-09-25-get-decisions-returns-what-was-asked.md).
     """
     from retrieval import CANDIDATE_FANOUT
-    from search_memory import MAX_SEARCH_LIMIT
 
     _require_decision_query(query)
     effective_query = query or "decision"
     candidates = _search_vault(
         effective_query,
-        min(limit * CANDIDATE_FANOUT, MAX_SEARCH_LIMIT),
+        limit * CANDIDATE_FANOUT,
         deadline=deadline,
         trace_sink=trace_sink,
         caller=DECISIONS_CALLER,

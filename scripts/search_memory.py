@@ -70,10 +70,6 @@ MAX_SEARCH_DIRECTORIES = 2_000
 # Directory depth of the Markdown fallback walk; the live knowledge tree is 5 deep (2026-09-27),
 # so 32 only refuses a runaway tree.
 MAX_SEARCH_DEPTH = 32
-# The largest result count a caller may ask for; a larger one is refused with its range. Bounds
-# one answer's work. Basis unknown: value predates measurement; review when a caller needs more
-# rows.
-MAX_SEARCH_LIMIT = 1_000
 MAX_PAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 SEARCH_INDEX_COLUMNS = (
     "path", "title", "summary", "body", "project", "timestamp", "slug",
@@ -282,9 +278,9 @@ def _validate_search_limit(value: object) -> int:
     if (
         isinstance(value, bool)
         or not isinstance(value, int)
-        or not 1 <= value <= MAX_SEARCH_LIMIT
+        or value < 1
     ):
-        raise ValueError(f"limit must be an integer from 1 to {MAX_SEARCH_LIMIT}")
+        raise ValueError("limit must be a positive integer")
     return value
 
 
@@ -3296,13 +3292,19 @@ def _exact_filename_rows(
 _SESSION_SOURCE_PREFIX = "knowledge/raw/sessions/"
 
 
+def _fts_cohort_row_limit(limit: int) -> int:
+    # SQLite INTEGER parameters are signed 64-bit. A larger requested pool
+    # means all representable rows, never an overflowing Python binding.
+    return min(limit * 5, (1 << 63) - 1)
+
+
 def _generation_cohort_rows(connection, query, filters, values, limit, *, sessions):
     operator = "LIKE" if sessions else "NOT LIKE"
     return connection.execute(
         f"SELECT {_GENERATION_CHUNK_COLUMNS}, bm25(chunks) AS rank FROM chunks "
         f"WHERE chunks MATCH ?{filters} AND source_path {operator} ? "
         "ORDER BY rank, chunk_order LIMIT ?",
-        [_fts_query(query), *values, _SESSION_SOURCE_PREFIX + "%", limit * 5],
+        [_fts_query(query), *values, _SESSION_SOURCE_PREFIX + "%", _fts_cohort_row_limit(limit)],
     ).fetchall()
 
 

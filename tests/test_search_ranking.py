@@ -200,14 +200,6 @@ def test_search_rejects_invalid_limit_before_dispatch(limit, monkeypatch):
         search_memory.search("needle", limit=limit)
 
 
-def test_search_rejects_limit_above_ceiling_before_dispatch(monkeypatch):
-    import search_memory
-
-
-    with pytest.raises(ValueError, match="limit"):
-        search_memory.search("needle", limit=search_memory.MAX_SEARCH_LIMIT + 1)
-
-
 def test_cli_rejects_invalid_limit_before_search(monkeypatch):
     import search_memory
 

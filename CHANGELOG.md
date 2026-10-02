@@ -8,6 +8,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Search counts follow caller budgets with representable SQLite candidate limits; common symbol names use the existing graph reader contract and preserve omission counts instead of separate numeric refusals.
+
 - OKF migration derives text and its precondition from one stable source snapshot within the existing Markdown target budget, replacing its separate read ceiling.
 
 - Codex installer configuration-status commands emit LF on every platform, so Bash can recognize native Windows output and rewrite the earlier owned entry.

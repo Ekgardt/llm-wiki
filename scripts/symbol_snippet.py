@@ -32,10 +32,6 @@ MAX_FILE_BYTES = 1024 * 1024
 # Lines of one definition shown; a longer body is cut and the snippet says
 # `truncated: true`. Basis unknown: value predates measurement (about two screens).
 MAX_SNIPPET_LINES = 120
-# Symbols sharing the asked name; past 200 the answer is refused ("too many symbols
-# share this name") so the caller qualifies it instead of reading a partial list.
-# Basis unknown: value predates measurement.
-MAX_NAME_MATCHES = 200
 # `constant` joined on 2026-09-12: a module-level UPPER_CASE name is a
 # definition an operator asks for by name like any other.
 SNIPPET_KINDS = ("class", "function", "method", "constant")
@@ -140,8 +136,6 @@ def _matching_nodes(graph, symbol: str, deadline: float) -> list[dict]:
     matched = [
         row for row in rows if _owner_matches(str(row["metadata"].get("owner", "")), wanted)
     ]
-    if len(matched) > MAX_NAME_MATCHES:
-        raise ValueError("too many symbols share this name")
     return matched
 
 
@@ -253,10 +247,7 @@ def _node_snippets(
 
 def _graph_snippets(graph, directory: Path, symbol: str, deadline: float) -> dict:
     answer = {"symbol": symbol, "graph": "active_generation", "generation_id": str(graph.generation_id)}
-    try:
-        nodes = _matching_nodes(graph, symbol, deadline)
-    except ValueError:
-        return {**answer, "snippets": [], "error": "too many symbols share this name; qualify it as owner.name"}
+    nodes = _matching_nodes(graph, symbol, deadline)
     _, name = _split_symbol(symbol)
     # One scope per answer: resolving it asks git, so never once per symbol.
     scope = contained_scope(directory, deadline)
@@ -306,10 +297,7 @@ def _definition_site(graph, node: dict, deadline: float) -> dict | None:
 
 def _graph_definition_report(graph, symbol: str, deadline: float) -> dict:
     """The first MAX_LOCATIONS definition sites, and how many matching nodes were left out."""
-    try:
-        nodes = _matching_nodes(graph, symbol, deadline)
-    except ValueError:
-        return {"sites": [], "sites_omitted": 0}
+    nodes = _matching_nodes(graph, symbol, deadline)
     shown = nodes[:MAX_LOCATIONS]
     sites = [_definition_site(graph, node, deadline) for node in shown]
     return {"sites": [site for site in sites if site is not None], "sites_omitted": len(nodes) - len(shown)}
