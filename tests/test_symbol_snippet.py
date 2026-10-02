@@ -51,14 +51,15 @@ def test_an_unreadable_file_is_a_named_refusal(tmp_path: Path) -> None:
     assert found == [{"path": "gone.py", "error": "file unreadable or over 1 MiB"}]
 
 
-def test_a_long_block_is_cut_and_says_so(tmp_path: Path) -> None:
+def test_a_long_block_keeps_its_complete_body(tmp_path: Path) -> None:
     body = "def long_one():\n" + "\n".join(
         f"    x{index} = {index}" for index in range(300)
     )
     (tmp_path / "big.py").write_text(body, encoding="utf-8")
     found = symbol_snippet._file_snippets(tmp_path, "big.py", "long_one")
-    assert found[0]["truncated"] is True
-    assert found[0]["end_line"] - found[0]["start_line"] + 1 <= 121
+    assert found[0]["truncated"] is False
+    assert found[0]["source"] == body
+    assert (found[0]["start_line"], found[0]["end_line"]) == (1, 301)
 
 
 def test_a_stale_snippet_is_read_from_the_file(tmp_path):

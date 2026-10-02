@@ -344,14 +344,14 @@ def test_snippet_says_when_the_working_tree_moved_on(indexed):
     assert "value + 1" in snippet["source"]
 
 
-def test_exact_block_cuts_long_definitions_and_keeps_the_true_end():
+def test_exact_block_keeps_the_complete_recorded_span():
     import symbol_snippet
 
     lines = [f"line {index}" for index in range(1, 301)]
     block = symbol_snippet._exact_block(lines, {"line_start": 10, "line_end": 250})
-    expected = {"start_line": 10, "end_line": 250, "truncated": True}
+    expected = {"start_line": 10, "end_line": 250, "truncated": False}
     assert _picked(block, expected) == expected
-    assert block["source"].count("\n") + 1 == symbol_snippet.MAX_SNIPPET_LINES
+    assert block["source"] == "\n".join(lines[9:250])
 
 
 # --------------------------------------------------------------------------

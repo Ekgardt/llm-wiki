@@ -21,17 +21,13 @@ from pathlib import Path
 
 from path_coverage import _current_sha, _freshness, contained_scope
 
-# Definitions a snippet answer shows. A display bound, not a data bound: each is a
-# source block of up to MAX_SNIPPET_LINES lines, so five already fill a screen, and
-# the answer states `resolved_nodes`, `nodes_omitted` and `snippets_omitted` so the
+# Definitions a snippet answer shows. The answer states `resolved_nodes`,
+# `nodes_omitted` and `snippets_omitted` so the
 # reader knows more exist and can qualify the name (the protocol reply bound is
 # 10 000). docs/research/2026-09-27-a-cut-says-what-it-left-out.md.
 MAX_LOCATIONS = 5
 # One source file read for a snippet; fresh positions re-read up to 4 MiB.
 MAX_FILE_BYTES = 1024 * 1024
-# Lines of one definition shown; a longer body is cut and the snippet says
-# `truncated: true`. Basis unknown: value predates measurement (about two screens).
-MAX_SNIPPET_LINES = 120
 # `constant` joined on 2026-09-12: a module-level UPPER_CASE name is a
 # definition an operator asks for by name like any other.
 SNIPPET_KINDS = ("class", "function", "method", "constant")
@@ -59,8 +55,7 @@ def _indent_of(line: str) -> int:
 
 def _block_end(lines: list[str], start: int, indent: int) -> int:
     end = start + 1
-    limit = min(len(lines), start + MAX_SNIPPET_LINES)
-    while end < limit and _still_inside(lines[end], indent):
+    while end < len(lines) and _still_inside(lines[end], indent):
         end += 1
     return end
 
@@ -82,7 +77,7 @@ def _snippet_at(lines: list[str], start: int) -> dict:
         "start_line": start + 1,
         "end_line": end,
         "source": "\n".join(lines[start:end]),
-        "truncated": end - start >= MAX_SNIPPET_LINES,
+        "truncated": False,
     }
 
 
@@ -156,12 +151,11 @@ def _stored_lines(graph, relative: str, deadline: float) -> list[str] | None:
 def _exact_block(lines: list[str], occurrence: dict) -> dict:
     start = int(occurrence["line_start"])
     end = int(occurrence["line_end"])
-    cut = min(end, start + MAX_SNIPPET_LINES - 1)
     return {
         "start_line": start,
         "end_line": end,
-        "source": "\n".join(lines[start - 1 : cut]),
-        "truncated": cut < end,
+        "source": "\n".join(lines[start - 1 : end]),
+        "truncated": False,
     }
 
 
@@ -200,12 +194,11 @@ def _file_block(directory: Path, relative: str, node: dict) -> dict | None:
     if lines is None:
         return None
     start, end = span
-    cut = min(end, start + MAX_SNIPPET_LINES - 1)
     return {
         "start_line": start,
         "end_line": end,
-        "source": "\n".join(lines[start - 1 : cut]),
-        "truncated": cut < end,
+        "source": "\n".join(lines[start - 1 : end]),
+        "truncated": False,
         "lines_read_from": "file",
     }
 
