@@ -17,6 +17,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Count compiler input sizes using its actual source selectors, excluding daily receipts and archived notes while including metadata snapshots.
+
 - Symbol snippets preserve the complete definition in indexed, fresh-file and heuristic reads instead of cutting source after an unexplained 120 lines; the existing MCP answer budget still reports any response-level omission.
 
 - Codex model calls retain reported completed-turn token usage beside the final answer, preserving unknown counters, CLI failures and the common DLP boundary.

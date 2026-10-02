@@ -451,7 +451,7 @@ def _vault_file_snapshots(
 ) -> list[SourceSnapshot]:
     """Snapshot every vault file whole, whatever one prompt later has room for."""
     snapshots: list[SourceSnapshot] = []
-    for path in (AGENTS, INDEX, LOG):
+    for path in _vault_source_paths():
         if not path.exists():
             continue
         snapshot = _snapshot(path)
@@ -492,12 +492,28 @@ def _knowledge_targets(
     return targets
 
 
-def _live_knowledge_pages() -> list[Path]:
-    if not KNOWLEDGE.exists():
+def _live_note_paths(directory: Path) -> list[Path]:
+    if not directory.exists():
         return []
-    return [
-        path for path in sorted(KNOWLEDGE.rglob("*.md")) if "archive" not in path.parts
-    ]
+    return [path for path in sorted(directory.rglob("*.md")) if "archive" not in path.parts]
+
+
+def _live_knowledge_pages() -> list[Path]:
+    return _live_note_paths(KNOWLEDGE)
+
+
+def _vault_source_paths(root: Path | None = None) -> tuple[Path, Path, Path]:
+    if root is None or root == ROOT:
+        return AGENTS, INDEX, LOG
+    candidates = (root / "docs" / "AGENTS.md", root / "AGENTS.md")
+    agents = next((path for path in candidates if path.exists()), candidates[0])
+    return agents, root / "knowledge" / "index.md", root / "knowledge" / LOG_NAME
+
+
+def compile_scope_paths(root: Path) -> list[Path]:
+    """Forecast all eligible daily inputs using the compiler's source selectors."""
+    metadata = [path for path in _vault_source_paths(root) if path.exists()]
+    return _live_note_paths(root / "knowledge" / "notes") + daily_logs(root / "knowledge" / "daily") + metadata
 
 
 def compile_source_identity(logical_path: str, source_sha256: str) -> str:
