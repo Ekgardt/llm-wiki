@@ -113,24 +113,20 @@ def _store_manifest(state_root: Path, intent_id: str, manifest: bytes) -> None:
     _publish(state_root, state_root / pending, manifest)
 
 
-def _store_bundle(
-    queue: object, coordinator: object, intent_id: str, content: bytes, *,
+def _store_owned_bundle(
+    queue: object, intent_id: str, content: bytes, *,
     occurred_at: datetime, accepted_at: datetime, time_origin: str,
 ) -> bytes:
-    from integration_adapter import _capture_publication_fence, _ensure_capture_intent_directories
-
     state_root = Path(queue.state_root)
-    _ensure_capture_intent_directories(state_root, intent_id)
-    with _capture_publication_fence(queue, coordinator, intent_id):
-        anchor = _selected_anchor(
-            state_root, intent_id, content, occurred_at=occurred_at,
-            accepted_at=accepted_at, time_origin=time_origin,
-        )
-        parts = protocol.encode_parts(intent_id, content)
-        manifest = protocol.make_manifest(anchor, parts)
-        _publish(state_root, anchor_path(state_root, intent_id), anchor)
-        _store_parts(state_root, intent_id, parts)
-        _store_manifest(state_root, intent_id, manifest)
+    anchor = _selected_anchor(
+        state_root, intent_id, content, occurred_at=occurred_at,
+        accepted_at=accepted_at, time_origin=time_origin,
+    )
+    parts = protocol.encode_parts(intent_id, content)
+    manifest = protocol.make_manifest(anchor, parts)
+    _publish(state_root, anchor_path(state_root, intent_id), anchor)
+    _store_parts(state_root, intent_id, parts)
+    _store_manifest(state_root, intent_id, manifest)
     return manifest
 
 
@@ -184,26 +180,32 @@ def load_bound_bundle(state_root: Path, intent_id: str, digest: str) -> Breadcru
     return load_bundle(state_root, manifest)
 
 
-def register_manifest(queue: object, coordinator: object, manifest: bytes) -> None:
+def register_manifest(
+    queue: object, coordinator: object, manifest: bytes, *, ownership=None,
+) -> None:
     bundle = load_bundle(Path(queue.state_root), manifest)
     intent_id = protocol.read_manifest(bundle.manifest)["intent_id"]
-    _register_verified_manifest(queue, coordinator, manifest, intent_id, HANDLER_VERSION)
+    _register_verified_manifest(queue, coordinator, manifest, intent_id, HANDLER_VERSION, ownership=ownership)
 
 
-def _register_verified_manifest(queue, coordinator, manifest, intent_id, handler_version) -> None:
+def _register_verified_manifest(
+    queue, coordinator, manifest, intent_id, handler_version, *, ownership=None,
+) -> None:
     from integration_adapter import _capture_relative_paths, _publish_capture_files_and_task
 
     pending, ready = _capture_relative_paths(intent_id)
     _publish_capture_files_and_task(
         queue, coordinator, intent_id=intent_id, payload=manifest,
         intent_sha256=sha256_bytes(manifest), pending_relative=pending,
-        ready_relative=ready, handler_version=handler_version,
+        ready_relative=ready, handler_version=handler_version, ownership=ownership,
     )
 
 
-def _register_or_retain(queue: object, coordinator: object, intent_id: str, manifest: bytes) -> BreadcrumbPublication:
+def _register_or_retain(
+    queue: object, coordinator: object, intent_id: str, manifest: bytes, *, ownership=None,
+) -> BreadcrumbPublication:
     try:
-        register_manifest(queue, coordinator, manifest)
+        register_manifest(queue, coordinator, manifest, ownership=ownership)
     except Exception as error:
         stored = _stored_manifest(Path(queue.state_root), intent_id)
         if stored != manifest:
@@ -222,11 +224,15 @@ def publish_breadcrumb(
     content = canonical_json_bytes(dict(event))
     require_safe_publication(content)
     intent_id = protocol.occurrence_identity(scope)
-    manifest = _store_bundle(
-        queue, coordinator, intent_id, content, occurred_at=occurred_at,
-        accepted_at=accepted_at, time_origin=time_origin,
-    )
-    return _register_or_retain(queue, coordinator, intent_id, manifest)
+    from integration_adapter import _capture_publication_fence, _ensure_capture_intent_directories
+
+    _ensure_capture_intent_directories(Path(queue.state_root), intent_id)
+    with _capture_publication_fence(queue, coordinator, intent_id) as ownership:
+        manifest = _store_owned_bundle(
+            queue, intent_id, content, occurred_at=occurred_at,
+            accepted_at=accepted_at, time_origin=time_origin,
+        )
+        return _register_or_retain(queue, coordinator, intent_id, manifest, ownership=ownership)
 
 
 def _recover_pending_file(queue: object, coordinator: object, path: Path) -> int:

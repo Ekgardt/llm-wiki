@@ -21,6 +21,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Breadcrumb publication and queue registration reuse one canonical capture owner, validating supplied ownership and retaining complete evidence on registration failure.
+
 - Capture verifies retained transcript bytes while native hosts append, and refuses replacement, shrink and rewriting for both whole and excerpt reads.
 
 - Queue health streams all retained task and owner facts, counts source records and modern artifacts completely within its deadline, and preserves result and deletion checks beyond the old row ceiling.

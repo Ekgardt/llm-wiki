@@ -3152,6 +3152,40 @@ def _capture_publication_fence(queue: object, coordinator: object, intent_id: st
         registry.release(owner)
 
 
+def _require_capture_registration_owner(coordinator, intent_id, owner, fence) -> None:
+    from iso_time import utc_text
+
+    coordinator._validate_intent_fence_owner(owner, "capture")
+    if (fence.intent_id, fence.mode) != (intent_id, "capture"):
+        raise ValueError("capture registration ownership has a different intent")
+    registry = coordinator._ownership_registry()
+    with coordinator._connect() as database:
+        registry.require(database, owner)
+        row = database.execute(
+            """SELECT 1 FROM intent_fences
+               WHERE intent_id=? AND mode='capture' AND token=? AND fencing_epoch=?
+                 AND canonical_role=? AND canonical_scope=? AND canonical_actor_id=?
+                 AND canonical_owner_token=? AND canonical_fencing_epoch=? AND expires_at>?""",
+            (intent_id, fence.token, fence.epoch, owner.role, owner.scope,
+             owner.actor_id, owner.token, owner.epoch, utc_text(datetime.now(timezone.utc))),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("intent_fence_lost")
+
+
+@contextmanager
+def _capture_registration_fence(queue, coordinator, intent_id, ownership):
+    if ownership is None:
+        with _capture_publication_fence(queue, coordinator, intent_id) as held:
+            yield held
+        return
+    if Path(queue.state_root).resolve() != Path(coordinator.state_root).resolve():
+        raise ValueError("capture registration runtime roots differ")
+    owner, fence = ownership
+    _require_capture_registration_owner(coordinator, intent_id, owner, fence)
+    yield owner, fence
+
+
 def _publish_capture_files_and_task(
     queue: object,
     coordinator: object,
@@ -3162,13 +3196,14 @@ def _publish_capture_files_and_task(
     pending_relative: str,
     ready_relative: str,
     handler_version: int = CAPTURE_HANDLER_VERSION,
+    ownership: tuple[object, object] | None = None,
 ) -> None:
     from reliable_memory import publish_runtime_file
 
     state_root = Path(queue.state_root)
     pending = state_root / pending_relative
     ready = state_root / ready_relative
-    with _capture_publication_fence(queue, coordinator, intent_id) as (owner, fence):
+    with _capture_registration_fence(queue, coordinator, intent_id, ownership) as (owner, fence):
         publish_runtime_file(
             pending, payload, state_root=state_root, create_only=True, mode=0o600
         )

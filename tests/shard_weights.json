@@ -10,6 +10,7 @@
   "test_a_blind_check_says_why_it_is_blind.py": 0.01,
   "test_a_block_opens_one_entry.py": 0.95,
   "test_a_blocked_task_has_a_way_back.py": 8.29,
+  "test_a_breadcrumb_has_one_publication_owner.py": 2.11,
   "test_a_broad_handler_carries_its_cause.py": 2.33,
   "test_a_build_in_flight_is_not_an_orphan.py": 0.55,
   "test_a_busy_append_repeats_its_attempt.py": 1.61,
