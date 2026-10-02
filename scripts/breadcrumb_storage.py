@@ -7,6 +7,7 @@ the producer's memory or another model call.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -233,14 +234,22 @@ def _recover_pending_file(queue: object, coordinator: object, path: Path) -> int
     from integration_adapter import _capture_relative_paths
 
     state_root = Path(queue.state_root)
-    manifest = _read(state_root, path)
     identity = protocol.require_digest(path.stem)
-    handler = verified_capture_handler(state_root, {"intent_id": identity}, manifest)
     pending, _ready = _capture_relative_paths(identity)
     if path != state_root / pending:
         raise ValueError("breadcrumb manifest path conflicts with its identity")
+    manifest = _recoverable_pending_manifest(state_root, path, identity)
+    handler = verified_capture_handler(state_root, {"intent_id": identity}, manifest)
     _register_verified_manifest(queue, coordinator, manifest, identity, handler)
     return handler
+
+
+def _recoverable_pending_manifest(state_root: Path, path: Path, identity: str) -> bytes:
+    """A discovered pending record may already have a verified ready successor."""
+    try:
+        return _read(state_root, path)
+    except FileNotFoundError:
+        return _stored_manifest(state_root, identity)
 
 
 def recover_pending(queue: object, coordinator: object) -> dict:
@@ -315,11 +324,29 @@ def inspect_pending_sources(state_root: Path, indexed: set[str], *, deadline: fl
 
 def _inspect_pending_path(state_root, path, seen, result, deadline) -> None:
     _check_deadline(deadline, "breadcrumb inspection")
-    identity = protocol.require_digest(path.name.partition(".")[0])
+    identity = _pending_source_identity(path)
     if identity in seen:
         return
     seen.add(identity)
     result[_pending_source_status(state_root, identity, deadline)] += 1
+
+
+def _pending_source_identity(path: Path) -> str:
+    name = path.name
+    if name.startswith("."):
+        name = _staged_pending_target(name)
+    return protocol.require_digest(name.partition(".")[0])
+
+
+def _staged_pending_target(name: str) -> str:
+    match = re.fullmatch(
+        r"\.(?P<target>[0-9a-f]{64}(?:\.anchor|\.json|\.[0-9a-f]{64}\.part))"
+        r"\.[0-9a-f]{32}\.tmp",
+        name,
+    )
+    if match is None:
+        raise ValueError("unrecognized pending capture staging name")
+    return match["target"]
 
 
 def _pending_source_status(state_root: Path, identity: str, deadline: float) -> str:

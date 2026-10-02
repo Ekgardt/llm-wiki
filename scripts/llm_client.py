@@ -1418,6 +1418,7 @@ def _codex_command(codex_bin: str, model: str | None, reasoning: str, out_path: 
     command = [
         codex_bin,
         "exec",
+        "--json",
         "--skip-git-repo-check",
         "--sandbox",
         "read-only",
@@ -1533,7 +1534,7 @@ def provider_environment() -> dict[str, str]:
     return environment
 
 
-def _codex_last_message(command: list[str], prompt_path: str, out_path: str) -> str:
+def _codex_last_message(command: list[str], prompt_path: str, out_path: str) -> BackendResponse:
     with open(prompt_path, "rb") as stdin_handle, provider_cwd() as neutral:
         try:
             result = _run_cli(
@@ -1548,10 +1549,53 @@ def _codex_last_message(command: list[str], prompt_path: str, out_path: str) -> 
                 f"codex did not answer within {_timeout_s()}s{_cleanup_note(exc)}"
             ) from exc
     _require_codex_exited_cleanly(result)
+    usage = _codex_usage(result.stdout)
     try:
-        return Path(out_path).read_text(encoding="utf-8", errors="ignore")
+        text = Path(out_path).read_text(encoding="utf-8", errors="ignore")
     except OSError:
-        return ""
+        text = ""
+    return BackendResponse(text, usage)
+
+
+def _codex_usage(output: str | bytes) -> TokenUsage:
+    reports = []
+    for line in output.splitlines():
+        report = _codex_usage_line(line)
+        if report is not None:
+            reports.append(report)
+    names = ("input_tokens", "output_tokens", "cache_read_tokens")
+    return TokenUsage(**{name: _complete_usage_count(reports, name) for name in names})
+
+
+def _complete_usage_count(reports: list[TokenUsage], name: str) -> int | None:
+    values = [getattr(report, name) for report in reports]
+    if not values or None in values:
+        return None
+    return sum(values)
+
+
+def _codex_usage_line(line: str | bytes) -> TokenUsage | None:
+    if not line.strip():
+        return None
+    return _codex_usage_event(json.loads(line))
+
+
+def _codex_usage_event(event: object) -> TokenUsage | None:
+    if not isinstance(event, Mapping):
+        raise ValueError("Codex JSONL event must be an object")
+    if event.get("type") != "turn.completed":
+        return None
+    return _codex_usage_counts(event.get("usage"))
+
+
+def _codex_usage_counts(value: object) -> TokenUsage:
+    if not isinstance(value, Mapping):
+        return TokenUsage()
+    return _usage_from_counts(
+        input_tokens=value.get("input_tokens"),
+        output_tokens=value.get("output_tokens"),
+        cache_read_tokens=value.get("cached_input_tokens"),
+    )
 
 
 def _codex_prompt(system_prompt: str, prompt: str) -> str:
@@ -1567,11 +1611,11 @@ def _call_codex(
     prompt: str,
     system_prompt: str,
     schema: Mapping[str, object] | None = None,
-) -> str:
-    """Call `codex exec` and return the model's final message."""
+) -> BackendResponse:
+    """Return the final message and reported completed-turn usage."""
     codex_bin = _find_codex_binary()
     if not codex_bin:
-        return ""
+        return BackendResponse("")
     prompt_path = _temp_text_file(_codex_prompt(system_prompt, prompt))
     out_path = _temp_text_file()
     command = _codex_command(

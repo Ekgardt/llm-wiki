@@ -439,6 +439,14 @@ def test_host_tool_call_id_separates_repeated_mutations():
     assert first.event_id != second.event_id
 
 
+def _without_writer_wait(callback):
+    def observe(envelope, *, writer_wait_seconds):
+        assert writer_wait_seconds == 0.0
+        return callback(envelope)
+
+    return observe
+
+
 def test_adapter_observes_same_envelope_once_before_durable_capture(monkeypatch, tmp_path):
     import io
     import sys
@@ -450,7 +458,7 @@ def test_adapter_observes_same_envelope_once_before_durable_capture(monkeypatch,
     monkeypatch.setattr(
         integration_adapter,
         "_observe_project_checkpoint",
-        lambda envelope: calls.append(("observe", envelope)),
+        _without_writer_wait(lambda envelope: calls.append(("observe", envelope))),
     )
     monkeypatch.setattr(
         integration_adapter,
@@ -591,7 +599,7 @@ def test_durable_capture_runs_when_checkpoint_observation_fails(monkeypatch, cap
     monkeypatch.setattr(
         integration_adapter,
         "_observe_project_checkpoint",
-        lambda envelope: (_ for _ in ()).throw(RuntimeError("x" * 2000)),
+        _without_writer_wait(lambda envelope: (_ for _ in ()).throw(RuntimeError("x" * 2000))),
     )
 
     def publish(*_args):
@@ -664,7 +672,7 @@ def test_adapter_observes_before_direct_ingestion(monkeypatch):
     monkeypatch.setattr(
         integration_adapter,
         "_observe_project_checkpoint",
-        lambda observed: calls.append(("observe", observed.event_id)),
+        _without_writer_wait(lambda observed: calls.append(("observe", observed.event_id))),
     )
     monkeypatch.setattr(
         integration_adapter,
@@ -689,7 +697,7 @@ def test_direct_ingestion_continues_when_checkpoint_observation_fails(monkeypatc
     monkeypatch.setattr(
         integration_adapter,
         "_observe_project_checkpoint",
-        lambda observed: (_ for _ in ()).throw(RuntimeError("checkpoint failed")),
+        _without_writer_wait(lambda observed: (_ for _ in ()).throw(RuntimeError("checkpoint failed"))),
     )
     monkeypatch.setattr(
         integration_adapter,
@@ -718,7 +726,7 @@ def test_claude_stop_is_dirty_checkpoint_only_and_never_dispatches_session_end(m
     monkeypatch.setattr(
         integration_adapter,
         "_observe_project_checkpoint",
-        lambda envelope: calls.append(("observe", envelope.event_type)),
+        _without_writer_wait(lambda envelope: calls.append(("observe", envelope.event_type))),
     )
     monkeypatch.setattr(
         integration_adapter,
@@ -1978,7 +1986,7 @@ def test_claude_session_end_uses_one_adapter_occurrence_for_both_side_effects(
     monkeypatch.setattr(
         integration_adapter,
         "_observe_project_checkpoint",
-        observe,
+        _without_writer_wait(observe),
     )
     monkeypatch.setattr(integration_adapter, "_run_delegate", delegate)
     monkeypatch.setattr(

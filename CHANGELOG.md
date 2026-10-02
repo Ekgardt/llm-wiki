@@ -17,6 +17,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Codex model calls retain reported completed-turn token usage beside the final answer, preserving unknown counters, CLI failures and the common DLP boundary.
+
+- Pending capture recovery verifies an existing ready successor when another publisher finishes after discovery, avoiding a false loss while still refusing missing or damaged evidence.
+
 - Compile related links share the existing complete response and page budgets; the earlier-interface import regression runs in its own process to preserve claim class identities across the full suite.
 
 - Search counts follow caller budgets with representable SQLite candidate limits; common symbol names use the existing graph reader contract and preserve omission counts instead of separate numeric refusals.
