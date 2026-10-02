@@ -711,25 +711,34 @@ def test_lint_candidate_location_and_project_claim_page_selection(
     ) == ([], True, ["context.md", "state.md"], 2)
 
 
-def test_claim_rebuild_uses_the_existing_database_open_boundary(tmp_path, monkeypatch):
-    import importlib
+def test_claim_rebuild_uses_the_existing_database_open_boundary(tmp_path):
+    import subprocess
     import sys
-    import types
 
     import claims
-    import reliable_memory
 
-    (tmp_path / "knowledge/notes").mkdir(parents=True)
-    previous_surface = types.ModuleType("reliable_memory")
-    previous_surface.__dict__.update(vars(reliable_memory))
-    del previous_surface.validate_database_directory
-    try:
-        with monkeypatch.context() as scoped:
-            scoped.setitem(sys.modules, "reliable_memory", previous_surface)
-            importlib.reload(claims)
-            index = claims.ClaimIndex(tmp_path, vault=tmp_path)
-            index.rebuild([])
-            assert index.path.is_file()
-            assert not (index.path.parent / "run").exists()
-    finally:
-        importlib.reload(claims)
+    identity = claims.NormalizedClaim
+    script = """
+import sys, types
+from pathlib import Path
+sys.path.insert(0, str(Path.cwd() / 'scripts'))
+import reliable_memory
+previous_surface = types.ModuleType('reliable_memory')
+previous_surface.__dict__.update(vars(reliable_memory))
+del previous_surface.validate_database_directory
+sys.modules['reliable_memory'] = previous_surface
+assert not hasattr(previous_surface, 'validate_database_directory')
+import claims
+root = Path(sys.argv[1])
+(root / 'knowledge/notes').mkdir(parents=True)
+index = claims.ClaimIndex(root, vault=root)
+index.rebuild([])
+assert index.path.is_file()
+assert not (index.path.parent / 'run').exists()
+"""
+    subprocess.run(
+        [sys.executable, '-c', script, str(tmp_path)],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True, capture_output=True, text=True, timeout=LONG_TIMEOUT,
+    )
+    assert claims.NormalizedClaim is identity

@@ -146,10 +146,6 @@ MAX_SOURCE_BYTES = 4 * 1024 * 1024
 MAX_PROVIDER_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_OPERATIONS = 100
 MAX_EVIDENCE_PER_OPERATION = 32
-# Related wikilinks one compile operation may carry; enforced in the model's output schema and on
-# validation, so a runaway plan is refused. Basis unknown: value predates measurement; review when
-# a real page needs more than 64 links.
-MAX_RELATED = 64
 MAX_AFTER_IMAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 # One compile receipt; the largest on the live vault is 16.6 KB (2026-09-27). 1 MiB refuses a
 # corrupted receipt before it is parsed.
@@ -248,7 +244,7 @@ RAW_PLAN_SCHEMA = {
                             "additionalProperties": False
                         }
                     },
-                    "related": {"type": "array", "maxItems": MAX_RELATED, "items": {"type": "string", "maxLength": 200, "pattern": "^\\[\\[[^\\r\\n]+\\]\\]$"}},
+                    "related": {"type": "array", "items": {"type": "string", "maxLength": 200, "pattern": "^\\[\\[[^\\r\\n]+\\]\\]$"}},
                     "claims": {"type": "array", "maxItems": MAX_CLAIMS_PER_OPERATION, "items": CLAIM_CANDIDATE_SCHEMA},
                 },
                 "additionalProperties": False
@@ -2184,7 +2180,7 @@ def _is_single_line(value: str) -> bool:
 
 def _require_semantic_links(operation: Mapping[str, object]) -> None:
     related = operation.get("related", [])
-    if not isinstance(related, list) or len(related) > MAX_RELATED:
+    if not isinstance(related, list):
         raise ValueError("compile operation related links are invalid")
     if any(not _is_wikilink(item) for item in related):
         raise ValueError("compile operation related links are invalid")

@@ -8,6 +8,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Compile related links share the existing complete response and page budgets; the earlier-interface import regression runs in its own process to preserve claim class identities across the full suite.
+
 - Search counts follow caller budgets with representable SQLite candidate limits; common symbol names use the existing graph reader contract and preserve omission counts instead of separate numeric refusals.
 
 - OKF migration derives text and its precondition from one stable source snapshot within the existing Markdown target budget, replacing its separate read ceiling.
