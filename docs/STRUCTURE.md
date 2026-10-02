@@ -430,6 +430,14 @@ Capture, project/Markdown writers, queue workers, compilers, Doctor, nightly, we
 and LSP use `maintenance_owners` in `markdown-transactions-v3.sqlite3` as the
 canonical admission registry. Queue workers project the same token and epoch into
 `queue_ownership` in `queue-v3.sqlite3`; the active database count remains two.
+Normal admission verifies immutable adoption evidence, both active file identities,
+complete schemas, and operational connection settings in read snapshots; it does not
+certify every retained transaction before each event. Mutation paths still verify
+record hashes, leases and fencing epochs. Complete adoption/doctor/candidate/backup
+certification retains whole-file integrity and foreign-key checks and the coordinator's
+operation and cross-table invariants. The admission cache tracks both database files;
+a replacement invalidates the cached verdict. No directory or database is added.
+See `docs/research/2026-10-02-capture-admission-is-not-history-certification.md`.
 Expiry permits takeover only with positive process-death proof; unknown liveness
 blocks.
 Since 2026-09-10 the nightly and weekly passes take the `nightly`/`weekly`

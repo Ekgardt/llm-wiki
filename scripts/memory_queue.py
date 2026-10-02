@@ -8449,11 +8449,13 @@ class _QueueV3CandidateReader:
 
     def _intent_coordinator(self):
         """The coordinator that pairs with this queue: adopted, or the candidate."""
-        from markdown_transaction import MarkdownCoordinator
+        from markdown_transaction import MarkdownCoordinator, active_markdown_coordinator
 
         path = self.coordinator_path
         if path is None:
             path = self.state_root / "run" / "markdown-transactions-v3.candidate.sqlite3"
+        if self.vault is not None and path == self.state_root / "run" / "markdown-transactions-v3.sqlite3":
+            return active_markdown_coordinator(self.vault, self.state_root)
         return MarkdownCoordinator._from_v3_candidate(path, state_root=self.state_root)
 
     @contextmanager
@@ -13412,10 +13414,10 @@ def _v3_queue_for_cli() -> _QueueV3CandidateReader:
 
 
 def active_memory_queue(vault: Path, state_root: Path) -> _QueueV3CandidateReader:
-    """Open the queue side of one completely validated adopted V3 pair.
+    """Open the queue side of an adopted pair with verified files and contracts.
 
-    The validation is the coordinator's: retried while a writer holds the
-    database for a moment, cached once it passed (2026-09-23).
+    Normal admission checks adoption evidence, identities and schema; complete
+    retained-history certification belongs to adoption, backup and doctor.
     """
     from markdown_transaction import _require_adopted_once
 

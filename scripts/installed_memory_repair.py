@@ -337,13 +337,8 @@ def _validate_immutable_artifact(
     return payload
 
 
-def _validate_active_database_reference(
-    record: dict[str, object],
-    *,
-    database_name: str,
-    path: Path,
-    state_root: Path,
-) -> None:
+@contextlib.contextmanager
+def _active_database_snapshot(record: dict[str, object], *, database_name: str, path: Path, state_root: Path) -> Iterator[sqlite3.Connection]:
     _validate_artifact_reference(
         record.get("active"),
         expected_path=path,
@@ -351,32 +346,62 @@ def _validate_active_database_reference(
         mutable=True,
         max_bytes=_MAX_OPERATIONAL_DB_BYTES,
     )
-    contract = _database_contract(database_name)
     with contextlib.closing(
         open_readonly_operational_db(
             path,
             state_root,
             max_bytes=_MAX_OPERATIONAL_DB_BYTES,
             owner_only=True,
-            contract=contract,
+            contract=_database_contract(database_name),
         )
     ) as database:
-        # Every invariant must observe one read transaction; autocommit lets an
-        # exclusive writer interrupt validation between its separate checks.
         database.execute("BEGIN")
-        complete = _database_schema_complete(database_name, database)
-        integrity = database.execute("PRAGMA integrity_check").fetchall()
-        foreign_keys = database.execute("PRAGMA foreign_key_check").fetchall()
-        observed = {
-            "application_id": database.execute("PRAGMA application_id").fetchone()[0],
-            "user_version": database.execute("PRAGMA user_version").fetchone()[0],
-            "journal_mode": database.execute("PRAGMA journal_mode").fetchone()[0],
-            "synchronous": database.execute("PRAGMA synchronous").fetchone()[0],
-            "foreign_keys": database.execute("PRAGMA foreign_keys").fetchone()[0],
-            "trusted_schema": database.execute("PRAGMA trusted_schema").fetchone()[0],
-        }
-    _require_database_health(complete, integrity, foreign_keys)
-    _require_database_metadata(record, observed)
+        if not _database_schema_complete(database_name, database):
+            raise ValueError("active database schema is incomplete")
+        _require_database_metadata(record, _active_database_metadata(database))
+        yield database
+
+
+
+def _active_database_metadata(database: sqlite3.Connection) -> dict[str, object]:
+    return {
+        name: database.execute(f"PRAGMA {name}").fetchone()[0]
+        for name in (
+            "application_id",
+            "user_version",
+            "journal_mode",
+            "synchronous",
+            "foreign_keys",
+            "trusted_schema",
+        )
+    }
+
+
+
+def _require_active_database_openable(record: dict[str, object], *, database_name: str, path: Path, state_root: Path) -> None:
+    """Verify file identity, schema and connection contract without certifying history."""
+    with _active_database_snapshot(
+        record, database_name=database_name, path=path, state_root=state_root
+    ):
+        pass
+
+
+
+def _validate_active_database_reference(record: dict[str, object], *, database_name: str, path: Path, state_root: Path) -> None:
+    """Full certification additionally checks every retained page and foreign key."""
+    with _active_database_snapshot(
+        record, database_name=database_name, path=path, state_root=state_root
+    ) as database:
+        _certify_active_database_contents(database_name, database)
+
+
+def _certify_active_database_contents(database_name: str, database: sqlite3.Connection) -> None:
+    if database_name == "coordinator":
+        markdown_transaction._require_v3_invariants(database)
+        return
+    integrity = database.execute("PRAGMA integrity_check").fetchall()
+    foreign_keys = database.execute("PRAGMA foreign_key_check").fetchall()
+    _require_database_health(True, integrity, foreign_keys)
 
 
 def _database_contract(database_name: str) -> OperationalDatabaseContract:
@@ -436,6 +461,7 @@ def _validate_complete_adoption(
     migration: dict[str, object],
     adoption: dict[str, object],
     operation_artifacts: list[str],
+    active_validator: Callable[..., None] = _validate_active_database_reference,
 ) -> dict[str, object]:
     _require_adoption_artifacts_complete(paths, operation_artifacts)
     _require_adoption_header(adoption, migration)
@@ -445,6 +471,7 @@ def _validate_complete_adoption(
     schemas = _require_adoption_sources(root, adoption)
     for database_name in ("queue", "coordinator"):
         _validate_adopted_database(
+            active_validator=active_validator,
             database_name=database_name,
             source_state=str(adoption["source_state"]),
             operation_id=str(adoption["operation_id"]),
@@ -689,6 +716,7 @@ def _validate_adopted_database(
     state_root: Path,
     migration_record: dict[str, object],
     adoption_record: dict[str, object],
+    active_validator: Callable[..., None] = _validate_active_database_reference,
 ) -> None:
     expected_migration = _expected_migration_record(
         database_name=database_name,
@@ -707,7 +735,9 @@ def _validate_adopted_database(
         migration_record=migration_record,
         adoption_record=adoption_record,
     )
-    _validate_adopted_active(database_name, paths, state_root, adoption_record)
+    _validate_adopted_active(
+        database_name, paths, state_root, adoption_record, active_validator=active_validator
+    )
     _validate_adopted_retired(
         database_name, source_state, paths, state_root, migration_record, adoption_record
     )
@@ -755,11 +785,13 @@ def _validate_adopted_active(
     paths: dict[str, Path],
     state_root: Path,
     adoption_record: dict[str, object],
+    *,
+    active_validator: Callable[..., None] = _validate_active_database_reference,
 ) -> None:
     _legacy, _active, _retired, _legacy_key, active_key, _retired_key = _database_spec(
         database_name
     )
-    _validate_active_database_reference(
+    active_validator(
         adoption_record,
         database_name=database_name,
         path=paths[active_key],
@@ -961,12 +993,23 @@ def _details(outcomes: list[tuple[str, str]], wanted: str) -> tuple[str, ...]:
     return tuple(detail for kind, detail in outcomes if kind == wanted)
 
 
-def require_reliability_v3_adopted(
-    *, root: Path, state_root: Path
-) -> dict[str, object]:
-    """Return the validated complete adoption record or a stable closed error."""
+def require_reliability_v3_adopted(*, root: Path, state_root: Path) -> dict[str, object]:
+    """Certify the complete adopted pair, including all retained database content."""
+    return _require_adoption_record(root, state_root, _validate_active_database_reference)
+
+
+
+def require_reliability_v3_admission(*, root: Path, state_root: Path) -> dict[str, object]:
+    """Admit an actor from verified adoption evidence and both database contracts."""
+    return _require_adoption_record(root, state_root, _require_active_database_openable)
+
+
+
+def _require_adoption_record(root: Path, state_root: Path, active_validator: Callable[..., None]) -> dict[str, object]:
     try:
-        return _load_complete_adoption(root=Path(root), state_root=Path(state_root))
+        return _load_complete_adoption(
+            root=Path(root), state_root=Path(state_root), active_validator=active_validator
+        )
     except ReliabilityV3ValidationError:
         raise
     except Exception as exc:
@@ -975,7 +1018,12 @@ def require_reliability_v3_adopted(
         ) from exc
 
 
-def _load_complete_adoption(*, root: Path, state_root: Path) -> dict[str, object]:
+def _load_complete_adoption(
+    *,
+    root: Path,
+    state_root: Path,
+    active_validator: Callable[..., None] = _validate_active_database_reference,
+) -> dict[str, object]:
     vault = root.resolve(strict=True)
     state = state_root.absolute()
     paths = _paths(state)
@@ -997,6 +1045,7 @@ def _load_complete_adoption(*, root: Path, state_root: Path) -> dict[str, object
         migration=migration,
         adoption=adoption,
         operation_artifacts=operation_artifacts,
+        active_validator=active_validator,
     )
 
 

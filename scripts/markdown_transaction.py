@@ -1715,6 +1715,14 @@ def _v3_operation_violations(database: sqlite3.Connection) -> int:
     ).fetchone()[0]
 
 
+def require_coordinator_v3_openable(path: Path, *, state_root: Path) -> None:
+    """Check the adopted file's place, connection contract and complete schema."""
+    _require_inside_state_root(Path(path), Path(state_root))
+    with contextlib.closing(open_readonly_operational_db(Path(path), Path(state_root), max_bytes=1 << 50, owner_only=True, busy_ms=DEFAULTS.markdown_busy_ms, contract=_COORDINATOR_V3_CONTRACT)) as database:
+        if not _coordinator_v3_schema_complete(database):
+            raise _coordinator_migration_error("coordinator_v3_schema_incomplete", "coordinator v3 schema is incomplete")
+
+
 def validate_coordinator_v3_database(
     path: Path, *, state_root: Path
 ) -> dict[str, object]:
@@ -3699,9 +3707,13 @@ def _adoption_validation_key(vault: Path, state_root: Path) -> tuple[object, ...
         16 * 1024 * 1024,
         label="installed integration adapter",
     )
-    active = os.lstat(run_root / "markdown-transactions-v3.sqlite3")
-    identity = (active.st_mode, active.st_dev, active.st_ino)
-    return (str(vault), str(state_root), *records, sha256_bytes(integration), *identity)
+    identities = tuple(_active_database_identity(run_root / name) for name in ("queue-v3.sqlite3", "markdown-transactions-v3.sqlite3"))
+    return (str(vault), str(state_root), *records, sha256_bytes(integration), *identities)
+
+
+def _active_database_identity(path: Path) -> tuple[int, int, int]:
+    active = os.lstat(path)
+    return active.st_mode, active.st_dev, active.st_ino
 
 
 def _transient_adoption_contention(error: BaseException) -> bool:
@@ -3730,22 +3742,24 @@ def _retire_strays_before_validation(state_root: Path) -> None:
 
 
 def _validate_adoption_with_retry(vault: Path, state_root: Path) -> None:
+    from installed_memory_repair import require_reliability_v3_admission
+
     _retire_strays_before_validation(state_root)
-    require_adopted_through_contention(vault, state_root)
+    _retry_adoption_validation(vault, state_root, require_reliability_v3_admission)
 
 
 def require_adopted_through_contention(vault: Path, state_root: Path) -> None:
-    """The writers' admission verdict: a busy database is waited out, not a refusal.
-
-    Doctor asks the same question and must get the same answer, so it calls this
-    and not the single attempt beneath it.
-    """
+    """Doctor's complete adoption certification, with ordinary contention retried."""
     from installed_memory_repair import require_reliability_v3_adopted
 
+    _retry_adoption_validation(vault, state_root, require_reliability_v3_adopted)
+
+
+def _retry_adoption_validation(vault: Path, state_root: Path, validate) -> None:
     deadline = time.monotonic() + _ADOPTION_VALIDATION_SECONDS
     while True:
         try:
-            require_reliability_v3_adopted(root=vault, state_root=state_root)
+            validate(root=vault, state_root=state_root)
             break
         except Exception as exc:
             if not _transient_adoption_contention(exc) or time.monotonic() >= deadline:
@@ -3769,7 +3783,7 @@ def active_markdown_coordinator(vault: Path, state_root: Path) -> MarkdownCoordi
     state = Path(state_root).absolute()
     _require_adopted_once(resolved_vault, state)
     path = state / "run" / "markdown-transactions-v3.sqlite3"
-    coordinator = MarkdownCoordinator._from_v3_candidate(path, state_root=state)
+    coordinator = MarkdownCoordinator._from_v3_active(path, state_root=state)
     coordinator.vault = resolved_vault
     return coordinator
 
@@ -5144,6 +5158,15 @@ class MarkdownCoordinator:
         cls, path: Path, *, state_root: Path
     ) -> MarkdownCoordinator:
         validate_coordinator_v3_database(path, state_root=state_root)
+        return cls._from_validated_v3_database(path, state_root=state_root)
+
+    @classmethod
+    def _from_v3_active(cls, path: Path, *, state_root: Path) -> MarkdownCoordinator:
+        require_coordinator_v3_openable(path, state_root=state_root)
+        return cls._from_validated_v3_database(path, state_root=state_root)
+
+    @classmethod
+    def _from_validated_v3_database(cls, path: Path, *, state_root: Path) -> MarkdownCoordinator:
         coordinator = cls.__new__(cls)
         coordinator.vault = Path(state_root).resolve()
         coordinator.state_root = Path(state_root)

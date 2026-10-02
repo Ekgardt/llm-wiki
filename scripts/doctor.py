@@ -8632,19 +8632,19 @@ def _candidates_in(directory: Path, names: tuple[str, ...]) -> int:
 
 
 def _adoption_refusal_message(code: str, cause: str, strays: list[str]) -> str:
-    message = f"Every Markdown writer is refused: {cause}."
+    message = f"Complete adoption certification failed: {cause}."
     if strays:
         message += " Stray candidate: " + ", ".join(strays) + "."
     return message + " Repair: `uv run python scripts/doctor.py --repair`."
 
 
 def _adoption_check(root: Path, state_root: Path) -> dict:
-    """Whether the adoption boundary admits writers at all; an error names why.
+    """Certify the adopted pair and name the cause of any diagnostic failure.
 
-    Every capture, checkpoint and compile passes `require_reliability_v3_adopted`
-    first, and for six days on the owner's vault it refused them all while doctor
-    reported only the symptoms. This reads two small records and `lstat`s two
-    paths, so no bound on `run/state.json` can hide it.
+    Writers verify the adoption evidence and both database contracts before
+    admission. Doctor additionally certifies the complete retained database
+    history through `require_adopted_through_contention`; a normal writer open
+    does not substitute for this deeper diagnostic.
     """
     from installed_memory_repair import ReliabilityV3ValidationError
     from markdown_transaction import (

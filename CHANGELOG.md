@@ -6,6 +6,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Separate normal capture admission from complete retained-history certification, preserve full diagnostic checks, and invalidate cached admission when either adopted database file is replaced.
+
+
 - Preserve every verified compile claim within the existing whole-response and page byte budgets instead of dropping claims after an unexplained per-page count of eight.
 
 
