@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Report a deferred compiler's outcome as unknown instead of predicting that the nightly service stops a compiler owned elsewhere.
+
 - Share the durable literal schema with compile draft quotations and binding, preventing refusal of complete source lines solely by a divergent 4000-character cutoff.
 
 - Collect only the daily evidence used by nightly fact keys, honor exclusions at direct traversal roots, and share the step deadline and existing daily-file read contract.

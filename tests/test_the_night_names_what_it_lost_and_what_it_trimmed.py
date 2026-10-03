@@ -1,8 +1,8 @@
 """A deferred compile is counted, the scheduler logs are bounded, and the
 daily archiver actually runs.
 
-Three promises the scheduled passes did not keep: a compile the pass defers is
-stopped with the unit under systemd and the loss was never reported (M-B4); the
+Three promises the scheduled passes did not keep: a compile owned by the
+systemd unit can stop with that unit and the loss was never reported (M-B4); the
 logs a scheduler redirects a pass into are named by nothing and grew for the
 life of the install (I-A15); and "Archives keep 90 hot days" had no scheduler
 behind it at all (M-D4). Research:

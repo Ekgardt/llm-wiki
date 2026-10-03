@@ -811,7 +811,7 @@ def _nightly_steps(run_step, log, _ownership: OwnerLease | None = None) -> int:
         # is unknown, and the steps that read its output wait for the next
         # pass. Counting it as a failure turned a slow healthy night red (#21).
         log("WARNING: compile still running past the wait bound — lint/index/graph deferred to the next pass")
-        log("  a service manager that owns this pass (systemd) stops that compile when the pass exits")
+        log("  compile outcome is unknown; ending this pass does not establish whether its owner stops it")
         _remember_deferred_compile(log)
         return failures
     failures += _report_compile_outcome(log, before, started_before) + _report_deferred_loss(log)
@@ -824,8 +824,9 @@ DEFERRED_COMPILE_KEY = "nightly_deferred_compile"
 def _remember_deferred_compile(log) -> None:
     """Keep the deferred compile's start stamp, so the next pass can miss it.
 
-    Under systemd the unit ends here and the compile ends with it; the loss used
-    to be invisible, because the next pass compares against its own start stamp.
+    A compiler owned by this systemd unit can end with the unit; a compiler
+    already running under another owner need not. Record its start stamp so a
+    later pass can establish the outcome without predicting its lifecycle.
     Research: docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
     """
     started = _last_compile_started()
