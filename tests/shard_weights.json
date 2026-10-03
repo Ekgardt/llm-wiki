@@ -885,6 +885,7 @@
   "test_what_is_not_yet_due_is_not_a_warning.py": 0.29,
   "test_what_nothing_runs_is_removed_or_reachable.py": 0.21,
   "test_what_was_mentioned_together.py": 0.11,
+  "test_whitespace_is_not_a_retrieval_chunk.py": 0.57,
   "test_who_calls_is_node_scoped.py": 2.08,
   "test_whole_graph_aggregates.py": 5.51,
   "test_widened_claim_preserves_its_verified_literal.py": 0.02,

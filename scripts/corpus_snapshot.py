@@ -35,7 +35,7 @@ COLLECTOR_VERSION = "corpus-collector/v1"
 # 2026-09-16 rule — a user turn begins its own chunk — which had shipped under v3.
 # `tests/test_a_chunker_that_changes_changes_its_version.py` holds the pin. See
 # `docs/research/2026-09-17-a-chunker-that-changes-changes-its-version.md`.
-EXTRACTOR_VERSION = "markdown-heading-extractor/v4"
+EXTRACTOR_VERSION = "markdown-heading-extractor/v5"
 
 MAX_CORPUS_FILE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 # Directories one corpus collection walks; the live knowledge tree has 76 (2026-09-27). A vault-
@@ -2204,7 +2204,12 @@ def _bounded_spans(content: bytes, spans: list) -> list:
         bounded.extend(_split_span(content, span))
     if len(bounded) > MAX_CORPUS_CHUNKS:
         raise ValueError("corpus chunk row ceiling exceeded")
-    return bounded
+    # A boundary may leave only whitespace; that is source content, not evidence.
+    # Match the reader's Unicode text invariant without changing retained bytes.
+    return [
+        span for span in bounded
+        if content[span[0]:span[1]].decode("utf-8", errors="strict").strip()
+    ]
 
 
 def _retrieval_spans(
