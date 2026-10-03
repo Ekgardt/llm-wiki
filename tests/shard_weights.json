@@ -881,6 +881,7 @@
   "test_unresolved_receivers_and_named_communities.py": 3.59,
   "test_vault_leak_guard.py": 0.06,
   "test_vector_freshness_parity.py": 0.55,
+  "test_vector_reuse_keeps_the_exact_input_across_extractors.py": 0.63,
   "test_verified_claims_share_the_compile_budget.py": 0.32,
   "test_warmup_records_a_warm_stage_cost.py": 0.01,
   "test_what_an_update_created_its_rollback_takes_back.py": 1.51,

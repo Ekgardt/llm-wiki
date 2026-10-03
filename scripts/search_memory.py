@@ -843,7 +843,8 @@ def _loaded_parent_matrix(reuse_from: Path, rows: int, dimensions: int):
 
 
 def _reusable_vector_rows(
-    reuse_from: Path | None, model_id: str, model_revision: str, dimensions: int
+    reuse_from: Path | None, model_id: str, model_revision: str, dimensions: int,
+    *, snapshot: CorpusSnapshot | None = None,
 ) -> dict[str, object]:
     """The parent generation's vectors, keyed by chunk digest.
 
@@ -862,7 +863,59 @@ def _reusable_vector_rows(
         metadata, model_id, model_revision, dimensions
     ):
         return {}
-    return _rows_by_chunk_id(reuse_from, metadata, dimensions)
+    rows = _rows_by_chunk_id(reuse_from, metadata, dimensions)
+    return _snapshot_vector_rows(rows, metadata, snapshot)
+
+
+def _chunk_id_at_extractor(chunk, extractor_version: str) -> str:
+    from corpus_snapshot import canonical_chunk_id
+
+    return canonical_chunk_id(
+        source_id=chunk.source_id, source_path=chunk.source_path,
+        byte_start=chunk.byte_start, byte_end=chunk.byte_end,
+        span_sha256=chunk.span_sha256, extractor_version=extractor_version,
+    )
+
+
+def _chunk_reuse_identity_holds(chunk, extractor_version: str) -> bool:
+    try:
+        text_digest = hashlib.sha256(chunk.text.encode("utf-8", errors="strict")).hexdigest()
+    except UnicodeError:
+        return False
+    return chunk.span_sha256 == text_digest and chunk.id == _chunk_id_at_extractor(chunk, extractor_version)
+
+
+def _parent_cache_extractor(metadata: Mapping[str, object], current: str) -> str:
+    """Unknown parent extraction identity permits only existing exact-ID reuse."""
+    value = metadata.get("extractor_version")
+    if not isinstance(value, str) or not value:
+        return current
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeError:
+        return current
+    return value
+
+
+def _cached_chunk_row(chunk, current: str, previous: str, rows: Mapping[str, object]):
+    if not _chunk_reuse_identity_holds(chunk, current):
+        return None
+    if chunk.id in rows:
+        return rows[chunk.id]
+    return rows.get(_chunk_id_at_extractor(chunk, previous))
+
+
+def _snapshot_vector_rows(
+    rows: dict[str, object], metadata: Mapping[str, object], snapshot: CorpusSnapshot | None
+) -> dict[str, object]:
+    if snapshot is None:
+        return rows
+    current = snapshot.extractor_version
+    previous = _parent_cache_extractor(metadata, current)
+    return {
+        chunk.id: row for chunk in snapshot.chunks
+        if (row := _cached_chunk_row(chunk, current, previous, rows)) is not None
+    }
 
 
 def _rows_by_chunk_id(
@@ -926,7 +979,7 @@ def _built_generation_vectors(
     directory = _generation_directory(generation_directory)
     destinations = [directory / name for name in GENERATION_VECTOR_ARTIFACTS]
     _require_absent_artifacts(destinations)
-    cache = _reusable_vector_rows(reuse_from, model_id, model_revision, dimensions)
+    cache = _reusable_vector_rows(reuse_from, model_id, model_revision, dimensions, snapshot=snapshot)
     matrix, reused = _reused_matrix(snapshot, embedder, dimensions, cache, check_stop)
     _publish_vector_artifacts(
         directory,

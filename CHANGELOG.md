@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Reuse sealed model vectors across extractor namespaces only when exact source, span and model identity remains verified.
+
 - Resolve historical citations with shared source boundaries and exact current-part hashes, removing the unsupported candidate cutoff while retaining source integrity checks.
 
 - Reuse immutable UTF-8 compile measurements instead of repeatedly serializing the schema and scanning unrelated daily parts; retain exact source selection and full model token counting.
