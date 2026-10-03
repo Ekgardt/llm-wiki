@@ -1291,6 +1291,7 @@ def _process_session_capture(
     now: Callable[[], datetime] = _capture_now,
 ) -> object:
     record = _read_capture_intent(queue, lease, active)
+    _project_session_marker(record, coordinator, owner)
     _keep_session_record(record, now, coordinator, owner)
     _ensure_capture_results_directory(queue)
     resolved = _existing_capture_decision(
@@ -1327,6 +1328,40 @@ def _process_session_capture(
         decision,
         decision_record,
     )
+
+
+def _project_session_marker(record, coordinator, owner) -> None:
+    from daily_log_append import contained_block
+    from session_end_project_tag import session_marker_plan
+
+    plan = session_marker_plan(record, coordinator.vault)
+    if plan is None:
+        return
+    path, entry, operation_id = plan
+    _ensure_session_marker_header(coordinator, owner, path)
+    _append_session_marker_block(
+        coordinator, owner, operation_id, path,
+        contained_block(redact_secrets(entry)).encode("utf-8"),
+    )
+
+
+def _ensure_session_marker_header(coordinator, owner, path) -> None:
+    from markdown_transaction import stable_operation_id
+
+    if path.exists():
+        return
+    header = f"# Daily Session Memory — {path.stem}\n".encode()
+    _append_session_marker_block(
+        coordinator, owner, stable_operation_id("daily-header", path.name, header), path, header
+    )
+
+
+def _append_session_marker_block(coordinator, owner, operation_id, path, block) -> None:
+    from markdown_transaction import append_owned_knowledge
+
+    transaction = append_owned_knowledge(coordinator, owner, operation_id, path, block)
+    if transaction.state != "committed":
+        raise RuntimeError("session marker transaction did not commit")
 
 
 def process_capture_lease(

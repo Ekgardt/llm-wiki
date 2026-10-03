@@ -3003,7 +3003,7 @@ def _fitting_capture_record(
     for _ in range(CAPTURE_FIT_ATTEMPTS):
         text = _capture_evidence_text(envelope, payload, limit)
         if text is None:
-            return None
+            return _marker_only_capture_record(envelope, payload, slug, trigger)
         record, encoded = _encoded_capture_record(
             _capture_source_record(envelope, slug, trigger, text)
         )
@@ -3011,6 +3011,33 @@ def _fitting_capture_record(
             return record, encoded
         limit = _smaller_evidence_limit(limit, len(encoded))
     raise ValueError("capture intent exceeds its byte limit")
+
+
+def _lifecycle_metadata_text(envelope: EventEnvelope) -> str:
+    metadata = {"event": envelope.event_type, "session": envelope.session,
+                "source_occurrence_id": envelope.event_id,
+                "occurred_at": _capture_occurred_at(envelope),
+                "transcript": "No transcript was supplied or available."}
+    return json.dumps(metadata, sort_keys=True, ensure_ascii=False)
+
+
+def _marker_only_capture_record(envelope, payload, slug, trigger):
+    from session_end_project_tag import session_marker_plan
+
+    if envelope.event_type != "session_end" or payload.get("force_session_marker") is not True:
+        return None
+    source = _capture_source_record(envelope, slug, trigger, _lifecycle_metadata_text(envelope))
+    return _encoded_marker_only_source(source, session_marker_plan(source, ROOT))
+
+
+def _encoded_marker_only_source(source: dict, plan: object):
+    if plan is None:
+        return None
+    source["evidence"][0]["role"] = "lifecycle"
+    record, encoded = _encoded_capture_record(source)
+    if len(encoded) > MAX_CAPTURE_INTENT_BYTES:
+        raise ValueError("lifecycle metadata exceeds the capture intent byte limit")
+    return record, encoded
 
 
 def _capture_relative_paths(intent_id: str) -> tuple[str, str]:
@@ -3462,11 +3489,12 @@ def _capture_session_end_without_transcript(
     project_dir: Path | None,
     result: dict[str, Any],
     force_stub: bool,
+    intent_id: str | None = None,
 ) -> bool:
-    """Nothing to read: stub the tag, or leave a heartbeat, and wake nobody."""
+    """Replay a retained forced marker, otherwise leave only a heartbeat."""
     if force_stub:
         _tag_session_end(payload, project_dir, result)
-        return False
+        return _wake_capture_worker(result, intent_id)
     if slug and project_dir:
         result["heartbeat_recorded"] = _record_activity(envelope, slug, project_dir)
     return False
@@ -3508,7 +3536,7 @@ def _capture_session_end(
         _tag_session_end(payload, project_dir, result)
         return _wake_capture_worker(result, intent_id)
     return _capture_session_end_without_transcript(
-        envelope, payload, slug, project_dir, result, force_stub
+        envelope, payload, slug, project_dir, result, force_stub, intent_id
     )
 
 
@@ -3523,6 +3551,10 @@ def _ingest_session_end(
 ) -> None:
     transient_path = _materialize_event_transcript(envelope, payload, result)
     payload["trigger"] = _session_end_trigger(trigger, payload)
+    payload["force_session_marker"] = force_stub
+    payload["capture_marker"] = _capture_source_record(
+        envelope, slug, _string(payload.get("trigger")), _lifecycle_metadata_text(envelope)
+    )
     intent_id = None
     try:
         intent_id = _publish_durable_capture_intent(
@@ -3772,11 +3804,20 @@ def _dispatch_cli_event(
 ) -> dict[str, object] | None:
     if envelope is None:
         return None
-    if args.delegate and args.delegate != INGESTED_DELEGATES.get(envelope.event_type):
+    if args.delegate and not _is_capture_delegate(args.delegate, envelope.event_type):
         _run_own_delegate(args, envelope)
         return None
-    result = ingest_event(envelope, background=args.background)
+    result = ingest_event(
+        envelope, background=args.background,
+        force_stub=args.delegate == "session_end_project_tag.py",
+    )
     return _legacy_output(args.source, envelope.event_type, result)
+
+
+def _is_capture_delegate(delegate: str, event_type: str) -> bool:
+    return delegate == INGESTED_DELEGATES.get(event_type) or (
+        event_type == "session_end" and delegate == "session_end_project_tag.py"
+    )
 
 
 # Set by `memory_state.spawn_detached` and by every provider call

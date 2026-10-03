@@ -4738,10 +4738,40 @@ def append_knowledge(
     cancelled: Callable[[], bool] | None = None,
 ) -> TransactionRecord:
     """CAS-append Markdown or project JSONL bytes, retrying concurrent winners."""
+    return _append_knowledge_with_coordinator(
+        _default_coordinator(), operation_id, path, block,
+        deadline=deadline, cancelled=cancelled,
+    )
+
+
+def append_owned_knowledge(
+    coordinator: MarkdownCoordinator,
+    owner: object,
+    operation_id: str,
+    path: Path,
+    block: bytes,
+    *,
+    deadline: float = float("inf"),
+) -> TransactionRecord:
+    """Use the canonical CAS append inside a lifecycle worker's existing gate."""
+    with coordinator.writer_gate(owner=owner):
+        return _append_knowledge_with_coordinator(
+            coordinator, operation_id, path, block, deadline=deadline, cancelled=None
+        )
+
+
+def _append_knowledge_with_coordinator(
+    coordinator: MarkdownCoordinator,
+    operation_id: str | Path | None,
+    path: Path | bytes | None,
+    block: bytes | None,
+    *,
+    deadline: float,
+    cancelled: Callable[[], bool] | None,
+) -> TransactionRecord:
     operation_id, append_path, block = _normalize_append_request(
         operation_id, path, block
     )
-    coordinator = _default_coordinator()
     relative = _relative_target(coordinator, append_path)
     _recover_initial_contention(
         coordinator, deadline=deadline, cancelled=cancelled

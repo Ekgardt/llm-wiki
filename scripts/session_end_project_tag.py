@@ -38,6 +38,7 @@ import os
 import re
 import sys
 import traceback
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 
@@ -278,6 +279,54 @@ def _session_operation_id(payload: dict) -> str | None:
     return f"session-end:{source_event_id}"
 
 
+def _marker_time(record: Mapping) -> datetime:
+    raw = record.get("occurred_at")
+    if not isinstance(raw, str):
+        raise ValueError("session marker has no retained occurrence time")
+    moment = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if moment.tzinfo is None or moment.utcoffset() is None:
+        raise ValueError("session marker occurrence time must include its timezone")
+    return moment
+
+
+def session_marker_plan(record: Mapping, vault: Path) -> tuple[Path, str, str] | None:
+    """One immutable marker for both the foreground and retained-intent worker."""
+    if record.get("event") != "session_end":
+        return None
+    worktree, slug = record.get("worktree"), record.get("project_slug")
+    if not isinstance(worktree, str) or not isinstance(slug, str) or not slug:
+        return None
+    return _external_marker_plan(record, vault, _owning_checkout(Path(worktree).resolve()), slug)
+
+
+def _external_marker_plan(record: Mapping, vault: Path, project: Path, slug: str):
+    if _is_inside_vault(project, vault) or _is_user_home(project):
+        return None
+    moment = _marker_time(record)
+    payload = {"session_id": record.get("session"), "reason": record.get("trigger"),
+               "agent": record.get("host")}
+    path = vault / "knowledge/daily" / f"{moment.strftime('%Y-%m-%d')}.md"
+    operation_id = f"session-end:{record['source_occurrence_id']}"
+    return path, _session_entry(payload, slug, project, moment), operation_id
+
+
+def _tag_retained_marker(record: object, vault: Path, project: Path) -> bool:
+    if not isinstance(record, Mapping):
+        raise ValueError("retained session marker must be an object")
+    if _owning_checkout(Path(str(record.get("worktree"))).resolve()) != project:
+        raise ValueError("retained session marker does not match the current project")
+    plan = session_marker_plan(record, vault)
+    return _append_marker_plan(plan)
+
+
+def _append_marker_plan(plan: tuple[Path, str, str] | None) -> bool:
+    if plan is None:
+        return False
+    path, entry, operation_id = plan
+    _append_entry(path, entry, operation_id)
+    return True
+
+
 def _tag_session() -> bool:
     """True when an entry was appended; False for every skip."""
     paths = _vault_paths()
@@ -287,7 +336,12 @@ def _tag_session() -> bool:
     project_dir = _eligible_project(vault)
     if project_dir is None:
         return False
-    payload = _read_payload()
+    return _tag_project_payload(_read_payload(), vault, daily_dir, project_dir)
+
+
+def _tag_project_payload(payload: dict, vault: Path, daily_dir: Path, project_dir: Path) -> bool:
+    if "capture_marker" in payload:
+        return _tag_retained_marker(payload["capture_marker"], vault, project_dir)
     now = local_now()
     slug = _compute_slug(project_dir, vault / "knowledge" / "projects")
     today_file = daily_dir / f"{now.strftime('%Y-%m-%d')}.md"
