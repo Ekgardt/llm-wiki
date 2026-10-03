@@ -558,6 +558,7 @@
   "test_grounded_qa.py": 0.67,
   "test_grounded_qa_errors.py": 0.01,
   "test_guardrails.py": 3.29,
+  "test_historical_slices_share_their_boundaries.py": 0.51,
   "test_hook_error_redaction.py": 0.14,
   "test_hook_failures_reach_health.py": 0.11,
   "test_impact_analysis.py": 13.83,

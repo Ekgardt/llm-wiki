@@ -6,9 +6,11 @@ import json
 import os
 import re
 import stat
+from bisect import bisect_right
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
+from itertools import islice
 from pathlib import Path
 
 from bounded_io import read_stable_bytes
@@ -1027,9 +1029,6 @@ _DAILY_ENTRY_MARKER = b"<!-- llm-wiki-operation:"
 # `docs/research/2026-09-12-a-daily-grows-by-two-kinds-of-entry.md`.
 _DAILY_BLOCK_MARKER = b"\n## "
 
-# A day is bounded, but the scan for a historical slice must be bounded too.
-MAX_EVIDENCE_SLICE_CANDIDATES = 4096
-
 
 def _daily_entry_offsets(content: bytes) -> list[int]:
     """Where each entry starts, the first one covering whatever precedes it."""
@@ -1142,9 +1141,8 @@ def _slice_offsets(content: bytes) -> list[int]:
 def _slice_boundaries(content: bytes, start: int) -> list[int]:
     """Where a historical slice beginning at `start` could have ended.
 
-    The end of the file is always a candidate, even when a day carries more
-    entries than the scan is allowed to try: the whole tail is the one slice a
-    compile part is most likely to have been.
+    Every source-aligned end is included. The source's existing byte bound
+    limits discovery; an arbitrary candidate prefix must not hide old evidence.
 
     Sorted and deduplicated because `_slice_from` hashes forward from one
     candidate to the next and needs them ascending.
@@ -1153,13 +1151,13 @@ def _slice_boundaries(content: bytes, start: int) -> list[int]:
     for offset in _slice_offsets(content):
         if offset > start:
             ends.update(end for end in _entry_ends(content, offset) if end > start)
-    return [*sorted(ends)[: MAX_EVIDENCE_SLICE_CANDIDATES - 1], len(content)]
+    return sorted(ends | {len(content)})
 
 
-def _slice_from(content: bytes, start: int, digest: str) -> bytes | None:
+def _slice_from(content: bytes, start: int, digest: str, boundaries: list[int]) -> bytes | None:
     running = hashlib.sha256()
     cursor = start
-    for boundary in _slice_boundaries(content, start):
+    for boundary in islice(boundaries, bisect_right(boundaries, start), None):
         running.update(content[cursor:boundary])
         cursor = boundary
         if running.hexdigest() == digest:
@@ -1176,16 +1174,30 @@ def compile_part_slice(content: bytes, digest: str) -> bytes | None:
     longer part now. Both are one question: is there an entry-aligned slice,
     starting where a part starts, whose bytes still hash to what the page
     recorded? Nothing weaker is accepted — the historical bytes must still be
-    present verbatim and in place, which is the append-only argument a
-    transparency log makes with a consistency proof (RFC 6962).
+    present verbatim and hash to the recorded SHA-256. A quote alone never
+    substitutes for this source proof.
     """
-    return _slice_at(content, [start for start, _end in _daily_part_bounds(content)], digest)
+    bounds = _daily_part_bounds(content)
+    current = _current_part_match(content, bounds, digest)
+    if current is not None:
+        return current
+    return _slice_at(content, [start for start, _end in bounds], digest)
+
+
+def _current_part_match(content: bytes, bounds: list[tuple[int, int]], digest: str) -> bytes | None:
+    """Try exact current parts first; historical matches still need the full scan."""
+    for start, end in bounds:
+        part = content[start:end]
+        if sha256_bytes(part) == digest:
+            return part
+    return None
 
 
 def _slice_at(content: bytes, starts: list[int], digest: str) -> bytes | None:
     """The first entry-aligned slice, from one of these part starts, whose bytes hash to `digest`."""
+    boundaries = _slice_boundaries(content, 0)
     for start in starts:
-        found = _slice_from(content, start, digest)
+        found = _slice_from(content, start, digest, boundaries)
         if found is not None:
             return found
     return None
