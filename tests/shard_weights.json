@@ -41,6 +41,7 @@
   "test_a_code_root_named_knowledge_is_code.py": 1.5,
   "test_a_codex_session_is_read_as_a_conversation.py": 0.0,
   "test_a_codex_turn_is_not_a_session.py": 42.64,
+  "test_a_committed_source_resolves_an_older_compile_plan.py": 3.92,
   "test_a_compile_asked_through_mcp_takes_the_compile_lock.py": 1.13,
   "test_a_context_answer_fits_the_budget_it_was_given.py": 0.69,
   "test_a_context_answer_says_when_its_corpus_was_read.py": 0.02,

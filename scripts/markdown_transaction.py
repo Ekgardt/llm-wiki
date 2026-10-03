@@ -2396,12 +2396,31 @@ def _compressed_image(content: bytes) -> bytes:
 
 def _image_bytes(path: Path) -> bytes:
     """One staged image as the bytes it stands for, compressed or not."""
+    return _decoded_image_bytes(path.read_bytes())
+
+
+def _decoded_image_bytes(raw: bytes, *, max_bytes: int | None = None) -> bytes:
+    """Decode the shared image format; optional budget bounds decoded evidence."""
+    if not raw.startswith(_LZMA_MAGIC):
+        return _image_within_budget(raw, max_bytes)
+    return _decompressed_image_bytes(raw, max_bytes)
+
+
+def _decompressed_image_bytes(raw: bytes, max_bytes: int | None) -> bytes:
+    import io
     import lzma
 
-    raw = path.read_bytes()
-    if not raw.startswith(_LZMA_MAGIC):
-        return raw
-    return lzma.decompress(raw)
+    if max_bytes is None:
+        return lzma.decompress(raw)
+    with lzma.LZMAFile(io.BytesIO(raw)) as stream:
+        decoded = stream.read(max_bytes + 1)
+    return _image_within_budget(decoded, max_bytes)
+
+
+def _image_within_budget(raw: bytes, max_bytes: int | None) -> bytes:
+    if max_bytes is not None and len(raw) > max_bytes:
+        raise ValueError("decoded transaction image exceeds evidence budget")
+    return raw
 
 
 class _ArtifactRoots(NamedTuple):

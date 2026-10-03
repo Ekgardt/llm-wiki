@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import importlib.util
 import json
+import lzma
 import math
 import os
 import re
@@ -1429,6 +1430,117 @@ def _part_receipt_path(logical_path: str, part: bytes) -> str:
     return f"{_COMPILE_RECEIPT_PREFIX}{identity}.md"
 
 
+class _ReceiptOperation(NamedTuple):
+    path: str
+    kind: str
+    after_hash: str
+
+
+def _snapshot_receipt_fields(raw: bytes, path: str) -> tuple[str, str]:
+    from compile_memory import _receipt_source_fields, parse_compile_receipt_v3
+
+    fields = _receipt_source_fields(raw)
+    if fields is None:
+        raise ValueError("staged receipt lacks source identity")
+    record = parse_compile_receipt_v3(raw, logical_path=fields[0], source_sha256=fields[1])
+    if path != f"{_COMPILE_RECEIPT_PREFIX}{record['source_identity']}.md":
+        raise ValueError("staged receipt path disagrees with source identity")
+    return fields
+
+
+def _committed_snapshot_receipt(database, path: str, raw: bytes, fields) -> bool:
+    from compile_memory import _require_operation_integrity, parse_compile_receipt_v3
+
+    record = parse_compile_receipt_v3(raw, logical_path=fields[0], source_sha256=fields[1])
+    row = database.execute(
+        'SELECT t.id FROM "transaction" t JOIN operation o ON o.transaction_id=t.id '
+        "WHERE t.state='committed' AND o.path=? AND o.after_hash=? "
+        "AND (t.operation_id=? OR t.operation_id LIKE ?) ORDER BY t.created_at DESC LIMIT 1",
+        (path, hashlib.sha256(raw).hexdigest(), record["operation_id"], record["operation_id"] + "#%"),
+    ).fetchone()
+    if row is None:
+        return False
+    operations = {
+        item[0]: _ReceiptOperation(*item)
+        for item in database.execute(
+            "SELECT path,kind,after_hash FROM operation WHERE transaction_id=?", (row[0],)
+        )
+    }
+    _require_operation_integrity(record, operations)
+    return True
+
+
+def _staged_snapshot_receipt(directory: Path, operation: dict, state_root: Path) -> bytes:
+    from markdown_transaction import _decoded_image_bytes
+
+    after = operation["after"]
+    artifact = after["artifact"]
+    if _STAGED_ARTIFACT_RE.fullmatch(artifact) is None:
+        raise ValueError("staged receipt path is not a plain after artifact")
+    encoded = read_runtime_bytes(directory / artifact, state_root, max_bytes=_MAX_STAGED_RECEIPT_BYTES)
+    raw = _decoded_image_bytes(encoded, max_bytes=_MAX_STAGED_RECEIPT_BYTES)
+    if hashlib.sha256(raw).hexdigest() != after["sha256"]:
+        raise ValueError("staged receipt image hash differs")
+    return raw
+
+
+def _snapshot_receipt_written(database, vault_root, state_root, directory, operation, digest) -> bool:
+    path = operation["path"]
+    if operation["after"]["sha256"] != digest:
+        raise ValueError("staged receipt hash disagrees with transaction")
+    staged = _staged_snapshot_receipt(directory, operation, state_root)
+    fields = _snapshot_receipt_fields(staged, path)
+    raw = read_stable_bytes(vault_root / path, _MAX_STAGED_RECEIPT_BYTES, label="compile receipt")
+    return _committed_snapshot_receipt(database, path, raw, fields)
+
+
+def _intended_compile_receipts(database, identifier) -> dict[str, str]:
+    return {
+        item[0]: item[1] for item in database.execute(
+            "SELECT path,after_hash FROM operation WHERE transaction_id=? AND kind='create'",
+            (identifier,),
+        ) if item[0].startswith(_COMPILE_RECEIPT_PREFIX)
+    }
+
+
+def _compile_snapshot_outcome(database, identifier, vault_root, state_root) -> bool:
+    row = database.execute('SELECT operation_id FROM "transaction" WHERE id=?', (identifier,)).fetchone()
+    if row is None or not row[0].startswith("compile:"):
+        return False
+    receipts = _intended_compile_receipts(database, identifier)
+    if not receipts:
+        return False
+    return _compile_snapshot_receipts_written(database, identifier, vault_root, state_root, receipts)
+
+
+def _staged_receipt_operations(plan, receipts) -> dict:
+    staged = {item["path"]: item for item in plan["operations"] if item["path"] in receipts}
+    if set(staged) != set(receipts):
+        raise ValueError("refused compile does not stage every bound receipt")
+    return staged
+
+
+def _compile_snapshot_receipts_written(database, identifier, vault_root, state_root, receipts) -> bool:
+    directory = state_root / "run" / "transactions" / identifier
+    plan = json.loads(read_runtime_bytes(directory / "plan.json", state_root, max_bytes=_MAX_STAGED_PLAN_BYTES))
+    if plan["transaction_id"] != identifier:
+        raise ValueError("staged plan transaction identity differs")
+    staged = _staged_receipt_operations(plan, receipts)
+    return all(
+        _snapshot_receipt_written(database, vault_root, state_root, directory, staged[path], digest)
+        for path, digest in receipts.items()
+    )
+
+
+def _compile_snapshot_was_written(database, identifier, vault_root, state_root) -> bool:
+    if vault_root is None:
+        return False
+    try:
+        return _compile_snapshot_outcome(database, identifier, vault_root, state_root)
+    except (OSError, ValueError, KeyError, TypeError, lzma.LZMAError):
+        return False
+
+
 class _CompiledDaySupersession:
     """The fourth proof: a refused compile of days that are compiled now.
 
@@ -1445,12 +1557,14 @@ class _CompiledDaySupersession:
         self.state_root = state_root
 
     def resolves(self, database: sqlite3.Connection, identifier: str, committed_creates: set[str]) -> bool:
+        if _compile_snapshot_was_written(database, identifier, self.vault_root, self.state_root):
+            return True
         intended = _intended_creates(database, identifier)
         if self.vault_root is None or not _only_compile_receipts(intended):
             return False
         try:
             return self._staged_days_compiled(identifier, intended, committed_creates)
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, lzma.LZMAError):
             return False
 
     def _staged_days_compiled(self, identifier: str, intended: set[str], committed_creates: set[str]) -> bool:
@@ -1474,7 +1588,10 @@ class _CompiledDaySupersession:
     def _staged_day(self, directory: Path, artifact: str) -> str:
         if _STAGED_ARTIFACT_RE.fullmatch(artifact) is None:
             raise ValueError("staged artifact path is not a plain after/ artifact")
-        raw = read_runtime_bytes(directory / artifact, self.state_root, max_bytes=_MAX_STAGED_RECEIPT_BYTES)
+        from markdown_transaction import _decoded_image_bytes
+
+        encoded = read_runtime_bytes(directory / artifact, self.state_root, max_bytes=_MAX_STAGED_RECEIPT_BYTES)
+        raw = _decoded_image_bytes(encoded, max_bytes=_MAX_STAGED_RECEIPT_BYTES)
         day = _staged_receipt_day(raw)
         if day is None:
             raise ValueError("staged artifact is not a compile receipt for a day")

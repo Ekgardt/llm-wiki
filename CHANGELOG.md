@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Recognize an exact source compiled by a later authoritative receipt even when its accepted page names differ from a retained refused proposal.
+
 - Reuse sealed model vectors across extractor namespaces only when exact source, span and model identity remains verified.
 
 - Resolve historical citations with shared source boundaries and exact current-part hashes, removing the unsupported candidate cutoff while retaining source integrity checks.
