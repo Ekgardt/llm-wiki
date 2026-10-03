@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Share the durable literal schema with compile draft quotations and binding, preventing refusal of complete source lines solely by a divergent 4000-character cutoff.
+
 - Collect only the daily evidence used by nightly fact keys, honor exclusions at direct traversal roots, and share the step deadline and existing daily-file read contract.
 
 - Stop repeated claim assessment of an immutable compile target snapshot that has already changed; preserve the source for resolution against fresh context and retain transactional conflict checks.

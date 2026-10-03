@@ -233,7 +233,7 @@ RAW_PLAN_SCHEMA = {
                             "properties": {
                                 "daily_date": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
                                 "timestamp": {"type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]$"},
-                                "quoted_text": {"type": "string", "minLength": 1, "maxLength": 4000},
+                                "quoted_text": dict(CLAIM_RECORD_SCHEMA["properties"]["evidence"]["properties"]["text"]),
                                 "claim": {"type": "string", "minLength": 1, "maxLength": 1000, "pattern": "^[^\\r\\n]+$"}
                             },
                             "additionalProperties": False
@@ -2530,7 +2530,7 @@ def _evidence_fields_valid(
     return (
         _evidence_matches(date, r"\d{4}-\d{2}-\d{2}")
         and _evidence_matches(timestamp, r"(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d")
-        and _evidence_bounded_text(quote, 4_000)
+        and _evidence_bounded_text(quote, CLAIM_RECORD_SCHEMA["properties"]["evidence"]["properties"]["text"]["maxLength"])
         and _evidence_single_line(claim, 1_000)
     )
 

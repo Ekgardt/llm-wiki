@@ -2484,3 +2484,38 @@ def test_stale_target_snapshot_does_not_repeat_claim_assessment(
     assert result.state == "committed"
     assert len(calls) == int(during_apply) + 1
     assert (root / "knowledge/notes/exact-byte-pattern.md").is_file()
+
+
+@pytest.mark.parametrize("size", (4001, 12000))
+def test_complete_source_line_within_claim_contract_survives_draft_validation(vault, size):
+    import compile_memory
+
+    root, _ = vault
+    daily = root / "knowledge/daily/2026-07-14.md"
+    line = "An exact observation: " + "x" * size
+    daily.write_text("## [10:00:00] session-end | manual\n" + line + "\n")
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    operation = json.loads(_semantic_plan()["operations"][0]["content"])
+    operation["evidence"][0]["quoted_text"] = line
+
+    drafted = compile_memory._draft_operations(json.dumps({"operations": [operation]}))
+    normalized = compile_memory._with_derived_claims(drafted, inputs)
+    binding = compile_memory._evidence_binding(normalized[0]["evidence"][0], inputs)
+    assert binding["quote_sha256"] == sha256_bytes(line.encode())
+    assert normalized[0]["evidence"][0]["quoted_text"] == line
+    plan = compile_memory._normalize_plan(normalized, inputs)
+    compile_memory.apply_compile_plan(
+        inputs, plan, action_key="d" * 64, trigger="manual",
+        coordinator=MarkdownCoordinator(root, vault[1]),
+        completed_at="2026-08-16T12:00:00Z",
+    )
+    page = (root / "knowledge/notes/exact-byte-pattern.md").read_text()
+    assert _resolved_evidence_texts(root, page) == [line]
+
+
+def test_complete_quote_schema_reuses_the_durable_literal_contract():
+    import compile_memory
+
+    evidence = compile_memory.RAW_PLAN_SCHEMA["properties"]["operations"]["items"]["properties"]["evidence"]["items"]["properties"]
+    literal = compile_memory.CLAIM_RECORD_SCHEMA["properties"]["evidence"]["properties"]["text"]
+    assert evidence["quoted_text"] == literal
