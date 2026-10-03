@@ -801,6 +801,9 @@ def _batch_measure(
 ) -> Callable[..., int]:
     """Count the draft-prompt tokens one candidate grouping would cost."""
 
+    if model is None:
+        return _ByteBatchMeasure(inputs)
+
     def measured(paths: set[str], optional_paths: set[str] | None = None) -> int:
         subset = _subset_compile_inputs(inputs, paths, optional_paths)
         count = count_tokens(
@@ -813,6 +816,39 @@ def _batch_measure(
         return count.tokens
 
     return measured
+
+
+def _selected_buckets(buckets, keys) -> tuple:
+    return tuple(item for key in keys for item in buckets.get(key, ()))
+
+
+class _ByteBatchMeasure:
+    """Exact existing UTF-8 estimate; real model tokenizers remain non-additive."""
+
+    def __init__(self, inputs: CompileInputs) -> None:
+        empty = CompileInputs((), (), ())
+        self.base = len(_draft_prompt_text(empty).encode("utf-8"))
+        self.dailies: dict[str, list[DailySnapshot]] = {}
+        for item in inputs.dailies:
+            self.dailies.setdefault(item.part_key, []).append(item)
+        daily_paths = {item.logical_path for item in inputs.dailies}
+        self.context: dict[str, list[SourceSnapshot]] = {}
+        for item in _context_sources(inputs, daily_paths, {s.logical_path for s in inputs.sources}):
+            self.context.setdefault(item.logical_path, []).append(item)
+        self.sizes: dict[SourceSnapshot, int] = {}
+
+    def _size(self, item: SourceSnapshot) -> int:
+        if item not in self.sizes:
+            self.sizes[item] = len(_source_blob(item).encode("utf-8"))
+        return self.sizes[item]
+
+    def __call__(self, paths: set[str], optional_paths: set[str] | None = None) -> int:
+        selected = _selected_buckets(self.dailies, paths)
+        sources = _deduplicated_sources(selected)
+        context = _selected_buckets(self.context, optional_paths or ())
+        frames = (*sources, *context)
+        separators = 2 * max(0, len(frames) - 1)
+        return self.base + sum(self._size(item) for item in frames) + separators
 
 
 def _group_dailies(
@@ -1646,11 +1682,12 @@ def _action_descriptor(
     )
 
 
+def _source_blob(item: SourceSnapshot) -> str:
+    return f"### FILE: {item.logical_path}\n{item.content.decode('utf-8', errors='strict')}"
+
+
 def _input_blob(inputs: CompileInputs) -> str:
-    return "\n\n".join(
-        f"### FILE: {item.logical_path}\n{item.content.decode('utf-8', errors='strict')}"
-        for item in inputs.sources
-    )
+    return "\n\n".join(_source_blob(item) for item in inputs.sources)
 
 
 def _draft_prompt(inputs: CompileInputs) -> str:

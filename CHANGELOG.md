@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Reuse immutable UTF-8 compile measurements instead of repeatedly serializing the schema and scanning unrelated daily parts; retain exact source selection and full model token counting.
+
 - Finish owned CLI process cleanup after interruption while preserving the original failure and naming unverified cleanup.
 
 - Exclude whitespace-only retrieval fragments in the shared versioned chunker, preserving original source bytes and strict FTS validation.
