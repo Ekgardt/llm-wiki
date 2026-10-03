@@ -1043,7 +1043,7 @@ class _Discovery:
             )
 
     def walk(self, root: Path, kind: str) -> None:
-        if not root.exists():
+        if root.relative_to(self.vault).as_posix() in self.pruned_directories or not root.exists():
             return
         if os.name == "posix":
             self._walk_posix(root, kind)

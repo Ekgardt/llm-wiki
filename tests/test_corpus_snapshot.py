@@ -1084,3 +1084,32 @@ def test_a_doc_ranks_below_a_compiled_page_and_below_code() -> None:
 
     assert provenance.type_weight("doc") < provenance.DEFAULT_TYPE_WEIGHT
     assert provenance.type_weight("doc") < provenance.type_weight("decision")
+
+
+@pytest.mark.parametrize("relative", ["knowledge/notes/unused.md", "knowledge/projects/demo/state.md"])
+def test_explicit_pruning_also_skips_a_direct_walk_root(vault, relative):
+    write(vault / relative, page("# Unused\nUnrelated to the selected daily.\n", type="concept"))
+    original = collect_corpus(vault)
+    assert [source.record.relative_path for source in original.sources] == [relative]
+    parent = "knowledge/notes" if relative.startswith("knowledge/notes/") else "knowledge/projects"
+    selected = collect_corpus(vault, pruned_directories=(parent,))
+    assert not selected.sources
+
+
+def test_daily_integrity_checks_remain_when_other_roots_are_pruned(vault, monkeypatch):
+    relative = "knowledge/daily/2026-10-03.md"
+    write(vault / relative, "# 2026-10-03\n\n## [10:00:00] session-end | s\n\n**user:** A fact.\n")
+    original = corpus_snapshot._candidate_bytes
+
+    def racing_daily_read(candidate, max_bytes, label):
+        content = original(candidate, max_bytes, label)
+        target = vault / relative
+        target.write_bytes(target.read_bytes() + b"Changed during collection.\n")
+        return content
+
+    monkeypatch.setattr(corpus_snapshot, "_candidate_bytes", racing_daily_read)
+    with pytest.raises(CorpusChanged):
+        collect_corpus(
+            vault, daily_paths=(relative,),
+            pruned_directories=("knowledge/notes", "knowledge/projects", "knowledge/raw/sessions"),
+        )

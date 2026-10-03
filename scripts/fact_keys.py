@@ -464,6 +464,7 @@ def _provider_ask(prompt: str, system_prompt: str) -> str | None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     from corpus_snapshot import collect_corpus
+    from evidence_resolver import MAX_DAILY_BYTES
     from memory_state import ROOT, STATE_ROOT
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -477,7 +478,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         turns, keys = store.count()
         print(f"keyed turns={turns} keys={keys} given up={store.given_up()}")
         return 0
-    snapshot = collect_corpus(ROOT, code_roots=(), daily_paths=_daily_paths(ROOT))
+    snapshot = collect_corpus(
+        ROOT, code_roots=(), daily_paths=_daily_paths(ROOT), deadline=deadline,
+        max_file_bytes=MAX_DAILY_BYTES,
+        pruned_directories=("knowledge/notes", "knowledge/projects", "knowledge/raw/sessions"),
+    )
     waiting = len(waiting_turns(store, snapshot.chunks))
     keyed = key_turns(store, snapshot.chunks, _provider_ask, deadline)
     print(f"keyed {keyed} of {waiting} waiting turns")
