@@ -3418,10 +3418,14 @@ def _chunk_weight(authority: object, page_type: object, content: object, relativ
     return trust_weight(authority, page_type, relative_path) * substance_weight(content)
 
 
-def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object]:
+def _generation_result(
+    row: sqlite3.Row, generation_id: str, *, apply_weight: bool = True
+) -> dict[str, object]:
     authority = _row_text(row, "authority")
     content = _row_text(row, "content")
-    score = -float(row["rank"]) * _chunk_weight(authority, _row_text(row, "type"), content, row["source_path"])
+    score = -float(row["rank"])
+    if apply_weight:
+        score *= _chunk_weight(authority, _row_text(row, "type"), content, row["source_path"])
     return {
         "path": row["source_path"],
         "title": _page_title(row),
@@ -3802,7 +3806,9 @@ def _vector_scored_rows(
     results = []
     for row in rows:
         _check_generation_stop(deadline, cancelled)
-        result = _generation_result(row, generation_id)
+        # This row's lexical rank is only a placeholder. Dense admission
+        # weighs its real cosine below, so do not scan its prose twice.
+        result = _generation_result(row, generation_id, apply_weight=False)
         score = float(similarities[row["chunk_order"]])
         # The vector path boosts a project match by 1.5, not by the lexical 2.0.
         if project and str(result["project"]).casefold() == project.casefold():

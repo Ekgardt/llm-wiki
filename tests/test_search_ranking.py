@@ -2058,7 +2058,7 @@ def test_the_vector_path_boosts_a_project_match_by_one_and_a_half(monkeypatch, t
         lambda *_args, **_kwargs: nullcontext(),
     )
     monkeypatch.setattr(
-        search_memory, "_generation_result", lambda row, _gen: dict(row)
+        search_memory, "_generation_result", lambda row, _gen, **_options: dict(row)
     )
 
     scored = search_memory._vector_scored_rows(
@@ -2138,4 +2138,3 @@ class TestASilentFallbackNamesItsCause:
         assert search_memory.degradation_reasons()["generation_manifest"].startswith(
             "ValueError: catalog.sqlite3"
         )
-

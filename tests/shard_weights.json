@@ -493,6 +493,7 @@
   "test_dead_code_says_which_zero.py": 0.01,
   "test_decisions_report_their_retrieval.py": 0.09,
   "test_dense_admission_trust_weight.py": 0.0,
+  "test_dense_admission_weighs_a_span_once.py": 0.02,
   "test_dependency_contract.py": 0.0,
   "test_dependency_environments.py": 0.04,
   "test_dlp_finding_allowlist.py": 0.02,

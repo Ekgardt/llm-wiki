@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Avoid calculating discarded lexical weights on the dense search path, retaining identical trust-weighted admission and ranking.
+
 - Choose shared path prefixes by complete answer cost instead of an unsupported character cutoff, preserving exact paths.
 
 - Continue draining independent captures after a durably recorded failure, preserving retry, exhaustion and ownership errors.
