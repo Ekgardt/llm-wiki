@@ -321,6 +321,7 @@
   "test_an_answer_uses_the_published_corpus.py": 6.0,
   "test_an_answer_without_a_provider_is_not_fresh.py": 0.0,
   "test_an_append_behind_a_stale_attempt_gives_up_in_time.py": 13.39,
+  "test_an_append_can_outlive_its_refused_history.py": 12.04,
   "test_an_append_keeps_only_what_it_added.py": 4.22,
   "test_an_append_whose_file_is_gone_is_written_again.py": 8.13,
   "test_an_append_whose_images_were_pruned_can_be_asked_again.py": 1.39,

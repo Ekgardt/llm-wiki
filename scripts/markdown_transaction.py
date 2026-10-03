@@ -4685,7 +4685,7 @@ def _append_until_committed(
     attempt = 0
     parent: str | None = None
     stall = _AppendStall(stall_seconds)
-    while attempt < 64:
+    while True:
         # `retry` repeats the same attempt, so the loop itself has to notice the
         # caller's deadline and an attempt that never settles.
         coordinator._require_operation_active(deadline, cancelled)
@@ -4708,7 +4708,6 @@ def _append_until_committed(
             parent = _refused_parent(coordinator, candidate_id) or parent
             attempt += 1
             stall.progressed()
-    raise TimeoutError("knowledge append did not converge after 64 CAS attempts")
 
 
 def append_knowledge(
