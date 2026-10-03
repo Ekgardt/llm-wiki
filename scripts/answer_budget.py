@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from functools import partial
 
 # The client ceiling Anthropic documents for tool responses; a budget above it
 # would be a number with nothing behind it.
@@ -97,11 +98,6 @@ PROTECTED_FIELDS = frozenset(
     }
 )
 
-# How deep identity stripping walks an answer; below it values stay as they are, which costs
-# tokens, never correctness. Basis unknown: value predates measurement; review when an answer
-# nests deeper than six levels.
-_MAX_DEPTH = 6
-
 # The budget block has to fit inside the budget too, or the answer would
 # overrun the number it just claimed to honour. The block is held back from
 # the body's budget rather than measured after the fact, because measuring it
@@ -156,9 +152,9 @@ def shape_code_answer(
     if not isinstance(data, dict):
         return data
     answer, omitted = _without_opaque_identifiers(data, include_node_ids)
-    answer = _without_repeated_modules(answer, 0)
-    answer = _with_row_constants(answer, 0)
-    return _as_columnar(_shaped_to_budget(answer, omitted, budget_tokens), 0)
+    answer = _without_repeated_modules(answer)
+    answer = _with_row_constants(answer)
+    return _as_columnar(_shaped_to_budget(answer, omitted, budget_tokens))
 
 
 def _shaped_to_budget(answer: dict, omitted: list[str], budget_tokens: int | None):
@@ -199,8 +195,8 @@ def _without_opaque_identifiers(
     if include_node_ids:
         return data, []
     omitted: set[str] = set()
-    pruned = _pruned(data, _is_opaque_identifier, omitted, 0)
-    return _without_recoverable_identities(pruned, omitted, 0), sorted(omitted)
+    pruned = _pruned(data, _is_opaque_identifier, omitted)
+    return _without_recoverable_identities(pruned, omitted), sorted(omitted)
 
 
 # The second mint. `code_extractor._identifier` makes `code:<kind>:<32 hex>`,
@@ -244,31 +240,142 @@ def _identity_is_recoverable(row: dict) -> bool:
     return all(segment in stated for segment in _readable_identity_segments(key))
 
 
-def _row_without_identity(row: dict, omitted: set, depth: int) -> dict:
-    descended = {
-        key: _without_recoverable_identities(value, omitted, depth + 1)
-        for key, value in row.items()
-    }
-    if not _identity_is_recoverable(descended):
-        return descended
-    omitted.add("identity_key")
-    return {key: value for key, value in descended.items() if key != "identity_key"}
+
+_TREE_EXIT = object()
 
 
-def _recoverable_identity_container(value, omitted: set, depth: int):
-    if isinstance(value, dict):
-        return _row_without_identity(value, omitted, depth)
-    if isinstance(value, list):
-        return [
-            _without_recoverable_identities(item, omitted, depth + 1) for item in value
-        ]
+def _unchanged(value):
     return value
 
 
-def _without_recoverable_identities(value, omitted: set, depth: int):
-    if depth > _MAX_DEPTH:
+def _children(value):
+    if isinstance(value, dict):
+        return list(value.items())
+    return list(enumerate(value))
+
+
+def _claim_tree_container(value, active: set) -> None:
+    identity = id(value)
+    if identity in active:
+        raise ValueError("Circular reference in code answer")
+    active.add(identity)
+
+
+def _walk_tree_step(value, closing: bool, pending: list, active: set):
+    if closing:
+        active.remove(id(value))
+        return _TREE_EXIT
+    if not isinstance(value, (dict, list)):
         return value
-    return _recoverable_identity_container(value, omitted, depth)
+    _claim_tree_container(value, active)
+    pending.append((value, True))
+    pending.extend((item, False) for _key, item in reversed(_children(value)))
+    return value
+
+
+def _tree_nodes(value):
+    pending = [(value, False)]
+    active: set = set()
+    while pending:
+        node = _walk_tree_step(*pending.pop(), pending, active)
+        if node is not _TREE_EXIT:
+            yield node
+
+
+def _opaque_collection_member(value) -> bool:
+    return _is_opaque_text(value) or (isinstance(value, list) and bool(value))
+
+
+def _empty_container(value):
+    if isinstance(value, dict):
+        return {key: None for key in value}
+    return [None] * len(value)
+
+
+class _TreeRewrite:
+    """Preserve child order and acyclic sharing without a depth cutoff.
+
+    Only ancestors are marked live: visiting the same acyclic child on a
+    different branch is valid. Each result is independent of the input tree.
+    """
+
+    def __init__(self, prepare, finish, *, descend_lists=True):
+        self.prepare = prepare
+        self.finish = finish
+        self.descend_lists = descend_lists
+        self.pending = []
+        self.active = set()
+
+    def run(self, value):
+        result = {}
+        self.pending.append(("enter", (value, result, "root")))
+        while self.pending:
+            action, arguments = self.pending.pop()
+            {"enter": self._enter, "leave": self._leave}[action](*arguments)
+        return result["root"]
+
+    def _is_container(self, value):
+        return isinstance(value, dict) or (self.descend_lists and isinstance(value, list))
+
+    def _enter(self, original, parent, key):
+        if not self._is_container(original):
+            parent[key] = original
+            return
+        _claim_tree_container(original, self.active)
+        prepared = self.prepare(original)
+        target = _empty_container(prepared)
+        self.pending.append(("leave", (original, target, parent, key)))
+        self._schedule_children(prepared, target)
+
+    def _schedule_children(self, prepared, target):
+        for key, value in reversed(_children(prepared)):
+            self.pending.append(("enter", (value, target, key)))
+
+    def _leave(self, original, target, parent, key):
+        parent[key] = self.finish(target)
+        self.active.remove(id(original))
+
+
+def _module_free_row(value):
+    if isinstance(value, dict):
+        return _row_without_its_module(value)
+    return value
+
+
+def _pruned_mapping(value, *, drop, omitted: set):
+    if not isinstance(value, dict):
+        return value
+    kept = {}
+    for key, item in value.items():
+        _keep_pruned_entry(kept, key, item, drop, omitted)
+    return kept
+
+
+def _keep_pruned_entry(kept: dict, key, value, drop, omitted: set) -> None:
+    if drop(key, value):
+        omitted.add(key)
+        return
+    kept[key] = value
+
+
+def _collect_row_list(value, found: list) -> None:
+    if isinstance(value, list) and _is_row_list(value):
+        found.append(value)
+
+
+def _row_without_identity(omitted: set, value):
+    if not isinstance(value, dict):
+        return value
+    if not _identity_is_recoverable(value):
+        return value
+    omitted.add("identity_key")
+    return {key: item for key, item in value.items() if key != "identity_key"}
+
+
+
+
+def _without_recoverable_identities(value, omitted: set):
+    return _TreeRewrite(_unchanged, partial(_row_without_identity, omitted)).run(value)
 
 
 def _is_opaque_identifier(key: str, value) -> bool:
@@ -282,17 +389,10 @@ def _is_opaque_text(value) -> bool:
 
 
 def _is_opaque_collection(value) -> bool:
-    """A structure holding nothing but hashes carries nothing but hashes.
-
-    Measured 2026-08-28: `mode=summary` on this repository answers with 4 078
-    communities, each a bare list of `code:node:` strings - 199 770 of the
-    answer's 208 786 tokens, naming no symbol, no file and no line. A rule that
-    only looked at scalar fields would have left the largest opaque payload in
-    the product untouched.
-    """
+    """Every leaf is opaque; cycles are invalid, and aliases are allowed."""
     if not isinstance(value, list) or not value:
         return False
-    return all(_is_opaque_text(item) or _is_opaque_collection(item) for item in value)
+    return all(_opaque_collection_member(item) for item in _tree_nodes(value))
 
 
 def _is_derivable(key: str, value) -> bool:
@@ -300,32 +400,15 @@ def _is_derivable(key: str, value) -> bool:
     return key in DERIVABLE_FIELDS
 
 
-def _pruned(value, drop, omitted: set, depth: int):
-    if depth > _MAX_DEPTH:
-        return value
-    return _pruned_container(value, drop, omitted, depth)
+def _pruned(value, drop, omitted: set):
+    prepare = partial(_pruned_mapping, drop=drop, omitted=omitted)
+    return _TreeRewrite(prepare, _unchanged).run(value)
 
 
-def _pruned_container(value, drop, omitted: set, depth: int):
-    if isinstance(value, dict):
-        return _pruned_dict(value, drop, omitted, depth)
-    if isinstance(value, list):
-        return [_pruned(item, drop, omitted, depth + 1) for item in value]
-    return value
 
 
-def _pruned_dict(mapping: dict, drop, omitted: set, depth: int) -> dict:
-    kept: dict = {}
-    for key, value in mapping.items():
-        _keep_entry(kept, key, value, drop, omitted, depth)
-    return kept
 
 
-def _keep_entry(kept: dict, key, value, drop, omitted: set, depth: int) -> None:
-    if drop(key, value):
-        omitted.add(key)
-        return
-    kept[key] = _pruned(value, drop, omitted, depth + 1)
 
 
 # A value identical on every row of a table is a fact about the table, not
@@ -509,39 +592,35 @@ def _columnar_if_cheaper(key: str, rows: list) -> dict:
     return columnar
 
 
-def _compacted_entry(key, value, depth: int) -> dict:
-    """One key's contribution: its value, plus row constants when they pay."""
-    descended = _with_row_constants(value, depth + 1)
-    constants = _payable_row_constants(key, descended)
+def _compacted_entry(key, value) -> dict:
+    """Children are already shaped; preserve every profitable table constant."""
+    constants = _payable_row_constants(key, value)
     if not constants:
-        return {key: descended}
-    return {
-        key: _hoisted_rows(descended, sorted(constants)),
-        f"{key}_row_constants": constants,
-    }
+        return {key: value}
+    return {key: _hoisted_rows(value, sorted(constants)), f"{key}_row_constants": constants}
 
 
-def _shortened_rows(key, value, depth: int) -> dict:
-    """The value with its shared path prefixes hoisted out, when that is cheaper."""
-    descended = _as_columnar(value, depth + 1)
-    prefixes = _prefixes_if_cheaper(key, descended)
+def _shortened_rows(key, value) -> dict:
+    prefixes = _prefixes_if_cheaper(key, value)
     if prefixes:
         return prefixes
-    return {key: descended}
+    return {key: value}
 
 
-def _columnar_entry(key, value, depth: int) -> dict:
-    shortened = _shortened_rows(key, value, depth)
+def _columnar_entry(key, value) -> dict:
+    shortened = _shortened_rows(key, value)
     columnar = _columnar_if_cheaper(key, shortened[key])
     if columnar:
         return {**shortened, **columnar}
     return shortened
 
 
-def _columnar_dict(mapping: dict, depth: int) -> dict:
+def _columnar_dict(value):
+    if not isinstance(value, dict):
+        return value
     compacted: dict = {}
-    for key, value in mapping.items():
-        compacted.update(_columnar_entry(key, value, depth))
+    for key, item in value.items():
+        compacted.update(_columnar_entry(key, item))
     return compacted
 
 
@@ -605,64 +684,36 @@ def _row_without_its_module(mapping: dict) -> dict:
     return _shortened_name(mapping, path_key, name_key)
 
 
-def _without_repeated_modules(value, depth: int):
-    if depth > _MAX_DEPTH:
-        return value
-    return _module_free_container(value, depth)
+def _without_repeated_modules(value):
+    return _TreeRewrite(_module_free_row, _unchanged).run(value)
 
 
-def _module_free_container(value, depth: int):
-    """A mapping loses its repeated module; a list passes each item on; a scalar stands."""
-    if isinstance(value, dict):
-        return _module_free_dict(value, depth)
-    if isinstance(value, list):
-        return [_without_repeated_modules(item, depth + 1) for item in value]
-    return value
 
 
-def _module_free_dict(mapping: dict, depth: int) -> dict:
-    shortened = _row_without_its_module(mapping)
-    return {
-        key: _without_repeated_modules(item, depth + 1)
-        for key, item in shortened.items()
-    }
 
 
-def _as_columnar(value, depth: int):
-    """The header-plus-arrays form everywhere it pays, applied last of all.
+def _as_columnar(value):
+    """Apply last: the budget still reads original row objects before this step.
 
-    Last, because every step before it reads rows as objects: the budget trims
-    a row, names the field it dropped, and counts what it kept. Turning rows
-    into arrays earlier broke all three (measured 2026-09-12: seven failures in
-    `tests/test_answer_budget.py`), so this runs on the answer that is already
-    shaped and is the only step after which nothing reads a row again.
+    Lists intentionally remain opaque to this traversal, as in the original
+    columnar contract. A table's dictionaries are not independently reshaped.
     """
-    if depth > _MAX_DEPTH:
+    return _TreeRewrite(_unchanged, _columnar_dict, descend_lists=False).run(value)
+
+
+def _row_constant_dict(value):
+    if not isinstance(value, dict):
         return value
-    if isinstance(value, dict):
-        return _columnar_dict(value, depth)
-    return value
-
-
-def _row_constant_dict(mapping: dict, depth: int) -> dict:
     compacted: dict = {}
-    for key, value in mapping.items():
-        compacted.update(_compacted_entry(key, value, depth))
+    for key, item in value.items():
+        compacted.update(_compacted_entry(key, item))
     return compacted
 
 
-def _row_constant_container(value, depth: int):
-    if isinstance(value, dict):
-        return _row_constant_dict(value, depth)
-    if isinstance(value, list):
-        return [_with_row_constants(item, depth + 1) for item in value]
-    return value
 
 
-def _with_row_constants(value, depth: int):
-    if depth > _MAX_DEPTH:
-        return value
-    return _row_constant_container(value, depth)
+def _with_row_constants(value):
+    return _TreeRewrite(_unchanged, _row_constant_dict).run(value)
 
 
 def _bounded_budget(budget_tokens) -> int:
@@ -698,7 +749,7 @@ def _apply_reductions(state: dict, budget: int) -> None:
 def _drop_derivable_fields(state: dict, budget: int) -> None:
     del budget
     omitted: set[str] = set()
-    state["answer"] = _pruned(state["answer"], _is_derivable, omitted, 0)
+    state["answer"] = _pruned(state["answer"], _is_derivable, omitted)
     state["omitted"].extend(sorted(omitted))
 
 
@@ -726,33 +777,19 @@ def _row_tokens(rows: list) -> int:
 
 def _row_lists_by_size(answer: dict) -> list[list]:
     found: list[list] = []
-    _collect_row_lists(answer, found, 0)
+    _collect_row_lists(answer, found)
     return sorted(found, key=len, reverse=True)
 
 
-def _collect_row_lists(value, found: list, depth: int) -> None:
-    if depth > _MAX_DEPTH:
-        return
-    _collect_from_container(value, found, depth)
+def _collect_row_lists(value, found: list) -> None:
+    for item in _tree_nodes(value):
+        _collect_row_list(item, found)
 
 
-def _collect_from_container(value, found: list, depth: int) -> None:
-    if isinstance(value, dict):
-        _collect_from_items(value.values(), found, depth)
-        return
-    if isinstance(value, list):
-        _collect_from_list(value, found, depth)
 
 
-def _collect_from_list(rows: list, found: list, depth: int) -> None:
-    if _is_row_list(rows):
-        found.append(rows)
-    _collect_from_items(rows, found, depth)
 
 
-def _collect_from_items(items, found: list, depth: int) -> None:
-    for item in items:
-        _collect_row_lists(item, found, depth + 1)
 
 
 def _is_row_list(rows: list) -> bool:
