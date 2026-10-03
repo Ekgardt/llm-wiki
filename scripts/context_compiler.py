@@ -1,25 +1,24 @@
-"""Task 15: Adaptive Context Compiler.
+"""Adaptive Context Compiler.
 
 Materializes L0/L1/L2 representations for each captured source and packs
-them into one shared token budget. Designed to be called by the retrieval
-planner (Task 11, future), the SessionStart context builder, and the
-grounded QA pipeline (Tasks 16–17, not yet integrated).
+them into one shared token budget. Query memory and get_context compile
+captured evidence here; other context producers share the final packing
+boundary through compile_context_items.
 
 Design contract (from docs/superpowers/plans/2026-07-16-unified-evidence-retrieval.md):
 
 - L0 is broad ranking metadata (every parent contributes one item).
 - L1 is shortlisted orientation (only parents in ``shortlist``).
 - L2/source spans are final evidence (only chunks in ``evidence_chunk_ids``).
-- Caches key by logical path + source SHA-256 + generator version + model
-  descriptor. Item IDs embed the source hash so different versions cannot
-  conflate.
+- Item IDs include the logical source identity and source SHA-256, so
+  different source versions cannot conflate.
 - Duplicate stems (e.g. ``foo.md`` and ``sub/foo.md``) are reported, not
   conflated.
 - LLM-generated contextual text is OFF by default.
 - Chunks carry a deterministic prefix with page title, project, type, status,
   aliases, and validity metadata.
-- Small parents expand in full; large parents expand to the matched heading
-  subtree plus a bounded adjacent context.
+- Selected evidence keeps its verified byte span by default. Callers may
+  request whole-parent or heading expansion with explicit bounds.
 - Every compiled package carries a compilation trace with materializations.
 """
 from __future__ import annotations
@@ -45,25 +44,14 @@ from corpus_snapshot import (
     _markdown_headings,
 )
 
-DEFAULT_BUDGET = ContextBudget(
-    model=None,
-    max_input_tokens=8192,
-    reserved_output_tokens=0,
-    safety_margin_tokens=512,
-)
-# How much surrounding page the compiler adds around a retrieved chunk: a parent
-# section up to 1 500 characters is taken whole, a larger one only as a 2 000-character
-# subtree, and a following section of up to 200 characters rides along when it still
-# fits. These shape context, not correctness: nothing is refused or lost past them.
-# Basis unknown: values predate measurement (2026-07-18, the L0/L1/L2 compiler); review
-# when answer quality is measured against context size.
-DEFAULT_SMALL_PARENT_CHARS = 1500
-DEFAULT_LARGE_PARENT_SUBTREE_CHARS = 2000
-ADJACENT_CONTEXT_CHARS = 200
+# Selected evidence stays in its verified chunk span by default, as in
+# query_memory. Widening is an explicit caller choice; the shared context
+# budget controls the complete output. Repeating a small page per selected
+# chunk can otherwise make get_context discard all evidence.
+# See docs/research/2026-10-03-selected-context-keeps-its-own-span.md.
 DEFAULT_RELEVANCE_L0 = 0.4
 DEFAULT_RELEVANCE_L1 = 0.7
 DEFAULT_RELEVANCE_L2 = 0.95
-COMPILER_VERSION = "context-compiler/v1"
 LLM_GENERATED_CONTEXT_DEFAULT = False
 
 Representation = Literal["l0", "l1", "l2"]
@@ -370,7 +358,7 @@ def _with_adjacent(headings: list, section_start: int, section_end: int, budget:
         content_length,
     )
     adjacent_size = adjacent_end - section_end
-    if 0 < adjacent_size <= ADJACENT_CONTEXT_CHARS and adjacent_end - section_start <= budget:
+    if 0 < adjacent_size and adjacent_end - section_start <= budget:
         return adjacent_end
     return section_end
 
@@ -547,8 +535,8 @@ def compile_context(
     shortlist: Iterable[str] = (),
     evidence_chunk_ids: Iterable[str] = (),
     budget: ContextBudget | None = None,
-    small_parent_chars: int = DEFAULT_SMALL_PARENT_CHARS,
-    large_parent_subtree_chars: int = DEFAULT_LARGE_PARENT_SUBTREE_CHARS,
+    small_parent_chars: int = 0,
+    large_parent_subtree_chars: int = 0,
     generated_context: bool = LLM_GENERATED_CONTEXT_DEFAULT,
     graph_expansions: Iterable[Mapping[str, object]] = (),
     deadline: float | None = None,
@@ -599,7 +587,7 @@ def _require_nonnegative_limits(small_parent_chars: int, large_parent_subtree_ch
 
 def _budget_or_default(budget: ContextBudget | None) -> ContextBudget:
     if budget is None:
-        return DEFAULT_BUDGET
+        return DEFAULT_CONTEXT_BUDGET
     return budget
 
 

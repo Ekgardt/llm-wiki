@@ -731,6 +731,7 @@
   "test_search_ranking.py": 30.13,
   "test_secret_redact.py": 0.01,
   "test_security_invariants.py": 408.64,
+  "test_selected_context_is_not_duplicated_to_fit_a_page.py": 0.06,
   "test_selective_forgetting_stand.py": 0.06,
   "test_self_update.py": 5.99,
   "test_semantic_leg_reaches_the_answer.py": 0.83,

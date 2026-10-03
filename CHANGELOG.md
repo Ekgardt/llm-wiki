@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Preserve selected context spans by default instead of repeating whole pages and losing evidence under the shared budget.
+
 - Allow a retained append to retry beyond historical CAS refusals while preserving deadlines, cancellation and publication checks.
 
 - Preserve explicitly adopted shared-resource and profile changes through update rollback and uninstall.
