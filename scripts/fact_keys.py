@@ -47,7 +47,6 @@ BATCH_TURNS = 25
 # lost knowledge (the turn's text stays searchable). Change both together.
 MAX_KEYS_PER_TURN = 5
 MAX_KEY_CHARS = 160
-MAX_TURN_CHARS = 1500
 # A nightly step keys new entries in this much time and leaves the rest for
 # the next night; the store remembers what is done. The nightly kills the step
 # at this budget plus the margin one last provider call may take
@@ -132,7 +131,7 @@ def _user_text(text: str) -> str | None:
     with replies between them; the user's segments are joined and keyed as one.
     """
     said = [words for side, words in _segments(text) if side == "user" and words]
-    return "\n".join(said)[:MAX_TURN_CHARS] or None
+    return "\n".join(said) or None
 
 
 def _next_start(marks: list, index: int, text: str) -> int:
