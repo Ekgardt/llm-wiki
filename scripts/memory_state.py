@@ -21,6 +21,7 @@ written by a faster one.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -199,7 +200,10 @@ def trim_state_to_budget(state: dict[str, Any]) -> int:
 
 def _serialized_state(state: dict[str, Any]) -> str:
     trim_state_to_budget(state)
-    return json.dumps(state, indent=2, ensure_ascii=False)
+    text = json.dumps(state, indent=2, ensure_ascii=False)
+    if len(text.encode("utf-8")) > MAX_STATE_TARGET_BYTES:
+        raise OSError(errno.EFBIG, "state exceeds the shared writable byte budget; protected state was preserved")
+    return text
 
 
 def _write_state_text(text: str) -> None:
