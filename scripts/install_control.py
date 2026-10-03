@@ -3418,17 +3418,29 @@ def _active_resource(
     return resource
 
 
+def _resource_checkpoint_desired(
+    install_root: Path,
+    snapshot: Mapping[str, object],
+    resource: ManagedResource,
+) -> dict[str, object]:
+    if resource.adopt_current:
+        return _v2_snapshot(install_root, _adopted_value(resource))
+    return _checkpoint_desired_snapshot(install_root, snapshot, resource)
+
+
 def _checkpoint_resource(
     install_root: Path,
     record: Mapping[str, object],
     resource: ManagedResource,
 ) -> dict[str, object]:
     desired_record = _record_desired(record)
-    desired = _checkpoint_desired_snapshot(install_root, desired_record, resource)
+    desired = _resource_checkpoint_desired(install_root, desired_record, resource)
     origin_record = record.get("origin")
     if not isinstance(origin_record, Mapping):
         raise InstallControlError("install_state_schema_invalid")
     origin = _read_origin(install_root, origin_record)
+    if resource.adopt_current:
+        origin = _read_v2_snapshot(install_root, desired)
     return {
         "desired": desired,
         "id": record["id"],

@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Preserve explicitly adopted shared-resource and profile changes through update rollback and uninstall.
+
 - Let durable Claude and Codex prompt/tool capture use the host budget instead of an unsupported five-second cutoff.
 
 - Preserve live SQLite locks when adoption and Doctor inspect operational database identity.
