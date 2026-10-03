@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Finish owned CLI process cleanup after interruption while preserving the original failure and naming unverified cleanup.
+
 - Exclude whitespace-only retrieval fragments in the shared versioned chunker, preserving original source bytes and strict FTS validation.
 
 - Preserve selected context spans by default instead of repeating whole pages and losing evidence under the shared budget.

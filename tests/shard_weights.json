@@ -340,6 +340,7 @@
   "test_an_impact_hears_its_cancel.py": 0.33,
   "test_an_impact_names_each_edit.py": 0.09,
   "test_an_installed_vault_is_checked_in_its_own_environment.py": 0.05,
+  "test_an_interrupted_cli_ends_its_child.py": 0.58,
   "test_an_interrupted_prune_is_repaired_not_reported_as_damage.py": 2.92,
   "test_an_ollama_prompt_gets_the_room_it_needs.py": 0.16,
   "test_an_open_that_runs_out_of_time_closes_its_database.py": 0.95,

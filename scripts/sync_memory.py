@@ -8,6 +8,7 @@ import math
 import os
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -386,7 +387,20 @@ def _run_process_tree(
     except subprocess.TimeoutExpired as exc:
         cleanup_error = _finish_timed_out_process(process, _kill_process_tree(process))
         raise ProcessTreeTimeout(command, exc.timeout, cleanup_error=cleanup_error) from exc
+    except BaseException as error:
+        _end_interrupted_process(process, error)
+        raise
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def _end_interrupted_process(
+    process: subprocess.Popen[str], error: BaseException
+) -> None:
+    """Finish the owned child tree before propagating the original interruption."""
+    cleanup_error = _finish_timed_out_process(process, _kill_process_tree(process))
+    setattr(error, "cleanup_error", cleanup_error)
+    if cleanup_error:
+        print(f"Process cleanup unverified after interruption: {cleanup_error}", file=sys.stderr)
 
 
 _INDEXES = "indexes"
