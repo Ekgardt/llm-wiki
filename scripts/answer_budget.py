@@ -430,7 +430,6 @@ def _payable_row_constants(key: str, value) -> dict:
 # the directory. Stated once under `<key>_row_prefixes`, the value is still in
 # the answer and the rows carry what differs. Chosen by measuring both shapes,
 # like every compaction above it.
-_MIN_PREFIX_LENGTH = 8
 
 
 def _common_prefix(values: list[str]) -> str:
@@ -444,11 +443,11 @@ def _prefixable_column(rows: list, key: str) -> str:
     if not all(isinstance(value, str) for value in values):
         return ""
     prefix = _common_prefix(values)
-    return prefix if len(prefix) >= _MIN_PREFIX_LENGTH else ""
+    return prefix
 
 
 def _row_prefixes(rows: list) -> dict[str, str]:
-    """Every column whose values share one long prefix, and that prefix."""
+    """Every column whose values share a path prefix, and that prefix."""
     found = {}
     for key in sorted(rows[0]):
         prefix = _prefixable_column(rows, key)

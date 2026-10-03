@@ -3658,13 +3658,14 @@ def _run_active_capture_worker_once() -> int:
     work = partial(
         run_capture_worker_once, queue, coordinator, process_missing=process_missing,
         handler_versions=(1, 2),
+        settled_failure=_record_settled_capture_failure,
     )
     _drain_capture_work(work)
     return 0
 
 
 def _drain_capture_work(work) -> None:
-    """Drain successful captures in bounded turns; failures keep their retry policy."""
+    """Drain settled captures; named failures retain their existing retry policy."""
     deadline = time.monotonic() + CAPTURE_DRAIN_SECONDS
     for _ in range(CAPTURE_DRAIN_MAX_TASKS):
         if work() is None:
@@ -3675,6 +3676,16 @@ def _drain_capture_work(work) -> None:
     # any remainder, including intents whose event wake met our live owner.
     spawn_detached(
         [sys.executable, str(SCRIPTS_DIR / "integration_adapter.py"), "--capture-worker"]
+    )
+
+
+def _record_settled_capture_failure(error: BaseException) -> None:
+    """A failed task was settled by the queue; retain its actual diagnostic."""
+    from capture_diagnostics import record_capture_failure
+    from secret_redact import describe_error_chain
+
+    record_capture_failure(
+        "adapter_capture_worker", describe_error_chain(error), error=error
     )
 
 

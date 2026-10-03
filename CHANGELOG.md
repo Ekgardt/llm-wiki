@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Choose shared path prefixes by complete answer cost instead of an unsupported character cutoff, preserving exact paths.
+
+- Continue draining independent captures after a durably recorded failure, preserving retry, exhaustion and ownership errors.
+
 - Recognize an exact source compiled by a later authoritative receipt even when its accepted page names differ from a retained refused proposal.
 
 - Reuse sealed model vectors across extractor namespaces only when exact source, span and model identity remains verified.

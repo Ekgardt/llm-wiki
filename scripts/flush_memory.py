@@ -17,7 +17,6 @@ work when no provider answered was retired on 2026-09-25
 """
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import json
 import sys
@@ -1405,6 +1404,7 @@ def run_capture_worker_once(
     *,
     process_missing: Callable[[object, object, object, object, object], object],
     handler_versions: tuple[int, ...] = (1,),
+    settled_failure: Callable[[BaseException], None] | None = None,
 ) -> object | None:
     # An intent with no task is invisible to `recover_expired_leases`, which
     # recovers a task whose lease expired and so presupposes a task. See
@@ -1425,7 +1425,7 @@ def run_capture_worker_once(
             if lease is None:
                 return None
             return _process_or_fail(
-                queue, coordinator, lease, owner, process_missing
+                queue, coordinator, lease, owner, process_missing, settled_failure
             )
     finally:
         registry.release(owner)
@@ -1437,6 +1437,7 @@ def _process_or_fail(
     lease: object,
     owner: object,
     process_missing: Callable[..., object],
+    settled_failure: Callable[[BaseException], None] | None,
 ) -> object:
     """Settle the claim either way: a failure is a named retry, not a stuck lease.
 
@@ -1453,10 +1454,30 @@ def _process_or_fail(
             process_missing=process_missing,
         )
     except Exception as error:
-        with contextlib.suppress(Exception):
-            queue.fail(lease, _capture_queue_failure(error))
+        queue.fail(lease, _capture_queue_failure(error))
+        return _settled_capture_failure(lease, error, settled_failure)
+
+
+def _settled_capture_failure(
+    lease: object,
+    error: BaseException,
+    observer: Callable[[BaseException], None] | None,
+) -> BaseException:
+    """Observe a committed retry or dead task; never turn it into success.
+
+    Called only after queue.fail returns. Settlement and owner-release failures
+    still escape. Callers without an observer retain the raised exception.
+    """
+    from capture_diagnostics import DurableWorkExhausted
+
+    try:
         _raise_if_attempts_spent(lease, error)
-        raise
+    except DurableWorkExhausted as exhausted:
+        error = exhausted
+    if observer is None:
+        raise error
+    observer(error)
+    return error
 
 
 def _capture_queue_failure(error: BaseException) -> object:
