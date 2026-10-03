@@ -3381,6 +3381,28 @@ def _require_apply_arguments(
         raise ValueError("compile batch inputs disagree")
 
 
+def _require_current_compile_targets(
+    inputs: CompileInputs, manifest: Mapping[str, object]
+) -> None:
+    """A changed model-input page needs a new plan, not the same assessment.
+
+    The publication retry refreshes its claim tree, but its original target
+    bytes remain immutable. Reassessing a plan against changed target bytes
+    cannot make those original preconditions true. Refuse before assessment;
+    the next compile snapshots and resolves the still-unreceipted source.
+    The transaction's own precondition checks remain authoritative.
+    """
+    current = {entry["path"]: entry["sha256"] for entry in manifest["entries"]}
+    for target in inputs.targets:
+        if current.get(target.logical_path) != target.sha256:
+            raise TransactionFailure(
+                f"compile target snapshot changed for {target.logical_path}; "
+                "a fresh snapshot and model plan are required",
+                "compile_snapshot_changed",
+                "quarantined",
+            )
+
+
 class _ApplyPlan:
     """One publication of one validated compile plan.
 
@@ -3433,6 +3455,7 @@ class _ApplyPlan:
         if not _plan_carries_claims(self.operations):
             return
         self.claim_tree_manifest = snapshot_claim_tree(ROOT)
+        _require_current_compile_targets(self.inputs, self.claim_tree_manifest)
         self.claim_index = ClaimIndex(self.coordinator.state_root, vault=ROOT)
         self.claim_index.rebuild(self._claim_tree_paths)
         candidates: list[IndexedClaim] = []

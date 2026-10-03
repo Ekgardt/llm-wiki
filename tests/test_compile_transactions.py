@@ -2417,3 +2417,70 @@ def test_a_quarantined_batch_is_named_apart_from_a_published_one(capsys):
         compile_memory.compile_outcome([first, second]),
         compile_memory._finished_outcome("error", [second]),
     ) == ("quarantined", "partial", "failed")
+
+
+def _plan_with_one_snapshot_claim(root):
+    content = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    content["claims"] = [_claim_record(
+        root, claim_id="snapshot-new", value="red",
+        text="A durable exact-byte observation.", authority="user",
+    )]
+    return {
+        "schema_version": "compile-plan/v2",
+        "operations": [{
+            "kind": "create", "path": "knowledge/notes/exact-byte-pattern.md",
+            "content": canonical_json_bytes(content).decode(),
+        }],
+    }
+
+
+@pytest.mark.parametrize("during_apply", [False, True])
+def test_stale_target_snapshot_does_not_repeat_claim_assessment(
+    vault, monkeypatch, during_apply
+):
+    import compile_memory
+    from markdown_transaction import TransactionFailure
+
+    root, state_root = vault
+    daily = _daily(root)
+    prior = root / "knowledge/notes/prior.md"
+    prior.write_bytes(b"---\ntype: concept\n---\n# Prior\nblue\n")
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    plan = _plan_with_one_snapshot_claim(root)
+    coordinator = MarkdownCoordinator(root, state_root)
+    calls = []
+    original_assess = compile_memory._ApplyPlan._assess_operation
+    original_apply = coordinator.apply
+
+    def observed_assessment(self, planned, candidates):
+        calls.append(planned["path"])
+        return original_assess(self, planned, candidates)
+
+    def changed_target_then_apply(transaction_id, **kwargs):
+        prior.write_bytes(b"---\ntype: concept\n---\n# Prior\ngreen\n")
+        return original_apply(transaction_id, **kwargs)
+
+    monkeypatch.setattr(compile_memory._ApplyPlan, "_assess_operation", observed_assessment)
+    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+    if during_apply:
+        monkeypatch.setattr(coordinator, "apply", changed_target_then_apply)
+    else:
+        prior.write_bytes(b"---\ntype: concept\n---\n# Prior\ngreen\n")
+    with pytest.raises(TransactionFailure):
+        compile_memory.apply_compile_plan(
+            inputs, plan, action_key="b" * 64, trigger="manual",
+            coordinator=coordinator, completed_at="2026-07-14T12:00:00Z",
+        )
+    assert len(calls) == int(during_apply)
+    assert prior.read_bytes().endswith(b"green\n")
+    assert not (root / "knowledge/notes/exact-byte-pattern.md").exists()
+    assert not list((root / "knowledge/daily/receipts").glob("*.md"))
+    refreshed = compile_memory.snapshot_compile_inputs([daily])
+    result = compile_memory.apply_compile_plan(
+        refreshed, _plan_with_one_snapshot_claim(root), action_key="c" * 64,
+        trigger="manual", coordinator=coordinator,
+        completed_at="2026-07-14T12:00:00Z",
+    )
+    assert result.state == "committed"
+    assert len(calls) == int(during_apply) + 1
+    assert (root / "knowledge/notes/exact-byte-pattern.md").is_file()

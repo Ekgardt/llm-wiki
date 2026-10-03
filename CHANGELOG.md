@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Stop repeated claim assessment of an immutable compile target snapshot that has already changed; preserve the source for resolution against fresh context and retain transactional conflict checks.
+
 - Avoid calculating discarded lexical weights on the dense search path, retaining identical trust-weighted admission and ranking.
 
 - Choose shared path prefixes by complete answer cost instead of an unsupported character cutoff, preserving exact paths.
