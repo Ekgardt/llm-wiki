@@ -270,6 +270,8 @@ def test_a_second_installer_is_refused_by_the_lock_its_sibling_holds(
 
 
 def test_a_lock_whose_owner_is_gone_is_reclaimed(tmp_path: Path) -> None:
+    from tests.process_identity_fixture import reused_current_process_identity
+
     lock = _lock_file(tmp_path)
     lock.write_bytes(
         canonical_json_bytes(
@@ -277,7 +279,7 @@ def test_a_lock_whose_owner_is_gone_is_reclaimed(tmp_path: Path) -> None:
                 "acquired_at_unix_ns": 0,
                 "nonce": "a" * 32,
                 "pid": os.getpid(),
-                "process_start": "a process that started at another time",
+                "process_start": reused_current_process_identity(),
             }
         )
     )

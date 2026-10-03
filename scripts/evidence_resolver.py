@@ -6,9 +6,11 @@ import json
 import os
 import re
 import stat
+from bisect import bisect_right
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
+from itertools import islice
 from pathlib import Path
 
 from bounded_io import read_stable_bytes
@@ -1027,9 +1029,6 @@ _DAILY_ENTRY_MARKER = b"<!-- llm-wiki-operation:"
 # `docs/research/2026-09-12-a-daily-grows-by-two-kinds-of-entry.md`.
 _DAILY_BLOCK_MARKER = b"\n## "
 
-# A day is bounded, but the scan for a historical slice must be bounded too.
-MAX_EVIDENCE_SLICE_CANDIDATES = 4096
-
 
 def _daily_entry_offsets(content: bytes) -> list[int]:
     """Where each entry starts, the first one covering whatever precedes it."""
@@ -1042,11 +1041,57 @@ def _daily_entry_offsets(content: bytes) -> list[int]:
     return offsets
 
 
+# Where a single entry longer than a part is cut inside itself, best first: a
+# `## ` block start, a blank line, a line end. One transactional append can carry
+# a whole pre-compact summary: on 2026-09-27 one entry was 49 964 bytes, its part
+# exceeded the compile budget, and the refusal stopped every day's compile
+# (docs/research/2026-09-28-a-long-entry-is-cut-inside-itself.md). A day whose
+# entries all fit a part is cut exactly as before, so no existing receipt moves.
+_INNER_SEPARATORS = (b"\n## ", b"\n\n", b"\n")
+
+
+def _character_boundary(content: bytes, start: int, position: int) -> int:
+    """`position`, moved back off a UTF-8 continuation byte, never to `start`."""
+    while position - 1 > start and content[position] & 0xC0 == 0x80:
+        position -= 1
+    return position
+
+
+def _inner_cut(content: bytes, start: int) -> int:
+    """The latest good place, within one part of `start`, for a piece to end."""
+    window = content[start : start + MAX_DAILY_PART_BYTES]
+    for separator in _INNER_SEPARATORS:
+        found = window.rfind(separator)
+        if found > 0:
+            return start + found + 1
+    return _character_boundary(content, start, start + MAX_DAILY_PART_BYTES)
+
+
+def _inner_cuts(content: bytes, start: int, end: int) -> list[int]:
+    """Cuts that leave every piece of one entry no longer than a part; none when it fits."""
+    cuts: list[int] = []
+    while end - start > MAX_DAILY_PART_BYTES:
+        start = _inner_cut(content, start)
+        cuts.append(start)
+    return cuts
+
+
+def _cut_offsets(content: bytes) -> list[int]:
+    """Entry starts, plus the cuts inside any entry longer than a part, and the end."""
+    entries = [*_daily_entry_offsets(content), len(content)]
+    offsets = [entries[0]]
+    for start, end in zip(entries, entries[1:]):
+        offsets.extend(_inner_cuts(content, start, end))
+        offsets.append(end)
+    return offsets
+
+
 def _daily_part_bounds(content: bytes) -> list[tuple[int, int]]:
-    """The byte ranges this day is compiled in, split only where an entry ends."""
+    """The byte ranges this day is compiled in, split where an entry ends or, inside
+    an entry longer than a part, at its latest block, paragraph or line end."""
     if len(content) <= MAX_DAILY_PART_BYTES:
         return [(0, len(content))]
-    offsets = [*_daily_entry_offsets(content), len(content)]
+    offsets = _cut_offsets(content)
     bounds: list[tuple[int, int]] = []
     start = 0
     for index in range(1, len(offsets)):
@@ -1096,9 +1141,8 @@ def _slice_offsets(content: bytes) -> list[int]:
 def _slice_boundaries(content: bytes, start: int) -> list[int]:
     """Where a historical slice beginning at `start` could have ended.
 
-    The end of the file is always a candidate, even when a day carries more
-    entries than the scan is allowed to try: the whole tail is the one slice a
-    compile part is most likely to have been.
+    Every source-aligned end is included. The source's existing byte bound
+    limits discovery; an arbitrary candidate prefix must not hide old evidence.
 
     Sorted and deduplicated because `_slice_from` hashes forward from one
     candidate to the next and needs them ascending.
@@ -1107,13 +1151,13 @@ def _slice_boundaries(content: bytes, start: int) -> list[int]:
     for offset in _slice_offsets(content):
         if offset > start:
             ends.update(end for end in _entry_ends(content, offset) if end > start)
-    return [*sorted(ends)[: MAX_EVIDENCE_SLICE_CANDIDATES - 1], len(content)]
+    return sorted(ends | {len(content)})
 
 
-def _slice_from(content: bytes, start: int, digest: str) -> bytes | None:
+def _slice_from(content: bytes, start: int, digest: str, boundaries: list[int]) -> bytes | None:
     running = hashlib.sha256()
     cursor = start
-    for boundary in _slice_boundaries(content, start):
+    for boundary in islice(boundaries, bisect_right(boundaries, start), None):
         running.update(content[cursor:boundary])
         cursor = boundary
         if running.hexdigest() == digest:
@@ -1130,19 +1174,47 @@ def compile_part_slice(content: bytes, digest: str) -> bytes | None:
     longer part now. Both are one question: is there an entry-aligned slice,
     starting where a part starts, whose bytes still hash to what the page
     recorded? Nothing weaker is accepted — the historical bytes must still be
-    present verbatim and in place, which is the append-only argument a
-    transparency log makes with a consistency proof (RFC 6962).
+    present verbatim and hash to the recorded SHA-256. A quote alone never
+    substitutes for this source proof.
     """
-    return _slice_at(content, [start for start, _end in _daily_part_bounds(content)], digest)
+    bounds = _daily_part_bounds(content)
+    current = _current_part_match(content, bounds, digest)
+    if current is not None:
+        return current
+    return _slice_at(content, [start for start, _end in bounds], digest)
+
+
+def _current_part_match(content: bytes, bounds: list[tuple[int, int]], digest: str) -> bytes | None:
+    """Try exact current parts first; historical matches still need the full scan."""
+    for start, end in bounds:
+        part = content[start:end]
+        if sha256_bytes(part) == digest:
+            return part
+    return None
 
 
 def _slice_at(content: bytes, starts: list[int], digest: str) -> bytes | None:
     """The first entry-aligned slice, from one of these part starts, whose bytes hash to `digest`."""
+    boundaries = _slice_boundaries(content, 0)
     for start in starts:
-        found = _slice_from(content, start, digest)
+        found = _slice_from(content, start, digest, boundaries)
         if found is not None:
             return found
     return None
+
+
+def _historical_part_offsets(content: bytes, source_digest: str) -> tuple[int, int] | None:
+    part = compile_part_slice(content, source_digest)
+    if part is None:
+        return None
+    start = content.find(part)
+    return start, start + len(part)
+
+
+def _part_at_offsets(content: bytes, offsets: tuple[int, int] | None) -> bytes | None:
+    if offsets is None:
+        return None
+    return content[offsets[0]:offsets[1]]
 
 
 class EvidenceResolver:
@@ -1151,6 +1223,9 @@ class EvidenceResolver:
         self.state_root = state_root
         self.daily_root = self.vault / "knowledge" / "daily"
         self.archive_root = self.daily_root / "archive"
+        # Operation-local offsets only. Every lookup re-reads and hashes the
+        # source; even a same-size edit with restored timestamps invalidates it.
+        self._part_offsets: dict[Path, tuple[str, dict[str, tuple[int, int] | None]]] = {}
 
     def resolve(self, reference: EvidenceRef | str) -> ResolvedEvidence:
         ref = EvidenceRef.parse(reference) if isinstance(reference, str) else reference
@@ -1163,12 +1238,25 @@ class EvidenceResolver:
         return self._resolve_flat(ref, content, flat)
 
     def _resolve_flat(self, ref: EvidenceRef, content: bytes, flat: Path):
-        if sha256_bytes(content) == ref.source_sha256:
+        current_digest = sha256_bytes(content)
+        if current_digest == ref.source_sha256:
             return self._slice(ref, content, flat, "flat")
-        part = compile_part_slice(content, ref.source_sha256)
+        part = self._historical_part(flat, content, current_digest, ref.source_sha256)
         if part is None:
             raise EvidenceResolutionError("flat daily source hash mismatch")
         return self._slice(ref, part, flat, "flat-part")
+
+    def _historical_part(
+        self, flat: Path, content: bytes, current_digest: str, source_digest: str
+    ) -> bytes | None:
+        cached = self._part_offsets.get(flat)
+        if cached is None or cached[0] != current_digest:
+            cached = (current_digest, {})
+            self._part_offsets[flat] = cached
+        offsets = cached[1]
+        if source_digest not in offsets:
+            offsets[source_digest] = _historical_part_offsets(content, source_digest)
+        return _part_at_offsets(content, offsets[source_digest])
 
     def resolve_bytes(
         self,

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -24,6 +25,10 @@ if str(SCRIPTS) not in sys.path:
 
 
 NOW = datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc)
+
+
+def _initialize_repository(repository: Path) -> None:
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True, capture_output=True)
 
 
 class _Monotonic:
@@ -139,6 +144,7 @@ def _publish_v2(catalog, generation_id: str) -> tuple[Path, dict[str, object]]:
     vault = catalog.state_root.parent / f"vault-{generation_id}"
     (vault / "knowledge/notes").mkdir(parents=True)
     (vault / "knowledge/projects").mkdir(parents=True)
+    _initialize_repository(vault)
     (vault / "knowledge/notes/page.md").write_text(
         "---\n"
         "type: concept\n"
@@ -531,18 +537,22 @@ def test_validated_candidate_rejects_post_validation_tampering(
     target = directory / ("manifest.json" if mutation == "manifest" else "evidence.sqlite3")
     original = target.read_bytes()
 
-    if mutation == "content":
-        _rewrite_preserving_metadata(target, bytes([original[0] ^ 1]) + original[1:])
-    elif mutation == "replacement":
-        replacement = directory.parent / "replacement.tmp"
-        replacement.write_bytes(original)
-        before = target.stat(follow_symlinks=False)
-        os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
-        os.replace(replacement, target)
-    else:
+    def tamper_candidate():
+        if mutation == "content":
+            _rewrite_preserving_metadata(target, bytes([original[0] ^ 1]) + original[1:])
+            return
+        if mutation == "replacement":
+            replacement = directory.parent / "replacement.tmp"
+            replacement.write_bytes(original)
+            before = target.stat(follow_symlinks=False)
+            os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+            os.replace(replacement, target)
+            return
         changed = original.replace(b"fixture-graph/v1", b"fixture-graph/v2")
         assert changed != original
         _rewrite_preserving_metadata(target, changed)
+
+    tamper_candidate()
 
     with pytest.raises((PermissionError, ValueError), match="changed|identity|validation"):
         catalog._register_validated(candidate)
@@ -1238,6 +1248,7 @@ def test_manifest_accepts_optional_closed_repository_scope(tmp_path):
 
     root = tmp_path / "repository"
     root.mkdir()
+    _initialize_repository(root)
     scope = resolve_repository_scope(root).as_dict()
     catalog = _catalog(tmp_path)
     _directory, manifest = _publish(catalog, "gen-1", repository_scope=scope)
@@ -1264,6 +1275,7 @@ def test_manifest_rejects_invalid_repository_scope(tmp_path, mutate):
 
     root = tmp_path / "repository"
     root.mkdir()
+    _initialize_repository(root)
     scope = resolve_repository_scope(root).as_dict()
     mutate(scope)
     catalog = _catalog(tmp_path)
@@ -1368,16 +1380,24 @@ def test_registration_rejects_missing_wrong_size_or_wrong_hash_artifact(tmp_path
     catalog = _catalog(tmp_path)
     directory, _manifest = _publish(catalog, "gen-1")
     artifact = directory / "search.sqlite3"
-    if damage == "missing":
-        artifact.unlink()
-    elif damage == "size":
-        artifact.write_bytes(b"x")
-    else:
+    def damage_artifact():
+        if damage == "missing":
+            artifact.unlink()
+            return
+        if damage == "size":
+            artifact.write_bytes(b"x")
+            return
         data = artifact.read_bytes()
         artifact.write_bytes(b"X" + data[1:])
 
-    with pytest.raises((ValueError, PermissionError)):
+    damage_artifact()
+
+    with pytest.raises((ValueError, PermissionError)) as refusal:
         catalog.register("gen-1")
+
+    if damage == "missing":
+        assert isinstance(refusal.value.__cause__, FileNotFoundError)
+        assert str(refusal.value) == "declared artifact is missing: search.sqlite3"
 
 
 def test_complete_vectors_reject_missing_declared_vector_artifact(tmp_path):
@@ -1388,8 +1408,28 @@ def test_complete_vectors_reject_missing_declared_vector_artifact(tmp_path):
     manifest["artifacts"].append({"path": "vectors.npy", "size": 10, "sha256": "0" * 64})
     (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
 
-    with pytest.raises((ValueError, PermissionError)):
+    with pytest.raises(ValueError, match="declared artifact is missing: vectors.npy") as refusal:
         catalog.register("gen-1")
+    assert isinstance(refusal.value.__cause__, FileNotFoundError)
+
+
+@pytest.mark.parametrize("phase", ["_remembered", "_hashed"])
+def test_artifact_disappearing_during_validation_keeps_its_missing_cause(tmp_path, monkeypatch, phase):
+    import generation_catalog
+
+    catalog = _catalog(tmp_path)
+    _publish(catalog, "gen-1")
+    original = getattr(generation_catalog._ArtifactScan, phase)
+
+    def remove_after_read(scan, artifact_path, *args, **options):
+        result = original(scan, artifact_path, *args, **options)
+        artifact_path.unlink()
+        return result
+
+    monkeypatch.setattr(generation_catalog._ArtifactScan, phase, remove_after_read)
+    with pytest.raises(ValueError, match="declared artifact is missing: search.sqlite3") as refusal:
+        catalog.register("gen-1")
+    assert isinstance(refusal.value.__cause__, FileNotFoundError)
 
 
 def test_compare_and_swap_has_one_winner_and_rejects_stale_expected_active(tmp_path):
@@ -1554,7 +1594,6 @@ def test_repeated_expired_discard_deadlines_do_not_consume_generation_rows(
     catalog = generation_catalog.GenerationCatalog(
         tmp_path / "state", clock=lambda: NOW, monotonic=monotonic
     )
-    monkeypatch.setattr(generation_catalog, "MAX_GENERATIONS", 2)
 
     for number in range(3):
         generation_id = f"expired-{number}"
@@ -1974,6 +2013,8 @@ def test_get_active_for_repository_answers_from_its_own_generation_without_mutat
     foreign_repository = tmp_path / "foreign"
     requested_repository.mkdir()
     foreign_repository.mkdir()
+    _initialize_repository(requested_repository)
+    _initialize_repository(foreign_repository)
     requested_scope = resolve_repository_scope(requested_repository)
     foreign_scope = resolve_repository_scope(foreign_repository)
     catalog = _catalog(tmp_path)
@@ -2021,6 +2062,8 @@ def test_get_active_for_repository_returns_none_without_its_own_generation(tmp_p
     foreign_repository = tmp_path / "foreign"
     requested_repository.mkdir()
     foreign_repository.mkdir()
+    _initialize_repository(requested_repository)
+    _initialize_repository(foreign_repository)
     requested_scope = resolve_repository_scope(requested_repository)
     foreign_scope = resolve_repository_scope(foreign_repository)
     catalog = _catalog(tmp_path)
@@ -2044,6 +2087,7 @@ def test_get_active_for_repository_repairs_only_to_same_scope_fallback(tmp_path)
 
     repository = tmp_path / "repository"
     repository.mkdir()
+    _initialize_repository(repository)
     scope = resolve_repository_scope(repository)
     catalog = _catalog(tmp_path)
     _publish(catalog, "prior", repository_scope=scope.as_dict())
@@ -2211,7 +2255,7 @@ def test_catalog_explicitly_closes_every_opened_connection(tmp_path, monkeypatch
                 connection.close()
 
 
-def test_catalog_row_ceilings_prevent_generation_and_history_growth(tmp_path, monkeypatch):
+def test_catalog_growth_uses_byte_budget_instead_of_row_ceilings(tmp_path, monkeypatch):
     import generation_catalog
 
     monkeypatch.setattr(generation_catalog, "MAX_GENERATIONS", 2, raising=False)
@@ -2219,25 +2263,15 @@ def test_catalog_row_ceilings_prevent_generation_and_history_growth(tmp_path, mo
     catalog = _catalog(tmp_path)
     for generation_id in ("gen-1", "gen-2", "gen-3"):
         _publish(catalog, generation_id)
-    catalog.register("gen-1")
-    catalog.register("gen-2")
-
-    with pytest.raises(ValueError, match="generation.*ceiling"):
-        catalog.register("gen-3")
+        catalog.register(generation_id)
     assert catalog.activate("gen-1", expected_active=None)
-    with pytest.raises(ValueError, match="history.*ceiling"):
-        catalog.activate("gen-2", expected_active="gen-1")
-
+    assert catalog.activate("gen-2", expected_active="gen-1")
+    assert catalog.activate("gen-3", expected_active="gen-2")
+    assert set(catalog.registered_generation_ids()) == {"gen-1", "gen-2", "gen-3"}
+    assert catalog.activated_generation_ids() == {"gen-1", "gen-2", "gen-3"}
     with closing(sqlite3.connect(catalog.catalog_path)) as database:
-        counts = (
-            database.execute("SELECT COUNT(*) FROM generations").fetchone()[0],
-            database.execute("SELECT COUNT(*) FROM activation_history").fetchone()[0],
-        )
-        pointer = database.execute(
-            "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
-        ).fetchone()[0]
-    assert counts == (2, 1)
-    assert pointer == "gen-1"
+        assert database.execute("SELECT COUNT(*) FROM activation_history").fetchone()[0] == 3
+    assert catalog.get_active()["generation_id"] == "gen-3"
 
 
 def test_catalog_byte_ceiling_rolls_back_large_generation_and_remains_reopenable(tmp_path):
@@ -2738,6 +2772,7 @@ def _scope_at_commit(tmp_path: Path, commit: str):
 
     repository = tmp_path / "repository"
     repository.mkdir(exist_ok=True)
+    _initialize_repository(repository)
     checkout_root = resolve_repository_scope(repository).checkout_root
     git_common_dir = f"{checkout_root}/.git"
     repository_id = derive_repository_id(
@@ -2812,3 +2847,34 @@ def test_a_deep_verdict_answers_a_shallow_question_and_not_the_reverse(tmp_path)
     catalog._validated.update(shallow_only)  # noqa: SLF001
 
     assert catalog._remembered_validation((identifier, True), seal) is None  # noqa: SLF001
+
+
+def test_catalog_listing_interrupts_sql_before_first_row(tmp_path, monkeypatch):
+    catalog = _catalog(tmp_path)
+    _publish(catalog, "gen-1")
+    catalog.register("gen-1")
+    checks = []
+
+    def cancelled():
+        checks.append(True)
+        return len(checks) > 4
+
+    with pytest.raises(TimeoutError, match="cancelled"):
+        catalog.registered_generation_ids(cancelled=cancelled)
+    assert len(checks) == 5
+    assert catalog.registered_generation_ids() == ("gen-1",)
+
+
+def test_catalog_query_deadline_interrupts_sort_and_clears_progress(tmp_path):
+    import generation_catalog
+
+    monotonic = _Monotonic()
+    catalog = generation_catalog.GenerationCatalog(tmp_path / "state", monotonic=monotonic)
+    with closing(sqlite3.connect(":memory:")) as database:
+        database.row_factory = sqlite3.Row
+        database.execute("CREATE TABLE evidence(value INTEGER)")
+        database.executemany("INSERT INTO evidence VALUES (?)", [(3,), (1,), (2,)])
+        monotonic.value = 2.0
+        with pytest.raises(TimeoutError, match="deadline"):
+            catalog._catalog_rows(database, "SELECT value FROM evidence ORDER BY value", 1.0)
+        assert database.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 3

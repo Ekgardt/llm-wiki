@@ -84,6 +84,9 @@ _OPTIONAL_STAGE_KIND_SLOTS = {
 
 def _optional_stage_slots(kind: str | None) -> threading.BoundedSemaphore:
     """The straggler slots this stage competes for; unlabelled work shares one pool."""
+    # Separate measured costs, one cross-encoder and the same concurrency bound.
+    if kind == "rerank_events":
+        kind = "rerank"
     return _OPTIONAL_STAGE_KIND_SLOTS.get(kind, _OPTIONAL_STAGE_SLOTS)
 
 
@@ -2033,7 +2036,8 @@ def _run_graph_backend(
         )
     except (TimeoutError, GenerationSealChanged):
         raise
-    except Exception:  # noqa: BLE001 - a broken graph degrades one signal only
+    except Exception as exc:  # noqa: BLE001 - a broken graph degrades one signal only
+        _note_degradation("graph_backend", exc)
         return None, False, False, "graph_error"
     return _prepared_graph_outcome(
         raw_hits,
@@ -2223,6 +2227,7 @@ def _run_reranker(
     pool_limit: int,
     deadline_monotonic: float | None,
     cancelled: Callable[[], bool] | None,
+    source_stage: str | None = None,
 ) -> Sequence[Mapping[str, Any]]:
     from reranker import rerank as _rerank
 
@@ -2241,36 +2246,51 @@ def _run_reranker(
     # itself. Abandoning only stops the caller waiting: the thread keeps
     # scoring, on the same four cores as the answer that is now being built
     # without it. Told when to stop, it stops between batches instead.
-    stage_deadline = _optional_stage_deadline(deadline_monotonic)
-    worker_deadline = _rerank_worker_deadline(stage_deadline)
+    stage_deadline = _source_rerank_deadline(deadline_monotonic, source_stage)
+    kind = source_stage or "rerank"
+    worker_deadline = _rerank_worker_deadline(stage_deadline, kind=kind)
     return _run_optional_bounded(
         lambda: call(worker_deadline),
         deadline=stage_deadline,
         cancelled=cancelled,
-        kind="rerank",
+        kind=kind,
         observes=_rerank_scored,
     )
 
 
-def _rerank_worker_deadline(stage_deadline: float) -> float:
+def _source_rerank_deadline(deadline: float, source_stage: str | None) -> float:
+    """Sequential source passes spend the remaining budget, keeping the measured tail.
+
+    The old half-share twice refused warm event scoring under the normal MCP
+    deadline. The paired experiment keeps that deadline, stage ceiling and
+    mandatory tail reserve; it introduces no longer request or extra thread.
+    See docs/research/2026-09-29-breadcrumb-durability-proposal.md.
+    """
+    if source_stage is None:
+        return _optional_stage_deadline(deadline)
+    return min(deadline - OPTIONAL_STAGE_TAIL_RESERVE_SECONDS,
+               time.monotonic() + OPTIONAL_STAGE_MAX_SECONDS)
+
+
+def _rerank_worker_deadline(stage_deadline: float, *, kind: str = "rerank") -> float:
     """When the rerank itself stops: the window, once to learn its cost, or never started.
 
     A straggler told to stop at the caller's window never finished under load,
     so it never recorded a cost and was started and cut on every call (audit
     B-17, docs/research/2026-09-25-a-rerank-that-cannot-fit-is-not-started.md).
     """
-    if _optional_stage_fits("rerank", stage_deadline):
+    if _optional_stage_fits(kind, stage_deadline):
         return stage_deadline
-    if _rerank_cost_worth_learning():
+    if _rerank_cost_worth_learning(kind):
         return time.monotonic() + OPTIONAL_STAGE_MAX_SECONDS
     raise OptionalStageNotAdmitted("the rerank is known not to fit this window")
 
 
-def _rerank_cost_worth_learning() -> bool:
+def _rerank_cost_worth_learning(kind: str = "rerank") -> bool:
     """No cost yet, or one old enough that the model may be warm again."""
-    if _observed_optional_stage_cost("rerank") is None:
+    if _observed_optional_stage_cost(kind) is None:
         return True
-    return _observed_cost_is_stale("rerank")
+    return _observed_cost_is_stale(kind)
 
 
 def _rerank_scored(reranked: Sequence[Mapping[str, Any]]) -> bool:
@@ -2311,15 +2331,101 @@ def _reranked_candidates(
     if not apply:
         trace.fallback_reason = skip_reason
         return tuple(candidates)
-    reranked = _run_reranker(
-        rows,
+    options = dict(
         query=analysis.normalized_query or analysis.query,
         pool_limit=_rerank_pool_limit(limit, max_candidates),
         deadline_monotonic=deadline_monotonic,
         cancelled=cancelled,
     )
-    _check_stopped(deadline_monotonic, cancelled)
+    return _rerank_admitted_sources(candidates, rows, trace, options)
+
+
+def _rerank_admitted_sources(candidates, rows, trace, options):
+    primary, events = _rerank_source_groups(candidates)
+    if primary and events:
+        return _rerank_breadcrumb_groups(candidates, rows, primary, events, trace, options)
+    ordered = primary or events
+    reranked = _run_reranker(_aligned_rerank_rows(ordered, rows), **options)
+    _check_stopped(options["deadline_monotonic"], options["cancelled"])
     return _candidates_after_rerank(candidates, reranked, trace)
+
+
+def _breadcrumb_candidate(candidate: RetrievalCandidate) -> bool:
+    """The corpus admits only verified linked evidence under this private root."""
+    return candidate.relative_path.startswith("knowledge/raw/sessions/")
+
+
+def _rerank_source_groups(candidates):
+    primary = _source_candidates(candidates, events=False)
+    events = _source_candidates(candidates, events=True)
+    # Trust remains in the final score. It must not hide the semantic match
+    # before the model can see it (the reproduced cross-language failure).
+    primary.sort(key=_semantic_admission_order)
+    events.sort(key=_semantic_admission_order)
+    return primary, events
+
+
+def _semantic_admission_order(candidate: RetrievalCandidate) -> float:
+    """Semantic relevance admits; provenance still weighs the model's final score."""
+    return -(candidate.vector_score or 0.0)
+
+
+def _aligned_rerank_rows(candidates, rows):
+    by_id = {row["candidate_id"]: row for row in rows}
+    return [by_id[item.candidate_id] for item in candidates]
+
+
+def _source_candidates(candidates, *, events: bool):
+    return [item for item in candidates if _breadcrumb_candidate(item) == events]
+
+
+def _rerank_breadcrumb_groups(candidates, rows, primary, events, trace, options):
+    by_id = {row["candidate_id"]: row for row in rows}
+    base = _rerank_source_group(primary, by_id, "rerank", trace, options)
+    if not trace.applied:
+        return tuple(candidates)
+    secondary = _RerankTrace()
+    supporting = _rerank_source_group(events, by_id, "rerank_events", secondary, options)
+    _merge_source_rerank_trace(trace, secondary)
+    return _merge_source_reranks(candidates, base, supporting)
+
+
+def _rerank_source_group(candidates, by_id, kind, trace, options):
+    rows = [by_id[item.candidate_id] for item in candidates]
+    try:
+        reranked = _run_reranker(rows, source_stage=kind, **options)
+        _check_stopped(options["deadline_monotonic"], options["cancelled"])
+        return _candidates_after_rerank(candidates, reranked, trace)
+    except OptionalStageTimeout as stopped:
+        trace.fallback_reason = stopped.reason
+        trace.optional_timeout = stopped.partial
+        trace.optional_reason = stopped.reason
+    except TimeoutError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - retain the completed primary pass
+        _note_degradation("reranker", exc)
+        trace.fallback_reason = "reranker_error"
+    return tuple(candidates)
+
+
+def _merge_source_rerank_trace(primary: _RerankTrace, secondary: _RerankTrace) -> None:
+    _add_source_rerank_measurements(primary, secondary)
+    primary.fallback_reason = secondary.fallback_reason or primary.fallback_reason
+    primary.optional_timeout = secondary.optional_timeout or primary.optional_timeout
+    primary.optional_reason = secondary.optional_reason or primary.optional_reason
+
+
+def _add_source_rerank_measurements(primary: _RerankTrace, secondary: _RerankTrace) -> None:
+    primary.depth = (primary.depth or 0) + (secondary.depth or 0)
+    primary.duration_ms = (primary.duration_ms or 0) + (secondary.duration_ms or 0)
+
+
+def _merge_source_reranks(original, primary, events):
+    # The same cross-encoder, sigmoid, fusion blend and provenance weights
+    # produce comparable scores: no per-pool normalization or output quota.
+    scored = [item for item in (*primary, *events) if item.rerank_score is not None]
+    scored.sort(key=lambda item: (-item.final_score, item.candidate_id))
+    return (*scored, *_below_rerank_pool(original, scored))
 
 
 def _candidates_after_rerank(
@@ -2388,7 +2494,8 @@ def _apply_reranking(
         trace.optional_reason = stopped.reason
     except TimeoutError:
         raise
-    except Exception:  # noqa: BLE001 - a failed reranker keeps the fused order
+    except Exception as exc:  # noqa: BLE001 - a failed reranker keeps the fused order
+        _note_degradation("reranker", exc)
         trace.fallback_reason = "reranker_error"
     return tuple(candidates)
 
@@ -3706,8 +3813,15 @@ def _diversity_groups(
     """
     groups: list[list[RetrievalCandidate]] = []
     for tier in _scored_then_unseen(candidates):
-        groups.extend(_by_kind(tier))
+        groups.extend(_reranked_source_kinds(tier))
     return tuple(groups)
+
+
+def _reranked_source_kinds(candidates):
+    """A scored event competes by relevance; unscored evidence retains its tier."""
+    if any(_breadcrumb_candidate(item) and item.rerank_score is not None for item in candidates):
+        return (list(candidates),)
+    return _by_kind(candidates)
 
 
 def _scored_then_unseen(
@@ -4562,7 +4676,8 @@ def _neighbour_boost_or_none(
         return _neighbour_boost_hits(lexical_backend, filters)
     except TimeoutError:
         raise
-    except Exception:  # noqa: BLE001 - the graph signal degrades on its own
+    except Exception as exc:  # noqa: BLE001 - the graph signal degrades on its own
+        _note_degradation("graph_neighbours", exc)
         return None
 
 

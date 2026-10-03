@@ -31,7 +31,6 @@ from reliable_memory import (
     open_operational_db,
     sha256_bytes,
     validate_schema,
-    validate_state_root,
 )
 from settings import raise_hint, setting_value
 
@@ -1025,8 +1024,10 @@ class ClaimIndex:
     ) -> None:
         if time.monotonic() >= deadline or bool(cancelled and cancelled()):
             raise TimeoutError("claim rebuild cancelled or deadline reached")
-        validate_state_root(self.path.parent)
-        _restrict_owner_only(self.path.parent, 0o700)
+        # The established database-open boundary validates the actual parent.
+        # It also remains importable by processes holding the previous module.
+        with closing(self._connect()):
+            pass
         with _exclusive_file_lock(self.lock_path):
             pages = self._rebuild_pages(sources)
             self._rebuild_locked(pages, deadline=deadline, cancelled=cancelled)

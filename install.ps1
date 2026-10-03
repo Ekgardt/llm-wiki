@@ -25,9 +25,14 @@
 param(
     [switch]$ProtectPush,
     [switch]$ConfirmAllAgentsStopped,
+    # Replace a Codex 'llm-wiki' MCP entry this product did not write, keeping a preimage.
+    [switch]$ReplaceCodexMcp,
     # The operator takes over a file changed outside the installer as it is now;
     # see docs/research/2026-09-28-a-rollback-undoes-only-what-it-did.md.
-    [string[]]$Adopt = @()
+    [string[]]$Adopt = @(),
+    # The memory model, checked with one short call; without it the installer asks on
+    # a console. See docs/research/2026-09-29-the-installer-asks-which-model.md.
+    [string]$Model = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,6 +63,11 @@ function Get-ClaudeStatusLine {
     param([bool]$Automatic, [string]$McpState)
     if (-not $Automatic) { return "Claude Code: not wired (install transaction failed)" }
     if ($McpState -eq "current") { return "Claude Code: active automatic" }
+    return Get-ClaudeMcpRegistrationLine -McpState $McpState
+}
+
+function Get-ClaudeMcpRegistrationLine {
+    param([string]$McpState)
     if ($McpState -eq "elsewhere") { return "Claude Code: hooks active; MCP entry points at another vault" }
     return "Claude Code: hooks active; MCP server not registered"
 }
@@ -95,22 +105,30 @@ function Invoke-NativeCommand {
     if (@($ArgumentList | Where-Object { [string]::IsNullOrEmpty($_) }).Count -gt 0) {
         throw "$FilePath was given an empty argument; omit the flag instead"
     }
+    $result = @{ ExitCode = 0; Output = $null }
+    Invoke-NativeProcess -FilePath $FilePath -ArgumentList $ArgumentList -CaptureOutput:$CaptureOutput -Result $result
+    if ($AllowedExitCodes -notcontains $result.ExitCode) {
+        throw "$FilePath failed with exit code $($result.ExitCode)"
+    }
+    Write-NativeResult -Result $result -ReturnResult:$ReturnResult -CaptureOutput:$CaptureOutput
+}
+
+function Invoke-NativeProcess {
+    param([string]$FilePath, [string[]]$ArgumentList, [switch]$CaptureOutput, [hashtable]$Result)
     if ($CaptureOutput) {
         $output = @(& $FilePath @ArgumentList)
-    } else {
-        & $FilePath @ArgumentList
+        $Result.ExitCode = $LASTEXITCODE
+        $Result.Output = $output -join [Environment]::NewLine
+        return
     }
-    $nativeExit = $LASTEXITCODE
-    if ($AllowedExitCodes -notcontains $nativeExit) {
-        throw "$FilePath failed with exit code $nativeExit"
-    }
-    if ($ReturnResult) {
-        return [pscustomobject]@{
-            ExitCode = $nativeExit
-            Output = if ($CaptureOutput) { $output -join [Environment]::NewLine } else { $null }
-        }
-    }
-    if ($CaptureOutput) { return ($output -join [Environment]::NewLine) }
+    & $FilePath @ArgumentList
+    $Result.ExitCode = $LASTEXITCODE
+}
+
+function Write-NativeResult {
+    param([hashtable]$Result, [switch]$ReturnResult, [switch]$CaptureOutput)
+    if ($ReturnResult) { return [pscustomobject]$Result }
+    if ($CaptureOutput) { return $Result.Output }
 }
 # A failed fetch used to leave the directory `git init` had made, and the next
 # attempt stopped at "already exists" with no way forward. The directory is ours
@@ -213,17 +231,58 @@ function Get-CodexInlineHooksState(
     if ($LASTEXITCODE -ne 0 -or -not $state) { return "unknown" }
     return $state
 }
+# This product's own earlier entry (`stale`) is rewritten to this vault's; an entry the
+# operator wrote is replaced only with -ReplaceCodexMcp. Either way the previous file
+# is kept as a verified preimage beside config.toml. The function is self-contained:
+# the installer tests run it alone. See docs/research/2026-09-28-a-check-names-its-cause.md.
 function Install-CodexMcp(
     [string]$VaultRoot,
-    [string]$Config
+    [string]$Config,
+    [bool]$ReplaceForeign = $false
 ) {
+    $result = Get-CodexMcpInstallState -VaultRoot $VaultRoot -Config $Config -ReplaceForeign $ReplaceForeign
+    if ($result.ExitCode -ne 0) { return $result.ExitCode }
+    $script:codexMcpState = $result.State
+    if ($result.State -eq "absent") { return Add-CodexMcpEntry -VaultRoot $VaultRoot -Config $Config }
+    return Complete-CodexMcpInstall -State $result.State
+}
+
+function Complete-CodexMcpInstall {
+    param([string]$State)
+    if ($State -in @("equivalent", "replaced")) { return 0 }
+    return 2
+}
+
+function Get-CodexMcpInstallState {
+    param([string]$VaultRoot, [string]$Config, [bool]$ReplaceForeign)
     $state = (& uv run --locked --no-sync --directory $VaultRoot python (Join-Path $VaultRoot "scripts\codex_memory.py") `
         config-state --config $Config --vault-root $VaultRoot | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0) { return 1 }
-    if ($state -eq "equivalent") { return 0 }
-    if ($state -in @("conflict", "invalid")) { return 2 }
-    if ($state -ne "absent") { return 1 }
+    if ($LASTEXITCODE -ne 0) { return @{ ExitCode = 1; State = $state } }
+    if ($state -in @("stale", "conflict")) {
+        return Update-CodexMcpEntry -VaultRoot $VaultRoot -Config $Config -ReplaceForeign $ReplaceForeign
+    }
+    return @{ ExitCode = 0; State = $state }
+}
 
+function Update-CodexMcpEntry {
+    param([string]$VaultRoot, [string]$Config, [bool]$ReplaceForeign)
+    $replaceArguments = @("config-replace", "--config", $Config, "--vault-root", $VaultRoot)
+    if ($ReplaceForeign) { $replaceArguments += "--foreign" }
+    $state = (& uv run --locked --no-sync --directory $VaultRoot python (Join-Path $VaultRoot "scripts\codex_memory.py") `
+        @replaceArguments | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) { return @{ ExitCode = 1; State = $state } }
+    return @{ ExitCode = 0; State = $state }
+}
+
+function Get-CodexMcpSeparator {
+    param([string]$Existing)
+    if ([string]::IsNullOrEmpty($Existing)) { return "" }
+    if ($Existing.EndsWith("`n")) { return "`n" }
+    return "`n`n"
+}
+
+function Add-CodexMcpEntry {
+    param([string]$VaultRoot, [string]$Config)
     $directory = Split-Path $Config -Parent
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
     $tomlVault = $VaultRoot.Replace("\", "\\").Replace('"', '\"')
@@ -236,13 +295,7 @@ args = ["run", "--locked", "--no-sync", "--directory", "$tomlVault", "python", "
     if (Test-Path $Config) {
         Copy-Item -LiteralPath $Config -Destination "$Config.bak" -Force
         $existing = [System.IO.File]::ReadAllText($Config)
-        $separator = if ([string]::IsNullOrEmpty($existing)) {
-            ""
-        } elseif ($existing.EndsWith("`n")) {
-            "`n"
-        } else {
-            "`n`n"
-        }
+        $separator = Get-CodexMcpSeparator -Existing $existing
         [System.IO.File]::AppendAllText($Config, $separator + $block + "`n", $encoding)
     } else {
         [System.IO.File]::WriteAllText($Config, $block + "`n", $encoding)
@@ -303,7 +356,9 @@ if ($scriptDirectory -and (Test-Path -LiteralPath (Join-Path $scriptDirectory "p
     )
     if ($ProtectPush) { $reexecArguments += "-ProtectPush" }
     if ($ConfirmAllAgentsStopped) { $reexecArguments += "-ConfirmAllAgentsStopped" }
+    if ($ReplaceCodexMcp) { $reexecArguments += "-ReplaceCodexMcp" }
     foreach ($resourceId in $Adopt) { $reexecArguments += @("-Adopt", $resourceId) }
+    if ($Model) { $reexecArguments += @("-Model", $Model) }
     try {
         & $hostExecutable @reexecArguments
         $nativeExit = $LASTEXITCODE
@@ -391,7 +446,7 @@ $testFailure = $null
 try {
     $testProcess = Start-Process `
         -FilePath "uv" `
-        -ArgumentList "run --locked --no-sync python scripts/install_smoke.py --deadline-seconds $smokeDeadlineSeconds" `
+        -ArgumentList "run --locked --no-sync python scripts/install_smoke.py --deadline-seconds $smokeDeadlineSeconds --report `"$(Join-Path $STATE_ROOT 'logs\install-smoke.json')`"" `
         -NoNewWindow `
         -PassThru
     # Windows PowerShell 5.1 needs an open handle to retain a fast process's exit code.
@@ -472,6 +527,22 @@ New-Item -ItemType Directory -Path "$STATE_ROOT\run" -Force | Out-Null
 New-Item -ItemType Directory -Path "$STATE_ROOT\logs" -Force | Out-Null
 New-Item -ItemType Directory -Path "$STATE_ROOT\cache" -Force | Out-Null
 Ok "LLM_WIKI_ROOT set (User scope); runtime at $STATE_ROOT\{run,logs,cache} (gitignored)"
+
+# --- 5a. Choose the memory model ---------------------------------
+
+# The provider's own list (Claude: each alias asked once); the answer is exported so
+# the install transaction persists it into the hooks' env and the scheduled tasks.
+Info "Choosing the model the memory pipeline calls..."
+$chooserArgs = @("run", "--locked", "--no-sync", "--directory", $VAULT_ROOT, "python",
+    (Join-Path $VAULT_ROOT "scripts\choose_model.py"), "--home", $env:USERPROFILE)
+if ($Model) { $chooserArgs += @("--model", $Model) }
+$modelChoice = (& uv @chooserArgs | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) { Fail "Model choice failed" }
+$modelAnswer = $modelChoice | ConvertFrom-Json
+if ($modelAnswer.variable -and $modelAnswer.model) {
+    Set-Item -Path "Env:$($modelAnswer.variable)" -Value $modelAnswer.model
+    Ok "Memory model: $($modelAnswer.model)"
+}
 
 # --- 6. Register Task Scheduler -----------------------------------
 
@@ -557,14 +628,14 @@ if (Get-Command codex -ErrorAction SilentlyContinue) {
     $codexConfig = Join-Path $env:USERPROFILE ".codex\config.toml"
     $codexDir = Split-Path $codexConfig -Parent
     New-Item -ItemType Directory -Path $codexDir -Force | Out-Null
-    $codexMcpExit = Install-CodexMcp -VaultRoot $VAULT_ROOT -Config $codexConfig
+    $codexMcpExit = Install-CodexMcp -VaultRoot $VAULT_ROOT -Config $codexConfig -ReplaceForeign ([bool]$ReplaceCodexMcp)
     if ($codexMcpExit -eq 0) {
         $codexMcpReady = $true
         Ok "Codex MCP config verified -> $codexConfig"
-    } elseif ($codexMcpExit -eq 2) {
-        Warn "Existing Codex MCP entry conflicts with LLM-Wiki; config.toml was not changed. Merge manually."
     } else {
-        Warn "Codex MCP config could not be verified; config.toml was not changed."
+        # The helper's own line for the state the entry was left in; none asks for a manual merge.
+        $mcpState = if ($codexMcpExit -eq 2) { $script:codexMcpState } else { "unverified" }
+        Warn ((uv run --locked --no-sync --directory $VAULT_ROOT python (Join-Path $VAULT_ROOT "scripts\codex_memory.py") config-advice --state $mcpState | Out-String).Trim())
     }
     $codexHooks = Join-Path $codexDir "hooks.json"
     if ($codexHooksState -eq "absent") {
@@ -666,8 +737,11 @@ $adoptCommand = "uv run --locked --no-sync python scripts/repair_installed_memor
 # which the repair resumes) is adopted only when the operator said so to the installer.
 # See docs/research/2026-09-17-the-installer-does-not-vouch-for-agents-it-cannot-see.md.
 function Get-AdoptionPlan([string]$State, [bool]$Confirmed) {
-    if ($State -eq "adopted") { return "adopted" }
-    if ($State -eq "fresh") { return "adopt" }
+    $ready = @{ adopted = "adopted"; fresh = "adopt" }
+    if ($ready.ContainsKey($State)) { return $ready[$State] }
+    return Get-ExistingAdoptionPlan -State $State -Confirmed $Confirmed
+}
+function Get-ExistingAdoptionPlan([string]$State, [bool]$Confirmed) {
     if ($State -notin @("upgrade-required", "partial")) { return "unknown" }
     if ($Confirmed) { return "adopt" }
     return "ask"
@@ -695,8 +769,10 @@ if ($adoptionPlan -eq "adopted") {
     }
 } else {
     $syncWarning = $true
-    Warn "Reliability V3 state is '$adoptionState'; session capture is disabled until adoption runs:"
-    Warn "  uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json"
+    # The check's own line says what the state means; the installer claims no more.
+    # See docs/research/2026-09-28-a-check-names-its-cause.md.
+    Warn ((uv run --locked --no-sync python "$VAULT_ROOT\scripts\repair_installed_memory.py" --check --summary 2>$null) | Out-String).Trim()
+    Warn "  details: uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json"
 }
 
 # --- 8a. Pinned model weights ------------------------------------
@@ -711,6 +787,20 @@ switch ($LASTEXITCODE) {
     0 { Ok "Model weights step done" }
     2 { Info "huggingface_hub is not installed; model weights are fetched once it is" }
     default { Warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" }
+}
+
+# A managed Pyright the operator installed earlier is validated, and repaired when
+# its receipt is from before the tree digest (`install_pyright.py` retires such an
+# install and reinstalls the pinned release). Nothing is installed where the operator
+# never installed it: that stays an explicit action.
+# See docs/research/2026-09-28-a-check-names-its-cause.md.
+if (Test-Path -LiteralPath (Join-Path $STATE_ROOT "cache\code-tools\pyright") -PathType Container) {
+    $pyrightReport = (uv run --locked --no-sync python "$VAULT_ROOT\scripts\install_pyright.py" --state-root $STATE_ROOT 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -eq 0) {
+        Ok "Managed Pyright verified"
+    } else {
+        Warn "Managed Pyright could not be verified or repaired: $pyrightReport"
+    }
 }
 
 # --- 8b. Bounded runtime sync -------------------------------------
@@ -733,8 +823,9 @@ Write-Host "==============================================" -ForegroundColor Gre
 if ($syncWarning -or $schedulerWarning) {
     Write-Host "  LLM-Wiki installed with warnings" -ForegroundColor Yellow
     if ($syncWarning) {
-        Write-Host "  The runtime synchronization ran after every other step and named the checks that need"
-        Write-Host "  attention (the doctor line above). For the state now: uv run --locked --no-sync python scripts/doctor.py"
+        Write-Host "  The install completed; this is not a failure (a failure stops with [FAIL] and exit 1)."
+        Write-Host "  The [WARN] lines above and the doctor line name what needs attention now."
+        Write-Host "  For the state now: uv run --locked --no-sync python scripts/doctor.py"
     }
 } else {
     Write-Host "  LLM-Wiki installed successfully!" -ForegroundColor Green
@@ -761,10 +852,8 @@ Write-Host "  1. Restart terminal"
 Write-Host "  2. Open a project in your agent"
 Write-Host "  3. Review the integration states above; automatic capture runs only for active automatic entries"
 Write-Host ""
-Write-Host "MCP baseline: 12 local task-shaped tools (installed)"
-Write-Host "Optional enhancements:"
-Write-Host "  uv sync --locked --no-default-groups --inexact --extra hybrid"
-Write-Host "  uv sync --locked --no-default-groups --inexact --extra code-graph"
-Write-Host "  uv sync --locked --no-default-groups --inexact --extra reranker"
+Write-Host "MCP: 12 local task-shaped tools; every component is installed, with Pyright for Python"
+Write-Host "Code navigation in another language (one command each, when you need it):"
+Write-Host "  uv run --locked --no-sync python scripts/install_language_server.py --profile <typescript|gopls|rust-analyzer>"
 Write-Host ""
 if ($schedulerWarning) { exit 1 }

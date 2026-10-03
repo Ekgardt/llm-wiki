@@ -71,9 +71,6 @@ MAX_NODE_FILTER = 512
 # aggregate refuses by name through the same `limit + 1` fetch; it is never
 # silently truncated.
 MAX_AGGREGATE_ROWS = 200_000
-# Bounded caller-supplied name-prefix exclusions for `nodes_without_edges` (untrusted
-# input); more are refused. Basis unknown: value predates measurement.
-MAX_NAME_PREFIX_FILTER = 32
 # Units of traversal work one walk may spend before it is refused by name, never
 # truncated. Basis unknown: value predates measurement.
 MAX_WORK = 100_000
@@ -2378,11 +2375,6 @@ def _argument_binding_row(row: sqlite3.Row) -> dict[str, object]:
 def _validated_prefix_values(prefixes: object) -> tuple[str, ...]:
     if isinstance(prefixes, (str, bytes)) or not isinstance(prefixes, Sequence):
         raise ValueError("exclude_name_prefixes must be a bounded sequence")
-    if len(prefixes) > MAX_NAME_PREFIX_FILTER:
-        raise ValueError(
-            f"exclude_name_prefixes cannot contain more than "
-            f"{MAX_NAME_PREFIX_FILTER} values"
-        )
     return tuple(sorted({_text(value, "name prefix", maximum=256) for value in prefixes}))
 
 
@@ -2399,9 +2391,15 @@ def _name_prefix_exclusions(prefixes: Sequence[str], parameters: list[object]) -
     convention that a `test_` function is not a dead-code candidate.
     """
     values = _validated_prefix_values(prefixes)
-    parameters.extend(_like_prefix(value) for value in values)
-    clause = " AND json_extract(metadata_json, '$.name') NOT LIKE ? ESCAPE '\\'"
-    return clause * len(values)
+    if not values:
+        return ""
+    parameters.append(json.dumps([_like_prefix(value) for value in values]))
+    return (
+        " AND json_extract(metadata_json, '$.name') IS NOT NULL"
+        " AND NOT EXISTS (SELECT 1 FROM json_each(?) AS excluded_prefix"
+        " WHERE json_extract(metadata_json, '$.name') LIKE excluded_prefix.value"
+        " ESCAPE '\\')"
+    )
 
 
 def _without_edge_clause(

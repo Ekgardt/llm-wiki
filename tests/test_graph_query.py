@@ -123,11 +123,10 @@ class TestParseRefusalsAreNamed:
         with pytest.raises(ValueError, match="direction must be 'in' or 'out'"):
             graph_query.parse_graph_query(query)
 
-    def test_more_than_max_hops_is_refused(self) -> None:
+    def test_four_hops_use_the_same_closed_grammar(self) -> None:
         hop = '{"edge": "calls", "direction": "in"}'
         query = f'{{"start": {{"name": "x"}}, "hops": [{hop}, {hop}, {hop}, {hop}]}}'
-        with pytest.raises(ValueError, match="at most 3 hops"):
-            graph_query.parse_graph_query(query)
+        assert len(graph_query.parse_graph_query(query)["hops"]) == 4
 
     def test_limit_bounds_are_enforced(self) -> None:
         with pytest.raises(ValueError, match="between 1 and 200"):
@@ -142,6 +141,11 @@ class TestParseRefusalsAreNamed:
 
 
 class TestBoundedExecution:
+    def test_an_empty_frontier_still_obeys_the_deadline(self, fake_graph: _FakeGraph) -> None:
+        plan = {"hops": [{"edge": "CALLS", "direction": "out"}] * 4, "limit": 50}
+        with pytest.raises(TimeoutError, match="graph query deadline"):
+            graph_query._executed_hops(fake_graph, plan, [], time.monotonic() - 1)
+
     def test_one_hop_in_returns_the_callers(self, fake_graph: _FakeGraph) -> None:
         answer = _run(
             {"start": {"name": "beta"}, "hops": [{"edge": "calls", "direction": "in"}]}

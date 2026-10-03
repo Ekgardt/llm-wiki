@@ -8,6 +8,7 @@ import hmac
 import json
 import os
 import re
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -296,7 +297,22 @@ def require_safe_model_output(text: str, policy: DLPPolicy) -> None:
         return
     scrubbed = _scrubbed(text, policy)
     if scrubbed != text and not _findings_allowlisted(text, scrubbed, policy):
-        raise DLPContentBlocked("model output contains protected content")
+        raise DLPContentBlocked(
+            f"model output contains protected content ({_finding_kinds(text, scrubbed)})"
+        )
+
+
+_MARKER_RE = re.compile(r"\[REDACTED[A-Z_]*\]")
+
+
+def _finding_kinds(text: str, scrubbed: str) -> str:
+    """Which rules fired, by their markers and counts, never the content they matched.
+
+    A refusal that named nothing left 72 captures on the live vault blocked on
+    every retry with no way to tell a real secret from a false positive.
+    """
+    counts = Counter(_MARKER_RE.findall(scrubbed)) - Counter(_MARKER_RE.findall(text))
+    return ", ".join(f"{marker.strip('[]')} x{counts[marker]}" for marker in sorted(counts)) or "unnamed"
 
 
 def require_safe_content(content: bytes, policy: DLPPolicy) -> None:

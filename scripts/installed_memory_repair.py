@@ -19,8 +19,10 @@ import memory_queue
 from bounded_io import read_stable_bytes
 from install_control import validate_install_state
 from reliable_memory import (
+    OPERATIONAL_SCAN_BATCH_ROWS,
     OperationalDatabaseContract,
     canonical_json_bytes,
+    capture_operational_database_identity,
     capture_runtime_file_identity,
     durable_publish_file,
     open_readonly_operational_db,
@@ -32,6 +34,7 @@ from reliable_memory import (
     validate_schema,
     validate_state_root,
 )
+from secret_redact import describe_error_chain
 
 if TYPE_CHECKING:
     from operational_ownership import OwnerLease
@@ -50,11 +53,9 @@ _MAX_RECORD_BYTES = 64 * 1024
 # candidate and one retired file per database (four), so 32 means a broken run
 # directory. Past it the listing sets its overflow flag and the check refuses.
 _MAX_OPERATION_ARTIFACTS = 32
-# The same bounds as doctor.MAX_OPERATIONAL_DB_BYTES and MAX_RUNTIME_ENTRIES, whose
-# comments give their basis: both read the same databases and directories. Repeated
-# because doctor imports this module lazily to stay importable without the queue and
-# transaction modules; keep the pairs equal. A scan past a bound raises, never judges
-# from entries unseen. Table rows have no count cap: they are streamed (`_scanned_rows`).
+# Whole-file artifact reads remain byte-bounded; mutable adopted SQLite
+# admission instead validates identity/schema through page-based reads.
+# Runtime entry traversal keeps the same bound as doctor.MAX_RUNTIME_ENTRIES.
 _MAX_OPERATIONAL_DB_BYTES = 256 * 1024 * 1024
 _MAX_RUNTIME_ENTRIES = 10_000
 # The same bound as memory_state.MAX_CAPTURE_INTENT_BYTES (the hook writes intents
@@ -274,10 +275,11 @@ def _validate_artifact_reference(
     expected_path: Path,
     state_root: Path,
     mutable: bool,
-    max_bytes: int,
+    max_bytes: int | None,
 ) -> bytes | None:
     artifact = _require_artifact_record(record, expected_path, state_root)
-    actual_identity = capture_runtime_file_identity(expected_path, state_root=state_root)
+    identity_reader = capture_operational_database_identity if mutable else capture_runtime_file_identity
+    actual_identity = identity_reader(expected_path, state_root=state_root)
     _validate_artifact_identity(artifact, actual_identity, mutable)
     if mutable:
         return None
@@ -335,43 +337,71 @@ def _validate_immutable_artifact(
     return payload
 
 
-def _validate_active_database_reference(
-    record: dict[str, object],
-    *,
-    database_name: str,
-    path: Path,
-    state_root: Path,
-) -> None:
+@contextlib.contextmanager
+def _active_database_snapshot(record: dict[str, object], *, database_name: str, path: Path, state_root: Path) -> Iterator[sqlite3.Connection]:
     _validate_artifact_reference(
         record.get("active"),
         expected_path=path,
         state_root=state_root,
         mutable=True,
-        max_bytes=_MAX_OPERATIONAL_DB_BYTES,
+        max_bytes=None,
     )
-    contract = _database_contract(database_name)
     with contextlib.closing(
         open_readonly_operational_db(
             path,
             state_root,
-            max_bytes=_MAX_OPERATIONAL_DB_BYTES,
+            max_bytes=None,
             owner_only=True,
-            contract=contract,
+            contract=_database_contract(database_name),
         )
     ) as database:
-        complete = _database_schema_complete(database_name, database)
-        integrity = database.execute("PRAGMA integrity_check").fetchall()
-        foreign_keys = database.execute("PRAGMA foreign_key_check").fetchall()
-        observed = {
-            "application_id": database.execute("PRAGMA application_id").fetchone()[0],
-            "user_version": database.execute("PRAGMA user_version").fetchone()[0],
-            "journal_mode": database.execute("PRAGMA journal_mode").fetchone()[0],
-            "synchronous": database.execute("PRAGMA synchronous").fetchone()[0],
-            "foreign_keys": database.execute("PRAGMA foreign_keys").fetchone()[0],
-            "trusted_schema": database.execute("PRAGMA trusted_schema").fetchone()[0],
-        }
-    _require_database_health(complete, integrity, foreign_keys)
-    _require_database_metadata(record, observed)
+        database.execute("BEGIN")
+        if not _database_schema_complete(database_name, database):
+            raise ValueError("active database schema is incomplete")
+        _require_database_metadata(record, _active_database_metadata(database))
+        yield database
+
+
+
+def _active_database_metadata(database: sqlite3.Connection) -> dict[str, object]:
+    return {
+        name: database.execute(f"PRAGMA {name}").fetchone()[0]
+        for name in (
+            "application_id",
+            "user_version",
+            "journal_mode",
+            "synchronous",
+            "foreign_keys",
+            "trusted_schema",
+        )
+    }
+
+
+
+def _require_active_database_openable(record: dict[str, object], *, database_name: str, path: Path, state_root: Path) -> None:
+    """Verify file identity, schema and connection contract without certifying history."""
+    with _active_database_snapshot(
+        record, database_name=database_name, path=path, state_root=state_root
+    ):
+        pass
+
+
+
+def _validate_active_database_reference(record: dict[str, object], *, database_name: str, path: Path, state_root: Path) -> None:
+    """Full certification additionally checks every retained page and foreign key."""
+    with _active_database_snapshot(
+        record, database_name=database_name, path=path, state_root=state_root
+    ) as database:
+        _certify_active_database_contents(database_name, database)
+
+
+def _certify_active_database_contents(database_name: str, database: sqlite3.Connection) -> None:
+    if database_name == "coordinator":
+        markdown_transaction._require_v3_invariants(database)
+        return
+    integrity = database.execute("PRAGMA integrity_check").fetchall()
+    foreign_keys = database.execute("PRAGMA foreign_key_check").fetchall()
+    _require_database_health(True, integrity, foreign_keys)
 
 
 def _database_contract(database_name: str) -> OperationalDatabaseContract:
@@ -431,6 +461,7 @@ def _validate_complete_adoption(
     migration: dict[str, object],
     adoption: dict[str, object],
     operation_artifacts: list[str],
+    active_validator: Callable[..., None] = _validate_active_database_reference,
 ) -> dict[str, object]:
     _require_adoption_artifacts_complete(paths, operation_artifacts)
     _require_adoption_header(adoption, migration)
@@ -440,6 +471,7 @@ def _validate_complete_adoption(
     schemas = _require_adoption_sources(root, adoption)
     for database_name in ("queue", "coordinator"):
         _validate_adopted_database(
+            active_validator=active_validator,
             database_name=database_name,
             source_state=str(adoption["source_state"]),
             operation_id=str(adoption["operation_id"]),
@@ -684,6 +716,7 @@ def _validate_adopted_database(
     state_root: Path,
     migration_record: dict[str, object],
     adoption_record: dict[str, object],
+    active_validator: Callable[..., None] = _validate_active_database_reference,
 ) -> None:
     expected_migration = _expected_migration_record(
         database_name=database_name,
@@ -702,7 +735,9 @@ def _validate_adopted_database(
         migration_record=migration_record,
         adoption_record=adoption_record,
     )
-    _validate_adopted_active(database_name, paths, state_root, adoption_record)
+    _validate_adopted_active(
+        database_name, paths, state_root, adoption_record, active_validator=active_validator
+    )
     _validate_adopted_retired(
         database_name, source_state, paths, state_root, migration_record, adoption_record
     )
@@ -750,11 +785,13 @@ def _validate_adopted_active(
     paths: dict[str, Path],
     state_root: Path,
     adoption_record: dict[str, object],
+    *,
+    active_validator: Callable[..., None] = _validate_active_database_reference,
 ) -> None:
     _legacy, _active, _retired, _legacy_key, active_key, _retired_key = _database_spec(
         database_name
     )
-    _validate_active_database_reference(
+    active_validator(
         adoption_record,
         database_name=database_name,
         path=paths[active_key],
@@ -956,12 +993,23 @@ def _details(outcomes: list[tuple[str, str]], wanted: str) -> tuple[str, ...]:
     return tuple(detail for kind, detail in outcomes if kind == wanted)
 
 
-def require_reliability_v3_adopted(
-    *, root: Path, state_root: Path
-) -> dict[str, object]:
-    """Return the validated complete adoption record or a stable closed error."""
+def require_reliability_v3_adopted(*, root: Path, state_root: Path) -> dict[str, object]:
+    """Certify the complete adopted pair, including all retained database content."""
+    return _require_adoption_record(root, state_root, _validate_active_database_reference)
+
+
+
+def require_reliability_v3_admission(*, root: Path, state_root: Path) -> dict[str, object]:
+    """Admit an actor from verified adoption evidence and both database contracts."""
+    return _require_adoption_record(root, state_root, _require_active_database_openable)
+
+
+
+def _require_adoption_record(root: Path, state_root: Path, active_validator: Callable[..., None]) -> dict[str, object]:
     try:
-        return _load_complete_adoption(root=Path(root), state_root=Path(state_root))
+        return _load_complete_adoption(
+            root=Path(root), state_root=Path(state_root), active_validator=active_validator
+        )
     except ReliabilityV3ValidationError:
         raise
     except Exception as exc:
@@ -970,7 +1018,12 @@ def require_reliability_v3_adopted(
         ) from exc
 
 
-def _load_complete_adoption(*, root: Path, state_root: Path) -> dict[str, object]:
+def _load_complete_adoption(
+    *,
+    root: Path,
+    state_root: Path,
+    active_validator: Callable[..., None] = _validate_active_database_reference,
+) -> dict[str, object]:
     vault = root.resolve(strict=True)
     state = state_root.absolute()
     paths = _paths(state)
@@ -992,6 +1045,7 @@ def _load_complete_adoption(*, root: Path, state_root: Path) -> dict[str, object
         migration=migration,
         adoption=adoption,
         operation_artifacts=operation_artifacts,
+        active_validator=active_validator,
     )
 
 
@@ -1212,16 +1266,33 @@ def _queue_table_blockers(
 
 
 def _capture_intent_blockers(
-    database: sqlite3.Connection, state_root: Path, deadline: float
+    database: sqlite3.Connection, state_root: Path, deadline: float, *, verified: set[str] | None = None,
 ) -> set[str]:
     blockers: set[str] = set()
-    for row in _scanned_rows(database, "SELECT * FROM capture_intents", deadline=deadline):
+    for row in _capture_intent_rows(database, deadline):
         blockers.add("capture_intent_retained")
-        _validate_capture_intent(row, state_root)
+        _validate_capture_intent(row, state_root, deadline=deadline)
+        if verified is not None:
+            verified.add(str(row["intent_id"]))
     return blockers
 
 
-def _validate_capture_intent(row: sqlite3.Row, state_root: Path) -> None:
+def _capture_intent_rows(database: sqlite3.Connection, deadline: float) -> Iterator[sqlite3.Row]:
+    """Finish each bounded SELECT before source I/O can delay a writer's commit."""
+    after = ""
+    while True:
+        _check_deadline(deadline)
+        rows = database.execute(
+            "SELECT * FROM capture_intents WHERE intent_id > ? ORDER BY intent_id LIMIT ?",
+            (after, OPERATIONAL_SCAN_BATCH_ROWS),
+        ).fetchall()
+        if not rows:
+            return
+        after = str(rows[-1]["intent_id"])
+        yield from rows
+
+
+def _validate_capture_intent(row: sqlite3.Row, state_root: Path, *, deadline: float) -> None:
     relative = row["relative_path"]
     if not _valid_capture_path(relative):
         raise ValueError("capture intent path is invalid")
@@ -1232,6 +1303,18 @@ def _validate_capture_intent(row: sqlite3.Row, state_root: Path) -> None:
         owner_only=True,
     )
     _require_capture_payload(payload, row)
+    _require_capture_document(payload, row, state_root, deadline)
+
+
+def _require_capture_document(payload: bytes, row: sqlite3.Row, state_root: Path, deadline: float) -> None:
+    from capture_adoption import verified_capture_handler
+
+    _check_deadline(deadline)
+    try:
+        verified_capture_handler(state_root, dict(row), payload, deadline=deadline)
+    except (KeyError, TypeError, RuntimeError) as error:
+        raise ValueError("capture intent format or identity is invalid") from error
+    _check_deadline(deadline)
 
 
 def _require_capture_payload(payload: bytes, row: sqlite3.Row) -> None:
@@ -1796,11 +1879,12 @@ def _positive_pid(value: str) -> int:
 
 def _require_process_absent(pid: int, identity: str) -> None:
     """A marker's PID given to another process since is not its owner (C-12)."""
-    from operational_ownership import process_start_identity
+    from process_liveness import recorded_process_state
 
-    observed = process_start_identity(pid)
-    if observed is not None and (not identity or observed == identity):
-        raise ValueError("live legacy owner blocks offline adoption")
+    state = recorded_process_state(pid, identity)
+    if state != "dead":
+        label = {"alive": "live", "unknown": "unknown"}[state]
+        raise ValueError(f"{label} legacy owner blocks offline adoption")
 
 
 def _reject_leased_v2_tasks(path: Path, state_root: Path) -> None:
@@ -2294,17 +2378,65 @@ def _report(
     }
 
 
+# Failures that say the state could not be read at this moment, not that a record is
+# wrong: a live writer's lock, an interrupted read. On 2026-09-28 one of them during an
+# install was reported as `conflict` with no cause, and the installer told the owner
+# capture was off while a second read found the vault adopted. SQLite says busy or
+# locked by its result code (`SQLITE_BUSY` 5, `SQLITE_LOCKED` 6; the primary code is
+# the low byte of an extended one); Python 3.10 does not expose the code, so there
+# every `OperationalError` counts as busy, the earlier and wider reading.
+_UNREADABLE_NOW = (TimeoutError, BlockingIOError, InterruptedError)
+_SQLITE_BUSY_CODES = frozenset({5, 6})
+# Absolute paths in a cause name private directories; the report is printed and
+# pasted, so they are replaced, and the class and the rest of the message stay.
+# A quoted path (as `OSError` prints one) is taken whole, spaces included.
+_QUOTED_PATH = re.compile(r"'(?:[A-Za-z]:[\\/]|/)[^']*'")
+_ABSOLUTE_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|(?<![\w.])/)[^\s'\"]+")
+# How much of the cause a report carries: one readable line of `Class: message <- Cause`,
+# redacted; the full chain of two causes fits well inside it.
+MAX_INSPECTION_ERROR_CHARS = 600
+
+
 def inspect_installed_vault(*, root: Path, state_root: Path) -> dict[str, object]:
-    """Run bounded Reliability V3 validation without creating or mutating state."""
+    """Run bounded Reliability V3 validation without creating or mutating state.
+
+    A failure is reported with its cause, and a state that could not be read now
+    (`unreadable`) is told apart from records that disagree (`conflict`).
+    See docs/research/2026-09-28-a-check-names-its-cause.md.
+    """
     try:
         return _inspect_installed_vault(root=Path(root), state_root=Path(state_root))
-    except Exception:  # noqa: BLE001 - closed read-only inspection envelope
-        return _report(
-            mode="check",
-            status="error",
-            state="conflict",
-            blockers=["reliability_v3_record_invalid"],
-        )
+    except Exception as exc:  # noqa: BLE001 - read-only inspection reports its cause
+        return _failed_inspection(exc)
+
+
+def describe_failure(exc: BaseException) -> str:
+    """The redacted cause chain without absolute paths, bounded for a report line."""
+    quoted = _QUOTED_PATH.sub("'<path>'", describe_error_chain(exc))
+    described = _ABSOLUTE_PATH.sub("<path>", quoted)
+    return described[:MAX_INSPECTION_ERROR_CHARS]
+
+
+def _unreadable_now(exc: Exception) -> bool:
+    """Busy or locked now, as opposed to a record that is wrong."""
+    if isinstance(exc, _UNREADABLE_NOW):
+        return True
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    code = getattr(exc, "sqlite_errorcode", None)
+    return code is None or code & 0xFF in _SQLITE_BUSY_CODES
+
+
+def _failed_inspection(exc: Exception) -> dict[str, object]:
+    unreadable = _unreadable_now(exc)
+    report = _report(
+        mode="check",
+        status="error",
+        state="unreadable" if unreadable else "conflict",
+        blockers=["reliability_v3_state_unreadable" if unreadable else "reliability_v3_record_invalid"],
+    )
+    report["details"]["error"] = describe_failure(exc)
+    return report
 
 
 def _inspect_installed_vault(*, root: Path, state_root: Path) -> dict[str, object]:
@@ -2505,12 +2637,20 @@ def repair_installed_vault(
     )
 
 
+def _inspection_failure(inspection: dict[str, object]) -> str:
+    """The failed inspection's blockers and cause, so the adoption refusal says why."""
+    details = inspection.get("details", {})
+    codes = ", ".join(str(item.get("code")) for item in inspection.get("blockers", []))
+    cause = details.get("error") if isinstance(details, dict) else None
+    return f"Reliability V3 inspection failed: {codes}" + (f" ({cause})" if cause else "")
+
+
 def _apply_reliability_v3_adoption(*, root: Path, state_root: Path) -> bool:
     inspection = inspect_installed_vault(root=root, state_root=state_root)
     status = inspection.get("overall_status")
     state = inspection.get("details", {}).get("adoption_state")
     if status == "error":
-        raise ValueError("Reliability V3 inspection failed")
+        raise ValueError(_inspection_failure(inspection))
     if state == "adopted":
         return False
     _require_adoptable_state(state)

@@ -15,7 +15,14 @@ import operational_ownership as ownership
 import process_liveness
 import pytest
 
-FOREIGN = "test-process:a-number-handed-to-somebody-else"
+
+def _reused_identity() -> str:
+    identity = process_liveness.process_start_identity(os.getpid())
+    prefix, ticks = identity.rsplit(":", 1)
+    return f"{prefix}:{int(ticks) + 1}"
+
+
+FOREIGN = _reused_identity()
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
 
@@ -105,7 +112,8 @@ def _functions(body: list[ast.stmt], prefix: str = "") -> list[tuple[str, ast.AS
     for node in body:
         if isinstance(node, ast.ClassDef):
             found += _functions(node.body, f"{prefix}{node.name}.")
-        elif isinstance(node, ast.FunctionDef):
+            continue
+        if isinstance(node, ast.FunctionDef):
             found.append((prefix + node.name, node))
     return found
 

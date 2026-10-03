@@ -2935,10 +2935,11 @@ def test_protocol_callback_lifecycle_operations_fail_fast_without_mutation(
             deadline = time.monotonic() + 1
             if operation == "close":
                 instance.close(deadline)
-            elif operation == "restart":
+                return
+            if operation == "restart":
                 instance.restart(deadline)
-            else:
-                instance._terminal_failure("handler_failure", deadline)
+                return
+            instance._terminal_failure("handler_failure", deadline)
         except BaseException as error:
             handler_errors.append(error)
         finally:

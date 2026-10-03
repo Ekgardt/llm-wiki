@@ -69,8 +69,10 @@ from contradiction_pipeline import (  # noqa: E402
     ContradictionPipeline,
     StaleLifecycleTarget,
     default_secondary_search,
+    supersede_claims_in_page,
 )
 from evidence_resolver import (  # noqa: E402
+    MAX_DAILY_BYTES,
     MAX_DAILY_PART_BYTES,  # noqa: F401 - re-exported: callers read the writer's bound here
     EvidenceRef,
     EvidenceResolver,
@@ -138,15 +140,12 @@ VALIDATION_RETRIES = 2
 
 COMPILER_VERSION = "2.0.0"
 NORMALIZATION_VERSION = "normalize-v2"
-# One daily log the compile reads; the evidence graph's source bound is 16 GiB.
+# Generic compile context pages; numerical basis remains under audit.
+# Daily readers use the existing archive contract and total compile budget.
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
 MAX_PROVIDER_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_OPERATIONS = 100
 MAX_EVIDENCE_PER_OPERATION = 32
-# Related wikilinks one compile operation may carry; enforced in the model's output schema and on
-# validation, so a runaway plan is refused. Basis unknown: value predates measurement; review when
-# a real page needs more than 64 links.
-MAX_RELATED = 64
 MAX_AFTER_IMAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 # One compile receipt; the largest on the live vault is 16.6 KB (2026-09-27). 1 MiB refuses a
 # corrupted receipt before it is parsed.
@@ -172,11 +171,6 @@ CLAIM_RECORD_SCHEMA = json.loads(LEDGER_SCHEMA.read_text(encoding="utf-8"))[
 # `"fingerprint": "a1b2c3d4e5f6a1b2..."` and a `block:` naming a hex prefix
 # instead of a time — and the whole two-page plan died on it. See
 # `docs/research/2026-08-28-who-computes-a-claims-provenance.md`.
-# The plan's schema asks for at most this many claims per page (`maxItems`), so the
-# cap repeats the request; a claim past it is reported like any other drop
-# (`_report_dropped_claim`). Basis of the number unknown — review when pages
-# routinely reach it, which the drop log counts.
-MAX_CLAIMS_PER_OPERATION = 8
 CLAIM_CANDIDATE_SCHEMA = {
     "type": "object",
     "required": ["evidence_index", "subject", "relation", "value"],
@@ -239,14 +233,14 @@ RAW_PLAN_SCHEMA = {
                             "properties": {
                                 "daily_date": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
                                 "timestamp": {"type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]$"},
-                                "quoted_text": {"type": "string", "minLength": 1, "maxLength": 4000},
+                                "quoted_text": dict(CLAIM_RECORD_SCHEMA["properties"]["evidence"]["properties"]["text"]),
                                 "claim": {"type": "string", "minLength": 1, "maxLength": 1000, "pattern": "^[^\\r\\n]+$"}
                             },
                             "additionalProperties": False
                         }
                     },
-                    "related": {"type": "array", "maxItems": MAX_RELATED, "items": {"type": "string", "maxLength": 200, "pattern": "^\\[\\[[^\\r\\n]+\\]\\]$"}},
-                    "claims": {"type": "array", "maxItems": MAX_CLAIMS_PER_OPERATION, "items": CLAIM_CANDIDATE_SCHEMA},
+                    "related": {"type": "array", "items": {"type": "string", "maxLength": 200, "pattern": "^\\[\\[[^\\r\\n]+\\]\\]$"}},
+                    "claims": {"type": "array", "items": CLAIM_CANDIDATE_SCHEMA},
                 },
                 "additionalProperties": False
             }
@@ -351,9 +345,9 @@ class CompileInputs:
     dailies: tuple[DailySnapshot, ...]
     sources: tuple[SourceSnapshot, ...]
     targets: tuple[TargetSnapshot, ...]
-    # The vault files read whole, before any model call. `sources` is narrowed
-    # to what one prompt has room for; these are what is on disk, so the writer
-    # can say whether a file it replaces existed without asking the budget.
+    # The complete original vault context, even when `sources` is narrowed for
+    # a prompt. Publication rereads derived index/log targets under its writer
+    # gate; this model-input snapshot remains immutable.
     vault_files: tuple[SourceSnapshot, ...] = ()
 
 
@@ -411,6 +405,12 @@ def _logical_path(path: Path) -> str:
     return path.relative_to(ROOT).as_posix()
 
 
+def _read_daily_source(path: Path) -> bytes:
+    """Use the existing daily evidence contract within the total source budget."""
+    budget = min(MAX_DAILY_BYTES, setting_value("compile.max_total_source_bytes", ROOT))
+    return read_stable_bytes(path, budget, label="daily source")
+
+
 def _snapshot(path: Path, *, label: str = "compile source") -> SourceSnapshot:
     content = read_stable_bytes(path, MAX_SOURCE_BYTES, label=label)
     return SourceSnapshot(_logical_path(path), content, sha256_bytes(content))
@@ -432,7 +432,7 @@ def snapshot_compile_inputs(
     budget = _SourceBudget(sources)
 
     for path in sorted(map(Path, paths), key=lambda item: item.as_posix()):
-        content = read_stable_bytes(path, MAX_SOURCE_BYTES, label="daily source")
+        content = _read_daily_source(path)
         logical = _logical_path(path)
         dailies.extend(_daily_parts(logical, content, compiled))
         budget.add(SourceSnapshot(logical, content, sha256_bytes(content)))
@@ -451,7 +451,7 @@ def _vault_file_snapshots(
 ) -> list[SourceSnapshot]:
     """Snapshot every vault file whole, whatever one prompt later has room for."""
     snapshots: list[SourceSnapshot] = []
-    for path in (AGENTS, INDEX, LOG):
+    for path in _vault_source_paths():
         if not path.exists():
             continue
         snapshot = _snapshot(path)
@@ -492,12 +492,28 @@ def _knowledge_targets(
     return targets
 
 
-def _live_knowledge_pages() -> list[Path]:
-    if not KNOWLEDGE.exists():
+def _live_note_paths(directory: Path) -> list[Path]:
+    if not directory.exists():
         return []
-    return [
-        path for path in sorted(KNOWLEDGE.rglob("*.md")) if "archive" not in path.parts
-    ]
+    return [path for path in sorted(directory.rglob("*.md")) if "archive" not in path.parts]
+
+
+def _live_knowledge_pages() -> list[Path]:
+    return _live_note_paths(KNOWLEDGE)
+
+
+def _vault_source_paths(root: Path | None = None) -> tuple[Path, Path, Path]:
+    if root is None or root == ROOT:
+        return AGENTS, INDEX, LOG
+    candidates = (root / "docs" / "AGENTS.md", root / "AGENTS.md")
+    agents = next((path for path in candidates if path.exists()), candidates[0])
+    return agents, root / "knowledge" / "index.md", root / "knowledge" / LOG_NAME
+
+
+def compile_scope_paths(root: Path) -> list[Path]:
+    """Forecast all eligible daily inputs using the compiler's source selectors."""
+    metadata = [path for path in _vault_source_paths(root) if path.exists()]
+    return _live_note_paths(root / "knowledge" / "notes") + daily_logs(root / "knowledge" / "daily") + metadata
 
 
 def compile_source_identity(logical_path: str, source_sha256: str) -> str:
@@ -640,6 +656,50 @@ def _record_oversized_daily(logical_path: str) -> None:
         pass
 
 
+def _without_days(inputs: CompileInputs, days: set[str]) -> CompileInputs:
+    """These inputs with the named days removed, as parts and as sources."""
+    return replace(
+        inputs,
+        dailies=tuple(item for item in inputs.dailies if item.logical_path not in days),
+        sources=tuple(item for item in inputs.sources if item.logical_path not in days),
+    )
+
+
+def _only_day(inputs: CompileInputs, day: str) -> CompileInputs:
+    """One day's parts and source, for recording a failure against that day alone."""
+    others = {item.logical_path for item in inputs.dailies} - {day}
+    return _without_days(inputs, others)
+
+
+def partition_packable(
+    inputs: CompileInputs,
+    *,
+    model: str | None,
+    token_adapters: Mapping[str, TokenCounter] | None = None,
+) -> tuple[CompileInputs, tuple[CompileInputs, ...]]:
+    """The days the budget can take, and each day it cannot, apart.
+
+    A part that does not fit refused the whole pack, so one oversized day
+    stopped the compile of every other day in the run. The refused days now
+    fail alone and the rest pack as before. See
+    `docs/research/2026-09-28-a-long-entry-is-cut-inside-itself.md`.
+    """
+    budget = _compile_budget(model)
+    measure = _batch_measure(inputs, model, token_adapters)
+    refused = sorted(
+        {item.logical_path for item in inputs.dailies if measure({item.part_key}) > budget.available_input_tokens}
+    )
+    return _without_days(inputs, set(refused)), tuple(_only_day(inputs, day) for day in refused)
+
+
+def _refused_day_outcome(day: CompileInputs) -> BatchOutcome:
+    """A day no part budget can take fails alone, recorded like any failed batch."""
+    path = day.dailies[0].logical_path
+    _record_oversized_daily(path)
+    refusal = ValueError(f"daily source exceeds compile input budget: {path}")
+    return BatchOutcome(_record_failed_batch(day, refusal))
+
+
 def pack_compile_batches(
     inputs: CompileInputs,
     *,
@@ -741,6 +801,9 @@ def _batch_measure(
 ) -> Callable[..., int]:
     """Count the draft-prompt tokens one candidate grouping would cost."""
 
+    if model is None:
+        return _ByteBatchMeasure(inputs)
+
     def measured(paths: set[str], optional_paths: set[str] | None = None) -> int:
         subset = _subset_compile_inputs(inputs, paths, optional_paths)
         count = count_tokens(
@@ -753,6 +816,39 @@ def _batch_measure(
         return count.tokens
 
     return measured
+
+
+def _selected_buckets(buckets, keys) -> tuple:
+    return tuple(item for key in keys for item in buckets.get(key, ()))
+
+
+class _ByteBatchMeasure:
+    """Exact existing UTF-8 estimate; real model tokenizers remain non-additive."""
+
+    def __init__(self, inputs: CompileInputs) -> None:
+        empty = CompileInputs((), (), ())
+        self.base = len(_draft_prompt_text(empty).encode("utf-8"))
+        self.dailies: dict[str, list[DailySnapshot]] = {}
+        for item in inputs.dailies:
+            self.dailies.setdefault(item.part_key, []).append(item)
+        daily_paths = {item.logical_path for item in inputs.dailies}
+        self.context: dict[str, list[SourceSnapshot]] = {}
+        for item in _context_sources(inputs, daily_paths, {s.logical_path for s in inputs.sources}):
+            self.context.setdefault(item.logical_path, []).append(item)
+        self.sizes: dict[SourceSnapshot, int] = {}
+
+    def _size(self, item: SourceSnapshot) -> int:
+        if item not in self.sizes:
+            self.sizes[item] = len(_source_blob(item).encode("utf-8"))
+        return self.sizes[item]
+
+    def __call__(self, paths: set[str], optional_paths: set[str] | None = None) -> int:
+        selected = _selected_buckets(self.dailies, paths)
+        sources = _deduplicated_sources(selected)
+        context = _selected_buckets(self.context, optional_paths or ())
+        frames = (*sources, *context)
+        separators = 2 * max(0, len(frames) - 1)
+        return self.base + sum(self._size(item) for item in frames) + separators
 
 
 def _group_dailies(
@@ -1441,15 +1537,7 @@ def _admitted_candidates(claims: object, slug: str) -> list[object]:
     if not isinstance(claims, list):
         _report_dropped_claim(slug, "claims is not an array")
         return []
-    kept = [item for item in claims if _claim_candidate_admitted(item, slug)]
-    return _within_the_claim_cap(kept, slug)
-
-
-def _within_the_claim_cap(kept: list[object], slug: str) -> list[object]:
-    """The first claims the schema allows; each one past it is reported as dropped."""
-    for index in range(MAX_CLAIMS_PER_OPERATION, len(kept)):
-        _report_dropped_claim(slug, f"claim {index + 1} is past the {MAX_CLAIMS_PER_OPERATION} a page may carry")
-    return kept[:MAX_CLAIMS_PER_OPERATION]
+    return [item for item in claims if _claim_candidate_admitted(item, slug)]
 
 
 def _claim_candidate_admitted(candidate: object, slug: str) -> bool:
@@ -1549,7 +1637,9 @@ def _assert_external_work_allowed(coordinator: MarkdownCoordinator) -> None:
     coordinator.assert_external_work_allowed()
     with coordinator._connect() as database:
         owner = database.execute(
-            "SELECT owner_token FROM writer_owners WHERE gate_name = 'global'"
+            "SELECT owner_token FROM writer_owners "
+            "WHERE gate_name = 'global' AND process_id = ?",
+            (os.getpid(),),
         ).fetchone()
     if owner is not None:
         raise RuntimeError("external LLM work is forbidden during persisted writer ownership")
@@ -1592,11 +1682,12 @@ def _action_descriptor(
     )
 
 
+def _source_blob(item: SourceSnapshot) -> str:
+    return f"### FILE: {item.logical_path}\n{item.content.decode('utf-8', errors='strict')}"
+
+
 def _input_blob(inputs: CompileInputs) -> str:
-    return "\n\n".join(
-        f"### FILE: {item.logical_path}\n{item.content.decode('utf-8', errors='strict')}"
-        for item in inputs.sources
-    )
+    return "\n\n".join(_source_blob(item) for item in inputs.sources)
 
 
 def _draft_prompt(inputs: CompileInputs) -> str:
@@ -2129,7 +2220,7 @@ def _is_single_line(value: str) -> bool:
 
 def _require_semantic_links(operation: Mapping[str, object]) -> None:
     related = operation.get("related", [])
-    if not isinstance(related, list) or len(related) > MAX_RELATED:
+    if not isinstance(related, list):
         raise ValueError("compile operation related links are invalid")
     if any(not _is_wikilink(item) for item in related):
         raise ValueError("compile operation related links are invalid")
@@ -2350,8 +2441,9 @@ def _derived_claim(
     if not isinstance(candidate, Mapping):
         raise ValueError("compile claim candidate must be an object")
     item = _claim_evidence_item(operation, candidate.get("evidence_index"))
-    date, timestamp, quote = _require_evidence_fields(item)
+    date, timestamp, _quote = _require_evidence_fields(item)
     binding = _evidence_binding(item, inputs)
+    quote = _verified_claim_quote(binding, inputs)
     semantic = _semantic_payload(_proposed_semantics(candidate, date))
     fingerprint = sha256_bytes(canonical_json_bytes(semantic))
     return {
@@ -2377,6 +2469,20 @@ def _derived_claim(
         "links": [],
         "extractor_version": CLAIM_EXTRACTOR_VERSION,
     }
+
+
+def _verified_claim_quote(binding: Mapping[str, str], inputs: CompileInputs) -> str:
+    """The exact span already verified by the shared evidence binder.
+
+    The binder can widen a partial quote to its whole source line. Both the
+    record text and its hash must refer to that same span, not the model's
+    shorter original quote.
+    """
+    reference = EvidenceRef.parse(binding["reference"])
+    source = _daily_for_evidence(inputs, reference.daily_id, reference.source_sha256)
+    if source is None:
+        raise ValueError("compile claim evidence source is absent from the snapshot")
+    return source.content[reference.byte_start:reference.byte_end].decode("utf-8", errors="strict")
 
 
 def _proposed_semantics(
@@ -2424,7 +2530,7 @@ def _evidence_fields_valid(
     return (
         _evidence_matches(date, r"\d{4}-\d{2}-\d{2}")
         and _evidence_matches(timestamp, r"(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d")
-        and _evidence_bounded_text(quote, 4_000)
+        and _evidence_bounded_text(quote, CLAIM_RECORD_SCHEMA["properties"]["evidence"]["properties"]["text"]["maxLength"])
         and _evidence_single_line(claim, 1_000)
     )
 
@@ -2696,15 +2802,24 @@ def _ledger_bytes(claims: list) -> bytes:
 
 
 def _merged_claims(existing: list, additions: list) -> list:
-    """Existing claims plus the new ones. A repeated id is a conflict."""
+    """Existing claims plus the new ones; a claim the page already holds is kept once.
+
+    The id is the date and the semantic fingerprint, so a day compiled again brings
+    its claims again under the same ids; the page's copy stays, as a repeat inside
+    one run is dropped. One id with another fingerprint is a real conflict.
+    """
     by_id = {str(item["id"]): item for item in existing}
     if len(by_id) != len(existing):
         raise ValueError("target ledger contains a duplicate claim id")
     for record in additions:
-        if str(record["id"]) in by_id:
-            raise ValueError("compile claim id already exists in target ledger")
-        by_id[str(record["id"])] = record
+        _admit_claim(by_id, record)
     return list(by_id.values())
+
+
+def _admit_claim(by_id: dict, record: Mapping[str, object]) -> None:
+    known = by_id.setdefault(str(record["id"]), record)
+    if known.get("fingerprint") != record.get("fingerprint"):
+        raise ValueError("compile claim id already exists in target ledger")
 
 
 def _with_claim_ledger(page: bytes, records: Sequence[Mapping[str, object]]) -> bytes:
@@ -3266,6 +3381,28 @@ def _require_apply_arguments(
         raise ValueError("compile batch inputs disagree")
 
 
+def _require_current_compile_targets(
+    inputs: CompileInputs, manifest: Mapping[str, object]
+) -> None:
+    """A changed model-input page needs a new plan, not the same assessment.
+
+    The publication retry refreshes its claim tree, but its original target
+    bytes remain immutable. Reassessing a plan against changed target bytes
+    cannot make those original preconditions true. Refuse before assessment;
+    the next compile snapshots and resolves the still-unreceipted source.
+    The transaction's own precondition checks remain authoritative.
+    """
+    current = {entry["path"]: entry["sha256"] for entry in manifest["entries"]}
+    for target in inputs.targets:
+        if current.get(target.logical_path) != target.sha256:
+            raise TransactionFailure(
+                f"compile target snapshot changed for {target.logical_path}; "
+                "a fresh snapshot and model plan are required",
+                "compile_snapshot_changed",
+                "quarantined",
+            )
+
+
 class _ApplyPlan:
     """One publication of one validated compile plan.
 
@@ -3318,6 +3455,7 @@ class _ApplyPlan:
         if not _plan_carries_claims(self.operations):
             return
         self.claim_tree_manifest = snapshot_claim_tree(ROOT)
+        _require_current_compile_targets(self.inputs, self.claim_tree_manifest)
         self.claim_index = ClaimIndex(self.coordinator.state_root, vault=ROOT)
         self.claim_index.rebuild(self._claim_tree_paths)
         candidates: list[IndexedClaim] = []
@@ -3544,12 +3682,28 @@ class _ApplyPlan:
         if target is None:
             raise ValueError("replace target was absent from snapshot")
         update = _update_section(semantic, references, self.completed_at)
-        page = _with_claim_ledger(target.content.rstrip() + update, claims)
+        original = self._updated_claim_history(path, target.content)
+        page = _with_claim_ledger(original.rstrip() + update, claims)
         self.changes.append(
             MarkdownChange.replace(path, page, max_before_bytes=MAX_AFTER_IMAGE_BYTES)
         )
         self.preconditions[path] = target.sha256
         return page
+
+    def _updated_claim_history(self, path: str, content: bytes) -> bytes:
+        mutations = tuple({
+            mutation for assessment in self._assessments_for(path)
+            for mutation in assessment.lifecycle_mutations if mutation.page == path
+        })
+        if not mutations:
+            return content
+        return supersede_claims_in_page(content, mutations, path)[0]
+
+    def _remaining_claim_assessments(self, source_page: str, assessments: Sequence[object]) -> tuple[object, ...]:
+        updated = {str(item["path"]) for item in self.operations if item["kind"] == "replace"}
+        return tuple(
+            _without_updated_lifecycle(item, updated & {source_page}) for item in assessments
+        )
 
     def _created_page(
         self,
@@ -3620,7 +3774,7 @@ class _ApplyPlan:
         for pipeline, assessments in self.claim_groups:
             try:
                 changes, preconditions, candidate_paths = pipeline.plan_changes(
-                    assessments
+                    self._remaining_claim_assessments(pipeline.source_page, assessments)
                 )
             except StaleLifecycleTarget:
                 return self._commit_quarantine()
@@ -3652,9 +3806,10 @@ class _ApplyPlan:
     def _append_index_and_log(self) -> None:
         from rebuild_memory_index import build_index_bytes
 
-        base_notes = {item.logical_path: item.content for item in self.inputs.targets}
-        index_bytes = build_index_bytes(ROOT, self.pending, base=base_notes)
-        sources = self._vault_sources()
+        # Both derived targets are materialized under the existing writer gate.
+        # Source/target-note snapshots still govern the semantic changes.
+        sources = self._publication_sources()
+        index_bytes = build_index_bytes(ROOT, self.pending)
         self._append_vault_file(
             "knowledge/index.md", index_bytes, sources, MAX_INDEX_BYTES
         )
@@ -3682,20 +3837,13 @@ class _ApplyPlan:
         ).encode()
         return _append_log_bytes(fresh, self._log_entry())
 
-    def _vault_sources(self) -> dict[str, object]:
-        """What is on disk outranks what one prompt had room to carry.
-
-        A vault file that did not fit the context budget is absent from
-        `sources`, and reading the write precondition from there once told the
-        transaction to create a file that already existed.
-        """
-        sources: dict[str, object] = {
-            item.logical_path: item for item in self.inputs.sources
-        }
-        sources.update(
-            {item.logical_path: item for item in self.inputs.vault_files}
+    def _publication_sources(self) -> dict[str, SourceSnapshot]:
+        """Current derived-file before-images; prepare still checks their hashes."""
+        snapshots = (
+            _snapshot(path, label="compile publication target")
+            for path in (INDEX, LOG) if path.exists()
         )
-        return sources
+        return {item.logical_path: item for item in snapshots}
 
     def _append_vault_file(
         self,
@@ -3785,7 +3933,9 @@ class _ApplyPlan:
         # naming the derived identity, because their own readers recompute it
         # from the record; the committed attempt is found through that identity.
         attempt_id, self.parent_transaction_id = (
-            self.coordinator.attempt_operation_id(self.operation_id)
+            self.coordinator.attempt_operation_id(
+                self.operation_id, deadline=self.deadline, cancelled=self.cancelled
+            )
         )
         transaction = self.coordinator.prepare(
             self.changes,
@@ -3880,6 +4030,11 @@ def _claim_lifecycle(record: Mapping[str, object], quarantined: set[str]) -> obj
     if str(record["id"]) in quarantined:
         return "quarantined"
     return record["lifecycle"]
+
+
+def _without_updated_lifecycle(assessment: object, updated: set[str]) -> object:
+    remaining = tuple(mutation for mutation in assessment.lifecycle_mutations if mutation.page not in updated)
+    return replace(assessment, lifecycle_mutations=remaining)
 
 
 def _require_unclaimed_path(known: set[str], path: str) -> None:
@@ -4124,7 +4279,7 @@ def _record_receipt_owners(owners: dict[str, str], path: Path) -> None:
 
 def _readable_daily(path: Path) -> bytes | None:
     try:
-        return read_stable_bytes(path, MAX_SOURCE_BYTES, label="daily source")
+        return _read_daily_source(path)
     except (OSError, ValueError):
         return None
 
@@ -4211,7 +4366,7 @@ def _explicit_daily(path: Path, coordinator: MarkdownCoordinator) -> list[Path]:
         raise SystemExit(
             f"compile_memory: --file must be an existing .md daily log: {path}"
         )
-    content = read_stable_bytes(path, MAX_SOURCE_BYTES, label="daily source")
+    content = _read_daily_source(path)
     logical_path = path.relative_to(ROOT).as_posix()
     if daily_is_compiled(logical_path, content, _receipt_predicate(coordinator)):
         return []
@@ -4238,7 +4393,7 @@ def _compiled_hashes(state: dict) -> dict:
 def _daily_already_compiled(
     path: Path, compiled_hashes: dict, coordinator: MarkdownCoordinator
 ) -> bool:
-    content = read_stable_bytes(path, MAX_SOURCE_BYTES, label="daily source")
+    content = _read_daily_source(path)
     logical_path = path.relative_to(ROOT).as_posix()
     if daily_is_compiled(logical_path, content, _receipt_predicate(coordinator)):
         return True
@@ -4523,7 +4678,7 @@ def _acquire_compile_lock(spawn_token: str | None = None) -> tuple[str | None, s
     Research: docs/research/2026-09-10-a-lock-lives-as-long-as-its-process-not-thirty-minutes.md
     """
     try:
-        if maybe_compile._try_claim_lock():
+        if maybe_compile._claim_lock():
             return (_claim_direct_lock(), "claimed")
         if _spawned_lock_is_ours(maybe_compile, spawn_token):
             return (SPAWNED_LOCK, "spawned")
@@ -4578,7 +4733,7 @@ def _run(
     coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT)
     dailies = select_dailies(args, state, coordinator=coordinator)
     _repair_compile_mirror(coordinator)
-    _retire_stale_source_failures(coordinator.state_root)
+    _retire_stale_source_failures(coordinator.state_root, coordinator=coordinator)
     _require_compile_active(deadline, cancelled)
     if not dailies:
         print("compile_memory: no changed daily logs; nothing to do.")
@@ -4588,12 +4743,14 @@ def _run(
     _announce_compile(args, dailies)
     inputs = snapshot_compile_inputs(dailies, compiled=_receipt_predicate(coordinator))
     try:
-        batches = pack_compile_batches(inputs, model=None)
+        packable, refused = partition_packable(inputs, model=None)
+        batches = pack_compile_batches(packable, model=None)
     except Exception as exc:  # noqa: BLE001 - provider/cache boundary is fail-closed
         _require_compile_active(deadline, cancelled)
-        return _failed_compile(args, inputs, exc)
+        failed = BatchOutcome(_record_failed_batch(inputs, exc))
+        return _finish_run(args, [failed])
 
-    outcomes: list[BatchOutcome] = []
+    outcomes: list[BatchOutcome] = [_refused_day_outcome(day) for day in refused]
     for batch in batches:
         # A failed batch is recorded against its sources and the run goes on:
         # batches are independent snapshots, and stopping here held every later
@@ -4614,9 +4771,11 @@ def _run(
 
 
 def _finish_run(args: argparse.Namespace, outcomes: Sequence[BatchOutcome]) -> int:
-    """Exit 1 when any batch failed (its failure is already recorded), else mark the run ok."""
+    """Finalize only after every batch has stopped using the compile lock."""
     failed = [item for item in outcomes if item.status != 0]
     if failed:
+        error = str(load_state().get("last_compile_error", "one or more compile batches failed"))
+        _mark_finished(args.trigger, "error", error, outcomes=outcomes)
         print(f"compile_memory: {len(failed)} batch(es) failed; the rest: {_outcome_sentence(outcomes)}.")
         return 1
     _mark_ok_unless_dry(args, outcomes=outcomes)
@@ -4631,19 +4790,25 @@ def _announce_compile(args: argparse.Namespace, dailies: Sequence[Path]) -> None
         print(f"  - {path.relative_to(ROOT).as_posix()}")
 
 
-def _failed_compile(
-    args: argparse.Namespace,
+def _record_failed_batch(
     inputs: CompileInputs,
     exc: BaseException,
     *,
     prefix: str = "",
 ) -> int:
-    """Record the failure against every source in the batch; the run reports it at the end."""
+    """Record a batch failure without finishing or unlocking the active run."""
     error = f"{type(exc).__name__}: {exc}"
     _record_compile_source_failures(inputs, STATE_ROOT, error_code=type(exc).__name__)
     print(f"compile_memory: FAILED — {prefix}{error}")
-    _mark_finished(args.trigger, "error", error)
+    _record_batch_error(error)
     return 1
+
+
+def _record_batch_error(error: str) -> None:
+    def remember(state: dict) -> None:
+        state["last_compile_error"] = error[:500]
+
+    update_state(remember)
 
 
 def _run_batch(
@@ -4665,7 +4830,7 @@ def _run_batch(
         )
     except Exception as exc:  # noqa: BLE001 - provider/cache boundary is fail-closed
         _require_compile_active(deadline, cancelled)
-        return BatchOutcome(_failed_compile(args, batch.inputs, exc))
+        return BatchOutcome(_record_failed_batch(batch.inputs, exc))
 
     _require_compile_active(deadline, cancelled)
     if args.dry_run:
@@ -4714,7 +4879,7 @@ def _apply_batch(
         return _still_quarantined_outcome(already)
     except Exception as exc:  # noqa: BLE001 - no diagnostic state is a commit receipt
         return BatchOutcome(
-            _failed_compile(args, batch.inputs, exc, prefix="transaction not committed: ")
+            _record_failed_batch(batch.inputs, exc, prefix="transaction not committed: ")
         )
     _require_compile_active(deadline, cancelled)
     _record_batch_diagnostics(batch, result, args, coordinator)
@@ -4743,9 +4908,7 @@ def _transactional_owner(
 def _whole_daily_digest(logical_path: str, compiled) -> str | None:
     """The digest of the file itself, once every part of it has a receipt."""
     try:
-        content = read_stable_bytes(
-            ROOT / logical_path, MAX_SOURCE_BYTES, label="daily source"
-        )
+        content = _read_daily_source(ROOT / logical_path)
     except (OSError, ValueError):
         return None
     if not daily_is_compiled(logical_path, content, compiled):
@@ -4854,7 +5017,9 @@ def _record_compile_source_failures(
         )
 
 
-def _retire_stale_source_failures(state_root: Path) -> None:
+def _retire_stale_source_failures(
+    state_root: Path, *, coordinator: MarkdownCoordinator | None = None
+) -> None:
     """Retire every failure row whose digest the file no longer has (audit B-15).
 
     A daily log only grows, so a failure of older bytes can never be cleared by a
@@ -4862,18 +5027,23 @@ def _retire_stale_source_failures(state_root: Path) -> None:
     for ever. See `docs/research/2026-09-25-a-failure-of-content-that-is-gone-is-retired.md`.
     """
     queue = active_or_legacy_memory_queue(ROOT, state_root)
+    coordinator = coordinator or active_or_legacy_coordinator(ROOT, state_root)
     current: dict[str, frozenset[str]] = {}
     for logical_path, digest in queue.source_failure_keys():
         if logical_path not in current:
-            current[logical_path] = _current_source_digests(logical_path)
+            current[logical_path] = _current_source_digests(logical_path, coordinator=coordinator)
         if digest not in current[logical_path]:
             queue.clear_source_failure(logical_path, digest)
 
 
-def _current_source_digests(logical_path: str) -> frozenset[str]:
-    """The digests a compile of this file would record: the whole and each part."""
+def _current_source_digests(
+    logical_path: str, *, coordinator: MarkdownCoordinator | None = None
+) -> frozenset[str]:
+    """Unresolved source digests; committed receipts resolve the whole and every part."""
     content = _readable_daily(ROOT / logical_path)
     if content is None:
+        return frozenset()
+    if coordinator is not None and daily_is_compiled(logical_path, content, _receipt_predicate(coordinator)):
         return frozenset()
     parts = {sha256_bytes(content[start:end]) for start, end in _daily_part_bounds(content)}
     return frozenset({sha256_bytes(content), *parts})

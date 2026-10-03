@@ -1,0 +1,15 @@
+# Search and symbol counts use existing contracts
+
+Research date: 2026-10-02. Five pre-fix regressions reproduced: refusal of a valid caller limit 1001; SQLite overflow from a large internal candidate limit; a decision pool smaller than its requested page count; and refusal/empty sites for a real indexed repository with 520 same-name methods. These synthetic fixtures do not establish a live520-method failure in the owner checkout.
+
+Public search now accepts a positive integer result count. Boolean, fractional, string, zero and negative inputs remain invalid before dispatch. The separate 1000-result ceiling is removed; decision retrieval no longer imports or clamps to that ceiling. Existing caller deadlines, cancellation, source/corpus controls and retrieval planning still govern work. This is not a claim that every possible requested count is always produced.
+
+SQLite's parameter representation remains signed 64-bit. The existing expanded FTS candidate count is saturated at that real external maximum before binding. Requests beyond that representation mean all representable rows, not a negative or overflowing SQL limit. Python slicing retains its own bounded-by-sequence behavior. The candidate fanout heuristic itself is unchanged and remains subject to the wider quality/budget review.
+
+Symbol resolution uses the graph reader's existing deadline and row contract instead of a separate 200-match refusal. Responses still show the existing small number of source blocks/sites and report all resolved/omitted matches. The two catches that turned the removed refusal into empty or misleading responses are removed; underlying reader failures propagate through the existing tool boundary. Existing graph row, snippet line and file budgets are unchanged; their full justification is not claimed here.
+
+Alternatives: changing only 1000 or 200 to larger guesses preserves arbitrary refusals; deleting all resource controls abandons real deadlines and protocol limits. Reuse those existing boundaries and preserve exact omission counts. No model, setting, schema, runtime root or tool is added.
+
+Independent primary research: [SQLite integer representation](https://www.sqlite.org/datatype3.html), [Python sequence slicing](https://docs.python.org/3/library/stdtypes.html#common-sequence-operations), [OWASP resource controls](https://api-security.owasp.org/editions/2023/en/0xa4-unrestricted-resource-consumption/), and [LSP definition responses](https://raw.githubusercontent.com/microsoft/language-server-protocol/gh-pages/_specifications/lsp/3.17/language/definition.md). These support grounded numeric representation and bounded work rather than a universal 1000-result or 200-definition rule.
+
+The obsolete test requiring refusal above 1000 is removed because the owner requires unsupported limits to be removed. Stronger actual filesystem/SQLite/real indexed-code regressions replace it; all malformed-count checks remain. Five new regressions pass and 110 related checks passed. Installation, current-checkout navigation and cross-platform full CI need their own dated proof. Original audit remains partial.

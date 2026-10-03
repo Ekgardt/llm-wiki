@@ -563,7 +563,7 @@ def build_grounded_context(
         deadline,
     )
     evidence, stale = _authoritative_evidence(
-        compiled, sources, snapshot.corpus_sha256, vault, _ReadingOrder.of(selected), _pruner(question)
+        compiled, sources, snapshot.corpus_sha256, vault, _ReadingOrder.of(selected), _pruner(question), deadline
     )
     offered = len(evidence)
     prompt_context = _packed_context(evidence, index_text, active_budget)
@@ -880,11 +880,15 @@ def _pruner(question: str | None):
     return _Pruner(question, _sentence_encoder())
 
 
-def _source_is_unchanged(source: object, vault: Path) -> bool:
-    """Whether the file still holds the bytes the snapshot captured."""
+def _source_is_unchanged(source: object, vault: Path, *, deadline: float | None = None) -> bool:
+    """A safe, bounded live read still holds the bytes the snapshot captured."""
+    from corpus_snapshot import CorpusChanged, read_current_source
+
     try:
-        live = (Path(vault) / source.record.relative_path).read_bytes()
-    except OSError:
+        live = read_current_source(vault, source.record, deadline=deadline)
+    except TimeoutError:
+        raise
+    except (OSError, ValueError, CorpusChanged):
         return False
     return hashlib.sha256(live).hexdigest() == source.record.sha256
 
@@ -903,14 +907,16 @@ class _FreshSources:
     it affordable at query time.
     """
 
-    def __init__(self, vault: Path) -> None:
+    def __init__(self, vault: Path, deadline: float | None = None) -> None:
         self.vault = vault
+        self.deadline = deadline
         self.verdicts: dict[str, bool] = {}
 
     def holds(self, source: object) -> bool:
+        _check_optional_deadline(self.deadline)
         path = source.record.relative_path
         if path not in self.verdicts:
-            self.verdicts[path] = _source_is_unchanged(source, self.vault)
+            self.verdicts[path] = _source_is_unchanged(source, self.vault, deadline=self.deadline)
         return self.verdicts[path]
 
     @property
@@ -939,6 +945,7 @@ def _authoritative_evidence(
     vault: Path,
     order: _ReadingOrder | None = None,
     pruner: _Pruner | None = None,
+    deadline: float | None = None,
 ) -> tuple[list[GroundedEvidence], tuple[str, ...]]:
     """One entry per distinct authoritative span, numbered in reading order.
 
@@ -947,7 +954,7 @@ def _authoritative_evidence(
     the model a session shuffled; `order` puts each entry's pieces back in byte
     order behind the entry retrieval ranked before it.
     """
-    fresh = _FreshSources(vault)
+    fresh = _FreshSources(vault, deadline)
     pairs = _quotable_pairs(compiled, sources, fresh)
     if order is not None:
         pairs.sort(key=lambda pair: order.rank(pair[0]))
@@ -979,15 +986,17 @@ def _packed_context(evidence: list[GroundedEvidence], index_text: str, budget: o
     return rendered
 
 
-# Words shorter than three characters (articles, particles) carry no evidence for a citation's
-# relevance; CJK is matched by bigrams instead. Basis unknown: value predates measurement; review
-# when a relevance check misses a real short term.
-_RELEVANCE_MIN_TOKEN_LENGTH = 3
 # Function words carry no evidence, so sharing only these proves nothing.
+# Token length does not distinguish these from technical terms such as C, Go,
+# IP and R. See docs/research/2026-09-30-short-terms-are-evidence.md.
 _RELEVANCE_STOPWORDS = frozenset(
     {
         "and", "are", "but", "для", "for", "from", "has", "have", "not", "the",
         "that", "this", "was", "were", "with", "что", "как", "это", "или",
+        "a", "an", "as", "at", "be", "by", "do", "if", "in", "is", "it",
+        "no", "of", "on", "or", "so", "to", "us", "we",
+        "вы", "да", "до", "за", "из", "и", "к", "ко", "ли", "мы", "на",
+        "не", "ни", "но", "о", "об", "от", "по", "с", "со", "у", "я",
     }
 )
 
@@ -998,7 +1007,7 @@ def _content_tokens(text: str) -> set[str]:
     words = {
         token
         for token in re.findall(r"\w+", lowered, flags=re.UNICODE)
-        if len(token) >= _RELEVANCE_MIN_TOKEN_LENGTH and token not in _RELEVANCE_STOPWORDS
+        if token not in _RELEVANCE_STOPWORDS
     }
     ideographs = re.findall(r"[\u3400-\u9fff]", lowered)
     return words | {a + b for a, b in zip(ideographs, ideographs[1:])}
@@ -1579,22 +1588,20 @@ def _answer_of_surviving_claims(
 
 
 def _answer_corpus(vault: Path, deadline: float) -> object:
-    """Capture the same corpus the candidates were retrieved from.
-
-    Retrieval searches a published generation; capturing a different corpus
-    here once meant candidates failed to resolve into a source and the answer
-    refused itself while search had just returned the right page. One corpus
-    definition, read from the same place the builder reads it.
-    """
+    """Use the published capture; selected sources are rechecked before prompts."""
     from corpus_snapshot import VAULT_CODE_ROOTS, collect_corpus
+    from search_memory import published_corpus
 
+    published = published_corpus(vault, deadline=deadline)
+    if published is not None:
+        return published
     return collect_corpus(vault, code_roots=VAULT_CODE_ROOTS, deadline=deadline)
 
 
 def _default_candidates(
     question: str,
     *,
-    profile: str,
+    profile: str | None,
     deadline: float,
     limit: int = QA_MAX_CANDIDATES,
     since: str | None = None,
@@ -1691,7 +1698,7 @@ class _AnswerPass:
         _check_deadline(self.deadline)
         self.passes.append(note)
         system_prompt = _qa_system_prompt()
-        question_block = "<question>\n" + self.question.strip() + "\n</question>\n" + note
+        question_block = _question_block(self.question, note)
         fixed_tokens = len((system_prompt + question_block).encode("utf-8"))
         context = build_grounded_context(
             self.captured,
@@ -1708,6 +1715,10 @@ class _AnswerPass:
         _require_prompt_fits(system_prompt + prompt, self.budget)
         raw = _provider_response(self.generator, prompt, system_prompt, self.deadline)
         return verify_grounded_answer(_parsed_answer(raw), context, vault=self.vault), context
+
+
+def _question_block(question: str, note: str = "") -> str:
+    return "<question>\n" + question.strip() + "\n</question>\n" + note
 
 
 def grounded_qa(
@@ -1735,19 +1746,24 @@ def grounded_qa(
     answer policy can be measured; the product never asks for it.
     """
     _require_bounded_question(question)
+    selected_budget = budget or _qa_budget()
+    _require_prompt_fits(_qa_system_prompt() + _question_block(question), selected_budget)
     selected_deadline = _resolved_deadline(deadline)
     _check_deadline(selected_deadline)
     selected_profile = _resolved_profile(profile, question)
-    fetch = _resolved_retriever(retrieve, candidates, question, selected_profile, selected_deadline)
+    retrieval_profile = None
+    if profile is not None:
+        retrieval_profile = selected_profile
+    fetch = _resolved_retriever(retrieve, candidates, question, retrieval_profile, selected_deadline)
     seek = _resolved_search(
-        search, candidates is not None or retrieve is not None, selected_profile, selected_deadline
+        search, candidates is not None or retrieve is not None, retrieval_profile, selected_deadline
     )
     single = _AnswerPass(
         question,
         Path(vault),
         snapshot or _answer_corpus(Path(vault), selected_deadline),
         selected_profile,
-        budget or _qa_budget(),
+        selected_budget,
         generator,
         selected_deadline,
     )
@@ -2404,8 +2420,8 @@ def _write_cited_events(question: str, profile: str, paths: Sequence[str]) -> No
 
 
 def _require_bounded_question(question: object) -> None:
-    if not isinstance(question, str) or not question.strip() or len(question) > 16_384:
-        raise GroundedQAError("question must be a bounded non-empty string")
+    if not isinstance(question, str) or not question.strip():
+        raise GroundedQAError("question must be a non-empty string")
 
 
 def _resolved_deadline(deadline: float | None) -> float:
@@ -2434,7 +2450,7 @@ def _resolved_candidates(
 def _resolved_search(
     search: Callable[[str, int], Iterable[object]] | None,
     fixed: bool,
-    profile: str,
+    profile: str | None,
     deadline: float,
 ) -> Callable[[str, int], Iterable[object]] | None:
     """How to search for something else; None when the caller decided retrieval.
@@ -2455,7 +2471,7 @@ def _resolved_retriever(
     retrieve: Callable[[int], Iterable[object]] | None,
     candidates: Iterable[object] | None,
     question: str,
-    profile: str,
+    profile: str | None,
     deadline: float,
 ) -> Callable[[int], Iterable[object]] | None:
     """How to ask retrieval for more; None when the caller fixed the candidates."""

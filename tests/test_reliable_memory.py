@@ -294,6 +294,29 @@ def test_runtime_file_identity_round_trips_through_create_only_publication(
     assert destination.read_bytes() == b'{"value":1}'
 
 
+def test_absent_runtime_file_keeps_its_actual_error(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        reliable_memory.read_runtime_bytes(tmp_path / "missing", tmp_path, max_bytes=1024)
+
+
+def test_runtime_file_outside_root_is_still_refused(tmp_path: Path) -> None:
+    root = tmp_path / "state"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"outside")
+    with pytest.raises(PermissionError, match="outside"):
+        reliable_memory.read_runtime_bytes(outside, root, max_bytes=1024)
+
+
+def test_runtime_file_symlink_is_still_refused(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.write_bytes(b"target")
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    with pytest.raises(PermissionError, match="regular file"):
+        reliable_memory.read_runtime_bytes(link, tmp_path, max_bytes=1024)
+
+
 def test_runtime_identity_capture_allows_a_live_writer(tmp_path: Path) -> None:
     """Operational databases stay open while their identity is captured.
 
@@ -726,7 +749,8 @@ def test_concurrent_state_root_validation_uses_unique_probe_databases(tmp_path, 
     assert results == [None] * 64
     probes = {path for path in connected_paths if path.name.startswith(".llm-wiki-lock-probe-")}
     assert len(probes) == 64
-    assert not list(root.glob(".llm-wiki-lock-probe-*"))
+    assert {path.parent for path in probes} == {root / "run"}
+    assert not list(root.rglob(".llm-wiki-lock-probe-*"))
 
 
 def _posix_locks_on_inode(inode: int) -> int:

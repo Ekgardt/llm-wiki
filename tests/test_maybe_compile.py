@@ -123,8 +123,17 @@ def test_compile_marker_stays_three_lines_and_is_published_before_canonical_owne
     assert not fake_env.LOCK_FILE.exists()
 
 
+def _write_reused_process_lock(module):
+    from tests.process_identity_fixture import reused_current_process_identity
+
+    module._write_lock(os.getpid())
+    lines = module.LOCK_FILE.read_text().splitlines()
+    lines[3] = reused_current_process_identity()
+    module.LOCK_FILE.write_text("\n".join(lines) + "\n")
+
+
 def test_clear_lock(fake_env):
-    fake_env._write_lock(99999)
+    _write_reused_process_lock(fake_env)
     assert fake_env.LOCK_FILE.exists()
     fake_env._clear_lock()
     assert not fake_env.LOCK_FILE.exists()
@@ -144,9 +153,7 @@ def test_is_compile_running_no_lock(fake_env):
 
 def test_is_compile_running_with_dead_pid(fake_env, monkeypatch):
     """Stale lock with a dead PID is reported as not-running."""
-    fake_env._write_lock(99999)  # almost certainly dead
-    # Force _is_pid_alive to confirm dead (don't rely on real OS state).
-    monkeypatch.setattr(fake_env, "_is_pid_alive", lambda pid: False)
+    _write_reused_process_lock(fake_env)
     is_running, reason = fake_env._is_compile_running()
     assert is_running is False
     assert "stale" in reason.lower()
@@ -278,8 +285,7 @@ def test_force_refuses_live_lock(fake_env, monkeypatch):
 def test_force_proceeds_on_stale_lock(fake_env, monkeypatch):
     """--force proceeds when the lock is stale (dead PID), bypassing the
     pending-work gate."""
-    fake_env._write_lock(99999)  # dead PID
-    monkeypatch.setattr(fake_env, "_is_pid_alive", lambda pid: False)
+    _write_reused_process_lock(fake_env)
     monkeypatch.setattr(fake_env, "_has_pending_work", lambda *_args: False)
     monkeypatch.setattr(fake_env, "spawn_detached", lambda *a, **kw: 55555)
 

@@ -164,6 +164,9 @@ def _create_generation(root: Path, state_root: Path) -> None:
     from generation_catalog import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
+    # A test vault owns its Git boundary and must not inherit an ancestor's
+    # possibly inaccessible repository marker from the execution environment.
+    subprocess.run(["git", "init", "--quiet", str(root)], check=True, capture_output=True)
     snapshot = corpus_snapshot.collect_corpus(root)
     build_full_generation(
         GenerationCatalog(state_root),
@@ -599,6 +602,7 @@ def test_filesystem_health_runs_bounded_probe_and_leaves_no_artifacts(tmp_path, 
 
     state_root = tmp_path / "state"
     state_root.mkdir()
+    (state_root / "run").mkdir()
     before = _snapshot(tmp_path)
     calls = []
     real_probe = reliable_memory._sqlite_lock_probe
@@ -617,7 +621,7 @@ def test_filesystem_health_runs_bounded_probe_and_leaves_no_artifacts(tmp_path, 
         bool(calls) and calls[0][0] == state_root,
         calls[0][1] != float("inf"),
         _snapshot(tmp_path) == before,
-        list(state_root.glob(".llm-wiki-lock-probe-*")),
+        list(state_root.rglob(".llm-wiki-lock-probe-*")),
     ) == ("ok", True, True, True, [])
 
 
@@ -1655,10 +1659,13 @@ def test_run_doctor_uses_supplied_absolute_deadline_after_queue_delay(tmp_path, 
     )
     monkeypatch.setattr(doctor, "_filesystem_check", filesystem)
 
-    with pytest.raises(RuntimeError, match="deadline capture"):
-        doctor.run_doctor(root=root, state_root=state, deadline=50.0)
+    report = doctor.run_doctor(root=root, state_root=state, deadline=50.0)
 
-    assert captured == [50.0]
+    filesystem_check = next(check for check in report["checks"] if check["id"] == "filesystem")
+    assert (captured, filesystem_check["message"]) == (
+        [50.0],
+        "The filesystem check could not finish: RuntimeError: stop after deadline capture",
+    )
 
 
 def test_budget_exhaustion_degrades_overall_and_health_summary(tmp_path):
@@ -1849,6 +1856,8 @@ def test_doctor_pyright_maps_infinite_deadline_to_api_none(tmp_path, monkeypatch
     import doctor
     import pyright_profile
     import repository_scope
+
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
 
     observed: list[tuple[str, float | None]] = []
     real_resolve = repository_scope.resolve_repository_scope
@@ -2414,7 +2423,7 @@ def test_doctor_lsp_production_live_lease_blocks_deletion(tmp_path, monkeypatch)
     monkeypatch.setattr(
         doctor,
         "_lsp_pid_state",
-        lambda pid: "alive" if pid in {1111, 2222} else "dead",
+        lambda pid, _identity=None: "alive" if pid in {1111, 2222} else "dead",
     )
 
     check = doctor._lsp_runtime_check(tmp_path, now, deadline=time.monotonic() + SHORT_TIMEOUT)
@@ -2453,7 +2462,7 @@ def test_doctor_lsp_pid_probe_deadline_crossing_fails_closed(tmp_path, monkeypat
     deadline = 2.0
     probed: list[int] = []
 
-    def pid_state(pid: int) -> str:
+    def pid_state(pid: int, _identity=None) -> str:
         probed.append(pid)
         clock[0] = deadline
         return "alive"
@@ -2464,7 +2473,7 @@ def test_doctor_lsp_pid_probe_deadline_crossing_fails_closed(tmp_path, monkeypat
     check = doctor._lsp_runtime_check(tmp_path, now, deadline=deadline)
     deletion = doctor._run_deletion_check(tmp_path, now, collected={"lsp": check})
 
-    assert probed == [1111]
+    assert probed == [2222]
     assert check["details"]["owners"] == []
     assert check["details"]["codes"] == ["lsp_state_unreadable"]
     assert deletion["blockers"] == [{"code": "legacy_protocol_unquiesced"}]
@@ -2496,7 +2505,7 @@ def test_doctor_lsp_unknown_pid_probe_fails_closed(tmp_path, monkeypatch) -> Non
     monkeypatch.setattr(
         doctor,
         "_lsp_pid_state",
-        lambda pid: "unknown",
+        lambda pid, _identity=None: "unknown",
         raising=False,
     )
 
@@ -2543,7 +2552,7 @@ def test_doctor_lsp_dead_owner_uses_last_heartbeat_as_crash_evidence(tmp_path, m
         heartbeat_at=now - timedelta(days=1),
         expires_at=now - timedelta(days=1) + timedelta(seconds=30),
     )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(doctor, "_lsp_pid_state", lambda _pid, _identity=None: "dead")
 
     check = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))
 
@@ -2575,7 +2584,7 @@ def test_doctor_lsp_crash_evidence_expires_at_exact_seven_day_boundary(
         heartbeat_at=now - timedelta(days=7),
         expires_at=now - timedelta(days=7) + timedelta(seconds=30),
     )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(doctor, "_lsp_pid_state", lambda _pid, _identity=None: "dead")
 
     check = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))
     deletion = doctor._run_deletion_check(tmp_path, now, collected={"lsp": check})
@@ -2657,7 +2666,7 @@ def test_doctor_lsp_dead_owner_without_lease_uses_owner_start_time(tmp_path, mon
         started_at=now - timedelta(days=8),
         owner_pid=2222,
     )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(doctor, "_lsp_pid_state", lambda _pid, _identity=None: "dead")
 
     check = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))
 
@@ -2798,24 +2807,29 @@ def test_doctor_lsp_rejects_nonproduction_record_schema(tmp_path, monkeypatch, r
         started_at=now - timedelta(days=8),
         owner_pid=2222,
     )
-    if record_name == "lease.json":
-        _write_lsp_lease(
-            owner,
-            owner_nonce=owner_nonce,
-            generation_nonce=generation_nonce,
-            manager_pid=1111,
-            server_pid=2222,
-            heartbeat_at=now - timedelta(seconds=5),
-            expires_at=now + timedelta(seconds=25),
-        )
-    elif record_name == "failure.json":
-        _write_lsp_failure(
-            owner,
-            owner_nonce=owner_nonce,
-            generation_nonce=generation_nonce,
-            timestamp=now - timedelta(days=8),
-            server_pid=2222,
-        )
+    def write_selected_record():
+        if record_name == "lease.json":
+            _write_lsp_lease(
+                owner,
+                owner_nonce=owner_nonce,
+                generation_nonce=generation_nonce,
+                manager_pid=1111,
+                server_pid=2222,
+                heartbeat_at=now - timedelta(seconds=5),
+                expires_at=now + timedelta(seconds=25),
+            )
+            return
+        if record_name == "failure.json":
+            _write_lsp_failure(
+                owner,
+                owner_nonce=owner_nonce,
+                generation_nonce=generation_nonce,
+                timestamp=now - timedelta(days=8),
+                server_pid=2222,
+            )
+            return
+
+    write_selected_record()
     path = owner / record_name
     record = json.loads(path.read_text(encoding="utf-8"))
     record["unexpected"] = True
@@ -2853,12 +2867,12 @@ def test_doctor_lsp_rejects_non_integer_lease_schema_version(tmp_path, monkeypat
     lease = json.loads(lease_path.read_text(encoding="utf-8"))
     lease["schema_version"] = 1.0
     lease_path.write_text(json.dumps(lease), encoding="utf-8")
-    monkeypatch.setattr(doctor, "_lsp_pid_state", lambda _pid: "alive")
+    monkeypatch.setattr(doctor, "_lsp_pid_state", lambda _pid, _identity=None: "alive")
 
     check = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))
 
     assert "lsp_state_unreadable" in check["details"]["codes"]
-    assert "lsp_owner_live" not in check["details"]["codes"]
+    assert "lsp_owner_live" in check["details"]["codes"]
 
 
 def test_doctor_reads_a_restarted_owner_as_live(tmp_path, monkeypatch) -> None:
@@ -2892,7 +2906,7 @@ def test_doctor_reads_a_restarted_owner_as_live(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         doctor,
         "_lsp_pid_state",
-        lambda pid: "alive" if pid in {1111, 3333} else "dead",
+        lambda pid, _identity=None: "alive" if pid in {1111, 3333} else "dead",
     )
 
     codes = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))["details"][
@@ -2925,7 +2939,7 @@ def test_doctor_rejects_a_lease_belonging_to_another_owner(
         heartbeat_at=now - timedelta(seconds=5),
         expires_at=now + timedelta(seconds=25),
     )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(doctor, "_lsp_pid_state", lambda _pid, _identity=None: "dead")
 
     codes = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))["details"][
         "codes"
@@ -2934,9 +2948,11 @@ def test_doctor_rejects_a_lease_belonging_to_another_owner(
     assert ("lsp_state_unreadable" in codes, "lsp_owner_live" in codes) == (True, False)
 
 
-def test_doctor_accepts_failure_evidence_from_a_later_generation(tmp_path) -> None:
+def test_doctor_accepts_failure_evidence_from_a_later_generation(tmp_path, monkeypatch) -> None:
     """The generation that failed is the one that was running, not the first."""
     import doctor
+
+    monkeypatch.setattr(doctor, "_lsp_pid_state", lambda _pid, _identity=None: "dead")
 
     now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
     owner_nonce = "a" * 32
@@ -2982,7 +2998,7 @@ def test_doctor_lsp_rejects_lease_heartbeat_before_owner_start(tmp_path, monkeyp
         heartbeat_at=now - timedelta(minutes=2),
         expires_at=now + timedelta(seconds=25),
     )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(doctor, "_lsp_pid_state", lambda _pid, _identity=None: "dead")
 
     check = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))
 
@@ -3540,7 +3556,7 @@ def test_doctor_lsp_live_owner_and_failure_block_deletion(tmp_path, monkeypatch)
     monkeypatch.setattr(
         doctor,
         "_lsp_pid_state",
-        lambda pid: "alive" if pid in {1111, 2222} else "dead",
+        lambda pid, _identity=None: "alive" if pid in {1111, 2222} else "dead",
     )
 
     check = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))

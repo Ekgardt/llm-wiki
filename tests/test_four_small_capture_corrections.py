@@ -36,17 +36,6 @@ def test_the_prompt_counter_keeps_the_sessions_counted_most_recently(own_state):
     assert (len(kept), kept[0], kept[-1]) == (bound, ("session-0", 2), (sessions[-1], 1))
 
 
-def test_a_commit_that_adds_several_reducers_is_trimmed_back_to_the_bound():
-    import integration_adapter
-
-    bound = integration_adapter.MAX_CHECKPOINT_REDUCERS
-    reducers = {f"project-{index}": {} for index in range(bound + 5)}
-
-    integration_adapter._trim_reducers(reducers)
-
-    assert (len(reducers), next(iter(reducers))) == (bound, "project-5")
-
-
 def test_a_stray_byte_in_a_short_transcript_does_not_lose_the_session(tmp_path):
     import integration_adapter
 
@@ -56,3 +45,26 @@ def test_a_stray_byte_in_a_short_transcript_does_not_lose_the_session(tmp_path):
     text = integration_adapter._capture_transcript_text(transcript)
 
     assert text == "we decided to keep � the queue\n"
+
+
+def test_a_reducer_commit_preserves_entries_that_fit_the_state_byte_budget(own_state):
+    import integration_adapter
+    from project_journal import CheckpointReducer
+
+    reducers = {
+        f"project-{index}:session": CheckpointReducer(observed_event_ids=(f"event-{index}",)).to_state()
+        for index in range(128)
+    }
+    new = {"new-project:session": CheckpointReducer(observed_event_ids=("new-event",)).to_state()}
+    expected = {**reducers, **new}
+    item = {"event_id": "new-event", "claim_owner": "owner"}
+    state = {"project_checkpoint_reducers": dict(reducers), "project_checkpoint_pending": {"queue": [item]}}
+    integration_adapter._commit_pending_state(state, "queue", "owner", [item], new)
+    assert memory_state._state_bytes(state) < memory_state.MAX_STATE_TARGET_BYTES
+    memory_state.save_state(state)
+    restored = memory_state.load_state()
+    assert restored["project_checkpoint_reducers"] == expected
+    integration_adapter._enqueue_pending_events(
+        restored, "project-0:session", "project-0", [{"event_id": "event-0"}],
+    )
+    assert restored["project_checkpoint_pending"]["project-0"] == []

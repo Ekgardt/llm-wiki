@@ -21,6 +21,7 @@ written by a faster one.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -160,9 +161,8 @@ def load_state() -> dict[str, Any]:
 # growth shows up as eviction rather than as a blind spot.
 MAX_STATE_TARGET_BYTES = 192 * 1024
 
-# The maps that grow with use: dedupe memory and per-project reducers. Each is
-# already capped by entry count, but an entry is not a fixed size, so the count
-# caps alone never bounded the file.
+# The maps that grow with use: dedupe memory and per-project reducer caches.
+# Entries have varying encoded sizes; the shared byte budget bounds the file.
 _TRIMMABLE_STATE_KEYS = (
     "tool_capture_dedupe",
     "prompt_capture_dedupe",
@@ -200,7 +200,10 @@ def trim_state_to_budget(state: dict[str, Any]) -> int:
 
 def _serialized_state(state: dict[str, Any]) -> str:
     trim_state_to_budget(state)
-    return json.dumps(state, indent=2, ensure_ascii=False)
+    text = json.dumps(state, indent=2, ensure_ascii=False)
+    if len(text.encode("utf-8")) > MAX_STATE_TARGET_BYTES:
+        raise OSError(errno.EFBIG, "state exceeds the shared writable byte budget; protected state was preserved")
+    return text
 
 
 def _write_state_text(text: str) -> None:

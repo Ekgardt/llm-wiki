@@ -8,6 +8,7 @@ slots after its caller had given up. Research:
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -28,6 +29,7 @@ def _repository_with_a_generation(tmp_path, monkeypatch) -> Path:
 
     repository = tmp_path / "repo"
     repository.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True, capture_output=True)
     (repository / "app.py").write_bytes(SOURCE)
     catalog = GenerationCatalog(tmp_path / "state")
     _publish(

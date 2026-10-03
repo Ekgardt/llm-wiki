@@ -1,5 +1,7 @@
 # Argument bindings and route calls, not a data-flow graph
 
+Update, 2026-09-30: stored bindings are no longer cut after eight pairs or 256 bytes. See [complete binding evidence](2026-09-30-bindings-are-stored-evidence.md). The original checkpoint below remains historical.
+
 Date: 2026-09-11. Trigger: the owner asked for issue #24 to be finished. Of
 its acceptance criteria four remain: `data_flow` and `cross_service` tracing
 (section B), cross-repository matching (D2), precise navigation for

@@ -2,6 +2,10 @@
 
 Date: 2026-09-26. Audit 2026-09-26 B-6.
 
+Update 2026-09-30: the eight-hop ceiling below is superseded by the finite,
+cycle-aware walk with caller deadline/cancellation in
+`2026-09-30-traversal-stops-at-the-budget.md`. The original diagnosis is retained.
+
 ## Facts
 
 - `from lib import compute as calc` resolved `calc()` to `lib.compute` and looked

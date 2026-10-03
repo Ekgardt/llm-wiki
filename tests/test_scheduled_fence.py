@@ -107,12 +107,15 @@ def test_an_expired_owner_whose_process_is_alive_is_not_stolen(tmp_path):
         ownership.release_marker_owner(lease, marker)
 
 
-def test_an_ownerless_marker_of_a_dead_pid_is_removed(tmp_path, monkeypatch):
+def test_an_ownerless_scoped_marker_of_a_dead_pid_is_removed(tmp_path, monkeypatch):
+    import process_liveness
+
     state_root = tmp_path / "state"
     _candidate(state_root)
     marker_path = state_root / MARKER
     marker_path.parent.mkdir(parents=True, exist_ok=True)
-    marker_path.write_bytes(b"4000000")
+    identity = process_liveness.process_start_identity(os.getpid())
+    marker_path.write_bytes(f"4000000\n{identity}\n".encode())
     real_probe = ownership.process_start_identity
     monkeypatch.setattr(
         ownership,
@@ -128,18 +131,32 @@ def test_an_ownerless_marker_of_a_dead_pid_is_removed(tmp_path, monkeypatch):
         ownership.release_marker_owner(lease, marker)
 
 
-def test_an_ownerless_marker_of_a_living_pid_refuses(tmp_path):
+def test_an_ownerless_scoped_marker_of_a_living_pid_refuses(tmp_path):
+    import process_liveness
+
     state_root = tmp_path / "state"
     _candidate(state_root)
     marker_path = state_root / MARKER
     marker_path.parent.mkdir(parents=True, exist_ok=True)
-    marker_path.write_bytes(str(os.getpid()).encode("ascii"))
+    payload = f"{os.getpid()}\n{process_liveness.process_start_identity(os.getpid())}\n".encode()
+    marker_path.write_bytes(payload)
 
     with pytest.raises(ownership.OperationalOwnershipError) as error:
         ownership.acquire_scheduled_owner("nightly", state_root=state_root)
 
     assert error.value.code == "owner_busy"
-    assert marker_path.read_bytes() == str(os.getpid()).encode("ascii")
+    assert marker_path.read_bytes() == payload
+
+
+def test_an_unscoped_ownerless_marker_preserves_unknown(tmp_path):
+    state_root = tmp_path / "state"
+    _candidate(state_root)
+    marker_path = state_root / MARKER
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    marker_path.write_bytes(b"4000000")
+    with pytest.raises(ownership.OperationalOwnershipError, match="owner_liveness_unknown"):
+        ownership.acquire_scheduled_owner("nightly", state_root=state_root)
+    assert marker_path.read_bytes() == b"4000000"
 
 
 @pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a file its owner cannot read")

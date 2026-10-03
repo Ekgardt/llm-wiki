@@ -1,10 +1,10 @@
-"""The fact keys are read by the index column alone, and a turn is asked a bounded number of nights.
+"""The index column alone reads keys; incomplete turns remain pending across finite runs.
 
 Third audit, 2026-09-17 (retrieval M3 and L6 with generations M4). LongMemEval measured the
 key merged into the turn's own index entry as the good shape and the keys kept as separate
 retrieval items as the worse one, so the separate leg is gone and with it the question of
-whether product keys need vectors. A turn whose reply never covers it is asked `MAX_ATTEMPTS`
-nights and then left to the index, so one failing batch cannot spend the budget every night.
+whether product keys need vectors. Since October 3, a turn a reply omits stays pending,
+ordered behind less-asked turns. One run visits each batch once under its deadline.
 See `docs/research/2026-09-17-the-keys-live-in-the-index-and-nowhere-else.md`.
 """
 
@@ -59,22 +59,22 @@ def _nights(store, chunks: tuple, ask, count: int) -> list[int]:
     return waiting
 
 
-def test_a_turn_no_reply_ever_covers_stops_being_asked(chunks: tuple, tmp_path: Path) -> None:
+def test_an_uncovered_turn_remains_pending_after_several_runs(chunks: tuple, tmp_path: Path) -> None:
     store = fact_keys.KeyStore(tmp_path / "keys.sqlite3")
 
-    waiting = _nights(store, chunks, _covers_neither, fact_keys.MAX_ATTEMPTS + 1)
-    after = (len(fact_keys.waiting_turns(store, chunks)), store.given_up())
+    waiting = _nights(store, chunks, _covers_neither, 4)
+    after = (len(fact_keys.waiting_turns(store, chunks)), store.uncovered())
     store.close()
 
-    assert waiting == [2] * fact_keys.MAX_ATTEMPTS + [0]
-    assert after == (0, 2)
+    assert waiting == [2] * 4
+    assert after == (2, 2)
 
 
 def test_a_provider_that_says_nothing_spends_no_attempt(chunks: tuple, tmp_path: Path) -> None:
     """An outage is not the turn's fault: three silent nights must not retire every turn."""
     store = fact_keys.KeyStore(tmp_path / "keys.sqlite3")
 
-    _nights(store, chunks, lambda prompt, system_prompt: None, fact_keys.MAX_ATTEMPTS + 1)
+    _nights(store, chunks, lambda prompt, system_prompt: None, 4)
     still_waiting = len(fact_keys.waiting_turns(store, chunks))
     keyed = fact_keys.key_turns(store, chunks, _covers_both)
     store.close()

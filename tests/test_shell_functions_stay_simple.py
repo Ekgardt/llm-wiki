@@ -91,6 +91,29 @@ def test_the_installer_is_among_the_measured_files() -> None:
 @pytest.mark.parametrize("path", _shell_files(), ids=lambda path: path.relative_to(ROOT).as_posix())
 def test_every_shipped_shell_function_is_under_the_ceiling(path: Path) -> None:
     assert _violations(path.read_bytes()) == {}
+    assert _shape_violations(path.read_bytes()) == []
+
+
+def _shape_violations(source: bytes) -> list[str]:
+    return [
+        f"{_name(fn)}: {reason}\n{fn.text.decode()}"
+        for fn in _functions(source) for reason in _shape_reasons(fn)
+    ]
+
+
+def _shape_reasons(function: Node) -> list[str]:
+    nodes = _own_nodes(function)
+    measured = {"if count": (sum(n.type == "if_statement" for n in nodes), 2),
+                "else-if chains": (sum(n.type == "elif_clause" for n in nodes), 0)}
+    return [f"{label}={value} > {limit}" for label, (value, limit) in measured.items() if value > limit]
+
+
+@pytest.mark.parametrize("body", [
+    "if a; then :; fi; if b; then :; fi; if c; then :; fi",
+    "if a; then :; elif b; then :; fi",
+])
+def test_forbidden_shell_branch_shapes_are_detected(body):
+    assert _shape_violations(f"bad() {{ {body}; }}".encode())
 
 
 @pytest.mark.parametrize(

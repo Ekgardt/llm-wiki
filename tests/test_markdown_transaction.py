@@ -1167,7 +1167,7 @@ def test_late_writer_heartbeat_renews_expired_unchanged_owner(
     expired = "2000-01-01T00:00:00Z"
     with coordinator._connect() as database:
         database.execute(
-            "INSERT INTO writer_owners VALUES ('global', ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO writer_owners (gate_name, owner_token, process_id, thread_id, acquired_at, heartbeat_at, expires_at, fencing_epoch) VALUES ('global', ?, ?, ?, ?, ?, ?, ?)",
             (token, os.getpid(), threading.get_ident(), expired, expired, expired, 1),
         )
         database.commit()
@@ -1209,7 +1209,7 @@ def test_late_writer_heartbeat_after_takeover_is_lost_without_overwrite(
     )
     with coordinator._connect() as database:
         database.execute(
-            "INSERT INTO writer_owners VALUES ('global', ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO writer_owners (gate_name, owner_token, process_id, thread_id, acquired_at, heartbeat_at, expires_at, fencing_epoch) VALUES ('global', ?, ?, ?, ?, ?, ?, ?)",
             takeover,
         )
         database.commit()
@@ -1247,7 +1247,7 @@ def test_writer_heartbeat_retries_transient_contention_without_losing_fence(
     now = markdown_transaction._now()
     with coordinator._connect() as database:
         database.execute(
-            "INSERT INTO writer_owners VALUES ('global', ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO writer_owners (gate_name, owner_token, process_id, thread_id, acquired_at, heartbeat_at, expires_at, fencing_epoch) VALUES ('global', ?, ?, ?, ?, ?, ?, ?)",
             (
                 token,
                 os.getpid(),

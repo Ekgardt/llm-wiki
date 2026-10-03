@@ -4,6 +4,7 @@ import concurrent.futures
 import hashlib
 import importlib
 import inspect
+import multiprocessing
 import os
 import sqlite3
 import subprocess
@@ -51,7 +52,6 @@ TASK14_BEHAVIORAL_ENTRYPOINTS = {
     "scripts/reflection.py:reflect_page",
     "scripts/session_end_project_tag.py:_append_entry",
     "scripts/session_start_project_state.py:_create_project_state",
-    "scripts/user_prompt_capture.py:_append_prompt_tag",
 }
 
 TASK14_READ_TRANSFORM_WRITE_ENTRYPOINTS = {
@@ -114,6 +114,12 @@ def _bounded_workers(requested: int) -> int:
     return max(2, min(requested, os.cpu_count() or requested))
 
 
+def _require_safe_worker_context() -> None:
+    if multiprocessing.parent_process() is None:
+        return
+    assert multiprocessing.get_start_method() != "fork"
+
+
 def _same_operation_worker(
     api: str,
     target: str,
@@ -122,6 +128,7 @@ def _same_operation_worker(
     vault: str,
     state: str,
 ) -> str:
+    _require_safe_worker_context()
     os.environ["LLM_WIKI_ROOT"] = vault
     os.environ["LLM_WIKI_STATE_ROOT"] = state
     import markdown_transaction
@@ -137,6 +144,7 @@ def _same_operation_worker(
 
 
 def _distinct_append_worker(target: str, index: int, vault: str, state: str) -> str:
+    _require_safe_worker_context()
     os.environ["LLM_WIKI_ROOT"] = vault
     os.environ["LLM_WIKI_STATE_ROOT"] = state
     import markdown_transaction
@@ -402,11 +410,6 @@ def _drive_session_start_project_state(d: _Drive) -> None:
     d.function(vault, projects_dir, project, "demo", projects_dir / "demo" / "state.md")
 
 
-def _drive_user_prompt_capture(d: _Drive) -> None:
-    d.monkeypatch.setattr("daily_log_append.append_daily", d.boundary)
-    d.function("demo", "s1", d.secret, "event-1")
-
-
 # One driver per writer module: the dispatch used to be a 24-branch chain.
 _WRITER_DRIVERS = {
     "access_tracking": _drive_access_tracking,
@@ -423,7 +426,6 @@ _WRITER_DRIVERS = {
     "reflection": _drive_reflection,
     "session_end_project_tag": _drive_session_end_project_tag,
     "session_start_project_state": _drive_session_start_project_state,
-    "user_prompt_capture": _drive_user_prompt_capture,
 }
 
 # These writers legitimately hand the boundary content read from disk, so the
@@ -949,9 +951,15 @@ def test_concurrent_daily_and_project_jsonl_appends_never_interleave(tmp_path, m
         assert jsonl_text.count(f'{{"id":{index}}}\n') == 1
 
 
+def _process_executor(*, max_workers: int):
+    return concurrent.futures.ProcessPoolExecutor(
+        max_workers=max_workers, mp_context=multiprocessing.get_context("spawn"),
+    )
+
+
 _EXECUTOR_CLASSES = {
     "thread": concurrent.futures.ThreadPoolExecutor,
-    "process": concurrent.futures.ProcessPoolExecutor,
+    "process": _process_executor,
 }
 
 
@@ -1008,7 +1016,7 @@ def test_concurrent_identical_append_converges_once_during_distinct_event_churn(
     target = vault / "knowledge" / "daily" / "mixed-stress.md"
     operation_id = "mixed-stress:same"
 
-    with concurrent.futures.ProcessPoolExecutor(max_workers=_bounded_workers(8)) as executor:
+    with _process_executor(max_workers=_bounded_workers(8)) as executor:
         futures = _mixed_append_futures(executor, target, vault, state)
         assert [future.result(timeout=LONG_TIMEOUT) for future in futures] == ["committed"] * 18
 
@@ -1045,11 +1053,7 @@ def test_distinct_events_survive_repeated_writer_contention(tmp_path, monkeypatc
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
     target = vault / "knowledge" / "daily" / "stress.md"
-    executor_class = (
-        concurrent.futures.ThreadPoolExecutor
-        if executor_type == "thread"
-        else concurrent.futures.ProcessPoolExecutor
-    )
+    executor_class = _EXECUTOR_CLASSES[executor_type]
 
     with executor_class(max_workers=_bounded_workers(6)) as executor:
         futures = [

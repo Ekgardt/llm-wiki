@@ -1803,7 +1803,8 @@ class _RealNavigationRuntime:
         if scenario == "crash":
             process.process.kill()
             self._query_after_crash(request, deadline)
-        elif scenario in {"timeout", "cancellation"}:
+            return self._reset(deadline)
+        if scenario in {"timeout", "cancellation"}:
             self._observe_inflight_interruption(process, scenario, deadline)
         return self._reset(deadline)
 
@@ -3269,14 +3270,11 @@ def resolve_state_root(
     environ: Mapping[str, str] | None = None,
 ) -> Path:
     environment = os.environ if environ is None else environ
-    value: Path
     if argument is not None:
-        value = Path(argument)
-    elif environment.get("LLM_WIKI_STATE_ROOT"):
-        value = Path(environment["LLM_WIKI_STATE_ROOT"])
-    else:
-        value = ROOT
-    return value.expanduser().resolve()
+        return Path(argument).expanduser().resolve()
+    if environment.get("LLM_WIKI_STATE_ROOT"):
+        return Path(environment["LLM_WIKI_STATE_ROOT"]).expanduser().resolve()
+    return ROOT.expanduser().resolve()
 
 
 def _validated_operator_corpus(parser: argparse.ArgumentParser, argument: Path) -> Path:

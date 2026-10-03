@@ -21,21 +21,13 @@ from pathlib import Path
 
 from path_coverage import _current_sha, _freshness, contained_scope
 
-# Definitions a snippet answer shows. A display bound, not a data bound: each is a
-# source block of up to MAX_SNIPPET_LINES lines, so five already fill a screen, and
-# the answer states `resolved_nodes`, `nodes_omitted` and `snippets_omitted` so the
+# Definitions a snippet answer shows. The answer states `resolved_nodes`,
+# `nodes_omitted` and `snippets_omitted` so the
 # reader knows more exist and can qualify the name (the protocol reply bound is
 # 10 000). docs/research/2026-09-27-a-cut-says-what-it-left-out.md.
 MAX_LOCATIONS = 5
 # One source file read for a snippet; fresh positions re-read up to 4 MiB.
 MAX_FILE_BYTES = 1024 * 1024
-# Lines of one definition shown; a longer body is cut and the snippet says
-# `truncated: true`. Basis unknown: value predates measurement (about two screens).
-MAX_SNIPPET_LINES = 120
-# Symbols sharing the asked name; past 200 the answer is refused ("too many symbols
-# share this name") so the caller qualifies it instead of reading a partial list.
-# Basis unknown: value predates measurement.
-MAX_NAME_MATCHES = 200
 # `constant` joined on 2026-09-12: a module-level UPPER_CASE name is a
 # definition an operator asks for by name like any other.
 SNIPPET_KINDS = ("class", "function", "method", "constant")
@@ -63,8 +55,7 @@ def _indent_of(line: str) -> int:
 
 def _block_end(lines: list[str], start: int, indent: int) -> int:
     end = start + 1
-    limit = min(len(lines), start + MAX_SNIPPET_LINES)
-    while end < limit and _still_inside(lines[end], indent):
+    while end < len(lines) and _still_inside(lines[end], indent):
         end += 1
     return end
 
@@ -86,7 +77,7 @@ def _snippet_at(lines: list[str], start: int) -> dict:
         "start_line": start + 1,
         "end_line": end,
         "source": "\n".join(lines[start:end]),
-        "truncated": end - start >= MAX_SNIPPET_LINES,
+        "truncated": False,
     }
 
 
@@ -140,8 +131,6 @@ def _matching_nodes(graph, symbol: str, deadline: float) -> list[dict]:
     matched = [
         row for row in rows if _owner_matches(str(row["metadata"].get("owner", "")), wanted)
     ]
-    if len(matched) > MAX_NAME_MATCHES:
-        raise ValueError("too many symbols share this name")
     return matched
 
 
@@ -162,12 +151,11 @@ def _stored_lines(graph, relative: str, deadline: float) -> list[str] | None:
 def _exact_block(lines: list[str], occurrence: dict) -> dict:
     start = int(occurrence["line_start"])
     end = int(occurrence["line_end"])
-    cut = min(end, start + MAX_SNIPPET_LINES - 1)
     return {
         "start_line": start,
         "end_line": end,
-        "source": "\n".join(lines[start - 1 : cut]),
-        "truncated": cut < end,
+        "source": "\n".join(lines[start - 1 : end]),
+        "truncated": False,
     }
 
 
@@ -206,12 +194,11 @@ def _file_block(directory: Path, relative: str, node: dict) -> dict | None:
     if lines is None:
         return None
     start, end = span
-    cut = min(end, start + MAX_SNIPPET_LINES - 1)
     return {
         "start_line": start,
         "end_line": end,
-        "source": "\n".join(lines[start - 1 : cut]),
-        "truncated": cut < end,
+        "source": "\n".join(lines[start - 1 : end]),
+        "truncated": False,
         "lines_read_from": "file",
     }
 
@@ -253,10 +240,7 @@ def _node_snippets(
 
 def _graph_snippets(graph, directory: Path, symbol: str, deadline: float) -> dict:
     answer = {"symbol": symbol, "graph": "active_generation", "generation_id": str(graph.generation_id)}
-    try:
-        nodes = _matching_nodes(graph, symbol, deadline)
-    except ValueError:
-        return {**answer, "snippets": [], "error": "too many symbols share this name; qualify it as owner.name"}
+    nodes = _matching_nodes(graph, symbol, deadline)
     _, name = _split_symbol(symbol)
     # One scope per answer: resolving it asks git, so never once per symbol.
     scope = contained_scope(directory, deadline)
@@ -306,10 +290,7 @@ def _definition_site(graph, node: dict, deadline: float) -> dict | None:
 
 def _graph_definition_report(graph, symbol: str, deadline: float) -> dict:
     """The first MAX_LOCATIONS definition sites, and how many matching nodes were left out."""
-    try:
-        nodes = _matching_nodes(graph, symbol, deadline)
-    except ValueError:
-        return {"sites": [], "sites_omitted": 0}
+    nodes = _matching_nodes(graph, symbol, deadline)
     shown = nodes[:MAX_LOCATIONS]
     sites = [_definition_site(graph, node, deadline) for node in shown]
     return {"sites": [site for site in sites if site is not None], "sites_omitted": len(nodes) - len(shown)}

@@ -34,6 +34,7 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from capture_diagnostics import record_hook_error  # noqa: E402
 from context_budget import (  # noqa: E402
     DEFAULT_CONTEXT_BUDGET,
     BudgetExceededError,
@@ -49,6 +50,7 @@ from memory_state import (  # noqa: E402
     update_state,
 )
 from reliable_memory import validate_runtime_file  # noqa: E402
+from secret_redact import describe_error  # noqa: E402
 from vault_log import LOG_RELATIVE  # noqa: E402
 
 MEMORY_INDEX = ROOT / "knowledge" / "index.md"
@@ -134,7 +136,8 @@ def _claim_nightly_catchup(today: str | None = None, now: str | None = None) -> 
 
     try:
         update_state(_mutate, lock_timeout=HOOK_STATE_LOCK_TIMEOUT)
-    except Exception:  # noqa: BLE001
+    except Exception as error:  # noqa: BLE001
+        record_hook_error(STATE_ROOT, "nightly catch-up claim", describe_error(error))
         return False
     return claimed
 
@@ -147,8 +150,8 @@ def _release_nightly_claim(today: str) -> None:
 
     try:
         update_state(_release, lock_timeout=HOOK_STATE_LOCK_TIMEOUT)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as error:  # noqa: BLE001
+        record_hook_error(STATE_ROOT, "nightly catch-up release", describe_error(error))
 
 
 def maybe_spawn_nightly_catchup(today: str | None = None) -> None:
@@ -950,10 +953,8 @@ def _unmeasured_health_block(deferred: int, total: int) -> str:
     )
 
 
-def _recover_transactions() -> None:
-    """Best-effort bounded recovery before any session context is read."""
-    deadline = time.monotonic() + RECOVERY_LIMIT_SECONDS
-    database = STATE_ROOT / "run" / "markdown-transactions.sqlite3"
+def _recovery_database_available(database: Path) -> bool:
+    """Distinguish a normal first start from a refused recovery database."""
     try:
         validate_runtime_file(
             database,
@@ -961,7 +962,19 @@ def _recover_transactions() -> None:
             max_bytes=MAX_TRANSACTION_DATABASE_BYTES,
             owner_only=True,
         )
-    except (OSError, PermissionError, ValueError):
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError) as error:
+        record_hook_error(STATE_ROOT, "session-start recovery database", describe_error(error))
+        return False
+    return True
+
+
+def _recover_transactions() -> None:
+    """Best-effort bounded recovery before any session context is read."""
+    deadline = time.monotonic() + RECOVERY_LIMIT_SECONDS
+    database = STATE_ROOT / "run" / "markdown-transactions.sqlite3"
+    if not _recovery_database_available(database):
         return
     if time.monotonic() >= deadline:
         return
@@ -973,8 +986,8 @@ def _recover_transactions() -> None:
             max_transactions=RECOVERY_MAX_TRANSACTIONS,
             deadline=deadline,
         )
-    except Exception:  # noqa: BLE001 - SessionStart must remain available
-        pass
+    except Exception as error:  # noqa: BLE001 - SessionStart must remain available
+        record_hook_error(STATE_ROOT, "session-start transaction recovery", describe_error(error))
 
 
 def _section_item(name: str, text: str) -> ContextItem | None:

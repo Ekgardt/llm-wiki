@@ -41,6 +41,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from memory_state import ROOT  # noqa: E402
+from repository_scope import sanitized_git_environment  # noqa: E402
 
 DEFAULT_SNAPSHOT_ROOT = Path.home() / "llm-wiki-snapshots"
 
@@ -81,7 +82,7 @@ def _snapshot_git_environment() -> dict[str, str]:
     snapshot sign, run hooks or start a monitor (audit 2026-09-26 C-13,
     docs/research/2026-09-26-every-git-call-has-a-deadline.md).
     """
-    return {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    return {**sanitized_git_environment(), "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
 
 
 def _git(root: Path, *arguments: str) -> subprocess.CompletedProcess:
@@ -101,13 +102,63 @@ def _git(root: Path, *arguments: str) -> subprocess.CompletedProcess:
 
 def _initialised(root: Path) -> None:
     """A repository with no remote, created once, owner-only."""
+    if (root / ".git").exists():
+        _require_snapshot_repository(root)
+        return
+    _require_empty_destination(root)
     root.mkdir(parents=True, exist_ok=True)
     root.chmod(0o700)
-    if (root / ".git").is_dir():
-        return
     _require_success(_git(root, "init", "--quiet"), "git init")
     _require_success(_git(root, "config", "user.name", "llm-wiki snapshot"), "git config")
     _require_success(_git(root, "config", "user.email", "snapshot@localhost"), "git config")
+
+
+def _require_empty_destination(root: Path) -> None:
+    if root.exists() and any(root.iterdir()):
+        raise SnapshotFailed("destination is not an empty snapshot repository")
+
+
+def _git_output(root: Path, *arguments: str) -> str:
+    result = _git(root, *arguments)
+    _require_success(result, "git " + arguments[0])
+    return result.stdout.strip()
+
+
+def _require_snapshot_repository(root: Path) -> None:
+    marker = root / ".git"
+    if marker.is_symlink() or not marker.is_dir():
+        raise SnapshotFailed("destination is not a standalone snapshot repository")
+    _require_snapshot_identity(root)
+    if _git_output(root, "remote"):
+        raise SnapshotFailed("snapshot repository has a remote")
+    _require_snapshot_paths(root)
+
+
+def _require_snapshot_identity(root: Path) -> None:
+    name = _git(root, "config", "--local", "--get", "user.name").stdout.strip()
+    email = _git(root, "config", "--local", "--get", "user.email").stdout.strip()
+    if (name, email) != ("llm-wiki snapshot", "snapshot@localhost"):
+        raise SnapshotFailed("destination is not an owned snapshot repository")
+    actual = Path(_git_output(root, "rev-parse", "--show-toplevel")).resolve()
+    if actual != root.resolve():
+        raise SnapshotFailed("snapshot repository worktree was redirected")
+
+
+def _require_snapshot_paths(root: Path) -> None:
+    tracked = _git_output(root, "ls-files", "-z").split("\0")
+    if any(path and not path.startswith(SNAPSHOT_SUBTREE + "/") for path in tracked):
+        raise SnapshotFailed("snapshot repository tracks files outside knowledge")
+
+
+def _require_separate_paths(vault: Path, source: Path, root: Path) -> None:
+    destination = (root / SNAPSHOT_SUBTREE).resolve()
+    _require_disjoint(vault.resolve(), root.resolve())
+    _require_disjoint(source.resolve(), destination)
+
+
+def _require_disjoint(left: Path, right: Path) -> None:
+    if left.is_relative_to(right) or right.is_relative_to(left):
+        raise SnapshotFailed("snapshot and source paths overlap")
 
 
 def _mirrored(source: Path, destination: Path) -> None:
@@ -119,9 +170,12 @@ def _mirrored(source: Path, destination: Path) -> None:
 
 def _committed(root: Path, message: str) -> str:
     """The new commit, or "no change" when nothing differs; a failed commit raises."""
-    _require_success(_git(root, "add", "-A"), "git add")
-    if _git(root, "diff", "--cached", "--quiet").returncode == 0:
+    _require_success(_git(root, "add", "-A", "--", SNAPSHOT_SUBTREE), "git add")
+    difference = _git(root, "diff", "--cached", "--quiet")
+    if difference.returncode == 0:
         return "no change"
+    if difference.returncode != 1:
+        _require_success(difference, "git diff")
     _require_success(_git(root, "commit", "--quiet", "-m", message), "git commit")
     return _git(root, "rev-parse", "--short", "HEAD").stdout.strip() or "committed"
 
@@ -151,6 +205,7 @@ def take_snapshot(vault: Path | None = None, root: Path | None = None) -> dict:
     if not source.is_dir():
         return {"status": "no memory to snapshot", "commit": None}
     destination_root = root or snapshot_root()
+    _require_separate_paths(vault or ROOT, source, destination_root)
     _initialised(destination_root)
     _mirrored(source, destination_root / SNAPSHOT_SUBTREE)
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")

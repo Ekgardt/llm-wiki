@@ -732,6 +732,36 @@ def _operation_paths(transaction) -> set:
     return {item.path for item in transaction.operations}
 
 
+def test_update_and_supersession_of_its_old_claim_share_one_after_image(vault):
+    import compile_memory
+
+    root, state_root = vault
+    daily = _daily(root)
+    old = _claim_record(root, claim_id="old", value="blue", text="The prior state is blue.", authority="inferred")
+    page = root / "knowledge/notes/exact-byte-pattern.md"
+    page.write_bytes(b"---\ntype: concept\n---\n# Existing\n\n## Claims\n```json\n"
+                     + canonical_json_bytes({"schema_version": "claim-ledger/v1", "claims": [old]}) + b"\n```\n")
+    new = _claim_record(root, claim_id="new", value="green", text="A durable exact-byte observation.", authority="user")
+    plan = _semantic_plan()
+    semantic = json.loads(plan["operations"][0]["content"])
+    semantic.update(action="update", claims=[new])
+    plan["operations"][0].update(kind="replace", content=canonical_json_bytes(semantic).decode())
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    coordinator = MarkdownCoordinator(root, state_root)
+
+    result = compile_memory.apply_compile_plan(
+        inputs, plan, action_key="6" * 64, trigger="manual", coordinator=coordinator,
+        completed_at="2026-07-14T12:00:00Z",
+    )
+
+    assert _page_claim_lifecycles(page) == {"old": "superseded", "new": "active"}
+    assert b"Use an immutable snapshot" in page.read_bytes()
+    assert b"status: superseded" not in page.read_bytes()
+    transaction = coordinator._record(result.transaction_id)
+    assert [item.path for item in transaction.operations].count("knowledge/notes/exact-byte-pattern.md") == 1
+    assert compile_memory.read_compile_receipt_v2(inputs.dailies[0].sha256, coordinator) is not None
+
+
 def test_a_recompile_that_quarantines_the_same_claim_again_does_not_fail(vault, capsys):
     """2026-09-11: the next plan for a pending quarantined daily differed elsewhere
     (new action key) but proposed the same claim; the candidate create met the file
@@ -1644,8 +1674,12 @@ def test_run_packs_before_provider_dispatch(vault, monkeypatch):
     daily.write_bytes(b"x" * 28_000)
     import compile_memory
 
-    monkeypatch.setattr(compile_memory, "load_state", lambda: {})
-    monkeypatch.setattr(compile_memory, "_mark_finished", lambda *args, **kwargs: None)
+    # A day is now cut inside a long entry, so no daily part outgrows the default
+    # budget; a window too small for one part keeps packing the step that refuses
+    # (docs/research/2026-09-28-a-long-entry-is-cut-inside-itself.md).
+    state = {}
+    monkeypatch.setattr(compile_memory, "COMPILE_CONTEXT_WINDOW_TOKENS", 8_000)
+    monkeypatch.setattr(compile_memory, "load_state", lambda: state)
     monkeypatch.setattr(
         compile_memory,
         "_record_compile_source_failures",
@@ -1659,7 +1693,7 @@ def test_run_packs_before_provider_dispatch(vault, monkeypatch):
     monkeypatch.setattr(
         compile_memory,
         "update_state",
-        lambda *args, **kwargs: pytest.fail("compile diagnostics were updated"),
+        lambda mutate: mutate(state),
     )
 
     result = compile_memory._run(
@@ -1668,6 +1702,12 @@ def test_run_packs_before_provider_dispatch(vault, monkeypatch):
 
     assert result == 1
     assert not list((root / "knowledge/daily/receipts").glob("*.md"))
+    assert set(state) == {
+        "last_compile_error", "last_compile_finished_at", "last_compile_finished_trigger",
+        "last_compile_status", "last_compile_outcome", "last_compile_dropped_claims",
+    }
+    assert (state["last_compile_status"], state["last_compile_outcome"]) == ("error", "failed")
+    assert "daily source exceeds compile input budget" in state["last_compile_error"]
 
 
 def test_run_refreshes_context_between_compile_batches(vault, monkeypatch):
@@ -1884,6 +1924,75 @@ def test_an_absent_index_and_log_are_still_created(vault):
 
     assert result.state == "committed"
     assert (root / "knowledge/log.md").is_file()
+
+
+def test_publication_preserves_a_log_append_after_the_model_snapshot(vault):
+    import compile_memory
+
+    root, state_root = vault
+    inputs = compile_memory.snapshot_compile_inputs([_daily(root)])
+    log = root / "knowledge/log.md"
+    concurrent = log.read_bytes() + b"\n- An independent writer's entry.\n"
+    log.write_bytes(concurrent)
+
+    result = compile_memory.apply_compile_plan(
+        inputs, _semantic_plan(), action_key="c" * 64, trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:00:00Z",
+    )
+
+    assert result.state == "committed"
+    assert log.read_bytes().startswith(concurrent)
+    assert inputs.dailies[0].sha256.encode() in log.read_bytes()
+    assert all(b"independent writer" not in source.content for source in inputs.vault_files)
+
+
+def test_publication_indexes_a_note_added_after_the_model_snapshot(vault):
+    import compile_memory
+    from rebuild_memory_index import build_index_bytes
+
+    root, state_root = vault
+    inputs = compile_memory.snapshot_compile_inputs([_daily(root)])
+    (root / "knowledge/notes/concurrent-note.md").write_bytes(
+        b"---\ntype: concept\n---\n# Concurrent Note\n\nOne-sentence summary: Another writer's note.\n"
+    )
+    (root / "knowledge/index.md").write_bytes(build_index_bytes(root))
+
+    result = compile_memory.apply_compile_plan(
+        inputs, _semantic_plan(), action_key="d" * 64, trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:00:00Z",
+    )
+
+    assert result.state == "committed"
+    index = (root / "knowledge/index.md").read_bytes()
+    assert b"concurrent-note" in index
+    assert b"exact-byte-pattern" in index
+
+
+@pytest.mark.parametrize("name", ["log.md", "index.md"])
+def test_external_edit_after_metadata_refresh_still_fails_the_hash_check(vault, monkeypatch, name):
+    import compile_memory
+    from markdown_transaction import PreconditionChangedError
+
+    root, state_root = vault
+    inputs = compile_memory.snapshot_compile_inputs([_daily(root)])
+    original = compile_memory._ApplyPlan._commit
+    target = root / "knowledge" / name
+
+    def raced_commit(publication):
+        target.write_bytes(b"An external edit after the publication read.\n")
+        return original(publication)
+
+    monkeypatch.setattr(compile_memory._ApplyPlan, "_commit", raced_commit)
+    with pytest.raises(PreconditionChangedError, match="target precondition changed"):
+        compile_memory.apply_compile_plan(
+            inputs, _semantic_plan(), action_key="e" * 64, trigger="manual",
+            coordinator=MarkdownCoordinator(root, state_root),
+            completed_at="2026-07-14T12:00:00Z",
+        )
+    assert target.read_bytes() == b"An external edit after the publication read.\n"
+    assert not (root / "knowledge/notes/exact-byte-pattern.md").exists()
     assert (root / "knowledge/index.md").is_file()
 
 
@@ -2184,13 +2293,10 @@ def test_a_second_refusal_takes_the_next_ordinal_again(vault):
     assert result.state == "committed"
 
 
-def test_the_retry_chain_is_bounded(vault, monkeypatch):
-    """A hundred refusals is an operator's problem, not a numbering exercise."""
+def test_the_retry_chain_obeys_the_caller_deadline(vault):
+    """Recorded refusals do not replace the caller's time budget."""
     root, state_root = vault
     daily = _daily(root)
-    import markdown_transaction
-
-    monkeypatch.setattr(markdown_transaction, "MAX_ATTEMPT_ORDINAL", 1)
     _quarantine_next_compile(root, state_root, daily)
     _quarantine_next_compile(root, state_root, daily)
     coordinator = MarkdownCoordinator(root, state_root)
@@ -2203,8 +2309,50 @@ def test_the_retry_chain_is_bounded(vault, monkeypatch):
     ).fetchone()[0]
     database.close()
 
-    with pytest.raises(ValueError, match="exhausted its quarantined retry ordinals"):
-        coordinator.attempt_operation_id(base)
+    import time
+
+    with pytest.raises(TimeoutError, match="deadline or cancellation"):
+        coordinator.attempt_operation_id(base, deadline=time.monotonic() - 1)
+
+
+def test_more_than_a_hundred_recorded_refusals_can_take_the_next_ordinal(vault, monkeypatch):
+    from types import SimpleNamespace
+
+    root, state_root = vault
+    coordinator = MarkdownCoordinator(root, state_root)
+    records = {f"compile:long#{ordinal}": SimpleNamespace(id=f"refusal-{ordinal}", state="quarantined") for ordinal in range(2, 103)}
+    records["compile:long"] = SimpleNamespace(id="refusal-1", state="quarantined")
+    monkeypatch.setattr(coordinator, "_record_for_operation_id", records.get)
+
+    assert coordinator.attempt_operation_id("compile:long") == ("compile:long#103", "refusal-102")
+
+
+def test_retry_ordinal_search_honours_cancellation(vault):
+    root, state_root = vault
+    coordinator = MarkdownCoordinator(root, state_root)
+    with pytest.raises(TimeoutError, match="deadline or cancellation"):
+        coordinator.attempt_operation_id("compile:cancelled", cancelled=lambda: True)
+
+
+def test_retry_ordinal_search_refuses_a_read_that_finishes_too_late(vault, monkeypatch):
+    from unittest.mock import Mock
+
+    root, state_root = vault
+    coordinator = MarkdownCoordinator(root, state_root)
+    monkeypatch.setattr(coordinator, "_recovery_stopped", Mock(side_effect=[False, True]))
+    with pytest.raises(TimeoutError, match="deadline or cancellation"):
+        coordinator.attempt_operation_id("compile:late")
+
+
+def test_retry_ordinal_search_uses_an_explicit_caller_budget(vault, monkeypatch):
+    import time
+
+    import markdown_transaction
+
+    root, state_root = vault
+    coordinator = MarkdownCoordinator(root, state_root)
+    monkeypatch.setattr(markdown_transaction, "_WRITER_WAIT_SECONDS", 0)
+    assert coordinator.attempt_operation_id("compile:explicit", deadline=time.monotonic() + 1) == ("compile:explicit", None)
 
 
 def test_critique_batches_split_until_each_one_fits(monkeypatch):
@@ -2269,3 +2417,105 @@ def test_a_quarantined_batch_is_named_apart_from_a_published_one(capsys):
         compile_memory.compile_outcome([first, second]),
         compile_memory._finished_outcome("error", [second]),
     ) == ("quarantined", "partial", "failed")
+
+
+def _plan_with_one_snapshot_claim(root):
+    content = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    content["claims"] = [_claim_record(
+        root, claim_id="snapshot-new", value="red",
+        text="A durable exact-byte observation.", authority="user",
+    )]
+    return {
+        "schema_version": "compile-plan/v2",
+        "operations": [{
+            "kind": "create", "path": "knowledge/notes/exact-byte-pattern.md",
+            "content": canonical_json_bytes(content).decode(),
+        }],
+    }
+
+
+@pytest.mark.parametrize("during_apply", [False, True])
+def test_stale_target_snapshot_does_not_repeat_claim_assessment(
+    vault, monkeypatch, during_apply
+):
+    import compile_memory
+    from markdown_transaction import TransactionFailure
+
+    root, state_root = vault
+    daily = _daily(root)
+    prior = root / "knowledge/notes/prior.md"
+    prior.write_bytes(b"---\ntype: concept\n---\n# Prior\nblue\n")
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    plan = _plan_with_one_snapshot_claim(root)
+    coordinator = MarkdownCoordinator(root, state_root)
+    calls = []
+    original_assess = compile_memory._ApplyPlan._assess_operation
+    original_apply = coordinator.apply
+
+    def observed_assessment(self, planned, candidates):
+        calls.append(planned["path"])
+        return original_assess(self, planned, candidates)
+
+    def changed_target_then_apply(transaction_id, **kwargs):
+        prior.write_bytes(b"---\ntype: concept\n---\n# Prior\ngreen\n")
+        return original_apply(transaction_id, **kwargs)
+
+    monkeypatch.setattr(compile_memory._ApplyPlan, "_assess_operation", observed_assessment)
+    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+    if during_apply:
+        monkeypatch.setattr(coordinator, "apply", changed_target_then_apply)
+    else:
+        prior.write_bytes(b"---\ntype: concept\n---\n# Prior\ngreen\n")
+    with pytest.raises(TransactionFailure):
+        compile_memory.apply_compile_plan(
+            inputs, plan, action_key="b" * 64, trigger="manual",
+            coordinator=coordinator, completed_at="2026-07-14T12:00:00Z",
+        )
+    assert len(calls) == int(during_apply)
+    assert prior.read_bytes().endswith(b"green\n")
+    assert not (root / "knowledge/notes/exact-byte-pattern.md").exists()
+    assert not list((root / "knowledge/daily/receipts").glob("*.md"))
+    refreshed = compile_memory.snapshot_compile_inputs([daily])
+    result = compile_memory.apply_compile_plan(
+        refreshed, _plan_with_one_snapshot_claim(root), action_key="c" * 64,
+        trigger="manual", coordinator=coordinator,
+        completed_at="2026-07-14T12:00:00Z",
+    )
+    assert result.state == "committed"
+    assert len(calls) == int(during_apply) + 1
+    assert (root / "knowledge/notes/exact-byte-pattern.md").is_file()
+
+
+@pytest.mark.parametrize("size", (4001, 12000))
+def test_complete_source_line_within_claim_contract_survives_draft_validation(vault, size):
+    import compile_memory
+
+    root, _ = vault
+    daily = root / "knowledge/daily/2026-07-14.md"
+    line = "An exact observation: " + "x" * size
+    daily.write_text("## [10:00:00] session-end | manual\n" + line + "\n")
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    operation = json.loads(_semantic_plan()["operations"][0]["content"])
+    operation["evidence"][0]["quoted_text"] = line
+
+    drafted = compile_memory._draft_operations(json.dumps({"operations": [operation]}))
+    normalized = compile_memory._with_derived_claims(drafted, inputs)
+    binding = compile_memory._evidence_binding(normalized[0]["evidence"][0], inputs)
+    assert binding["quote_sha256"] == sha256_bytes(line.encode())
+    assert normalized[0]["evidence"][0]["quoted_text"] == line
+    plan = compile_memory._normalize_plan(normalized, inputs)
+    compile_memory.apply_compile_plan(
+        inputs, plan, action_key="d" * 64, trigger="manual",
+        coordinator=MarkdownCoordinator(root, vault[1]),
+        completed_at="2026-08-16T12:00:00Z",
+    )
+    page = (root / "knowledge/notes/exact-byte-pattern.md").read_text()
+    assert _resolved_evidence_texts(root, page) == [line]
+
+
+def test_complete_quote_schema_reuses_the_durable_literal_contract():
+    import compile_memory
+
+    evidence = compile_memory.RAW_PLAN_SCHEMA["properties"]["operations"]["items"]["properties"]["evidence"]["items"]["properties"]
+    literal = compile_memory.CLAIM_RECORD_SCHEMA["properties"]["evidence"]["properties"]["text"]
+    assert evidence["quoted_text"] == literal

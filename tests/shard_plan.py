@@ -100,8 +100,8 @@ def weigh(paths: list[str]) -> dict[str, float]:
     with tempfile.TemporaryDirectory() as directory:
         report = Path(directory) / "junit.xml"
         command = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", f"--junitxml={report}", *paths]
-        subprocess.call(command)
-        return junit_seconds(report) if report.is_file() else {}
+        subprocess.check_call(command)
+        return junit_seconds(report)
 
 
 def plan(shard_count: int) -> list[list[str]]:
@@ -164,8 +164,11 @@ def main(argv: list[str] | None = None) -> int:
     else. Handing the work to `python -m pytest` keeps that shape identical.
     """
     args = _parse(argv)
-    if _maintain_weights(args):
-        return 0
+    try:
+        if _maintain_weights(args):
+            return 0
+    except subprocess.CalledProcessError as error:
+        return error.returncode
     _require_selected(args.shard, args.of)
     files = plan(args.of)[args.shard - 1]
     if args.list:

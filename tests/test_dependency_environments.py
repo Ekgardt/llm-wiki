@@ -75,6 +75,8 @@ def test_fresh_install_is_locked_without_default_groups(tmp_path: Path) -> None:
         "--locked",
         "--no-default-groups",
         "--quiet",
+        "--extra",
+        "full",
     ]
 
 
@@ -94,6 +96,8 @@ def test_reinstall_is_locked_inexact_and_preserves_selected_extras(
         "--locked",
         "--no-default-groups",
         "--quiet",
+        "--extra",
+        "full",
     ]
 
 
@@ -166,12 +170,12 @@ def test_generated_mcp_entries_use_exact_arguments(tmp_path: Path) -> None:
     assert codex_memory.codex_mcp_config_state(config, root) == "equivalent"
 
 
-def test_installer_optional_commands_are_additive() -> None:
-    expected = {
-        f"uv sync --locked --no-default-groups --inexact --extra {extra}"
-        for extra in ("hybrid", "code-graph", "reranker")
-    }
+def test_installers_offer_no_optional_extras_only_language_servers() -> None:
+    """Every component is installed (2026-09-29); a language server is the one thing left to add.
+
+    See docs/research/2026-09-29-every-install-brings-every-component.md.
+    """
     for installer in ("install.sh", "install.ps1"):
         source = (ROOT / installer).read_text(encoding="utf-8")
-        commands = set(re.findall(r'"  (uv sync --locked[^"\r\n]+)"', source))
-        assert expected <= commands
+        offered = set(re.findall(r'"  (uv sync --locked[^"\r\n]+)"', source))
+        assert (offered, "install_language_server.py --profile" in source) == (set(), True)

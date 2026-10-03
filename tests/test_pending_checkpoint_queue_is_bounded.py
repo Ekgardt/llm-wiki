@@ -59,3 +59,23 @@ def test_the_queue_checkpoints_once_it_would_outgrow_the_state_file() -> None:
     assert waiting is False
     assert index == count - 1
     assert decision is not None and decision.reason == "debounce_flush"
+
+
+def test_maintenance_time_releases_an_elapsed_quiet_queue():
+    items = _items(5)
+    index, decision, waiting = integration_adapter._debounce_due(items, _reducers(), now=NOW + timedelta(days=1))
+    assert waiting is False and index == 4
+    assert decision.checkpoint_at == datetime.fromisoformat(str(items[-1]["occurred_at"]))
+
+
+def test_maintenance_time_does_not_flush_before_existing_debounce():
+    result = integration_adapter._debounce_due(_items(5), _reducers(), now=NOW + timedelta(seconds=29))
+    assert result == (None, None, True)
+
+
+def test_maintenance_time_does_not_replace_a_later_event_time():
+    items = _items(5)
+    items[-1]["occurred_at"] = (NOW + timedelta(seconds=30)).isoformat()
+    index, decision, waiting = integration_adapter._debounce_due(items, _reducers(), now=NOW - timedelta(days=1))
+    assert waiting is False and index == 4
+    assert decision.checkpoint_at == NOW + timedelta(seconds=30)

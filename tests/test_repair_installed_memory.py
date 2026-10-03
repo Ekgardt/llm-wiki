@@ -161,7 +161,7 @@ def test_cli_redacts_backend_exceptions(
     assert report == {
         "actions": [],
         "blockers": [{"code": "repair_backend_error"}],
-        "details": {},
+        "details": {"error": "RuntimeError: <path>"},
         "mode": "check",
         "overall_status": "error",
     }

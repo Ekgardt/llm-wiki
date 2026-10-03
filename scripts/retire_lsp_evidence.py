@@ -10,7 +10,6 @@ Research: `docs/research/2026-09-23-the-rest-of-the-live-audit.md`.
 """
 from __future__ import annotations
 
-import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -26,16 +25,18 @@ SCAN_BUDGET_SECONDS = 20.0
 
 
 def _retirable(record: dict) -> bool:
-    """Not live, holds failure evidence, and that evidence is older than the bound."""
+    """Proven dead, holding failure evidence older than the retention bound."""
     age = record.get("failure_age_days")
+    if record.get("processes_dead") is not True:
+        return False
     if record.get("live") or not record.get("failure_evidence"):
         return False
     return isinstance(age, (int, float)) and age > MAX_AGE_DAYS
 
 
 def _dead_evidence(owners: list[dict]) -> list[dict]:
-    """Owner records that hold failure evidence and are not live, oldest last."""
-    dead = [r for r in owners if r.get("failure_evidence") and not r.get("live")]
+    """Proven-dead owners with failure evidence, oldest last."""
+    dead = [r for r in owners if r.get("failure_evidence") and r.get("processes_dead") is True]
     return sorted(dead, key=_age_of)
 
 
@@ -66,9 +67,11 @@ def retirable_roots(state_root: Path, now: datetime) -> list[Path]:
 
 def retire(state_root: Path, now: datetime | None = None) -> int:
     """Remove the retirable roots; the count removed."""
+    from lsp_process import _remove_dead_owner_root
+
     removed = 0
     for root in retirable_roots(state_root, now or datetime.now(timezone.utc)):
-        shutil.rmtree(root, ignore_errors=True)
+        _remove_dead_owner_root(root)
         removed += int(not root.exists())
     return removed
 

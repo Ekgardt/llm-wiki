@@ -59,3 +59,47 @@ targetRules = ["generic-api-key"]
 regexTarget = "match"
 paths = ['''^tests/test_the_redactor_knows_the_missing_shapes\.py$''']
 regexes = ['''ya29\.a0AfH6SMBxQwErTy12345''']
+
+[[allowlists]]
+description = "Synthetic key for failed-server stderr redaction"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexTarget = "line"
+paths = ['''^tests/test_a_failed_server_leaves_its_redacted_last_words\.py$''']
+regexes = ['''(?m)^API_KEY = "0123456789abcdef0123"$''']
+
+[[allowlists]]
+description = "Synthetic unprefixed key for credential-assignment redaction"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexTarget = "line"
+paths = ['''^tests/test_secret_redact\.py$''']
+regexes = ['''(?m)^_UNPREFIXED_SECRET = "Zx8Qw2Lp5Rt9Yv3Nb6Mk1Hj4Gd7Fs0A"$''']
+
+[[allowlists]]
+description = "Public pinned multilingual-e5-small model revision"
+condition = "AND"
+targetRules = ["sourcegraph-access-token"]
+regexTarget = "line"
+paths = ['''^docs/research/2026-08-28-what-a-rebuild-may-reuse\.md$''']
+regexes = ['''(?m)^- `model_revision` is equal \(`614241f622f53c4eeff9890bdc4f31cfecc418b3`\)\.$''']
+
+[[allowlists]]
+description = "Exact synthetic curl credentials in command-context redaction regressions"
+condition = "AND"
+targetRules = ["curl-auth-user"]
+regexTarget = "line"
+paths = ['''^tests/test_a_user_flag_belongs_to_its_command\.py$''']
+regexes = [
+  '''(?m)^    "curl -u user:privatepw https://example\.test",$''',
+  '''(?m)^    "curl --user=user:privatepw https://example\.test",$''',
+  '''(?m)^    'curl -u "user:privatepw with spaces" https://example\.test',$''',
+  '''(?m)^    "curl -u 'user:privatepw with spaces' https://example\.test",$''',
+  '''(?m)^    "date -u \+%H:%M:%S; curl -u user:privatepw https://example\.test",$''',
+  '''(?m)^    "curl -H 'X-Example: one;two' -u user:privatepw https://example\.test",$''',
+  '''(?m)^    "bash -c 'curl -u user:privatepw https://example\.test'",$''',
+  '''(?m)^    "/usr/bin/curl -u user:privatepw https://example\.test",$''',
+  '''(?m)^    '"/usr/bin/curl" \-u user:privatepw https://example\.test',$''',
+  '''(?m)^    "curl \\\\\\n  \-u user:privatepw https://example\.test",$''',
+  '''(?m)^    "curl `\\n  \-u user:privatepw https://example\.test",$''',
+]

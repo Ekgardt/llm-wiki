@@ -263,10 +263,10 @@ def _held_with(judged: bytes, owner: str | None) -> bool:
 
 
 def _judged_state(judged: bytes) -> str:
-    """absent/stale/live for the exact bytes that will be retired; unreadable is stale."""
+    """Judge ownership, preserving an unparsed lock inside its write window."""
     lock = _parse_lock(judged.decode("utf-8", errors="replace").strip().splitlines())
     if lock is None:
-        return "stale"
+        return _unparsed_state()[0]
     return _owner_state(lock)[0]
 
 

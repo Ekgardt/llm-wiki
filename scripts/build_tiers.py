@@ -31,6 +31,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT, STATE_ROOT, atomic_write  # noqa: E402
+from secret_redact import describe_error  # noqa: E402
 
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 TIERS_DIR = STATE_ROOT / "cache" / "tiers"
@@ -460,8 +461,8 @@ def _build_page_tier(md: Path, verbose: bool, current: set[Path]) -> str:
     try:
         captured = md.read_bytes()
         content = captured.decode("utf-8", errors="strict")
-    except (OSError, UnicodeDecodeError):
-        return "errors"
+    except (OSError, UnicodeDecodeError) as exc:
+        return _page_error(md, exc)
     if "status: superseded" in content or "status: archived" in content:
         return "skipped"
     return _refresh_page_tier(md, captured, content, verbose, current)
@@ -483,8 +484,8 @@ def _refresh_page_tier(
             return "skipped"
         _write_page_l1(slug, content, source_sha256, logical_path)
         _announce_generated(slug, verbose)
-    except Exception:  # noqa: BLE001 - one page's failure is counted, the run goes on
-        return "errors"
+    except Exception as exc:  # noqa: BLE001 - one page's failure is counted, the run goes on
+        return _page_error(md, exc)
     return "generated"
 
 
@@ -498,6 +499,12 @@ def _write_page_l1(slug: str, content: str, source_sha256: str, logical_path: st
         source_sha256=source_sha256,
         logical_path=logical_path,
     )
+
+
+def _page_error(md: Path, exc: Exception) -> str:
+    """Count one page's failure, and say which page and why: a count alone let nobody act."""
+    print(f"  L1 failed for {md.name}: {describe_error(exc)}", file=sys.stderr)
+    return "errors"
 
 
 def _announce_generated(slug: str, verbose: bool) -> None:

@@ -68,6 +68,11 @@ DEFAULTS = ReliableMemoryDefaults()
 MAX_CAPTURE_DECISION_BYTES = 1024 * 1024
 
 
+def quote_sqlite_identifier(name: str) -> str:
+    """Encode one exact SQLite identifier, including its embedded quotes."""
+    return '"' + name.replace('"', '""') + '"'
+
+
 def _require_positive_int(name: str, value: object) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
@@ -378,17 +383,89 @@ def _run_lock_probe(
     return _second_writer_is_blocked(second)
 
 
+def _require_probe_component(path: Path) -> None:
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or _windows_reparse_point(path):
+        raise PermissionError("locking probe path must contain only real directories")
+
+
+def _require_probe_root_chain(root: Path) -> None:
+    from bounded_io import _acceptable_ancestor
+
+    _require_probe_component(root)
+    for parent in root.parents:
+        if not _acceptable_ancestor(parent):
+            raise PermissionError("locking probe ancestor is not trusted")
+
+
+def _probe_directory(root: Path) -> Path:
+    root = root.absolute()
+    _require_probe_root_chain(root)
+    directory = root / "run"
+    _require_probe_component(directory)
+    if directory.lstat().st_dev != root.lstat().st_dev:
+        raise PermissionError("locking probe must use the runtime root filesystem")
+    return directory
+
+
+def _initialize_probe_directory(root: Path) -> None:
+    _require_probe_root_chain(root.absolute())
+    (root / "run").mkdir(exist_ok=True)
+    _set_owner_only(_probe_directory(root), 0o700)
+
+
+def _probe_directory_identity(directory: Path) -> tuple[int, int, int]:
+    info = directory.lstat()
+    return info.st_dev, info.st_ino, info.st_mode
+
+
+def _require_same_probe_directory(directory: Path, identity: tuple[int, int, int]) -> None:
+    _require_probe_root_chain(directory)
+    if _probe_directory_identity(directory) != identity:
+        raise PermissionError("locking probe directory changed")
+
+
+def _contained_lock_probe(root, probe, identity, deadline, connections) -> bool | None:
+    _require_same_probe_directory(root, identity)
+    result = _run_lock_probe(probe, deadline, connections)
+    _require_same_probe_directory(root, identity)
+    return result
+
+
+def _cleanup_lock_probe(probe, connections, root, identity) -> None:
+    _close_probe_connections(connections)
+    if probe is None:
+        return
+    try:
+        _require_same_probe_directory(root, identity)
+    except OSError:
+        return  # The original directory is no longer owned at this path.
+    _remove_probe_files(probe)
+
+
 def _sqlite_lock_probe(root: Path, *, deadline: float = float("inf")) -> bool | None:
-    """Return lock support, or ``None`` when a bounded probe cannot complete."""
-    probe = root / f".llm-wiki-lock-probe-{secrets.token_hex(16)}.sqlite3"
+    """Probe existing run/ without changing the sealed vault root."""
+    try:
+        directory = _probe_directory(root)
+    except OSError:
+        return None
+    return _sqlite_directory_lock_probe(directory, deadline=deadline)
+
+
+def _sqlite_directory_lock_probe(directory: Path, *, deadline: float = float("inf")) -> bool | None:
+    """Probe the database's actual directory without creating another runtime root."""
+    probe = None
+    identity = None
     connections: list[sqlite3.Connection] = []
     try:
-        return _run_lock_probe(probe, deadline, connections)
+        _require_probe_root_chain(directory.absolute())
+        identity = _probe_directory_identity(directory)
+        probe = directory / f".llm-wiki-lock-probe-{secrets.token_hex(16)}.sqlite3"
+        return _contained_lock_probe(directory, probe, identity, deadline, connections)
     except (OSError, sqlite3.Error):
         return None
     finally:
-        _close_probe_connections(connections)
-        _remove_probe_files(probe)
+        _cleanup_lock_probe(probe, connections, directory, identity)
 
 
 _CLOUD_DIRECTORY_NAMES = frozenset(
@@ -414,15 +491,29 @@ def _warn_if_cloud_synchronized(path: Path) -> None:
     )
 
 
-def validate_state_root(path: Path) -> None:
-    """Fail closed when a runtime root lacks known-safe local lock semantics."""
+def _prepare_local_database_directory(path: Path) -> Path:
     path = Path(path)
     _require_local_non_reparse_root(path)
     _warn_if_cloud_synchronized(path)
     path.mkdir(parents=True, exist_ok=True)
+    _require_probe_root_chain(path.absolute())
     _set_owner_only(path, 0o700)
+    return path
+
+
+def validate_state_root(path: Path) -> None:
+    """Fail closed when a runtime root lacks known-safe local lock semantics."""
+    path = _prepare_local_database_directory(path)
+    _initialize_probe_directory(path)
     if _sqlite_lock_probe(path) is not True:
         raise UnsafeStateRoot(f"state root failed the SQLite two-connection locking probe: {path}")
+
+
+def validate_database_directory(path: Path) -> None:
+    """Validate a database parent; only a state-root initializer creates run/."""
+    path = _prepare_local_database_directory(path)
+    if _sqlite_directory_lock_probe(path) is not True:
+        raise UnsafeStateRoot(f"database directory failed the SQLite two-connection locking probe: {path}")
 
 
 def _owner_permissions_supported(path: Path) -> bool:
@@ -431,6 +522,8 @@ def _owner_permissions_supported(path: Path) -> bool:
 
 def _chmod_or_warn(path: Path, mode: int) -> bool:
     """Apply `mode`; False (with the warning) when the filesystem has no permission bits."""
+    if stat.S_IMODE(path.stat().st_mode) == mode:
+        return True
     try:
         path.chmod(mode)
     except OSError as exc:
@@ -480,7 +573,7 @@ def open_operational_db(
     """Open an owner-restricted rollback-journal operational database."""
     _require_operational_open_arguments(busy_ms, contract, initialize_contract)
     path = Path(path)
-    validate_state_root(path.parent)
+    validate_database_directory(path.parent)
     expected = _operational_db_identity(path)
     connection = sqlite3.connect(
         path,
@@ -684,21 +777,37 @@ def _contained_runtime_metadata(path: Path, state_root: Path) -> os.stat_result:
     root = Path(state_root).resolve(strict=True)
     try:
         path.parent.resolve(strict=True).relative_to(root)
-        return path.lstat()
     except (OSError, ValueError) as exc:
         raise PermissionError("runtime file is outside the configured state root") from exc
+    return path.lstat()
 
 
 def _require_bounded_regular_file(
-    path: Path, metadata: os.stat_result, max_bytes: int
+    path: Path, metadata: os.stat_result, max_bytes: int | None
 ) -> None:
     if (
         stat.S_ISLNK(metadata.st_mode)
         or _windows_reparse_point(path)
         or not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_size > max_bytes
     ):
         raise PermissionError("runtime file must be a bounded regular file")
+    _require_file_size_budget(metadata.st_size, max_bytes)
+
+
+
+def _require_file_size_budget(size: int, max_bytes: int | None) -> None:
+    """SQLite metadata opens need no whole-file byte budget."""
+    if max_bytes is None:
+        return
+    if size > max_bytes:
+        raise PermissionError("runtime file must be a bounded regular file")
+
+
+def _require_nonnegative_file_budget(max_bytes: int | None) -> None:
+    if max_bytes is None:
+        return
+    if max_bytes < 0:
+        raise ValueError("max_bytes must be non-negative")
 
 
 def _require_windows_owner_only(path: Path) -> None:
@@ -721,12 +830,11 @@ def _validated_runtime_metadata(
     path: Path,
     state_root: Path,
     *,
-    max_bytes: int,
+    max_bytes: int | None,
     owner_only: bool,
 ) -> os.stat_result:
     """Validate a bounded regular runtime file from metadata alone."""
-    if max_bytes < 0:
-        raise ValueError("max_bytes must be non-negative")
+    _require_nonnegative_file_budget(max_bytes)
     metadata = _contained_runtime_metadata(path, state_root)
     _require_bounded_regular_file(path, metadata, max_bytes)
     if owner_only:
@@ -772,7 +880,7 @@ def validate_operational_db_file(
     path: Path,
     state_root: Path,
     *,
-    max_bytes: int,
+    max_bytes: int | None,
     owner_only: bool = False,
 ) -> os.stat_result:
     """Validate an operational database without opening a second descriptor.
@@ -874,7 +982,7 @@ def open_readonly_operational_db(
     path: Path,
     state_root: Path,
     *,
-    max_bytes: int,
+    max_bytes: int | None,
     owner_only: bool = False,
     busy_ms: int = 0,
     contract: OperationalDatabaseContract | None = None,
@@ -903,7 +1011,7 @@ def _opened_readonly_operational_db(
     path: Path,
     state_root: Path,
     *,
-    max_bytes: int,
+    max_bytes: int | None,
     owner_only: bool,
     busy_ms: int,
     contract: OperationalDatabaseContract | None,
@@ -1011,6 +1119,22 @@ def capture_runtime_file_identity(
     target = Path(path)
     root = Path(state_root).resolve(strict=True)
     metadata = validate_runtime_file(target, root, max_bytes=1 << 50)
+    return _runtime_identity_from_metadata(target, metadata)
+
+
+def capture_operational_database_identity(
+    path: Path, *, state_root: Path
+) -> RuntimeFileIdentity:
+    """Identify a live database without closing a non-SQLite descriptor."""
+    target = Path(path)
+    root = Path(state_root).resolve(strict=True)
+    metadata = validate_operational_db_file(target, root, max_bytes=None)
+    return _runtime_identity_from_metadata(target, metadata)
+
+
+def _runtime_identity_from_metadata(
+    target: Path, metadata: os.stat_result
+) -> RuntimeFileIdentity:
     on_windows = os.name == "nt"
     names = _windows_runtime_identity_names(target) if on_windows else None
     current = target.stat(follow_symlinks=False)

@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import importlib.util
 import json
+import lzma
 import math
 import os
 import re
@@ -38,7 +39,7 @@ from reliable_memory import (
     read_runtime_bytes,
     streamed_rows,
 )
-from secret_redact import describe_error
+from secret_redact import describe_error, describe_error_chain
 from settings import (
     DEFAULT_SOURCE,
     SettingsError,
@@ -97,11 +98,8 @@ MAX_LOCK_BYTES = 4096
 # vault on 2026-09-27 was 12 143 bytes, so 8 MiB is a guard on an untrusted file,
 # about 690 times a real one; refused past it, never cut.
 MAX_QUEUE_RESULT_BYTES = 8 * 1024 * 1024
-# An operational SQLite database doctor opens read-only; past it the check reports it
-# rather than reading. The same bound is repeated in installed_memory_repair. Basis:
-# a guard against reading an unbounded file into a health check; the live transaction
-# database was 62 MiB on 2026-09-26 (audit 2026-09-27 B-2), so review past ~200 MiB.
-MAX_OPERATIONAL_DB_BYTES = 256 * 1024 * 1024
+# SQLite opens page data on demand. Health scans use their existing deadline and
+# streamed rows; a whole-file byte ceiling is not a query resource budget.
 # Rows one health read takes from a small operational table (owners, leases, queue
 # ownership, queue and archive-index rows). A table past it is reported with its
 # `*_unknown`/`*_truncated` code and refuses `run/` deletion; nothing is judged from
@@ -484,17 +482,40 @@ def _count_legacy_queue_entries(
 def _count_queue_artifact_directory(
     state_root: Path, relative: str, key: str, deadline: float, details: dict
 ) -> None:
-    entries, truncated, error = _bounded_runtime_entries(
-        state_root / relative,
-        state_root,
-        limit=MAX_RUNTIME_ENTRIES,
-        deadline=deadline,
+    count, truncated, error = _runtime_artifact_count(
+        state_root / relative, state_root, deadline
     )
-    details[key] = len(entries)
+    details[key] = count
     details["artifact_truncated"] |= truncated
     details["artifact_error"] |= error
-    if _any_irregular_entry(entries, state_root):
-        details["artifact_error"] = True
+
+
+def _runtime_artifact_count(
+    directory: Path, root: Path, deadline: float
+) -> tuple[int, bool, bool]:
+    kind, _ = _safe_kind(directory, root)
+    if kind == "missing":
+        return 0, False, False
+    if kind != "directory":
+        return 0, False, True
+    return _scanned_artifact_count(directory, root, deadline)
+
+
+def _scanned_artifact_count(
+    directory: Path, root: Path, deadline: float
+) -> tuple[int, bool, bool]:
+    count = 0
+    error = False
+    try:
+        with os.scandir(directory) as scanned:
+            for entry in scanned:
+                if _deadline_reached(deadline):
+                    return count, True, error
+                count += 1
+                error = error or _safe_kind(Path(entry.path), root)[0] != "regular"
+    except OSError:
+        return count, False, True
+    return count, False, error
 
 
 def _append_queue_artifact_codes(details: dict) -> None:
@@ -596,7 +617,7 @@ def _readonly_database(
     path: Path,
     state_root: Path,
     *,
-    max_bytes: int = MAX_OPERATIONAL_DB_BYTES,
+    max_bytes: int | None = None,
     deadline: float | None = None,
 ) -> sqlite3.Connection:
     return open_readonly_operational_db(
@@ -709,7 +730,7 @@ def _owner_pid_live(pid: object, identity: object = None) -> bool:
     if not isinstance(pid, int) or pid <= 0:
         return False
     if not isinstance(identity, str):
-        return _pid_alive(pid)
+        return process_liveness.owner_alive(pid)
     return process_liveness.owner_alive(pid, identity)
 
 
@@ -1409,6 +1430,117 @@ def _part_receipt_path(logical_path: str, part: bytes) -> str:
     return f"{_COMPILE_RECEIPT_PREFIX}{identity}.md"
 
 
+class _ReceiptOperation(NamedTuple):
+    path: str
+    kind: str
+    after_hash: str
+
+
+def _snapshot_receipt_fields(raw: bytes, path: str) -> tuple[str, str]:
+    from compile_memory import _receipt_source_fields, parse_compile_receipt_v3
+
+    fields = _receipt_source_fields(raw)
+    if fields is None:
+        raise ValueError("staged receipt lacks source identity")
+    record = parse_compile_receipt_v3(raw, logical_path=fields[0], source_sha256=fields[1])
+    if path != f"{_COMPILE_RECEIPT_PREFIX}{record['source_identity']}.md":
+        raise ValueError("staged receipt path disagrees with source identity")
+    return fields
+
+
+def _committed_snapshot_receipt(database, path: str, raw: bytes, fields) -> bool:
+    from compile_memory import _require_operation_integrity, parse_compile_receipt_v3
+
+    record = parse_compile_receipt_v3(raw, logical_path=fields[0], source_sha256=fields[1])
+    row = database.execute(
+        'SELECT t.id FROM "transaction" t JOIN operation o ON o.transaction_id=t.id '
+        "WHERE t.state='committed' AND o.path=? AND o.after_hash=? "
+        "AND (t.operation_id=? OR t.operation_id LIKE ?) ORDER BY t.created_at DESC LIMIT 1",
+        (path, hashlib.sha256(raw).hexdigest(), record["operation_id"], record["operation_id"] + "#%"),
+    ).fetchone()
+    if row is None:
+        return False
+    operations = {
+        item[0]: _ReceiptOperation(*item)
+        for item in database.execute(
+            "SELECT path,kind,after_hash FROM operation WHERE transaction_id=?", (row[0],)
+        )
+    }
+    _require_operation_integrity(record, operations)
+    return True
+
+
+def _staged_snapshot_receipt(directory: Path, operation: dict, state_root: Path) -> bytes:
+    from markdown_transaction import _decoded_image_bytes
+
+    after = operation["after"]
+    artifact = after["artifact"]
+    if _STAGED_ARTIFACT_RE.fullmatch(artifact) is None:
+        raise ValueError("staged receipt path is not a plain after artifact")
+    encoded = read_runtime_bytes(directory / artifact, state_root, max_bytes=_MAX_STAGED_RECEIPT_BYTES)
+    raw = _decoded_image_bytes(encoded, max_bytes=_MAX_STAGED_RECEIPT_BYTES)
+    if hashlib.sha256(raw).hexdigest() != after["sha256"]:
+        raise ValueError("staged receipt image hash differs")
+    return raw
+
+
+def _snapshot_receipt_written(database, vault_root, state_root, directory, operation, digest) -> bool:
+    path = operation["path"]
+    if operation["after"]["sha256"] != digest:
+        raise ValueError("staged receipt hash disagrees with transaction")
+    staged = _staged_snapshot_receipt(directory, operation, state_root)
+    fields = _snapshot_receipt_fields(staged, path)
+    raw = read_stable_bytes(vault_root / path, _MAX_STAGED_RECEIPT_BYTES, label="compile receipt")
+    return _committed_snapshot_receipt(database, path, raw, fields)
+
+
+def _intended_compile_receipts(database, identifier) -> dict[str, str]:
+    return {
+        item[0]: item[1] for item in database.execute(
+            "SELECT path,after_hash FROM operation WHERE transaction_id=? AND kind='create'",
+            (identifier,),
+        ) if item[0].startswith(_COMPILE_RECEIPT_PREFIX)
+    }
+
+
+def _compile_snapshot_outcome(database, identifier, vault_root, state_root) -> bool:
+    row = database.execute('SELECT operation_id FROM "transaction" WHERE id=?', (identifier,)).fetchone()
+    if row is None or not row[0].startswith("compile:"):
+        return False
+    receipts = _intended_compile_receipts(database, identifier)
+    if not receipts:
+        return False
+    return _compile_snapshot_receipts_written(database, identifier, vault_root, state_root, receipts)
+
+
+def _staged_receipt_operations(plan, receipts) -> dict:
+    staged = {item["path"]: item for item in plan["operations"] if item["path"] in receipts}
+    if set(staged) != set(receipts):
+        raise ValueError("refused compile does not stage every bound receipt")
+    return staged
+
+
+def _compile_snapshot_receipts_written(database, identifier, vault_root, state_root, receipts) -> bool:
+    directory = state_root / "run" / "transactions" / identifier
+    plan = json.loads(read_runtime_bytes(directory / "plan.json", state_root, max_bytes=_MAX_STAGED_PLAN_BYTES))
+    if plan["transaction_id"] != identifier:
+        raise ValueError("staged plan transaction identity differs")
+    staged = _staged_receipt_operations(plan, receipts)
+    return all(
+        _snapshot_receipt_written(database, vault_root, state_root, directory, staged[path], digest)
+        for path, digest in receipts.items()
+    )
+
+
+def _compile_snapshot_was_written(database, identifier, vault_root, state_root) -> bool:
+    if vault_root is None:
+        return False
+    try:
+        return _compile_snapshot_outcome(database, identifier, vault_root, state_root)
+    except (OSError, ValueError, KeyError, TypeError, lzma.LZMAError):
+        return False
+
+
 class _CompiledDaySupersession:
     """The fourth proof: a refused compile of days that are compiled now.
 
@@ -1425,12 +1557,14 @@ class _CompiledDaySupersession:
         self.state_root = state_root
 
     def resolves(self, database: sqlite3.Connection, identifier: str, committed_creates: set[str]) -> bool:
+        if _compile_snapshot_was_written(database, identifier, self.vault_root, self.state_root):
+            return True
         intended = _intended_creates(database, identifier)
         if self.vault_root is None or not _only_compile_receipts(intended):
             return False
         try:
             return self._staged_days_compiled(identifier, intended, committed_creates)
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, lzma.LZMAError):
             return False
 
     def _staged_days_compiled(self, identifier: str, intended: set[str], committed_creates: set[str]) -> bool:
@@ -1454,7 +1588,10 @@ class _CompiledDaySupersession:
     def _staged_day(self, directory: Path, artifact: str) -> str:
         if _STAGED_ARTIFACT_RE.fullmatch(artifact) is None:
             raise ValueError("staged artifact path is not a plain after/ artifact")
-        raw = read_runtime_bytes(directory / artifact, self.state_root, max_bytes=_MAX_STAGED_RECEIPT_BYTES)
+        from markdown_transaction import _decoded_image_bytes
+
+        encoded = read_runtime_bytes(directory / artifact, self.state_root, max_bytes=_MAX_STAGED_RECEIPT_BYTES)
+        raw = _decoded_image_bytes(encoded, max_bytes=_MAX_STAGED_RECEIPT_BYTES)
         day = _staged_receipt_day(raw)
         if day is None:
             raise ValueError("staged artifact is not a compile receipt for a day")
@@ -1692,8 +1829,8 @@ def _transaction_check(
 
 
 _QUEUE_COUNT_QUERIES = {
-    "source_failures": "SELECT 1 FROM source_failures LIMIT ?",
-    "source_fences": "SELECT 1 FROM source_fences LIMIT ?",
+    "source_failures": "SELECT COUNT(*) FROM source_failures",
+    "source_fences": "SELECT COUNT(*) FROM source_fences",
 }
 
 
@@ -1706,6 +1843,16 @@ class _QueueScan(NamedTuple):
     result: dict | None
     unknown_state: bool
     corrupt_metadata: bool
+
+
+class _QueueTaskScan(NamedTuple):
+    unknown_state: bool
+    corrupt_metadata: bool
+    references: set[str]
+    result_hashes: dict[str, object]
+    retained: bool
+    dead_unresolved: int
+    oldest_dead_days: int | None
 
 
 def _empty_queue_details() -> tuple[dict, dict[str, int]]:
@@ -1851,22 +1998,25 @@ def _scan_one_task_row(
 
 
 def _scan_queue_tasks(
-    rows: list[sqlite3.Row],
+    rows: Iterator[sqlite3.Row],
     *,
     now: datetime,
     deadline: float,
     details: dict,
     states: dict[str, int],
-) -> tuple[bool, bool, set[str], dict[str, object]]:
+) -> _QueueTaskScan:
     codes: set[str] = set()
     capabilities: set[str] = set()
     references: set[str] = set()
     result_hashes: dict[str, object] = {}
     unknown_state = False
     corrupt_metadata = False
+    retained = False
+    backlog: list[dict[str, object]] = []
     for row in rows:
-        if _deadline_reached(deadline):
-            raise TimeoutError("queue check deadline")
+        _queue_scan_stop(deadline)
+        retained = True
+        _remember_task_backlog(row, backlog)
         verdict = _scan_one_task_row(
             row,
             now=now,
@@ -1881,28 +2031,51 @@ def _scan_queue_tasks(
         corrupt_metadata = corrupt_metadata or verdict.corrupt
     details["codes"] = sorted(set(details["codes"]) | codes)
     details["capabilities"] = sorted(capabilities)
-    return unknown_state, corrupt_metadata, references, result_hashes
+    dead, oldest = _dead_backlog(backlog, now)
+    return _QueueTaskScan(
+        unknown_state, corrupt_metadata, references, result_hashes,
+        retained, dead, oldest,
+    )
 
 
-def _bounded_task_rows(database: sqlite3.Connection, details: dict) -> list[sqlite3.Row]:
-    rows = database.execute(
-        "SELECT * FROM tasks ORDER BY state IN ('succeeded', 'dead', 'cancelled'), rowid DESC LIMIT ?",
-        (MAX_OPERATIONAL_ROWS + 1,),
-    ).fetchall()
-    if len(rows) <= MAX_OPERATIONAL_ROWS:
-        return rows
-    details["codes"].append("queue_scan_truncated")
-    details["deletion_codes"].append("queue_state_unknown")
-    return rows[:MAX_OPERATIONAL_ROWS]
+def _queue_scan_stop(deadline: float) -> None:
+    if _deadline_reached(deadline):
+        raise TimeoutError("queue check deadline")
+
+
+def _remember_task_backlog(
+    row: sqlite3.Row, backlog: list[dict[str, object]]
+) -> None:
+    if row["state"] == "dead" or _has_answering_redrive(row):
+        backlog.append(_task_backlog_projection(row))
+
+
+def _has_answering_redrive(row: sqlite3.Row) -> bool:
+    if "redrive_of" not in row.keys():
+        return False
+    return _answers_its_origin(row)
+
+
+def _task_backlog_projection(row: sqlite3.Row) -> dict[str, object]:
+    return {
+        key: row[key] for key in ("id", "state", "updated_at", "redrive_of")
+        if key in row.keys()
+    }
+
+
+def _queue_task_rows(database: sqlite3.Connection) -> Iterator[sqlite3.Row]:
+    return iter(database.execute(
+        "SELECT * FROM tasks ORDER BY state IN ('succeeded', 'dead', 'cancelled'), rowid DESC"
+    ))
 
 
 def _append_queue_scan_codes(
-    details: dict, unknown_state: bool, corrupt_metadata: bool, rows: list
+    details: dict, unknown_state: bool, corrupt_metadata: bool, retained: bool
 ) -> None:
     ordered = (
         (unknown_state, "queue_state_unknown"),
         (corrupt_metadata, "queue_state_corrupt"),
-        (bool(rows), "queue_task_retained"),
+        (retained, "queue_task_retained"),
     )
     for flagged, code in ordered:
         if flagged:
@@ -1916,62 +2089,74 @@ def _count_queue_rows(
     *,
     table: str,
     retained_code: str,
-    unknown_code: str,
 ) -> None:
     if table not in tables:
         return
-    rows = database.execute(
-        _QUEUE_COUNT_QUERIES[table], (MAX_OPERATIONAL_ROWS + 1,)
-    ).fetchall()
-    details[table] = len(rows)
-    ordered = (
-        (bool(rows), retained_code),
-        (len(rows) > MAX_OPERATIONAL_ROWS, unknown_code),
-    )
-    for flagged, code in ordered:
-        if flagged:
-            details["deletion_codes"].append(code)
+    count = database.execute(_QUEUE_COUNT_QUERIES[table]).fetchone()[0]
+    details[table] = count
+    if count:
+        details["deletion_codes"].append(retained_code)
 
 
-def _count_owner_role(row: sqlite3.Row, details: dict) -> None:
-    if row["role"] == "worker":
+class _QueueOwnerColumns(NamedTuple):
+    token: str
+    pid: str
+    role: str
+
+
+# The legacy queue and the adopted v3 queue name the same owner facts differently;
+# reading the v3 row by the legacy names raised IndexError and doctor printed no
+# report whenever a v3 worker held the queue (2026-09-29, the installer's smoke).
+_LEGACY_QUEUE_OWNER = _QueueOwnerColumns("token", "pid", "role")
+_V3_QUEUE_OWNER = _QueueOwnerColumns("owner_token", "process_id", "domain_role")
+
+
+def _queue_owner_columns(row: sqlite3.Row) -> _QueueOwnerColumns:
+    if _V3_QUEUE_OWNER.token in row.keys():
+        return _V3_QUEUE_OWNER
+    return _LEGACY_QUEUE_OWNER
+
+
+def _count_owner_role(role: object, details: dict) -> None:
+    if role == "worker":
         details["live_workers"] += 1
-    if row["role"] == "migration":
+    if role == "migration":
         details["live_migrations"] += 1
 
 
-def _count_live_owner_role(row: sqlite3.Row, details: dict, now: datetime) -> None:
+def _count_live_owner_role(
+    row: sqlite3.Row, columns: _QueueOwnerColumns, details: dict, now: datetime
+) -> None:
     """Count the role of an owner row, when its lease is still live."""
-    if not _live_owner(row, now, pid_column="pid"):
+    if not _live_owner(row, now, pid_column=columns.pid):
         return
-    _count_owner_role(row, details)
+    _count_owner_role(row[columns.role], details)
 
 
 def _count_one_queue_owner(row: sqlite3.Row, details: dict, now: datetime) -> None:
-    if row["token"] is None:
+    columns = _queue_owner_columns(row)
+    if row[columns.token] is None:
         return
-    if not _owner_row_known(row, pid_column="pid"):
+    if not _owner_row_known(row, pid_column=columns.pid):
         details["deletion_codes"].append("queue_owner_state_unknown")
         return
-    _count_live_owner_role(row, details, now)
+    _count_live_owner_role(row, columns, details, now)
 
 
 def _count_queue_ownership(
-    database: sqlite3.Connection, tables: set[str], details: dict, now: datetime
+    database: sqlite3.Connection, tables: set[str], details: dict, now: datetime,
+    deadline: float,
 ) -> None:
     if "queue_ownership" not in tables:
         return
-    rows = database.execute(
-        "SELECT * FROM queue_ownership LIMIT ?", (MAX_OPERATIONAL_ROWS + 1,)
-    ).fetchall()
-    if len(rows) > MAX_OPERATIONAL_ROWS:
-        details["deletion_codes"].append("queue_owner_state_unknown")
-    for row in rows[:MAX_OPERATIONAL_ROWS]:
+    for row in database.execute("SELECT * FROM queue_ownership"):
+        _queue_scan_stop(deadline)
         _count_one_queue_owner(row, details, now)
 
 
 def _count_queue_side_tables(
-    database: sqlite3.Connection, tables: set[str], details: dict, now: datetime
+    database: sqlite3.Connection, tables: set[str], details: dict, now: datetime,
+    deadline: float,
 ) -> None:
     _count_queue_rows(
         database,
@@ -1979,7 +2164,6 @@ def _count_queue_side_tables(
         details,
         table="source_failures",
         retained_code="queue_source_failure_retained",
-        unknown_code="queue_source_failure_state_unknown",
     )
     _count_queue_rows(
         database,
@@ -1987,9 +2171,8 @@ def _count_queue_side_tables(
         details,
         table="source_fences",
         retained_code="queue_source_fence_retained",
-        unknown_code="queue_source_fence_state_unknown",
     )
-    _count_queue_ownership(database, tables, details, now)
+    _count_queue_ownership(database, tables, details, now, deadline)
 
 
 def _queue_result_bytes(state_root: Path, reference: str) -> bytes | None:
@@ -2017,8 +2200,10 @@ def _validate_queue_results(
     references: set[str],
     result_hashes: dict[str, object],
     details: dict,
+    deadline: float,
 ) -> None:
     for reference in references:
+        _queue_scan_stop(deadline)
         raw = _queue_result_bytes(state_root, reference)
         expected = result_hashes.get(reference)
         if raw is None or not isinstance(expected, str):
@@ -2058,15 +2243,45 @@ def _scan_queue_database(
                 False,
                 False,
             )
-        rows = _bounded_task_rows(database, details)
-        unknown_state, corrupt_metadata, references, result_hashes = _scan_queue_tasks(
-            rows, now=now, deadline=deadline, details=details, states=states
+        tasks = _scan_queue_tasks(
+            _queue_task_rows(database), now=now, deadline=deadline,
+            details=details, states=states
         )
-        _append_queue_scan_codes(details, unknown_state, corrupt_metadata, rows)
-        details["dead_unresolved"], details["oldest_dead_days"] = _dead_backlog(rows, now)
-        _count_queue_side_tables(database, tables, details, now)
-        _validate_queue_results(state_root, references, result_hashes, details)
-        return _QueueScan(None, unknown_state, corrupt_metadata)
+        _append_queue_scan_codes(
+            details, tasks.unknown_state, tasks.corrupt_metadata, tasks.retained
+        )
+        details["dead_unresolved"] = tasks.dead_unresolved
+        details["oldest_dead_days"] = tasks.oldest_dead_days
+        _count_queue_side_tables(database, tables, details, now, deadline)
+        _validate_queue_results(
+            state_root, tasks.references, tasks.result_hashes, details, deadline
+        )
+        _validate_capture_sources(database, tables, state_root, deadline, details)
+        return _QueueScan(None, tasks.unknown_state, tasks.corrupt_metadata)
+
+
+def _validate_capture_sources(database, tables, state_root, deadline, details) -> None:
+    from breadcrumb_storage import inspect_pending_sources
+    from installed_memory_repair import _capture_intent_blockers, describe_failure
+
+    if "capture_intents" not in tables:
+        return
+    verified: set[str] = set()
+    try:
+        codes = _capture_intent_blockers(database, state_root, deadline, verified=verified)
+        pending = inspect_pending_sources(state_root, verified, deadline=deadline)
+    except (OSError, sqlite3.Error, ValueError, KeyError, RuntimeError) as error:
+        details["capture_intent_error"] = describe_failure(error)
+        raise ValueError("capture evidence could not be verified") from error
+    details["deletion_codes"].extend(sorted(codes))
+    _record_pending_capture_health(pending, details)
+
+
+def _record_pending_capture_health(pending: dict, details: dict) -> None:
+    details["capture_pending_complete"] = pending["complete"]
+    details["capture_incomplete"] = pending["incomplete"]
+    if any(pending.values()):
+        details["deletion_codes"].append("capture_intent_retained")
 
 
 def _queue_error_state(
@@ -2078,7 +2293,9 @@ def _queue_error_state(
 
 
 def _queue_pending_work(states: dict[str, int], details: dict) -> bool:
-    return bool(states["ready"] or states["leased"] or states["blocked"] or details.get("dead_unresolved"))
+    counts = [states[key] for key in ("ready", "leased", "blocked")]
+    counts.extend(details.get(key, 0) for key in ("dead_unresolved", "capture_pending_complete", "capture_incomplete"))
+    return any(counts)
 
 
 # A dead task is work that did not happen, whatever its age, until it is redriven
@@ -2087,10 +2304,37 @@ def _queue_pending_work(states: dict[str, int], details: dict) -> bool:
 # weekly that would export them had not run since 09-13 (audit 2026-09-27 B-13,
 # docs/research/2026-09-27-a-dead-task-counts-until-it-is-resolved.md). The age
 # is shown, not used to hide.
-def _dead_backlog(rows: list[sqlite3.Row], now: datetime) -> tuple[int, int | None]:
-    """(dead tasks in the queue, age in days of the oldest)."""
-    moments = [_dead_moment(row) for row in rows if row["state"] == "dead"]
-    return len(moments), _oldest_age_days([moment for moment in moments if moment is not None], now)
+#
+# A dead task with a redrive that was not cancelled is resolved by that redrive: it
+# succeeded, it is queued again (and counted as ready), or it died and is counted
+# itself. Counting the parent too named 25 captures on 2026-09-28 whose redrives had
+# all been answered (docs/research/2026-09-28-a-check-names-its-cause.md).
+def _dead_backlog(
+    rows: Sequence[Mapping[str, object] | sqlite3.Row], now: datetime
+) -> tuple[int, int | None]:
+    """(dead tasks no live or finished redrive answers, age in days of the oldest)."""
+    answered = _redriven_ids(rows)
+    moments = [_dead_moment(row) for row in rows if _unanswered_dead(row, answered)]
+    return len(moments), _oldest_age_days(_known(moments), now)
+
+
+def _known(moments: list[datetime | None]) -> list[datetime]:
+    return [moment for moment in moments if moment is not None]
+
+
+def _unanswered_dead(row: Mapping[str, object] | sqlite3.Row, answered: set[str]) -> bool:
+    return row["state"] == "dead" and row["id"] not in answered
+
+
+def _redriven_ids(rows: Sequence[Mapping[str, object] | sqlite3.Row]) -> set[str]:
+    """Tasks that a redrive other than a cancelled one names as its origin."""
+    if not rows or "redrive_of" not in rows[0].keys():
+        return set()
+    return {row["redrive_of"] for row in rows if _answers_its_origin(row)}
+
+
+def _answers_its_origin(row: Mapping[str, object] | sqlite3.Row) -> bool:
+    return bool(row["redrive_of"]) and row["state"] != "cancelled"
 
 
 def _oldest_age_days(moments: list[datetime], now: datetime) -> int | None:
@@ -2099,7 +2343,7 @@ def _oldest_age_days(moments: list[datetime], now: datetime) -> int | None:
     return (now - min(moments)).days
 
 
-def _dead_moment(row: sqlite3.Row) -> datetime | None:
+def _dead_moment(row: Mapping[str, object] | sqlite3.Row) -> datetime | None:
     if "updated_at" not in row.keys():
         return None
     return _parse_utc(row["updated_at"])
@@ -2138,19 +2382,46 @@ def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
     except (OSError, PermissionError, sqlite3.Error, TimeoutError, ValueError):
         details["read_error"] = True
         details["deletion_codes"].append("queue_state_unreadable")
-        return _result("queue", "error", "Queue state is unreadable.", details)
+        return _result("queue", "error", _queue_read_error_message(details), details)
     if scan.result is not None:
         return scan.result
     if time.monotonic() >= deadline:
         details["budget_exhausted"] = True
     status = _queue_status(states, details, scan.unknown_state, scan.corrupt_metadata)
     _append_queue_deletion_codes(details)
-    message = (
-        "Queue state is healthy."
-        if status == "ok"
-        else "Queue state requires operator attention."
+    return _result("queue", status, _queue_message(status, details), details)
+
+
+def _queue_read_error_message(details: dict) -> str:
+    capture_error = details.get("capture_intent_error")
+    if capture_error:
+        return f"Capture evidence cannot be verified: {capture_error}"
+    return "Queue state is unreadable."
+
+
+def _queue_message(status: str, details: dict) -> str:
+    """What needs attention, by name: a vague line left the owner nothing to act on."""
+    if status == "ok":
+        return "Queue state is healthy."
+    return _capture_pending_message(details) or _queue_backlog_message(details)
+
+
+def _capture_pending_message(details: dict) -> str | None:
+    complete = details.get("capture_pending_complete", 0)
+    incomplete = details.get("capture_incomplete", 0)
+    if complete or incomplete:
+        return f"Capture publication: {complete} complete pending record(s), {incomplete} incomplete record(s); retained for recovery."
+    return None
+
+
+def _queue_backlog_message(details: dict) -> str:
+    dead = details.get("dead_unresolved")
+    if not dead:
+        return "Queue state requires operator attention."
+    return (
+        f"{dead} dead queue task(s) no redrive has answered, the oldest "
+        f"{details.get('oldest_dead_days')} day(s) old."
     )
-    return _result("queue", status, message, details)
 
 
 def _empty_archive_details() -> dict:
@@ -2639,17 +2910,14 @@ def _observed_deletion_codes(
     owner: object,
     validate_reliability_v3_runtime,
 ) -> list[str]:
-    try:
-        codes = _snapshot_deletion_codes(
-            root_path,
-            state_path,
-            now,
-            snapshot_deadline,
-            owner,
-            validate_reliability_v3_runtime,
-        )
-    except (OSError, PermissionError, sqlite3.Error, TimeoutError, ValueError):
-        codes = ["run_deletion_state_unknown"]
+    codes = _snapshot_deletion_codes(
+        root_path,
+        state_path,
+        now,
+        snapshot_deadline,
+        owner,
+        validate_reliability_v3_runtime,
+    )
     if _deadline_reached(snapshot_deadline):
         codes.append("run_deletion_state_unknown")
     return codes
@@ -2685,7 +2953,7 @@ def _run_deletion_check(
     except ReliabilityV3ValidationError as exc:
         return _deletion_snapshot([exc.code])
 
-    snapshot_deadline = min(deadline, time.monotonic() + 20.0)
+    snapshot_deadline = deadline
     if _deadline_reached(snapshot_deadline):
         return _deletion_snapshot(["run_deletion_state_unknown"])
     registry = OwnershipRegistry._from_adopted_database(  # noqa: SLF001
@@ -2693,22 +2961,18 @@ def _run_deletion_check(
         state_path / "run" / "markdown-transactions-v3.sqlite3",
     )
     try:
-        owner = registry.acquire("runtime-deletion-check", scope="global")
+        owner = registry.acquire("doctor", scope="global")
     except (OperationalOwnershipError, OSError, sqlite3.Error, ValueError) as exc:
         code = getattr(exc, "code", "runtime_deletion_check_unavailable")
+        code = {"owner_busy": "runtime_deletion_check_requires_quiescence"}.get(code, code)
         return _deletion_snapshot([str(code)])
 
-    return _deletion_snapshot(
-        _deletion_codes_with_owner(
-            registry,
-            owner,
-            root_path,
-            state_path,
-            now,
-            snapshot_deadline,
-            validate_reliability_v3_runtime,
-        )
+    diagnostics: dict[str, str] = {}
+    codes = _deletion_codes_with_owner(
+        registry, owner, root_path, state_path, now, snapshot_deadline,
+        validate_reliability_v3_runtime, diagnostics=diagnostics,
     )
+    return {**_deletion_snapshot(codes), **diagnostics}
 
 
 def _release_deletion_owner(registry, owner, codes: list[str]) -> None:
@@ -2728,14 +2992,99 @@ def _deletion_codes_with_owner(
     now: datetime,
     snapshot_deadline: float,
     validate,
+    *,
+    diagnostics: dict[str, str] | None = None,
 ) -> list[str]:
+    from operational_ownership import OperationalOwnershipError, heartbeat_owner
+    from secret_redact import describe_error
+
     codes: list[str] = []
     try:
-        codes = _observed_deletion_codes(
-            root_path, state_path, now, snapshot_deadline, owner, validate
-        )
+        with heartbeat_owner(owner, registry=registry):
+            codes = _validated_observation_codes(
+                registry, root_path, state_path, now, snapshot_deadline, owner, validate
+            )
+    except (OperationalOwnershipError, OSError, sqlite3.Error, TimeoutError, ValueError) as error:
+        codes = ["run_deletion_state_unknown"]
+        if diagnostics is not None:
+            diagnostics["observation_error"] = describe_error(error)
     finally:
         _release_deletion_owner(registry, owner, codes)
+    return codes
+
+
+class _RuntimeObservationStamp(NamedTuple):
+    database_identity: tuple[str, str, str]
+    epochs_digest: bytes
+    other_owner: bool
+
+
+def _observation_database_identity(path: Path, state_root: Path) -> tuple[str, str, str]:
+    identity = reliable_memory.capture_operational_database_identity(path, state_root=state_root)
+    return identity.platform, identity.volume, identity.file_id
+
+
+def _owner_epoch_bytes(row: sqlite3.Row) -> bytes:
+    from operational_ownership import _require_lease_epoch, _validate_role
+
+    _validate_role(row["role"])
+    _require_lease_epoch(row["last_epoch"])
+    return reliable_memory.canonical_json_bytes(list(row))
+
+
+def _observation_epoch_digest(database: sqlite3.Connection, deadline: float) -> bytes:
+    digest = hashlib.sha256()
+    rows = streamed_rows(
+        database,
+        "SELECT role,scope,last_epoch FROM maintenance_owner_epochs ORDER BY role,scope",
+        stop=lambda: _stop_at(deadline),
+    )
+    for row in rows:
+        digest.update(_owner_epoch_bytes(row))
+    return digest.digest()
+
+
+def _observation_other_owner(database: sqlite3.Connection, owner, deadline: float) -> bool:
+    from installed_memory_repair import _owner_matches
+
+    rows = streamed_rows(database, "SELECT * FROM maintenance_owners", stop=lambda: _stop_at(deadline))
+    return any(not _owner_matches(row, owner) for row in rows)
+
+
+def _require_observation_database(expected: tuple, actual: tuple) -> None:
+    if actual != expected:
+        raise ValueError("runtime observation database changed")
+
+
+def _runtime_observation_stamp(registry, owner, state_root: Path, deadline: float) -> _RuntimeObservationStamp:
+    from markdown_transaction import _COORDINATOR_V3_CONTRACT
+
+    _stop_at(deadline)
+    path = registry.database_path
+    identity = _observation_database_identity(path, state_root)
+    with closing(open_readonly_operational_db(
+        path, state_root, max_bytes=None,
+        owner_only=True, contract=_COORDINATOR_V3_CONTRACT,
+    )) as database:
+        # One is SQLite's minimum callback interval, not a work/count ceiling.
+        database.set_progress_handler(lambda: _deadline_reached(deadline), 1)
+        database.execute("BEGIN")
+        registry.require(database, owner)
+        other_owner = _observation_other_owner(database, owner, deadline)
+        epochs_digest = _observation_epoch_digest(database, deadline)
+        _require_observation_database(identity, _observation_database_identity(path, state_root))
+    _stop_at(deadline)
+    return _RuntimeObservationStamp(identity, epochs_digest, other_owner)
+
+
+def _validated_observation_codes(registry, root_path, state_path, now, deadline, owner, validate) -> list[str]:
+    before = _runtime_observation_stamp(registry, owner, state_path, deadline)
+    if before.other_owner:
+        return ["runtime_deletion_check_requires_quiescence"]
+    codes = _observed_deletion_codes(root_path, state_path, now, deadline, owner, validate)
+    after = _runtime_observation_stamp(registry, owner, state_path, deadline)
+    if before != after:
+        codes.append("runtime_deletion_snapshot_changed")
     return codes
 
 
@@ -2757,10 +3106,8 @@ _LSP_OWNER_FIELDS = {
 # Written since 2026-09-25 when the platform can name a process start (audit C-39).
 _LSP_OWNER_OPTIONAL_FIELDS = {"owner_start_identity"}
 _LSP_LEASE_OPTIONAL_FIELDS = {"manager_start_identity", "server_start_identity"}
-# The writer's bound (lsp_process._MAX_START_IDENTITY_CHARS). The longest identity
-# process_liveness builds is Linux's `linux:<36-char boot id>:<start ticks>`, under
-# 70 characters, so a longer value is not one this runtime wrote.
-_LSP_START_IDENTITY_CHARS = 128
+# Use the writer's canonical bound, including scoped Linux identities.
+_LSP_START_IDENTITY_CHARS = process_liveness.MAX_START_IDENTITY_CHARS
 _LSP_LEASE_FIELDS = {
     "expires_at",
     "generation_nonce",
@@ -2956,6 +3303,15 @@ _PYRIGHT_ACTIONS = MappingProxyType(
         "pyright_repository_config_too_deep": (
             "flatten the repository's [tool.pyright] settings"
         ),
+        # Pyright starts only a regular `node` file on a local path whose parent
+        # directories are real directories: a symbolic link or a network path is
+        # refused, so what runs is the file that was checked. Named here because the
+        # code alone left the owner nothing to act on (2026-09-28).
+        "pyright_node_executable_unsafe": (
+            "the first `node` on PATH is a symbolic link, sits under a linked or "
+            "network directory, or is not a regular file; put a regular node binary "
+            "on a local path first on PATH"
+        ),
     }
 )
 _PYRIGHT_INSTALL_ACTION = (
@@ -3013,8 +3369,9 @@ def _pyright_check(
             "Pyright discovery did not complete before the deadline.",
             details,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - a health check names the cause and goes on
         details["status"] = "unsafe"
+        details["error"] = describe_error(exc)
         codes.append("pyright_unsafe")
         return _result(
             "pyright",
@@ -3827,24 +4184,12 @@ def _lsp_records_match(
     return _lsp_start_within_window(owner, now, heartbeat_at)
 
 
-def _valid_lsp_pid(pid: object) -> bool:
-    return isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
-
-
-def _lease_still_live(
-    matching: bool, expires_at: datetime | None, now: datetime, pids: tuple
-) -> bool:
-    if not matching or expires_at is None or expires_at <= now:
-        return False
-    return all(_valid_lsp_pid(pid) for pid in pids)
-
-
-def _lsp_pid_states(pids: tuple, deadline: float) -> list[str]:
+def _lsp_pid_states(processes: tuple, deadline: float) -> list[str]:
     states: list[str] = []
-    for pid in pids:
+    for pid, identity in processes:
         _require_lsp_deadline(deadline)
         try:
-            pid_state = _lsp_pid_state(pid)
+            pid_state = _lsp_pid_state(pid, identity)
         finally:
             _require_lsp_deadline(deadline)
         states.append(pid_state)
@@ -3860,7 +4205,7 @@ def _lsp_pid_liveness(
         return _LspLiveness(False, heartbeat_at, True, _deadline_reached(deadline))
     except Exception:  # noqa: BLE001
         return _LspLiveness(False, heartbeat_at, True, False)
-    live = all(state == "alive" for state in pid_states)
+    live = any(state == "alive" for state in pid_states)
     return _LspLiveness(live, heartbeat_at, "unknown" in pid_states, False)
 
 
@@ -3872,15 +4217,30 @@ def _lsp_liveness(
     deadline: float,
 ) -> _LspLiveness:
     """Whether this owner still holds live processes, and what that cost to learn."""
-    if not isinstance(owner, dict) or not isinstance(lease, dict):
-        return _LspLiveness(False, None, False, False)
-    heartbeat_at = _parse_lsp_timestamp(lease.get("heartbeat_at"))
-    matching = _lsp_records_match(owner, lease, entry_name, now, heartbeat_at)
-    pids = (lease.get("manager_pid"), lease.get("server_pid"))
-    expires_at = _parse_lsp_timestamp(lease.get("expires_at"))
-    if not _lease_still_live(matching, expires_at, now, pids):
-        return _LspLiveness(False, heartbeat_at, not matching, False)
-    return _lsp_pid_liveness(pids, heartbeat_at, deadline)
+    if not isinstance(owner, dict):
+        return _LspLiveness(False, None, True, False)
+    heartbeat_at = _lsp_heartbeat(lease)
+    processes = _lsp_recorded_processes(owner, lease)
+    result = _lsp_pid_liveness(processes, heartbeat_at, deadline)
+    if isinstance(lease, dict) and not _lsp_records_match(owner, lease, entry_name, now, heartbeat_at):
+        return result._replace(unreadable=True)
+    return result
+
+
+def _lsp_heartbeat(lease: dict | None) -> datetime | None:
+    if not isinstance(lease, dict):
+        return None
+    return _parse_lsp_timestamp(lease.get("heartbeat_at"))
+
+
+def _lsp_recorded_processes(owner: dict, lease: dict | None) -> tuple:
+    recorded = ((owner.get("owner_pid"), owner.get("owner_start_identity")),)
+    if not isinstance(lease, dict):
+        return recorded
+    return recorded + (
+        (lease.get("manager_pid"), lease.get("manager_start_identity")),
+        (lease.get("server_pid"), lease.get("server_start_identity")),
+    )
 
 
 def _failure_time_invalid(owner: dict, failure: dict, now: datetime) -> bool:
@@ -3974,7 +4334,7 @@ def _record_failure_evidence(
 ) -> bool:
     if "failure.json" in child_names:
         return _record_explicit_failure(record, codes, failure, owner, entry_name, now)
-    if record["live"]:
+    if not record["processes_dead"]:
         return False
     _record_crash_evidence(record, codes, owner, heartbeat_at, now)
     return False
@@ -3994,6 +4354,9 @@ def _read_lsp_owner(snapshot: tuple, now: datetime, deadline: float) -> _LspOwne
     )
     liveness = _lsp_liveness(owner, lease, entry_name, now, deadline)
     record["live"] = liveness.live
+    # Only positive death may imply a crash; explicit failure evidence is
+    # validated below before publishing the final deletion-relevant verdict.
+    record["processes_dead"] = _lsp_death_proven(liveness, unreadable, liveness.stop)
     if liveness.live:
         codes.append("lsp_owner_live")
     failure_unreadable = _record_failure_evidence(
@@ -4008,7 +4371,12 @@ def _read_lsp_owner(snapshot: tuple, now: datetime, deadline: float) -> _LspOwne
     )
     stop = liveness.stop or _deadline_reached(deadline)
     unreadable = unreadable or liveness.unreadable or failure_unreadable
+    record["processes_dead"] = _lsp_death_proven(liveness, unreadable, stop)
     return _LspOwnerReading(record, codes, unreadable, stop)
+
+
+def _lsp_death_proven(liveness: _LspLiveness, unreadable: bool, stop: bool) -> bool:
+    return not (liveness.live or liveness.unreadable or unreadable or stop)
 
 
 def _scan_lsp_owners(
@@ -4332,6 +4700,26 @@ def _extraction_faults(
     )
 
 
+class _LiveCorpusUnverified(RuntimeError):
+    """Live-source collection failed after immutable artifacts were validated."""
+
+
+def _collect_generation_live_corpus(root, policy, max_sources, deadline):
+    from corpus_snapshot import CorpusCapacityExceeded, CorpusChanged, collect_corpus
+    from secret_redact import describe_error
+
+    try:
+        return collect_corpus(
+            root, daily_paths=policy["daily_paths"], code_roots=policy["code_roots"],
+            include_historical=policy["include_historical"], as_of=policy["as_of"],
+            max_files=max_sources, deadline=deadline,
+        )
+    except (CorpusCapacityExceeded, TimeoutError):
+        raise
+    except (CorpusChanged, OSError, ValueError) as error:
+        raise _LiveCorpusUnverified(describe_error(error)) from error
+
+
 def _generation_facts(
     root: Path,
     state_root: Path,
@@ -4351,21 +4739,13 @@ def _generation_facts(
     )
     policy = source_manifest["policy"]
 
-    from corpus_snapshot import COLLECTOR_VERSION, EXTRACTOR_VERSION, collect_corpus
+    from corpus_snapshot import COLLECTOR_VERSION, EXTRACTOR_VERSION
     from repository_scope import resolve_repository_scope
 
     repository_scope = resolve_repository_scope(
         root, deadline=deadline, cancelled=cancelled
     )
-    snapshot = collect_corpus(
-        root,
-        daily_paths=policy["daily_paths"],
-        code_roots=policy["code_roots"],
-        include_historical=policy["include_historical"],
-        as_of=policy["as_of"],
-        max_files=max_sources,
-        deadline=deadline,
-    )
+    snapshot = _collect_generation_live_corpus(root, policy, max_sources, deadline)
     return _GenerationFacts(
         delta=_source_delta(source_manifest, snapshot),
         unresolved=_unresolved_observations(generation_path, state_root, deadline),
@@ -4552,6 +4932,8 @@ def _checked_generation(
     cancelled,
     state: dict,
 ) -> dict:
+    from corpus_snapshot import CorpusCapacityExceeded
+
     early, active = _catalog_active_generation(
         catalog_path, state_root, deadline, state
     )
@@ -4564,10 +4946,45 @@ def _checked_generation(
     manifest, seal = _validated_generation_manifest(
         generation_path, state_root, deadline, state
     )
-    facts = _generation_facts(
-        root, state_root, generation_path, manifest, max_sources, deadline, cancelled
-    )
+    try:
+        facts = _generation_facts(
+            root, state_root, generation_path, manifest, max_sources, deadline, cancelled
+        )
+    except CorpusCapacityExceeded as error:
+        return _generation_capacity_refusal(active, manifest, error)
+    except _LiveCorpusUnverified as error:
+        return _generation_live_source_refusal(active, manifest, error)
     return _generation_health_result(active, manifest, seal, catalog_info, now, facts)
+
+
+def _generation_live_source_refusal(active: str, manifest: dict, error) -> dict:
+    return _generation_result(
+        "error", "Live corpus could not be verified; freshness is unknown. " + str(error),
+        catalog="valid", active_generation=active,
+        generation_schema=manifest.get("graph_schema_version"),
+        live_corpus_state="unverified", validation_error=str(error),
+        freshness="unknown", partial=True, repairable=False,
+        recommended_action="review_live_corpus", **_vector_fields(manifest),
+    )
+
+
+def _generation_capacity_refusal(active: str, manifest: dict, error) -> dict:
+    return _generation_result(
+        "degraded",
+        "Live corpus exceeded its configured budget; freshness is unverified. " + str(error),
+        catalog="valid",
+        active_generation=active,
+        generation_schema=manifest.get("graph_schema_version"),
+        capacity_exceeded=True,
+        limit_name=error.setting,
+        configured_limit=error.limit,
+        observed_minimum=error.observed,
+        freshness="unknown",
+        partial=True,
+        repairable=False,
+        recommended_action="review_corpus_budget",
+        **_vector_fields(manifest),
+    )
 
 
 def _generation_source_limit(max_sources: int | None, root: Path) -> int:
@@ -4737,11 +5154,22 @@ def _deferred_sentence(details: dict) -> str:
     )
 
 
+# The totals are cumulative and the verdict is about the last seven days
+# (`capture_diagnostics.CAPTURE_RECENT_SECONDS`): a degraded line that gave only the
+# total read as a count that keeps the install in warning forever. It says both.
+# See docs/research/2026-09-28-a-check-names-its-cause.md.
+def _recent_loss_message(lost: int, details: dict) -> str:
+    return (
+        f"{lost} capture(s) have been lost in total; the last at {details.get('last_at')}, "
+        f"within the last seven days.{_deferred_sentence(details)}"
+    )
+
+
 def _capture_loss_result(lost: int, live: bool, details: dict) -> dict:
     """The capture verdict, once the diagnostics themselves have been read."""
     suffix = _deferred_sentence(details)
     if live:
-        return _result("capture", "degraded", f"{lost} capture(s) were lost.{suffix}", details)
+        return _result("capture", "degraded", _recent_loss_message(lost, details), details)
     if lost:
         return _result(
             "capture",
@@ -4781,7 +5209,8 @@ def _tool_failure_check(state_root: Path, deadline: float) -> dict:
     return _result(
         "tools",
         "degraded",
-        f"{failed} tool call(s) or telemetry write(s) failed; see `logs/capture-failures.jsonl`.",
+        f"{failed} tool call(s) or telemetry write(s) have failed in total; the last at "
+        f"{details['last_at']}, within the last seven days. See `logs/capture-failures.jsonl`.",
         details,
     )
 
@@ -4833,10 +5262,10 @@ _CEILING_SCOPES = {
     "search.max_pages": ("notes",),
     "impact.max_note_files": ("notes",),
     "impact.max_total_note_bytes": ("notes",),
-    "claims.max_pages": ("notes", "projects"),
-    "claims.max_total_bytes": ("notes", "projects"),
-    "compile.max_sources": ("notes", "daily"),
-    "compile.max_total_source_bytes": ("notes", "daily"),
+    "claims.max_pages": ("claims",),
+    "claims.max_total_bytes": ("claims",),
+    "compile.max_sources": ("compile",),
+    "compile.max_total_source_bytes": ("compile",),
     "corpus.max_files": ("notes", "projects", "daily"),
     "corpus.max_total_bytes": ("notes", "projects", "daily"),
     "extraction.max_sources": ("notes", "projects", "daily"),
@@ -4850,7 +5279,24 @@ def _markdown_size(directory: Path) -> tuple[int, int]:
 
 
 def _vault_sizes(root: Path) -> dict[str, tuple[int, int]]:
-    return {name: _markdown_size(root / "knowledge" / name) for name in ("notes", "projects", "daily")}
+    sizes = {name: _markdown_size(root / "knowledge" / name) for name in ("notes", "projects", "daily")}
+    sizes["compile"] = _compile_sources_size(root)
+    sizes["claims"] = _claim_sources_size(root)
+    return sizes
+
+
+def _compile_sources_size(root: Path) -> tuple[int, int]:
+    from compile_memory import compile_scope_paths
+
+    files = compile_scope_paths(root)
+    return len(files), sum(path.stat().st_size for path in files)
+
+
+def _claim_sources_size(root: Path) -> tuple[int, int]:
+    from claim_tree_manifest import claim_scope_paths
+
+    files = claim_scope_paths(root)
+    return len(files), sum(path.stat().st_size for path in files)
 
 
 def _ceiling_use(name: str, ceiling: int, sizes: dict[str, tuple[int, int]]) -> dict:
@@ -4919,22 +5365,42 @@ def _capture_check(root: Path, state_root: Path, deadline: float) -> dict:
             + state_size_hint(state_root),
             details,
         )
-    adoption = _adoption_state(root, state_root)
+    adoption, details["adoption_error"] = _adoption_state(root, state_root)
     details["adoption_state"] = adoption
-    if adoption not in {"adopted", "unknown"}:
-        return _result("capture", "degraded", _capture_disabled_message(adoption), details)
-    return _capture_loss_result(lost, live, details)
+    return _adoption_result(adoption, details) or _capture_loss_result(lost, live, details)
 
 
-def _adoption_state(root: Path, state_root: Path) -> str:
-    """The Reliability V3 adoption state, from the two records under run/, or unknown."""
-    from installed_memory_repair import inspect_installed_vault
+def _adoption_result(adoption: str, details: dict[str, Any]) -> dict | None:
+    """The capture verdict the adoption state decides, or None when it decides nothing."""
+    if adoption == "unreadable":
+        return _result("capture", "degraded", _adoption_unreadable_message(details), details)
+    if adoption in {"adopted", "unknown"}:
+        return None
+    return _result("capture", "degraded", _capture_disabled_message(adoption), details)
+
+
+def _adoption_state(root: Path, state_root: Path) -> tuple[str, str | None]:
+    """The Reliability V3 adoption state and the cause of a failed read, from run/."""
+    from installed_memory_repair import describe_failure, inspect_installed_vault
 
     try:
         report = inspect_installed_vault(root=root, state_root=state_root)
-    except Exception:  # noqa: BLE001 - a health check never raises
-        return "unknown"
-    return str(report.get("details", {}).get("adoption_state") or "unknown")
+    except Exception as exc:  # noqa: BLE001 - a health check never raises; it names the cause
+        return "unknown", describe_failure(exc)
+    details = report.get("details", {})
+    return str(details.get("adoption_state") or "unknown"), details.get("error")
+
+
+def _adoption_unreadable_message(details: dict[str, Any]) -> str:
+    """A busy or locked record is not a verdict on adoption: never say capture is disabled.
+
+    See docs/research/2026-09-28-a-check-names-its-cause.md.
+    """
+    return (
+        "The Reliability V3 records could not be read just now "
+        f"({details.get('adoption_error')}); this is not a finding that capture is "
+        "disabled. Run doctor again."
+    )
 
 
 def _capture_disabled_message(adoption: str) -> str:
@@ -5280,6 +5746,7 @@ def _scheduler_check(
         "last_nightly_date": state.get("last_nightly_date"),
         "last_nightly_status": state.get("last_nightly_status", "unknown"),
         "last_nightly_skip": state.get("last_nightly_skip"),
+        "nightly_deferred_compile": state.get("nightly_deferred_compile"),
         "state_error": state_error,
     }
     if state_error in {"budget", "oversized"}:
@@ -5316,11 +5783,13 @@ _UPDATE_ATTENTION = {
     ("status", "error"): "The nightly code update failed; see the nightly log.",
     ("reason", "fetch_failed"): "The nightly code update could not fetch the remote.",
     ("reason", "not_on_default_branch"): (
-        "The vault is not on its default branch, so the nightly never updates it."
+        "The last nightly code update was skipped because the vault was not on its default branch."
     ),
-    ("reason", "diverged_branch"): "The vault's branch has diverged from the remote.",
+    ("reason", "diverged_branch"): (
+        "The last nightly code update was skipped because the vault's branch had diverged from the remote."
+    ),
     ("reason", "local_changes_conflict"): (
-        "A local change stops the nightly code update; see the nightly log."
+        "The last nightly code update was stopped by a conflicting local change; see the nightly log."
     ),
     ("dependencies", "stale"): (
         "The code was updated but its dependencies were not synced; the nightly syncs "
@@ -5351,11 +5820,16 @@ def _unit_limit_verdict(home: Path) -> tuple[str, str] | None:
     stale = [kind for kind, limit in _installed_unit_limits(home).items() if limit != _expected_unit_limit(kind)]
     if not stale:
         return None
+    # The installer replaces units edited outside it, keeps the edited copy and moves a
+    # line added by hand into a drop-in, so rerunning it is the whole advice
+    # (docs/research/2026-09-28-an-update-replaces-what-it-owns.md).
     return (
         "degraded",
         "Installed maintenance units are older than this release ("
         + ", ".join(stale)
-        + " time limit); rerun the installer.",
+        + " time limit); rerun the installer. It replaces the units even if they were "
+        "edited by hand, keeps the edited copy under run/install/displaced/, and moves an "
+        "added setting into a drop-in (<unit>.d/50-local.conf).",
     )
 
 
@@ -5592,6 +6066,12 @@ def _nightly_freshness_result(
     state: dict, status: object, last_date: str, now: datetime, details: dict
 ) -> dict:
     """Whether a recorded, non-failed nightly run is still current."""
+    if state.get("nightly_deferred_compile"):
+        return _result(
+            "scheduler", "degraded",
+            "Compile-dependent nightly maintenance was deferred; completion is not verified.",
+            details,
+        )
     if _nightly_is_current(state, status, last_date, now):
         return _result("scheduler", "ok", "Nightly maintenance is current.", details)
     return _result("scheduler", "degraded", _stale_nightly_message(state), details)
@@ -6284,6 +6764,22 @@ def _integration_host_configs(
     }
 
 
+# Codex runs a hook only after a person approves it in Codex (`/hooks`); nothing an
+# installer writes stands in for that approval. Said once, in the words of the step,
+# instead of a reason code (2026-09-28, docs/research/2026-09-28-a-check-names-its-cause.md).
+_CODEX_TRUST_STEP = (
+    "Codex has not been told to trust the LLM-Wiki hooks: open Codex, run /hooks, and "
+    "trust the LLM-Wiki commands. Codex asks a person for this; the installer cannot."
+)
+_CODEX_TRUST_REASONS = frozenset({"runtime_hooks_untrusted", "runtime_hooks_modified"})
+
+
+def _codex_trust_message(reason: str, message: str) -> str:
+    if reason not in _CODEX_TRUST_REASONS:
+        return message
+    return f"{_CODEX_TRUST_STEP} {message}"
+
+
 def _codex_degraded_result(root: Path, home: Path, reason: str) -> dict[str, object]:
     wrapper = _codex_wrapper_configured(root, home)
     message = "Official Codex hooks are not verified and no capture fallback is configured."
@@ -6293,7 +6789,7 @@ def _codex_degraded_result(root: Path, home: Path, reason: str) -> dict[str, obj
         capture_mode = "wrapper-fallback-heartbeat-only"
     result: dict[str, object] = {
         "status": "degraded",
-        "message": message,
+        "message": _codex_trust_message(reason, message),
         "reason": reason,
         "capture_mode": capture_mode,
     }
@@ -6406,8 +6902,8 @@ def _repair_runtime(state_root: Path, repaired: list[dict]) -> None:
             repaired.append({"action": "create_runtime_directory", "directory": relative})
 
 
-def _lsp_pid_state(pid: int) -> str:
-    return process_liveness.process_state(pid)
+def _lsp_pid_state(pid: int, identity: str | None = None) -> str:
+    return process_liveness.recorded_process_state(pid, identity)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -6892,17 +7388,6 @@ def _record_generation_recovery(
         )
 
 
-def _registered_generation_ids(catalog: object, generation_catalog) -> set[str]:
-    with closing(catalog._readonly()) as database:  # noqa: SLF001 - bounded repair
-        rows = database.execute(
-            "SELECT generation_id FROM generations LIMIT ?",
-            (generation_catalog.MAX_GENERATIONS + 1,),
-        ).fetchall()
-    if len(rows) > generation_catalog.MAX_GENERATIONS:
-        raise ValueError("generation catalog exceeds cleanup bound")
-    return {str(row[0]) for row in rows}
-
-
 def _cleanup_stop_reached(deadline: float, cancelled) -> bool:
     return bool(cancelled and cancelled()) or _deadline_reached(deadline)
 
@@ -7024,7 +7509,9 @@ def _repair_generation_catalog(
     catalog = generation_catalog.GenerationCatalog(state_root)
     active_before = _active_pointer_value(catalog)
     _record_generation_recovery(catalog, deadline, repaired, active_before)
-    registered = _registered_generation_ids(catalog, generation_catalog)
+    registered = set(catalog.registered_generation_ids(
+        deadline=deadline, cancelled=cancelled
+    ))
     removed = _cleanup_generation_orphans(
         catalog, generation_catalog, state_root, registered, deadline, cancelled
     )
@@ -7647,6 +8134,8 @@ def _build_or_refresh_generation(
             code_roots=VAULT_CODE_ROOTS if code_roots is None else code_roots,
             max_files=max_sources,
             deadline=deadline,
+            coordinator=coordinator,
+            cancelled=cancelled,
         )
     if len(snapshot.sources) > max_sources:
         raise ValueError("corpus source limit exceeded")
@@ -8141,6 +8630,7 @@ def _repair_generations_action(guard: Any, context: _RepairContext) -> None:
         cancelled=guard.cancelled,
         max_sources=setting_value("corpus.max_files", context.root_path),
         force_rebuild=True,
+        coordinator=guard.coordinator,
     )
     _record_generation_rebuild(result, context)
 
@@ -8332,26 +8822,25 @@ def _candidates_in(directory: Path, names: tuple[str, ...]) -> int:
 
 
 def _adoption_refusal_message(code: str, cause: str, strays: list[str]) -> str:
-    message = f"Every Markdown writer is refused: {cause}."
+    message = f"Complete adoption certification failed: {cause}."
     if strays:
         message += " Stray candidate: " + ", ".join(strays) + "."
     return message + " Repair: `uv run python scripts/doctor.py --repair`."
 
 
 def _adoption_check(root: Path, state_root: Path) -> dict:
-    """Whether the adoption boundary admits writers at all; an error names why.
+    """Certify the adopted pair and name the cause of any diagnostic failure.
 
-    Every capture, checkpoint and compile passes `require_reliability_v3_adopted`
-    first, and for six days on the owner's vault it refused them all while doctor
-    reported only the symptoms. This reads two small records and `lstat`s two
-    paths, so no bound on `run/state.json` can hide it.
+    Writers verify the adoption evidence and both database contracts before
+    admission. Doctor additionally certifies the complete retained database
+    history through `require_adopted_through_contention`; a normal writer open
+    does not substitute for this deeper diagnostic.
     """
-    from installed_memory_repair import (
-        ReliabilityV3ValidationError,
-        require_reliability_v3_adopted,
+    from installed_memory_repair import ReliabilityV3ValidationError
+    from markdown_transaction import (
+        _reliability_v3_records_present,
+        require_adopted_through_contention,
     )
-    from markdown_transaction import _reliability_v3_records_present
-    from secret_redact import describe_error_chain
 
     if not _reliability_v3_records_present(state_root):
         message = "Reliability V3 is not adopted here; writers use the legacy path."
@@ -8363,7 +8852,7 @@ def _adoption_check(root: Path, state_root: Path) -> dict:
         "quarantined_candidates": _quarantined_candidates(state_root),
     }
     try:
-        require_reliability_v3_adopted(root=root, state_root=state_root)
+        require_adopted_through_contention(Path(root), state_root)
     except ReliabilityV3ValidationError as exc:
         details.update(code=exc.code, cause=describe_error_chain(exc))
         message = _adoption_refusal_message(exc.code, details["cause"], strays)
@@ -8584,20 +9073,41 @@ def _collect_checks(
     2026-09-26 B-19, docs/research/2026-09-26-a-check-is-judged-when-it-ends.md).
     """
     runs = [
-        lambda: _environment_check(root_path, state_path),
-        lambda: _runtime_check(state_path),
-        lambda: _adoption_check(root_path, state_path),
-        lambda: _filesystem_check(state_path, deadline),
-        lambda: _transaction_check(state_path, generated_at, deadline, vault_root=root_path),
-        lambda: _queue_check(state_path, generated_at, deadline),
-        lambda: _archive_check(root_path, state_path, deadline),
-        lambda: _claim_check(root_path, state_path, deadline),
+        ("environment", lambda: _environment_check(root_path, state_path)),
+        ("runtime", lambda: _runtime_check(state_path)),
+        ("adoption", lambda: _adoption_check(root_path, state_path)),
+        ("filesystem", lambda: _filesystem_check(state_path, deadline)),
+        (
+            "transactions",
+            lambda: _transaction_check(state_path, generated_at, deadline, vault_root=root_path),
+        ),
+        ("queue", lambda: _queue_check(state_path, generated_at, deadline)),
+        ("archives", lambda: _archive_check(root_path, state_path, deadline)),
+        ("claims", lambda: _claim_check(root_path, state_path, deadline)),
     ]
     runs.extend(
-        _deferred_run(check_id, operation, deadline)
+        (check_id, _deferred_run(check_id, operation, deadline))
         for check_id, operation in _deferrable_checks(root_path, state_path, home_path, generated_at)
     )
-    return [_unfinished_when_late(run(), deadline) for run in runs]
+    return [_unfinished_when_late(_isolated(check_id, run), deadline) for check_id, run in runs]
+
+
+def _isolated(check_id: str, run) -> dict:
+    """A check that raised is that check's error, named; the others still report.
+
+    One unguarded check raised IndexError on a v3 queue owner and doctor printed
+    nothing at all, so the installer's smoke saw no report and stopped the update
+    (2026-09-29).
+    """
+    try:
+        return run()
+    except Exception as error:  # noqa: BLE001 - reported as the check's own error, with its cause
+        return _result(
+            check_id,
+            "error",
+            f"The {check_id} check could not finish: {describe_error(error)}",
+            {"exception": type(error).__name__},
+        )
 
 
 def _deferred_run(check_id: str, operation, deadline: float):
@@ -8616,14 +9126,24 @@ def _mark_repair_deferred(check: dict) -> None:
 def _mark_repair_failed(check: dict, errors: list[str]) -> None:
     check["status"] = "error"
     check["message"] = f"{check['id'].title()} repair failed."
+    check["details"].pop("repair_deferred", None)
     check["details"]["repair_errors"] = errors
+
+
+def _repair_errors_for_check(check_id: str, errors: dict[str, list[str]]) -> list[str]:
+    """Repair action names and health check names are not always identical."""
+    matched = []
+    for action, reasons in errors.items():
+        if check_id in _DEFERRED_BY_ACTION.get(action, {action}):
+            matched.extend(reasons)
+    return matched
 
 
 def _apply_repair_outcomes(checks: list[dict], context: _RepairContext) -> None:
     for check in checks:
         if check["id"] in context.repair_deferred:
             _mark_repair_deferred(check)
-        errors = context.repair_errors.get(check["id"])
+        errors = _repair_errors_for_check(check["id"], context.repair_errors)
         if errors:
             _mark_repair_failed(check, errors)
 

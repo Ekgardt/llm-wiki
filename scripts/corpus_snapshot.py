@@ -25,7 +25,7 @@ from bounded_io import (
 )
 from code_languages import language_for_path
 from page_status import is_retired
-from settings import raise_hint, setting_value
+from settings import MAX_CORPUS_INSPECTED_ENTRIES, raise_hint, setting_value
 from vault_editorial import EDITORIAL_NAMES
 
 COLLECTOR_VERSION = "corpus-collector/v1"
@@ -35,13 +35,9 @@ COLLECTOR_VERSION = "corpus-collector/v1"
 # 2026-09-16 rule — a user turn begins its own chunk — which had shipped under v3.
 # `tests/test_a_chunker_that_changes_changes_its_version.py` holds the pin. See
 # `docs/research/2026-09-17-a-chunker-that-changes-changes-its-version.md`.
-EXTRACTOR_VERSION = "markdown-heading-extractor/v4"
+EXTRACTOR_VERSION = "markdown-heading-extractor/v5"
 
 MAX_CORPUS_FILE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
-# Directory entries one corpus collection may inspect before it refuses, a bound on a
-# walk over a tree the user controls. Basis unknown: value predates measurement; the
-# live vault holds about 1 185 entries (2026-09-27). Review when a vault nears it.
-MAX_CORPUS_INSPECTED_ENTRIES = 50_000
 # Directories one corpus collection walks; the live knowledge tree has 76 (2026-09-27). A vault-
 # size bound like `corpus.max_files`; review when it becomes a setting.
 MAX_CORPUS_DIRECTORIES = 5_000
@@ -134,6 +130,16 @@ def _is_link_entry(info: os.stat_result, *, symlink: bool) -> bool:
 
 class CorpusChanged(RuntimeError):
     """Live corpus membership or content differs from a captured snapshot."""
+
+
+class CorpusCapacityExceeded(ValueError):
+    """A configured resource budget refused a complete live-corpus snapshot."""
+
+    def __init__(self, setting: str, limit: int, observed: int, message: str) -> None:
+        self.setting = setting
+        self.limit = limit
+        self.observed = observed
+        super().__init__(message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,6 +261,8 @@ class _PathIdentity:
     size: int
     ctime_ns: int
     attributes: int
+    uid: int
+    gid: int
 
 
 def _sha256(content: bytes) -> str:
@@ -628,15 +636,25 @@ _SEAL_ATTRIBUTES = 0x10 | 0x400  # FILE_ATTRIBUTE_DIRECTORY, _REPARSE_POINT
 
 
 def _identity(path: Path, info: os.stat_result) -> _PathIdentity:
+    size, ctime_ns = _identity_content_fields(info)
     return _PathIdentity(
         path=path,
         device=info.st_dev,
         inode=info.st_ino,
         mode=info.st_mode,
-        size=info.st_size,
-        ctime_ns=info.st_ctime_ns,
+        size=size,
+        ctime_ns=ctime_ns,
+        uid=getattr(info, "st_uid", 0),
+        gid=getattr(info, "st_gid", 0),
         attributes=(getattr(info, "st_file_attributes", 0) or 0) & _SEAL_ATTRIBUTES,
     )
+
+
+def _identity_content_fields(info: os.stat_result) -> tuple[int, int]:
+    """Directory entries may change without replacing the directory itself."""
+    if stat.S_ISDIR(info.st_mode):
+        return 0, 0
+    return info.st_size, info.st_ctime_ns
 
 
 def _seal_path(
@@ -776,7 +794,7 @@ def _open_sealed_posix_path(
 
 def _identity_delta(expected: _PathIdentity, current: _PathIdentity) -> str:
     """Name the fields that moved, so the refusal can be acted on."""
-    fields = ("device", "inode", "mode", "size", "ctime_ns", "attributes")
+    fields = ("device", "inode", "mode", "size", "ctime_ns", "attributes", "uid", "gid")
     changed = [
         f"{name}: {getattr(expected, name)} -> {getattr(current, name)}"
         for name in fields
@@ -1005,7 +1023,10 @@ class _Discovery:
         self._count_bytes(content)
         self.candidates[relative] = _Candidate(path, relative, kind, project, seal, content)
         if len(self.candidates) > self.max_files:
-            raise ValueError(f"corpus file limit exceeded; {raise_hint('corpus.max_files')}")
+            raise CorpusCapacityExceeded(
+                "corpus.max_files", self.max_files, len(self.candidates),
+                f"corpus file limit exceeded; {raise_hint('corpus.max_files')}",
+            )
 
     def _require_unseen(self, relative: str) -> None:
         if relative in self.candidates:
@@ -1016,10 +1037,13 @@ class _Discovery:
             return
         self.total_bytes += len(content)
         if self.total_bytes > self.max_total_bytes:
-            raise ValueError(f"corpus total byte limit exceeded; {raise_hint('corpus.max_total_bytes')}")
+            raise CorpusCapacityExceeded(
+                "corpus.max_total_bytes", self.max_total_bytes, self.total_bytes,
+                f"corpus total byte limit exceeded; {raise_hint('corpus.max_total_bytes')}",
+            )
 
     def walk(self, root: Path, kind: str) -> None:
-        if not root.exists():
+        if root.relative_to(self.vault).as_posix() in self.pruned_directories or not root.exists():
             return
         if os.name == "posix":
             self._walk_posix(root, kind)
@@ -1303,25 +1327,61 @@ class _Discovery:
             return path.suffix.casefold() == ".md" and path.name not in EDITORIAL_NAMES
         if kind == "project":
             return path.name in PROJECT_FILES
-        return True
+        return kind != "session" or _is_breadcrumb_head(path)
 
 
 def _walk_knowledge(discovery: _Discovery, vault: Path) -> None:
     discovery.walk(vault / "knowledge/notes", "note")
     discovery.walk(vault / "knowledge/projects", "project")
-    # Session records are deliberately NOT collected. They are kept verbatim on
-    # disk, they are read by the nightly consolidation, and they are greppable —
-    # but they are not part of the retrieval corpus, because measurement says
-    # they take it over: importing 236 past sessions (about 10 MB of the same
-    # conversations the pages were compiled from) moved the vault stand from
-    # hit@5 0.7 to 0.0, and neither a below-neutral trust weight nor ordering
-    # compiled pages first brought it back past 0.4 — by then the decision page
-    # was no longer in the candidate pool at all.
-    #
-    # What would make them safe to index is a second tier consulted when the
-    # compiled pages do not answer, or a per-source quota in the pool. Neither is
-    # built, so the honest state is: kept, not indexed. See MEM-01 in
-    # docs/DEVELOPER-AUDIT-STATUS-2026-08-18.md.
+    # Ordinary sessions remain excluded: their import displaced claim pages in
+    # the measured vault stand. Only integrity-bound breadcrumb sources enter.
+    _walk_breadcrumbs(discovery, vault)
+
+
+def _is_breadcrumb_head(path: Path) -> bool:
+    from breadcrumb_evidence import is_breadcrumb_document
+
+    return path.name.endswith(".breadcrumb.md") and is_breadcrumb_document(path)
+
+
+def _breadcrumb_logical_path(relative: str) -> str:
+    from breadcrumb_evidence import archived_source_path
+
+    path = PurePosixPath(relative)
+    logical = "knowledge/raw/sessions/" + "/".join(path.parts[-2:])
+    if relative not in {logical, archived_source_path(logical)}:
+        raise ValueError("breadcrumb source has no canonical corpus location")
+    return logical
+
+
+def _breadcrumb_corpus_read(discovery: _Discovery, relative: str, archived: bool) -> bytes:
+    from breadcrumb_evidence import archived_source_path
+
+    _check_deadline(discovery.deadline)
+    physical = archived_source_path(relative) if archived else relative
+    if physical not in discovery.candidates:
+        discovery.add(discovery.vault / physical, "session")
+    return _candidate_bytes(discovery.candidates[physical], discovery.max_file_bytes, "breadcrumb corpus source")
+
+
+def _follow_breadcrumb(discovery: _Discovery, head: _Candidate) -> None:
+    from breadcrumb_evidence import restore_source
+
+    logical = _breadcrumb_logical_path(head.relative)
+    archived = logical != head.relative
+
+    def read(relative: str) -> bytes:
+        return _breadcrumb_corpus_read(discovery, relative, archived)
+
+    restore_source(logical, read)
+    _check_deadline(discovery.deadline)
+
+
+def _walk_breadcrumbs(discovery: _Discovery, vault: Path) -> None:
+    discovery.walk(vault / "knowledge/raw/sessions", "session")
+    heads = tuple(item for item in discovery.candidates.values() if item.kind == "session")
+    for head in heads:
+        _follow_breadcrumb(discovery, head)
 
 
 def is_memory_path(relative_path: str, code_roots: Iterable[str] = ()) -> bool:
@@ -1714,19 +1774,26 @@ def _metadata_language(frontmatter: Mapping[str, object]) -> str | None:
 _DAILY_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})\.md$")
 
 
-def _dated_by_name(candidate: _Candidate) -> str | None:
-    """A daily entry's date is the one in its file name — the one certain date about it.
+def _breadcrumb_date(candidate: _Candidate) -> str | None:
+    from breadcrumb_evidence import is_breadcrumb_document
 
-    Since 2026-09-09 that date is its `valid_from`, so the index's own
-    since/as-of window reaches daily entries and a question's dates can bound
-    a search. See `docs/research/2026-09-08-the-calendar-does-the-arithmetic.md`.
-    """
+    if not is_breadcrumb_document(candidate.path):
+        return None
+    return date.fromisoformat(PurePosixPath(candidate.relative).parent.name).isoformat()
+
+
+def _daily_date(relative: str) -> str | None:
+    match = _DAILY_DATE.search(relative)
+    return match.group(1) if match is not None else None
+
+
+def _dated_by_name(candidate: _Candidate) -> str | None:
+    """Daily names and verified breadcrumb directories bind occurrence days."""
+    if candidate.kind == "session":
+        return _breadcrumb_date(candidate)
     if candidate.kind != "daily":
         return None
-    match = _DAILY_DATE.search(candidate.relative)
-    if match is None:
-        return None
-    return match.group(1)
+    return _daily_date(candidate.relative)
 
 
 def _metadata(frontmatter: Mapping[str, object], candidate: _Candidate) -> SourceMetadata:
@@ -2137,7 +2204,12 @@ def _bounded_spans(content: bytes, spans: list) -> list:
         bounded.extend(_split_span(content, span))
     if len(bounded) > MAX_CORPUS_CHUNKS:
         raise ValueError("corpus chunk row ceiling exceeded")
-    return bounded
+    # A boundary may leave only whitespace; that is source content, not evidence.
+    # Match the reader's Unicode text invariant without changing retained bytes.
+    return [
+        span for span in bounded
+        if content[span[0]:span[1]].decode("utf-8", errors="strict").strip()
+    ]
 
 
 def _retrieval_spans(
@@ -2348,17 +2420,11 @@ def _canonical_source_record(
     )
 
 
-def canonical_retrieval_chunks(
-    *,
-    source_id: str,
-    source_path: str,
-    source_sha256: str,
-    content: bytes,
-    extractor_version: str = EXTRACTOR_VERSION,
-    deadline: float | None = None,
-    cancelled: Callable[[], bool] | None = None,
-) -> tuple[RetrievalChunk, ...]:
-    """Reconstruct every canonical chunk field from authoritative source bytes."""
+def _canonical_captured_head(
+    source_id: str, source_path: str, source_sha256: str, content: bytes,
+    deadline: float | None, cancelled: Callable[[], bool] | None,
+) -> tuple[CapturedSource, int, bool]:
+    """Metadata comes from the captured Markdown, never from index metadata."""
     path = PurePosixPath(source_path)
     _require_canonical_source(source_id, source_path, path, content, source_sha256)
     kind, project = _source_kind(path)
@@ -2377,10 +2443,38 @@ def canonical_retrieval_chunks(
         candidate=candidate,
         searchable_start=searchable_start,
     )
+    return CapturedSource(source, metadata, content), searchable_start, is_markdown
+
+
+def canonical_captured_source(
+    *, source_id: str, source_path: str, source_sha256: str, content: bytes,
+    deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
+) -> CapturedSource:
+    """Reconstruct source metadata from its exact hash-verified captured bytes."""
+    captured, _start, _markdown = _canonical_captured_head(
+        source_id, source_path, source_sha256, content, deadline, cancelled
+    )
+    return captured
+
+
+def canonical_retrieval_chunks(
+    *,
+    source_id: str,
+    source_path: str,
+    source_sha256: str,
+    content: bytes,
+    extractor_version: str = EXTRACTOR_VERSION,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> tuple[RetrievalChunk, ...]:
+    """Reconstruct every canonical chunk field from authoritative source bytes."""
+    captured, searchable_start, is_markdown = _canonical_captured_head(
+        source_id, source_path, source_sha256, content, deadline, cancelled
+    )
     return _chunks(
-        source,
-        metadata,
-        content,
+        captured.record,
+        captured.metadata,
+        captured.content,
         searchable_start,
         heading_enabled=is_markdown,
         extractor_version=extractor_version,
@@ -2474,10 +2568,14 @@ def _policy(
 
 
 def _candidate_content(candidate: _Candidate, policy: SnapshotPolicy, label: str) -> bytes:
+    return _candidate_bytes(candidate, policy.max_file_bytes, label)
+
+
+def _candidate_bytes(candidate: _Candidate, max_bytes: int, label: str) -> bytes:
     if candidate.content is not None:
         return candidate.content
     _verify_seal(candidate.seal)
-    content = _sealed_source_bytes(candidate.path, policy.max_file_bytes, label)
+    content = _sealed_source_bytes(candidate.path, max_bytes, label)
     _verify_seal(candidate.seal)
     return content
 
@@ -2568,7 +2666,10 @@ class _Capture:
     def _count_bytes(self, size: int) -> None:
         self.total += size
         if self.total > self.policy.max_total_bytes:
-            raise ValueError(f"corpus total byte limit exceeded; {raise_hint('corpus.max_total_bytes')}")
+            raise CorpusCapacityExceeded(
+                "corpus.max_total_bytes", self.policy.max_total_bytes, self.total,
+                f"corpus total byte limit exceeded; {raise_hint('corpus.max_total_bytes')}",
+            )
 
     def _store(
         self,
@@ -2596,6 +2697,48 @@ class _Capture:
             raise ValueError("corpus chunk row ceiling exceeded")
         self.chunks.extend(source_chunks)
 
+
+
+
+def read_current_source(
+    vault: Path, record: SourceRecord, *, deadline: float | None = None,
+) -> bytes:
+    """Re-read one selected source through the collector's safe file boundary.
+
+    Its captured size is the byte bound: a larger replacement cannot have the
+    same bytes. The ancestor count is the exact selected path, not a new cap.
+    """
+    _check_processing_stop(deadline, None)
+    root = Path(vault).resolve(strict=True)
+    relative = PurePosixPath(record.relative_path)
+    normalized = unicodedata.normalize("NFC", relative.as_posix())
+    if not _valid_source_path(record.relative_path, relative, normalized):
+        raise ValueError("selected source path is not normalized relative POSIX")
+    path = root.joinpath(*relative.parts)
+    content = _read_current_source(root, path, record.size, len(relative.parts))
+    _check_processing_stop(deadline, None)
+    return content
+
+
+def _read_current_source(root, path, size, components):
+    if os.name == "posix":
+        return _read_current_posix_source(root, path, size, components)
+    seal = _seal_source_file(root, path, components)
+    content = _sealed_source_bytes(path, size, "selected current source")
+    _verify_seal(seal)
+    return content
+
+
+def _read_current_posix_source(root, path, size, components):
+    seal, descriptor = _open_sealed_posix_path(
+        root, path, target_directory=False, max_components=components
+    )
+    try:
+        content = _read_bounded_descriptor(descriptor, size)
+        _verify_seal(seal)
+        return content
+    finally:
+        os.close(descriptor)
 
 def _require_stable_membership(
     candidates: tuple[_Candidate, ...], current: tuple[_Candidate, ...]

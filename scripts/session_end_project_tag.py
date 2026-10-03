@@ -11,8 +11,8 @@ user-level hook **skips** when the current directory is inside the vault — the
 vault's own capture already handles that case with richer content.
 
 Contract (hard requirements, mirrors session_start_project_state.py):
-    * Must exit 0 on ANY error. Breaking a session-end is worse than a
-      missing log entry.
+    * Failed tagging or acknowledgement exits 1. Session continuation belongs
+      to the lifecycle adapter, separately from delegate success.
     * Must no-op if LLM_WIKI_ROOT is unset.
     * Reads the SessionEnd payload (session_id, transcript_path, reason)
       from stdin when available — forwards metadata into the daily entry.
@@ -38,7 +38,7 @@ import os
 import re
 import sys
 import traceback
-from contextlib import suppress
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 
@@ -50,6 +50,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 SLUG_UNSAFE_RE = re.compile(r"[\s_/\\:*?\"<>|]+")
 
+from capture_diagnostics import record_hook_error  # noqa: E402
 from daily_log_append import append_deadline, locked_append  # noqa: E402
 from event_envelope import canonical_agent  # noqa: E402
 from iso_time import local_now  # noqa: E402
@@ -79,18 +80,11 @@ def _resolve_state_root() -> Path | None:
 
 
 def _safe_write_error(err: str) -> None:
-    """Best-effort error log."""
+    """Keep the hook available when its diagnostic destination is unavailable."""
     try:
-        state_root = _resolve_state_root()
-        if state_root is None:
-            return
-        log_path = state_root / "logs" / "hook-errors.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().astimezone().isoformat(timespec="seconds")
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(f"[{ts}] session_end_project_tag: {err}\n")
-    except Exception:  # noqa: BLE001
-        pass
+        record_hook_error(_resolve_state_root(), "session_end_project_tag", err)
+    except Exception:  # noqa: BLE001 - resolving the diagnostic root can itself fail
+        return
 
 
 def _base_slug(project_dir: Path) -> str:
@@ -285,6 +279,54 @@ def _session_operation_id(payload: dict) -> str | None:
     return f"session-end:{source_event_id}"
 
 
+def _marker_time(record: Mapping) -> datetime:
+    raw = record.get("occurred_at")
+    if not isinstance(raw, str):
+        raise ValueError("session marker has no retained occurrence time")
+    moment = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if moment.tzinfo is None or moment.utcoffset() is None:
+        raise ValueError("session marker occurrence time must include its timezone")
+    return moment
+
+
+def session_marker_plan(record: Mapping, vault: Path) -> tuple[Path, str, str] | None:
+    """One immutable marker for both the foreground and retained-intent worker."""
+    if record.get("event") != "session_end":
+        return None
+    worktree, slug = record.get("worktree"), record.get("project_slug")
+    if not isinstance(worktree, str) or not isinstance(slug, str) or not slug:
+        return None
+    return _external_marker_plan(record, vault, _owning_checkout(Path(worktree).resolve()), slug)
+
+
+def _external_marker_plan(record: Mapping, vault: Path, project: Path, slug: str):
+    if _is_inside_vault(project, vault) or _is_user_home(project):
+        return None
+    moment = _marker_time(record)
+    payload = {"session_id": record.get("session"), "reason": record.get("trigger"),
+               "agent": record.get("host")}
+    path = vault / "knowledge/daily" / f"{moment.strftime('%Y-%m-%d')}.md"
+    operation_id = f"session-end:{record['source_occurrence_id']}"
+    return path, _session_entry(payload, slug, project, moment), operation_id
+
+
+def _tag_retained_marker(record: object, vault: Path, project: Path) -> bool:
+    if not isinstance(record, Mapping):
+        raise ValueError("retained session marker must be an object")
+    if _owning_checkout(Path(str(record.get("worktree"))).resolve()) != project:
+        raise ValueError("retained session marker does not match the current project")
+    plan = session_marker_plan(record, vault)
+    return _append_marker_plan(plan)
+
+
+def _append_marker_plan(plan: tuple[Path, str, str] | None) -> bool:
+    if plan is None:
+        return False
+    path, entry, operation_id = plan
+    _append_entry(path, entry, operation_id)
+    return True
+
+
 def _tag_session() -> bool:
     """True when an entry was appended; False for every skip."""
     paths = _vault_paths()
@@ -294,7 +336,12 @@ def _tag_session() -> bool:
     project_dir = _eligible_project(vault)
     if project_dir is None:
         return False
-    payload = _read_payload()
+    return _tag_project_payload(_read_payload(), vault, daily_dir, project_dir)
+
+
+def _tag_project_payload(payload: dict, vault: Path, daily_dir: Path, project_dir: Path) -> bool:
+    if "capture_marker" in payload:
+        return _tag_retained_marker(payload["capture_marker"], vault, project_dir)
     now = local_now()
     slug = _compute_slug(project_dir, vault / "knowledge" / "projects")
     today_file = daily_dir / f"{now.strftime('%Y-%m-%d')}.md"
@@ -307,24 +354,23 @@ def _tag_session() -> bool:
 
 
 def _report(written: bool) -> None:
-    """Say on stdout whether a line was written; the exit code stays 0 either way.
+    """Acknowledge a completed write or intentional skip, including output flush.
 
     A skip (no vault root, a session inside the vault, a session started in `$HOME`)
     used to be indistinguishable from a write, so `codex_memory daily-log` printed
     "Daily log tagged" for a day nothing was tagged in. See
     `docs/research/2026-09-17-the-six-capture-corrections-the-first-round-left.md`.
     """
-    with suppress(OSError, ValueError):
-        print(json.dumps({"daily_log_written": written}, ensure_ascii=False))
+    print(json.dumps({"daily_log_written": written}, ensure_ascii=False), flush=True)
 
 
 def main() -> int:
-    written = False
     try:
         written = _tag_session()
+        _report(written)
     except Exception:  # noqa: BLE001
         _safe_write_error("unhandled:\n" + traceback.format_exc())
-    _report(written)
+        return 1
     return 0
 
 

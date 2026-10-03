@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from argparse import Namespace
 from pathlib import Path
 from types import MappingProxyType
@@ -10,6 +12,8 @@ from compile_cache import CompileCache
 from llm_client import LLMResult, ProviderDescriptor
 from markdown_transaction import MarkdownCoordinator, TransactionFailure
 from reliable_memory import canonical_json_bytes, sha256_bytes
+
+from tests.slow_machine import LONG_TIMEOUT
 
 
 @pytest.fixture
@@ -321,6 +325,34 @@ def test_resolve_requires_coordinator_and_checks_persisted_gate_before_probe(
             )
 
 
+def test_external_work_can_overlap_an_unrelated_process_writer(vault):
+    import compile_memory
+
+    root, state_root = vault
+    observer = MarkdownCoordinator(root, state_root)
+    scripts = Path(compile_memory.__file__).parent
+    command = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from markdown_transaction import MarkdownCoordinator
+owner = MarkdownCoordinator(Path(sys.argv[2]), Path(sys.argv[3]))
+with owner.writer_gate():
+    print('writer-held', flush=True)
+    sys.stdin.read()
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", command, str(scripts), str(root), str(state_root)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        assert process.stdout.readline().strip() == "writer-held"
+        compile_memory._assert_external_work_allowed(observer)
+    finally:
+        _, error = process.communicate("", timeout=LONG_TIMEOUT)
+    assert process.returncode == 0, error
+
+
 def test_critique_failure_lineage_records_stage_provider_and_stable_code(
     vault, monkeypatch
 ):
@@ -426,6 +458,41 @@ def test_receipt_evidence_is_source_scoped_and_operation_associated(vault):
             "source_path": "knowledge/daily/2026-07-14.md",
         }
     ]
+
+
+def test_a_verified_committed_receipt_retires_a_retained_source_failure(vault):
+    import compile_memory
+    from memory_queue import MemoryQueue
+
+    root, state_root = vault
+    daily = _daily(root)
+    coordinator, inputs, _result = _compile(root, state_root, daily)
+    source = inputs.dailies[0]
+    queue = MemoryQueue(state_root)
+    queue.record_source_failure(
+        source.logical_path, source.sha256, error_code="ValueError", producer="compile"
+    )
+    compile_memory._retire_stale_source_failures(state_root)
+    assert queue.source_failure_keys() == []
+
+
+def test_a_missing_receipt_preserves_the_current_source_failure(vault):
+    import compile_memory
+    from memory_queue import MemoryQueue
+
+    root, state_root = vault
+    daily = _daily(root)
+    coordinator, inputs, _result = _compile(root, state_root, daily)
+    source = inputs.dailies[0]
+    queue = MemoryQueue(state_root)
+    queue.record_source_failure(
+        source.logical_path, source.sha256, error_code="ValueError", producer="compile"
+    )
+    compile_memory.compile_receipt_path(
+        compile_memory.compile_source_identity(source.logical_path, source.sha256)
+    ).unlink()
+    compile_memory._retire_stale_source_failures(state_root)
+    assert queue.source_failure_keys() == [(source.logical_path, source.sha256)]
 
 
 def test_index_rejects_invalid_utf8_instead_of_replacement_decoding(vault):

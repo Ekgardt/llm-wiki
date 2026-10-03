@@ -239,6 +239,7 @@ def test_opencode_tool_names_are_mapped_to_shared_capture_names():
     assert envelope.payload == {
         "tool_name": "Edit",
         "target": "src/auth.py",
+        "capture_time_origin": "host",
         "changed": True,
         "dirty": True,
         "significant": True,
@@ -358,7 +359,7 @@ def test_lifecycle_cli_delegate_uses_shared_ingest_boundary(
     monkeypatch.setattr(
         integration_adapter,
         "ingest_event",
-        lambda event: calls.append(event) or {"capture_intent_ids": ["1" * 64]},
+        lambda event, **_options: calls.append(event) or {"capture_intent_ids": ["1" * 64]},
     )
     monkeypatch.setattr(
         integration_adapter,
@@ -367,7 +368,7 @@ def test_lifecycle_cli_delegate_uses_shared_ingest_boundary(
             AssertionError("lifecycle delegate bypassed shared ingestion")
         ),
     )
-    args = SimpleNamespace(source="claude", event=event_type, delegate=delegate)
+    args = SimpleNamespace(source="claude", event=event_type, delegate=delegate, background=False)
 
     assert integration_adapter._dispatch_cli_event(args, envelope) is None
     assert calls == [envelope]
@@ -512,7 +513,7 @@ def _delegate_output(command, delegate: str, outputs: list[str]) -> str:
     return outputs.pop(0)
 
 
-@pytest.mark.parametrize("delegate", ["user_prompt_capture.py", "session_start_context.py"])
+@pytest.mark.parametrize("delegate", ["session_start_context.py"])
 def test_delegate_forwards_only_valid_hook_json(monkeypatch, capsys, delegate):
     import integration_adapter
 
@@ -520,8 +521,8 @@ def test_delegate_forwards_only_valid_hook_json(monkeypatch, capsys, delegate):
         '{"hookSpecificOutput":{}}',
         '{"hookSpecificOutput":{"additionalContext":"safe"}}',
     ]
-    # A Claude prompt also reaches feedback capture (audit B-7), whose output is
-    # never forwarded; only the named delegate's output is under test here.
+    # Session-start still delegates context rendering. Prompt advisory output
+    # is checked through the durable ingress in test_breadcrumb_worker.py.
     monkeypatch.setattr(
         integration_adapter.subprocess,
         "run",

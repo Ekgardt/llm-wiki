@@ -67,7 +67,7 @@ from model_dlp import (
     require_safe_model_output,
 )
 from reliable_memory import canonical_json_bytes
-from secret_redact import redact_secrets
+from secret_redact import describe_error, redact_secrets
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -119,6 +119,9 @@ class LLMResult:
     structured_output: str
     usage: TokenUsage = field(default_factory=TokenUsage)
     input_token_count: TokenCount | None = None
+    # The redacted cause behind `failure_class` when an exception produced it:
+    # the class names what failed, this says why.
+    failure_detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -297,10 +300,22 @@ class _Transport(NamedTuple):
     policy: object
 
 
+class _Blocked(NamedTuple):
+    """A DLP failure class and the redacted cause that produced it."""
+
+    code: str
+    detail: str | None = None
+
+
+def _scanner_failure(exc: Exception) -> str:
+    """The failed scanner's exception class only: its message may quote the text it scanned."""
+    return type(exc).__name__
+
+
 def _protected_transport(
     system_prompt: str, prompt: str, schema: Mapping[str, object] | None
-) -> _Transport | str:
-    """Redacted inputs, or the failure class that blocks transport."""
+) -> _Transport | _Blocked:
+    """Redacted inputs, or the failure that blocks transport."""
     try:
         policy = load_policy()
         return _Transport(
@@ -309,10 +324,10 @@ def _protected_transport(
             redact_transport_value(schema, policy),
             policy,
         )
-    except DLPPolicyError:
-        return "dlp_policy_error"
-    except Exception:  # noqa: BLE001 - scanner failure must block transport
-        return "dlp_scan_error"
+    except DLPPolicyError as exc:
+        return _Blocked("dlp_policy_error", describe_error(exc))
+    except Exception as exc:  # noqa: BLE001 - scanner failure must block transport
+        return _Blocked("dlp_scan_error", _scanner_failure(exc))
 
 
 def _counted_tokens(
@@ -364,13 +379,13 @@ def _input_count(usage: TokenUsage, pre_call_count: TokenCount) -> TokenCount:
     return pre_call_count
 
 
-def _unsafe_output_failure(text: str, policy: object) -> str | None:
+def _unsafe_output_failure(text: str, policy: object) -> _Blocked | None:
     try:
         require_safe_model_output(text, policy)
     except DLPContentBlocked:
-        return "dlp_output_blocked"
-    except Exception:  # noqa: BLE001 - scanner failure must block publication
-        return "dlp_scan_error"
+        return _Blocked("dlp_output_blocked")
+    except Exception as exc:  # noqa: BLE001 - scanner failure must block publication
+        return _Blocked("dlp_scan_error", _scanner_failure(exc))
     return None
 
 
@@ -517,7 +532,9 @@ def _outcome_of(
         return LLMResult(descriptor, None, True, "empty_response", mode, usage, count)
     failure = _unsafe_output_failure(text, transport.policy)
     if failure is not None:
-        return LLMResult(descriptor, None, True, failure, mode, usage, count)
+        return LLMResult(
+            descriptor, None, True, failure.code, mode, usage, count, failure.detail
+        )
     return LLMResult(descriptor, text.strip(), True, None, mode, usage, count)
 
 
@@ -559,8 +576,10 @@ def _dispatched_call(
     transport = _protected_transport(
         _prompted_system(system_prompt, schema, mode), prompt, schema
     )
-    if isinstance(transport, str):
-        return LLMResult(descriptor, None, False, transport, mode)
+    if isinstance(transport, _Blocked):
+        return LLMResult(
+            descriptor, None, False, transport.code, mode, failure_detail=transport.detail
+        )
     native_schema_json = _native_schema_json(schema, mode)
     return _completed_call(
         descriptor,
@@ -851,6 +870,27 @@ def _is_literal_loopback_endpoint(endpoint: str) -> bool:
     return hostname in {"127.0.0.1", "::1"}
 
 
+class _RejectProviderRedirects(urllib.request.HTTPRedirectHandler):
+    """A provider response cannot authorize a different destination or method."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        fp.close()
+        raise urllib.error.HTTPError(req.full_url, code, "provider_redirect_refused", None, None)
+
+
+def open_provider_request(request: urllib.request.Request, *, timeout: float):
+    """Keep the approved request's destination; literal loopback never uses a proxy.
+
+    Remote endpoints retain configured proxies and standard TLS verification.
+    This opener is local to the request, not a process-wide urllib replacement.
+    See docs/research/2026-09-29-provider-transport-keeps-the-approved-destination.md.
+    """
+    handlers: list[urllib.request.BaseHandler] = [_RejectProviderRedirects()]
+    if _is_literal_loopback_endpoint(request.full_url):
+        handlers.append(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(*handlers).open(request, timeout=timeout)
+
+
 # ---------------------------------------------------------------------------
 # Liveness probes (cheap, before attempting real call)
 # ---------------------------------------------------------------------------
@@ -878,7 +918,7 @@ def _opencode_request(url: str, *, method: str = "GET", body: bytes | None = Non
 
 
 def _opencode_healthy() -> bool:
-    with urllib.request.urlopen(_opencode_request(f"{_opencode_base()}/global/health"), timeout=1.0) as resp:
+    with open_provider_request(_opencode_request(f"{_opencode_base()}/global/health"), timeout=1.0) as resp:
         payload = json.loads(resp.read().decode("utf-8") or "{}")
     return isinstance(payload, dict) and payload.get("healthy") is True
 
@@ -927,7 +967,7 @@ def _probe_ollama(descriptor: ProviderDescriptor) -> bool:
         return False
     try:
         request = urllib.request.Request(_ollama_api_url(descriptor._endpoint, "tags"))
-        with urllib.request.urlopen(request, timeout=1.0) as response:
+        with open_provider_request(request, timeout=1.0) as response:
             return _ollama_tags_answer(descriptor, response)
     except (
         json.JSONDecodeError,
@@ -1253,7 +1293,7 @@ def _framed_system_text(system_prompt: str) -> str:
 
 def _opencode_post(url: str, payload: Mapping[str, object]) -> object:
     request = _opencode_request(url, method="POST", body=json.dumps(payload).encode("utf-8"))
-    with urllib.request.urlopen(request, timeout=_timeout_s()) as response:
+    with open_provider_request(request, timeout=_timeout_s()) as response:
         raw = response.read().decode("utf-8")
     if not raw:
         return None
@@ -1306,9 +1346,10 @@ def _is_text_part(part: object) -> bool:
 def _opencode_delete(base: str, session_id: str) -> None:
     try:
         request = _opencode_request(f"{base}/session/{session_id}", method="DELETE")
-        urllib.request.urlopen(request, timeout=5.0)
-    except (urllib.error.URLError, OSError):
-        pass
+        with open_provider_request(request, timeout=5.0):
+            return
+    except (urllib.error.URLError, OSError) as error:
+        print(f"llm_client: OpenCode session cleanup failed: {describe_error(error)}", file=sys.stderr)
 
 
 def _opencode_answer(base: str, session_id: str, prompt: str, system_prompt: str):
@@ -1377,6 +1418,7 @@ def _codex_command(codex_bin: str, model: str | None, reasoning: str, out_path: 
     command = [
         codex_bin,
         "exec",
+        "--json",
         "--skip-git-repo-check",
         "--sandbox",
         "read-only",
@@ -1492,7 +1534,7 @@ def provider_environment() -> dict[str, str]:
     return environment
 
 
-def _codex_last_message(command: list[str], prompt_path: str, out_path: str) -> str:
+def _codex_last_message(command: list[str], prompt_path: str, out_path: str) -> BackendResponse:
     with open(prompt_path, "rb") as stdin_handle, provider_cwd() as neutral:
         try:
             result = _run_cli(
@@ -1507,10 +1549,53 @@ def _codex_last_message(command: list[str], prompt_path: str, out_path: str) -> 
                 f"codex did not answer within {_timeout_s()}s{_cleanup_note(exc)}"
             ) from exc
     _require_codex_exited_cleanly(result)
+    usage = _codex_usage(result.stdout)
     try:
-        return Path(out_path).read_text(encoding="utf-8", errors="ignore")
+        text = Path(out_path).read_text(encoding="utf-8", errors="ignore")
     except OSError:
-        return ""
+        text = ""
+    return BackendResponse(text, usage)
+
+
+def _codex_usage(output: str | bytes) -> TokenUsage:
+    reports = []
+    for line in output.splitlines():
+        report = _codex_usage_line(line)
+        if report is not None:
+            reports.append(report)
+    names = ("input_tokens", "output_tokens", "cache_read_tokens")
+    return TokenUsage(**{name: _complete_usage_count(reports, name) for name in names})
+
+
+def _complete_usage_count(reports: list[TokenUsage], name: str) -> int | None:
+    values = [getattr(report, name) for report in reports]
+    if not values or None in values:
+        return None
+    return sum(values)
+
+
+def _codex_usage_line(line: str | bytes) -> TokenUsage | None:
+    if not line.strip():
+        return None
+    return _codex_usage_event(json.loads(line))
+
+
+def _codex_usage_event(event: object) -> TokenUsage | None:
+    if not isinstance(event, Mapping):
+        raise ValueError("Codex JSONL event must be an object")
+    if event.get("type") != "turn.completed":
+        return None
+    return _codex_usage_counts(event.get("usage"))
+
+
+def _codex_usage_counts(value: object) -> TokenUsage:
+    if not isinstance(value, Mapping):
+        return TokenUsage()
+    return _usage_from_counts(
+        input_tokens=value.get("input_tokens"),
+        output_tokens=value.get("output_tokens"),
+        cache_read_tokens=value.get("cached_input_tokens"),
+    )
 
 
 def _codex_prompt(system_prompt: str, prompt: str) -> str:
@@ -1526,11 +1611,11 @@ def _call_codex(
     prompt: str,
     system_prompt: str,
     schema: Mapping[str, object] | None = None,
-) -> str:
-    """Call `codex exec` and return the model's final message."""
+) -> BackendResponse:
+    """Return the final message and reported completed-turn usage."""
     codex_bin = _find_codex_binary()
     if not codex_bin:
-        return ""
+        return BackendResponse("")
     prompt_path = _temp_text_file(_codex_prompt(system_prompt, prompt))
     out_path = _temp_text_file()
     command = _codex_command(
@@ -1762,7 +1847,7 @@ def _call_openai(
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=_timeout_s()) as response:
+    with open_provider_request(request, timeout=_timeout_s()) as response:
         data = json.loads(response.read().decode("utf-8"))
     return BackendResponse(
         data["choices"][0]["message"]["content"], _parse_http_usage(data)
@@ -1863,7 +1948,7 @@ def _ollama_model_context(descriptor: ProviderDescriptor) -> int | None:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=OLLAMA_SHOW_TIMEOUT_S) as response:
+        with open_provider_request(request, timeout=OLLAMA_SHOW_TIMEOUT_S) as response:
             data = json.loads(response.read(1024 * 1024).decode("utf-8"))
     except (OSError, ValueError, urllib.error.URLError):
         return None
@@ -1938,7 +2023,7 @@ def _call_ollama(
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=_timeout_s()) as resp:
+    with open_provider_request(req, timeout=_timeout_s()) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     _require_unfilled_window(data, num_ctx, int(descriptor.inference_settings["max_tokens"]))
     return BackendResponse(data["message"]["content"], _parse_ollama_usage(data))

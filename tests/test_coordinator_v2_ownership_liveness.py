@@ -53,7 +53,7 @@ def _ownership_sql(table: str, expires_at: str) -> str:
             f"('demo', 'token', 1, 'actor', '{expires_at}', '{expires_at}')"
         ),
         "writer_owners": (
-            "INSERT INTO writer_owners VALUES "
+            "INSERT INTO writer_owners (gate_name, owner_token, process_id, thread_id, acquired_at, heartbeat_at, expires_at, fencing_epoch) VALUES "
             f"('global', 'token', 1, 2, '{expires_at}', '{expires_at}', "
             f"'{expires_at}', 1)"
         ),

@@ -882,9 +882,7 @@ class _GitRun:
 
     def release(self, *, holds_fds: bool) -> None:
         """Release the process and its pipe, whatever happened."""
-        if holds_fds and not self.terminating:
-            self.terminate()
-        elif self.process.poll() is None:
+        if (holds_fds and not self.terminating) or self.process.poll() is None:
             self.terminate()
         self._close_stdout()
         self._reader.join(timeout=_PROCESS_CLEANUP_SECONDS)

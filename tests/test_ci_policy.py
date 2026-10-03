@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 
 import yaml
@@ -406,3 +407,16 @@ def test_the_whole_lock_is_audited_by_a_hash_pinned_auditor() -> None:
     assert "uv export --locked --all-extras --all-groups --no-emit-project" in commands
     assert "pip-audit --requirement" in commands and "--disable-pip" in commands
     assert re.search(r'(?m)^audit = \[\n    "pip-audit[^"]*",\n\]', project)
+
+
+def _dependency_audit_arguments() -> list[list[str]]:
+    commands = _commands(_workflow()["jobs"]["dependency-audit"]).splitlines()
+    return [shlex.split(command) for command in commands if "pip-audit --requirement" in command]
+
+
+def test_local_builds_are_audited_without_removing_the_pypi_pass() -> None:
+    audits = _dependency_audit_arguments()
+
+    assert any("osv" not in arguments for arguments in audits)
+    required = {"--vulnerability-service", "osv", "--strict", "--disable-pip"}
+    assert any(required <= set(arguments) for arguments in audits)

@@ -200,7 +200,9 @@ def _load_reranker_bundle() -> dict[str, Any] | None:
     try:
         _reranker_bundle = _loaded_bundle(*identity)
     except Exception as exc:  # noqa: BLE001 - an unloadable reranker degrades one stage
-        _reranker_unavailable_reason = f"{type(exc).__name__}: {exc}"[:512]
+        from secret_redact import describe_error
+
+        _reranker_unavailable_reason = describe_error(exc)[:512]
         return None
     return _reranker_bundle
 
@@ -352,8 +354,8 @@ def _score_with_scorer(
     pairs = _query_pairs(head, query, text_field)
     try:
         scores = [float(value) for value in scorer(pairs)]
-    except Exception:  # noqa: BLE001 - a failed scorer keeps the fused order
-        return _Scoring(None, model_id, model_revision, "reranker_error")
+    except Exception as exc:  # noqa: BLE001 - a failed scorer keeps the fused order
+        return _failed_scoring(exc, model_id, model_revision)
     return _Scoring(
         scores,
         model_id or "fake-cross-encoder",
@@ -447,9 +449,24 @@ def _score_with_bundle(
         scores = _cross_encoder_scores(bundle, pairs, deadline=deadline)
     except _OutOfTime:
         return _Scoring(None, model_id, revision, "reranker_deadline")
-    except Exception:  # noqa: BLE001 - a failed reranker keeps the fused order
-        return _Scoring(None, model_id, revision, "reranker_error")
+    except Exception as exc:  # noqa: BLE001 - a failed reranker keeps the fused order
+        return _failed_scoring(exc, model_id, revision)
     return _Scoring(scores, model_id, revision, None)
+
+
+def _failed_scoring(
+    error: Exception, model_id: str | None, model_revision: str | None
+) -> _Scoring:
+    """The fused order stands, and the cause is recorded where degradations are read.
+
+    The answer says `reranker_error`; `vault_status.retrieval_degradations` says
+    which error it was. A code with no cause behind it left nobody able to act.
+    See `docs/research/2026-09-28-a-check-names-its-cause.md`.
+    """
+    import search_memory
+
+    search_memory.note_degradation("reranker_scoring", error)
+    return _Scoring(None, model_id, model_revision, "reranker_error")
 
 
 def _mark_not_applied(documents: list[dict], reason: str) -> None:
