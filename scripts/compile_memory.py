@@ -841,6 +841,7 @@ class _ByteBatchMeasure:
     def __init__(self, inputs: CompileInputs) -> None:
         empty = CompileInputs((), (), ())
         self.base = len(_draft_prompt_text(empty).encode("utf-8"))
+        self.base_context_bytes = len(_entry_context(empty).encode("utf-8"))
         self.dailies: dict[str, list[DailySnapshot]] = {}
         for item in inputs.dailies:
             self.dailies.setdefault(item.part_key, []).append(item)
@@ -861,7 +862,8 @@ class _ByteBatchMeasure:
         context = _selected_buckets(self.context, optional_paths or ())
         frames = (*sources, *context)
         separators = 2 * max(0, len(frames) - 1)
-        return self.base + sum(self._size(item) for item in frames) + separators
+        entry_bytes = len(_entry_context(CompileInputs(selected, (), ())).encode("utf-8"))
+        return self.base + sum(self._size(item) for item in frames) + separators + entry_bytes - self.base_context_bytes
 
 
 def _group_dailies(
