@@ -26,7 +26,8 @@ from bounded_io import (
 from code_languages import language_for_path
 from evidence_resolver import MAX_DAILY_BYTES
 from page_status import is_retired
-from settings import MAX_CORPUS_INSPECTED_ENTRIES, raise_hint, setting_value
+from settings import MAX_CORPUS_INSPECTED_ENTRIES as MAX_CORPUS_INSPECTED_ENTRIES
+from settings import raise_hint, setting_value
 from vault_editorial import EDITORIAL_NAMES
 
 COLLECTOR_VERSION = "corpus-collector/v1"
@@ -1069,7 +1070,10 @@ class _Discovery:
     def _count_entry(self) -> None:
         self.entries += 1
         if self.entries > self.max_entries:
-            raise ValueError("corpus traversal entry limit exceeded")
+            raise ValueError(
+                "corpus traversal entry limit exceeded; increase explicit max_entries "
+                "or " + raise_hint("corpus.max_files")
+            )
 
     def _directory_excluded(self, name: str, kind: str) -> bool:
         """`kind == "code"` means somebody's source tree, so vault nouns do not apply."""
@@ -2892,7 +2896,7 @@ def collect_corpus(
     max_files: int | None = None,
     max_file_bytes: int = MAX_CORPUS_FILE_BYTES,
     max_total_bytes: int | None = None,
-    max_entries: int = MAX_CORPUS_INSPECTED_ENTRIES,
+    max_entries: int | None = None,
     max_directories: int = MAX_CORPUS_DIRECTORIES,
     max_depth: int = MAX_CORPUS_DEPTH,
     deadline: float | None = None,
@@ -2906,6 +2910,8 @@ def collect_corpus(
     `pruned_directories` are vault-relative POSIX paths the walk never enters: a
     repository's git-ignored directories at any depth. They are not policy; the
     membership they leave out is what the caller asked not to read.
+    Unless explicitly supplied, the discovery entry budget uses the existing
+    corpus.max_files setting, including entries that are not accepted sources.
     """
     root = Path(vault).resolve(strict=True)
     if not stat.S_ISDIR(_safe_info(root).st_mode):
@@ -2919,7 +2925,7 @@ def collect_corpus(
         max_files=_or_setting(max_files, "corpus.max_files", root),
         max_file_bytes=max_file_bytes,
         max_total_bytes=_or_setting(max_total_bytes, "corpus.max_total_bytes", root),
-        max_entries=max_entries,
+        max_entries=_or_setting(max_entries, "corpus.max_files", root),
         max_directories=max_directories,
         max_depth=max_depth,
     )

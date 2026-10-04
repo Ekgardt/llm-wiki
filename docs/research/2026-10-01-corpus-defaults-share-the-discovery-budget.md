@@ -19,3 +19,27 @@ Rejected alternatives: invent a larger independent count, select a private opera
 Old implementation: two actual default failures and one explicit-limit control passing. The broader first candidate run exposed a fixture error: setting the environment after memory_state had loaded did not change its already-resolved root. The corrected fixture also sets that root to its private test vault; strict refusal assertions are retained. Evidence remains under private logs/audit-2026-10-01-corpus-default-*.
 
 The source snapshot and all new fixtures remain private. Current model and historical retrieval findings are separate: a multilingual question can place a retained English passage below the dense candidate window. Increasing corpus capacity does not establish query accuracy, historical recovery, or all native lifecycle delivery. The original audit remains partial until those are qualified.
+
+## Configured discovery correction, 2026-10-04
+
+The registry states that corpus.max_files shares discovery capacity, but omitted
+collect_corpus max_entries still used the fixed 50,000. Real 50,001 ignored files
+reproduced refusal despite configured 50,100, through TOML and environment. An
+omitted max_entries now reads that existing setting. Explicit caller values remain
+independent and enforced; ignored entries still count. Refusal names the existing
+setting and override. No new threshold, setting or schema is introduced.
+
+Fresh primary research: [Python directory traversal](https://docs.python.org/3/library/os.html#os.walk)
+(3.14.8; implementation remains 3.10-compatible), [OWASP DoS](https://cheatsheetseries.owasp.org/cheatsheets/Denial_of_Service_Cheat_Sheet.html),
+and [MITRE CWE-400](https://cwe.mitre.org/data/definitions/400.html) (4.20).
+They support resource controls, not a universal number. Removing the entry bound
+leaves ignored work unbounded; another knob duplicates the existing contract;
+retaining the constant ignores operator intent. Existing byte, depth, directory,
+cancellation and deadline protections remain. The numerical basis of the original
+50,000 remains under the wider audit.
+
+160 related corpus/settings tests passed, with three platform skips. The first
+small-limit fixture mistakenly used exactly one entry against a limit of one;
+correcting it to two retained strict refusal. That fixture error is recorded
+separately from the two genuine large-directory original failures. This does not
+qualify complete generation, nightly or audit closure.

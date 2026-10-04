@@ -1019,6 +1019,9 @@ class _ByteBatchMeasure:
         for item in _context_sources(inputs, daily_paths, {s.logical_path for s in inputs.sources}):
             self.context.setdefault(item.logical_path, []).append(item)
         self.sizes: dict[SourceSnapshot, int] = {}
+        self.projection_parts: tuple[DailySnapshot, ...] = ()
+        self.projection_key: tuple[int, ...] | None = None
+        self.projection_sources: tuple[SourceSnapshot, ...] = ()
 
     def _size(self, item: SourceSnapshot) -> int:
         if item not in self.sizes:
@@ -1027,12 +1030,27 @@ class _ByteBatchMeasure:
 
     def __call__(self, paths: set[str], optional_paths: set[str] | None = None) -> int:
         selected = _selected_buckets(self.dailies, paths)
-        sources = _deduplicated_sources(selected)
+        sources = self._projection(selected)
         context = _selected_buckets(self.context, optional_paths or ())
         frames = (*sources, *context)
         separators = 2 * max(0, len(frames) - 1)
         entry_bytes = self._entry_size(selected)
         return self.base + sum(self._size(item) for item in frames) + separators + entry_bytes - self.base_context_bytes
+
+    def _projection(self, selected: tuple[DailySnapshot, ...]) -> tuple[SourceSnapshot, ...]:
+        """Reuse only this measure's last immutable selection for size planning.
+
+        Keep the selected objects alive so identity keys cannot be recycled.
+        Final batch construction and evidence binding independently validate the
+        current permanent source; this estimate does not grant source authority.
+        """
+        key = tuple(sorted(id(part) for part in selected))
+        if key != self.projection_key:
+            sources = tuple(_deduplicated_sources(selected))
+            self.projection_parts = selected
+            self.projection_key = key
+            self.projection_sources = sources
+        return self.projection_sources
 
 
     def _entry_size(self, selected) -> int:

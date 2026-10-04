@@ -52,3 +52,29 @@ Source evidence: private audit logs for the interrupted profile, actual graph
 navigation (fresh commit with incomplete graph explicitly reported), regression
 runs and paired read-only measurement. Source inspection supplements unresolved
 navigation edges. The audit remains open until runtime and answer qualification.
+
+## Native projection correction, 2026-10-04
+
+Native proof added after the original measurement caused each optional-context
+estimate to derive the selected source again. A genuine regression observes three
+forwarded derivations for three estimates of one immutable native unit. The
+measure now retains only its last projection, keyed by selected object identities
+and keeping those objects alive. Changed objects invalidate it. Optional context
+and original-entry bytes remain exact. Final batch construction and evidence
+binding independently recheck permanent head and physical container; changed-head
+and forged-frame guards refuse. No global cache or persisted contract is added.
+
+Fresh primary sources: [Python functools](https://docs.python.org/3/library/functools.html)
+(3.14.8; compatible supported implementation APIs), [Microsoft Cache-Aside](https://learn.microsoft.com/en-us/azure/architecture/patterns/cache-aside),
+and [OWASP DoS](https://cheatsheetseries.owasp.org/cheatsheets/Denial_of_Service_Cheat_Sheet.html).
+Global proof caching requires freshness guarantees; raising deadlines retains the
+repeated work; omitting final proof weakens authority. Local planning-only reuse
+preserves proof checks and changes no provider or selection policy.
+
+A read-only private replica of the actual 15 MB journal, one native cross-part
+unit and ten optional-context estimates yielded ten derivations in 2.338 seconds
+before versus one in 0.236 seconds after. Both match independent full rendering
+byte for byte. Cache/order/load were uncontrolled: these are observed costs and
+parity, not qualified whole-run speedup. No model calls ran. Model token boundaries
+remain non-additive. All 155 related packing/native/transaction tests passed.
+Complete live packing, compilation, token cost and audit closure remain separate.
