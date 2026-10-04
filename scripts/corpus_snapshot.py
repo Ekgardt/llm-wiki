@@ -24,6 +24,7 @@ from bounded_io import (
     read_stable_bytes,
 )
 from code_languages import language_for_path
+from evidence_resolver import MAX_DAILY_BYTES
 from page_status import is_retired
 from settings import MAX_CORPUS_INSPECTED_ENTRIES, raise_hint, setting_value
 from vault_editorial import EDITORIAL_NAMES
@@ -35,9 +36,9 @@ COLLECTOR_VERSION = "corpus-collector/v1"
 # 2026-09-16 rule — a user turn begins its own chunk — which had shipped under v3.
 # `tests/test_a_chunker_that_changes_changes_its_version.py` holds the pin. See
 # `docs/research/2026-09-17-a-chunker-that-changes-changes-its-version.md`.
-EXTRACTOR_VERSION = "markdown-heading-extractor/v5"
+EXTRACTOR_VERSION = "markdown-heading-extractor/v6"
 
-MAX_CORPUS_FILE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
+MAX_CORPUS_FILE_BYTES = max(MAX_KNOWLEDGE_PAGE_BYTES, MAX_DAILY_BYTES)
 # Directories one corpus collection walks; the live knowledge tree has 76 (2026-09-27). A vault-
 # size bound like `corpus.max_files`; review when it becomes a setting.
 MAX_CORPUS_DIRECTORIES = 5_000
@@ -2176,12 +2177,56 @@ def _round_spans(content: bytes, span: tuple) -> list[tuple[int, int, tuple[str,
     return rounds
 
 
-def _split_span(content: bytes, span: tuple) -> list[tuple[int, int, tuple[str, ...]]]:
+def _split_span(content: bytes, span: tuple, *, native_frames: bool = False) -> list[tuple[int, int, tuple[str, ...]]]:
     """One span as rounds, then as bounded pieces, each keeping its heading ancestry."""
     pieces: list[tuple[int, int, tuple[str, ...]]] = []
-    for round_span in _round_spans(content, span):
-        pieces.extend(_bounded_pieces(content, round_span))
+    for section, atomic in _source_sections(content, span, native_frames):
+        pieces.extend([section] if atomic else _ordinary_pieces(content, section))
     return pieces
+
+
+def _source_sections(content: bytes, span: tuple, native_frames: bool) -> list:
+    return _native_sections(content, span) if native_frames else [(span, False)]
+
+
+def _native_source_path(source_path: str) -> bool:
+    return source_path.startswith("knowledge/daily/") or (
+        source_path.startswith("knowledge/raw/sessions/") and source_path.endswith(".breadcrumb-part.md"))
+
+
+def _ordinary_pieces(content: bytes, span: tuple) -> list:
+    return [piece for round_span in _round_spans(content, span)
+            for piece in _bounded_pieces(content, round_span)]
+
+
+def _native_sections(content: bytes, span: tuple) -> list:
+    from event_envelope import native_frame_heading, native_physical_user_text
+
+    start, end, ancestry = span
+    if not native_frame_heading(ancestry) or not _native_container(content, span):
+        return [(span, False)]
+    result = []
+    cursor = start
+    for line in content[start:end].splitlines(keepends=True):
+        following = cursor + len(line)
+        if native_physical_user_text(line.decode("utf-8"), ancestry, allow_fragment=True) is not None:
+            result.extend([((start, cursor, ancestry), False), ((cursor, following, ancestry), True)])
+            start = following
+        cursor = following
+    result.append(((start, end, ancestry), False))
+    return result
+
+
+def _native_container(content: bytes, span: tuple) -> bool:
+    start, end, ancestry = span
+    if ancestry[-1] == "Integrity record":
+        return True
+    prefix = b"\n<!-- llm-wiki-operation:"
+    suffix = b" -->\n"
+    marker_length = len(prefix) + 64 + len(suffix)
+    marker = content[max(0, start - marker_length):start]
+    return bool(re.fullmatch(rb'\n<!-- llm-wiki-operation:[0-9a-f]{64} -->\n', marker)
+                and b"[Complete captured event](../raw/sessions/" in content[start:end])
 
 
 def _bounded_pieces(content: bytes, span: tuple) -> list[tuple[int, int, tuple[str, ...]]]:
@@ -2198,10 +2243,10 @@ def _bounded_pieces(content: bytes, span: tuple) -> list[tuple[int, int, tuple[s
     return pieces
 
 
-def _bounded_spans(content: bytes, spans: list) -> list:
+def _bounded_spans(content: bytes, spans: list, *, native_frames: bool = False) -> list:
     bounded: list[tuple[int, int, tuple[str, ...]]] = []
     for span in spans:
-        bounded.extend(_split_span(content, span))
+        bounded.extend(_split_span(content, span, native_frames=native_frames))
     if len(bounded) > MAX_CORPUS_CHUNKS:
         raise ValueError("corpus chunk row ceiling exceeded")
     # A boundary may leave only whitespace; that is source content, not evidence.
@@ -2219,6 +2264,7 @@ def _retrieval_spans(
     heading_enabled: bool,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    native_frames: bool = False,
 ) -> tuple[tuple[int, int, tuple[str, ...]], ...]:
     headings = _headings_when_enabled(
         content, searchable_start, heading_enabled, deadline, cancelled
@@ -2234,7 +2280,7 @@ def _retrieval_spans(
         _append_heading_span(
             spans, content, heading, _heading_end(headings, index, content), ancestry
         )
-    return tuple(_bounded_spans(content, spans))
+    return tuple(_bounded_spans(content, spans, native_frames=native_frames))
 
 
 def _markdown_head(
@@ -2273,6 +2319,7 @@ def canonical_retrieval_spans(
         content,
         searchable_start,
         heading_enabled=is_markdown,
+        native_frames=_native_source_path(source_path),
         deadline=deadline,
         cancelled=cancelled,
     )
@@ -2315,6 +2362,7 @@ def _chunks(
         content,
         searchable_start,
         heading_enabled=heading_enabled,
+        native_frames=_native_source_path(source.relative_path),
         deadline=deadline,
         cancelled=cancelled,
     )

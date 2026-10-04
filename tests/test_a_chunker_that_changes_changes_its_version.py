@@ -41,6 +41,7 @@ SOURCES = {"knowledge/daily/2026-01-01.md": CONVERSATION, "knowledge/notes/a-pag
 PINNED = {
     "markdown-heading-extractor/v4": "bbb697b4db948a325ac3054a8befc3b78162d4ca2440c9d6e5c55785ea4efb3f",
     "markdown-heading-extractor/v5": "bbb697b4db948a325ac3054a8befc3b78162d4ca2440c9d6e5c55785ea4efb3f",
+    "markdown-heading-extractor/v6": "bbb697b4db948a325ac3054a8befc3b78162d4ca2440c9d6e5c55785ea4efb3f",
 }
 
 

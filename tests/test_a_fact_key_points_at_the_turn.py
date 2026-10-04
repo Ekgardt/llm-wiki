@@ -84,7 +84,7 @@ def test_main_collects_only_the_daily_sources_and_shares_its_deadline(
 
     if large_daily:
         daily = vault / DAILY
-        daily.write_bytes(daily.read_bytes() + b"\n" + b" " * (corpus_snapshot.MAX_CORPUS_FILE_BYTES + 1))
+        daily.write_bytes(daily.read_bytes() + b"\n" + b" " * (corpus_snapshot.MAX_KNOWLEDGE_PAGE_BYTES + 1))
     (vault / "knowledge/notes/unused.md").write_text("---\ntype: concept\n---\n# Unused\n")
     state_root = tmp_path / "state"
     seen = []
