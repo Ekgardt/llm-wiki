@@ -17,3 +17,33 @@ Three new regressions fail on the old code. Two submit complete 4023/12022-chara
 Limits of this result: the existing ledger 16384-character contract is retained, not newly established as a measured optimal budget. Eight current daily lines exceed it and require separate investigation, including compile-part boundaries. A successful fixture commit is not a successful whole live model compile or full token-cost qualification; the running compiler loaded its earlier code before this installation. The four open audit items remain open until their full operational checks pass.
 
 Evidence: ignored local logs `audit-2026-10-03-complete-quote-*.json` and `audit-2026-10-03-compile-complete-line-lengths.json`, plus the regression tests. Private source text is not published.
+
+
+## Shared outer-whitespace policy, 2026-10-04
+
+An actual closed journal reproduced physical-line refusal on 127 indented
+Markdown bullet lines. Quote completion stripped outer whitespace before
+recognizing a list marker; the final physical validator recognized that marker
+before stripping. The two stages consequently disagreed about the same complete
+line. The common `_without_bullet` now strips outer whitespace before applying
+its existing unordered/ordered marker expression. The physical source bytes,
+line bounds, hashes, complete-line comparison and evidence schema are unchanged.
+
+Fresh primary research: [CommonMark 0.31.2 list
+items](https://spec.commonmark.org/0.31.2/#list-items), [Python 3.10.22 regular
+expressions](https://docs.python.org/3.10/library/re.html), and [Unicode UAX15
+normalization](https://www.unicode.org/reports/tr15/) checked on 2026-10-04.
+Anchored matching observes the supplied beginning; moving the already approved
+outer-whitespace normalization before that match makes both stages agree.
+Unicode normalization is deliberately absent: equivalent displayed NFC/NFD
+strings are not identical physical bytes. A general Markdown renderer, citation
+substring acceptance, and promotion of partial tool containers were rejected.
+
+Five original indented-space/tab/ordered/unordered cases failed while six
+controls passed. After the one-line shared fix, 58 related tests pass, including
+exact UTF-8/NFD, blockquotes, unindented lists, incomplete citations, and a long
+partial physical line. The same 127 actual source lines now pass the shared
+validator without source changes or model calls. This does not attribute every
+historical provider failure to this cause. Two large tool JSON containers still
+cross physical compile parts; approved native user selectors do not extend tool
+source authority. No settings, runtime paths, schema, or limits are added.

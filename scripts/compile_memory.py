@@ -3120,6 +3120,7 @@ def _report_widened_quote(quote: str, whole: str) -> None:
 
 
 def _without_bullet(source_line: str) -> str:
+    source_line = source_line.strip()
     bullet = re.match(r"^(?:[-+*]|\d+[.)])\s+(.*)$", source_line)
     if bullet is None:
         return source_line.strip()
