@@ -686,6 +686,21 @@ or nonzero active state remains fail-closed.
   MIT notices.
 - `scripts/schemas/` — closed JSON Schemas for transaction, project checkpoint,
   queue task, compile plan/receipt, archive manifest, and claim records.
+  On 2026-10-04 the owner approved a separate `claim-ledger-v2.json` for
+  `claim-ledger/v2` and `claim/v2`. The compatible readers and native compiler
+  are installed; controlled publication/consumer tests and one actual native
+  compile-and-retrieve cycle in the supported base profile are qualified.
+  Installed hybrid retrieval, whole-day compilation and full nightly
+  qualification remain pending.
+  Historical v1 schemas and records remain strict. V2 preserves the complete
+  physical citation, its source range and hash; a transient native logical-line
+  selector is verified against the canonical capture before that citation is
+  bound. All source parts covering the container must participate together.
+  Admission uses existing full-source and full-page byte budgets, without a new
+  literal-length cap. Readers must support both versions before v2 publication;
+  unknown versions refuse explicitly. This adds no runtime root, database,
+  environment variable, daemon or MCP tool. Historical readers remain necessary
+  while retained pages, archives, undo or live consumers require v1.
 - `skills/` — 9 SKILL.md files (knowledge-compile, knowledge-lookup,
   knowledge-review, knowledge-qa-file-back, contradict-check,
   crystallize-playbook, bridge-promote-insight, session-memory-compile,

@@ -50,9 +50,10 @@ from claim_tree_manifest import (  # noqa: E402
     PROJECT_CLAIM_FILES,
 )
 from claims import (  # noqa: E402
-    CANDIDATE_SCHEMA,
     MAX_CLAIM_PAGE_BYTES,
+    claim_json_bytes,
     parse_claim_ledger,
+    validate_claim_candidate,
     validate_claim_record,
 )
 from evidence_resolver import (  # noqa: E402
@@ -75,7 +76,6 @@ from okf_types import (
     TYPE_ALIASES,  # noqa: E402
 )
 from page_status import is_retired  # noqa: E402
-from reliable_memory import canonical_json_bytes, validate_schema  # noqa: E402
 from vault_editorial import (  # noqa: E402
     BACKLINK_EXEMPT_NAMES,
     BROKEN_LINK_SKIP_NAMES,
@@ -663,7 +663,7 @@ def _candidate_record(page: Path, text: str) -> dict:
     if candidate_root not in Path(page).resolve(strict=True).parents:
         raise ValueError("claim-candidate is allowed only under knowledge/inbox/claims")
     candidate = _embedded_canonical_record(text)
-    validate_schema(candidate, CANDIDATE_SCHEMA)
+    validate_claim_candidate(candidate)
     validate_claim_record(candidate["claim"])
     return candidate["claim"]
 
@@ -674,7 +674,7 @@ def _embedded_canonical_record(text: str) -> dict:
         raise ValueError("claim-candidate must embed exactly one JSON record")
     encoded = matches[0].encode("utf-8")
     candidate = json.loads(encoded)
-    if canonical_json_bytes(candidate) != encoded:
+    if claim_json_bytes(candidate) != encoded:
         raise ValueError("claim-candidate record is not restricted canonical JSON")
     return candidate
 

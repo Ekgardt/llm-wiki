@@ -11,6 +11,7 @@ import time
 import unicodedata
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -31,12 +32,19 @@ from reliable_memory import (
     open_operational_db,
     sha256_bytes,
     validate_schema,
+    validate_schema_object,
 )
 from settings import raise_hint, setting_value
 
 SCHEMA_DIR = Path(__file__).with_name("schemas")
 LEDGER_SCHEMA = SCHEMA_DIR / "claim-ledger-v1.json"
 CANDIDATE_SCHEMA = SCHEMA_DIR / "claim-candidate-v1.json"
+LEDGER_V2_SCHEMA = SCHEMA_DIR / "claim-ledger-v2.json"
+_LEDGER_SCHEMAS = {"claim-ledger/v1": LEDGER_SCHEMA, "claim-ledger/v2": LEDGER_V2_SCHEMA}
+_RECORD_SCHEMA_RULES = {
+    "claim/v1": json.loads(LEDGER_SCHEMA.read_text(encoding="utf-8"))["properties"]["claims"]["items"],
+    "claim/v2": json.loads(LEDGER_V2_SCHEMA.read_text(encoding="utf-8"))["properties"]["claims"]["items"]["oneOf"][1],
+}
 # The claim tree's ceiling, which is the journal's: a project journal is one of
 # the pages this index reads, and a page the journal accepts must never be one
 # the index refuses. Measured 2026-09-10: a 4.2 MB journal refused every compile
@@ -598,16 +606,16 @@ class ClaimPipeline:
         raw = claim.record
         semantic = _semantic_payload(raw)
         record = {
-            "schema_version": "claim/v1",
+            "schema_version": raw.get("schema_version", "claim/v1"),
             "id": _trim(raw["id"], label="id"),
             "fingerprint": sha256_bytes(canonical_json_bytes(semantic)),
-            "text": _nfc(raw["text"]),
+            "text": _normalized_literal(raw),
             **semantic,
             "observed_at": claim.claim.block.observed_at,
             "lifecycle": raw["lifecycle"],
             "confidence": raw["confidence"],
             "authority": raw["authority"],
-            "evidence": json.loads(canonical_json_bytes(raw["evidence"])),
+            "evidence": _normalized_evidence(raw),
             "links": sorted({_trim(item, label="claim link") for item in raw["links"]}),
             "extractor_version": _trim(raw["extractor_version"], label="extractor version"),
         }
@@ -683,8 +691,116 @@ def _evidence_literal(span: bytes) -> str:
         raise EvidenceMismatch("evidence span is not UTF-8") from exc
 
 
+def _normalized_evidence(record: Mapping[str, object]) -> dict:
+    if record.get("schema_version") == "claim/v2":
+        return deepcopy(record["evidence"])
+    return json.loads(canonical_json_bytes(record["evidence"]))
+
+
+def _requires_literal_encoding(value: object) -> bool:
+    if isinstance(value, (list, tuple)):
+        return any(_requires_literal_encoding(item) for item in value)
+    if not isinstance(value, Mapping):
+        return False
+    return value.get("schema_version") in ("claim/v2", "claim-ledger/v2") or _embedded_literal_encoding(value)
+
+
+def _embedded_literal_encoding(value: Mapping[str, object]) -> bool:
+    return any(_requires_literal_encoding(item) for item in value.get("claims", [])) or _requires_literal_encoding(value.get("claim")) or _has_native_evidence(value)
+
+
+def _has_native_evidence(value: Mapping[str, object]) -> bool:
+    return "native_event" in value or any(isinstance(item, Mapping) and "native_event" in item for item in value.get("evidence", []))
+
+
+def claim_json_bytes(value: object) -> bytes:
+    """Historical v1 canonical encoding, or exact v2 physical literal strings.
+
+    Accepts a validated claim, ledger or existing candidate wrapper. Semantic
+    fingerprints still use canonical_json_bytes; this encoder never grants proof.
+    """
+    if _requires_literal_encoding(value):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8", errors="strict")
+    return canonical_json_bytes(value)
+
+
+def _normalized_literal(record: Mapping[str, object]) -> str:
+    if record.get("schema_version") == "claim/v2":
+        return record["text"]
+    return _nfc(record["text"])
+
+
+def _require_claim_byte_budget(content: bytes) -> None:
+    if len(content) > MAX_CLAIM_PAGE_BYTES:
+        raise ValueError("claim content exceeds the existing page byte budget")
+
+
+def _ledger_schema_path(ledger: object) -> Path:
+    if not isinstance(ledger, Mapping):
+        raise ValueError("claim ledger must be an object")
+    path = _LEDGER_SCHEMAS.get(_document_version(ledger))
+    if path is None:
+        raise ValueError("unsupported claim ledger version")
+    return path
+
+
+def claim_record_schema(record: object) -> dict:
+    if not isinstance(record, Mapping):
+        raise ValueError("claim record must be an object")
+    version = _document_version(record)
+    if version not in _RECORD_SCHEMA_RULES:
+        raise ValueError("unsupported claim record version")
+    return deepcopy(_RECORD_SCHEMA_RULES[version])
+
+
+def _document_version(document: Mapping[str, object]) -> str:
+    version = document.get("schema_version")
+    if not isinstance(version, str):
+        raise ValueError("claim document version must be a string")
+    return version
+
+
+def _candidate_schema(record: object) -> dict:
+    rule = claim_record_schema(record)
+    schema = json.loads(CANDIDATE_SCHEMA.read_text(encoding="utf-8"))
+    if record["schema_version"] == "claim/v1":
+        return schema
+    rule["properties"]["lifecycle"] = deepcopy(schema["properties"]["claim"]["properties"]["lifecycle"])
+    schema["properties"]["claim"] = rule
+    return schema
+
+
+def validate_claim_candidate(candidate: object) -> None:
+    if not isinstance(candidate, Mapping):
+        raise ValueError("claim candidate must be an object")
+    record = candidate.get("claim")
+    schema = _candidate_schema(record)
+    _require_claim_byte_budget(claim_json_bytes(candidate))
+    validate_schema_object(candidate, schema)
+    validate_claim_record(record)
+
+
+def claim_ledger_document(records: Sequence[Mapping[str, object]], *, previous_version: str | None = None) -> dict:
+    for record in records:
+        validate_claim_record(record)
+    version = _ledger_output_version(records, previous_version)
+    ledger = {"schema_version": version, "claims": list(records)}
+    validate_schema(ledger, _ledger_schema_path(ledger))
+    _require_claim_byte_budget(claim_json_bytes(ledger))
+    return ledger
+
+
+def _ledger_output_version(records: Sequence[Mapping[str, object]], previous_version: str | None) -> str:
+    if previous_version not in {None, "claim-ledger/v1", "claim-ledger/v2"}:
+        raise ValueError("unsupported previous claim ledger version")
+    if previous_version == "claim-ledger/v2" or any(record["schema_version"] == "claim/v2" for record in records):
+        return "claim-ledger/v2"
+    return "claim-ledger/v1"
+
+
 def validate_claim_record(record: object) -> None:
-    validate_schema({"schema_version": "claim-ledger/v1", "claims": [record]}, LEDGER_SCHEMA)
+    _require_claim_byte_budget(claim_json_bytes(record))
+    validate_schema_object(record, claim_record_schema(record))
     assert isinstance(record, Mapping)
     _require_canonical_semantics(record)
     evidence = record["evidence"]
@@ -730,11 +846,12 @@ def _require_observation(record: Mapping[str, object], ref: EvidenceRef) -> None
 
 
 def parse_claim_ledger(content: bytes) -> dict[str, object] | None:
+    _require_claim_byte_budget(content)
     text = _decoded_claim_page(content)
     if not _has_claims_heading(text):
         return None
     ledger = _parsed_ledger(text)
-    validate_schema(ledger, LEDGER_SCHEMA)
+    validate_schema(ledger, _ledger_schema_path(ledger))
     _require_unique_ledger_ids(ledger["claims"])
     for record in ledger["claims"]:
         validate_claim_record(record)
@@ -766,7 +883,7 @@ def _parsed_ledger(text: str) -> dict[str, object]:
         ledger = json.loads(raw.decode("utf-8"))
     except json.JSONDecodeError as exc:
         raise ValueError("Claims ledger is malformed JSON") from exc
-    if canonical_json_bytes(ledger) != raw:
+    if claim_json_bytes(ledger) != raw:
         raise ValueError("Claims ledger is not restricted canonical JSON")
     return ledger
 
@@ -1121,7 +1238,7 @@ class ClaimIndex:
                 record["relation"],
                 record["lifecycle"],
                 relative,
-                canonical_json_bytes(record),
+                claim_json_bytes(record),
             )
         )
 

@@ -2515,6 +2515,9 @@ def test_complete_source_line_within_claim_contract_survives_draft_validation(va
 def test_complete_quote_schema_reuses_the_durable_literal_contract():
     import compile_memory
 
-    evidence = compile_memory.RAW_PLAN_SCHEMA["properties"]["operations"]["items"]["properties"]["evidence"]["items"]["properties"]
+    branches = compile_memory.RAW_PLAN_SCHEMA["properties"]["operations"]["items"]["properties"]["evidence"]["items"]["oneOf"]
+    evidence = branches[0]["properties"]
     literal = compile_memory.CLAIM_RECORD_SCHEMA["properties"]["evidence"]["properties"]["text"]
     assert evidence["quoted_text"] == literal
+    assert "native_event" in branches[1]["required"]
+    assert branches[1]["additionalProperties"] is False

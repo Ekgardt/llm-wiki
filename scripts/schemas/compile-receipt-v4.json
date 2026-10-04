@@ -214,7 +214,7 @@
       ],
       "properties": {
         "algorithm": {
-          "const": "compile-complete-items/v1"
+          "enum": ["compile-complete-items/v1", "compile-complete-items/v2"]
         },
         "tokenizer_identity": {
           "type": "string",

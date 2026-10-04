@@ -15,14 +15,17 @@ from types import MappingProxyType, SimpleNamespace
 from bounded_io import read_stable_bytes
 from claim_tree_manifest import snapshot_claim_tree
 from claims import (
-    CANDIDATE_SCHEMA,
     CLAIM_LEDGER_RE,
     MAX_CLAIM_PAGE_BYTES,
     ClaimIndex,
     ClaimPipeline,
     IndexedClaim,
     NormalizedClaim,
+    claim_json_bytes,
+    claim_ledger_document,
     is_substantive,
+    parse_claim_ledger,
+    validate_claim_candidate,
     validate_claim_record,
 )
 from llm_client import (
@@ -37,7 +40,7 @@ from markdown_transaction import (
     MarkdownCoordinator,
     active_or_legacy_coordinator,
 )
-from reliable_memory import canonical_json_bytes, sha256_bytes, validate_schema
+from reliable_memory import canonical_json_bytes, sha256_bytes
 
 AUTHORITY = {"inferred": 0, "ai-derived": 1, "web": 2, "user": 3}
 FUNCTIONAL_RELATIONS = frozenset(
@@ -90,7 +93,7 @@ class LifecycleTarget:
             existing.page,
             str(record["id"]),
             str(record["fingerprint"]),
-            sha256_bytes(canonical_json_bytes(record)),
+            sha256_bytes(claim_json_bytes(record)),
             str(evidence["sha256"]),
         )
 
@@ -670,6 +673,7 @@ def _embedded_candidate_claim(raw: bytes) -> Mapping[str, object] | None:
         return None
     if not isinstance(candidate, dict) or candidate.get("schema_version") != "claim-candidate/v1":
         return None
+    validate_claim_candidate(candidate)
     return _dict_or_none(candidate.get("claim"))
 
 
@@ -744,7 +748,7 @@ def _require_unchanged_claim(
     evidence = record["evidence"]
     unchanged = (
         record["fingerprint"] == expected.fingerprint
-        and sha256_bytes(canonical_json_bytes(record)) == expected.record_hash
+        and sha256_bytes(claim_json_bytes(record)) == expected.record_hash
         and evidence["sha256"] == expected.evidence_hash
     )
     if not unchanged:
@@ -785,9 +789,9 @@ def supersede_claims_in_page(
     match = CLAIM_LEDGER_RE.search(raw)
     if match is None:
         raise ValueError("lifecycle target has no canonical claim ledger")
-    ledger = json.loads(match[2])
+    ledger = parse_claim_ledger(raw)
     _supersede_ledger_claims(ledger, targets, path)
-    after = raw[:match.start(2)] + canonical_json_bytes(ledger) + raw[match.end(2):]
+    after = raw[:match.start(2)] + claim_json_bytes(ledger) + raw[match.end(2):]
     return after, ledger
 
 
@@ -1157,7 +1161,7 @@ class ContradictionPipeline:
             "source_page": self.source_page,
             "created_at": claim.record["observed_at"],
         }
-        validate_schema(candidate, CANDIDATE_SCHEMA)
+        validate_claim_candidate(candidate)
         identity = sha256_bytes(
             canonical_json_bytes(
                 {"id": claim.record["id"], "evidence": claim.record["evidence"]}
@@ -1167,7 +1171,7 @@ class ContradictionPipeline:
         content = (
             "---\ntype: claim-candidate\nstatus: quarantined\n---\n"
             f"# Quarantined claim {claim.record['id']}\n\n"
-            "```json\n" + canonical_json_bytes(candidate).decode("utf-8") + "\n```\n"
+            "```json\n" + claim_json_bytes(candidate).decode("utf-8") + "\n```\n"
         ).encode("utf-8")
         return path, content, quarantined.record
 
@@ -1432,10 +1436,10 @@ def _prepare_benchmark_vault(temporary: Path) -> tuple[Path, Path]:
 
 
 def _benchmark_page_bytes(claim_record: Mapping[str, object]) -> bytes:
-    ledger = {"schema_version": "claim-ledger/v1", "claims": [claim_record]}
+    ledger = claim_ledger_document([claim_record])
     return (
         b"---\ntype: concept\n---\n# Benchmark\n\n## Claims\n```json\n"
-        + canonical_json_bytes(ledger)
+        + claim_json_bytes(ledger)
         + b"\n```\n"
     )
 
@@ -1487,7 +1491,7 @@ def _extract_benchmark_claims(
         ):
             extracted[str(case["id"])] = normalized
             true_positive += int(
-                canonical_json_bytes(normalized.record)
+                claim_json_bytes(normalized.record)
                 == canonical_json_bytes(case["expected_new_claim"])
             )
     return extracted, true_positive
@@ -1583,13 +1587,13 @@ def _case_publication(
         )
         changes, _preconditions, paths = candidate_pipeline.plan_changes((result,))
         return list(changes), list(paths)
-    ledger = {"schema_version": "claim-ledger/v1", "claims": [new.record]}
+    ledger = claim_ledger_document([new.record])
     return (
         [
             MarkdownChange.create(
                 proposed,
                 b"---\ntype: concept\n---\n# Proposed\n\n## Claims\n```json\n"
-                + canonical_json_bytes(ledger)
+                + claim_json_bytes(ledger)
                 + b"\n```\n",
                 max_before_bytes=MAX_CLAIM_PAGE_BYTES,
             )
@@ -1833,7 +1837,10 @@ def _decoded_claim(claim: str) -> object:
 
 
 def _is_claim_document(decoded: object) -> bool:
-    return isinstance(decoded, dict) and decoded.get("schema_version") == "claim/v1"
+    if not isinstance(decoded, dict):
+        return False
+    version = decoded.get("schema_version")
+    return (isinstance(version, str) and version.startswith("claim/")) or {"evidence", "subject", "relation", "value"}.issubset(decoded)
 
 
 def _verified_claim(

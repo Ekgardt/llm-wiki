@@ -162,7 +162,11 @@ def test_native_semantic_schema_is_closed_through_evidence_fields():
     operation = compile_memory.RAW_PLAN_SCHEMA["properties"]["operations"]["items"]
     evidence = operation["properties"]["evidence"]["items"]
     assert operation["additionalProperties"] is False
-    assert evidence["additionalProperties"] is False
+    assert len(evidence["oneOf"]) == 2
+    assert all(branch["additionalProperties"] is False for branch in evidence["oneOf"])
+    native = evidence["oneOf"][1]["properties"]["native_event"]
+    assert native["additionalProperties"] is False
+    assert set(native["required"]) == {"source_path", "byte_start", "line_index"}
     assert operation["properties"]["action"]["enum"] == ["create", "update"]
     assert operation["properties"]["category"]["enum"] == sorted(
         compile_memory.ALLOWED_CATEGORIES

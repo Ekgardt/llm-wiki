@@ -11,7 +11,6 @@ from dataclasses import dataclass
 
 from corpus_snapshot import CapturedSource, read_frontmatter
 from graph_storable import storable_identity_key, storable_metadata
-from reliable_memory import canonical_json_bytes
 from settings import raise_hint, setting_value
 
 EXTRACTOR_VERSION = "knowledge-extractor/v1"
@@ -514,7 +513,9 @@ class _Extraction:
         search_start: int,
         authority: str,
     ) -> int:
-        encoded = canonical_json_bytes(record)
+        from claims import claim_json_bytes
+
+        encoded = claim_json_bytes(record)
         start = source.content.find(encoded, search_start)
         if start < 0:
             raise ValueError("canonical claim record is not present in source bytes")
