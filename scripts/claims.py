@@ -846,11 +846,10 @@ def _require_observation(record: Mapping[str, object], ref: EvidenceRef) -> None
 
 
 def parse_claim_ledger(content: bytes) -> dict[str, object] | None:
-    _require_claim_byte_budget(content)
-    text = _decoded_claim_page(content)
-    if not _has_claims_heading(text):
+    match = claim_ledger_match(content)
+    if match is None:
         return None
-    ledger = _parsed_ledger(text)
+    ledger = _parsed_ledger(match)
     validate_schema(ledger, _ledger_schema_path(ledger))
     _require_unique_ledger_ids(ledger["claims"])
     for record in ledger["claims"]:
@@ -865,19 +864,179 @@ def _decoded_claim_page(content: bytes) -> str:
         raise ValueError("claim page is not UTF-8") from exc
 
 
-def _has_claims_heading(text: str) -> bool:
-    headings = list(re.finditer(r"(?m)^## Claims[ \t]*\r?$", text))
-    if not headings:
+_REFLECTION_HEADER = re.compile(rb"## History \(pre-reflection (\d{4}-\d{2}-\d{2})\)[ \t]*")
+_REFLECTION_SUMMARY = b"<summary>Original page before reflection</summary>"
+_CLAIMS_HEADING = re.compile(rb"## Claims[ \t]*")
+_DETAILS_OPEN = re.compile(rb"<details>(?:[ \t]*<summary>.*</summary>)?")
+
+
+class _ClaimPageScan:
+    """Only the producer-owned historical container is excluded from authority."""
+
+    def __init__(self):
+        self.fence = None
+        self.depth = 0
+        self.pending = None
+        self.start = None
+        self.summary_pending = False
+        self.headings = []
+        self.histories = []
+        self.history_markers = []
+
+    def line(self, body, start, end):
+        if self.pending is not None or self.summary_pending:
+            self._container_header(body)
+            return
+        if self._fenced(body):
+            return
+        self._body_line(body, start, end)
+
+    def _container_header(self, body):
+        if self.pending is not None:
+            self._begin_history(body)
+            return
+        self._summary(body)
+
+    def _body_line(self, body, start, end):
+        if self.depth:
+            self._history_line(body, end)
+            return
+        self._active_line(body, start)
+
+    def _fenced(self, body):
+        from corpus_snapshot import _closing_fence, _opening_fence
+
+        if self.fence is not None:
+            character, length = self.fence
+            if _closing_fence(body, character, length):
+                self.fence = None
+            return True
+        opening = _opening_fence(body)
+        return self._opened_fence(opening)
+
+    def _opened_fence(self, opening):
+        if opening is None:
+            return False
+        self.fence = (opening[1][:1], len(opening[1]))
+        return True
+
+    def _active_line(self, body, start):
+        _require_no_orphan_history_close(body, self.histories)
+        self._note_history_marker(body, start)
+        if _reflection_header(body):
+            self.pending = start
+            return
+        if _CLAIMS_HEADING.fullmatch(body):
+            self.headings.append(start)
+
+    def _note_history_marker(self, body, start):
+        if body.startswith(b"## History (pre-reflection"):
+            self.history_markers.append(start)
+
+    def _begin_history(self, body):
+        if not body.strip():
+            return
+        _require_reflection_open(body)
+        self.start, self.pending, self.depth = self.pending, None, 1
+        self.summary_pending = body == b"<details>"
+
+    def _history_line(self, body, end):
+        self.depth += _details_delta(body)
+        if self.depth == 0:
+            self.histories.append((self.start, end))
+            self.start = None
+
+    def _summary(self, body):
+        if not body.strip():
+            return
+        if body != _REFLECTION_SUMMARY:
+            raise ValueError("reflection history has no canonical summary")
+        self.summary_pending = False
+
+    def finish(self):
+        if self.pending is not None or self.depth:
+            raise ValueError("reflection history is malformed or unclosed")
+
+
+def _reflection_header(body):
+    matched = _REFLECTION_HEADER.fullmatch(body)
+    if matched is None:
         return False
-    if len(headings) != 1:
-        raise ValueError("claim page must contain exactly one Claims ledger")
+    date.fromisoformat(matched[1].decode("ascii"))
     return True
 
 
-def _parsed_ledger(text: str) -> dict[str, object]:
-    match = CLAIM_LEDGER_RE.search(text.encode("utf-8"))
-    if match is None:
+def _require_reflection_open(body):
+    allowed = (b"<details>", b"<details>" + _REFLECTION_SUMMARY)
+    if body not in allowed:
+        raise ValueError("reflection history has no canonical details container")
+
+
+def _require_no_orphan_history_close(body, histories):
+    if histories and body == b"</details>":
+        raise ValueError("reflection history has an unmatched closing container")
+
+
+def _details_delta(body):
+    if body == b"</details>":
+        return -1
+    return int(_DETAILS_OPEN.fullmatch(body) is not None)
+
+
+def _claim_page_scan(content):
+    scan, offset = _ClaimPageScan(), 0
+    for line in content.splitlines(keepends=True):
+        end = offset + len(line)
+        scan.line(line.rstrip(b"\r\n"), offset, end)
+        offset = end
+    scan.finish()
+    return scan
+
+
+def _active_claim_match(content, scan):
+    if not scan.headings:
+        return None
+    if len(scan.headings) != 1:
+        raise ValueError("claim page must contain exactly one Claims ledger")
+    masked = bytearray(content)
+    for start, end in scan.histories:
+        masked[start:end] = re.sub(rb"[^\r\n]", b" ", content[start:end])
+    matched = CLAIM_LEDGER_RE.match(bytes(masked), scan.headings[0])
+    return _require_claim_match(matched)
+
+
+def _require_claim_match(matched):
+    if matched is None:
         raise ValueError("Claims ledger must be one fenced canonical JSON object")
+    return matched
+
+
+def claim_ledger_match(content: bytes):
+    """The active canonical ledger with original byte offsets, never history."""
+    _require_claim_byte_budget(content)
+    _decoded_claim_page(content)
+    return _active_claim_match(content, _claim_page_scan(content))
+
+
+def reflection_history_spans(content: bytes) -> tuple[tuple[int, int], ...]:
+    """Exact byte ranges of balanced producer-owned historical containers."""
+    _require_claim_byte_budget(content)
+    _decoded_claim_page(content)
+    return tuple(_claim_page_scan(content).histories)
+
+
+def reflection_history_boundary(content: bytes) -> int | None:
+    """The legacy or current history heading outside Markdown fences."""
+    scan = _claim_page_scan(content)
+    if not scan.history_markers:
+        return None
+    start = scan.history_markers[0]
+    if start and content[start - 1:start] == b"\n":
+        return start - 1
+    return start
+
+
+def _parsed_ledger(match) -> dict[str, object]:
     raw = match[2]
     try:
         ledger = json.loads(raw.decode("utf-8"))

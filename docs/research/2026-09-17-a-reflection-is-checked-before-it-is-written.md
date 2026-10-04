@@ -51,3 +51,45 @@ fix.
 
 Files: `scripts/reflection.py`, `tests/test_reflection.py`,
 `docs/research/2026-09-17-a-reflection-is-checked-before-it-is-written.md`.
+
+
+## Current claim authority and reflection history, 2026-10-04
+
+The installed writer's dated history wrapper can contain an older `## Claims`
+ledger. The old whole-page regular expression treated that preserved copy as a
+second active ledger, or included the closing details tag in a history-only
+ledger. Ten original regressions reproduced lost, duplicated, invented, fenced,
+and malformed authority before the shared fix.
+
+The reader now scans original UTF-8 byte offsets. Only a dated producer history
+with its exact details opening and `Original page before reflection` summary is
+excluded from current authority. Nested details and code fences are tracked;
+unclosed or malformed owned histories refuse. Fenced examples do not become
+claim headings. The parser, compiler merge, and contradiction supersession use
+one current-ledger matcher. Schema, canonical JSON, physical evidence hashes,
+version dispatch, and duplicate active-heading checks remain strict. A
+history-only ledger is not promoted. Recovering an old lost active ledger needs
+separate canonical committed preimage proof and a fenced write.
+
+The future reflection writer preserves the original verified active ledger when
+the model omits it. A model-created or changed ledger refuses. The original body
+remains byte-for-byte in history. Existing redaction still runs; if it changes
+preserved history or active claim JSON, publication refuses rather than silently
+rewriting either authority or history. These changes add no schema, module,
+runtime path, environment contract, service, or resource limit.
+
+Primary sources checked on 2026-10-04: [CommonMark 0.31.2 HTML blocks and code
+fences](https://spec.commonmark.org/0.31.2/#html-blocks), [Python HTMLParser,
+3.14.8 documentation](https://docs.python.org/3/library/html.parser.html), and
+[WHATWG details, current living specification](https://html.spec.whatwg.org/multipage/interactive-elements.html#the-details-element).
+CommonMark's fenced content is opaque. HTMLParser alone does not establish
+matching closure. The details element supplies disclosure structure, not claim
+authority. The implementation therefore recognizes the existing producer's
+narrow framing rather than adopting an HTML renderer or renaming old headings.
+Arbitrary HTML normalization and automatic promotion of historical facts were
+rejected because they would change original bytes or authority.
+
+Qualification uses controlled replies, actual reflection assembly, compiler
+merge and supersession, malformed and fenced history, and refusal before
+publication when redaction changes history. It is not a paid-model quality
+benchmark or proof that the full installed nightly pass is complete.

@@ -47,7 +47,6 @@ import process_liveness  # noqa: E402
 from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
 from claim_tree_manifest import snapshot_claim_tree  # noqa: E402
 from claims import (  # noqa: E402
-    CLAIM_LEDGER_RE,
     LEDGER_SCHEMA,
     RELATIONS,
     ClaimIndex,
@@ -56,6 +55,7 @@ from claims import (  # noqa: E402
     _semantic_payload,
     claim_json_bytes,
     claim_ledger_document,
+    claim_ledger_match,
     validate_claim_record,
 )
 from compile_cache import (  # noqa: E402
@@ -3262,7 +3262,7 @@ def _with_claim_ledger(page: bytes, records: Sequence[Mapping[str, object]]) -> 
         return page
     existing = parse_claim_ledger(page)
     additions = [json.loads(claim_json_bytes(item)) for item in records]
-    match = CLAIM_LEDGER_RE.search(page)
+    match = claim_ledger_match(page)
     if existing is None:
         opening = b"\n\n## Claims\n```json\n"
         return page.rstrip() + opening + _ledger_bytes(additions) + b"\n```\n"

@@ -15,7 +15,6 @@ from types import MappingProxyType, SimpleNamespace
 from bounded_io import read_stable_bytes
 from claim_tree_manifest import snapshot_claim_tree
 from claims import (
-    CLAIM_LEDGER_RE,
     MAX_CLAIM_PAGE_BYTES,
     ClaimIndex,
     ClaimPipeline,
@@ -23,6 +22,7 @@ from claims import (
     NormalizedClaim,
     claim_json_bytes,
     claim_ledger_document,
+    claim_ledger_match,
     is_substantive,
     parse_claim_ledger,
     validate_claim_candidate,
@@ -786,7 +786,7 @@ def supersede_claims_in_page(
 ) -> tuple[bytes, Mapping[str, object]]:
     """Transform a verified ledger; the caller decides the final page status."""
     targets = _grouped_targets(mutations).get(path, {})
-    match = CLAIM_LEDGER_RE.search(raw)
+    match = claim_ledger_match(raw)
     if match is None:
         raise ValueError("lifecycle target has no canonical claim ledger")
     ledger = parse_claim_ledger(raw)
