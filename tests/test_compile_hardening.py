@@ -116,6 +116,12 @@ def _compile(root: Path, state_root: Path, daily: Path):
     return coordinator, inputs, result
 
 
+def _context_test_receipt_path(source):
+    import compile_memory
+
+    return compile_memory._context_receipt_path(compile_memory._v4_source_descriptor(source))
+
+
 def test_all_filters_committed_receipts_and_keeps_uncompiled_mixed_source(vault):
     root, state_root = vault
     first = _daily(root)
@@ -206,26 +212,22 @@ def test_target_changed_after_snapshot_conflicts_with_frozen_update(vault):
 
 
 def test_receipt_copy_is_rejected_without_matching_committed_transaction(vault):
+    from dataclasses import replace
+
     root, state_root = vault
     daily = _daily(root)
     coordinator, inputs, _result = _compile(root, state_root, daily)
     import compile_memory
 
     source = inputs.dailies[0]
-    identity = compile_memory.compile_source_identity(
-        source.logical_path, source.sha256
-    )
-    receipt = root / f"knowledge/daily/receipts/v3-{identity}.md"
+    receipt = _context_test_receipt_path(source)
     forged_path = "knowledge/daily/2099-01-01.md"
-    forged_identity = compile_memory.compile_source_identity(
-        forged_path, source.sha256
-    )
-    forged = root / f"knowledge/daily/receipts/v3-{forged_identity}.md"
+    forged = _context_test_receipt_path(replace(source, logical_path=forged_path))
     forged.write_bytes(receipt.read_bytes())
 
     with pytest.raises(ValueError, match="receipt"):
-        compile_memory.read_compile_receipt_v3(
-            forged_path, source.sha256, coordinator
+        compile_memory.read_compile_receipt_version(
+            forged_path, source.sha256, coordinator, path=forged
         )
 
 
@@ -442,16 +444,14 @@ def test_receipt_evidence_is_source_scoped_and_operation_associated(vault):
     import compile_memory
 
     source = inputs.dailies[0]
-    record = compile_memory.read_compile_receipt_v3(
-        source.logical_path, source.sha256, coordinator
+    record = compile_memory.read_compile_receipt_version(
+        source.logical_path, source.sha256, coordinator, path=_context_test_receipt_path(source)
     )
     assert record is not None
     assert "completed_at" not in record
     assert record["evidence"] == [
         {
-            "source_identity": compile_memory.compile_source_identity(
-                source.logical_path, source.sha256
-            ),
+            "source_identity": compile_memory.compile_context_source_identity(compile_memory._v4_source_descriptor(source)),
             "operation_path": "knowledge/notes/safe-note.md",
             "quote_sha256": sha256_bytes(b"durable fact"),
             "source_digest": source.sha256,
@@ -488,9 +488,7 @@ def test_a_missing_receipt_preserves_the_current_source_failure(vault):
     queue.record_source_failure(
         source.logical_path, source.sha256, error_code="ValueError", producer="compile"
     )
-    compile_memory.compile_receipt_path(
-        compile_memory.compile_source_identity(source.logical_path, source.sha256)
-    ).unlink()
+    _context_test_receipt_path(source).unlink()
     compile_memory._retire_stale_source_failures(state_root)
     assert queue.source_failure_keys() == [(source.logical_path, source.sha256)]
 
@@ -587,8 +585,8 @@ def test_unusable_receipts_are_discarded_only_when_asked(tmp_path, monkeypatch):
     receipts.mkdir(parents=True)
     good = receipts / "v3-good.md"
     bad = receipts / "v3-bad.md"
-    good.write_text('---\n---\n```json\n{"source": {"logical_path": "d.md", "sha256": "a"}}\n```\n', encoding="utf-8")
-    bad.write_text('---\n---\n```json\n{"source": {"logical_path": "d.md", "sha256": "broken"}}\n```\n', encoding="utf-8")
+    good.write_text('---\n---\n```json\n{"schema_version": "compile-receipt/v3", "source": {"logical_path": "d.md", "sha256": "a"}}\n```\n', encoding="utf-8")
+    bad.write_text('---\n---\n```json\n{"schema_version": "compile-receipt/v3", "source": {"logical_path": "d.md", "sha256": "broken"}}\n```\n', encoding="utf-8")
     monkeypatch.setattr(compile_memory, "DAILY_DIR", tmp_path / "knowledge/daily")
 
     def parse(raw, *, logical_path, source_sha256):

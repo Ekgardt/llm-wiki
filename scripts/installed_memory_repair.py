@@ -11,6 +11,7 @@ import stat
 import time
 from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
@@ -26,6 +27,7 @@ from reliable_memory import (
     capture_runtime_file_identity,
     durable_publish_file,
     open_readonly_operational_db,
+    operational_deadline_active,
     publish_runtime_file,
     read_runtime_bytes,
     sha256_bytes,
@@ -192,15 +194,16 @@ def _legacy_evidence_item(run: Path, name: str) -> str | None:
     return f"run/{name}" if kind == "file" else f"run/{name}:{kind}"
 
 
-def _operation_artifacts(run: Path) -> tuple[list[str], bool]:
+def _operation_artifacts(run: Path, *, deadline: float | None = None) -> tuple[list[str], bool]:
     if _kind(run) != "directory":
         return [], False
+    operational_deadline_active(deadline)
+    names = []
     with os.scandir(run) as entries:
-        names = [
-            entry.name
-            for entry in entries
-            if _OPERATION_ARTIFACT_RE.fullmatch(entry.name)
-        ]
+        for entry in entries:
+            operational_deadline_active(deadline)
+            if _OPERATION_ARTIFACT_RE.fullmatch(entry.name):
+                names.append(entry.name)
     names.sort()
     return names[:_MAX_OPERATION_ARTIFACTS], len(names) > _MAX_OPERATION_ARTIFACTS
 
@@ -338,7 +341,8 @@ def _validate_immutable_artifact(
 
 
 @contextlib.contextmanager
-def _active_database_snapshot(record: dict[str, object], *, database_name: str, path: Path, state_root: Path) -> Iterator[sqlite3.Connection]:
+def _active_database_snapshot(record: dict[str, object], *, database_name: str, path: Path, state_root: Path, deadline: float | None = None) -> Iterator[sqlite3.Connection]:
+    operational_deadline_active(deadline)
     _validate_artifact_reference(
         record.get("active"),
         expected_path=path,
@@ -353,13 +357,16 @@ def _active_database_snapshot(record: dict[str, object], *, database_name: str, 
             max_bytes=None,
             owner_only=True,
             contract=_database_contract(database_name),
+            deadline=deadline,
         )
     ) as database:
         database.execute("BEGIN")
         if not _database_schema_complete(database_name, database):
             raise ValueError("active database schema is incomplete")
         _require_database_metadata(record, _active_database_metadata(database))
+        operational_deadline_active(deadline)
         yield database
+        operational_deadline_active(deadline)
 
 
 
@@ -378,19 +385,19 @@ def _active_database_metadata(database: sqlite3.Connection) -> dict[str, object]
 
 
 
-def _require_active_database_openable(record: dict[str, object], *, database_name: str, path: Path, state_root: Path) -> None:
+def _require_active_database_openable(record: dict[str, object], *, database_name: str, path: Path, state_root: Path, deadline: float | None = None) -> None:
     """Verify file identity, schema and connection contract without certifying history."""
     with _active_database_snapshot(
-        record, database_name=database_name, path=path, state_root=state_root
+        record, database_name=database_name, path=path, state_root=state_root, deadline=deadline
     ):
         pass
 
 
 
-def _validate_active_database_reference(record: dict[str, object], *, database_name: str, path: Path, state_root: Path) -> None:
+def _validate_active_database_reference(record: dict[str, object], *, database_name: str, path: Path, state_root: Path, deadline: float | None = None) -> None:
     """Full certification additionally checks every retained page and foreign key."""
     with _active_database_snapshot(
-        record, database_name=database_name, path=path, state_root=state_root
+        record, database_name=database_name, path=path, state_root=state_root, deadline=deadline
     ) as database:
         _certify_active_database_contents(database_name, database)
 
@@ -462,7 +469,9 @@ def _validate_complete_adoption(
     adoption: dict[str, object],
     operation_artifacts: list[str],
     active_validator: Callable[..., None] = _validate_active_database_reference,
+    deadline: float | None = None,
 ) -> dict[str, object]:
+    operational_deadline_active(deadline)
     _require_adoption_artifacts_complete(paths, operation_artifacts)
     _require_adoption_header(adoption, migration)
     _require_migration_reference(adoption, paths, state_root)
@@ -470,6 +479,7 @@ def _validate_complete_adoption(
     adoption_by_name = _named_database_records(adoption.get("databases"))
     schemas = _require_adoption_sources(root, adoption)
     for database_name in ("queue", "coordinator"):
+        operational_deadline_active(deadline)
         _validate_adopted_database(
             active_validator=active_validator,
             database_name=database_name,
@@ -899,46 +909,52 @@ class StrayRetirement(NamedTuple):
     kept: tuple[str, ...]
 
 
-def _adoption_in_flight(paths: dict[str, Path]) -> str | None:
+def _adoption_in_flight(paths: dict[str, Path], *, deadline: float | None = None) -> str | None:
     """Why no candidate may be retired now, or None when adoption is complete."""
     if _kind(paths["adoption"]) != "file":
         return "no complete adoption record"
-    artifacts, _overflow = _operation_artifacts(paths["run"])
+    artifacts, _overflow = _operation_artifacts(paths["run"], deadline=deadline)
     if artifacts:
         return "an adoption operation is in flight: " + ", ".join(artifacts)
     return None
 
 
-def _first_held_table(database: sqlite3.Connection, spec: _StraySpec) -> str | None:
+def _first_held_table(database: sqlite3.Connection, spec: _StraySpec, *, deadline: float | None = None) -> str | None:
     for table in spec.data_tables:
+        operational_deadline_active(deadline)
         if database.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone() is not None:
             return f"holds a row in {table}"
     return None
 
 
-def _live_owner(database: sqlite3.Connection, spec: _StraySpec, now: datetime) -> str | None:
+def _live_owner(database: sqlite3.Connection, spec: _StraySpec, now: datetime, *, deadline: float | None = None) -> str | None:
     from operational_ownership import _parse_timestamp
 
     for actor, expires in database.execute(
         f'SELECT actor_id, expires_at FROM "{spec.owner_table}"'
     ):
+        operational_deadline_active(deadline)
         if expires is not None and _parse_timestamp(expires) > now:
             return f"{spec.owner_label} {actor} is live until {expires}"
     return None
 
 
-def _content_reason(candidate: Path, state_root: Path, spec: _StraySpec, now: datetime) -> str | None:
+def _content_reason(candidate: Path, state_root: Path, spec: _StraySpec, now: datetime, *, deadline: float | None = None) -> str | None:
     """Why the candidate's contents forbid retiring it, or None when it is empty."""
+    operational_deadline_active(deadline)
     if _kind(candidate.with_name(candidate.name + "-journal")) != "missing":
         return "a rollback journal is beside it"
     try:
         with contextlib.closing(
             open_readonly_operational_db(
-                candidate, state_root, max_bytes=_MAX_OPERATIONAL_DB_BYTES, contract=spec.contract
+                candidate, state_root, max_bytes=_MAX_OPERATIONAL_DB_BYTES, contract=spec.contract, deadline=deadline
             )
         ) as database:
-            return _first_held_table(database, spec) or _live_owner(database, spec, now)
+            reason = _first_held_table(database, spec, deadline=deadline) or _live_owner(database, spec, now, deadline=deadline)
+            operational_deadline_active(deadline)
+            return reason
     except Exception as exc:  # noqa: BLE001 - unreadable means keep, and say why
+        operational_deadline_active(deadline)
         return f"its contents could not be read: {type(exc).__name__}: {exc}"
 
 
@@ -952,14 +968,16 @@ def _quarantined(candidate: Path, directory: Path, now: datetime) -> Path:
 
 
 def _retire_one(
-    paths: dict[str, Path], spec: _StraySpec, now: datetime, blocker: str | None
+    paths: dict[str, Path], spec: _StraySpec, now: datetime, blocker: str | None, *, deadline: float | None = None
 ) -> tuple[str, str]:
+    operational_deadline_active(deadline)
     candidate = paths[spec.key]
     if _kind(candidate) != "file":
         return "kept", f"{candidate.name}: not a regular file"
-    reason = blocker or _content_reason(candidate, paths["run"].parent, spec, now)
+    reason = blocker or _content_reason(candidate, paths["run"].parent, spec, now, deadline=deadline)
     if reason is not None:
         return "kept", f"{candidate.name}: {reason}"
+    operational_deadline_active(deadline)
     try:
         destination = _quarantined(candidate, paths["run"] / spec.quarantine, now)
     except FileNotFoundError:
@@ -967,7 +985,7 @@ def _retire_one(
     return "retired", destination.relative_to(paths["run"].parent).as_posix()
 
 
-def retire_stray_candidates(state_root: Path, now: datetime) -> StrayRetirement:
+def retire_stray_candidates(state_root: Path, now: datetime, *, deadline: float | None = None) -> StrayRetirement:
     """Quarantine every pre-adoption candidate that is provably stray.
 
     A stray candidate refuses every writer; on 2026-09-17 one left by a test run
@@ -976,12 +994,13 @@ def retire_stray_candidates(state_root: Path, now: datetime) -> StrayRetirement:
     applied, for both candidates, and it runs where the refusal happens. See
     `docs/research/2026-09-24-a-stray-candidate-is-retired-where-it-refuses.md`.
     """
+    operational_deadline_active(deadline)
     paths = _paths(Path(state_root).absolute())
     present = _present_candidates(paths)
     if not present:
         return StrayRetirement((), ())
-    blocker = _adoption_in_flight(paths)
-    outcomes = [_retire_one(paths, spec, now, blocker) for spec in present]
+    blocker = _adoption_in_flight(paths, deadline=deadline)
+    outcomes = [_retire_one(paths, spec, now, blocker, deadline=deadline) for spec in present]
     return StrayRetirement(_details(outcomes, "retired"), _details(outcomes, "kept"))
 
 
@@ -993,24 +1012,28 @@ def _details(outcomes: list[tuple[str, str]], wanted: str) -> tuple[str, ...]:
     return tuple(detail for kind, detail in outcomes if kind == wanted)
 
 
-def require_reliability_v3_adopted(*, root: Path, state_root: Path) -> dict[str, object]:
+def require_reliability_v3_adopted(*, root: Path, state_root: Path, deadline: float | None = None) -> dict[str, object]:
     """Certify the complete adopted pair, including all retained database content."""
-    return _require_adoption_record(root, state_root, _validate_active_database_reference)
+    return _require_adoption_record(root, state_root, _validate_active_database_reference, deadline=deadline)
 
 
 
-def require_reliability_v3_admission(*, root: Path, state_root: Path) -> dict[str, object]:
+def require_reliability_v3_admission(*, root: Path, state_root: Path, deadline: float | None = None) -> dict[str, object]:
     """Admit an actor from verified adoption evidence and both database contracts."""
-    return _require_adoption_record(root, state_root, _require_active_database_openable)
+    return _require_adoption_record(root, state_root, _require_active_database_openable, deadline=deadline)
 
 
 
-def _require_adoption_record(root: Path, state_root: Path, active_validator: Callable[..., None]) -> dict[str, object]:
+def _require_adoption_record(root: Path, state_root: Path, active_validator: Callable[..., None], *, deadline: float | None = None) -> dict[str, object]:
+    operational_deadline_active(deadline)
+    bounded_validator = partial(active_validator, deadline=deadline)
     try:
-        return _load_complete_adoption(
-            root=Path(root), state_root=Path(state_root), active_validator=active_validator
+        result = _load_complete_adoption(
+            root=Path(root), state_root=Path(state_root), active_validator=bounded_validator, deadline=deadline
         )
-    except ReliabilityV3ValidationError:
+        operational_deadline_active(deadline)
+        return result
+    except (ReliabilityV3ValidationError, TimeoutError):
         raise
     except Exception as exc:
         raise ReliabilityV3ValidationError(
@@ -1023,22 +1046,28 @@ def _load_complete_adoption(
     root: Path,
     state_root: Path,
     active_validator: Callable[..., None] = _validate_active_database_reference,
+    deadline: float | None = None,
 ) -> dict[str, object]:
+    operational_deadline_active(deadline)
     vault = root.resolve(strict=True)
     state = state_root.absolute()
     paths = _paths(state)
-    operation_artifacts, overflow = _operation_artifacts(paths["run"])
+    operation_artifacts, overflow = _operation_artifacts(paths["run"], deadline=deadline)
     if overflow:
         raise ValueError("operation artifact scan exceeded its bound")
     if _kind(paths["migration"]) != "file" or _kind(paths["adoption"]) != "file":
         raise ReliabilityV3ValidationError("legacy_protocol_unquiesced")
+    operational_deadline_active(deadline)
     migration = _read_record(
         paths["migration"], state, schema=_MIGRATION_SCHEMA, max_bytes=_MAX_RECORD_BYTES
     )
+    operational_deadline_active(deadline)
     adoption = _read_record(
         paths["adoption"], state, schema=_ADOPTION_SCHEMA, max_bytes=_MAX_RECORD_BYTES
     )
+    operational_deadline_active(deadline)
     return _validate_complete_adoption(
+        deadline=deadline,
         root=vault,
         state_root=state,
         paths=paths,

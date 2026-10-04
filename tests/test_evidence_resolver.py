@@ -20,6 +20,29 @@ def _reference(daily_id: str, source: bytes, block: str, start: int, end: int) -
     )
 
 
+def _archive_source_receipt(root: Path, logical_path: str, source: bytes) -> Path:
+    import compile_memory
+
+    identity = compile_memory.compile_source_identity(logical_path, _sha(source))
+    legacy = root / f"knowledge/daily/receipts/v3-{identity}.md"
+    parts = compile_memory._daily_parts(logical_path, source)
+    if len(parts) != 1:
+        return legacy
+    descriptor = compile_memory._v4_source_descriptor(parts[0])
+    current = root / "knowledge/daily/receipts" / compile_memory._context_receipt_path(descriptor).name
+    if current.exists():
+        return current
+    return legacy
+
+
+def _archive_receipt_authority(path: Path, fallback_identity: str) -> tuple[str, str, str]:
+    if not path.exists():
+        return "a" * 64, fallback_identity, "compile:test"
+    raw = path.read_bytes()
+    record = json.loads(raw.split(b"```json\n", 1)[1].split(b"\n```", 1)[0])
+    return _sha(raw), record["source_identity"], record["operation_id"]
+
+
 def _write_bag(root: Path, daily_id: str, source: bytes, *, suffix: str = "one") -> Path:
     bag = root / "knowledge" / "daily" / "archive" / daily_id[:7] / f"bag-test-{suffix}"
     payload_name = f"data/{daily_id}.md"
@@ -53,15 +76,8 @@ def _write_bag(root: Path, daily_id: str, source: bytes, *, suffix: str = "one")
     source_identity = compile_memory.compile_source_identity(
         logical_path, _sha(source)
     )
-    receipt_path = root / f"knowledge/daily/receipts/v3-{source_identity}.md"
-    receipt_hash = _sha(receipt_path.read_bytes()) if receipt_path.exists() else "a" * 64
-    operation_id = "compile:test"
-    if receipt_path.exists():
-        operation_id = json.loads(
-            receipt_path.read_text(encoding="utf-8")
-            .split("```json\n", 1)[1]
-            .split("\n```", 1)[0]
-        )["operation_id"]
+    receipt_path = _archive_source_receipt(root, logical_path, source)
+    receipt_hash, source_identity, operation_id = _archive_receipt_authority(receipt_path, source_identity)
     manifest = {
         "schema_version": "archive-manifest/v1",
         "logical_daily_id": daily_id,
@@ -70,7 +86,7 @@ def _write_bag(root: Path, daily_id: str, source: bytes, *, suffix: str = "one")
         "payload_hash": _sha(source),
         "compile_receipt_ref": {
             "schema": "compile-receipt-ref/v1",
-            "path": f"knowledge/daily/receipts/v3-{source_identity}.md",
+            "path": receipt_path.relative_to(root).as_posix(),
             "logical_path": logical_path,
             "source_digest": _sha(source),
             "source_identity": source_identity,

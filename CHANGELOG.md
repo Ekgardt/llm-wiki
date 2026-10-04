@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- Preserve original daily source context in versioned compile receipts and enforce canonical receipt authority across compilation, archive, retrieval, diagnostics and operator actions.
+
 - Report a deferred compiler's outcome as unknown instead of predicting that the nightly service stops a compiler owned elsewhere.
 
 - Share the durable literal schema with compile draft quotations and binding, preventing refusal of complete source lines solely by a divergent 4000-character cutoff.

@@ -1442,9 +1442,9 @@ def test_run_acl_is_hardened_before_first_sqlite_connection(
         del mode
         hardened.append(Path(path))
 
-    def checked_open(path: Path, *, busy_ms: int) -> sqlite3.Connection:
+    def checked_open(path: Path, *, busy_ms: int, deadline: float | None = None) -> sqlite3.Connection:
         assert tmp_path.resolve() / "run" in hardened
-        return real_open(path, busy_ms=busy_ms)
+        return real_open(path, busy_ms=busy_ms, deadline=deadline)
 
     monkeypatch.setattr(memory_queue, "_harden_owner_only", record_hardening)
     monkeypatch.setattr(memory_queue, "open_operational_db", checked_open)

@@ -318,7 +318,7 @@ def test_critique_budget_fails_before_second_provider_call(vault, monkeypatch):
     assert len(calls) == 1
 
 
-def test_v3_receipt_path_and_body_bind_source_path_not_only_digest(vault):
+def test_v4_receipt_path_and_body_bind_exact_original_context(vault):
     root, state_root = vault
     daily = _daily(root)
     import compile_memory
@@ -340,14 +340,13 @@ def test_v3_receipt_path_and_body_bind_source_path_not_only_digest(vault):
         },
     )
     source = batch.manifest[0]
-    source_identity = compile_memory.compile_source_identity(
-        source.logical_path, source.sha256
-    )
-    receipt = root / f"knowledge/daily/receipts/v3-{source_identity}.md"
+    descriptor = compile_memory._v4_source_descriptor(batch.inputs.dailies[0])
+    source_identity = compile_memory.compile_context_source_identity(descriptor)
+    receipt = root / f"knowledge/daily/receipts/v4-{source_identity}.md"
 
     digest_only = root / f"knowledge/daily/receipts/{source.sha256}.md"
     assert (receipt.is_file(), digest_only.exists()) == (True, False)
-    record = compile_memory.parse_compile_receipt_v3(
+    record = compile_memory.parse_compile_receipt_v4(
         receipt.read_bytes(),
         logical_path=source.logical_path,
         source_sha256=source.sha256,
@@ -359,8 +358,8 @@ def test_v3_receipt_path_and_body_bind_source_path_not_only_digest(vault):
         record["operation_id"],
     ) == (
         source_identity,
-        source.receipt_descriptor(),
-        batch.manifest_sha256,
+        descriptor,
+        sha256_bytes(canonical_json_bytes([descriptor])),
         result.operation_id,
     )
     assert "completed_at" not in record
@@ -448,7 +447,7 @@ def test_v3_compile_uses_supplied_canonical_owner(vault):
     assert result.state == "committed"
 
 
-def test_successful_v3_retry_keeps_operation_receipt_path_and_bytes(
+def test_successful_v4_retry_keeps_operation_receipt_path_and_bytes(
     vault, monkeypatch
 ):
     root, state_root = vault
@@ -481,12 +480,12 @@ def test_successful_v3_retry_keeps_operation_receipt_path_and_bytes(
             completed_at="2026-07-14T12:00:00Z",
         )
     source = batch.manifest[0]
-    identity = compile_memory.compile_source_identity(
-        source.logical_path, source.sha256
+    identity = compile_memory.compile_context_source_identity(
+        compile_memory._v4_source_descriptor(batch.inputs.dailies[0])
     )
-    receipt = root / f"knowledge/daily/receipts/v3-{identity}.md"
+    receipt = root / f"knowledge/daily/receipts/v4-{identity}.md"
     first_bytes = receipt.read_bytes()
-    first_record = compile_memory.parse_compile_receipt_v3(
+    first_record = compile_memory.parse_compile_receipt_v4(
         first_bytes,
         logical_path=source.logical_path,
         source_sha256=source.sha256,
@@ -1184,7 +1183,7 @@ def test_append_after_snapshot_remains_pending_even_after_receipt(vault):
     assert selected == [daily]
 
 
-def test_exact_legacy_diagnostic_suppresses_migration_only_compile(vault):
+def test_legacy_diagnostic_cannot_invent_verified_original_context(vault):
     root, state_root = vault
     daily = _daily(root)
     import compile_memory
@@ -1195,7 +1194,7 @@ def test_exact_legacy_diagnostic_suppresses_migration_only_compile(vault):
         coordinator=MarkdownCoordinator(root, state_root),
     )
 
-    assert selected == []
+    assert selected == [daily]
 
 
 def test_v2_receipt_alone_never_suppresses_normal_selection(vault):
@@ -2121,7 +2120,7 @@ def test_a_split_day_is_recorded_by_the_whole_file_not_its_last_part(
     bounds = compile_memory._daily_part_bounds(content)
     assert len(bounds) > 1, "this day is supposed to split into parts"
     monkeypatch.setattr(
-        compile_memory, "_receipt_predicate", lambda _coordinator: lambda *_a: True
+        compile_memory, "_receipt_predicate", lambda _coordinator, **_kwargs: lambda *_a: True
     )
 
     compile_memory._repair_compile_mirror(object())
@@ -2142,7 +2141,7 @@ def test_a_day_without_receipts_for_every_part_is_left_alone(vault, monkeypatch)
     daily = root / "knowledge/daily/2026-07-15.md"
     daily.write_bytes(b"# 2026-07-15\n\nshort day\n")
     monkeypatch.setattr(
-        compile_memory, "_receipt_predicate", lambda _coordinator: lambda *_a: False
+        compile_memory, "_receipt_predicate", lambda _coordinator, **_kwargs: lambda *_a: False
     )
 
     compile_memory._repair_compile_mirror(object())

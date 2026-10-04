@@ -12,6 +12,7 @@ import functools
 import getpass
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -50,14 +51,17 @@ from reliable_memory import (
     _set_owner_only,
     begin_immediate,
     canonical_json_bytes,
+    configure_operational_deadline,
     durable_publish_file,
     fsync_directory,
     fsync_file,
     open_operational_db,
     open_readonly_operational_db,
+    operational_deadline_active,
     publish_runtime_file,
     quote_sqlite_identifier,
     read_runtime_bytes,
+    refresh_operational_deadline,
     restricted_relative_path,
     run_resumable_migration,
     sha256_bytes,
@@ -1715,10 +1719,10 @@ def _v3_operation_violations(database: sqlite3.Connection) -> int:
     ).fetchone()[0]
 
 
-def require_coordinator_v3_openable(path: Path, *, state_root: Path) -> None:
+def require_coordinator_v3_openable(path: Path, *, state_root: Path, deadline: float | None = None) -> None:
     """Check the adopted file's place, connection contract and complete schema."""
     _require_inside_state_root(Path(path), Path(state_root))
-    with contextlib.closing(open_readonly_operational_db(Path(path), Path(state_root), max_bytes=1 << 50, owner_only=True, busy_ms=DEFAULTS.markdown_busy_ms, contract=_COORDINATOR_V3_CONTRACT)) as database:
+    with contextlib.closing(open_readonly_operational_db(Path(path), Path(state_root), max_bytes=1 << 50, owner_only=True, busy_ms=DEFAULTS.markdown_busy_ms, contract=_COORDINATOR_V3_CONTRACT, deadline=deadline)) as database:
         if not _coordinator_v3_schema_complete(database):
             raise _coordinator_migration_error("coordinator_v3_schema_incomplete", "coordinator v3 schema is incomplete")
 
@@ -3710,12 +3714,18 @@ def _reliability_v3_records_present(state_root: Path) -> bool:
     return any(path.exists() or path.is_symlink() for path in records)
 
 
-def _adoption_validation_key(vault: Path, state_root: Path) -> tuple[object, ...]:
+def _adoption_record_digest(path: Path, state_root: Path, deadline: float | None) -> str:
+    operational_deadline_active(deadline)
+    digest = sha256_bytes(read_runtime_bytes(path, state_root, max_bytes=1024 * 1024, owner_only=True))
+    operational_deadline_active(deadline)
+    return digest
+
+
+def _adoption_validation_key(vault: Path, state_root: Path, *, deadline: float | None = None) -> tuple[object, ...]:
+    operational_deadline_active(deadline)
     run_root = Path(state_root) / "run"
     records = tuple(
-        sha256_bytes(
-            read_runtime_bytes(path, state_root, max_bytes=1024 * 1024, owner_only=True)
-        )
+        _adoption_record_digest(path, state_root, deadline)
         for path in (
             run_root / "reliability-v3-migration.json",
             run_root / "reliability-v3-adopted.json",
@@ -3726,7 +3736,9 @@ def _adoption_validation_key(vault: Path, state_root: Path) -> tuple[object, ...
         16 * 1024 * 1024,
         label="installed integration adapter",
     )
+    operational_deadline_active(deadline)
     identities = tuple(_active_database_identity(run_root / name) for name in ("queue-v3.sqlite3", "markdown-transactions-v3.sqlite3"))
+    operational_deadline_active(deadline)
     return (str(vault), str(state_root), *records, sha256_bytes(integration), *identities)
 
 
@@ -3744,7 +3756,7 @@ def _transient_adoption_contention(error: BaseException) -> bool:
     return False
 
 
-def _retire_strays_before_validation(state_root: Path) -> None:
+def _retire_strays_before_validation(state_root: Path, *, deadline: float | None = None) -> None:
     """A provably stray candidate is moved aside here, where it would refuse.
 
     Only when a candidate exists: two `lstat`s otherwise. A candidate that holds
@@ -3754,17 +3766,18 @@ def _retire_strays_before_validation(state_root: Path) -> None:
     """
     from installed_memory_repair import STRAY_CANDIDATE_NAMES, retire_stray_candidates
 
+    operational_deadline_active(deadline)
     run = Path(state_root) / "run"
     if not any(os.path.lexists(run / name) for name in STRAY_CANDIDATE_NAMES):
         return
-    retire_stray_candidates(state_root, datetime.now(timezone.utc))
+    retire_stray_candidates(state_root, datetime.now(timezone.utc), deadline=deadline)
 
 
-def _validate_adoption_with_retry(vault: Path, state_root: Path) -> None:
+def _validate_adoption_with_retry(vault: Path, state_root: Path, *, deadline: float | None = None) -> None:
     from installed_memory_repair import require_reliability_v3_admission
 
-    _retire_strays_before_validation(state_root)
-    _retry_adoption_validation(vault, state_root, require_reliability_v3_admission)
+    _retire_strays_before_validation(state_root, deadline=deadline)
+    _retry_adoption_validation(vault, state_root, require_reliability_v3_admission, deadline=deadline)
 
 
 def require_adopted_through_contention(vault: Path, state_root: Path) -> None:
@@ -3774,41 +3787,83 @@ def require_adopted_through_contention(vault: Path, state_root: Path) -> None:
     _retry_adoption_validation(vault, state_root, require_reliability_v3_adopted)
 
 
-def _retry_adoption_validation(vault: Path, state_root: Path, validate) -> None:
-    deadline = time.monotonic() + _ADOPTION_VALIDATION_SECONDS
+def _adoption_retry_pause(error: Exception, deadline: float) -> None:
+    if not _transient_adoption_contention(error):
+        raise error
+    operational_deadline_active(deadline)
+    time.sleep(min(_WRITER_RETRY_CAP_SECONDS, max(0.0, deadline - time.monotonic())))
+
+
+def _invoke_adoption_validator(validate, vault: Path, state_root: Path, deadline: float | None) -> None:
+    if deadline is None:
+        validate(root=vault, state_root=state_root)
+        return
+    validate(root=vault, state_root=state_root, deadline=deadline)
+
+
+def _adoption_validator_deadline(caller: float | None, retry_deadline: float) -> float | None:
+    if caller is None:
+        return None
+    return retry_deadline
+
+
+def _retry_adoption_validation(vault: Path, state_root: Path, validate, *, deadline: float | None = None) -> None:
+    operational_deadline_active(deadline)
+    retry_deadline = time.monotonic() + _ADOPTION_VALIDATION_SECONDS
+    if deadline is not None:
+        retry_deadline = min(retry_deadline, deadline)
     while True:
         try:
-            validate(root=vault, state_root=state_root)
-            break
+            _invoke_adoption_validator(validate, vault, state_root, _adoption_validator_deadline(deadline, retry_deadline))
+            operational_deadline_active(deadline)
+            return
         except Exception as exc:
-            if not _transient_adoption_contention(exc) or time.monotonic() >= deadline:
-                raise
-            time.sleep(_WRITER_RETRY_CAP_SECONDS)
+            _adoption_retry_pause(exc, retry_deadline)
 
 
-def _require_adopted_once(vault: Path, state_root: Path) -> None:
-    key = _adoption_validation_key(vault, state_root)
-    with _ADOPTION_VALIDATION_LOCK:
+def _acquire_adoption_validation_lock(deadline: float | None) -> None:
+    operational_deadline_active(deadline)
+    if deadline is None or math.isinf(deadline):
+        _ADOPTION_VALIDATION_LOCK.acquire()
+        return
+    if not _ADOPTION_VALIDATION_LOCK.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        raise TimeoutError("adoption validation mutex deadline expired")
+
+
+@contextlib.contextmanager
+def _adoption_validation_guard(deadline: float | None) -> Iterator[None]:
+    _acquire_adoption_validation_lock(deadline)
+    try:
+        operational_deadline_active(deadline)
+        yield
+    finally:
+        _ADOPTION_VALIDATION_LOCK.release()
+
+
+def _require_adopted_once(vault: Path, state_root: Path, *, deadline: float | None = None) -> None:
+    operational_deadline_active(deadline)
+    key = _adoption_validation_key(vault, state_root, deadline=deadline)
+    with _adoption_validation_guard(deadline):
         if key in _ADOPTION_VALIDATION_CACHE:
             return
-    _validate_adoption_with_retry(vault, state_root)
-    with _ADOPTION_VALIDATION_LOCK:
+    _validate_adoption_with_retry(vault, state_root, deadline=deadline)
+    with _adoption_validation_guard(deadline):
         _ADOPTION_VALIDATION_CACHE.add(key)
 
 
-def active_markdown_coordinator(vault: Path, state_root: Path) -> MarkdownCoordinator:
+def active_markdown_coordinator(vault: Path, state_root: Path, *, deadline: float | None = None) -> MarkdownCoordinator:
     """Open the validated adopted coordinator-v3 database for normal writes."""
     resolved_vault = Path(vault).resolve(strict=True)
     state = Path(state_root).absolute()
-    _require_adopted_once(resolved_vault, state)
+    _require_adopted_once(resolved_vault, state, deadline=deadline)
     path = state / "run" / "markdown-transactions-v3.sqlite3"
-    coordinator = MarkdownCoordinator._from_v3_active(path, state_root=state)
+    coordinator = MarkdownCoordinator._from_v3_active(path, state_root=state, deadline=deadline)
     coordinator.vault = resolved_vault
     return coordinator
 
 
 def active_or_legacy_coordinator(
-    vault: Path, state_root: Path
+    vault: Path, state_root: Path, *, deadline: float | None = None
 ) -> MarkdownCoordinator:
     """The adopted V3 coordinator where adoption is in force, else the legacy one.
 
@@ -3818,9 +3873,10 @@ def active_or_legacy_coordinator(
     which coordinator a writer gets; a writer that constructs one itself
     bypasses adoption and dies on the tombstone.
     """
+    operational_deadline_active(deadline)
     if _reliability_v3_records_present(state_root):
-        return active_markdown_coordinator(vault, state_root)
-    return MarkdownCoordinator(vault, state_root)
+        return active_markdown_coordinator(vault, state_root, deadline=deadline)
+    return MarkdownCoordinator(vault, state_root, deadline=deadline)
 
 
 def _default_coordinator() -> MarkdownCoordinator:
@@ -5209,8 +5265,8 @@ class MarkdownCoordinator:
         return cls._from_validated_v3_database(path, state_root=state_root)
 
     @classmethod
-    def _from_v3_active(cls, path: Path, *, state_root: Path) -> MarkdownCoordinator:
-        require_coordinator_v3_openable(path, state_root=state_root)
+    def _from_v3_active(cls, path: Path, *, state_root: Path, deadline: float | None = None) -> MarkdownCoordinator:
+        require_coordinator_v3_openable(path, state_root=state_root, deadline=deadline)
         return cls._from_validated_v3_database(path, state_root=state_root)
 
     @classmethod
@@ -5225,7 +5281,8 @@ class MarkdownCoordinator:
         coordinator._database_contract = _COORDINATOR_V3_CONTRACT
         return coordinator
 
-    def __init__(self, vault: Path, state_root: Path):
+    def __init__(self, vault: Path, state_root: Path, *, deadline: float | None = None):
+        operational_deadline_active(deadline)
         self.vault = Path(vault).resolve(strict=True)
         if not self.vault.is_dir():
             raise ValueError(f"vault is not a directory: {self.vault}")
@@ -5239,16 +5296,17 @@ class MarkdownCoordinator:
         _set_owner_only(self.transaction_root, 0o700)
         self.database_path = self.run_root / "markdown-transactions.sqlite3"
         self._local = threading.local()
-        self._initialize_database()
+        self._initialize_database(deadline=deadline)
 
     @contextlib.contextmanager
     def _connect(
-        self, *, busy_ms: int | None = None
+        self, *, busy_ms: int | None = None, deadline: float | None = None
     ) -> Iterator[sqlite3.Connection]:
         database = open_operational_db(
             self.database_path,
             busy_ms=DEFAULTS.markdown_busy_ms if busy_ms is None else busy_ms,
             contract=getattr(self, "_database_contract", None),
+            deadline=deadline,
         )
         try:
             # Preserve this legacy context manager's implicit commit/rollback API.
@@ -5256,8 +5314,10 @@ class MarkdownCoordinator:
             _relax_legacy_state_constraint(database)
             with database:
                 yield database
+                refresh_operational_deadline(database, DEFAULTS.markdown_busy_ms, deadline)
         finally:
             database.close()
+            operational_deadline_active(deadline)
 
     def _ownership_registry(self) -> object:
         from operational_ownership import OwnershipRegistry
@@ -5471,8 +5531,8 @@ class MarkdownCoordinator:
             _require_live_intent_fence(database, intent_fence, now)
             _project_binding_row(database, binding, intent_fence, now)
 
-    def _initialize_database(self) -> None:
-        with self._connect() as database:
+    def _initialize_database(self, *, deadline: float | None = None) -> None:
+        with self._connect(deadline=deadline) as database:
             # executescript commits any pending transaction before its script.
             database.executescript("BEGIN IMMEDIATE;\n" + _COORDINATOR_V2_SCHEMA_SQL)
             _add_writer_owner_columns(database)
@@ -5908,7 +5968,34 @@ class MarkdownCoordinator:
             raise ValueError("duplicate transaction target")
         return normalized
 
-    def committed_attempt(self, operation_id: str):
+    @staticmethod
+    def _authority_read_active(deadline: float | None) -> None:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("transaction authority read deadline reached")
+
+    @staticmethod
+    def _authority_read_busy_ms(deadline: float | None) -> int:
+        if deadline is None or deadline == float("inf"):
+            return DEFAULTS.markdown_busy_ms
+        return min(DEFAULTS.markdown_busy_ms, max(0, int((deadline - time.monotonic()) * 1000)))
+
+    @contextlib.contextmanager
+    def _authority_read_connection(self, deadline: float | None):
+        self._authority_read_active(deadline)
+        try:
+            with self._connect(busy_ms=self._authority_read_busy_ms(deadline), deadline=deadline) as database:
+                self._configure_authority_read(database, deadline)
+                yield database
+                self._authority_read_active(deadline)
+        except (sqlite3.OperationalError, TimeoutError):
+            self._authority_read_active(deadline)
+            raise
+
+    def _configure_authority_read(self, database, deadline):
+        self._authority_read_active(deadline)
+        configure_operational_deadline(database, deadline)
+
+    def committed_attempt(self, operation_id: str, *, deadline: float | None = None):
         """The attempt of this operation that committed, ordinals included.
 
         Evidence written by a compile names the operation identity derived from
@@ -5919,13 +6006,13 @@ class MarkdownCoordinator:
         Callers still have to prove the bytes: this only says which attempt to
         ask.
         """
-        record = self._record_for_operation_id(operation_id)
+        record = self._record_for_operation_id(operation_id, deadline=deadline)
         if record is not None and record.state == "committed":
             return record
-        return self._committed_attempt_by_ordinal(operation_id)
+        return self._committed_attempt_by_ordinal(operation_id, deadline=deadline)
 
-    def _committed_attempt_by_ordinal(self, operation_id: str):
-        with self._connect() as database:
+    def _committed_attempt_by_ordinal(self, operation_id: str, *, deadline: float | None = None):
+        with self._authority_read_connection(deadline) as database:
             row = database.execute(
                 'SELECT id FROM "transaction" WHERE operation_id LIKE ? ESCAPE ? '
                 "AND state = 'committed' ORDER BY created_at DESC, rowid DESC "
@@ -5934,7 +6021,7 @@ class MarkdownCoordinator:
             ).fetchone()
         if row is None:
             return None
-        return self._record(row["id"])
+        return self._record(row["id"], deadline=deadline)
 
     def attempt_operation_id(
         self, operation_id: str, *, deadline: float | None = None,
@@ -9956,14 +10043,14 @@ class MarkdownCoordinator:
             ).fetchone()
         return None if row is None else str(row["state"])
 
-    def _record(self, transaction_id: str) -> TransactionRecord:
-        record = self._record_if_present(transaction_id)
+    def _record(self, transaction_id: str, *, deadline: float | None = None) -> TransactionRecord:
+        record = self._record_if_present(transaction_id, deadline=deadline)
         if record is None:
             raise KeyError(f"unknown transaction: {transaction_id}")
         return record
 
-    def _record_if_present(self, transaction_id: str) -> TransactionRecord | None:
-        with self._connect() as database:
+    def _record_if_present(self, transaction_id: str, *, deadline: float | None = None) -> TransactionRecord | None:
+        with self._authority_read_connection(deadline) as database:
             row = database.execute(
                 'SELECT * FROM "transaction" WHERE id = ?', (transaction_id,)
             ).fetchone()
@@ -10004,17 +10091,17 @@ class MarkdownCoordinator:
             ).fetchone()
         return row is not None and row["artifacts_pruned_at"] is not None
 
-    def operation_id_at(self, sequence: int) -> str | None:
+    def operation_id_at(self, sequence: int, *, deadline: float | None = None) -> str | None:
         """The operation a committed transaction ran, by its commit sequence (rowid)."""
-        with self._connect() as database:
+        with self._authority_read_connection(deadline) as database:
             row = database.execute(
                 'SELECT operation_id FROM "transaction" WHERE rowid=? AND state=\'committed\'',
                 (sequence,),
             ).fetchone()
         return None if row is None else str(row["operation_id"])
 
-    def _record_for_operation_id(self, operation_id: str) -> TransactionRecord | None:
-        with self._connect() as database:
+    def _record_for_operation_id(self, operation_id: str, *, deadline: float | None = None) -> TransactionRecord | None:
+        with self._authority_read_connection(deadline) as database:
             row = database.execute(
                 'SELECT id, state FROM "transaction" WHERE operation_id = ?',
                 (operation_id,),
@@ -10022,7 +10109,7 @@ class MarkdownCoordinator:
         if row is None:
             return None
         try:
-            return self._record(row["id"])
+            return self._record(row["id"], deadline=deadline)
         except KeyError:
             if row["state"] == "preparing":
                 return None

@@ -73,11 +73,11 @@ def _old_attempts(coordinator):
 
 
 def _erase_receipt(root, coordinator):
-    next((root / "knowledge/daily/receipts").glob("v3-*.md")).unlink()
+    next((root / "knowledge/daily/receipts").glob("v4-*.md")).unlink()
 
 
 def _alter_receipt(root, coordinator):
-    receipt = next((root / "knowledge/daily/receipts").glob("v3-*.md"))
+    receipt = next((root / "knowledge/daily/receipts").glob("v4-*.md"))
     receipt.write_bytes(receipt.read_bytes() + b"changed bytes\n")
 
 
@@ -105,9 +105,21 @@ def _noncompile_attempt(root, coordinator):
         database.execute('UPDATE "transaction" SET operation_id=\'other:\'||id WHERE state=\'quarantined\'')
 
 
+def _alter_source_context(root, coordinator):
+    daily = root / "knowledge/daily/2026-07-14.md"
+    daily.write_bytes(b"Changed earlier source context.\n" + daily.read_bytes())
+
+
+def _alter_retained_plan(root, coordinator):
+    for identifier in _old_attempts(coordinator):
+        path = coordinator.state_root / "run/transactions" / identifier / "plan.json"
+        path.write_bytes(path.read_bytes() + b"\n")
+
+
 @pytest.mark.parametrize("invalidate", [
     _erase_receipt, _alter_receipt, _uncommitted_authority,
     _alter_operation_authority, _alter_staged_image, _noncompile_attempt,
+    _alter_source_context, _alter_retained_plan,
 ])
 def test_incomplete_or_unverified_outcomes_keep_the_refusal(vault, monkeypatch, invalidate):
     import doctor
@@ -117,6 +129,8 @@ def test_incomplete_or_unverified_outcomes_keep_the_refusal(vault, monkeypatch, 
     invalidate(root, coordinator)
     with coordinator._connect() as database:
         assert all(not doctor._compile_snapshot_was_written(database, identifier, root, state) for identifier in identifiers)
+        reader = doctor._CompiledDaySupersession(root, coordinator.state_root, database=database)
+        assert all(not reader._source_context_outcome(identifier) for identifier in identifiers)
 
 
 def test_decoded_images_keep_the_shared_format_and_evidence_budget():

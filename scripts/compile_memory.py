@@ -28,6 +28,7 @@ Pages, the in-process index, log entry, and receipts commit in one recoverable t
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -133,6 +134,7 @@ COMPILE_PLAN_SCHEMA = Path(__file__).with_name("schemas") / "compile-plan-v2.jso
 COMPILE_PUBLICATION_ATTEMPTS = 4
 COMPILE_RECEIPT_SCHEMA = Path(__file__).with_name("schemas") / "compile-receipt-v2.json"
 COMPILE_RECEIPT_V3_SCHEMA = Path(__file__).with_name("schemas") / "compile-receipt-v3.json"
+COMPILE_RECEIPT_V4_SCHEMA = Path(__file__).with_name("schemas") / "compile-receipt-v4.json"
 # One malformed generation used to lose a whole compile. Current practice caps
 # structured-output retries at about three attempts in total, because a prompt
 # that needs more than that needs work rather than more calls.
@@ -195,8 +197,8 @@ ALLOWED_CATEGORIES = frozenset(
     {"concepts", "decisions", "patterns", "debugging", "qa"}
 )
 DRAFT_PROGRAM = (
-    "compile-draft/v4: skeptical complete-line evidence semantic operations "
-    "with derived-provenance claims"
+    "compile-draft/v5: skeptical complete-line evidence semantic operations "
+    "with immutable original-entry context and derived-provenance claims"
 )
 CRITIQUE_PROGRAM = (
     "compile-critique/v3: specificity durability evidence completeness, "
@@ -317,6 +319,9 @@ class DailySnapshot:
     part_count: int = 1
     byte_start: int = 0
     byte_end: int = 0
+    original_content: bytes | None = None
+    original_sha256: str = ""
+    original_entries: tuple[tuple[str, int, int], ...] = ()
 
     @property
     def part_key(self) -> str:
@@ -534,6 +539,8 @@ def _daily_parts(
 ) -> list[DailySnapshot]:
     """This day as the one or more parts the compiler still has to take."""
     bounds = _daily_part_bounds(content)
+    original_digest = sha256_bytes(content)
+    original_entries = tuple(daily_entries(content))
     parts = [
         DailySnapshot(
             logical_path,
@@ -543,22 +550,28 @@ def _daily_parts(
             part_count=len(bounds),
             byte_start=start,
             byte_end=end,
+            original_content=content,
+            original_sha256=original_digest,
+            original_entries=original_entries,
         )
         for index, (start, end) in enumerate(bounds)
     ]
     if compiled is None:
         return parts
-    return [part for part in parts if not compiled(part.logical_path, part.sha256)]
+    return [part for part in parts if not _snapshot_compiled(compiled, part)]
 
 
 def daily_is_compiled(
     logical_path: str, content: bytes, compiled: Callable[[str, str], bool]
 ) -> bool:
     """Whether every part of this day already has a receipt."""
-    return all(
-        compiled(logical_path, sha256_bytes(content[start:end]))
-        for start, end in _daily_part_bounds(content)
-    )
+    return all(_snapshot_compiled(compiled, part) for part in _daily_parts(logical_path, content))
+
+
+def _snapshot_compiled(compiled: Callable[[str, str], bool], part: DailySnapshot) -> bool:
+    if isinstance(compiled, _ContextReceiptSelector):
+        return compiled.matches(part)
+    return compiled(part.logical_path, part.sha256)
 
 
 def _source_descriptor(snapshot: DailySnapshot) -> SourceDescriptor:
@@ -692,12 +705,12 @@ def partition_packable(
     return _without_days(inputs, set(refused)), tuple(_only_day(inputs, day) for day in refused)
 
 
-def _refused_day_outcome(day: CompileInputs) -> BatchOutcome:
+def _refused_day_outcome(day: CompileInputs, *, deadline: float = math.inf) -> BatchOutcome:
     """A day no part budget can take fails alone, recorded like any failed batch."""
     path = day.dailies[0].logical_path
     _record_oversized_daily(path)
     refusal = ValueError(f"daily source exceeds compile input budget: {path}")
-    return BatchOutcome(_record_failed_batch(day, refusal))
+    return BatchOutcome(_record_failed_batch(day, refusal, deadline=deadline))
 
 
 def pack_compile_batches(
@@ -1139,9 +1152,10 @@ def _require_transaction_authority(
     path: Path,
     vault: Path,
     raw_bytes: bytes,
+    *, deadline: float | None = None,
 ) -> None:
     """A receipt is evidence only when a committed transaction wrote those bytes."""
-    transaction = coordinator.committed_attempt(str(record["operation_id"]))
+    transaction = coordinator.committed_attempt(str(record["operation_id"]), deadline=deadline)
     if transaction is None:
         raise ValueError("compile receipt has no committed transaction authority")
     operations = _transaction_operations(transaction)
@@ -1307,9 +1321,11 @@ class _CompileAttempt:
         draft_call = _call_descriptor(descriptor, DRAFT_PROGRAM_HASH, mode)
         critique_call = _call_descriptor(descriptor, CRITIQUE_PROGRAM_HASH, mode)
         return (
-            _action_descriptor(self.source_descriptors, draft_call, (), critique=False),
+            _action_descriptor(self.source_descriptors, draft_call, (), critique=False,
+                               entry_context=_entry_context_identity(self.inputs)),
             _action_descriptor(
-                self.source_descriptors, draft_call, (critique_call,), critique=True
+                self.source_descriptors, draft_call, (critique_call,), critique=True,
+                entry_context=_entry_context_identity(self.inputs),
             ),
         )
 
@@ -1669,13 +1685,14 @@ def _action_descriptor(
     critiques: tuple[CompileCallDescriptor, ...],
     *,
     critique: bool,
+    entry_context: list[dict[str, object]] | None = None,
 ) -> CompileActionDescriptor:
     return CompileActionDescriptor(
         compiler_version=COMPILER_VERSION,
         schema_version=COMPILE_PLAN_SCHEMA_VERSION,
         schema_hash=COMPILE_PLAN_SCHEMA_HASH,
         normalization_version=NORMALIZATION_VERSION,
-        feature_flags={"critique": critique},
+        feature_flags={"critique": critique, "original_entry_context": entry_context},
         draft_calls=(draft,),
         critique_calls=critiques,
         sources=sources,
@@ -1703,7 +1720,65 @@ so a value you invent for them is discarded. Omit claims when the lines settle n
 Return an object with operations in the semantic compile format.
 
 IMMUTABLE SOURCES
-{_input_blob(inputs)}"""
+{_input_blob(inputs)}
+
+ORIGINAL ENTRY CONTEXT (metadata only; cite only complete lines inside the selected part)
+{_entry_context(inputs)}"""
+
+
+def _entry_context(inputs: CompileInputs) -> str:
+    return canonical_json_bytes([
+        {
+            "source_path": part.logical_path,
+            "part_start": part.byte_start,
+            "part_end": part.byte_end,
+            "entry_ids": _part_entry_ids(part),
+        }
+        for part in inputs.dailies if part.original_content is not None
+    ]).decode()
+
+
+def _part_entry_ids(part: DailySnapshot) -> list[str]:
+    return [
+        block_id for block_id, start, end in part.original_entries
+        if start < part.byte_end and end > part.byte_start
+    ]
+
+
+def _entry_context_identity(inputs: CompileInputs) -> list[dict[str, object]]:
+    return [
+        {
+            "source_path": part.logical_path,
+            "physical_digest": _physical_source(part).sha256,
+            "part_start": part.byte_start,
+            "part_end": part.byte_end,
+        }
+        for part in inputs.dailies if part.original_content is not None
+    ]
+
+
+def _physical_source(part: DailySnapshot) -> SourceSnapshot:
+    content = part.original_content
+    if content is None:
+        return SourceSnapshot(part.logical_path, part.content, part.sha256)
+    return SourceSnapshot(part.logical_path, content, part.original_sha256)
+
+
+def _reference_source(inputs: CompileInputs, reference: EvidenceRef) -> SourceSnapshot:
+    parts = _dailies_for_evidence(inputs, reference.daily_id)
+    matched = [part for part in parts if _part_holds_reference(part, reference)]
+    if len(matched) != 1:
+        raise ValueError("compile claim evidence source is absent from the snapshot")
+    return _physical_source(matched[0])
+
+
+def _part_holds_reference(part: DailySnapshot, reference: EvidenceRef) -> bool:
+    physical = _physical_source(part)
+    if physical.sha256 != reference.source_sha256:
+        return False
+    if part.original_content is None:
+        return 0 <= reference.byte_start < reference.byte_end <= len(part.content)
+    return part.byte_start <= reference.byte_start < reference.byte_end <= part.byte_end
 
 
 def _cited_evidence(
@@ -2055,23 +2130,6 @@ def _escape_yaml(value: object) -> str:
     )
 
 
-def _daily_for_evidence(
-    inputs: CompileInputs, date: str, digest: str
-) -> DailySnapshot | None:
-    """The one part of that day whose bytes the reference names.
-
-    A long day is carried as several parts under one logical path, so asking for
-    the sole snapshot of a date returned nothing the moment a day passed 16 KiB
-    — and every real daily of this vault is far past that. This is the same
-    defect fixed for quoted evidence on 2026-08-24; the claim path read a
-    different helper and kept it. The digest in the reference names exactly one
-    part, so there is no ambiguity to resolve.
-    """
-    parts = _dailies_for_evidence(inputs, date)
-    matches = [item for item in parts if item.sha256 == digest]
-    return matches[0] if len(matches) == 1 else None
-
-
 def _dailies_for_evidence(inputs: CompileInputs, date: str) -> list[DailySnapshot]:
     """Every part of that day the run carries.
 
@@ -2275,16 +2333,18 @@ def _bound_evidence_block(item: object, inputs: CompileInputs) -> tuple[dict[str
     quote_offset = _sole_quote_offset(block, quote_bytes)
     quote, quote_bytes, quote_offset = _completed_line(block, quote_offset, quote_bytes, quote)
     quote_start = marker_at + quote_offset
+    physical = _physical_source(source)
+    _require_whole_physical_line(physical.content, quote_start, quote_bytes)
     reference = EvidenceRef(
         date,
-        source.sha256,
+        physical.sha256,
         timestamp,
         quote_start,
         quote_start + len(quote_bytes),
     )
     EvidenceResolver(ROOT).resolve_bytes(
         reference,
-        source.content,
+        physical.content,
         source_path=ROOT / source.logical_path,
     )
     binding = {
@@ -2294,6 +2354,13 @@ def _bound_evidence_block(item: object, inputs: CompileInputs) -> tuple[dict[str
         "reference": str(reference),
     }
     return binding, block
+
+
+def _require_whole_physical_line(content: bytes, start: int, quote: bytes) -> None:
+    line_start, line_end = _line_bounds(content, start, len(quote))
+    actual = content[line_start:line_end].decode("utf-8", errors="strict")
+    if _without_bullet(actual) != quote.decode("utf-8", errors="strict"):
+        raise ValueError("compile evidence is not a complete physical source line")
 
 
 # Every claim dropped in this process, so the compile can report the count
@@ -2479,9 +2546,7 @@ def _verified_claim_quote(binding: Mapping[str, str], inputs: CompileInputs) -> 
     shorter original quote.
     """
     reference = EvidenceRef.parse(binding["reference"])
-    source = _daily_for_evidence(inputs, reference.daily_id, reference.source_sha256)
-    if source is None:
-        raise ValueError("compile claim evidence source is absent from the snapshot")
+    source = _reference_source(inputs, reference)
     return source.content[reference.byte_start:reference.byte_end].decode("utf-8", errors="strict")
 
 
@@ -2605,6 +2670,12 @@ def _evidence_block(
     knowledge/notes/daily-entry-quote-anchor-decision.md.
     """
     content = _source_content(source)
+    if isinstance(source, DailySnapshot) and source.original_content is not None:
+        return _continuation_block(source, timestamp, quote_bytes)
+    return _entry_block(content, timestamp, quote_bytes)
+
+
+def _entry_block(content: bytes, timestamp: str, quote_bytes: bytes) -> tuple[bytes, int]:
     declared = _declaring_entries(content, timestamp)
     matched = declared
     if len(matched) > 1:
@@ -2613,6 +2684,36 @@ def _evidence_block(
         raise ValueError(_ambiguous_block_message(timestamp, declared, matched))
     start, end = matched[0]
     return content[start:end], start
+
+
+def _continuation_block(
+    source: DailySnapshot, timestamp: str, quote_bytes: bytes
+) -> tuple[bytes, int]:
+    content = source.original_content
+    declared = _original_declaring_entries(source, timestamp)
+    spans = _selected_entry_spans(source, declared)
+    matched = spans
+    if len(spans) > 1:
+        matched = _quote_bearing(content, spans, quote_bytes)
+    if len(matched) != 1:
+        raise ValueError(_ambiguous_block_message(timestamp, declared, matched))
+    start, end = matched[0]
+    return content[start:end], start
+
+
+def _selected_entry_spans(
+    source: DailySnapshot, declared: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    return [
+        (max(start, source.byte_start), min(end, source.byte_end))
+        for start, end in declared if start < source.byte_end and end > source.byte_start
+    ]
+
+
+def _original_declaring_entries(
+    source: DailySnapshot, timestamp: str
+) -> list[tuple[int, int]]:
+    return [(start, end) for block_id, start, end in source.original_entries if block_id == timestamp]
 
 
 def _ambiguous_block_message(
@@ -2720,11 +2821,7 @@ def _require_resolved_claim_evidence(
     claim_evidence: Mapping[str, object], inputs: CompileInputs
 ) -> None:
     reference = EvidenceRef.parse(claim_evidence["reference"])
-    source = _daily_for_evidence(
-        inputs, reference.daily_id, reference.source_sha256
-    )
-    if source is None:
-        raise ValueError("compile claim evidence source is absent from the snapshot")
+    source = _reference_source(inputs, reference)
     resolved = EvidenceResolver(ROOT).resolve_bytes(
         reference,
         source.content,
@@ -2991,7 +3088,123 @@ def _receipt_v3_bytes(
     ).encode()
 
 
-def _preflight_v3_receipts(
+def _v4_source_descriptor(part: DailySnapshot) -> dict[str, object]:
+    physical = _physical_source(part)
+    start, end = _snapshot_absolute_bounds(part)
+    _require_snapshot_source_hashes(part, physical)
+    if physical.content[start:end] != part.content:
+        raise ValueError("compile source context slice disagrees")
+    descriptor = _source_descriptor(part).receipt_descriptor()
+    descriptor.update({
+        "original_sha256": physical.sha256,
+        "original_byte_size": len(physical.content),
+        "byte_start": start,
+        "byte_end": end,
+    })
+    _require_v4_descriptor(descriptor)
+    return descriptor
+
+
+def _snapshot_absolute_bounds(part: DailySnapshot) -> tuple[int, int]:
+    if part.original_content is not None:
+        return part.byte_start, part.byte_end
+    return _standalone_snapshot_bounds(part)
+
+
+def _standalone_snapshot_bounds(part):
+    if part.part_count != 1 or part.byte_start != 0 or part.byte_end not in {0, len(part.content)}:
+        raise ValueError("compile source original context is absent")
+    return 0, len(part.content)
+
+
+def _require_snapshot_source_hashes(part, physical):
+    if sha256_bytes(physical.content) != physical.sha256 or sha256_bytes(part.content) != part.sha256:
+        raise ValueError("compile source context digest disagrees")
+
+
+def compile_context_source_identity(source: Mapping[str, object]) -> str:
+    return sha256_bytes(canonical_json_bytes({
+        "logical_path": source["logical_path"], "sha256": source["sha256"],
+        "original_sha256": source["original_sha256"],
+        "original_byte_size": source["original_byte_size"],
+        "byte_start": source["byte_start"], "byte_end": source["byte_end"],
+    }))
+
+
+def _require_v4_descriptor(source: Mapping[str, object]) -> None:
+    start, end = source["byte_start"], source["byte_end"]
+    if not (0 <= start <= end <= source["original_byte_size"]):
+        raise ValueError("compile source context bounds are invalid")
+    if end - start != source["byte_size"]:
+        raise ValueError("compile source context size disagrees")
+
+
+def _v4_manifest(inputs: CompileInputs) -> list[dict[str, object]]:
+    paths = [part.logical_path for part in inputs.dailies]
+    if len(paths) != len(set(paths)):
+        raise ValueError("two parts of one day in one compile batch")
+    return sorted((_v4_source_descriptor(part) for part in inputs.dailies),
+                  key=lambda item: item["logical_path"])
+
+
+def _context_dispositions(
+    manifest: Sequence[Mapping[str, object]], evidence: Sequence[Mapping[str, str]]
+) -> list[dict[str, str]]:
+    compiled_paths = {item["source_path"] for item in evidence}
+    return sorted(({
+        "source_identity": compile_context_source_identity(source),
+        "disposition": "compiled" if source["logical_path"] in compiled_paths else "no_durable_content",
+    } for source in manifest), key=lambda item: item["source_identity"])
+
+
+def _context_source_for(source: SourceDescriptor, manifest) -> dict[str, object]:
+    matches = [part for part in manifest
+               if part["logical_path"] == source.logical_path and part["sha256"] == source.sha256]
+    if len(matches) != 1:
+        raise ValueError("compile receipt work part is ambiguous or absent")
+    return matches[0]
+
+
+def _receipt_v4_bytes(
+    source: Mapping[str, object], *, manifest: Sequence[Mapping[str, object]],
+    packing: CompilePackingIdentity, provider_budget: Mapping[str, object],
+    action_key: str, operations: list[dict[str, str]], evidence: list[dict[str, str]],
+) -> bytes:
+    identity = compile_context_source_identity(source)
+    dispositions = _context_dispositions(manifest, evidence)
+    manifest_hash = sha256_bytes(canonical_json_bytes(manifest))
+    record = {
+        "schema_version": "compile-receipt/v4", "source": dict(source),
+        "source_identity": identity, "batch_manifest": list(manifest),
+        "batch_manifest_sha256": manifest_hash, "action_key": action_key,
+        "operation_id": _compile_operation_id(action_key, manifest_hash, dispositions),
+        "packing": packing.canonical(), "provider_budget": dict(provider_budget),
+        "dispositions": dispositions, "operations": sorted(operations, key=lambda item: item["path"]),
+        "evidence": _v4_receipt_evidence(source, identity, evidence),
+    }
+    validate_schema(record, COMPILE_RECEIPT_V4_SCHEMA)
+    return _context_receipt_document(record)
+
+
+def _v4_receipt_evidence(source, identity, evidence):
+    return sorted(({"source_identity": identity, **item} for item in evidence
+                   if item["source_path"] == source["logical_path"]
+                   and item["source_digest"] == source["sha256"]),
+                  key=lambda item: (item["operation_path"], item["source_path"], item["quote_sha256"]))
+
+
+def _context_receipt_document(record: Mapping[str, object]) -> bytes:
+    return (
+        "---\ntype: compile-receipt\nschema_version: compile-receipt/v4\n"
+        f"source_identity: {record['source_identity']}\n"
+        "status: completed\nconfidence: high\nsource_authority: ai-derived\n---\n\n"
+        "# Compile Receipt\n\n"
+        "One-sentence summary: This immutable receipt proves completion of a snapshot compile.\n\n"
+        "## Record\n```json\n" + canonical_json_bytes(record).decode() + "\n```\n"
+    ).encode()
+
+
+def _preflight_context_receipts(
     inputs: CompileInputs,
     plan: dict[str, object],
     *,
@@ -3005,20 +3218,14 @@ def _preflight_v3_receipts(
     receipt_operations, evidence_bindings = _materialized_operations(
         operations, inputs, completed_at
     )
-    dispositions = _compile_dispositions(batch.manifest, evidence_bindings)
-    operation_id = _compile_operation_id(
-        action_key, batch.manifest_sha256, dispositions
-    )
+    manifest = _v4_manifest(inputs)
     for source in batch.manifest:
-        receipt = _receipt_v3_bytes(
-            source,
-            manifest=batch.manifest,
-            manifest_sha256=batch.manifest_sha256,
+        receipt = _receipt_v4_bytes(
+            _context_source_for(source, manifest),
+            manifest=manifest,
             packing=batch.packing,
             provider_budget=provider_budget,
-            dispositions=dispositions,
             action_key=action_key,
-            operation_id=operation_id,
             operations=receipt_operations,
             evidence=evidence_bindings,
         )
@@ -3213,6 +3420,11 @@ def _require_v3_evidence_entry(
         raise ValueError("compile receipt evidence scope is invalid")
 
 
+def _receipt_reader_active(deadline: float | None) -> None:
+    if deadline is not None:
+        _require_compile_active(deadline, None)
+
+
 def read_compile_receipt_v3(
     logical_path: str,
     source_sha256: str,
@@ -3220,7 +3432,9 @@ def read_compile_receipt_v3(
     *,
     path: Path | None = None,
     vault: Path | None = None,
+    deadline: float | None = None,
 ) -> dict[str, object] | None:
+    _receipt_reader_active(deadline)
     source_identity = compile_source_identity(logical_path, source_sha256)
     path = compile_receipt_path(source_identity) if path is None else Path(path)
     vault = ROOT if vault is None else Path(vault)
@@ -3235,7 +3449,8 @@ def read_compile_receipt_v3(
             logical_path=logical_path,
             source_sha256=source_sha256,
         )
-        _require_transaction_authority(record, coordinator, path, vault, raw_bytes)
+        _require_transaction_authority(record, coordinator, path, vault, raw_bytes, deadline=deadline)
+        _receipt_reader_active(deadline)
         return record
     except (
         IndexError,
@@ -3246,6 +3461,110 @@ def read_compile_receipt_v3(
         json.JSONDecodeError,
     ) as exc:
         raise _corrupt_receipt(exc, path) from exc
+
+
+def parse_compile_receipt_v4(
+    raw_bytes: bytes, *, logical_path: str, source_sha256: str
+) -> dict[str, object]:
+    try:
+        return _parsed_receipt_v4(raw_bytes, logical_path, source_sha256)
+    except (IndexError, KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise _corrupt_receipt(exc) from exc
+
+
+def _parsed_receipt_v4(raw_bytes: bytes, logical_path: str, source_sha256: str):
+    frontmatter, body = raw_bytes.decode("utf-8", errors="strict").split("---\n", 2)[1:]
+    prefix = ("\n# Compile Receipt\n\n"
+              "One-sentence summary: This immutable receipt proves completion of a snapshot compile.\n\n"
+              "## Record\n```json\n")
+    record = _receipt_record(body, prefix, COMPILE_RECEIPT_V4_SCHEMA)
+    identity = compile_context_source_identity(record["source"])
+    _require_v4_frontmatter(_receipt_frontmatter(frontmatter), identity)
+    _require_v3_source(record, identity, logical_path, source_sha256)
+    _require_v4_manifest(record)
+    _require_v3_identity(record)
+    _require_v3_evidence_scope(record, identity, logical_path, source_sha256)
+    return record
+
+
+def _require_v4_frontmatter(fields, identity):
+    expected = {
+        "type": "compile-receipt", "schema_version": "compile-receipt/v4",
+        "source_identity": identity, "status": "completed",
+        "confidence": "high", "source_authority": "ai-derived",
+    }
+    if fields != expected:
+        raise ValueError("compile receipt frontmatter fields are invalid")
+
+
+def _require_v4_manifest(record):
+    manifest = record["batch_manifest"]
+    _require_sorted_manifest(manifest)
+    _require_v4_manifest_sources(record, manifest)
+    if sha256_bytes(canonical_json_bytes(manifest)) != record["batch_manifest_sha256"]:
+        raise ValueError("compile receipt manifest digest disagrees")
+    identities = sorted(compile_context_source_identity(item) for item in manifest)
+    if [item["source_identity"] for item in record["dispositions"]] != identities:
+        raise ValueError("compile receipt dispositions are incomplete")
+
+
+def _require_v4_manifest_sources(record, manifest):
+    paths = [item["logical_path"] for item in manifest]
+    if len(paths) != len(set(paths)) or record["source"] not in manifest:
+        raise ValueError("compile receipt source manifest is invalid")
+    for source in manifest:
+        _require_v4_descriptor(source)
+
+
+def parse_compile_receipt_version(raw_bytes, *, logical_path, source_sha256):
+    try:
+        reader = _receipt_version_reader(raw_bytes)
+        return reader(raw_bytes, logical_path=logical_path, source_sha256=source_sha256)
+    except UnsupportedCompileReceiptVersion:
+        raise
+    except (IndexError, KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise _corrupt_receipt(exc) from exc
+
+
+class UnsupportedCompileReceiptVersion(ValueError):
+    """An older reader must preserve evidence written by a newer version."""
+
+
+def _receipt_version_reader(raw_bytes):
+    record = json.loads(raw_bytes.split(b"```json\n", 1)[1].split(b"\n```", 1)[0])
+    if not isinstance(record, dict):
+        raise ValueError("compile receipt record must be an object")
+    readers = {"compile-receipt/v3": parse_compile_receipt_v3,
+               "compile-receipt/v4": parse_compile_receipt_v4}
+    reader = readers.get(record.get("schema_version"))
+    if reader is None:
+        raise UnsupportedCompileReceiptVersion("unsupported compile receipt version")
+    return reader
+
+
+def read_compile_receipt_version(logical_path, source_sha256, coordinator, *, path, vault=None, deadline=None):
+    path = Path(path)
+    vault = ROOT if vault is None else Path(vault)
+    try:
+        raw = read_stable_bytes(path, MAX_RECEIPT_BYTES, label="compile receipt")
+    except FileNotFoundError:
+        return None
+    record = parse_compile_receipt_version(raw, logical_path=logical_path, source_sha256=source_sha256)
+    version = record["schema_version"].rsplit("/", 1)[1]
+    if path.name != f"{version}-{record['source_identity']}.md":
+        raise ValueError("compile receipt filename disagrees")
+    _require_transaction_authority(record, coordinator, path, vault, raw, deadline=deadline)
+    return record
+
+
+def _context_receipt_path(source):
+    return DAILY_DIR / "receipts" / f"v4-{compile_context_source_identity(source)}.md"
+
+
+def _read_snapshot_receipt(part, coordinator):
+    source = _v4_source_descriptor(part)
+    return read_compile_receipt_version(part.logical_path, part.sha256, coordinator,
+                                        path=_context_receipt_path(source))
 
 
 def _require_receipt_name(path: Path, source_identity: str) -> None:
@@ -3271,7 +3590,7 @@ def apply_compile_plan(
     _require_apply_arguments(plan, inputs, action_key, batch, provider_budget)
     completed_at = completed_at or _utc_now()
     if batch is not None:
-        _preflight_v3_receipts(
+        _preflight_context_receipts(
             inputs,
             plan,
             action_key=action_key,
@@ -3425,6 +3744,9 @@ class _ApplyPlan:
         cancelled: Callable[[], bool] | None,
     ) -> None:
         self.inputs = inputs
+        self.context_manifest = []
+        if batch is not None:
+            self.context_manifest = _v4_manifest(inputs)
         self.action_key = action_key
         self.trigger = trigger
         self.coordinator = coordinator
@@ -3535,8 +3857,8 @@ class _ApplyPlan:
         if not receipts or any(item is None for item in receipts):
             return None
         operation_id, action_key = _receipt_authority(receipts)
-        transaction, sequence = _transaction_authority(self.coordinator, operation_id)
-        _clear_compile_source_failures(self.inputs, self.coordinator.state_root)
+        transaction, sequence = _transaction_authority(self.coordinator, operation_id, deadline=self.deadline)
+        _clear_compile_source_failures(self.inputs, self.coordinator.state_root, deadline=self.deadline)
         return CompileApplyResult(
             transaction.id,
             operation_id,
@@ -3553,12 +3875,8 @@ class _ApplyPlan:
                 read_compile_receipt(digest, self.coordinator)
                 for digest in self.source_digests
             ]
-        return [
-            read_compile_receipt_v3(
-                source.logical_path, source.sha256, self.coordinator
-            )
-            for source in self.batch.manifest
-        ]
+        selection = _receipt_predicate(self.coordinator, deadline=self.deadline)
+        return [selection.receipt(part) for part in self.inputs.dailies]
 
     def _commit_quarantine(self) -> CompileApplyResult:
         """A quarantined batch publishes candidates only, and no pages."""
@@ -3598,7 +3916,7 @@ class _ApplyPlan:
         )
 
     def _quarantine_result(self, operation_id: str, paths: list[str]) -> CompileApplyResult:
-        committed, sequence = _transaction_authority(self.coordinator, operation_id)
+        committed, sequence = _transaction_authority(self.coordinator, operation_id, deadline=self.deadline)
         return CompileApplyResult(
             committed.id,
             operation_id,
@@ -3761,11 +4079,10 @@ class _ApplyPlan:
                 )
             )
             return
-        self.dispositions = _compile_dispositions(
-            self.batch.manifest, self.evidence_bindings
-        )
+        manifest = self.context_manifest
+        self.dispositions = _context_dispositions(manifest, self.evidence_bindings)
         self.operation_id = _compile_operation_id(
-            self.action_key, self.batch.manifest_sha256, self.dispositions
+            self.action_key, sha256_bytes(canonical_json_bytes(manifest)), self.dispositions
         )
 
     def _apply_claim_policy(self) -> CompileApplyResult | None:
@@ -3900,8 +4217,8 @@ class _ApplyPlan:
     def _receipt_relative(self, source: SourceDescriptor) -> str:
         if self.batch is None:
             return f"knowledge/daily/receipts/{source.sha256}.md"
-        identity = compile_source_identity(source.logical_path, source.sha256)
-        return f"knowledge/daily/receipts/v3-{identity}.md"
+        identity = compile_context_source_identity(_context_source_for(source, self.context_manifest))
+        return f"knowledge/daily/receipts/v4-{identity}.md"
 
     def _receipt_body(self, source: SourceDescriptor) -> bytes:
         if self.batch is None:
@@ -3914,15 +4231,12 @@ class _ApplyPlan:
                 self.evidence_bindings,
                 self.completed_at,
             )
-        return _receipt_v3_bytes(
-            source,
-            manifest=self.batch.manifest,
-            manifest_sha256=self.batch.manifest_sha256,
+        return _receipt_v4_bytes(
+            _context_source_for(source, self.context_manifest),
+            manifest=self.context_manifest,
             packing=self.batch.packing,
             provider_budget=self.provider_budget,
-            dispositions=self.dispositions,
             action_key=self.action_key,
-            operation_id=self.operation_id,
             operations=self.receipt_operations,
             evidence=self.evidence_bindings,
         )
@@ -3950,10 +4264,10 @@ class _ApplyPlan:
             transaction.id, deadline=self.deadline, cancelled=self.cancelled
         )
         committed, sequence = _transaction_authority(
-            self.coordinator, self.operation_id
+            self.coordinator, self.operation_id, deadline=self.deadline
         )
         _rebuild_claim_index(self.claim_index)
-        _clear_compile_source_failures(self.inputs, self.coordinator.state_root)
+        _clear_compile_source_failures(self.inputs, self.coordinator.state_root, deadline=self.deadline)
         return CompileApplyResult(
             committed.id,
             self.operation_id,
@@ -4094,12 +4408,12 @@ def _discard_claim_index(claim_index: ClaimIndex) -> None:
 
 
 def _transaction_authority(
-    coordinator: MarkdownCoordinator, operation_id: str
+    coordinator: MarkdownCoordinator, operation_id: str, *, deadline: float | None = None
 ) -> tuple[object, int]:
-    transaction = coordinator.committed_attempt(operation_id)
+    transaction = coordinator.committed_attempt(operation_id, deadline=deadline)
     if transaction is None:
         raise ValueError("compile transaction is not committed")
-    with coordinator._connect() as database:
+    with coordinator._authority_read_connection(deadline) as database:
         row = database.execute(
             'SELECT rowid AS commit_sequence FROM "transaction" WHERE id = ?',
             (transaction.id,),
@@ -4160,18 +4474,165 @@ def _canonical_dailies() -> list[Path]:
     return daily_logs(DAILY_DIR)
 
 
-def _receipt_predicate(
-    coordinator: MarkdownCoordinator,
-) -> Callable[[str, str], bool]:
-    """Whether a source of this identity already carries a committed receipt."""
+class _ContextReceiptSelector:
+    """One deadline-aware discovery pass; every positive result verifies authority."""
 
-    def compiled(logical_path: str, source_sha256: str) -> bool:
-        return (
-            read_compile_receipt_v3(logical_path, source_sha256, coordinator)
-            is not None
+    def __init__(self, coordinator: MarkdownCoordinator, deadline: float) -> None:
+        self.coordinator = coordinator
+        self.vault = coordinator.vault
+        self.deadline = deadline
+        self.catalog: dict[tuple[str, str], list[tuple[Path, dict[str, object]]]] | None = None
+        self.prefix_hashes: dict[tuple[str, int], str] = {}
+        self.sources: dict[str, list[DailySnapshot]] = {}
+        self.source_identities: dict[str, tuple] = {}
+        self.historical_receipts: dict[tuple[str, str], tuple | None] = {}
+
+    def _active(self) -> None:
+        if time.monotonic() >= self.deadline:
+            raise TimeoutError("compile receipt discovery deadline exceeded")
+
+    def _load(self) -> None:
+        self._active()
+        if self.catalog is not None:
+            return
+        catalog = {}
+        for path in _v4_receipt_paths(self.vault / "knowledge/daily/receipts", self._active):
+            self._index_receipt(catalog, path)
+        self._active()
+        self.catalog = catalog
+
+    def _index_receipt(self, catalog, path):
+        raw = read_stable_bytes(path, MAX_RECEIPT_BYTES, label="compile receipt")
+        fields = _receipt_source_fields(raw)
+        if fields is None:
+            raise ValueError("compile receipt source identity is absent")
+        record = parse_compile_receipt_v4(raw, logical_path=fields[0], source_sha256=fields[1])
+        if path.name != f"v4-{record['source_identity']}.md":
+            raise ValueError("compile receipt filename disagrees")
+        catalog.setdefault(fields, []).append((path, record["source"]))
+        self._active()
+
+    def __call__(self, logical_path: str, digest: str) -> bool:
+        self._active()
+        self._source_parts(logical_path)
+        return self._matching_parts_are_compiled(logical_path, digest)
+
+    def _source_parts(self, logical_path):
+        self._active()
+        path = self.vault / logical_path
+        identity = _daily_file_identity(path)
+        if self.source_identities.get(logical_path) != identity:
+            self.sources[logical_path] = _daily_parts(logical_path, _read_daily_source(path))
+            self.source_identities[logical_path] = identity
+        self._active()
+        return self.sources[logical_path]
+
+    def matches_saved_source(self, source):
+        self._active()
+        _require_saved_context_source(source)
+        parts = self._source_parts(source["logical_path"])
+        return any(self._saved_source_matches_part(source, part) for part in parts)
+
+    def _saved_source_matches_part(self, source, part):
+        if part.sha256 != source["sha256"] or not self._context_matches(source, part):
+            return False
+        return self.matches(part)
+
+    def _matching_parts_are_compiled(self, logical_path, digest):
+        matches = [part for part in self.sources[logical_path] if part.sha256 == digest]
+        return bool(matches) and all(self.matches(part) for part in matches)
+
+    def matches(self, part: DailySnapshot) -> bool:
+        return self.receipt(part) is not None
+
+    def receipt(self, part: DailySnapshot):
+        self._validate_historical_part(part)
+        self._load()
+        candidates = self.catalog.get((part.logical_path, part.sha256), ())
+        for path, source in candidates:
+            record = self._authoritative_match(path, source, part)
+            if record is not None:
+                return record
+        return None
+
+    def _validate_historical_part(self, part):
+        self._active()
+        key = (part.logical_path, part.sha256)
+        identity = compile_source_identity(*key)
+        path = self.vault / "knowledge/daily/receipts" / f"v3-{identity}.md"
+        file_identity = _historical_receipt_file_identity(path)
+        if key in self.historical_receipts and self.historical_receipts[key] == file_identity:
+            return
+        read_compile_receipt_v3(*key, self.coordinator, path=path, vault=self.vault, deadline=self.deadline)
+        self._active()
+        self.historical_receipts[key] = file_identity
+
+
+    def _authoritative_match(self, path, source, part):
+        self._active()
+        if not self._context_matches(source, part):
+            return None
+        record = read_compile_receipt_version(
+            part.logical_path, part.sha256, self.coordinator, path=path, vault=self.vault, deadline=self.deadline
         )
+        self._active()
+        return record
 
-    return compiled
+    def _context_matches(self, source, part):
+        physical = _physical_source(part)
+        size = source["original_byte_size"]
+        if size > len(physical.content) or (source["byte_start"], source["byte_end"]) != _snapshot_absolute_bounds(part):
+            return False
+        key = (physical.sha256, size)
+        if key not in self.prefix_hashes:
+            self.prefix_hashes[key] = hashlib.sha256(memoryview(physical.content)[:size]).hexdigest()
+        return self.prefix_hashes[key] == source["original_sha256"]
+
+
+
+def _historical_receipt_file_identity(path):
+    try:
+        return _daily_file_identity(path)
+    except FileNotFoundError:
+        return None
+
+
+def _daily_file_identity(path):
+    stat = path.stat()
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+def _require_saved_context_source(source):
+    from reliable_memory import validate_schema_object
+
+    document = json.loads(COMPILE_RECEIPT_V4_SCHEMA.read_text())
+    schema = {"$defs": document["$defs"], **document["$defs"]["source_descriptor"]}
+    validate_schema_object(source, schema)
+    _require_v4_descriptor(source)
+    compile_source_identity(source["logical_path"], source["sha256"])
+
+
+def _v4_receipt_paths(directory: Path, active):
+    active()
+    try:
+        entries = os.scandir(directory)
+    except FileNotFoundError:
+        return
+    with entries:
+        for entry in entries:
+            active()
+            if entry.name.startswith("v4-") and entry.name.endswith(".md"):
+                yield Path(entry.path)
+
+
+def _existing_receipt_selection(selection, coordinator, deadline):
+    if selection is not None:
+        return selection
+    return _receipt_predicate(coordinator, deadline=deadline)
+
+
+def _receipt_predicate(coordinator: MarkdownCoordinator, *, deadline: float = math.inf):
+    return _ContextReceiptSelector(coordinator, deadline)
 
 
 def _receipt_source_fields(raw: bytes) -> tuple[str, str] | None:
@@ -4184,12 +4645,25 @@ def _receipt_source_fields(raw: bytes) -> tuple[str, str] | None:
         return None
 
 
+def _receipt_version_failure_reason(raw: bytes) -> str:
+    try:
+        _receipt_version_reader(raw)
+    except UnsupportedCompileReceiptVersion:
+        raise
+    except (IndexError, KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        return str(error)[:MAX_FAILURE_DETAIL_CHARS]
+    return ""
+
+
 def _unusable_receipt_reason(path: Path) -> str:
     """Why this receipt cannot be read, or "" when it reads fine."""
     try:
         raw = path.read_bytes()
     except OSError as error:
         return str(error)[:MAX_FAILURE_DETAIL_CHARS]
+    version_failure = _receipt_version_failure_reason(raw)
+    if version_failure:
+        return version_failure
     fields = _receipt_source_fields(raw)
     if fields is None:
         return "receipt does not declare the source it belongs to"
@@ -4198,7 +4672,9 @@ def _unusable_receipt_reason(path: Path) -> str:
 
 def _parse_failure_reason(raw: bytes, fields: tuple[str, str]) -> str:
     try:
-        parse_compile_receipt_v3(raw, logical_path=fields[0], source_sha256=fields[1])
+        parse_compile_receipt_version(raw, logical_path=fields[0], source_sha256=fields[1])
+    except UnsupportedCompileReceiptVersion:
+        raise
     except ValueError as error:
         return str(error)[:MAX_FAILURE_DETAIL_CHARS]
     return ""
@@ -4219,18 +4695,19 @@ def discard_unusable_receipts() -> list[str]:
     if not directory.is_dir():
         return []
     discarded: list[str] = []
-    for path in sorted(directory.glob("*.md")):
-        reason = _unusable_receipt_reason(path)
+    checked = [(path, _unusable_receipt_reason(path)) for path in sorted(directory.glob("*.md"))]
+    owners = _receipt_owners()
+    for path, reason in checked:
         if not reason:
             continue
         print(f"compile_memory: discarding {path.name}: {reason}", file=sys.stderr)
         path.unlink()
         discarded.append(path.name)
-    _forget_discarded_days(discarded)
+    _forget_discarded_days(discarded, owners=owners)
     return discarded
 
 
-def _forget_discarded_days(discarded: Sequence[str]) -> None:
+def _forget_discarded_days(discarded: Sequence[str], *, owners: dict[str, str] | None = None) -> None:
     """Take the days whose receipts were discarded out of the mirror.
 
     The mirror is only a cheap diagnostic copy of what the receipts say, but a
@@ -4241,7 +4718,7 @@ def _forget_discarded_days(discarded: Sequence[str]) -> None:
     receipt names its day as well as a readable one. Days recorded before
     receipts existed carry no discarded receipt and are left alone.
     """
-    owners = _receipt_owners()
+    owners = _receipt_owners() if owners is None else owners
     forgotten = sorted({owners[name] for name in discarded if name in owners})
     if not forgotten:
         return
@@ -4262,9 +4739,32 @@ def _drop_mirror_days(state: dict, names: Sequence[str]) -> None:
 def _receipt_owners() -> dict[str, str]:
     """Which daily each receipt file name belongs to, by the name alone."""
     owners: dict[str, str] = {}
-    for path in _canonical_dailies():
+    dailies = frozenset(_canonical_dailies())
+    for path in dailies:
         _record_receipt_owners(owners, path)
+    for path in sorted((DAILY_DIR / "receipts").glob("v4-*.md")):
+        _record_declared_context_owner(owners, path, dailies)
     return owners
+
+
+def _record_declared_context_owner(owners: dict[str, str], path: Path, dailies: frozenset[Path]) -> None:
+    try:
+        source = _declared_context_owner(path, dailies)
+    except (OSError, IndexError, KeyError, TypeError, ValueError):
+        return
+    owners[path.name] = Path(source["logical_path"]).name
+
+
+def _declared_context_owner(path: Path, dailies: frozenset[Path]) -> Mapping[str, object]:
+    raw = read_stable_bytes(path, MAX_RECEIPT_BYTES, label="compile receipt owner")
+    record = json.loads(raw.split(b"```json\n", 1)[1].split(b"\n```", 1)[0])
+    source = record["source"]
+    _require_v4_descriptor(source)
+    if record["schema_version"] != "compile-receipt/v4" or path.name != f"v4-{compile_context_source_identity(source)}.md":
+        raise ValueError("declared context owner identity disagrees")
+    if ROOT / source["logical_path"] not in dailies:
+        raise ValueError("declared context owner is not a current daily")
+    return source
 
 
 def _record_receipt_owners(owners: dict[str, str], path: Path) -> None:
@@ -4275,6 +4775,7 @@ def _record_receipt_owners(owners: dict[str, str], path: Path) -> None:
     owners[f"{sha256_bytes(content)}.md"] = path.name
     for part in _daily_parts(logical, content):
         owners[f"v3-{compile_source_identity(logical, part.sha256)}.md"] = path.name
+        owners[_context_receipt_path(_v4_source_descriptor(part)).name] = path.name
 
 
 def _readable_daily(path: Path) -> bytes | None:
@@ -4284,7 +4785,7 @@ def _readable_daily(path: Path) -> bytes | None:
         return None
 
 
-def _repair_compile_mirror(coordinator: MarkdownCoordinator) -> None:
+def _repair_compile_mirror(coordinator: MarkdownCoordinator, *, deadline: float = math.inf, selection=None) -> None:
     """Make the diagnostic mirror agree with the receipts, every pass.
 
     A vault that already carries the wrong digest would keep reporting a phantom
@@ -4292,21 +4793,23 @@ def _repair_compile_mirror(coordinator: MarkdownCoordinator) -> None:
     revisit it. Nothing here decides anything: the receipts already did, and
     this only writes down what they say.
     """
-    compiled = _receipt_predicate(coordinator)
+    _require_compile_active(deadline, None)
+    compiled = _existing_receipt_selection(selection, coordinator, deadline)
     corrected = {}
     unreceipted = []
     for path in _canonical_dailies():
+        _require_compile_active(deadline, None)
         whole = _whole_daily_digest(path.relative_to(ROOT).as_posix(), compiled)
         if whole is None:
             unreceipted.append(path.name)
             continue
         corrected[path.name] = whole
-    quarantined = _quarantine_only_days(unreceipted, coordinator)
+    quarantined = _quarantine_only_days(unreceipted, coordinator, deadline=deadline)
     if corrected or quarantined:
-        update_state(lambda state: _apply_mirror_repair(state, corrected, quarantined))
+        _update_state_under_clock(lambda state: _apply_mirror_repair(state, corrected, quarantined), deadline)
 
 
-def _quarantine_only_days(names: Sequence[str], coordinator: MarkdownCoordinator) -> list[str]:
+def _quarantine_only_days(names: Sequence[str], coordinator: MarkdownCoordinator, *, deadline: float = math.inf) -> list[str]:
     """Days the mirror holds only because a quarantined batch once wrote them there.
 
     A quarantine commit writes candidates and no receipt, so such a day was
@@ -4317,13 +4820,13 @@ def _quarantine_only_days(names: Sequence[str], coordinator: MarkdownCoordinator
     commits = load_state().get("compiled_daily_commits", {})
     if not isinstance(commits, dict):
         return []
-    return [name for name in names if _committed_by_quarantine(commits.get(name), coordinator)]
+    return [name for name in names if _committed_by_quarantine(commits.get(name), coordinator, deadline=deadline)]
 
 
-def _committed_by_quarantine(record: object, coordinator: MarkdownCoordinator) -> bool:
+def _committed_by_quarantine(record: object, coordinator: MarkdownCoordinator, *, deadline: float = math.inf) -> bool:
     if not isinstance(record, dict) or not isinstance(record.get("sequence"), int):
         return False
-    operation_id = coordinator.operation_id_at(record["sequence"]) or ""
+    operation_id = coordinator.operation_id_at(record["sequence"], deadline=deadline) or ""
     return operation_id.startswith(QUARANTINE_OPERATION_PREFIX)
 
 
@@ -4342,14 +4845,16 @@ def select_dailies(
     state: dict,
     *,
     coordinator: MarkdownCoordinator,
+    deadline: float = math.inf,
+    selection=None,
 ) -> list[Path]:
+    selection = _existing_receipt_selection(selection, coordinator, deadline)
     if args.file:
-        return _explicit_daily(Path(args.file).resolve(), coordinator)
-    compiled_hashes = _compiled_hashes(state)
+        return _explicit_daily(Path(args.file).resolve(), coordinator, selection=selection)
     return [
         path
         for path in _offered_dailies(args)
-        if not _daily_already_compiled(path, compiled_hashes, coordinator)
+        if not _daily_already_compiled(path, selection)
     ]
 
 
@@ -4360,7 +4865,7 @@ def _offered_dailies(args: argparse.Namespace) -> list[Path]:
     return _canonical_dailies()
 
 
-def _explicit_daily(path: Path, coordinator: MarkdownCoordinator) -> list[Path]:
+def _explicit_daily(path: Path, coordinator: MarkdownCoordinator, *, selection=None) -> list[Path]:
     _require_inside_daily_dir(path)
     if not path.is_file() or path.suffix.lower() != ".md":
         raise SystemExit(
@@ -4368,7 +4873,7 @@ def _explicit_daily(path: Path, coordinator: MarkdownCoordinator) -> list[Path]:
         )
     content = _read_daily_source(path)
     logical_path = path.relative_to(ROOT).as_posix()
-    if daily_is_compiled(logical_path, content, _receipt_predicate(coordinator)):
+    if daily_is_compiled(logical_path, content, selection or _receipt_predicate(coordinator)):
         return []
     return [path]
 
@@ -4383,31 +4888,10 @@ def _require_inside_daily_dir(path: Path) -> None:
         ) from exc
 
 
-def _compiled_hashes(state: dict) -> dict:
-    compiled = state.get("compiled_daily_hashes", {})
-    if not isinstance(compiled, dict):
-        return {}
-    return compiled
-
-
-def _daily_already_compiled(
-    path: Path, compiled_hashes: dict, coordinator: MarkdownCoordinator
-) -> bool:
+def _daily_already_compiled(path: Path, selection) -> bool:
     content = _read_daily_source(path)
     logical_path = path.relative_to(ROOT).as_posix()
-    if daily_is_compiled(logical_path, content, _receipt_predicate(coordinator)):
-        return True
-    return _unchanged_since_last_compile(path, compiled_hashes, sha256_bytes(content))
-
-
-def _unchanged_since_last_compile(
-    path: Path, compiled_hashes: dict, digest: str
-) -> bool:
-    """State records digests under a bare file name, so the name must be safe."""
-    key = path.name
-    if "/" in key or "\\" in key or key in {"", ".", ".."}:
-        return False
-    return compiled_hashes.get(key) == digest and path == DAILY_DIR / key
+    return daily_is_compiled(logical_path, content, selection)
 
 
 def _mark_started_unless_dry(args: argparse.Namespace) -> None:
@@ -4730,10 +5214,11 @@ def _run(
     _require_compile_active(deadline, cancelled)
     DROPPED_CLAIMS.clear()
     state = load_state()
-    coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT)
-    dailies = select_dailies(args, state, coordinator=coordinator)
-    _repair_compile_mirror(coordinator)
-    _retire_stale_source_failures(coordinator.state_root, coordinator=coordinator)
+    coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT, deadline=deadline)
+    selection = _receipt_predicate(coordinator, deadline=deadline)
+    dailies = select_dailies(args, state, coordinator=coordinator, deadline=deadline, selection=selection)
+    _repair_compile_mirror(coordinator, deadline=deadline, selection=selection)
+    _retire_stale_source_failures(coordinator.state_root, coordinator=coordinator, deadline=deadline, selection=selection)
     _require_compile_active(deadline, cancelled)
     if not dailies:
         print("compile_memory: no changed daily logs; nothing to do.")
@@ -4741,16 +5226,16 @@ def _run(
         return 0
 
     _announce_compile(args, dailies)
-    inputs = snapshot_compile_inputs(dailies, compiled=_receipt_predicate(coordinator))
+    inputs = snapshot_compile_inputs(dailies, compiled=selection)
     try:
         packable, refused = partition_packable(inputs, model=None)
         batches = pack_compile_batches(packable, model=None)
     except Exception as exc:  # noqa: BLE001 - provider/cache boundary is fail-closed
         _require_compile_active(deadline, cancelled)
-        failed = BatchOutcome(_record_failed_batch(inputs, exc))
+        failed = BatchOutcome(_record_failed_batch(inputs, exc, deadline=deadline))
         return _finish_run(args, [failed])
 
-    outcomes: list[BatchOutcome] = [_refused_day_outcome(day) for day in refused]
+    outcomes: list[BatchOutcome] = [_refused_day_outcome(day, deadline=deadline) for day in refused]
     for batch in batches:
         # A failed batch is recorded against its sources and the run goes on:
         # batches are independent snapshots, and stopping here held every later
@@ -4795,20 +5280,21 @@ def _record_failed_batch(
     exc: BaseException,
     *,
     prefix: str = "",
+    deadline: float = math.inf,
 ) -> int:
     """Record a batch failure without finishing or unlocking the active run."""
     error = f"{type(exc).__name__}: {exc}"
-    _record_compile_source_failures(inputs, STATE_ROOT, error_code=type(exc).__name__)
-    print(f"compile_memory: FAILED — {prefix}{error}")
-    _record_batch_error(error)
+    print(f"compile_memory: FAILED — {prefix}{error}", flush=True)
+    _record_compile_source_failures(inputs, STATE_ROOT, error_code=type(exc).__name__, deadline=deadline)
+    _record_batch_error(error, deadline=deadline)
     return 1
 
 
-def _record_batch_error(error: str) -> None:
+def _record_batch_error(error: str, *, deadline: float = math.inf) -> None:
     def remember(state: dict) -> None:
         state["last_compile_error"] = error[:500]
 
-    update_state(remember)
+    _update_state_under_clock(remember, deadline)
 
 
 def _run_batch(
@@ -4830,7 +5316,7 @@ def _run_batch(
         )
     except Exception as exc:  # noqa: BLE001 - provider/cache boundary is fail-closed
         _require_compile_active(deadline, cancelled)
-        return BatchOutcome(_record_failed_batch(batch.inputs, exc))
+        return BatchOutcome(_record_failed_batch(batch.inputs, exc, deadline=deadline))
 
     _require_compile_active(deadline, cancelled)
     if args.dry_run:
@@ -4879,10 +5365,10 @@ def _apply_batch(
         return _still_quarantined_outcome(already)
     except Exception as exc:  # noqa: BLE001 - no diagnostic state is a commit receipt
         return BatchOutcome(
-            _record_failed_batch(batch.inputs, exc, prefix="transaction not committed: ")
+            _record_failed_batch(batch.inputs, exc, prefix="publication or source cleanup failed: ", deadline=deadline)
         )
     _require_compile_active(deadline, cancelled)
-    _record_batch_diagnostics(batch, result, args, coordinator)
+    _record_batch_diagnostics(batch, result, args, coordinator, deadline=deadline)
     return _committed_outcome(result)
 
 
@@ -4916,7 +5402,7 @@ def _whole_daily_digest(logical_path: str, compiled) -> str | None:
     return sha256_bytes(content)
 
 
-def _mirror_digests(batch: CompileBatch, coordinator: MarkdownCoordinator) -> dict:
+def _mirror_digests(batch: CompileBatch, coordinator: MarkdownCoordinator, *, deadline: float = math.inf) -> dict:
     """What the diagnostic mirror should say about each daily after this commit.
 
     Receipts are the authority. The mirror exists so cheap readers — the lint,
@@ -4927,7 +5413,7 @@ def _mirror_digests(batch: CompileBatch, coordinator: MarkdownCoordinator) -> di
     file, and only once every part of it carries a receipt: a quarantined batch
     writes no receipt, so it writes nothing here either (audit A-12).
     """
-    compiled = _receipt_predicate(coordinator)
+    compiled = _receipt_predicate(coordinator, deadline=deadline)
     digests = {
         Path(item.logical_path).name: item.sha256
         for item in batch.inputs.dailies
@@ -4953,7 +5439,7 @@ def _receipted_whole_snapshot(item: DailySnapshot, compiled: Callable[[str, str]
     """A one-part snapshot this commit compiled: the file may have grown since."""
     if item.part_count != 1:
         return False
-    return compiled(item.logical_path, item.sha256)
+    return _snapshot_compiled(compiled, item)
 
 
 def _record_batch_diagnostics(
@@ -4961,8 +5447,9 @@ def _record_batch_diagnostics(
     result: CompileApplyResult,
     args: argparse.Namespace,
     coordinator: MarkdownCoordinator,
+    *, deadline: float = math.inf,
 ) -> None:
-    hashes = _mirror_digests(batch, coordinator)
+    hashes = _mirror_digests(batch, coordinator, deadline=deadline)
 
     def mutate(state: dict) -> None:
         merge_compile_diagnostics(
@@ -4976,7 +5463,16 @@ def _record_batch_diagnostics(
             trigger=args.trigger,
         )
 
-    update_state(mutate)
+    _update_state_under_clock(mutate, deadline)
+
+
+def _update_state_under_clock(mutator: Callable[[dict], None], deadline: float) -> None:
+    _require_compile_active(deadline, None)
+    if math.isinf(deadline):
+        update_state(mutator)
+        return
+    update_state(mutator, lock_timeout=max(0.0, deadline - time.monotonic()))
+    _require_compile_active(deadline, None)
 
 
 def _require_compile_active(
@@ -5005,20 +5501,22 @@ def run_pending_compile(
 
 
 def _record_compile_source_failures(
-    inputs: CompileInputs, state_root: Path, *, error_code: str
+    inputs: CompileInputs, state_root: Path, *, error_code: str, deadline: float = math.inf
 ) -> None:
-    queue = active_or_legacy_memory_queue(ROOT, state_root)
+    _require_compile_active(deadline, None)
+    queue = active_or_legacy_memory_queue(ROOT, state_root, deadline=deadline)
     for source in inputs.dailies:
         queue.record_source_failure(
             source.logical_path,
             source.sha256,
             error_code=error_code[:200],
             producer="compile",
+            deadline=deadline,
         )
 
 
 def _retire_stale_source_failures(
-    state_root: Path, *, coordinator: MarkdownCoordinator | None = None
+    state_root: Path, *, coordinator: MarkdownCoordinator | None = None, deadline: float = math.inf, selection=None
 ) -> None:
     """Retire every failure row whose digest the file no longer has (audit B-15).
 
@@ -5026,33 +5524,40 @@ def _retire_stale_source_failures(
     commit, and it held the day out of the archive and `run/` out of deletion
     for ever. See `docs/research/2026-09-25-a-failure-of-content-that-is-gone-is-retired.md`.
     """
-    queue = active_or_legacy_memory_queue(ROOT, state_root)
-    coordinator = coordinator or active_or_legacy_coordinator(ROOT, state_root)
+    _require_compile_active(deadline, None)
+    queue = active_or_legacy_memory_queue(ROOT, state_root, deadline=deadline)
+    coordinator = coordinator or active_or_legacy_coordinator(ROOT, state_root, deadline=deadline)
+    compiled = _existing_receipt_selection(selection, coordinator, deadline)
     current: dict[str, frozenset[str]] = {}
-    for logical_path, digest in queue.source_failure_keys():
+    for logical_path, digest in queue.source_failure_keys(deadline=deadline):
+        _require_compile_active(deadline, None)
         if logical_path not in current:
-            current[logical_path] = _current_source_digests(logical_path, coordinator=coordinator)
+            current[logical_path] = _current_source_digests(logical_path, coordinator=coordinator, deadline=deadline, selection=compiled)
         if digest not in current[logical_path]:
-            queue.clear_source_failure(logical_path, digest)
+            queue.clear_source_failure(logical_path, digest, deadline=deadline)
 
 
 def _current_source_digests(
-    logical_path: str, *, coordinator: MarkdownCoordinator | None = None
+    logical_path: str, *, coordinator: MarkdownCoordinator | None = None, deadline: float = math.inf, selection=None
 ) -> frozenset[str]:
     """Unresolved source digests; committed receipts resolve the whole and every part."""
+    _require_compile_active(deadline, None)
     content = _readable_daily(ROOT / logical_path)
+    _require_compile_active(deadline, None)
     if content is None:
         return frozenset()
-    if coordinator is not None and daily_is_compiled(logical_path, content, _receipt_predicate(coordinator)):
+    if coordinator is not None and daily_is_compiled(logical_path, content, _existing_receipt_selection(selection, coordinator, deadline)):
         return frozenset()
     parts = {sha256_bytes(content[start:end]) for start, end in _daily_part_bounds(content)}
     return frozenset({sha256_bytes(content), *parts})
 
 
-def _clear_compile_source_failures(inputs: CompileInputs, state_root: Path) -> None:
-    queue = active_or_legacy_memory_queue(ROOT, state_root)
+def _clear_compile_source_failures(inputs: CompileInputs, state_root: Path, *, deadline: float = math.inf) -> None:
+    _require_compile_active(deadline, None)
+    queue = active_or_legacy_memory_queue(ROOT, state_root, deadline=deadline)
     for source in inputs.dailies:
-        queue.clear_source_failure(source.logical_path, source.sha256)
+        _require_compile_active(deadline, None)
+        queue.clear_source_failure(source.logical_path, source.sha256, deadline=deadline)
 
 
 def merge_compile_diagnostics(

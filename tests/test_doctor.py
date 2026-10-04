@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import errno
-import hashlib
 import importlib
 import io
 import json
@@ -4099,45 +4098,52 @@ def test_a_refused_attempt_whose_pages_nobody_wrote_still_needs_attention(
 _REFUSED_DAY = "knowledge/daily/2026-08-25.md"
 
 
-def _day_receipt_path(logical_path: str, content: bytes) -> str:
-    from reliable_memory import canonical_json_bytes
+def _refuse_day_receipts(coordinator, staged_day):
+    from markdown_transaction import MarkdownChange, TransactionFailure
 
-    part = hashlib.sha256(content).hexdigest()
-    identity = hashlib.sha256(canonical_json_bytes([logical_path, part])).hexdigest()
-    return f"knowledge/daily/receipts/v3-{identity}.md"
+    record = json.dumps({"schema_version": "compile-receipt/v3", "source": {"logical_path": staged_day}})
+    raw = b"---\ntype: compile-receipt\n---\n\n## Record\n```json\n" + record.encode() + b"\n```\n"
+    changes = [MarkdownChange.create(f"knowledge/daily/receipts/v3-{digit * 64}.md", raw)
+               for digit in ("1", "2")]
+    transaction = coordinator.prepare(changes, operation_id="compile:refused-day",
+                                      preconditions={"knowledge/notes/absent.md": "0" * 64})
+    with pytest.raises(TransactionFailure):
+        coordinator.apply(transaction.id)
+    assert coordinator.transaction_state(transaction.id) == "quarantined"
 
 
-def _stage_refused_receipts(state_root: Path, identifier: str, staged: dict[str, str]) -> None:
-    """The plan and `after` artifacts a refused compile left under run/transactions/."""
-    directory = state_root / "run" / "transactions" / identifier
-    (directory / "after").mkdir(parents=True, exist_ok=True)
-    operations = []
-    for position, (path, logical_path) in enumerate(sorted(staged.items()), start=1):
-        artifact = f"after/{position:06d}.bin"
-        record = json.dumps({"schema_version": "compile-receipt/v3", "source": {"logical_path": logical_path}})
-        (directory / artifact).write_bytes(
-            b"---\ntype: compile-receipt\n---\n\n## Record\n```json\n" + record.encode() + b"\n```\n"
-        )
-        operations.append({"path": path, "kind": "create", "before": "absent", "after": {"artifact": artifact}})
-    (directory / "plan.json").write_text(json.dumps({"operations": operations}), encoding="utf-8")
+def _publish_current_day(root, state_root, monkeypatch, coordinator):
+    import compile_memory
+
+    mapping = {"ROOT": root, "STATE_ROOT": state_root, "MEMORY": root / "knowledge",
+               "DAILY_DIR": root / "knowledge/daily", "KNOWLEDGE": root / "knowledge/notes",
+               "INDEX": root / "knowledge/index.md", "LOG": root / "knowledge/log.md", "AGENTS": root / "AGENTS.md"}
+    for name, path in mapping.items():
+        monkeypatch.setattr(compile_memory, name, path)
+    inputs = compile_memory.snapshot_compile_inputs([root / _REFUSED_DAY])
+    batch = compile_memory.pack_compile_batches(inputs, model=None)[0]
+    compile_memory.apply_compile_plan(
+        batch.inputs, {"schema_version": "compile-plan/v2", "operations": []},
+        action_key="b" * 64, trigger="manual", coordinator=coordinator, batch=batch,
+        provider_budget={"provider": "fake", "model": "test", "max_output_tokens": 4000},
+    )
 
 
 def _refused_compile_of_a_day(tmp_path, monkeypatch, *, compiled_now: bool, staged_day: str = _REFUSED_DAY):
     import doctor
+    from markdown_transaction import MarkdownCoordinator
 
     root, state_root, home = _build_root(tmp_path)
     monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
-    day = b"# 2026-08-25\n\n## 10:00\nThe day as it stands now.\n"
-    (root / _REFUSED_DAY).parent.mkdir(parents=True, exist_ok=True)
+    day = b"# 2026-08-25\n\n## [10:00:00] event\nThe day as it stands now.\n"
+    (root / "knowledge/daily/receipts").mkdir(parents=True)
     (root / _REFUSED_DAY).write_bytes(day)
-    refused_receipts = ["knowledge/daily/receipts/v3-" + "1" * 64 + ".md", "knowledge/daily/receipts/v3-" + "2" * 64 + ".md"]
-    committed = [_day_receipt_path(_REFUSED_DAY, day)] if compiled_now else []
-    _transaction_database(
-        state_root,
-        [("a" * 32, "quarantined", None), ("b" * 32, "committed", None)],
-        creates={"a" * 32: refused_receipts, "b" * 32: committed},
-    )
-    _stage_refused_receipts(state_root, "a" * 32, {path: staged_day for path in refused_receipts})
+    for relative in ("knowledge/index.md", "knowledge/log.md", "AGENTS.md"):
+        (root / relative).write_bytes(b"# Synthetic test fixture\n")
+    coordinator = MarkdownCoordinator(root, state_root)
+    _refuse_day_receipts(coordinator, staged_day)
+    if compiled_now:
+        _publish_current_day(root, state_root, monkeypatch, coordinator)
     return _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "transactions")
 
 

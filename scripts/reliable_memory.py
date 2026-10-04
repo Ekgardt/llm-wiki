@@ -563,15 +563,60 @@ def _harden_runtime_owner_only(path: Path, mode: int) -> None:
     _set_owner_only(Path(path), mode)
 
 
+def operational_deadline_active(deadline: float | None) -> None:
+    """Refuse an expired caller budget without creating runtime state."""
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("operational database deadline expired")
+
+
+def operational_busy_ms(busy_ms: int, deadline: float | None) -> int:
+    operational_deadline_active(deadline)
+    if deadline is None or math.isinf(deadline):
+        return busy_ms
+    return min(busy_ms, max(0, int((deadline - time.monotonic()) * 1_000)))
+
+
+# Cooperative SQL checks every 1 000 VM instructions. Measured 2026-10-03:
+# a 100 000-row recursive aggregate took 0.384 s at interval 1 versus 0.0194 s
+# here, with a 20 ms interruption overshoot below 16 microseconds. A retained
+# authority fallback read was 0.153 s at 1 versus 0.0387 s here (same result).
+# At 10 000, cost barely improved while overshoot grew; this is instrumentation
+# granularity, never a row/data/work ceiling. Requalify on SQLite/workload changes;
+# UDFs and filesystem/OS scheduling remain cooperative, not hard real-time.
+_OPERATIONAL_PROGRESS_VM_STEPS = 1_000
+
+
+def configure_operational_deadline(database: sqlite3.Connection, deadline: float | None) -> None:
+    operational_deadline_active(deadline)
+    if deadline is None or math.isinf(deadline):
+        return
+
+    def interrupted() -> int:
+        return int(time.monotonic() >= deadline)
+
+    database.set_progress_handler(interrupted, _OPERATIONAL_PROGRESS_VM_STEPS)
+
+
+def refresh_operational_deadline(database: sqlite3.Connection, busy_ms: int, deadline: float | None) -> None:
+    """Recompute lock waiting before the next transaction or commit."""
+    operational_deadline_active(deadline)
+    if deadline is None or math.isinf(deadline):
+        return
+    remaining_ms = operational_busy_ms(busy_ms, deadline)
+    database.execute(f"PRAGMA busy_timeout={remaining_ms:d}")
+
+
 def open_operational_db(
     path: Path,
     *,
     busy_ms: int,
     contract: OperationalDatabaseContract | None = None,
     initialize_contract: bool = False,
+    deadline: float | None = None,
 ) -> sqlite3.Connection:
     """Open an owner-restricted rollback-journal operational database."""
     _require_operational_open_arguments(busy_ms, contract, initialize_contract)
+    busy_ms = operational_busy_ms(busy_ms, deadline)
     path = Path(path)
     validate_database_directory(path.parent)
     expected = _operational_db_identity(path)
@@ -581,17 +626,20 @@ def open_operational_db(
         isolation_level=None,
     )
     try:
+        configure_operational_deadline(connection, deadline)
         _configure_operational_connection(
             connection,
             path,
             expected,
-            busy_ms=busy_ms,
+            busy_ms=operational_busy_ms(busy_ms, deadline),
             contract=contract,
             initialize_contract=initialize_contract,
         )
+        operational_deadline_active(deadline)
         return connection
     except Exception:
         connection.close()
+        operational_deadline_active(deadline)
         raise
 
 
@@ -924,28 +972,34 @@ def _readonly_write_refusal(error: BaseException) -> bool:
     return "readonly database" in str(error)
 
 
-def _replayed_hot_journal(path: Path) -> bool:
+def _replayed_hot_journal(path: Path, *, deadline: float | None = None) -> bool:
     """Let SQLite replay a stranded journal; True when it is gone afterwards."""
+    busy_ms = operational_busy_ms(_JOURNAL_REPLAY_BUSY_MS, deadline)
     try:
         database = sqlite3.connect(
-            str(Path(path)), timeout=_JOURNAL_REPLAY_BUSY_MS / 1_000
+            str(Path(path)), timeout=busy_ms / 1_000
         )
     except sqlite3.Error:
+        operational_deadline_active(deadline)
         return False
     try:
+        configure_operational_deadline(database, deadline)
         database.execute("PRAGMA journal_mode")
+        operational_deadline_active(deadline)
     except sqlite3.Error:
+        operational_deadline_active(deadline)
         return False
     finally:
         database.close()
     return not _hot_journal(path).exists()
 
 
-def _require_replayed_journal(path: Path, error: sqlite3.OperationalError) -> None:
+def _require_replayed_journal(path: Path, error: sqlite3.OperationalError, *, deadline: float | None = None) -> None:
     """Re-raise the original refusal unless a stranded journal explains it."""
+    operational_deadline_active(deadline)
     if not _readonly_write_refusal(error) or not _hot_journal(path).exists():
         raise error
-    if not _replayed_hot_journal(path):
+    if not _replayed_hot_journal(path, deadline=deadline):
         raise error
 
 
@@ -986,6 +1040,7 @@ def open_readonly_operational_db(
     owner_only: bool = False,
     busy_ms: int = 0,
     contract: OperationalDatabaseContract | None = None,
+    deadline: float | None = None,
 ) -> sqlite3.Connection:
     """Open a validated runtime SQLite database read-only and fail on path races.
 
@@ -994,7 +1049,9 @@ def open_readonly_operational_db(
     """
     if busy_ms < 0:
         raise ValueError("busy_ms must be non-negative")
+    operational_deadline_active(deadline)
     arguments = {
+        "deadline": deadline,
         "max_bytes": max_bytes,
         "owner_only": owner_only,
         "busy_ms": busy_ms,
@@ -1003,7 +1060,7 @@ def open_readonly_operational_db(
     try:
         return _opened_readonly_operational_db(path, state_root, **arguments)
     except sqlite3.OperationalError as error:
-        _require_replayed_journal(Path(path), error)
+        _require_replayed_journal(Path(path), error, deadline=deadline)
     return _opened_readonly_operational_db(path, state_root, **arguments)
 
 
@@ -1015,8 +1072,10 @@ def _opened_readonly_operational_db(
     owner_only: bool,
     busy_ms: int,
     contract: OperationalDatabaseContract | None,
+    deadline: float | None = None,
 ) -> sqlite3.Connection:
     """Validate the file and open it read-only, once, with no recovery."""
+    busy_ms = operational_busy_ms(busy_ms, deadline)
     expected = validate_operational_db_file(
         path, state_root, max_bytes=max_bytes, owner_only=owner_only
     )
@@ -1027,17 +1086,20 @@ def _opened_readonly_operational_db(
         isolation_level=None,
     )
     try:
+        configure_operational_deadline(database, deadline)
         current = Path(path).stat(follow_symlinks=False)
         if not os.path.samestat(expected, current):
             raise PermissionError("runtime database identity changed while opening")
-        _apply_readonly_operational_pragmas(database, busy_ms)
+        _apply_readonly_operational_pragmas(database, operational_busy_ms(busy_ms, deadline))
         if contract is not None:
             _validate_or_initialize_operational_contract(
                 database, contract, initialize=False
             )
+        operational_deadline_active(deadline)
         return database
     except Exception:
         database.close()
+        operational_deadline_active(deadline)
         raise
 
 

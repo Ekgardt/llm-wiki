@@ -47,6 +47,7 @@ BATCH_TURNS = 25
 # lost knowledge (the turn's text stays searchable). Change both together.
 MAX_KEYS_PER_TURN = 5
 MAX_KEY_CHARS = 160
+MAX_TURN_CHARS = 1500
 # A nightly step keys new entries in this much time and leaves the rest for
 # the next night; the store remembers what is done. The nightly kills the step
 # at this budget plus the margin one last provider call may take
@@ -88,6 +89,12 @@ CREATE TABLE IF NOT EXISTS keys(
 );
 CREATE TABLE IF NOT EXISTS attempts(span_sha256 TEXT PRIMARY KEY, asked INTEGER NOT NULL);
 """
+# A turn the provider's reply never covers is asked this many nights and then left
+# to be found by its own text. Without the bound the same failing batch was first in
+# line every night and spent the step's budget before any new turn was reached.
+MAX_ATTEMPTS = 3
+
+
 @dataclass(frozen=True)
 class Turn:
     """A user turn of a daily entry: where it is, what it says, what names it."""
@@ -125,7 +132,7 @@ def _user_text(text: str) -> str | None:
     with replies between them; the user's segments are joined and keyed as one.
     """
     said = [words for side, words in _segments(text) if side == "user" and words]
-    return "\n".join(said) or None
+    return "\n".join(said)[:MAX_TURN_CHARS] or None
 
 
 def _next_start(marks: list, index: int, text: str) -> int:
@@ -284,11 +291,12 @@ class KeyStore:
         keys = self.connection.execute("SELECT COUNT(*) FROM keys").fetchone()[0]
         return int(turns), int(keys)
 
-    def uncovered(self) -> int:
-        """Attempted turns that still lack a covered answer; none is retired."""
+    def given_up(self) -> int:
+        """Turns that used up their attempts and were never keyed."""
         row = self.connection.execute(
-            "SELECT COUNT(*) FROM attempts "
-            "WHERE span_sha256 NOT IN (SELECT span_sha256 FROM keyed)"
+            "SELECT COUNT(*) FROM attempts WHERE asked >= ? "
+            "AND span_sha256 NOT IN (SELECT span_sha256 FROM keyed)",
+            (MAX_ATTEMPTS,),
         ).fetchone()
         return int(row[0])
 
@@ -370,7 +378,7 @@ def _found_records(batch: Sequence[Turn], raw: str | None) -> dict[str, list]:
 
 
 def waiting_turns(store: KeyStore, chunks: Iterable[object]) -> list[Turn]:
-    """The user turns still to be keyed, with the least-asked turns first.
+    """The user turns still to be keyed: never-asked first, given-up ones left out.
 
     The sort is stable, so among turns asked equally often the chunk order holds.
     """
@@ -379,7 +387,7 @@ def waiting_turns(store: KeyStore, chunks: Iterable[object]) -> list[Turn]:
     waiting = [
         turn
         for turn in user_turns(chunks)
-        if turn.span_sha256 not in done
+        if turn.span_sha256 not in done and asked.get(turn.span_sha256, 0) < MAX_ATTEMPTS
     ]
     return sorted(waiting, key=lambda turn: asked.get(turn.span_sha256, 0))
 
@@ -420,10 +428,9 @@ def _key_batch(
     turn states nothing, and counts. See
     `docs/research/2026-09-14-an-error-is-not-an-answer.md`.
 
-    An omitted turn stays pending. Its attempt count puts it behind less-asked
-    turns on the next run. A run visits each pending batch once under its existing
-    deadline; it does not repeat an incomplete batch within that run. A provider
-    that said nothing at all uses no attempt — an outage is not the turn's fault.
+    Asked again, but not for ever: a turn a reply left out has used one of its
+    `MAX_ATTEMPTS`. A provider that said nothing at all used none — an outage is
+    not the turn's fault, and three silent nights must not retire every turn.
 
     The ledger records of a covered turn are posted beside its keys, once each.
     """
@@ -469,7 +476,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     store = KeyStore(store_path(STATE_ROOT))
     if args.status:
         turns, keys = store.count()
-        print(f"keyed turns={turns} keys={keys} uncovered={store.uncovered()}")
+        print(f"keyed turns={turns} keys={keys} given up={store.given_up()}")
         return 0
     snapshot = collect_corpus(
         ROOT, code_roots=(), daily_paths=_daily_paths(ROOT), deadline=deadline,

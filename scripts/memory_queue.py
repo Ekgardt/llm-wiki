@@ -42,12 +42,15 @@ from reliable_memory import (
     _set_owner_only,
     begin_immediate,
     canonical_json_bytes,
+    configure_operational_deadline,
     fsync_directory,
     fsync_file,
     open_operational_db,
     open_readonly_operational_db,
+    operational_deadline_active,
     quote_sqlite_identifier,
     read_runtime_bytes,
+    refresh_operational_deadline,
     restricted_relative_path,
     run_resumable_migration,
     sha256_bytes,
@@ -2158,7 +2161,7 @@ def _require_inside_state_root(path: Path, state_root: Path) -> None:
         raise PermissionError("queue v3 database is outside the state root") from exc
 
 
-def _open_queue_v3_readonly(path: Path, state_root: Path) -> sqlite3.Connection:
+def _open_queue_v3_readonly(path: Path, state_root: Path, *, deadline: float | None = None) -> sqlite3.Connection:
     """A read-only handle on a queue v3 database under the runtime root."""
     return open_readonly_operational_db(
         path,
@@ -2167,6 +2170,7 @@ def _open_queue_v3_readonly(path: Path, state_root: Path) -> sqlite3.Connection:
         owner_only=True,
         busy_ms=DEFAULTS.queue_busy_ms,
         contract=_QUEUE_V3_CONTRACT,
+        deadline=deadline,
     )
 
 
@@ -2213,7 +2217,7 @@ def _queue_v3_report(database: sqlite3.Connection) -> dict[str, object]:
     }
 
 
-def require_queue_v3_openable(path: Path, *, state_root: Path) -> None:
+def require_queue_v3_openable(path: Path, *, state_root: Path, deadline: float | None = None) -> None:
     """What every open of the adopted queue checks: place, contract, schema.
 
     The whole-file check (`validate_queue_v3_database`) reads every retained row,
@@ -2222,7 +2226,7 @@ def require_queue_v3_openable(path: Path, *, state_root: Path) -> None:
     transition that touches that task demotes it, which a veto on open prevents.
     """
     _require_inside_state_root(Path(path), Path(state_root))
-    with closing(_open_queue_v3_readonly(Path(path), Path(state_root))) as database:
+    with closing(_open_queue_v3_readonly(Path(path), Path(state_root), deadline=deadline)) as database:
         if not _queue_v3_schema_complete(database):
             raise _migration_error(
                 "queue_v3_schema_incomplete", "queue v3 schema is incomplete"
@@ -2250,6 +2254,44 @@ def _require_active(
 ) -> None:
     if time.monotonic() >= deadline or bool(cancelled and cancelled()):
         raise TimeoutError("queue mutation deadline or cancellation reached")
+
+
+
+def _source_failure_commit_active(database, deadline):
+    _require_active(deadline)
+    refresh_operational_deadline(database, DEFAULTS.queue_busy_ms, deadline)
+
+
+@contextmanager
+def _source_failure_connection(queue, deadline):
+    _require_active(deadline)
+    connection = queue._connect(deadline=deadline)
+    with _queue_connection_context(connection) as database:
+        with _source_failure_deadline(database, deadline):
+            yield database
+
+
+def _queue_connection_context(connection):
+    if isinstance(connection, sqlite3.Connection):
+        return closing(connection)
+    return connection
+
+
+@contextmanager
+def _source_failure_deadline(database, deadline):
+    _require_active(deadline)
+    if deadline == float("inf"):
+        yield database
+        return
+    configure_operational_deadline(database, deadline)
+    try:
+        yield database
+        _require_active(deadline)
+    except sqlite3.OperationalError:
+        _require_active(deadline)
+        raise
+    finally:
+        database.set_progress_handler(None, 0)
 
 
 class LeaseFenceError(RuntimeError):
@@ -5568,7 +5610,9 @@ class MemoryQueue:
         max_attempts: int = DEFAULTS.queue_max_attempts,
         retry_base_seconds: int = DEFAULTS.retry_base_seconds,
         retry_cap_seconds: int = DEFAULTS.retry_cap_seconds,
+        deadline: float | None = None,
     ) -> None:
+        operational_deadline_active(deadline)
         _validate_retry_policy(max_attempts, retry_base_seconds, retry_cap_seconds)
         self.state_root = Path(state_root).resolve()
         self.run_dir = self.state_root / "run"
@@ -5588,11 +5632,11 @@ class MemoryQueue:
         _harden_owner_only(self.run_dir, 0o700)
         self.results_dir.mkdir(parents=True, exist_ok=True)
         _harden_owner_only(self.results_dir, 0o700)
-        with self._connect() as connection:
+        with self._connect(deadline=deadline) as connection:
             self._create_schema(connection)
-            self._retire_exhausted_on_open(connection)
+            self._retire_exhausted_on_open(connection, deadline=deadline)
 
-    def _retire_exhausted_on_open(self, connection: sqlite3.Connection) -> None:
+    def _retire_exhausted_on_open(self, connection: sqlite3.Connection, *, deadline: float | None = None) -> None:
         """Take the write lock only when a ready task is out of attempts.
 
         Every construction opened `BEGIN IMMEDIATE`, so opening a queue while a
@@ -5608,10 +5652,11 @@ class MemoryQueue:
             return
         with begin_immediate(connection):
             self._retire_exhausted_ready(connection, _as_utc(self._clock()), self._max_attempts)
+            refresh_operational_deadline(connection, DEFAULTS.queue_busy_ms, deadline)
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        connection = open_operational_db(self.db_path, busy_ms=DEFAULTS.queue_busy_ms)
+    def _connect(self, *, busy_ms: int | None = None, deadline: float | None = None) -> Iterator[sqlite3.Connection]:
+        connection = open_operational_db(self.db_path, busy_ms=DEFAULTS.queue_busy_ms if busy_ms is None else busy_ms, deadline=deadline)
         try:
             # Preserve this legacy context manager's implicit commit/rollback API.
             connection.isolation_level = "DEFERRED"
@@ -5620,8 +5665,10 @@ class MemoryQueue:
                 self._db_hardened = True
             with connection:
                 yield connection
+                refresh_operational_deadline(connection, DEFAULTS.queue_busy_ms, deadline)
         finally:
             connection.close()
+            operational_deadline_active(deadline)
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
@@ -6602,11 +6649,12 @@ class MemoryQueue:
         *,
         error_code: str,
         producer: str,
+        deadline: float = float("inf"),
     ) -> None:
         self._validate_failure_identity(logical_path, source_digest)
         if not _valid_source_failure_fields(error_code, producer):
             raise ValueError("source failure fields are invalid")
-        with self._connect() as connection, begin_immediate(connection):
+        with _source_failure_connection(self, deadline) as connection, begin_immediate(connection):
             self._record_source_failure_row(
                 connection,
                 logical_path,
@@ -6615,22 +6663,24 @@ class MemoryQueue:
                 producer,
                 _as_utc(self._clock()),
             )
+            _source_failure_commit_active(connection, deadline)
 
-    def clear_source_failure(self, logical_path: str, source_digest: str) -> None:
+    def clear_source_failure(self, logical_path: str, source_digest: str, *, deadline: float = float("inf")) -> None:
         self._validate_failure_identity(logical_path, source_digest)
-        with self._connect() as connection, begin_immediate(connection):
+        with _source_failure_connection(self, deadline) as connection, begin_immediate(connection):
             connection.execute(
                 "DELETE FROM source_failures WHERE logical_path=? AND source_digest=?",
                 (logical_path, source_digest),
             )
+            _source_failure_commit_active(connection, deadline)
 
-    def source_failure_keys(self) -> list[tuple[str, str]]:
+    def source_failure_keys(self, *, deadline: float = float("inf")) -> list[tuple[str, str]]:
         """Every recorded `(logical_path, source_digest)`, so a caller can retire stale ones.
 
         A row keyed by a digest the file no longer has is about content that is
         gone (audit B-15, docs/research/2026-09-25-a-failure-of-content-that-is-gone-is-retired.md).
         """
-        with self._connect() as connection:
+        with _source_failure_connection(self, deadline) as connection:
             rows = connection.execute(_SOURCE_FAILURE_KEYS).fetchall()
         return [(str(row[0]), str(row[1])) for row in rows]
 
@@ -7340,11 +7390,12 @@ class _QueueV3CandidateReader:
             self.state_root, self.coordinator_path
         )
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self, *, busy_ms: int | None = None, deadline: float | None = None) -> sqlite3.Connection:
         return open_operational_db(
             self.db_path,
-            busy_ms=DEFAULTS.queue_busy_ms,
+            busy_ms=DEFAULTS.queue_busy_ms if busy_ms is None else busy_ms,
             contract=_QUEUE_V3_CONTRACT,
+            deadline=deadline,
         )
 
     def _heartbeat_wait(self, stop: threading.Event, interval: float) -> bool:
@@ -7425,11 +7476,12 @@ class _QueueV3CandidateReader:
         *,
         error_code: str,
         producer: str,
+        deadline: float = float("inf"),
     ) -> None:
         MemoryQueue._validate_failure_identity(logical_path, source_digest)
         if not _valid_source_failure_fields(error_code, producer):
             raise ValueError("source failure fields are invalid")
-        with closing(self._connect()) as database, begin_immediate(database):
+        with _source_failure_connection(self, deadline) as database, begin_immediate(database):
             MemoryQueue._record_source_failure_row(
                 database,
                 logical_path,
@@ -7438,18 +7490,20 @@ class _QueueV3CandidateReader:
                 producer,
                 _utc_now(),
             )
+            _source_failure_commit_active(database, deadline)
 
-    def clear_source_failure(self, logical_path: str, source_digest: str) -> None:
+    def clear_source_failure(self, logical_path: str, source_digest: str, *, deadline: float = float("inf")) -> None:
         MemoryQueue._validate_failure_identity(logical_path, source_digest)
-        with closing(self._connect()) as database, begin_immediate(database):
+        with _source_failure_connection(self, deadline) as database, begin_immediate(database):
             database.execute(
                 "DELETE FROM source_failures WHERE logical_path=? AND source_digest=?",
                 (logical_path, source_digest),
             )
+            _source_failure_commit_active(database, deadline)
 
-    def source_failure_keys(self) -> list[tuple[str, str]]:
+    def source_failure_keys(self, *, deadline: float = float("inf")) -> list[tuple[str, str]]:
         """Every recorded `(logical_path, source_digest)`; see `MemoryQueue.source_failure_keys`."""
-        with closing(self._connect()) as database:
+        with _source_failure_connection(self, deadline) as database:
             rows = database.execute(_SOURCE_FAILURE_KEYS).fetchall()
         return [(str(row[0]), str(row[1])) for row in rows]
 
@@ -13413,7 +13467,7 @@ def _v3_queue_for_cli() -> _QueueV3CandidateReader:
     )
 
 
-def active_memory_queue(vault: Path, state_root: Path) -> _QueueV3CandidateReader:
+def active_memory_queue(vault: Path, state_root: Path, *, deadline: float | None = None) -> _QueueV3CandidateReader:
     """Open the queue side of an adopted pair with verified files and contracts.
 
     Normal admission checks adoption evidence, identities and schema; complete
@@ -13423,10 +13477,10 @@ def active_memory_queue(vault: Path, state_root: Path) -> _QueueV3CandidateReade
 
     resolved_vault = Path(vault).resolve(strict=True)
     state = Path(state_root).absolute()
-    _require_adopted_once(resolved_vault, state)
+    _require_adopted_once(resolved_vault, state, deadline=deadline)
     queue_path = state / "run" / "queue-v3.sqlite3"
     coordinator_path = state / "run" / "markdown-transactions-v3.sqlite3"
-    require_queue_v3_openable(queue_path, state_root=state)
+    require_queue_v3_openable(queue_path, state_root=state, deadline=deadline)
     return _QueueV3CandidateReader(
         queue_path, coordinator_path=coordinator_path, vault=resolved_vault
     )
@@ -13440,7 +13494,7 @@ class QueueRetryPolicy(NamedTuple):
     retry_cap_seconds: int = DEFAULTS.retry_cap_seconds
 
 
-def _json_queue_entries(state_root: Path) -> int:
+def _json_queue_entries(state_root: Path, *, deadline: float | None = None) -> int:
     """Entries under `run/queue/`, the file-per-task queue of v3.3.0–v3.4.0.
 
     An unreadable directory or a symlink counts as one: unknown is not empty.
@@ -13452,34 +13506,41 @@ def _json_queue_entries(state_root: Path) -> int:
         return 0
     try:
         with os.scandir(directory) as entries:
-            return sum(1 for _ in entries)
+            return sum(_deadline_queue_entry(deadline) for _ in entries)
     except OSError:
         return 1
 
 
-def _require_no_json_queue(state_root: Path) -> None:
+def _deadline_queue_entry(deadline: float | None) -> int:
+    operational_deadline_active(deadline)
+    return 1
+
+
+def _require_no_json_queue(state_root: Path, *, deadline: float | None = None) -> None:
     """Records of the JSON queue are refused, never imported or dropped.
 
     No release since v4.0.0 wrote that queue and, since 2026-09-23, none reads
     it; the installer's adoption refuses on the same directory. See
     `docs/research/2026-09-23-the-json-queue-import-goes.md`.
     """
-    if _json_queue_entries(state_root):
+    operational_deadline_active(deadline)
+    if _json_queue_entries(state_root, deadline=deadline):
         raise QueueOperationError("legacy_json_queue_unsupported")
 
 
 def _legacy_memory_queue(
-    state_root: Path, policy: QueueRetryPolicy | None
+    state_root: Path, policy: QueueRetryPolicy | None, *, deadline: float | None = None
 ) -> MemoryQueue:
     """The pre-adoption queue, given the caller's bounds only if it named any."""
-    _require_no_json_queue(state_root)
+    _require_no_json_queue(state_root, deadline=deadline)
     if policy is None:
-        return MemoryQueue(state_root)
+        return MemoryQueue(state_root, deadline=deadline)
     return MemoryQueue(
         state_root,
         max_attempts=policy.max_attempts,
         retry_base_seconds=policy.retry_base_seconds,
         retry_cap_seconds=policy.retry_cap_seconds,
+        deadline=deadline,
     )
 
 
@@ -13491,6 +13552,7 @@ def active_or_legacy_memory_queue(
     state_root: Path,
     *,
     policy: QueueRetryPolicy | None = None,
+    deadline: float | None = None,
 ) -> MemoryQueue | _QueueV3CandidateReader:
     """The adopted V3 queue where adoption is in force, else the legacy one.
 
@@ -13507,9 +13569,10 @@ def active_or_legacy_memory_queue(
     """
     from markdown_transaction import _reliability_v3_records_present
 
+    operational_deadline_active(deadline)
     if _reliability_v3_records_present(state_root):
-        return active_memory_queue(vault, state_root)
-    return _legacy_memory_queue(state_root, policy)
+        return active_memory_queue(vault, state_root, deadline=deadline)
+    return _legacy_memory_queue(state_root, policy, deadline=deadline)
 
 
 @contextmanager

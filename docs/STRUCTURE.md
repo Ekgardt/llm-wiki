@@ -414,12 +414,31 @@ one call each; a separately tested smaller caller budget retained those answers.
 This small fixture does not qualify a globally smaller answer window or prove
 billed token savings.
 
-Compile authority is `compile-receipt/v3`. V3 receipt filenames are
+Historical path-bound compile authority is `compile-receipt/v3`. V3 receipt filenames are
 `knowledge/daily/receipts/v3-<source-identity-sha256>.md`; source identity hashes
 canonical logical path plus content digest. Every receipt binds a sorted batch
 manifest and one validated disposition to each source. Historical v2 digest-only
 receipts remain readable as evidence but cannot authorize automatic skip or archive
 under the path-bound v3 contract.
+
+Installed source-context receipt contract (approved 2026-10-03, installed
+2026-10-04): `compile-receipt/v4` additionally binds the
+original daily SHA-256, its byte count, and the absolute selected part bounds.
+The v4 source identity hashes those context fields with logical path and part
+digest; `knowledge/daily/receipts/v4-<source-identity-sha256>.md` remains create-only.
+V3 schema, identity, filenames and retained historical authority stay unchanged.
+A context-aware skip verifies committed authority and the exact saved-length
+prefix of the current daily. Benign appends preserve unchanged-part completion;
+changed prefixes and legacy records without context are explicitly unverified.
+Citation syntax and physical block/span validation remain unchanged. Archive
+and Doctor readers dispatch by receipt version; old consumers are accounted
+for before writer activation or source retirement. No env contract, runtime
+root, database, daemon or MCP tool is added. See the approved proposal in
+`docs/research/2026-10-03-source-context-receipt-proposal.md` and the owner's
+private `knowledge/notes/compile-source-context-receipt-decision.md` and
+`knowledge/notes/compile-source-context-receipt-installation-decision.md`.
+Installation qualification does not establish completion of the later native
+capture, full nightly, or complete resource-limit audit steps.
 
 `queue-task/v3` describes production serialization. `input_hash` is SHA-256 over
 the exact canonical stored payload. It is recomputed before every insertion, lease,
@@ -698,9 +717,9 @@ or nonzero active state remains fail-closed.
   `observed_at` is that reading converted to UTC (2026-09-27,
   `docs/research/2026-09-27-the-daily-log-keeps-one-clock.md`).
 - `knowledge/daily/receipts/` — authoritative immutable Markdown compile receipts.
-  Current v2 is keyed by source digest. The proposed v3 target above adds logical
-  path identity and commits one source receipt with compile output; v2 then remains
-  historical evidence only.
+  Installed v3 binds logical path plus source-part digest; v2 is historical only.
+  The approved v4 target additionally binds original source context as described
+  above. V4 activation is not implied by recording the decision.
 - `knowledge/notes/` — durable OKF pages, flat `<slug>.md`. All gitignored:
   the repository ships no memory (2026-09-10). The decision pages named in
   this document are the owner's private record; the contracts are stated here.

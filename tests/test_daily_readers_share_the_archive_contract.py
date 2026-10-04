@@ -33,7 +33,7 @@ def test_pending_and_explicit_readers_accept_the_same_actual_day(vault):
     coordinator = MarkdownCoordinator(root, state)
     assert compile_memory._readable_daily(day) == content
     assert compile_memory._explicit_daily(day, coordinator) == [day]
-    assert not compile_memory._daily_already_compiled(day, {}, coordinator)
+    assert not compile_memory._daily_already_compiled(day, compile_memory._receipt_predicate(coordinator))
 
 
 def test_whole_day_mirror_keeps_its_exact_digest_and_requires_all_parts(vault):

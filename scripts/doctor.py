@@ -31,9 +31,9 @@ import integration_hook_config as _hook_config
 import process_liveness
 import reliable_memory
 from bounded_io import read_stable_bytes
-from evidence_resolver import _daily_part_bounds
 from install_control import SCHEDULER_LIMIT_HOURS, installed_at, validate_install_state
 from iso_time import utc_text
+from markdown_transaction import MarkdownCoordinator
 from reliable_memory import (
     open_readonly_operational_db,
     read_runtime_bytes,
@@ -626,6 +626,7 @@ def _readonly_database(
         max_bytes=max_bytes,
         owner_only=False,
         busy_ms=_read_busy_ms(deadline),
+        deadline=deadline,
     )
 
 
@@ -1359,7 +1360,7 @@ def _scan_transaction_database(
         details["quarantined_unresolved"] = _unresolved_quarantine(
             database,
             transaction_columns,
-            _CompiledDaySupersession(vault_root, state_root),
+            _CompiledDaySupersession(vault_root, state_root, database=database, deadline=deadline),
         )
         return None
 
@@ -1374,6 +1375,7 @@ def _quarantined_ids(database: sqlite3.Connection) -> set[str]:
 
 
 _COMPILE_RECEIPT_PREFIX = "knowledge/daily/receipts/v3-"
+_COMPILE_RECEIPT_PREFIXES = (_COMPILE_RECEIPT_PREFIX, "knowledge/daily/receipts/v4-")
 _STAGED_ARTIFACT_RE = re.compile(r"after/[0-9]{6}\.bin")
 _DAILY_LOGICAL_PATH_RE = re.compile(r"knowledge/daily/[0-9]{4}-[0-9]{2}-[0-9]{2}\.md")
 _RECEIPT_RECORD_RE = re.compile(rb"(?s)```json\n(.*?)\n```")
@@ -1399,7 +1401,7 @@ def _intended_creates(database: sqlite3.Connection, identifier: str) -> set[str]
 
 
 def _only_compile_receipts(paths: set[str]) -> bool:
-    return bool(paths) and all(path.startswith(_COMPILE_RECEIPT_PREFIX) for path in paths)
+    return bool(paths) and all(path.startswith(_COMPILE_RECEIPT_PREFIXES) for path in paths)
 
 
 def _mapping_field(value: object, key: str) -> object:
@@ -1423,13 +1425,6 @@ def _staged_receipt_day(raw: bytes) -> str | None:
     return _daily_logical_path(_mapping_field(source, "logical_path"))
 
 
-def _part_receipt_path(logical_path: str, part: bytes) -> str:
-    identity = hashlib.sha256(
-        reliable_memory.canonical_json_bytes([logical_path, hashlib.sha256(part).hexdigest()])
-    ).hexdigest()
-    return f"{_COMPILE_RECEIPT_PREFIX}{identity}.md"
-
-
 class _ReceiptOperation(NamedTuple):
     path: str
     kind: str
@@ -1437,21 +1432,22 @@ class _ReceiptOperation(NamedTuple):
 
 
 def _snapshot_receipt_fields(raw: bytes, path: str) -> tuple[str, str]:
-    from compile_memory import _receipt_source_fields, parse_compile_receipt_v3
+    from compile_memory import _receipt_source_fields, parse_compile_receipt_version
 
     fields = _receipt_source_fields(raw)
     if fields is None:
         raise ValueError("staged receipt lacks source identity")
-    record = parse_compile_receipt_v3(raw, logical_path=fields[0], source_sha256=fields[1])
-    if path != f"{_COMPILE_RECEIPT_PREFIX}{record['source_identity']}.md":
+    record = parse_compile_receipt_version(raw, logical_path=fields[0], source_sha256=fields[1])
+    version = record["schema_version"].rsplit("/", 1)[1]
+    if path != f"knowledge/daily/receipts/{version}-{record['source_identity']}.md":
         raise ValueError("staged receipt path disagrees with source identity")
     return fields
 
 
 def _committed_snapshot_receipt(database, path: str, raw: bytes, fields) -> bool:
-    from compile_memory import _require_operation_integrity, parse_compile_receipt_v3
+    from compile_memory import _require_operation_integrity, parse_compile_receipt_version
 
-    record = parse_compile_receipt_v3(raw, logical_path=fields[0], source_sha256=fields[1])
+    record = parse_compile_receipt_version(raw, logical_path=fields[0], source_sha256=fields[1])
     row = database.execute(
         'SELECT t.id FROM "transaction" t JOIN operation o ON o.transaction_id=t.id '
         "WHERE t.state='committed' AND o.path=? AND o.after_hash=? "
@@ -1491,6 +1487,8 @@ def _snapshot_receipt_written(database, vault_root, state_root, directory, opera
     staged = _staged_snapshot_receipt(directory, operation, state_root)
     fields = _snapshot_receipt_fields(staged, path)
     raw = read_stable_bytes(vault_root / path, _MAX_STAGED_RECEIPT_BYTES, label="compile receipt")
+    if hashlib.sha256(raw).hexdigest() != digest:
+        return False
     return _committed_snapshot_receipt(database, path, raw, fields)
 
 
@@ -1499,7 +1497,7 @@ def _intended_compile_receipts(database, identifier) -> dict[str, str]:
         item[0]: item[1] for item in database.execute(
             "SELECT path,after_hash FROM operation WHERE transaction_id=? AND kind='create'",
             (identifier,),
-        ) if item[0].startswith(_COMPILE_RECEIPT_PREFIX)
+        ) if item[0].startswith(_COMPILE_RECEIPT_PREFIXES)
     }
 
 
@@ -1521,15 +1519,24 @@ def _staged_receipt_operations(plan, receipts) -> dict:
 
 
 def _compile_snapshot_receipts_written(database, identifier, vault_root, state_root, receipts) -> bool:
-    directory = state_root / "run" / "transactions" / identifier
-    plan = json.loads(read_runtime_bytes(directory / "plan.json", state_root, max_bytes=_MAX_STAGED_PLAN_BYTES))
-    if plan["transaction_id"] != identifier:
-        raise ValueError("staged plan transaction identity differs")
+    directory, plan = _verified_compile_plan(database, identifier, state_root)
     staged = _staged_receipt_operations(plan, receipts)
     return all(
         _snapshot_receipt_written(database, vault_root, state_root, directory, staged[path], digest)
         for path, digest in receipts.items()
     )
+
+
+def _verified_compile_plan(database, identifier, state_root):
+    directory = state_root / "run" / "transactions" / identifier
+    raw = read_runtime_bytes(directory / "plan.json", state_root, max_bytes=_MAX_STAGED_PLAN_BYTES)
+    row = database.execute('SELECT plan_hash FROM "transaction" WHERE id=?', (identifier,)).fetchone()
+    if row is None or hashlib.sha256(raw).hexdigest() != row["plan_hash"]:
+        raise ValueError("staged plan hash differs from canonical transaction")
+    plan = json.loads(raw)
+    if plan["transaction_id"] != identifier:
+        raise ValueError("staged plan transaction identity differs")
+    return directory, plan
 
 
 def _compile_snapshot_was_written(database, identifier, vault_root, state_root) -> bool:
@@ -1539,6 +1546,19 @@ def _compile_snapshot_was_written(database, identifier, vault_root, state_root) 
         return _compile_snapshot_outcome(database, identifier, vault_root, state_root)
     except (OSError, ValueError, KeyError, TypeError, lzma.LZMAError):
         return False
+
+
+class _DoctorCompileAuthority(MarkdownCoordinator):
+    """Borrow doctor's read-only connection for the canonical authority reader."""
+
+    def __init__(self, vault_root, state_root, database):
+        self.vault = Path(vault_root)
+        self.state_root = Path(state_root)
+        self.database = database
+
+    @contextlib.contextmanager
+    def _connect(self, *, busy_ms=None, deadline=None):
+        yield self.database
 
 
 class _CompiledDaySupersession:
@@ -1552,12 +1572,17 @@ class _CompiledDaySupersession:
     Anything unreadable or unexpected leaves the finding in place.
     """
 
-    def __init__(self, vault_root: Path | None, state_root: Path) -> None:
+    def __init__(self, vault_root: Path | None, state_root: Path, *, database=None, deadline=math.inf) -> None:
         self.vault_root = vault_root
         self.state_root = state_root
+        self.database = database
+        self.deadline = deadline
+        self.selection = None
 
     def resolves(self, database: sqlite3.Connection, identifier: str, committed_creates: set[str]) -> bool:
-        if _compile_snapshot_was_written(database, identifier, self.vault_root, self.state_root):
+        self._require_active()
+        self.database = database
+        if self._exact_or_source_outcome(identifier):
             return True
         intended = _intended_creates(database, identifier)
         if self.vault_root is None or not _only_compile_receipts(intended):
@@ -1565,17 +1590,70 @@ class _CompiledDaySupersession:
         try:
             return self._staged_days_compiled(identifier, intended, committed_creates)
         except (OSError, ValueError, KeyError, TypeError, lzma.LZMAError):
+            self._require_active()
             return False
+
+    def _exact_or_source_outcome(self, identifier):
+        return _compile_snapshot_was_written(
+            self.database, identifier, self.vault_root, self.state_root
+        ) or self._source_context_outcome(identifier)
+
+    def _source_context_outcome(self, identifier):
+        if self.vault_root is None:
+            return False
+        try:
+            manifests = self._staged_context_manifests(identifier)
+            return bool(manifests) and all(self._manifest_compiled(item) for item in manifests)
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError, lzma.LZMAError):
+            self._require_active()
+            return False
+
+    def _staged_context_manifests(self, identifier):
+        row = self.database.execute('SELECT operation_id FROM "transaction" WHERE id=?', (identifier,)).fetchone()
+        if row is None or not row["operation_id"].startswith("compile:"):
+            return []
+        receipts = _intended_compile_receipts(self.database, identifier)
+        if not receipts:
+            return []
+        directory, plan = _verified_compile_plan(self.database, identifier, self.state_root)
+        staged = _staged_receipt_operations(plan, receipts)
+        return [self._staged_manifest(directory, staged[path], digest) for path, digest in receipts.items()]
+
+    def _staged_manifest(self, directory, operation, digest):
+        from compile_memory import parse_compile_receipt_version
+
+        self._require_active()
+        if operation["after"]["sha256"] != digest:
+            raise ValueError("staged receipt hash disagrees with transaction")
+        raw = _staged_snapshot_receipt(directory, operation, self.state_root)
+        fields = _snapshot_receipt_fields(raw, operation["path"])
+        record = parse_compile_receipt_version(raw, logical_path=fields[0], source_sha256=fields[1])
+        return record["schema_version"], record["batch_manifest"]
+
+    def _manifest_compiled(self, item):
+        version, sources = item
+        readers = {"compile-receipt/v3": self._whole_legacy_source_compiled,
+                   "compile-receipt/v4": self._saved_context_source_compiled}
+        return all(readers[version](source) for source in sources)
+
+    def _saved_context_source_compiled(self, source):
+        self._require_active()
+        return self._cached_selection().matches_saved_source(source)
+
+    def _whole_legacy_source_compiled(self, source):
+        self._require_active()
+        logical = source["logical_path"]
+        content = read_stable_bytes(self.vault_root / logical, _MAX_DAY_BYTES, label="daily source")
+        if hashlib.sha256(content).hexdigest() != source["sha256"]:
+            return False
+        return self._day_compiled(logical, set())
 
     def _staged_days_compiled(self, identifier: str, intended: set[str], committed_creates: set[str]) -> bool:
         days = self._staged_days(identifier, intended)
         return bool(days) and all(self._day_compiled(day, committed_creates) for day in days)
 
     def _staged_days(self, identifier: str, intended: set[str]) -> set[str]:
-        directory = self.state_root / "run" / "transactions" / identifier
-        plan = json.loads(
-            read_runtime_bytes(directory / "plan.json", self.state_root, max_bytes=_MAX_STAGED_PLAN_BYTES)
-        )
+        directory, plan = _verified_compile_plan(self.database, identifier, self.state_root)
         staged = {
             operation["path"]: operation["after"]["artifact"]
             for operation in plan["operations"]
@@ -1598,12 +1676,36 @@ class _CompiledDaySupersession:
         return day
 
     def _day_compiled(self, logical_path: str, committed_creates: set[str]) -> bool:
+        from compile_memory import daily_is_compiled
+
+        self._require_active()
         content = read_stable_bytes(self.vault_root / logical_path, _MAX_DAY_BYTES, label="daily source")
-        bounds = _daily_part_bounds(content)
-        return bool(bounds) and all(
-            _part_receipt_path(logical_path, content[start:end]) in committed_creates
-            for start, end in bounds
-        )
+        if self.database is not None:
+            return daily_is_compiled(logical_path, content, self._cached_selection())
+        return self._standalone_day_compiled(logical_path, content)
+
+    def _require_active(self):
+        if _deadline_reached(self.deadline):
+            raise TimeoutError("compile context authority deadline exceeded")
+
+    def _new_selection(self, database):
+        from compile_memory import _receipt_predicate
+
+        authority = _DoctorCompileAuthority(self.vault_root, self.state_root, database)
+        return _receipt_predicate(authority, deadline=self.deadline)
+
+    def _cached_selection(self):
+        if self.selection is None:
+            self.selection = self._new_selection(self.database)
+        return self.selection
+
+    def _standalone_day_compiled(self, logical_path, content):
+        from compile_memory import daily_is_compiled
+
+        path = _operational_database_path(self.state_root, "coordinator")
+        with closing(_readonly_database(path, self.state_root, deadline=self.deadline)) as database:
+            with _one_snapshot(database):
+                return daily_is_compiled(logical_path, content, self._new_selection(database))
 
 
 def _unresolved_quarantine(

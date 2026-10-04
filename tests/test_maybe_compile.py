@@ -7,7 +7,7 @@ Locks in:
 3. Lock is cleared when compile_memory finishes.
 4. A lost claim names the lock that won, never a race.
 5. --force bypasses the pending-work gate and refuses a live lock.
-6. _has_pending_work returns False when all hashes match.
+6. Canonical receipts decide pending work; matching mirrors alone do not.
 """
 from __future__ import annotations
 
@@ -191,7 +191,7 @@ def test_a_live_process_holds_its_lock_however_old_the_file_is(fake_env):
 
 def test_a_lost_claim_names_the_lock_that_won_not_a_race(fake_env, monkeypatch):
     """The reason after a lost claim is the lock's real state (audit OPS-01)."""
-    monkeypatch.setattr(fake_env, "_has_pending_work", lambda *_args: True)
+    monkeypatch.setattr(fake_env, "_has_pending_work", lambda *_args, **_kwargs: True)
     live = os.getpid()
 
     def claimed_by_someone_else() -> bool:
@@ -236,7 +236,7 @@ def test_spawn_skipped_when_already_running(fake_env, monkeypatch):
 
 def test_spawn_skipped_when_no_pending_work(fake_env, monkeypatch):
     """If no daily logs differ from last compile, skip spawn."""
-    monkeypatch.setattr(fake_env, "_has_pending_work", lambda *_args: False)
+    monkeypatch.setattr(fake_env, "_has_pending_work", lambda *_args, **_kwargs: False)
     spawned_calls = []
     monkeypatch.setattr(
         fake_env, "spawn_detached", lambda *a, **kw: spawned_calls.append(1) or 12345
@@ -250,7 +250,7 @@ def test_spawn_skipped_when_no_pending_work(fake_env, monkeypatch):
 
 def test_spawn_happens_when_idle_and_work_pending(fake_env, monkeypatch):
     """Normal path: idle + work pending → spawn + write lock."""
-    monkeypatch.setattr(fake_env, "_has_pending_work", lambda *_args: True)
+    monkeypatch.setattr(fake_env, "_has_pending_work", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(fake_env, "_is_pid_alive", lambda pid: True)
     spawned_pid = [12345]
     monkeypatch.setattr(
@@ -270,7 +270,7 @@ def test_force_refuses_live_lock(fake_env, monkeypatch):
     """--force refuses to steal a LIVE lock (race risk); prints a warning."""
     live = os.getpid()
     fake_env._write_lock(live)
-    monkeypatch.setattr(fake_env, "_has_pending_work", lambda *_args: False)
+    monkeypatch.setattr(fake_env, "_has_pending_work", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(fake_env, "spawn_detached", lambda *a, **kw: 55555)
 
     spawned, reason = fake_env.spawn_compile_if_idle(force=True)
@@ -286,7 +286,7 @@ def test_force_proceeds_on_stale_lock(fake_env, monkeypatch):
     """--force proceeds when the lock is stale (dead PID), bypassing the
     pending-work gate."""
     _write_reused_process_lock(fake_env)
-    monkeypatch.setattr(fake_env, "_has_pending_work", lambda *_args: False)
+    monkeypatch.setattr(fake_env, "_has_pending_work", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(fake_env, "spawn_detached", lambda *a, **kw: 55555)
 
     spawned, reason = fake_env.spawn_compile_if_idle(force=True)
@@ -295,8 +295,8 @@ def test_force_proceeds_on_stale_lock(fake_env, monkeypatch):
     assert lock["pid"] == 55555
 
 
-def test_has_pending_work_false_when_all_compiled(fake_env, monkeypatch):
-    """All daily hashes match state.json → no pending work."""
+def test_matching_mirror_alone_does_not_prove_the_day_compiled(fake_env, monkeypatch):
+    """Matching derived hashes cannot replace canonical context authority."""
     daily_dir = fake_env.ROOT / "knowledge" / "daily"
     daily_dir.mkdir(parents=True)
     p = daily_dir / "2026-07-01.md"
@@ -313,7 +313,7 @@ def test_has_pending_work_false_when_all_compiled(fake_env, monkeypatch):
         encoding="utf-8",
     )
 
-    assert fake_env._has_pending_work() is False
+    assert fake_env._has_pending_work() is True
 
 
 def test_has_pending_work_true_when_hash_differs(fake_env):

@@ -1,8 +1,8 @@
 """Concurrency-safe compile trigger.
 
 Checks if compile is needed and no other compile is running, then spawns
-compile_memory.py in a detached background process. The caller never
-blocks — this script returns immediately (under 100ms).
+compile_memory.py in a detached background process. Admission reads complete
+context receipts; a caller may provide its deadline for that work.
 
 Lock mechanism:
 - Writes a PID file at $LLM_WIKI_STATE_ROOT/run/compile.pid
@@ -15,8 +15,8 @@ Lock mechanism:
 This is the ONLY entry point that should be called from hooks/wrappers/
 schedulers. It guarantees:
   1. At most one compile runs at any time.
-  2. Never blocks the caller (fire-and-forget).
-  3. Quick exit if nothing to compile (state.json hash check).
+  2. Background compilation begins only after foreground admission succeeds.
+  3. Pending work is determined by canonical source-context receipts.
   4. Clears a stale lock (crashed compile, killed process) by process liveness, never by age.
 
 Usage:
@@ -42,10 +42,14 @@ from memory_state import (  # noqa: E402
     atomic_write,
     closed_daily_logs,
     daily_logs,
-    file_hash,
-    load_state,
     retire_stale_lock,
     spawn_detached,
+)
+from memory_state import (
+    file_hash as file_hash,
+)
+from memory_state import (
+    load_state as load_state,
 )
 
 COMPILE_SCRIPT = ROOT / "scripts" / "compile_memory.py"
@@ -276,19 +280,36 @@ def _is_compile_running() -> tuple[bool, str]:
     return (state == "live", reason)
 
 
-def _has_pending_work(closed_days_only: bool = False) -> bool:
-    """Quick check: are there daily logs whose hash differs from last compile?
+def _has_pending_work(closed_days_only: bool = False, *, deadline: float = float("inf")) -> bool:
+    """A mirror is diagnostic; only context-bound receipt authority can skip work."""
+    _trigger_active(deadline)
+    paths = _candidate_logs(closed_days_only)
+    _trigger_active(deadline)
+    if not paths:
+        return False
+    if not (ROOT / "knowledge/daily/receipts").is_dir():
+        return True
+    return _unreceipted_daily_exists(paths, deadline)
 
-    Reads state.json (cheap) and compares against current daily files.
-    Under 50ms even for 100 daily logs. `closed_days_only` leaves out the day
-    still being appended to (`memory_state.closed_daily_logs`).
-    """
-    state = load_state()
-    compiled_hashes = state.get("compiled_daily_hashes", {}) or {}
-    return any(
-        compiled_hashes.get(p.name) != file_hash(p)
-        for p in _candidate_logs(closed_days_only)
-    )
+
+def _trigger_active(deadline: float) -> None:
+    if time.monotonic() >= deadline:
+        raise TimeoutError("compile trigger deadline exceeded")
+
+
+def _unreceipted_daily_exists(paths: list[Path], deadline: float) -> bool:
+    import compile_memory
+    from markdown_transaction import active_or_legacy_coordinator
+
+    coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT, deadline=deadline)
+    selection = compile_memory._receipt_predicate(coordinator, deadline=deadline)
+    return any(not _daily_receipted(path, selection, compile_memory) for path in paths)
+
+
+def _daily_receipted(path: Path, selection, compiler) -> bool:
+    selection._active()
+    content = compiler._read_daily_source(path)
+    return compiler.daily_is_compiled(path.relative_to(ROOT).as_posix(), content, selection)
 
 
 def _candidate_logs(closed_days_only: bool) -> list[Path]:
@@ -299,24 +320,27 @@ def _candidate_logs(closed_days_only: bool) -> list[Path]:
 
 
 def spawn_compile_if_idle(
-    force: bool = False, closed_days_only: bool = False
+    force: bool = False, closed_days_only: bool = False, *, deadline: float = float("inf")
 ) -> tuple[bool, str]:
     """Spawn a detached compile unless one is running or nothing is pending.
 
-    Returns (spawned, reason). Never raises. ``force`` bypasses the
+    Returns (spawned, reason). Admission refusals and expired deadlines remain
+    visible to the caller. ``force`` bypasses the
     "no pending work" gate but never steals a live lock. ``closed_days_only``
     is the session start's: the day still being appended to waits for the
     nightly (`memory_state.closed_daily_logs`).
     """
-    spawned, _skipped, reason = _spawn_outcome(force, closed_days_only)
+    spawned, _skipped, reason = _spawn_outcome(force, closed_days_only, deadline=deadline)
     return (spawned, reason)
 
 
-def _spawn_outcome(force: bool, closed_days_only: bool = False) -> tuple[bool, bool, str]:
+def _spawn_outcome(force: bool, closed_days_only: bool = False, *, deadline: float = float("inf")) -> tuple[bool, bool, str]:
     """(spawned, skipped, reason): a skip is a named refusal, not a failure."""
-    refusal = _refusal_before_claim(force, closed_days_only)
+    _trigger_active(deadline)
+    refusal = _refusal_before_claim(force, closed_days_only, deadline=deadline)
     if refusal is not None:
         return (False, True, refusal)
+    _trigger_active(deadline)
     if not _claim_lock():
         # Another caller took the lock between our check and our claim; name
         # what holds it now rather than a race the reader cannot verify.
@@ -325,11 +349,12 @@ def _spawn_outcome(force: bool, closed_days_only: bool = False) -> tuple[bool, b
     return _spawn_claimed(closed_days_only)
 
 
-def _refusal_before_claim(force: bool, closed_days_only: bool = False) -> str | None:
+def _refusal_before_claim(force: bool, closed_days_only: bool = False, *, deadline: float = float("inf")) -> str | None:
+    _trigger_active(deadline)
     is_running, reason = _is_compile_running()
     if is_running:
         return _live_lock_refusal(force, reason)
-    if not force and not _has_pending_work(closed_days_only):
+    if not force and not _has_pending_work(closed_days_only, deadline=deadline):
         return "skipped: no pending work (all daily logs compiled)"
     return None
 

@@ -697,6 +697,7 @@ def _bag_receipts(
         path, manifest, daily_id, payload_hash, coordinator, vault, expected
     )
     receipt = _bag_receipt(manifest, receipt_path, daily_id, payload_hash, coordinator, vault, self_contained)
+    _require_archive_receipt_context(receipt, payload, 0, len(payload))
     return [receipt], ["compile-receipt.md"] if self_contained else []
 
 
@@ -748,7 +749,9 @@ def _part_receipt(
     _require_receipt_reference(receipt_ref, daily_id, digest)
     view = {"compile_receipt_ref": receipt_ref, "compile_authority": part["compile_authority"]}
     receipt_path = path / str(receipt_ref["embedded_path"])
-    return _bag_receipt(view, receipt_path, daily_id, digest, coordinator, None, True)
+    receipt = _bag_receipt(view, receipt_path, daily_id, digest, coordinator, None, True)
+    _require_archive_receipt_context(receipt, payload, part["byte_start"], part["byte_end"])
+    return receipt
 
 
 def _bag_receipt_path(
@@ -785,16 +788,31 @@ def _require_receipt_reference(
     receipt_ref: Mapping[str, object], daily_id: str, payload_hash: str
 ) -> None:
     logical_path = f"knowledge/daily/{daily_id}.md"
+    if receipt_ref["logical_path"] != logical_path or receipt_ref["source_digest"] != payload_hash:
+        raise EvidenceResolutionError("archive compile receipt reference is invalid")
+    _require_versioned_receipt_reference(receipt_ref, logical_path, payload_hash)
+
+
+def _require_versioned_receipt_reference(receipt_ref, logical_path, payload_hash):
     from compile_memory import compile_source_identity
 
-    source_identity = compile_source_identity(logical_path, payload_hash)
-    if (
-        receipt_ref["path"] != f"knowledge/daily/receipts/v3-{source_identity}.md"
-        or receipt_ref["logical_path"] != logical_path
-        or receipt_ref["source_digest"] != payload_hash
-        or receipt_ref["source_identity"] != source_identity
-    ):
+    identity = receipt_ref["source_identity"]
+    names = {f"knowledge/daily/receipts/v3-{identity}.md", f"knowledge/daily/receipts/v4-{identity}.md"}
+    if receipt_ref["path"] not in names:
         raise EvidenceResolutionError("archive compile receipt reference is invalid")
+    if str(receipt_ref["path"]).split("/")[-1].startswith("v3-") and identity != compile_source_identity(logical_path, payload_hash):
+        raise EvidenceResolutionError("archive legacy receipt identity disagrees")
+
+
+def _require_archive_receipt_context(receipt, payload, start, end):
+    if receipt["schema_version"] == "compile-receipt/v3":
+        return
+    source = receipt["source"]
+    prefix = memoryview(payload)[:source["original_byte_size"]]
+    expected = (source["original_byte_size"], source["original_sha256"], source["byte_start"], source["byte_end"])
+    actual = (len(prefix), sha256_bytes(prefix), start, end)
+    if actual != expected:
+        raise EvidenceResolutionError("archive compile receipt original context disagrees")
 
 
 def _require_bag_members(members: set[str], expected: set[str]) -> None:
@@ -848,21 +866,22 @@ def _authoritative_receipt(
 ) -> dict[str, object] | None:
     logical_path = f"knowledge/daily/{daily_id}.md"
     if not self_contained:
-        from compile_memory import read_compile_receipt_v3
+        from compile_memory import read_compile_receipt_version
 
-        return read_compile_receipt_v3(
+        return read_compile_receipt_version(
             logical_path,
             payload_hash,
             coordinator,  # type: ignore[arg-type]
             path=receipt_path,
             vault=Path(vault),  # type: ignore[arg-type]
         )
-    from compile_memory import parse_compile_receipt_v3
+    from compile_memory import parse_compile_receipt_version
 
-    receipt = parse_compile_receipt_v3(
+    receipt = parse_compile_receipt_version(
         receipt_bytes, logical_path=logical_path, source_sha256=payload_hash
     )
     receipt_ref = manifest["compile_receipt_ref"]
+    _require_receipt_record_reference(receipt, receipt_ref)
     _validate_compile_authority(
         manifest.get("compile_authority"),
         receipt,
@@ -871,6 +890,13 @@ def _authoritative_receipt(
         receipt_hash=str(receipt_ref["receipt_file_hash"]),
     )
     return receipt
+
+
+def _require_receipt_record_reference(receipt, receipt_ref):
+    version = receipt["schema_version"].rsplit("/", 1)[1]
+    identity = receipt["source_identity"]
+    if (receipt_ref["source_identity"], receipt_ref["path"]) != (identity, f"knowledge/daily/receipts/{version}-{identity}.md"):
+        raise EvidenceResolutionError("archive receipt record identity disagrees")
 
 
 def _require_manifest_operations(

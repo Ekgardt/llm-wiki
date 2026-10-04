@@ -616,14 +616,14 @@ def test_operation_lookup_tolerates_disappearing_preparing_row(
         database.commit()
     original = coordinator._record
 
-    def delete_then_read(transaction_id: str):
-        with coordinator._connect() as database:
+    def delete_then_read(transaction_id: str, *, deadline=None):
+        with coordinator._connect(deadline=deadline) as database:
             database.execute(
                 'DELETE FROM "transaction" WHERE id=? AND state=\'preparing\'',
                 (transaction_id,),
             )
             database.commit()
-        return original(transaction_id)
+        return original(transaction_id, deadline=deadline)
 
     monkeypatch.setattr(coordinator, "_record", delete_then_read)
 
