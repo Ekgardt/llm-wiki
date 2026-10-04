@@ -2989,26 +2989,6 @@ def _receipt_bytes(
     ).encode()
 
 
-def _compile_dispositions(
-    manifest: Sequence[SourceDescriptor], evidence: Sequence[Mapping[str, str]]
-) -> list[dict[str, str]]:
-    compiled_paths = {item["source_path"] for item in evidence}
-    return sorted(
-        (
-            {
-                "source_identity": compile_source_identity(
-                    source.logical_path, source.sha256
-                ),
-                "disposition": (
-                    "compiled"
-                    if source.logical_path in compiled_paths
-                    else "no_durable_content"
-                ),
-            }
-            for source in manifest
-        ),
-        key=lambda item: item["source_identity"],
-    )
 
 
 def _compile_operation_id(
@@ -3027,65 +3007,6 @@ def _compile_operation_id(
     )
 
 
-def _receipt_v3_bytes(
-    source: SourceDescriptor,
-    *,
-    manifest: Sequence[SourceDescriptor],
-    manifest_sha256: str,
-    packing: CompilePackingIdentity,
-    provider_budget: Mapping[str, object],
-    dispositions: Sequence[Mapping[str, str]],
-    action_key: str,
-    operation_id: str,
-    operations: list[dict[str, str]],
-    evidence: list[dict[str, str]],
-) -> bytes:
-    source_identity = compile_source_identity(source.logical_path, source.sha256)
-    record = {
-        "schema_version": "compile-receipt/v3",
-        "source": source.receipt_descriptor(),
-        "source_identity": source_identity,
-        "batch_manifest": [item.receipt_descriptor() for item in manifest],
-        "batch_manifest_sha256": manifest_sha256,
-        "action_key": action_key,
-        "operation_id": operation_id,
-        "packing": packing.canonical(),
-        "provider_budget": dict(provider_budget),
-        "dispositions": list(dispositions),
-        "operations": sorted(operations, key=lambda item: item["path"]),
-        "evidence": sorted(
-            (
-                {
-                    "source_identity": source_identity,
-                    **item,
-                }
-                for item in evidence
-                if _evidence_of_source(item, source)
-            ),
-            key=lambda item: (
-                item["operation_path"],
-                item["source_path"],
-                item["quote_sha256"],
-            ),
-        ),
-    }
-    validate_schema(record, COMPILE_RECEIPT_V3_SCHEMA)
-    canonical = canonical_json_bytes(record).decode()
-    return (
-        "---\n"
-        "type: compile-receipt\n"
-        "schema_version: compile-receipt/v3\n"
-        f"source_identity: {source_identity}\n"
-        "status: completed\n"
-        "confidence: high\n"
-        "source_authority: ai-derived\n"
-        "---\n\n"
-        "# Compile Receipt\n\n"
-        "One-sentence summary: This immutable receipt proves completion of a snapshot compile.\n\n"
-        "## Record\n```json\n"
-        f"{canonical}\n"
-        "```\n"
-    ).encode()
 
 
 def _v4_source_descriptor(part: DailySnapshot) -> dict[str, object]:
@@ -3375,18 +3296,6 @@ def _require_v3_identity(record: Mapping[str, object]) -> None:
         raise ValueError("compile receipt operation identity is invalid")
 
 
-def _evidence_of_source(item: Mapping[str, str], source: object) -> bool:
-    """Evidence belongs to the part it was bound in, not to the day.
-
-    Every part of a split day carries the same logical path, so matching on the
-    path alone put part five's evidence into part one's receipt, where the digest
-    check refused it: `compile receipt evidence scope is invalid`. The digest is
-    what tells the parts apart.
-    """
-    return (
-        item["source_path"] == source.logical_path
-        and item["source_digest"] == source.sha256
-    )
 
 
 def _require_v3_evidence_scope(
