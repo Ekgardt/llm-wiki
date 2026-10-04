@@ -788,17 +788,11 @@ def _artifact_kind(entry: Path, state_root: Path) -> str:
 
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _TRANSACTION_ID_RE = re.compile(r"[0-9a-z_-]{1,128}")
-# Every row is read, streamed in batches, so no order is needed: a row cap judged a
-# third of the installed vault (29 275 transactions, 37 509 operations on 2026-09-27)
-# and the whole scan costs 0.63 s there. The operation read has no join, so an
-# operation whose transaction is gone reaches the identity check instead of vanishing.
-# docs/research/2026-09-27-doctor-reads-every-transaction.md.
-_TRANSACTION_IDS_QUERY = 'SELECT id FROM "transaction"'
-_TRANSACTION_QUERY = (
-    "SELECT id, operation_id, request_hash, state, preconditions_json, "
-    "plan_hash, created_at, updated_at, artifacts_pruned_at "
-    'FROM "transaction"'
-)
+# Complete SQL rows are copied in one short consistent snapshot. Cursors and
+# the read connection close before filesystem inspection; all significant rows
+# are compared exactly in a final streaming SQL snapshot before the verdict.
+# The operation query has no join: an operation whose transaction is absent
+# reaches the identity check instead of disappearing from the inspection.
 _OPERATION_QUERY = (
     "SELECT transaction_id, position, kind, path, before_hash, after_hash, "
     'parent_device, parent_inode, applied FROM "operation"'
@@ -999,11 +993,8 @@ def _collect_error_code(
         "error_code" not in transaction_columns
     ):
         return
-    code_row = database.execute(
-        'SELECT error_code FROM "transaction" WHERE id=?', (row["id"],)
-    ).fetchone()
-    if code_row is not None and code_row[0]:
-        codes.add(str(code_row[0]))
+    if row["error_code"]:
+        codes.add(str(row["error_code"]))
 
 
 def _scan_one_transaction_row(
@@ -1229,11 +1220,6 @@ def _checked_artifacts(
     return None if incomplete else artifacts
 
 
-def _transaction_ids(database: sqlite3.Connection, deadline: float) -> set[str]:
-    rows = _streamed_rows(database, _TRANSACTION_IDS_QUERY, deadline)
-    return {row[0] for row in rows if isinstance(row[0], str)}
-
-
 def _mark_corrupt(details: dict) -> None:
     details["codes"].append("transaction_metadata_corrupt")
     details["deletion_codes"].append("transaction_state_corrupt")
@@ -1247,8 +1233,9 @@ def _one_snapshot(database: sqlite3.Connection) -> Iterator[None]:
     The read connection autocommits, so each statement saw its own state: a
     transaction committed between the reads showed up as a row with no operations,
     or an operation of an unknown transaction, and was called corrupt. One read
-    transaction holds SQLite's shared lock for the scan (0.63 s on the installed
-    vault); writers wait within their busy timeout rather than being misread.
+    transaction holds SQLite's shared lock until the context exits. The main
+    transaction check copies SQL rows here, closes its connection before file
+    inspection, and revalidates those rows before accepting a verdict.
     """
     database.execute("BEGIN")
     try:
@@ -1257,9 +1244,33 @@ def _one_snapshot(database: sqlite3.Connection) -> Iterator[None]:
         database.execute("COMMIT")
 
 
+class _TransactionSnapshot(NamedTuple):
+    transactions: tuple
+    operations: tuple
+
+
+def _snapshot_rows(database: sqlite3.Connection, query: str, deadline: float) -> tuple:
+    rows = []
+    with closing(database.execute(query)) as cursor:
+        while batch := cursor.fetchmany(reliable_memory.OPERATIONAL_SCAN_BATCH_ROWS):
+            _stop_at(deadline)
+            rows.extend(batch)
+    _stop_at(deadline)
+    return tuple(rows)
+
+
+def _read_transaction_snapshot(database: sqlite3.Connection, deadline: float) -> _TransactionSnapshot:
+    with _one_snapshot(database):
+        snapshot = _TransactionSnapshot(
+            _snapshot_rows(database, 'SELECT * FROM "transaction"', deadline),
+            _snapshot_rows(database, _OPERATION_QUERY, deadline),
+        )
+    _stop_at(deadline)
+    return snapshot
+
+
 def _scan_transaction_tables(
-    database: sqlite3.Connection,
-    tables: set[str],
+    snapshot: _TransactionSnapshot,
     transaction_columns: set[str],
     *,
     state_root: Path,
@@ -1267,29 +1278,59 @@ def _scan_transaction_tables(
     deadline: float,
     details: dict,
     states: dict[str, int],
-) -> None:
-    """Every transaction and operation row, streamed; nothing is judged from a sample."""
-    with _one_snapshot(database):
-        known_ids = _transaction_ids(database, deadline)
-        operation_positions, operations_corrupt = _operation_positions(
-            _streamed_rows(database, _OPERATION_QUERY, deadline), known_ids
-        )
-        verdict = _scan_transaction_rows(
-            database,
-            _streamed_rows(database, _TRANSACTION_QUERY, deadline),
-            operation_positions,
-            transaction_columns,
-            artifacts=_checked_artifacts(state_root, known_ids, details, deadline),
-            known_ids=known_ids,
-            state_root=state_root,
-            now=now,
-            details=details,
-            states=states,
-        )
+) -> bool:
+    """Inspect complete SQL rows after the read connection has been closed."""
+    known_ids = {row["id"] for row in _checked_snapshot_rows(snapshot.transactions, deadline)}
+    operation_positions, operations_corrupt = _operation_positions(_checked_snapshot_rows(snapshot.operations, deadline), known_ids)
+    verdict = _scan_transaction_rows(
+        None, _checked_snapshot_rows(snapshot.transactions, deadline), operation_positions, transaction_columns,
+        artifacts=_checked_artifacts(state_root, known_ids, details, deadline),
+        known_ids=known_ids, state_root=state_root, now=now, details=details, states=states,
+    )
     details["codes"] = sorted(set(details["codes"]) | verdict.codes)
-    _count_owner_tables(database, tables, details, now)
-    if operations_corrupt or verdict.corrupt or verdict.artifacts_mismatched:
+    return operations_corrupt or verdict.corrupt or verdict.artifacts_mismatched
+
+
+def _checked_snapshot_rows(rows: tuple, deadline: float) -> Iterator[sqlite3.Row]:
+    for row in rows:
+        _stop_at(deadline)
+        yield row
+
+
+def _accept_transaction_verdict(corrupt: bool, details: dict) -> None:
+    if corrupt:
         _mark_corrupt(details)
+
+
+def _require_snapshot_rows(database, query, expected, deadline) -> None:
+    _stop_at(deadline)
+    offset = 0
+    with closing(database.execute(query)) as cursor:
+        while batch := cursor.fetchmany(reliable_memory.OPERATIONAL_SCAN_BATCH_ROWS):
+            _stop_at(deadline)
+            if tuple(batch) != expected[offset:offset + len(batch)]:
+                raise TimeoutError("transaction snapshot changed during filesystem inspection")
+            offset += len(batch)
+    _stop_at(deadline)
+    if offset != len(expected):
+        raise TimeoutError("transaction snapshot changed during filesystem inspection")
+
+
+def _require_transaction_snapshot(database, snapshot: _TransactionSnapshot, deadline: float) -> None:
+    with _one_snapshot(database):
+        _require_snapshot_rows(database, 'SELECT * FROM "transaction"', snapshot.transactions, deadline)
+        _require_snapshot_rows(database, _OPERATION_QUERY, snapshot.operations, deadline)
+    _stop_at(deadline)
+
+
+def _finish_transaction_snapshot(path, state_root, now, deadline, details, snapshot, columns, vault_root):
+    with closing(_readonly_database(path, state_root, deadline=deadline)) as database:
+        _count_owner_tables(database, _tables(database, deadline), details, now)
+        details["quarantined_unresolved"] = _unresolved_quarantine(
+            database, columns,
+            _CompiledDaySupersession(vault_root, state_root, database=database, deadline=deadline),
+        )
+        _require_transaction_snapshot(database, snapshot, deadline)
 
 
 def _operation_columns(
@@ -1331,7 +1372,7 @@ def _scan_transaction_database(
     vault_root: Path | None = None,
 ) -> dict | None:
     """Fill in the counters; return a result only when the schema is incomplete."""
-    with _readonly_database(path, state_root, deadline=deadline) as database:
+    with closing(_readonly_database(path, state_root, deadline=deadline)) as database:
         if _deadline_reached(deadline):
             raise TimeoutError("transaction check deadline")
         tables = _tables(database, deadline)
@@ -1347,22 +1388,14 @@ def _scan_transaction_database(
                 "Transaction metadata is incomplete.",
                 details,
             )
-        _scan_transaction_tables(
-            database,
-            tables,
-            transaction_columns,
-            state_root=state_root,
-            now=now,
-            deadline=deadline,
-            details=details,
-            states=states,
-        )
-        details["quarantined_unresolved"] = _unresolved_quarantine(
-            database,
-            transaction_columns,
-            _CompiledDaySupersession(vault_root, state_root, database=database, deadline=deadline),
-        )
-        return None
+        snapshot = _read_transaction_snapshot(database, deadline)
+    corrupt = _scan_transaction_tables(
+        snapshot, transaction_columns, state_root=state_root, now=now,
+        deadline=deadline, details=details, states=states,
+    )
+    _finish_transaction_snapshot(path, state_root, now, deadline, details, snapshot, transaction_columns, vault_root)
+    _accept_transaction_verdict(corrupt, details)
+    return None
 
 
 def _quarantined_ids(database: sqlite3.Connection) -> set[str]:
@@ -1704,8 +1737,11 @@ class _CompiledDaySupersession:
 
         path = _operational_database_path(self.state_root, "coordinator")
         with closing(_readonly_database(path, self.state_root, deadline=self.deadline)) as database:
-            with _one_snapshot(database):
-                return daily_is_compiled(logical_path, content, self._new_selection(database))
+            snapshot = _read_transaction_snapshot(database, self.deadline)
+        with closing(_readonly_database(path, self.state_root, deadline=self.deadline)) as database:
+            compiled = daily_is_compiled(logical_path, content, self._new_selection(database))
+            _require_transaction_snapshot(database, snapshot, self.deadline)
+        return compiled
 
 
 def _unresolved_quarantine(
