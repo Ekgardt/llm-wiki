@@ -528,6 +528,7 @@
   "test_doctor_quarantine_lineage.py": 0.02,
   "test_doctor_reads_a_v3_queue_owner.py": 1.24,
   "test_doctor_reads_the_open_rows_first.py": 4.93,
+  "test_doctor_reconciles_verified_terminal_changes.py": 13.78,
   "test_doctor_releases_snapshot_before_artifact_work.py": 5.62,
   "test_doctor_requires_current_source_context.py": 0.51,
   "test_doctor_transaction_inventory_uses_its_deadline.py": 1.2,

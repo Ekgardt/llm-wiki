@@ -1312,6 +1312,87 @@ def _read_transaction_snapshot(database: sqlite3.Connection, deadline: float) ->
     return snapshot
 
 
+class _TransactionRowContribution(NamedTuple):
+    states: tuple
+    undo_retained: int
+    state_invalid: bool
+    deletion_codes: tuple
+    codes: frozenset
+    corrupt: bool
+
+
+def _nonzero_transaction_states(states):
+    return tuple((state, count) for state, count in states.items() if count)
+
+
+def _transaction_row_contribution(row, positions, columns, cutoff, state_root, artifacts, known_ids):
+    states = {state: 0 for state in TRANSACTION_STATES}
+    details = {"deletion_codes": [], "state_invalid": False, "undo_retained": 0}
+    codes = set()
+    corrupt = _scan_one_transaction_row(
+        None, row, states=states, details=details, codes=codes,
+        operation_positions=positions, transaction_columns=columns,
+        cutoff=cutoff, state_root=state_root, artifacts=artifacts,
+    )
+    return _TransactionRowContribution(
+        _nonzero_transaction_states(states), details["undo_retained"], details["state_invalid"],
+        tuple(details["deletion_codes"]), frozenset(codes),
+        corrupt or _artifact_mismatch(row, artifacts, known_ids),
+    )
+
+
+def _merge_transaction_contribution(proof, states, details, codes):
+    for state, count in proof.states:
+        states[state] += count
+    details["undo_retained"] += proof.undo_retained
+    details["state_invalid"] |= proof.state_invalid
+    details["deletion_codes"].extend(proof.deletion_codes)
+    codes.update(proof.codes)
+
+
+class _TransactionInspection:
+    """Pure row contributions belong to this inspection, never filesystem authority."""
+
+    def __init__(self):
+        self.rows = {}
+
+    def contribution(self, row, positions, columns, cutoff, state_root, artifacts, known_ids):
+        membership = None if artifacts is None else row["id"] in artifacts
+        signature = (row, tuple(positions.get(row["id"], ())), membership)
+        saved = self.rows.get(row["id"])
+        if saved is not None and saved[0] == signature:
+            return saved[1]
+        proof = _transaction_row_contribution(row, positions, columns, cutoff, state_root, artifacts, known_ids)
+        self.rows[row["id"]] = (signature, proof)
+        return proof
+
+
+def _inspect_snapshot_rows(inspection, snapshot, positions, columns, artifacts, known_ids, state_root, now, deadline, details, states):
+    codes = set()
+    corrupt = False
+    cutoff = now - timedelta(days=UNDO_RETENTION_DAYS)
+    for row in _checked_snapshot_rows(snapshot.transactions, deadline):
+        proof = inspection.contribution(row, positions, columns, cutoff, state_root, artifacts, known_ids)
+        _merge_transaction_contribution(proof, states, details, codes)
+        corrupt |= proof.corrupt
+    return _RowVerdict(codes, corrupt, False)
+
+
+def _snapshot_row_verdict(inspection, snapshot, positions, columns, artifacts, known_ids, state_root, now, deadline, details, states):
+    if inspection is not None:
+        return _inspect_snapshot_rows(inspection, snapshot, positions, columns, artifacts, known_ids, state_root, now, deadline, details, states)
+    return _scan_transaction_rows(
+        None, _checked_snapshot_rows(snapshot.transactions, deadline), positions, columns,
+        artifacts=artifacts, known_ids=known_ids, state_root=state_root,
+        now=now, details=details, states=states,
+    )
+
+
+def _require_reconciliation_artifacts(inspection, artifacts):
+    if inspection is not None and artifacts is None:
+        raise TimeoutError("transaction artifact inventory is incomplete")
+
+
 def _scan_transaction_tables(
     snapshot: _TransactionSnapshot,
     transaction_columns: set[str],
@@ -1321,14 +1402,16 @@ def _scan_transaction_tables(
     deadline: float,
     details: dict,
     states: dict[str, int],
+    inspection: _TransactionInspection | None = None,
 ) -> bool:
     """Inspect complete SQL rows after the read connection has been closed."""
     known_ids = {row["id"] for row in _checked_snapshot_rows(snapshot.transactions, deadline)}
     operation_positions, operations_corrupt = _operation_positions(_checked_snapshot_rows(snapshot.operations, deadline), known_ids)
-    verdict = _scan_transaction_rows(
-        None, _checked_snapshot_rows(snapshot.transactions, deadline), operation_positions, transaction_columns,
-        artifacts=_checked_artifacts(state_root, known_ids, details, deadline),
-        known_ids=known_ids, state_root=state_root, now=now, details=details, states=states,
+    artifacts = _checked_artifacts(state_root, known_ids, details, deadline)
+    _require_reconciliation_artifacts(inspection, artifacts)
+    verdict = _snapshot_row_verdict(
+        inspection, snapshot, operation_positions, transaction_columns,
+        artifacts, known_ids, state_root, now, deadline, details, states,
     )
     details["codes"] = sorted(set(details["codes"]) | verdict.codes)
     return operations_corrupt or verdict.corrupt or verdict.artifacts_mismatched
@@ -1366,14 +1449,141 @@ def _require_transaction_snapshot(database, snapshot: _TransactionSnapshot, dead
     _stop_at(deadline)
 
 
-def _finish_transaction_snapshot(path, state_root, now, deadline, details, snapshot, columns, vault_root):
+def _snapshot_expected_row(expected, offset):
+    if offset < len(expected):
+        return expected[offset]
+    return None
+
+
+def _snapshot_identity_field(row):
+    if "transaction_id" in row.keys():
+        return row["transaction_id"]
+    return row["id"]
+
+
+def _delta_transaction_id(row):
+    identifier = _snapshot_identity_field(row)
+    if not isinstance(identifier, str):
+        raise ValueError("transaction snapshot delta has invalid identity")
+    return identifier
+
+
+def _updated_snapshot_row(row, prior, changed):
+    if row == prior:
+        return prior
+    changed.add(_delta_transaction_id(row))
+    if prior is not None:
+        changed.add(_delta_transaction_id(prior))
+    return row
+
+
+def _refresh_snapshot_rows(database, query, expected, deadline, changed):
+    rows = []
+    with closing(database.execute(query)) as cursor:
+        for row in cursor:
+            _stop_at(deadline)
+            rows.append(_updated_snapshot_row(row, _snapshot_expected_row(expected, len(rows)), changed))
+    _stop_at(deadline)
+    for row in expected[len(rows):]:
+        changed.add(_delta_transaction_id(row))
+    return tuple(rows)
+
+
+def _require_reconciliation_schema(database, schemas, deadline):
+    current = _transaction_schema(database, _tables(database, deadline), deadline)
+    if current != schemas:
+        raise TimeoutError("transaction snapshot schema changed during filesystem inspection")
+
+
+def _refresh_transaction_snapshot(database, snapshot, deadline, schemas):
+    changed = set()
+    with _one_snapshot(database):
+        _require_reconciliation_schema(database, schemas, deadline)
+        current = _TransactionSnapshot(
+            _refresh_snapshot_rows(database, 'SELECT * FROM "transaction"', snapshot.transactions, deadline, changed),
+            _refresh_snapshot_rows(database, _OPERATION_QUERY, snapshot.operations, deadline, changed),
+        )
+    _stop_at(deadline)
+    return current, changed
+
+
+def _terminal_transaction_rows(snapshot):
+    terminal = set(TRANSACTION_STATES) - set(UNSETTLED_TRANSACTION_STATES)
+    return {row["id"]: row for row in snapshot.transactions if row["state"] in terminal}
+
+
+def _require_prior_terminal_row(row, terminal):
+    previous = terminal.get(row["id"])
+    if previous is not None and row != previous:
+        raise TimeoutError("immutable terminal transaction changed during filesystem inspection")
+
+
+def _terminal_operation_rows(snapshot, terminal):
+    return tuple(row for row in snapshot.operations if row["transaction_id"] in terminal)
+
+
+def _require_terminal_evidence_unchanged(previous, current):
+    terminal = _terminal_transaction_rows(previous)
+    for row in current.transactions:
+        _require_prior_terminal_row(row, terminal)
+    if _terminal_operation_rows(previous, terminal) != _terminal_operation_rows(current, terminal):
+        raise TimeoutError("immutable terminal operations changed during filesystem inspection")
+
+
+def _require_terminal_delta(snapshot, changed, details):
+    states = {row["id"]: row["state"] for row in snapshot.transactions}
+    terminal = set(TRANSACTION_STATES) - set(UNSETTLED_TRANSACTION_STATES)
+    if any(states.get(identifier) not in terminal for identifier in changed):
+        raise TimeoutError("transaction snapshot changed during filesystem inspection")
+    _require_no_live_delta_writer(details)
+
+
+def _require_no_live_delta_writer(details):
+    if details["live_writers"] or details["overdue_writers"]:
+        raise TimeoutError("transaction snapshot changed while writer remains live")
+
+
+def _finish_reconciled_snapshot(path, state_root, now, deadline, details, snapshot, schemas, vault_root):
     with closing(_readonly_database(path, state_root, deadline=deadline)) as database:
         _count_owner_tables(database, _tables(database, deadline), details, now)
         details["quarantined_unresolved"] = _unresolved_quarantine(
-            database, columns,
+            database, schemas[0],
             _CompiledDaySupersession(vault_root, state_root, database=database, deadline=deadline),
         )
-        _require_transaction_snapshot(database, snapshot, deadline)
+        return _refresh_transaction_snapshot(database, snapshot, deadline, schemas)
+
+
+def _replace_transaction_details(details, states):
+    current, counts = _empty_transaction_details()
+    states.clear()
+    states.update(counts)
+    current["states"] = states
+    details.clear()
+    details.update(current)
+
+
+def _require_final_reconciliation_artifacts(details):
+    if "transaction_artifact_state_unknown" in details["deletion_codes"]:
+        raise TimeoutError("transaction artifact inventory has unknown authority")
+
+
+def _reconcile_transaction_tables(path, snapshot, schemas, state_root, now, deadline, details, states, vault_root):
+    inspection = _TransactionInspection()
+    while True:
+        _stop_at(deadline)
+        _replace_transaction_details(details, states)
+        corrupt = _scan_transaction_tables(
+            snapshot, schemas[0], state_root=state_root, now=now, deadline=deadline,
+            details=details, states=states, inspection=inspection,
+        )
+        current, changed = _finish_reconciled_snapshot(path, state_root, now, deadline, details, snapshot, schemas, vault_root)
+        if not changed:
+            _require_final_reconciliation_artifacts(details)
+            _accept_transaction_verdict(corrupt, details)
+            return
+        _require_terminal_delta(current, changed, details)
+        _require_terminal_evidence_unchanged(snapshot, current)
+        snapshot = current
 
 
 def _operation_columns(
@@ -1432,12 +1642,7 @@ def _scan_transaction_database(
                 details,
             )
         snapshot = _read_transaction_snapshot(database, deadline)
-    corrupt = _scan_transaction_tables(
-        snapshot, transaction_columns, state_root=state_root, now=now,
-        deadline=deadline, details=details, states=states,
-    )
-    _finish_transaction_snapshot(path, state_root, now, deadline, details, snapshot, transaction_columns, vault_root)
-    _accept_transaction_verdict(corrupt, details)
+    _reconcile_transaction_tables(path, snapshot, (transaction_columns, operation_columns), state_root, now, deadline, details, states, vault_root)
     return None
 
 
