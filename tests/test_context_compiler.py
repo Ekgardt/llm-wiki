@@ -321,6 +321,34 @@ def _snapshot(
     return CorpusSnapshot(sources, chunks, digest, policy)
 
 
+class _UnrequestedChunks:
+    def __iter__(self):
+        raise AssertionError("L0 metadata must not materialize unrequested chunks")
+
+
+def test_metadata_context_does_not_materialize_unrequested_chunks():
+    source = _source("knowledge/notes/example.md", b"# Example\nUseful context\n")
+    snapshot = _snapshot((source,))
+    object.__setattr__(snapshot, "chunks", _UnrequestedChunks())
+    compilation = context_compiler._Compilation(snapshot, set(), ())
+    assert len(compilation.parents) == 1
+    assert compilation.chunks_by_id == {}
+
+
+def _stop_requested():
+    return True
+
+
+@pytest.mark.parametrize("stop", ["deadline", "cancelled"])
+def test_context_stops_before_materializing_requested_source(stop):
+    source = _source("knowledge/notes/example.md", b"# Example\nUseful context\n")
+    snapshot = _snapshot((source,))
+    object.__setattr__(snapshot, "chunks", _UnrequestedChunks())
+    options = {"deadline": time.monotonic() - 1} if stop == "deadline" else {"cancelled": _stop_requested}
+    with pytest.raises(TimeoutError):
+        compile_context(snapshot, evidence_chunk_ids=("requested",), **options)
+
+
 def _page(
     relative_path: str,
     title: str,

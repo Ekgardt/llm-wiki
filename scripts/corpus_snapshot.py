@@ -4,14 +4,15 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import operator
 import os
 import re
 import stat
 import time
 import unicodedata
-from bisect import bisect_left
-from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from bisect import bisect_left, bisect_right
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from datetime import time as datetime_time
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -50,9 +51,8 @@ MAX_CORPUS_DEPTH = 16
 # bound like `corpus.max_files`. Basis unknown: value predates measurement; review when doctor
 # warns on corpus size.
 MAX_CORPUS_HEADINGS = 100_000
-# Chunks held in memory for one generation build; the FTS writer holds the same count
-# (`search_memory.MAX_GENERATION_FTS_CHUNKS`). A vault-size bound. Basis unknown: value predates
-# measurement; review when doctor warns on corpus size.
+# Per-source chunk admission remains unchanged. The complete corpus is streamed;
+# numerical basis for this inherited per-source bound remains under audit.
 MAX_CORPUS_CHUNKS = 100_000
 # Default wall-clock budget for one corpus collection (`collect_corpus`).
 DEFAULT_DEADLINE_SECONDS = 30.0
@@ -226,7 +226,7 @@ class SnapshotPolicy:
 @dataclass(frozen=True, slots=True)
 class CorpusSnapshot:
     sources: tuple[CapturedSource, ...]
-    chunks: tuple[RetrievalChunk, ...]
+    chunks: Sequence[RetrievalChunk]
     corpus_sha256: str
     policy: SnapshotPolicy
     collector_version: str = COLLECTOR_VERSION
@@ -242,6 +242,163 @@ class CorpusSnapshot:
             (source.record.relative_path, source.record.sha256)
             for source in self.sources
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _ChunkPlan:
+    source: CapturedSource
+    searchable_start: int
+    heading_enabled: bool
+    count: int
+    extractor_version: str = EXTRACTOR_VERSION
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class CapturedChunks(Sequence[RetrievalChunk]):
+    """Immutable source-backed sequence; no chunk corpus or collection clock is held."""
+    plans: tuple[_ChunkPlan, ...]
+    ends: tuple[int, ...]
+
+    def for_source_paths(self, paths):
+        selected = frozenset(paths)
+        return _captured_chunks(
+            plan for plan in self.plans
+            if plan.source.record.relative_path in selected
+        )
+
+    def __len__(self):
+        return self.ends[-1]
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return _ChunkSlice(self, range(len(self))[index])
+        return self.chunk_at(index)
+
+    def __iter__(self):
+        return self.iter_chunks()
+
+    def __eq__(self, other):
+        return _chunk_values_equal(self, other)
+
+    def chunk_at(self, index, *, deadline=None, cancelled=None):
+        position = _chunk_index(index, len(self))
+        source_index = bisect_right(self.ends, position) - 1
+        rows = self._source_chunks(source_index, deadline, cancelled)
+        return rows[position - self.ends[source_index]]
+
+    def _source_chunks(self, index, deadline, cancelled):
+        _check_processing_stop(deadline, cancelled)
+        plan = self.plans[index]
+        source = plan.source
+        rows = _chunks(source.record, source.metadata, source.content,
+                       plan.searchable_start, heading_enabled=plan.heading_enabled,
+                       extractor_version=plan.extractor_version,
+                       deadline=deadline, cancelled=cancelled)
+        _require_chunk_count(rows, plan.count)
+        _check_processing_stop(deadline, cancelled)
+        return rows
+
+    def iter_chunks(self, *, deadline=None, cancelled=None):
+        _check_processing_stop(deadline, cancelled)
+        for index in range(len(self.plans)):
+            rows = self._source_chunks(index, deadline, cancelled)
+            yield from _checked_chunks(rows, deadline, cancelled)
+            del rows
+
+    def _iter_positions(self, positions, deadline, cancelled):
+        _check_processing_stop(deadline, cancelled)
+        current, rows = -1, ()
+        for position in positions:
+            source_index = bisect_right(self.ends, position) - 1
+            if source_index != current:
+                rows = ()
+                rows = self._source_chunks(source_index, deadline, cancelled)
+                current = source_index
+            _check_processing_stop(deadline, cancelled)
+            yield rows[position - self.ends[source_index]]
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _ChunkSlice(Sequence[RetrievalChunk]):
+    chunks: CapturedChunks
+    positions: range
+
+    def __len__(self):
+        return len(self.positions)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return _ChunkSlice(self.chunks, self.positions[index])
+        return self.chunks[self.positions[index]]
+
+    def __iter__(self):
+        return self.iter_chunks()
+
+    def __eq__(self, other):
+        return _chunk_values_equal(self, other)
+
+    def iter_chunks(self, *, deadline=None, cancelled=None):
+        return self.chunks._iter_positions(self.positions, deadline, cancelled)
+
+
+def _chunk_index(index, size):
+    position = operator.index(index)
+    if position < 0:
+        position += size
+    if not 0 <= position < size:
+        raise IndexError("corpus chunk index out of range")
+    return position
+
+
+def _chunk_values_equal(left, right):
+    if not isinstance(right, Sequence):
+        return NotImplemented
+    if len(left) != len(right):
+        return False
+    return all(a == b for a, b in zip(left, right))
+
+
+def _require_chunk_count(rows, expected):
+    if len(rows) != expected:
+        raise ValueError("captured source chunk count changed")
+
+
+def _checked_chunks(chunks, deadline, cancelled):
+    _check_processing_stop(deadline, cancelled)
+    for chunk in chunks:
+        _check_processing_stop(deadline, cancelled)
+        yield chunk
+
+
+def iter_snapshot_chunks(snapshot, *, deadline=None, cancelled=None):
+    """Use this caller's clock, including before source materialization."""
+    iterate = getattr(snapshot.chunks, "iter_chunks", None)
+    if iterate is None:
+        return _checked_chunks(snapshot.chunks, deadline, cancelled)
+    return iterate(deadline=deadline, cancelled=cancelled)
+
+
+def select_snapshot_chunks(snapshot, paths):
+    """Select source plans without expanding a production chunk sequence."""
+    select = getattr(snapshot.chunks, "for_source_paths", None)
+    if select is not None:
+        return select(paths)
+    selected = frozenset(paths)
+    return tuple(chunk for chunk in snapshot.chunks if chunk.source_path in selected)
+
+
+def _pinned_chunk_plan(source, searchable_start, heading_enabled, count):
+    """Public descriptor aliases cannot change already captured chunk fields."""
+    pinned = CapturedSource(replace(source.record), replace(source.metadata), source.content)
+    return _ChunkPlan(pinned, searchable_start, heading_enabled, count)
+
+
+def _captured_chunks(plans):
+    plans = tuple(plans)
+    ends = [0]
+    for plan in plans:
+        ends.append(ends[-1] + plan.count)
+    return CapturedChunks(plans, tuple(ends))
 
 
 @dataclass(frozen=True, slots=True)
@@ -2432,6 +2589,14 @@ def _source_kind(path: PurePosixPath) -> tuple[str, str | None]:
     return "code", None
 
 
+def _captured_source_kind(path: PurePosixPath, code_roots: tuple[str, ...]):
+    """The sealed collection policy determines whether a path is code."""
+    normalized = tuple(_code_root(root, code_roots) for root in code_roots)
+    if any(path.is_relative_to(PurePosixPath(root)) for root in normalized):
+        return "code", None
+    return _source_kind(path)
+
+
 def _require_canonical_source(
     source_id: str,
     source_path: str,
@@ -2475,11 +2640,12 @@ def _canonical_source_record(
 def _canonical_captured_head(
     source_id: str, source_path: str, source_sha256: str, content: bytes,
     deadline: float | None, cancelled: Callable[[], bool] | None,
+    code_roots: tuple[str, ...],
 ) -> tuple[CapturedSource, int, bool]:
     """Metadata comes from the captured Markdown, never from index metadata."""
     path = PurePosixPath(source_path)
     _require_canonical_source(source_id, source_path, path, content, source_sha256)
-    kind, project = _source_kind(path)
+    kind, project = _captured_source_kind(path, code_roots)
     is_markdown, searchable_start, frontmatter = _markdown_head(
         source_path, content, deadline, cancelled
     )
@@ -2501,10 +2667,11 @@ def _canonical_captured_head(
 def canonical_captured_source(
     *, source_id: str, source_path: str, source_sha256: str, content: bytes,
     deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
+    code_roots: tuple[str, ...] = (),
 ) -> CapturedSource:
     """Reconstruct source metadata from its exact hash-verified captured bytes."""
     captured, _start, _markdown = _canonical_captured_head(
-        source_id, source_path, source_sha256, content, deadline, cancelled
+        source_id, source_path, source_sha256, content, deadline, cancelled, code_roots
     )
     return captured
 
@@ -2518,10 +2685,11 @@ def canonical_retrieval_chunks(
     extractor_version: str = EXTRACTOR_VERSION,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    code_roots: tuple[str, ...] = (),
 ) -> tuple[RetrievalChunk, ...]:
     """Reconstruct every canonical chunk field from authoritative source bytes."""
     captured, searchable_start, is_markdown = _canonical_captured_head(
-        source_id, source_path, source_sha256, content, deadline, cancelled
+        source_id, source_path, source_sha256, content, deadline, cancelled, code_roots
     )
     return _chunks(
         captured.record,
@@ -2685,7 +2853,7 @@ class _Capture:
         self.deadline = deadline
         self.cancelled = cancelled
         self.captured: list[CapturedSource] = []
-        self.chunks: list[RetrievalChunk] = []
+        self.plans: list[_ChunkPlan] = []
         self.hashes: dict[str, str] = {}
         self.total = 0
         # Code files left out because their bytes are not UTF-8: named with the
@@ -2735,7 +2903,8 @@ class _Capture:
         record = _captured_record(
             candidate, content, metadata, is_markdown, searchable_start, digest
         )
-        self.captured.append(CapturedSource(record, metadata, content))
+        captured = CapturedSource(record, metadata, content)
+        self.captured.append(captured)
         source_chunks = _chunks(
             record,
             metadata,
@@ -2745,9 +2914,7 @@ class _Capture:
             deadline=self.deadline,
             cancelled=self.cancelled,
         )
-        if len(self.chunks) + len(source_chunks) > MAX_CORPUS_CHUNKS:
-            raise ValueError("corpus chunk row ceiling exceeded")
-        self.chunks.extend(source_chunks)
+        self.plans.append(_pinned_chunk_plan(captured, searchable_start, is_markdown, len(source_chunks)))
 
 
 
@@ -2838,7 +3005,7 @@ def _capture(
     )
     return CorpusSnapshot(
         tuple(capture.captured),
-        tuple(capture.chunks),
+        _captured_chunks(capture.plans),
         corpus_hash,
         policy,
         skipped=(*discovery.skipped, *capture.unreadable),

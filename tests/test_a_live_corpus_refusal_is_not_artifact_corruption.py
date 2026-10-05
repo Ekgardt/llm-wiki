@@ -34,7 +34,9 @@ def test_live_ancestor_change_does_not_claim_artifact_corruption(tmp_path, monke
 
     def race(expected, flags, changed_error):
         if not changed:
-            (root / "concurrent-source-marker").write_bytes(b"independent editor")
+            assert expected.path == root
+            root.rename(root.with_name("replaced-vault"))
+            root.mkdir()
             changed.append(True)
         return original(expected, flags, changed_error)
 
@@ -53,6 +55,33 @@ def test_live_ancestor_change_does_not_claim_artifact_corruption(tmp_path, monke
     assert details["freshness"] == "unknown"
     assert details["partial"] is True
     assert details["repairable"] is False
+    assert hashlib.sha256(evidence.read_bytes()).hexdigest() == before
+
+
+@pytest.mark.skipif(os.name != "posix", reason="real POSIX descriptor race")
+def test_unrelated_sibling_creation_keeps_the_sealed_corpus_valid(tmp_path, monkeypatch):
+    import corpus_snapshot
+    import doctor
+
+    root, state, built, directory = _built(tmp_path)
+    evidence = directory / "evidence.sqlite3"
+    before = hashlib.sha256(evidence.read_bytes()).hexdigest()
+    original = corpus_snapshot._open_sealed_root
+    changed = []
+
+    def race(expected, flags, changed_error):
+        if not changed:
+            (root / "concurrent-source-marker").write_bytes(b"independent editor")
+            changed.append(True)
+        return original(expected, flags, changed_error)
+
+    monkeypatch.setattr(corpus_snapshot, "_open_sealed_root", race)
+    result = doctor._generation_check(
+        root, state, datetime.now(timezone.utc), deadline=time.monotonic() + LONG_TIMEOUT
+    )
+    assert changed
+    assert result["status"] == "ok"
+    assert result["details"]["active_generation"] == built["generation_id"]
     assert hashlib.sha256(evidence.read_bytes()).hexdigest() == before
 
 

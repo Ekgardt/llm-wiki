@@ -33,6 +33,7 @@ def _chunk(page: str, identity: str, position: int):
     return SimpleNamespace(
         id=identity,
         parent_page=page,
+        source_path=page,
         byte_start=position,
         byte_end=position + 10,
         text="**user:** something",
@@ -50,7 +51,7 @@ def test_the_narrowed_snapshot_keeps_the_corpus_order_through_the_index() -> Non
     chunks = [_chunk("a.md", "a1", 0), _chunk("b.md", "b1", 10), _chunk("a.md", "a2", 20)]
     snapshot = _snapshot(chunks)
 
-    through_index = query_memory._chunks_of(snapshot, ("a.md", "b.md"), query_memory._chunks_by_page(snapshot))
+    through_index = query_memory._chunks_of(snapshot, ("a.md", "b.md"), query_memory._chunks_by_page(snapshot, ("a.md", "b.md")))
     without_index = query_memory._chunks_of(snapshot, ("a.md", "b.md"), None)
 
     assert [chunk.id for chunk in through_index] == ["a1", "b1", "a2"]

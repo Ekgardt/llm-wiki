@@ -526,12 +526,31 @@ class TestCompileEvidenceEnforcement:
         item = compile_memory.RAW_PLAN_SCHEMA["properties"]["operations"][
             "items"
         ]["properties"]["evidence"]["items"]
-        assert set(item["required"]) == {
+        legacy, native = item["oneOf"]
+        expected = {
             "daily_date",
             "timestamp",
             "quoted_text",
             "claim",
         }
+        assert set(legacy["required"]) == expected
+        assert set(native["required"]) == expected | {"native_event"}
+        assert legacy["additionalProperties"] is False
+        assert native["additionalProperties"] is False
+
+    @pytest.mark.parametrize("field", ("daily_date", "timestamp", "quoted_text", "claim"))
+    @pytest.mark.parametrize("native", (False, True))
+    def test_neither_evidence_form_admits_a_missing_required_field(self, field, native):
+        import compile_memory
+
+        item = compile_memory.RAW_PLAN_SCHEMA["properties"]["operations"]["items"]["properties"]["evidence"]["items"]
+        record = {"daily_date": "2026-07-14", "timestamp": "10:00:00", "quoted_text": "An exact observation.", "claim": "A grounded claim."}
+        if native:
+            record["native_event"] = {"source_path": "knowledge/raw/sessions/2026-07-14/example.md", "byte_start": 0, "line_index": 0}
+        compile_memory._validate_rule(record, item, "$evidence")
+        del record[field]
+        with pytest.raises(ValueError):
+            compile_memory._validate_rule(record, item, "$evidence")
 
 
 # ---------------------------------------------------------------------------

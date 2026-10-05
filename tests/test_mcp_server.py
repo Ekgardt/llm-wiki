@@ -2174,8 +2174,8 @@ class TestHandleToolCall:
         received = []
 
         class Queue:
-            def __init__(self, root):
-                del root
+            def __init__(self, root, *, deadline=None):
+                del root, deadline
 
             def cancel(self, target_id, *, deadline, cancelled):
                 received.append((target_id, deadline, cancelled()))
@@ -2212,8 +2212,8 @@ class TestHandleToolCall:
             error_code = None
 
         class Coordinator:
-            def __init__(self, *args):
-                del args
+            def __init__(self, *args, deadline=None):
+                del args, deadline
 
             def undo(self, target_id, *, deadline, cancelled):
                 received.append(("undo", target_id, deadline, cancelled()))
@@ -2278,7 +2278,7 @@ class TestHandleToolCall:
                 raise
 
         monkeypatch.setattr(memory_queue, "begin_immediate", delayed_begin)
-        monkeypatch.setattr(memory_queue, "MemoryQueue", lambda _root: queue)
+        monkeypatch.setattr(memory_queue, "MemoryQueue", lambda _root, *, deadline=None: queue)
         monkeypatch.setattr(memory_state, "ROOT", vault)
         monkeypatch.setattr(memory_state, "STATE_ROOT", state_root)
         # The operation has to reach its commit before the budget expires;
@@ -3135,8 +3135,8 @@ class TestHandleToolCall:
         received = []
 
         class Coordinator:
-            def __init__(self, *args):
-                pass
+            def __init__(self, *args, deadline=None):
+                del args, deadline
 
             def recover(self, **kwargs):
                 received.append(kwargs)
@@ -3181,8 +3181,8 @@ class TestHandleToolCall:
                 connection.execute("CREATE TABLE tasks(id, state, error_code)")
         else:
             class Queue:
-                def __init__(self, root):
-                    pass
+                def __init__(self, root, *, deadline=None):
+                    del root, deadline
 
                 def cancel(self, target_id, **kwargs):
                     del kwargs

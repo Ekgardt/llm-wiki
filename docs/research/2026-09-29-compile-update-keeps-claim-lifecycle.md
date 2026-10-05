@@ -84,3 +84,30 @@ operation on the present Linux host, not a new product daemon or platform contra
 Its log prefix is `logs/audit-2026-09-29-compile-retry-after-lifecycle-fix`.
 At the last check it was still waiting; execution or success of the retry must
 be verified from those logs and receipts, not inferred from scheduling it.
+
+## 2026-10-05: shared lifecycle targets and committed retry receipts
+
+The retained third installed-day plan and a real isolated claim database
+reproduce another overlap: two source assessments target the same external
+ledger. Their separate replacements are correctly refused. The streaming
+candidate combines verified lifecycle transitions into one after-image per
+target, then merges any same-page update into that image. Existing claim IDs,
+history, authority checks, captured bytes and publication preconditions remain
+required. The previous same-page correction alone did not cover this case.
+
+A second regression covers replay of a plan already committed by the real
+transaction coordinator. Receipt verification now precedes reassessment under
+the existing writer gate, and publication rechecks it. This makes a proven
+committed retry idempotent. An unreceipted external change still refuses without
+outputs; a changed source or an invalid receipt does not receive this exemption.
+No model call, persistent schema, runtime location or new budget is added.
+
+The original failures and corrected related run are retained under
+`logs/audit-2026-10-05-step7-shared-lifecycle-` and
+`logs/audit-2026-10-05-step7-retry-authority-`. The combined related run passed
+134 checks. Actual complexity and branch-shape qualification passed; the fourth
+full candidate run passed 11,381 tests with 210 skips. A subsequent foreign
+code-capture context correction requires its own full merged run. These are
+candidate results: installation, complete closed-day replay and full nightly
+completion remain unverified at this checkpoint. Retained plans and refusal
+records are evidence, not cleanup targets.

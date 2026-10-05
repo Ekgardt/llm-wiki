@@ -298,14 +298,15 @@ def _assert_delegate_saw_only_redacted(observed, secret):
 def test_delegate_receives_only_normalized_redacted_payload(monkeypatch, capsys, tmp_path):
     import integration_adapter
 
+    from tests.adopted_vault import adopt
+
     # This one runs the adapter for real, so it writes a project journal. Without
     # its own root that lands in the live vault under the redacted slug.
-    vault = tmp_path / "vault"
-    vault.mkdir()
+    vault, state = adopt(tmp_path)
     monkeypatch.setattr(integration_adapter, "ROOT", vault)
-    monkeypatch.setattr(integration_adapter, "STATE_ROOT", tmp_path / "state")
+    monkeypatch.setattr(integration_adapter, "STATE_ROOT", state)
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
-    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
     secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
     observed = {}
 
@@ -1426,7 +1427,7 @@ def test_windows_transient_permissions_use_bounded_icacls(monkeypatch, tmp_path)
 def _assert_hook_contract(settings: dict, hook_name: str, timeouts: list, event_name: str) -> None:
     hooks = settings["hooks"][hook_name][0]["hooks"]
     commands = [hook["command"] for hook in hooks]
-    assert [hook["timeout"] for hook in hooks] == timeouts
+    assert [hook.get("timeout") for hook in hooks] == timeouts
     assert all("scripts/integration_adapter.py" in command for command in commands)
     assert all(f"--event {event_name}" in command for command in commands)
 
@@ -1442,7 +1443,7 @@ def test_claude_hooks_route_through_shared_adapter_and_preserve_contract():
         "SessionStart": ([15], "session_start"),
         "PreCompact": ([15], "pre_compact"),
         "SessionEnd": ([15], "session_end"),
-        "UserPromptSubmit": ([5], "user_prompt"),
+        "UserPromptSubmit": ([None], "user_prompt"),
         "PostToolUse": ([5], "post_tool_use"),
     }
     for hook_name, (timeouts, event_name) in expected.items():

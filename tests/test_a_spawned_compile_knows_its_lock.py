@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -66,20 +67,28 @@ def test_the_spawner_keeps_the_token_when_it_records_the_child(lock_file) -> Non
 
 def test_the_spawn_command_names_the_lock_token(lock_file, monkeypatch) -> None:
     commands: list[list[str]] = []
-    monkeypatch.setattr(maybe_compile, "_has_pending_work", lambda *_args: True)
+    deadlines: list[float] = []
+
+    def pending(_closed_days_only, *, deadline):
+        deadlines.append(deadline)
+        return True
+
+    monkeypatch.setattr(maybe_compile, "_has_pending_work", pending)
     monkeypatch.setattr(
         maybe_compile,
         "spawn_detached",
         lambda command, **_kwargs: commands.append(command) or os.getpid(),
     )
 
-    spawned, reason = maybe_compile.spawn_compile_if_idle()
+    deadline = time.monotonic() + 10
+    spawned, reason = maybe_compile.spawn_compile_if_idle(deadline=deadline)
 
     assert (spawned, "--lock-token" in commands[0]) == (True, True)
     assert commands[0][commands[0].index("--lock-token") + 1] == (
         maybe_compile.lock_owner_token()
     )
     assert reason.startswith("spawned compile")
+    assert deadlines == [deadline]
 
 
 def test_an_empty_lock_inside_the_spawn_window_is_a_write_in_progress(

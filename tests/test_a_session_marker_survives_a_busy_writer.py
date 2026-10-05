@@ -84,7 +84,7 @@ def test_missing_transcript_force_stub_keeps_real_metadata_for_replay(tmp_path, 
     assert len(records) == 1
     assert records[0]["evidence"][0]["role"] == "lifecycle"
     assert records[0]["session"] == "marker-replay"
-    assert records[0]["occurred_at"] == OCCURRED.isoformat()
+    assert records[0]["occurred_at"] == OCCURRED.isoformat(timespec="microseconds")
     _work(state, monkeypatch)
     assert "- Project slug:" in _marker_text(adapter.ROOT)
 

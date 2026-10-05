@@ -100,14 +100,17 @@ def test_select_dailies_rejects_outside_daily(tmp_path, monkeypatch):
     import argparse
 
     import compile_memory
+    from markdown_transaction import MarkdownCoordinator
 
     monkeypatch.setattr(compile_memory, "DAILY_DIR", tmp_path / "knowledge" / "daily")
     (tmp_path / "knowledge" / "daily").mkdir(parents=True)
     outside = tmp_path / "README.md"
     outside.write_text("x", encoding="utf-8")
     args = argparse.Namespace(file=str(outside), all=False)
-    with pytest.raises(SystemExit):
-        compile_memory.select_dailies(args, {}, coordinator=object())
+    coordinator = MarkdownCoordinator(tmp_path, tmp_path / "runtime")
+    with pytest.raises(SystemExit, match="--file must be under"):
+        compile_memory.select_dailies(args, {}, coordinator=coordinator)
+    assert outside.read_text(encoding="utf-8") == "x"
 
 
 def test_e2e_compile_with_fake_provider(tmp_path, monkeypatch):

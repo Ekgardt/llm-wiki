@@ -35,8 +35,10 @@ import os
 import re
 import sys
 import time
+import weakref
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -384,6 +386,7 @@ class CompileInputs:
     # a prompt. Publication rereads derived index/log targets under its writer
     # gate; this model-input snapshot remains immutable.
     vault_files: tuple[SourceSnapshot, ...] = ()
+    partition_context: object | None = dataclass_field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -465,21 +468,22 @@ def snapshot_compile_inputs(
     dailies: list[DailySnapshot] = []
     sources: list[SourceSnapshot] = []
     budget = _SourceBudget(sources)
+    partitions = _CapturedPartitions()
 
     for path in sorted(map(Path, paths), key=lambda item: item.as_posix()):
         content = _read_daily_source(path)
         logical = _logical_path(path)
-        frames = _native_daily_frames(logical, content, ROOT)
-        dailies.extend(_daily_parts(logical, content, compiled, native_frames=frames))
+        dailies.extend(partitions.daily(logical, content, compiled))
         budget.add(SourceSnapshot(logical, content, sha256_bytes(content)))
     vault_files = _vault_file_snapshots(budget.add)
     targets = _knowledge_targets(budget.add)
-    return CompileInputs(
+    return partitions.bind(CompileInputs(
         tuple(dailies),
         tuple(sorted(sources, key=lambda item: item.logical_path)),
         tuple(sorted(targets, key=lambda item: item.logical_path)),
         tuple(vault_files),
-    )
+        partitions,
+    ))
 
 
 def _vault_file_snapshots(
@@ -568,9 +572,10 @@ def _daily_parts(
     content: bytes,
     compiled: Callable[[str, str], bool] | None = None,
     *, native_frames: tuple[NativeCompileFrame, ...] = (),
+    bounds=None,
 ) -> list[DailySnapshot]:
     """This day as the one or more parts the compiler still has to take."""
-    bounds = _daily_part_bounds(content)
+    bounds = _daily_part_bounds(content) if bounds is None else bounds
     original_digest = sha256_bytes(content)
     original_entries = tuple(daily_entries(content))
     parts = [
@@ -693,11 +698,12 @@ def _subset_compile_inputs(
     inputs: CompileInputs,
     daily_paths: set[str],
     optional_paths: set[str] | None = None,
+    *, journal_indexes=None, partitions=None,
 ) -> CompileInputs:
     all_daily_paths = {item.logical_path for item in inputs.dailies}
     selected = tuple(item for item in inputs.dailies if item.part_key in daily_paths)
     context = _context_sources(inputs, all_daily_paths, optional_paths)
-    selected_sources = _deduplicated_sources(selected)
+    selected_sources = _deduplicated_sources(selected, journal_indexes=journal_indexes, partitions=partitions)
     return CompileInputs(
         selected,
         tuple(
@@ -722,32 +728,185 @@ def _context_sources(
 
 def _deduplicated_sources(
     selected: Sequence[DailySnapshot],
+    *, journal_indexes=None, partitions=None,
 ) -> list[SourceSnapshot]:
-    """One complete source per day; only a verified native unit may join parts."""
+    """One source per day preserves every byte of verified contiguous parts."""
     grouped = {}
     for part in selected:
         grouped.setdefault(part.logical_path, []).append(part)
-    return [_native_unit_source(parts) for parts in grouped.values()]
+    return [_native_unit_source(parts, journal_indexes=journal_indexes, partitions=partitions) for parts in grouped.values()]
 
 
-def _native_unit_source(parts):
+def _native_unit_source(parts, *, journal_indexes=None, partitions=None):
     ordered = sorted(parts, key=lambda item: item.byte_start)
-    _require_native_unit(ordered)
+    _require_native_unit(ordered, partitions=partitions)
     raw = b"".join(part.content for part in ordered)
-    projected = _native_prompt_content(ordered, raw)
+    projected = _native_prompt_content(ordered, raw, journal_indexes=journal_indexes)
     return SourceSnapshot(ordered[0].logical_path, raw, sha256_bytes(raw), projected)
 
 
-def _require_native_unit(parts):
+def _require_native_unit(parts, *, partitions=None):
     if len(parts) == 1:
         return
-    if not all(_native_parts_join(left, right) and left.original_sha256 == right.original_sha256
-               for left, right in zip(parts, parts[1:])):
-        raise ValueError("two parts of one day require a complete verified native unit")
+    _require_contiguous_daily_parts(parts, partitions=partitions)
 
 
-def _native_prompt_content(parts, raw):
-    frames = _selected_native_frames(parts)
+def _partition_for_join(first, *, journal_indexes=None):
+    original = first.original_content
+    if type(original) is not bytes:
+        raise ValueError("two parts of one day require immutable original bytes")
+    if sha256_bytes(original) != first.original_sha256:
+        raise ValueError("canonical original source digest does not match")
+    return _daily_part_bounds(original), _native_partition_ranges(first, journal_indexes)
+
+
+def _native_partition_ranges(part, journal_indexes):
+    spans = []
+    for start, (_, block) in _journal_index_for_part(part, journal_indexes).items():
+        span = _native_partition_span(start, block)
+        if span is not None:
+            spans.append(span)
+    return tuple(spans)
+
+
+def _native_partition_span(start, block):
+    from event_envelope import native_user_text
+
+    physical = block.rsplit(b"\n", 2)[-2]
+    if native_user_text(physical.decode()) is None:
+        return None
+    return start + 4, start + len(physical)
+
+
+def _require_native_partition_cover(parts, spans):
+    first, last = parts[0].byte_start, parts[-1].byte_end
+    overlapping = _overlapping_partition_spans(spans, first, last)
+    if any(start < first or end > last for start, end in overlapping):
+        raise ValueError("native frame requires all covering source parts")
+
+
+def _overlapping_partition_spans(spans, first, last):
+    return [span for span in spans if span[0] < last and span[1] > first]
+
+
+def _require_join_identity(part, first):
+    if part.logical_path != first.logical_path or part.original_sha256 != first.original_sha256:
+        raise ValueError("joined daily parts name different physical sources")
+    if type(part.original_content) is not bytes or part.original_content != first.original_content:
+        raise ValueError("joined daily parts contain different original bytes")
+
+
+def _require_join_ordinal(part, bounds):
+    if type(part.part_index) is not int or type(part.part_count) is not int:
+        raise ValueError("joined daily partition ordinals must be integers")
+    if part.part_count != len(bounds) or not 0 <= part.part_index < len(bounds):
+        raise ValueError("joined daily partition ordinal differs from its original")
+
+
+def _require_join_member(part, bounds):
+    _require_join_ordinal(part, bounds)
+    if (part.byte_start, part.byte_end) != bounds[part.part_index]:
+        raise ValueError("joined daily part bounds differ from its original partition")
+    expected = part.original_content[part.byte_start:part.byte_end]
+    if type(part.content) is not bytes or part.content != expected or sha256_bytes(expected) != part.sha256:
+        raise ValueError("joined daily part bytes differ from its original partition")
+
+
+def _require_contiguous_daily_parts(parts, *, partitions=None):
+    first = parts[0]
+    bounds, native_ranges = _join_partition(first, partitions)
+    for part in parts:
+        _require_join_identity(part, first)
+        _require_join_member(part, bounds)
+    if any(left.byte_end != right.byte_start for left, right in zip(parts, parts[1:])):
+        raise ValueError("joined daily parts have a gap or overlap")
+    _require_native_partition_cover(parts, native_ranges)
+
+
+class _DailyPartitionProofs:
+    """One packing pass owns pure partition proofs of strongly held immutable bytes."""
+
+    def __init__(self, journal_indexes=None):
+        self.sources = {}
+        self.journal_indexes = journal_indexes
+
+    def for_part(self, part):
+        key = (id(part.original_content), part.original_sha256)
+        if key not in self.sources:
+            self.sources[key] = (part.original_content, _partition_for_join(part, journal_indexes=self.journal_indexes))
+        return self.sources[key][1]
+
+
+
+class _CapturedPartitions:
+    """Pure immutable capture facts, usable only by their original input owner."""
+
+    def __init__(self):
+        self.journal_indexes = _NativeJournalIndexes()
+        self.partitions = _DailyPartitionProofs(self.journal_indexes)
+        self.owner = None
+        self.parts = {}
+        self.bound_dailies = None
+        self.bound_sources = None
+
+    def daily(self, logical, content, compiled):
+        index = self.journal_indexes.for_content(content)
+        observed = (_verified_native_frame(logical, content, start, head, block, ROOT)
+                    for start, (head, block) in index.items())
+        frames = tuple(frame for frame in observed if frame is not None)
+        bounds = _daily_part_bounds(content)
+        spans = tuple((frame.byte_start, frame.byte_end) for frame in frames)
+        key = (id(content), sha256_bytes(content))
+        self.partitions.sources[key] = (content, (bounds, spans))
+        parts = _daily_parts(logical, content, compiled, native_frames=frames, bounds=bounds)
+        return self._remember_parts(parts)
+
+    def _remember_parts(self, parts):
+        self.parts.update((id(part), part) for part in parts)
+        return parts
+
+    def bind(self, inputs):
+        if any(self.parts.get(id(part)) is not part for part in inputs.dailies):
+            raise ValueError("capture partition context does not own these input parts")
+        self.owner = weakref.ref(inputs)
+        self.bound_dailies, self.bound_sources = inputs.dailies, inputs.sources
+        self.journal_indexes.sources.clear()
+        return inputs
+
+
+def _measurement_proofs(inputs):
+    context = getattr(inputs, "partition_context", None)
+    if type(context) is _CapturedPartitions and context.owner is not None and context.owner() is inputs:
+        return _bound_capture_proofs(context, inputs)
+    journal = _NativeJournalIndexes()
+    return journal, _DailyPartitionProofs(journal)
+
+
+def _bound_capture_proofs(context, inputs):
+    journal = _NativeJournalIndexes()
+    partitions = _DailyPartitionProofs(journal)
+    if context.bound_dailies is inputs.dailies and context.bound_sources is inputs.sources:
+        partitions.sources.update(context.partitions.sources)
+    return journal, partitions
+
+
+def _join_partition(part, partitions):
+    if partitions is None:
+        return _partition_for_join(part)
+    return partitions.for_part(part)
+
+
+def _same_day_parts_join(current_parts, unit, partitions):
+    selected = [part for part in current_parts if part.logical_path == unit[0].logical_path]
+    try:
+        _require_native_unit(selected + list(unit), partitions=partitions)
+    except ValueError:
+        return False
+    return True
+
+
+def _native_prompt_content(parts, raw, *, journal_indexes=None):
+    frames = _selected_native_frames(parts, journal_indexes=journal_indexes)
     if not frames:
         return None
     offset = parts[0].byte_start
@@ -760,28 +919,67 @@ def _native_prompt_content(parts, raw):
     return b"".join(result)
 
 
-def _selected_native_frames(parts):
+def _overlapping_native_frames(parts):
     first, last = parts[0].byte_start, parts[-1].byte_end
-    overlapping = [frame for frame in parts[0].native_frames
-                   if frame.byte_start < last and frame.byte_end > first]
+    return [frame for frame in parts[0].native_frames
+            if frame.byte_start < last and frame.byte_end > first]
+
+
+def _selected_native_frames(parts, *, journal_indexes=None):
+    overlapping = _overlapping_native_frames(parts)
+    if not overlapping:
+        return overlapping
+    index = _journal_index_for_part(parts[0], journal_indexes)
     for frame in overlapping:
-        _require_native_frame_cache(frame, parts[0])
+        _require_native_frame_cache(frame, parts[0], journal_index=index)
         _require_native_frame_cover(frame, parts)
     return overlapping
 
 
-def _require_native_frame_cache(frame, part):
+def _parse_native_journal(content):
     from fact_keys import _native_journal_index
 
+    return _native_journal_index(content)
+
+
+class _NativeJournalIndexes:
+    """Pure parsing for one measurement; strong refs prevent identity reuse."""
+
+    def __init__(self):
+        self.sources: dict[int, tuple[bytes, dict]] = {}
+
+    def for_content(self, content):
+        if type(content) is not bytes:
+            return _parse_native_journal(content)
+        key = id(content)
+        if key not in self.sources:
+            self.sources[key] = (content, _parse_native_journal(content))
+        return self.sources[key][1]
+
+
+def _journal_index_for_part(part, journal_indexes):
+    content = _physical_source(part).content
+    if journal_indexes is None:
+        return _parse_native_journal(content)
+    return journal_indexes.for_content(content)
+
+
+def _require_native_frame_cache(frame, part, *, journal_index=None):
     physical = _physical_source(part)
     start = frame.byte_start - 4
-    entry = _native_journal_index(physical.content).get(start)
+    entry = _available_journal_index(part, journal_index).get(start)
     if entry is None:
         raise ValueError("native frame cache lacks canonical source proof")
     head, block = entry
     verified = _verified_native_frame(part.logical_path, physical.content, start, head, block, ROOT)
     if frame != verified:
         raise ValueError("native frame cache disagrees with canonical source container")
+
+
+def _available_journal_index(part, journal_index):
+    if journal_index is None:
+        return _parse_native_journal(_physical_source(part).content)
+    return journal_index
 
 
 def _require_native_frame_cover(frame, parts):
@@ -835,6 +1033,12 @@ def _record_oversized_daily(logical_path: str) -> None:
 
 def _without_days(inputs: CompileInputs, days: set[str]) -> CompileInputs:
     """These inputs with the named days removed, as parts and as sources."""
+    if not days:
+        return inputs
+    return _filtered_compile_days(inputs, days)
+
+
+def _filtered_compile_days(inputs, days):
     return replace(
         inputs,
         dailies=tuple(item for item in inputs.dailies if item.logical_path not in days),
@@ -897,11 +1101,19 @@ def pack_compile_batches(
             model,
             token_adapters,
             optional_paths=_fitting_context(
-                paths, ranking.ordered(_batch_text(inputs, paths)), budget, measure
+                paths, ranking.ordered(_measure_batch_text(inputs, paths, measure)), budget, measure
             ),
+            journal_indexes=_packing_journal_indexes(measure),
+            partitions=_measure_partitions(measure, _measure_owns_inputs(measure, inputs)),
         )
         for paths in _group_dailies(inputs, budget, measure)
     )
+
+
+def _packing_journal_indexes(measure):
+    if type(measure) is _ByteBatchMeasure:
+        return measure.journal_indexes
+    return None
 
 
 _RANKING_WORD = re.compile(r"[^\W\d_]{4,}")
@@ -916,6 +1128,49 @@ def _words(content: bytes) -> frozenset[str]:
 
 def _batch_text(inputs: CompileInputs, paths: set[str]) -> bytes:
     return b"\n".join(item.content for item in inputs.dailies if item.part_key in paths)
+
+
+
+class _BatchTextLookup:
+    """One measure's original ordered part references, without copied source bytes."""
+
+    def __init__(self, inputs):
+        self.inputs = inputs
+        self.dailies = inputs.dailies
+        self.parts = _batch_text_parts(inputs.dailies)
+
+    def text(self, inputs, paths):
+        if inputs is not self.inputs or inputs.dailies is not self.dailies:
+            return _batch_text(inputs, paths)
+        rows = _selected_text_rows(self.parts, paths)
+        return b"\n".join(_batch_text_row(row) for row in sorted(rows))
+
+
+def _batch_text_parts(dailies):
+    parts = {}
+    for ordinal, part in enumerate(dailies):
+        parts.setdefault(part.part_key, []).append((ordinal, part.part_key, part))
+    return {key: tuple(rows) for key, rows in parts.items()}
+
+
+def _selected_text_rows(parts, paths):
+    return [row for key in paths for row in parts.get(key, ())]
+
+
+def _batch_text_row(row):
+    _, key, part = row
+    if part.part_key != key:
+        raise ValueError("immutable batch text part identity changed")
+    return part.content
+
+
+def _measure_batch_text(inputs, paths, measure):
+    if _measure_owns_inputs(measure, inputs):
+        return measure.batch_texts.text(inputs, paths)
+    return _batch_text(inputs, paths)
+
+
+
 
 
 def _inverse_document_frequency(documents, total: int) -> dict[str, float]:
@@ -980,18 +1235,27 @@ def _batch_measure(
     if model is None:
         return _ByteBatchMeasure(inputs)
 
-    def measured(paths: set[str], optional_paths: set[str] | None = None) -> int:
-        subset = _subset_compile_inputs(inputs, paths, optional_paths)
-        count = count_tokens(
-            _draft_prompt_text(subset),
-            model=model,
-            adapters=token_adapters,
-        )
+    return _TokenBatchMeasure(inputs, model, token_adapters)
+
+
+class _TokenBatchMeasure:
+    """A tokenizer counts the exact serialization of its captured inputs."""
+
+    def __init__(self, inputs, model, adapters):
+        self.inputs, self.model, self.adapters = inputs, model, adapters
+        self.batch_texts = _BatchTextLookup(inputs)
+        self.journal_indexes, self.partitions = _measurement_proofs(inputs)
+
+    def __call__(self, paths, optional_paths=None):
+        subset = _subset_compile_inputs(self.inputs, paths, optional_paths, partitions=self.partitions, journal_indexes=self.journal_indexes)
+        count = count_tokens(_draft_prompt_text(subset), model=self.model, adapters=self.adapters)
         if count.tokens is None:
             raise ValueError("compile input token count is unknown")
         return count.tokens
 
-    return measured
+
+def _measure_owns_inputs(measure, inputs):
+    return type(measure) in (_ByteBatchMeasure, _TokenBatchMeasure) and measure.inputs is inputs
 
 
 def _selected_buckets(buckets, keys) -> tuple:
@@ -1007,6 +1271,8 @@ class _ByteBatchMeasure:
     """Exact existing UTF-8 estimate; real model tokenizers remain non-additive."""
 
     def __init__(self, inputs: CompileInputs) -> None:
+        self.inputs = inputs
+        self.batch_texts = _BatchTextLookup(inputs)
         empty = CompileInputs((), (), ())
         self.base = len(_draft_prompt_text(empty).encode("utf-8"))
         self.base_context_bytes = len(_entry_context(empty).encode("utf-8"))
@@ -1022,6 +1288,8 @@ class _ByteBatchMeasure:
         self.projection_parts: tuple[DailySnapshot, ...] = ()
         self.projection_key: tuple[int, ...] | None = None
         self.projection_sources: tuple[SourceSnapshot, ...] = ()
+        self.projection_bytes = 0
+        self.journal_indexes, self.partitions = _measurement_proofs(inputs)
 
     def _size(self, item: SourceSnapshot) -> int:
         if item not in self.sizes:
@@ -1035,7 +1303,7 @@ class _ByteBatchMeasure:
         frames = (*sources, *context)
         separators = 2 * max(0, len(frames) - 1)
         entry_bytes = self._entry_size(selected)
-        return self.base + sum(self._size(item) for item in frames) + separators + entry_bytes - self.base_context_bytes
+        return self.base + self.projection_bytes + sum(self._size(item) for item in context) + separators + entry_bytes - self.base_context_bytes
 
     def _projection(self, selected: tuple[DailySnapshot, ...]) -> tuple[SourceSnapshot, ...]:
         """Reuse only this measure's last immutable selection for size planning.
@@ -1046,10 +1314,11 @@ class _ByteBatchMeasure:
         """
         key = tuple(sorted(id(part) for part in selected))
         if key != self.projection_key:
-            sources = tuple(_deduplicated_sources(selected))
+            sources = tuple(_deduplicated_sources(selected, journal_indexes=self.journal_indexes, partitions=self.partitions))
             self.projection_parts = selected
             self.projection_key = key
             self.projection_sources = sources
+            self.projection_bytes = sum(len(_source_blob(item).encode("utf-8")) for item in sources)
         return self.projection_sources
 
 
@@ -1058,21 +1327,56 @@ class _ByteBatchMeasure:
         sizes = [self.entry_sizes[id(part)] for part in selected if part.original_content is not None]
         return 2 + sum(sizes) + max(0, len(sizes) - 1)
 
+    def fitting_context(self, paths, optional_sources, budget):
+        selection = _ByteContextSelection(self, paths, budget)
+        for source in optional_sources:
+            selection.offer(source.logical_path)
+        return selection.chosen
+
+
+class _ByteContextSelection:
+    """One selection's exact additive UTF-8 cost, including FILE separators."""
+
+    def __init__(self, measure, paths, budget):
+        self.measure = measure
+        self.limit = budget.available_input_tokens
+        self.total = measure(paths)
+        self.frames = len(measure.projection_sources)
+        self.chosen: set[str] = set()
+
+    def offer(self, path):
+        if path in self.chosen:
+            return
+        sources = self.measure.context.get(path, ())
+        size = sum(self.measure._size(source) for source in sources)
+        separators = 2 * (max(0, self.frames + len(sources) - 1) - max(0, self.frames - 1))
+        prospective = self.total + size + separators
+        if prospective > self.limit:
+            return
+        self.chosen.add(path)
+        self.total = prospective
+        self.frames += len(sources)
+
 
 def _group_dailies(
     inputs: CompileInputs,
     budget: ContextBudget,
     measure: Callable[..., int],
 ) -> list[set[str]]:
-    """Pack days into the largest groups the input budget allows, one part of a day each."""
+    """Pack days into the largest groups the input budget allows, with verified adjacent parts retaining every physical byte."""
     groups: list[set[str]] = []
     current: set[str] = set()
     days: set[str] = set()
+    current_parts = []
+    source_bound = _measure_owns_inputs(measure, inputs)
+    partitions = _measure_partitions(measure, source_bound)
     for unit in _native_part_units(inputs.dailies):
         _require_unit_fits(unit, budget, measure)
-        if _starts_a_new_group(current, days, unit, budget, measure):
+        if _starts_a_new_group(current, days, unit, budget, measure, current_parts=current_parts, partitions=partitions, source_bound=source_bound):
             groups.append(current)
             current, days = set(), set()
+            current_parts = []
+        current_parts.extend(unit)
         current.update(part.part_key for part in unit)
         days.add(unit[0].logical_path)
     if current:
@@ -1086,13 +1390,26 @@ def _starts_a_new_group(
     unit: Sequence[DailySnapshot],
     budget: ContextBudget,
     measure: Callable[..., int],
+    *, current_parts=(), partitions=None, source_bound=False,
 ) -> bool:
-    """A full group, or one already holding another part of this day, is closed."""
+    """Close a full group or an unverified same-day join."""
     if not current:
         return False
-    if unit[0].logical_path in days:
+    if unit[0].logical_path in days and not _qualified_same_day_join(current_parts, unit, partitions, source_bound):
         return True
     return measure(current | {part.part_key for part in unit}) > budget.available_input_tokens
+
+
+def _measure_partitions(measure, source_bound):
+    if source_bound:
+        return measure.partitions
+    return None
+
+
+def _qualified_same_day_join(parts, unit, partitions, source_bound):
+    if not source_bound:
+        return False
+    return _same_day_parts_join(parts, unit, partitions)
 
 
 def _require_unit_fits(unit, budget, measure):
@@ -1104,16 +1421,16 @@ def _require_unit_fits(unit, budget, measure):
 
 def _unit_is_refused(unit, budget, measure):
     count = measure({part.part_key for part in unit})
-    admitted = _atomic_unit_budget(unit, budget, count)
+    admitted = _atomic_unit_budget(unit, budget, count, partitions=_measure_partitions(measure, type(measure) in (_ByteBatchMeasure, _TokenBatchMeasure)))
     return count > admitted.available_input_tokens
 
 
-def _atomic_unit_budget(unit, target, measured):
+def _atomic_unit_budget(unit, target, measured, *, partitions=None):
     if len(unit) <= 1:
         return target
     if measured <= target.available_input_tokens:
         return target
-    _require_native_unit(unit)
+    _require_native_unit(unit, partitions=partitions)
     minimum = measured + target.reserved_output_tokens + target.safety_margin_tokens
     return replace(target, max_input_tokens=max(target.max_input_tokens, minimum))
 
@@ -1142,6 +1459,13 @@ def _fitting_context(
     measure: Callable[..., int],
 ) -> set[str]:
     """Carry optional context pages while they still fit beside the days."""
+    if type(measure) is _ByteBatchMeasure:
+        return measure.fitting_context(paths, optional_sources, budget)
+    return _fitting_measured_context(paths, optional_sources, budget, measure)
+
+
+def _fitting_measured_context(paths, optional_sources, budget, measure):
+    """Keep full measurement for arbitrary, potentially non-additive tokenizers."""
     chosen: set[str] = set()
     for source in optional_sources:
         prospective = {*chosen, source.logical_path}
@@ -1158,8 +1482,10 @@ def _compile_batch(
     token_adapters: Mapping[str, TokenCounter] | None,
     *,
     optional_paths: set[str] | None = None,
+    journal_indexes=None,
+    partitions=None,
 ) -> CompileBatch:
-    subset = _subset_compile_inputs(inputs, paths, optional_paths)
+    subset = _subset_compile_inputs(inputs, paths, optional_paths, journal_indexes=journal_indexes, partitions=partitions)
     count = count_tokens(
         _draft_prompt_text(subset),
         model=model,
@@ -1167,7 +1493,7 @@ def _compile_batch(
     )
     if count.tokens is None or count.source not in {"tokenizer", "estimated"}:
         raise ValueError("compile input token count is unknown")
-    budget = _selected_atomic_budget(subset, budget, count.tokens)
+    budget = _selected_atomic_budget(subset, budget, count.tokens, partitions=partitions)
     manifest = tuple(sorted(_source_descriptor(item) for item in subset.dailies))
     manifest_bytes = canonical_json_bytes(
         [item.receipt_descriptor() for item in manifest]
@@ -1184,15 +1510,16 @@ def _compile_batch(
     return CompileBatch(subset, manifest, sha256_bytes(manifest_bytes), packing)
 
 
-def _selected_atomic_budget(inputs, target, measured):
+def _selected_atomic_budget(inputs, target, measured, *, partitions=None):
     units = _native_part_units(inputs.dailies)
     if any(len(unit) > 1 for unit in units):
-        return _atomic_unit_budget(max(units, key=len), target, measured)
+        return _atomic_unit_budget(max(units, key=len), target, measured, partitions=partitions)
     return target
 
 
 def _packing_algorithm(inputs):
-    if any(len(unit) > 1 for unit in _native_part_units(inputs.dailies)):
+    paths = [part.logical_path for part in inputs.dailies]
+    if len(paths) != len(set(paths)):
         return "compile-complete-items/v2"
     return "compile-complete-items/v1"
 
@@ -3958,6 +4285,10 @@ def _published_once(
     deadline: float,
     cancelled: Callable[[], bool] | None,
 ) -> CompileApplyResult:
+    with coordinator.writer_gate(owner=owner):
+        committed = publication.completed()
+    if committed is not None:
+        return committed
     publication.assess_claims()
     with coordinator.writer_gate(owner=owner):
         coordinator.recover(owner=owner, deadline=deadline, cancelled=cancelled)
@@ -4163,9 +4494,14 @@ class _ApplyPlan:
 
     # -- publication, inside the writer gate ---------------------------------
 
-    def publish(self) -> CompileApplyResult:
+    def completed(self) -> CompileApplyResult | None:
+        """A verified committed receipt precedes reassessment of its own writes."""
+        _require_compile_active(self.deadline, self.cancelled)
         self._require_companion_receipts()
-        committed = self._existing_receipts()
+        return self._existing_receipts()
+
+    def publish(self) -> CompileApplyResult:
+        committed = self.completed()
         if committed is not None:
             return committed
         # A quarantined claim is carried on its page as `quarantined` and its
@@ -4351,19 +4687,33 @@ class _ApplyPlan:
         return page
 
     def _updated_claim_history(self, path: str, content: bytes) -> bytes:
-        mutations = tuple({
-            mutation for assessment in self._assessments_for(path)
-            for mutation in assessment.lifecycle_mutations if mutation.page == path
-        })
+        mutations = tuple(mutation for mutation in self._lifecycle_mutations() if mutation.page == path)
         if not mutations:
             return content
         return supersede_claims_in_page(content, mutations, path)[0]
 
-    def _remaining_claim_assessments(self, source_page: str, assessments: Sequence[object]) -> tuple[object, ...]:
+    def _lifecycle_mutations(self) -> tuple[object, ...]:
+        return tuple(sorted({
+            mutation for _pipeline, assessments in self.claim_groups
+            for mutation in _assessment_lifecycle_targets(assessments)
+        }))
+
+    def _external_lifecycle_groups(self) -> dict[str, list]:
         updated = {str(item["path"]) for item in self.operations if item["kind"] == "replace"}
-        return tuple(
-            _without_updated_lifecycle(item, updated & {source_page}) for item in assessments
-        )
+        groups: dict[str, list] = {}
+        for mutation in self._lifecycle_mutations():
+            if mutation.page not in updated:
+                groups.setdefault(mutation.page, []).append(mutation)
+        return groups
+
+    def _lifecycle_pipelines(self) -> dict[str, object]:
+        # The last contributing source is the source that completes the page's
+        # supersession, just as with successive individually committed updates.
+        pipelines: dict[str, object] = {}
+        for pipeline, assessments in self.claim_groups:
+            for mutation in _assessment_lifecycle_targets(assessments):
+                pipelines[mutation.page] = pipeline
+        return pipelines
 
     def _created_page(
         self,
@@ -4428,20 +4778,30 @@ class _ApplyPlan:
         )
 
     def _apply_claim_policy(self) -> CompileApplyResult | None:
-        """Lifecycle writes join this transaction, or the batch is quarantined."""
-        candidate_needed = False
-        for pipeline, assessments in self.claim_groups:
-            try:
-                changes, preconditions, candidate_paths = pipeline.plan_changes(
-                    self._remaining_claim_assessments(pipeline.source_page, assessments)
-                )
-            except StaleLifecycleTarget:
-                return self._commit_quarantine()
-            candidate_needed = candidate_needed or bool(candidate_paths)
-            self._add_policy_changes(changes, preconditions)
+        """Compose every ledger once while preserving each candidate's source."""
+        try:
+            candidate_needed = self._stage_claim_candidates()
+            self._stage_lifecycle_changes()
+        except StaleLifecycleTarget:
+            return self._commit_quarantine()
         if candidate_needed:
             self.claim_groups[0][0].ensure_candidate_parent()
         return None
+
+    def _stage_claim_candidates(self) -> bool:
+        candidate_needed = False
+        for pipeline, assessments in self.claim_groups:
+            candidates = tuple(_without_lifecycle(item) for item in assessments)
+            changes, preconditions, candidate_paths = pipeline.plan_changes(candidates)
+            candidate_needed = candidate_needed or bool(candidate_paths)
+            self._add_policy_changes(changes, preconditions)
+        return candidate_needed
+
+    def _stage_lifecycle_changes(self) -> None:
+        pipelines = self._lifecycle_pipelines()
+        for path, mutations in self._external_lifecycle_groups().items():
+            changes, preconditions = pipelines[path]._lifecycle_changes(mutations)  # noqa: SLF001
+            self._add_policy_changes(changes, preconditions)
 
     def _add_policy_changes(
         self, changes: Sequence[MarkdownChange], preconditions: Mapping[str, object]
@@ -4688,9 +5048,12 @@ def _claim_lifecycle(record: Mapping[str, object], quarantined: set[str]) -> obj
     return record["lifecycle"]
 
 
-def _without_updated_lifecycle(assessment: object, updated: set[str]) -> object:
-    remaining = tuple(mutation for mutation in assessment.lifecycle_mutations if mutation.page not in updated)
-    return replace(assessment, lifecycle_mutations=remaining)
+def _assessment_lifecycle_targets(assessments: Sequence[object]) -> tuple[object, ...]:
+    return tuple(mutation for item in assessments for mutation in item.lifecycle_mutations)
+
+
+def _without_lifecycle(assessment: object) -> object:
+    return replace(assessment, lifecycle_mutations=())
 
 
 def _require_unclaimed_path(known: set[str], path: str) -> None:

@@ -295,8 +295,10 @@ def _is_writable_directory(directory: Path) -> bool:
 
 def _within(path: Path, root: Path) -> bool:
     try:
-        path.resolve().relative_to(root.resolve())
-        return True
+        resolved_path = path.resolve()
+        resolved_root = root.resolve()
+        common = os.path.commonpath((resolved_path, resolved_root))
+        return os.path.normcase(common) == os.path.normcase(resolved_root)
     except (OSError, ValueError):
         return False
 
@@ -758,15 +760,45 @@ def _database_sidecar_present(path: Path, state_root: Path) -> bool:
 
 
 def _transaction_artifacts(state_root: Path, deadline: float) -> tuple[set[str], bool]:
-    entries, truncated, error = _bounded_runtime_entries(
-        state_root / "run" / "transactions",
-        state_root,
-        limit=MAX_RUNTIME_ENTRIES,
-        deadline=deadline,
-    )
-    kinds = {entry.name: _artifact_kind(entry, state_root) for entry in entries}
-    identifiers = _names_of_kind(kinds, "artifact")
-    return identifiers, bool(truncated or error or _names_of_kind(kinds, "unsafe"))
+    directory = state_root / "run" / "transactions"
+    kind, _ = _safe_kind(directory, state_root)
+    if _deadline_reached(deadline):
+        return set(), True
+    if kind == "missing":
+        return set(), False
+    return _transaction_directory_inventory(directory, state_root, kind, deadline)
+
+
+def _transaction_directory_inventory(
+    directory: Path, state_root: Path, kind: str, deadline: float
+) -> tuple[set[str], bool]:
+    if kind != "directory":
+        return set(), True
+    identifiers: set[str] = set()
+    try:
+        with os.scandir(directory) as entries:
+            incomplete = _collect_transaction_identifiers(entries, state_root, deadline, identifiers)
+    except OSError:
+        return identifiers, True
+    return identifiers, incomplete
+
+
+def _collect_transaction_identifiers(
+    entries: Iterator[os.DirEntry], state_root: Path, deadline: float, identifiers: set[str]
+) -> bool:
+    incomplete = False
+    for entry in entries:
+        if _deadline_reached(deadline):
+            return True
+        kind = _artifact_kind(Path(entry.path), state_root)
+        incomplete = incomplete or kind == "unsafe"
+        _retain_transaction_identifier(identifiers, entry.name, kind)
+    return incomplete or _deadline_reached(deadline)
+
+
+def _retain_transaction_identifier(identifiers: set[str], name: str, kind: str) -> None:
+    if kind == "artifact":
+        identifiers.add(name)
 
 
 def _names_of_kind(kinds: dict[str, str], wanted: str) -> set[str]:
@@ -971,13 +1003,22 @@ def _committed_within_undo_window(
 
 
 def _undo_artifact_retained(
-    row: sqlite3.Row, state: str, cutoff: datetime, state_root: Path
+    row: sqlite3.Row, state: str, cutoff: datetime, state_root: Path,
+    *, artifacts: set[str] | None = None,
 ) -> bool:
     if not _committed_within_undo_window(row, state, cutoff):
         return False
     transaction_id = row["id"]
     if _TRANSACTION_ID_RE.fullmatch(transaction_id) is None:
         return False
+    return _undo_directory_present(transaction_id, state_root, artifacts)
+
+
+def _undo_directory_present(
+    transaction_id: str, state_root: Path, artifacts: set[str] | None
+) -> bool:
+    if artifacts is not None:
+        return transaction_id in artifacts
     artifact = state_root / "run" / "transactions" / transaction_id
     return _safe_kind(artifact, state_root)[0] == "directory"
 
@@ -1008,6 +1049,7 @@ def _scan_one_transaction_row(
     transaction_columns: set[str],
     cutoff: datetime,
     state_root: Path,
+    artifacts: set[str] | None = None,
 ) -> bool:
     """Count one row and report whether it is corrupt."""
     state = row["state"]
@@ -1017,7 +1059,7 @@ def _scan_one_transaction_row(
         return False
     states[state] += 1
     _collect_error_code(database, row, state, transaction_columns, codes)
-    if _undo_artifact_retained(row, state, cutoff, state_root):
+    if _undo_artifact_retained(row, state, cutoff, state_root, artifacts=artifacts):
         details["undo_retained"] += 1
     return _transaction_row_corrupt(row, state, operation_positions)
 
@@ -1057,6 +1099,7 @@ def _scan_transaction_rows(
             transaction_columns=transaction_columns,
             cutoff=cutoff,
             state_root=state_root,
+            artifacts=artifacts,
         ) or corrupt
         mismatched = _artifact_mismatch(row, artifacts, known_ids) or mismatched
     return _RowVerdict(codes, corrupt, mismatched)
@@ -1209,8 +1252,8 @@ def _checked_artifacts(
 ) -> set[str] | None:
     """The undo artifacts on disk, or None when the listing is incomplete.
 
-    `run/transactions/` is listed under MAX_RUNTIME_ENTRIES; past it (or with an
-    unsafe entry) the names read are not all there are, and a row whose directory
+    `run/transactions/` is listed under the caller's inspection deadline. With an
+    incomplete scan or an unsafe entry the names read are not all there are, and a row whose directory
     was not listed looked like a row whose directory is missing - corruption
     alleged from an entry never read. The deletion refusal stays; the accusation goes.
     """

@@ -1547,10 +1547,10 @@ def _selected_sources(snapshot, requested: set) -> tuple:
     )
 
 
-def _selected_chunks(snapshot, selected_paths: set) -> tuple:
-    return tuple(
-        chunk for chunk in snapshot.chunks if chunk.parent_page in selected_paths
-    )
+def _selected_chunks(snapshot, selected_paths: set):
+    from corpus_snapshot import select_snapshot_chunks
+
+    return select_snapshot_chunks(snapshot, selected_paths)
 
 
 def _missing_context_slugs(sources, requested: set) -> list:
@@ -3943,7 +3943,9 @@ def _doctor_queue_read(context: dict) -> dict:
 def _doctor_queue_cancel(context: dict) -> dict:
     from memory_queue import active_or_legacy_memory_queue
 
-    queue = active_or_legacy_memory_queue(context["root"], context["state_root"])
+    queue = active_or_legacy_memory_queue(
+        context["root"], context["state_root"], deadline=context["deadline"]
+    )
     changed = queue.cancel(
         str(context["target_id"]),
         deadline=context["deadline"],
@@ -3970,7 +3972,9 @@ def _redrive_error_code(error) -> str:
 def _doctor_queue_redrive(context: dict) -> dict:
     from memory_queue import QueueOperationError, active_or_legacy_memory_queue
 
-    queue = active_or_legacy_memory_queue(context["root"], context["state_root"])
+    queue = active_or_legacy_memory_queue(
+        context["root"], context["state_root"], deadline=context["deadline"]
+    )
     try:
         replacement = queue.redrive(
             str(context["target_id"]),
@@ -4006,7 +4010,9 @@ def _transaction_result(action: str, records) -> dict:
 def _transaction_coordinator(context: dict):
     from markdown_transaction import active_or_legacy_coordinator
 
-    return active_or_legacy_coordinator(context["root"], context["state_root"])
+    return active_or_legacy_coordinator(
+        context["root"], context["state_root"], deadline=context["deadline"]
+    )
 
 
 def _doctor_transaction_recover(context: dict) -> dict:
@@ -6544,6 +6550,7 @@ WARMUP_PASSES = 2
 
 def _warmup_pass(deadline_seconds: float) -> None:
     """One throwaway question down the real path, so nothing is warmed by proxy."""
+    from retrieval import background_cancellation
     from search_memory import search
 
     search(
@@ -6554,6 +6561,7 @@ def _warmup_pass(deadline_seconds: float) -> None:
         rerank=True,
         source_tool="warmup",
         emit_telemetry=False,
+        cancelled=background_cancellation(),
         deadline_monotonic=time.monotonic() + deadline_seconds,
     )
 
@@ -6586,23 +6594,36 @@ def _record_warmup_failure(stage: str, error: Exception) -> None:
     )
 
 
-def _warmup_stage(stage: str, run) -> bool:
-    """One stage of the warm-up; a failure is recorded, never raised.
+def _attempt_prioritized_warmup(run, deadline: float) -> bool:
+    import inference_threads
+    from retrieval import _require_optional_not_cancelled, warmup_priority
 
-    A server that is shutting down stops the warm-up here, between stages, so no
-    model is mid-inference when the interpreter finalizes. See
-    `docs/research/2026-09-14-no-model-running-at-exit.md`.
-    """
+    with warmup_priority(deadline, inference_threads.stopping.is_set) as cancelled:
+        try:
+            run()
+            _require_optional_not_cancelled(cancelled)
+        except Exception:
+            if cancelled():
+                return False
+            raise
+    return True
+
+
+def _warmup_stage(stage: str, run, deadline_seconds: float = WARMUP_LIMIT_SECONDS) -> bool:
+    """Only a complete idle pass warms; preempted work retries within its original clock."""
     import inference_threads
 
-    if inference_threads.stopping.is_set():
-        return False
-    try:
-        run()
-    except Exception as error:  # noqa: BLE001 - recorded in the health answer
-        _record_warmup_failure(stage, error)
-        return False
-    return True
+    deadline = time.monotonic() + deadline_seconds
+    while not inference_threads.stopping.is_set():
+        try:
+            if _attempt_prioritized_warmup(run, deadline):
+                return True
+        except Exception as error:  # noqa: BLE001 - recorded in the health answer
+            if inference_threads.stopping.is_set():
+                return False
+            _record_warmup_failure(stage, error)
+            return False
+    return False
 
 
 def warmup_retrieval_path(deadline_seconds: float = WARMUP_LIMIT_SECONDS) -> None:
@@ -6635,10 +6656,10 @@ def warmup_retrieval_path(deadline_seconds: float = WARMUP_LIMIT_SECONDS) -> Non
     """
     started = time.monotonic()
     _set_warmup(status="running")
-    if not _warmup_stage("reranker", _warm_reranker):
+    if not _warmup_stage("reranker", _warm_reranker, deadline_seconds):
         return
     for index in range(WARMUP_PASSES):
-        if not _warmup_stage(f"pass_{index + 1}", lambda: _warmup_pass(deadline_seconds)):
+        if not _warmup_stage(f"pass_{index + 1}", lambda: _warmup_pass(deadline_seconds), deadline_seconds):
             return
     _set_warmup(status="warm", seconds=round(time.monotonic() - started, 3))
 
@@ -6664,14 +6685,18 @@ def _start_encoder_warmup() -> None:
     ~1.1 GiB resident, so the first semantic question of a session always fell
     back to lexical-only. The owner accepted that price on 2026-08-27: every
     resident server pays the memory up front, and the first `recall` answers
-    with the dense leg. The load runs on a daemon thread so serving starts
+    with the dense leg in that measured corpus. This is not a guarantee for
+    the current corpus or a cold fourteen-second answer. The load runs on a
+    tracked background thread so serving starts
     immediately, and it shares `search_memory._get_embedder`'s module cache
     with the dense leg — a straggler racing it wastes one load, never a vector.
     Set LLMWIKI_NO_ENCODER_WARMUP=1 to keep the old lazy behaviour.
 
     What it loads is now the whole path rather than the encoder alone, because
     loading was never the part that was missing; `warmup_retrieval_path` says
-    what was.
+    what was. Foreground search and its still-running workers now have
+    priority: cooperating warm-up stages yield and retry only after actual
+    settlement, within their original clocks. Native forwards are not killed.
     """
     if os.environ.get("LLMWIKI_NO_ENCODER_WARMUP") == "1":
         return

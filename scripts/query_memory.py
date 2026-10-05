@@ -295,7 +295,7 @@ def _chunk_of_cited(candidate: object, chunks: tuple) -> object | None:
     if not _candidate_field(candidate, "cited"):
         return None
     path = _first_present(candidate, _CANDIDATE_PATH_KEYS)
-    on_page = [chunk for chunk in chunks if chunk.source_path == path]
+    on_page = (chunk for chunk in chunks if chunk.source_path == path)
     return _holding(on_page, _candidate_field(candidate, "byte_start") or 0)
 
 
@@ -303,16 +303,46 @@ def _holds(chunk: object, byte: int) -> bool:
     return chunk.byte_start <= byte < chunk.byte_end
 
 
-def _holding(on_page: list, byte: int) -> object | None:
-    holding = [chunk for chunk in on_page if _holds(chunk, byte)]
-    return next(iter(holding or on_page), None)
+def _holding(on_page: Iterable[object], byte: int) -> object | None:
+    iterator = iter(on_page)
+    first = next(iterator, None)
+    if first is None:
+        return None
+    if _holds(first, byte):
+        return first
+    return next((chunk for chunk in iterator if _holds(chunk, byte)), first)
 
 
-def _matching_chunks(snapshot: object, candidates: Iterable[object]) -> tuple[object, ...]:
-    chunks = tuple(snapshot.chunks)
-    by_id = {chunk.id: chunk for chunk in chunks}
+def _requested_chunk_ids(candidates: Iterable[object]) -> set[object]:
+    return {_first_present(candidate, _CANDIDATE_ID_KEYS) for candidate in candidates}
+
+
+def _requested_chunks_by_id(chunks: Iterable[object], requested: set[object]) -> dict:
+    return {chunk.id: chunk for chunk in chunks if chunk.id in requested}
+
+
+class _CallerChunks:
+    """Replay immutable chunks with this caller's clock on every traversal."""
+
+    def __init__(self, snapshot: object, deadline: float | None):
+        self.snapshot = snapshot
+        self.deadline = deadline
+
+    def __iter__(self):
+        from corpus_snapshot import iter_snapshot_chunks
+
+        return iter_snapshot_chunks(self.snapshot, deadline=self.deadline)
+
+
+def _matching_chunks(
+    snapshot: object, candidates: Iterable[object], *, deadline: float | None = None
+) -> tuple[object, ...]:
+    candidates = tuple(candidates)
+    chunks = _CallerChunks(snapshot, deadline)
+    by_id = _requested_chunks_by_id(chunks, _requested_chunk_ids(candidates))
     selected: list[object] = []
     for candidate in candidates:
+        _check_optional_deadline(deadline)
         match = _resolved_chunk(candidate, chunks, by_id)
         if match is not None and match not in selected:
             selected.append(match)
@@ -365,17 +395,23 @@ def _entry_key(chunk: object) -> tuple[object, tuple]:
     return (chunk.source_path, tuple(chunk.heading_ancestry or ()))
 
 
-def _entry_pieces(snapshot: object) -> dict[tuple, list]:
+def _entry_pieces(
+    snapshot: object, requested: set[tuple], deadline: float | None = None
+) -> dict[tuple, list]:
+    chunks = _selected_source_chunks(snapshot, {key[0] for key in requested}, deadline)
     pieces: dict[tuple, list] = {}
-    for chunk in snapshot.chunks:
-        pieces.setdefault(_entry_key(chunk), []).append(chunk)
+    for chunk in chunks:
+        key = _entry_key(chunk)
+        if key in requested:
+            pieces.setdefault(key, []).append(chunk)
     for group in pieces.values():
         group.sort(key=lambda chunk: chunk.byte_start)
     return pieces
 
 
 def _with_entry_siblings(
-    snapshot: object, selected: tuple, whole: int | None = None, partner: bool = True
+    snapshot: object, selected: tuple, whole: int | None = None, partner: bool = True,
+    *, deadline: float | None = None,
 ) -> tuple:
     """Every piece of the top entries, in byte order, where each entry first ranked.
 
@@ -384,7 +420,7 @@ def _with_entry_siblings(
     user said, not what the assistant replied.
     """
     limit = _whole_entry_limit(whole)
-    pieces = _entry_pieces(snapshot)
+    pieces = _entry_pieces(snapshot, {_entry_key(chunk) for chunk in selected}, deadline)
     kept: list = []
     admitted: set[tuple] = set()
     for chunk in selected:
@@ -552,9 +588,9 @@ def build_grounded_context(
         raise GroundedQAError("unsupported grounded QA profile")
     active_budget = budget or _qa_budget()
     index_text, chosen = _profile_selection(
-        snapshot, candidates, vault=vault, profile=normalized_profile
+        snapshot, candidates, vault=vault, profile=normalized_profile, deadline=deadline
     )
-    selected = _with_entry_siblings(snapshot, chosen, whole, partner)
+    selected = _with_entry_siblings(snapshot, chosen, whole, partner, deadline=deadline)
     parent_paths, sources, compiled = _fitted_selection(
         snapshot,
         selected,
@@ -598,21 +634,23 @@ def _cached_full_index(vault: Path) -> bytes:
         raise GroundedQAError("CACHED_FULL requires a genuinely small measured index") from exc
 
 
-def _cached_full_selection(snapshot: object, vault: Path) -> tuple[str, tuple]:
+def _cached_full_selection(snapshot: object, vault: Path) -> tuple[str, Sequence]:
     """The whole corpus and index, refused unless the corpus is genuinely small."""
     index_bytes = _cached_full_index(vault)
     total_bytes = sum(len(source.content) for source in snapshot.sources) + len(index_bytes)
     if len(snapshot.sources) > CACHED_FULL_MAX_SOURCES or total_bytes > CACHED_FULL_MAX_BYTES:
         raise GroundedQAError("CACHED_FULL requires a genuinely small measured corpus")
-    return index_bytes.decode("utf-8", errors="strict"), tuple(snapshot.chunks)
+    return index_bytes.decode("utf-8", errors="strict"), snapshot.chunks
 
 
 def _profile_selection(
-    snapshot: object, candidates: Iterable[object], *, vault: Path, profile: str
-) -> tuple[str, tuple]:
+    snapshot: object, candidates: Iterable[object], *, vault: Path, profile: str,
+    deadline: float | None = None,
+) -> tuple[str, Sequence]:
     """The chunks this profile exposes, and any cached index text alongside."""
+    _check_optional_deadline(deadline)
     if profile != "CACHED_FULL":
-        return "", _matching_chunks(snapshot, candidates)
+        return "", _matching_chunks(snapshot, candidates, deadline=deadline)
     return _cached_full_selection(snapshot, vault)
 
 
@@ -646,7 +684,7 @@ def _fitted_selection(
     """
     from context_budget import BudgetExceededError
 
-    pages = _chunks_by_page(snapshot)
+    pages = _chunks_by_page(snapshot, _parent_paths(selected), deadline)
     if not selected:
         return _compiled_for(snapshot, (), budget, pages, deadline)
     kept = list(selected)
@@ -658,16 +696,29 @@ def _fitted_selection(
     raise GroundedQAError("no retrieved span fits the grounded answer budget")
 
 
-def _chunks_by_page(snapshot: object) -> dict[str, list]:
-    """The snapshot's chunks grouped by page, each with its place in the snapshot.
+def _selected_source_chunks(snapshot: object, paths: set, deadline: float | None):
+    from types import SimpleNamespace
+
+    from corpus_snapshot import iter_snapshot_chunks, select_snapshot_chunks
+
+    _check_optional_deadline(deadline)
+    selected = select_snapshot_chunks(snapshot, paths)
+    return iter_snapshot_chunks(SimpleNamespace(chunks=selected), deadline=deadline)
+
+
+def _chunks_by_page(
+    snapshot: object, parent_paths: tuple[str, ...], deadline: float | None = None
+) -> dict[str, list]:
+    """Requested pages' chunks, each with its place in their ordered source view.
 
     Built once for the whole shedding loop, which narrows the snapshot again
     after every dropped span and used to walk every chunk of the corpus each
     time. The position travels with the chunk so the narrowed snapshot keeps
     the order the corpus has.
     """
+    chunks = _selected_source_chunks(snapshot, set(parent_paths), deadline)
     pages: dict[str, list] = {}
-    for position, chunk in enumerate(snapshot.chunks):
+    for position, chunk in enumerate(chunks):
         pages.setdefault(chunk.parent_page, []).append((position, chunk))
     return pages
 
@@ -774,7 +825,7 @@ def _compiled_context(
 
 def _chunks_of(snapshot: object, parent_paths: tuple[str, ...], pages: dict[str, list] | None):
     """The chunks of these pages in the snapshot's own order, through the index."""
-    index = pages if pages is not None else _chunks_by_page(snapshot)
+    index = pages if pages is not None else _chunks_by_page(snapshot, parent_paths)
     found = [entry for page in parent_paths for entry in index.get(page, ())]
     found.sort()
     return [chunk for _position, chunk in found]

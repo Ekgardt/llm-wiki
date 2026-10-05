@@ -761,6 +761,93 @@ def test_update_and_supersession_of_its_old_claim_share_one_after_image(vault):
     assert compile_memory.read_compile_receipt_v2(inputs.dailies[0].sha256, coordinator) is not None
 
 
+def _claim_for_subject(root, claim_id, subject, *, new=False):
+    text = "A durable exact-byte observation." if new else "The prior state is blue."
+    record = _claim_record(root, claim_id=claim_id, value="green" if new else "blue",
+                           text=text, authority="user" if new else "inferred")
+    record["subject"] = subject
+    semantic = {key: record[key] for key in ("subject", "relation", "value", "qualifiers", "validity")}
+    record["fingerprint"] = sha256_bytes(canonical_json_bytes(semantic))
+    return record
+
+
+def _claim_operation(slug, claims, *, replace_page=False):
+    operation = dict(_semantic_plan()["operations"][0])
+    semantic = json.loads(operation["content"])
+    semantic.update(slug=slug, title=slug, claims=claims,
+                    action="update" if replace_page else "create")
+    operation.update(path=f"knowledge/notes/{slug}.md", kind="replace" if replace_page else "create",
+                     content=canonical_json_bytes(semantic).decode())
+    return operation
+
+
+def _assert_shared_ledger_status(page, replaced):
+    content = page.read_bytes()
+    if replaced:
+        assert b"status: superseded" not in content
+        return
+    assert b"status: superseded" in content
+    assert b"superseded_by: [[second]]" in content
+
+
+@pytest.mark.parametrize("replace_page", [False, True])
+def test_two_sources_supersede_shared_ledger_in_one_after_image(vault, replace_page):
+    import compile_memory
+
+    root, state_root = vault
+    daily = _daily(root)
+    old = [_claim_for_subject(root, "old-1", "first"), _claim_for_subject(root, "old-2", "second")]
+    page = root / "knowledge/notes/shared-ledger.md"
+    page.write_bytes(b"---\ntype: concept\n---\n# Shared ledger\n\n## Claims\n```json\n"
+                     + canonical_json_bytes({"schema_version": "claim-ledger/v1", "claims": old}) + b"\n```\n")
+    operations = [_claim_operation("first", [_claim_for_subject(root, "new-1", "first", new=True)]),
+                  _claim_operation("second", [_claim_for_subject(root, "new-2", "second", new=True)])]
+    if replace_page:
+        operations.append(_claim_operation("shared-ledger", [_claim_for_subject(root, "third", "third", new=True)],
+                                           replace_page=True))
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    coordinator = MarkdownCoordinator(root, state_root)
+    plan = {"schema_version": "compile-plan/v2", "operations": operations}
+    result = compile_memory.apply_compile_plan(inputs, plan, action_key="d" * 64, trigger="manual",
+                                               coordinator=coordinator, completed_at="2026-07-14T12:00:00Z")
+    expected = {"old-1": "superseded", "old-2": "superseded"}
+    if replace_page:
+        expected["third"] = "active"
+    assert _page_claim_lifecycles(page) == expected
+    _assert_shared_ledger_status(page, replace_page)
+    transaction = coordinator._record(result.transaction_id)
+    assert [item.path for item in transaction.operations].count("knowledge/notes/shared-ledger.md") == 1
+    assert compile_memory.read_compile_receipt_v2(inputs.dailies[0].sha256, coordinator) is not None
+    retried = compile_memory.apply_compile_plan(inputs, plan, action_key="d" * 64, trigger="manual",
+                                                coordinator=coordinator, completed_at="2026-07-14T12:00:00Z")
+    assert retried.transaction_id == result.transaction_id
+
+
+def test_unreceipted_target_change_still_requires_a_fresh_plan(vault):
+    import compile_memory
+    from markdown_transaction import TransactionFailure
+
+    root, state_root = vault
+    daily = _daily(root)
+    page = root / "knowledge/notes/shared-ledger.md"
+    old = _claim_for_subject(root, "old", "first")
+    page.write_bytes(b"---\ntype: concept\n---\n# Shared ledger\n\n## Claims\n```json\n"
+                     + canonical_json_bytes({"schema_version": "claim-ledger/v1", "claims": [old]}) + b"\n```\n")
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    changed = page.read_bytes() + b"\nAn external edit after the snapshot.\n"
+    page.write_bytes(changed)
+    plan = {"schema_version": "compile-plan/v2", "operations": [
+        _claim_operation("first", [_claim_for_subject(root, "new", "first", new=True)])]}
+    coordinator = MarkdownCoordinator(root, state_root)
+    with pytest.raises(TransactionFailure, match="fresh snapshot and model plan") as refusal:
+        compile_memory.apply_compile_plan(inputs, plan, action_key="e" * 64, trigger="manual",
+                                         coordinator=coordinator, completed_at="2026-07-14T12:00:00Z")
+    assert refusal.value.code == "compile_snapshot_changed"
+    assert page.read_bytes() == changed
+    assert not (root / "knowledge/notes/first.md").exists()
+    assert compile_memory.read_compile_receipt_v2(inputs.dailies[0].sha256, coordinator) is None
+
+
 def test_a_recompile_that_quarantines_the_same_claim_again_does_not_fail(vault, capsys):
     """2026-09-11: the next plan for a pending quarantined daily differed elsewhere
     (new action key) but proposed the same claim; the candidate create met the file

@@ -16,7 +16,7 @@ import math
 import os
 import re
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, NamedTuple
 
 from provenance import authority_weight, type_weight
@@ -368,7 +368,13 @@ class _OutOfTime(Exception):
     """The rerank budget ran out; the fused order stands unchanged."""
 
 
-def _require_time(deadline: float | None) -> None:
+class _RerankCancelled(TimeoutError):
+    """Cooperating caller cancelled; no partial scoring may become authority."""
+
+
+def _require_time(deadline: float | None, cancelled: Callable[[], bool] | None = None) -> None:
+    if cancelled is not None and cancelled():
+        raise _RerankCancelled("rerank cancelled")
     if deadline is not None and time.monotonic() >= deadline:
         raise _OutOfTime("rerank budget exhausted")
 
@@ -404,7 +410,8 @@ def _batches_by_length(pairs: list) -> list[list[int]]:
 
 
 def _cross_encoder_scores(
-    bundle: Mapping[str, Any], pairs: list, *, deadline: float | None = None
+    bundle: Mapping[str, Any], pairs: list, *, deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None
 ) -> list[float]:
     """Raw logits for (query, passage) pairs; the caller squashes them.
 
@@ -418,9 +425,11 @@ def _cross_encoder_scores(
     """
     scores = [0.0] * len(pairs)
     for batch in _batches_by_length(pairs):
-        _require_time(deadline)
+        _require_time(deadline, cancelled)
         chosen = [pairs[index] for index in batch]
-        for index, score in zip(batch, _batch_logits(bundle, chosen)):
+        logits = _batch_logits(bundle, chosen)
+        _require_time(deadline, cancelled)
+        for index, score in zip(batch, logits):
             scores[index] = score
     return scores
 
@@ -431,6 +440,7 @@ def _score_with_bundle(
     query: str,
     text_field: str,
     deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> _Scoring:
     """Scores for the head, or a named reason the fused order should stand.
 
@@ -446,7 +456,9 @@ def _score_with_bundle(
     if not pairs:
         return _Scoring([], model_id, revision, None)
     try:
-        scores = _cross_encoder_scores(bundle, pairs, deadline=deadline)
+        scores = _cross_encoder_scores(bundle, pairs, deadline=deadline, cancelled=cancelled)
+    except _RerankCancelled:
+        return _Scoring(None, model_id, revision, "reranker_cancelled")
     except _OutOfTime:
         return _Scoring(None, model_id, revision, "reranker_deadline")
     except Exception as exc:  # noqa: BLE001 - a failed reranker keeps the fused order
@@ -554,7 +566,27 @@ def _kept_tail(
     return tail_kept
 
 
+def _cancelled_scoring(scoring: _Scoring | None, cancelled: Callable[[], bool] | None) -> _Scoring | None:
+    if cancelled is not None and cancelled():
+        return _Scoring(None, getattr(scoring, "model_id", None),
+                        getattr(scoring, "model_revision", None), "reranker_cancelled")
+    return scoring
+
+
 def _scoring_for(
+    head: Sequence[Mapping[str, Any]], query: str, text_field: str,
+    scorer: Any | None, model_id: str | None, model_revision: str | None,
+    deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
+) -> _Scoring | None:
+    refusal = _cancelled_scoring(None, cancelled)
+    if refusal is not None:
+        return refusal
+    scoring = _ready_scoring_for(head, query, text_field, scorer, model_id,
+                                 model_revision, deadline, cancelled)
+    return _cancelled_scoring(scoring, cancelled)
+
+
+def _ready_scoring_for(
     head: Sequence[Mapping[str, Any]],
     query: str,
     text_field: str,
@@ -562,6 +594,7 @@ def _scoring_for(
     model_id: str | None,
     model_revision: str | None,
     deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> _Scoring | None:
     """None means there is no reranker at all, which is not a failure."""
     if scorer is not None:
@@ -571,7 +604,7 @@ def _scoring_for(
     bundle = _get_reranker_bundle()
     if bundle is None:
         return None
-    return _score_with_bundle(bundle, head, query, text_field, deadline)
+    return _score_with_bundle(bundle, head, query, text_field, deadline, cancelled)
 
 
 def rerank(
@@ -585,6 +618,7 @@ def rerank(
     model_id: str | None = None,
     model_revision: str | None = None,
     deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[dict]:
     """Re-rank documents; preserve tail beyond depth; blend into final_score.
 
@@ -599,7 +633,7 @@ def rerank(
     started = time.perf_counter()
     depth = max(1, int(depth))
     scoring = _scoring_for(
-        documents[:depth], query, text_field, scorer, model_id, model_revision, deadline
+        documents[:depth], query, text_field, scorer, model_id, model_revision, deadline, cancelled
     )
     if scoring is None:
         _mark_not_applied(documents, "reranker_unavailable")

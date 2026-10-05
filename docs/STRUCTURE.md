@@ -511,6 +511,20 @@ Evidence Graph and FTS artifacts are both built from that exact immutable
 `CorpusSnapshot`; live membership and hashes are recaptured immediately before
 publication.
 
+The owner approved sequential derived-generation processing on 2026-10-04.
+The implementation is pending qualification. The internal chunk sequence retains
+its length, stable order, indexed access, fields, hashes and physical spans while
+deriving chunks from the captured immutable sources without retaining the complete
+object corpus. FTS writing and validation use successive rows; vector construction
+uses the existing temporary `.npy` artifact through memory mapping, with successive
+metadata processing. Consumers must not rematerialize the complete chunk corpus.
+This changes no persistent database, directory, runtime root, environment contract,
+generation schema, dependency or MCP tool. Source rechecks, fenced ownership,
+deadlines, artifact integrity and complete-or-absent activation remain mandatory.
+The unsupported global chunk ceiling is replaced only after memory, compatibility,
+failure and real-corpus qualification; this approval does not remove unrelated
+resource contracts. See the private `streamed-derived-generations-decision.md`.
+
 `search.sqlite3` also carries the **ledger of things and events** (approved
 2026-09-22): one table, `ledger`, whose rows are posted by the nightly fact-keys
 call into `cache/fact-keys/keys.sqlite3` — kind, canonical thing, event, day,

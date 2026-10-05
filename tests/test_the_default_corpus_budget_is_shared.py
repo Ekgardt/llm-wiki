@@ -45,6 +45,6 @@ def test_explicit_lower_file_and_extraction_limits_still_refuse(larger_corpus, m
     monkeypatch.setattr(memory_state, "ROOT", root)
     monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
     with pytest.raises(CorpusCapacityExceeded, match="corpus file limit exceeded"):
-        collect_corpus(root, deadline_seconds=LONG_TIMEOUT)
+        collect_corpus(root, max_entries=snapshot.policy.max_entries, deadline_seconds=LONG_TIMEOUT)
     with pytest.raises(ValueError, match="knowledge extraction source ceiling exceeded"):
         extract_knowledge(snapshot.sources[:2], deadline=time.monotonic() + LONG_TIMEOUT)

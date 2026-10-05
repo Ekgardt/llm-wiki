@@ -27,16 +27,31 @@ BREADCRUMB_EVENTS = ("UserPromptSubmit", "PostToolUse")
 ROOM_SECONDS = 2.0
 
 
-def _breadcrumb_handlers(path: Path) -> list[dict]:
+def _breadcrumb_handlers(path: Path) -> list[tuple[str, dict]]:
     hooks = json.loads(path.read_text(encoding="utf-8"))["hooks"]
-    groups = [group for event in BREADCRUMB_EVENTS for group in hooks[event]]
-    return [handler for group in groups for handler in group["hooks"]]
+    groups = [(event, group) for event in BREADCRUMB_EVENTS for group in hooks[event]]
+    return [(event, handler) for event, group in groups for handler in group["hooks"]]
+
+
+def _host_timeout(path: Path, event: str, handler: dict) -> float:
+    # Official host references checked 2026-10-05; Codex async still uses timeout.
+    if path.parent.name == "codex":
+        return handler.get("timeout", 600)
+    from tests.test_a_claude_prompt_takes_the_ingest_path import _effective_host_timeout
+
+    return _effective_host_timeout(event, handler)
 
 
 def _our_timeouts(path: Path, script: str) -> list[float]:
     """The timeouts a shipped hook file gives the breadcrumb hooks that run `script`."""
     handlers = _breadcrumb_handlers(path)
-    return [float(h["timeout"]) for h in handlers if script in h["command"]]
+    return [float(_host_timeout(path, event, h)) for event, h in handlers if script in h["command"]]
+
+
+def test_codex_host_default_and_explicit_ceiling_are_both_measured():
+    path = REPOSITORY / "integrations/codex/hooks.json"
+    assert _host_timeout(path, "UserPromptSubmit", {"type": "command"}) == 600
+    assert _host_timeout(path, "PostToolUse", {"type": "command", "async": True, "timeout": 5}) == 5
 
 
 def test_a_breadcrumb_budget_fits_inside_every_shipped_host_timeout():

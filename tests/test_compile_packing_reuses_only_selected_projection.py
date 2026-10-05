@@ -21,9 +21,9 @@ def _observe(monkeypatch):
     seen = []
     original = compiler._native_unit_source
 
-    def forwarded(parts):
+    def forwarded(parts, **kwargs):
         seen.append(tuple(id(part) for part in parts))
-        return original(parts)
+        return original(parts, **kwargs)
 
     monkeypatch.setattr(compiler, "_native_unit_source", forwarded)
     return seen

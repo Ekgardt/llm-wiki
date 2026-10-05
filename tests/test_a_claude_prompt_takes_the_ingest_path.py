@@ -62,7 +62,23 @@ ADAPTER_START_ALLOWANCE_SECONDS = 1.0
 
 def _host_timeouts() -> dict[str, float]:
     settings = json.loads((ROOT / "integrations/claude-code/settings.json").read_text(encoding="utf-8"))
-    return {event: groups[0]["hooks"][0]["timeout"] for event, groups in settings["hooks"].items()}
+    return {event: _effective_host_timeout(event, settings["hooks"][event][0]["hooks"][0]) for event in EVENT_DELEGATES}
+
+
+def _effective_host_timeout(event: str, hook: dict) -> float:
+    # https://code.claude.com/docs/en/hooks, checked 2026-10-05.
+    # Command hooks with async:true are not canceled by the host timeout.
+    if hook.get("async"):
+        return float("inf")
+    default = {"UserPromptSubmit": 30}.get(event, 600)
+    return hook.get("timeout", default)
+
+
+def test_host_budget_uses_explicit_overrides_and_documented_defaults() -> None:
+    assert _effective_host_timeout("UserPromptSubmit", {"type": "command"}) == 30
+    assert _effective_host_timeout("PostToolUse", {"type": "command"}) == 600
+    assert _effective_host_timeout("UserPromptSubmit", {"type": "command", "timeout": 5}) == 5
+    assert _effective_host_timeout("PostToolUse", {"type": "command", "async": True, "timeout": 5}) == float("inf")
 
 
 def test_every_delegate_stops_before_the_host_stops_its_hook() -> None:

@@ -332,6 +332,7 @@ def test_public_search_propagates_generation_stage_timeout(
         return False
 
     seen: list[tuple[str, float | None, object]] = []
+    connection_seals = []
 
     def stop(name, received_deadline=None, received_cancelled=None):
         seen.append((name, received_deadline, received_cancelled))
@@ -400,7 +401,8 @@ def test_public_search_propagates_generation_stage_timeout(
         stop("seal_recheck", deadline, cancelled)
         return True
 
-    def connection(_catalog, _manifest, *, deadline=None, cancelled=None):
+    def connection(_catalog, _manifest, *, deadline=None, cancelled=None, seal=None):
+        connection_seals.append(seal)
         stop("fts_open", deadline, cancelled)
         return Connection()
 
@@ -447,6 +449,7 @@ def test_public_search_propagates_generation_stage_timeout(
         else (stage, deadline, cancelled)
     )
     assert expected_stop in seen
+    assert connection_seals[:1] in ([], [("sealed",)])
 
 
 @pytest.mark.parametrize("stop", ["deadline", "cancelled"])
@@ -836,7 +839,7 @@ def test_reranker_receives_full_chunk_content(monkeypatch):
     # The stage is told its own budget, so an abandoned rerank stops scoring
     # instead of finishing on the cores the answer is being built with. No
     # deadline was given to this call, so there is none to pass on.
-    assert options == [{"text_field": "content", "deadline": None}]
+    assert options == [{"text_field": "content", "deadline": None, "cancelled": None}]
 
 
 def _paths_of(result) -> list[str]:

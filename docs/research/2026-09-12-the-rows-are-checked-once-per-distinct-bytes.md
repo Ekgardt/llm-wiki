@@ -115,3 +115,53 @@ Files: `scripts/search_memory.py`, `scripts/verified_artifacts.py`,
 `tests/test_lsp_process.py`,
 `benchmark/code-parity-v2.json`,
 `docs/research/2026-09-12-the-rows-are-checked-once-per-distinct-bytes.md`.
+
+## 2026-10-05: the sealed query consumes the same verified row verdict
+
+The current ordinary MCP request reproduced a remaining cold refusal on the
+actual captured corpus: 59,873 sources, 126,298 chunks and a genuinely extracted
+six-table graph. Its foreground ownership already preempted whole-path warmup.
+An already-running native reranker load still overlapped the mandatory work.
+Ordered tracing measured catalog selection at 8.361 seconds, its light FTS
+check at 1.539 seconds, and a subsequent strict query FTS check at 3.773 seconds
+including a 2.158-second stored-row walk. The query ignored the existing
+`VerifiedArtifacts` `fts-chunks` verdict that the catalog had consumed for the
+same bytes. This does not prove that native loading alone caused the refusal;
+6.821 seconds of the catalog's earlier work remained unsegmented.
+
+The compatible correction passes the existing query seal into the connection
+reader. It consumes a successful persistent row verdict only after comparing
+an actual current FTS file seal with the captured named artifact seal and the
+canonical manifest digest. Schema, metadata, row count and version checks still
+run. The actual file and canonical manifest are checked again before returning
+the open connection. A failed or cancelled check closes it. This scoped reuse
+does not seed the process-wide verdict for unsealed callers. Raw callers,
+missing verdicts and unknown bytes still run the strict row checks. No database,
+schema, runtime path, setting, deadline or resource limit is added.
+
+Fresh primary research on this date: [Git's racy-file proof](https://git-scm.com/docs/racy-git)
+explains why matching timestamps alone cannot establish unchanged bytes;
+[SQLite URI contracts](https://www.sqlite.org/uri.html) distinguish read-only
+access from an assertion of immutability; [Python 3.10.22 cache semantics](https://docs.python.org/3.10/library/functools.html)
+do not guarantee that concurrent first calls compute once. The existing
+content-digest and racy-file checks remain the authority. Repeated unconditional
+walks were reliable but expensive; a new persisted attestation would broaden the
+contract; disabling warmup or increasing the request clock would mask the issue.
+
+The original regression observed a full walk despite a successful persisted
+verdict and an actual current seal. Fifteen focused guards now pass, including
+unsealed and absent-verdict strict reads, malformed seals, corrupted new bytes,
+unknown metadata version, original-seal changes, atomic file replacement and
+content changes with forged mtime during validation, changed manifests, caller
+expiry and late cancellation. Mutation and cancellation close the connection.
+The related 158-test run passed; its existing availability test actually loaded
+and quantized the local Torch reranker. Local token and monetary cost are unknown.
+
+One subsequent unprofiled ordinary MCP first/repeated cycle, with real local
+models, normal warmup and the unchanged fourteen-second clock, returned in
+11.794 and 6.003 seconds. The first answer used lexical evidence; the second also
+used the real reranker (1.668 seconds). Both remained `BASE`, with dense work not
+admitted. This proves the two measured answers met their clocks on the genuine
+full fixture, not full HYBRID readiness or an isolated speedup. Earlier failed
+cycles and their costs are retained. ROOT is not installed by this qualification;
+whole-current-product regression and installation remain separate checks.

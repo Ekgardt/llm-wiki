@@ -9,6 +9,7 @@ import memory_queue
 import pytest
 import reliable_memory as reliability
 
+from tests.slow_machine import LONG_TIMEOUT
 from tests.test_reliability_v3_adoption import _vault, build_adopted_reliability_v3
 
 
@@ -64,7 +65,7 @@ def test_adopted_cold_factory_has_a_bounded_retry_and_can_recover(tmp_path, fact
         assert time.monotonic() - started < 0.5
         assert not transactions._ADOPTION_VALIDATION_CACHE
         blocker.execute('ROLLBACK')
-    assert factory(vault, state, deadline=time.monotonic() + 5) is not None
+    assert factory(vault, state, deadline=time.monotonic() + LONG_TIMEOUT) is not None
 
 
 def test_expired_admission_does_not_create_runtime_state(tmp_path):

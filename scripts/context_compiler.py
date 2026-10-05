@@ -42,6 +42,7 @@ from corpus_snapshot import (
     RetrievalChunk,
     _frontmatter,
     _markdown_headings,
+    iter_snapshot_chunks,
 )
 
 # Selected evidence stays in its verified chunk span by default, as in
@@ -160,7 +161,6 @@ class CompiledContext:
 @dataclass(frozen=True)
 class _Parent:
     source: CapturedSource
-    chunks: tuple[RetrievalChunk, ...]
     title: str
     summary: str
     aliases: tuple[str, ...]
@@ -196,10 +196,6 @@ def _extract_summary(content: str) -> str:
 
 
 def _build_parents(snapshot: CorpusSnapshot) -> tuple[_Parent, ...]:
-    chunks_by_parent: dict[str, list[RetrievalChunk]] = {}
-    for chunk in snapshot.chunks:
-        chunks_by_parent.setdefault(chunk.parent_page, []).append(chunk)
-
     parents: list[_Parent] = []
     for source in snapshot.sources:
         relative_path = source.record.relative_path
@@ -211,7 +207,6 @@ def _build_parents(snapshot: CorpusSnapshot) -> tuple[_Parent, ...]:
         parents.append(
             _Parent(
                 source=source,
-                chunks=tuple(chunks_by_parent.get(relative_path, ())),
                 title=title,
                 summary=summary,
                 aliases=aliases,
@@ -554,6 +549,8 @@ def compile_context(
         snapshot,
         {str(s) for s in shortlist},
         tuple(sorted({str(c) for c in evidence_chunk_ids})),
+        deadline=deadline,
+        cancelled=cancelled,
     )
     compilation.materialize(
         _L2Limits(small_parent_chars, large_parent_subtree_chars, deadline, cancelled)
@@ -691,14 +688,29 @@ def _packing_trace(packed, packed_items: list[CompiledItem]) -> PackingTrace:
     )
 
 
+def _requested_evidence_chunks(
+    snapshot: CorpusSnapshot, requested: tuple[str, ...], *, deadline=None, cancelled=None
+) -> dict:
+    if not requested:
+        return {}
+    selected = set(requested)
+    chunks = iter_snapshot_chunks(snapshot, deadline=deadline, cancelled=cancelled)
+    return {chunk.id: chunk for chunk in chunks if chunk.id in selected}
+
+
 class _Compilation:
     """The items one compile materializes, each with its trace and its owner."""
 
-    def __init__(self, snapshot: CorpusSnapshot, shortlist: set[str], evidence_ids: tuple[str, ...]) -> None:
+    def __init__(
+        self, snapshot: CorpusSnapshot, shortlist: set[str], evidence_ids: tuple[str, ...],
+        *, deadline=None, cancelled=None,
+    ) -> None:
         self.parents = _build_parents(snapshot)
         self.shortlist = shortlist
         self.requested_evidence_ids = evidence_ids
-        self.chunks_by_id = {chunk.id: chunk for chunk in snapshot.chunks}
+        self.chunks_by_id = _requested_evidence_chunks(
+            snapshot, evidence_ids, deadline=deadline, cancelled=cancelled
+        )
         self.items: list[CompiledItem] = []
         self.materializations: list[MaterializationTrace] = []
         self.l1_parent_by_item_id: dict[str, str] = {}

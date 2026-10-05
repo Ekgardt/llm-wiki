@@ -170,6 +170,8 @@ def native_user_text(text: str) -> str | None:
     if not text.startswith("    {\""):
         return None
     encoded = text[4:].rstrip("\r\n")
+    if not native_encoding_candidate(encoded):
+        return None
     return _native_encoded_user_text(encoded)
 
 
@@ -200,6 +202,24 @@ def _native_part_prompt(record: dict, allow_fragment: bool) -> str | None:
 
 
 def native_encoding_candidate(encoded: str) -> bool:
+    """Distinguish outer native identity from generic or nested JSON data."""
+    try:
+        event = json.loads(encoded)
+    except json.JSONDecodeError:
+        return _native_fragment_candidate(encoded)
+    return _native_record_candidate(event)
+
+
+def _native_record_candidate(event: Any) -> bool:
+    if not isinstance(event, dict):
+        return False
+    actor_fields = {"agent", "session", "project", "worktree", "severity",
+                    "parent_event_id", "source_event_id", "payload"}
+    return {"event_type", "schema_version"}.issubset(event) or actor_fields.issubset(event)
+
+
+def _native_fragment_candidate(encoded: str) -> bool:
+    """Keep recognition of incomplete canonical native parts separate."""
     return encoded.startswith('{"agent":') or (encoded.startswith("{") and
             '"event_type":' in encoded and '"schema_version":' in encoded)
 

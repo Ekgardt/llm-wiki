@@ -10,6 +10,8 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import date, timedelta
@@ -88,6 +90,112 @@ def _optional_stage_slots(kind: str | None) -> threading.BoundedSemaphore:
     if kind == "rerank_events":
         kind = "rerank"
     return _OPTIONAL_STAGE_KIND_SLOTS.get(kind, _OPTIONAL_STAGE_SLOTS)
+
+
+
+# Caller and worker leases outlive fallback answers until their real work settles.
+# Condition notifications handle ownership changes; the existing optional-stage
+# 10 ms cancellation cadence also observes shutdown while waiting for idle.
+_OPTIONAL_WAIT_POLL_SECONDS = 0.01
+_FOREGROUND_CONDITION = threading.Condition()
+_FOREGROUND_OWNERS: set[object] = set()
+_WARMUP_CANCELLATIONS: set[threading.Event] = set()
+_BACKGROUND_WORKERS: dict[object, threading.Event] = {}
+_BACKGROUND_EVENT: ContextVar[threading.Event | None] = ContextVar("retrieval_background_event", default=None)
+_BACKGROUND_CANCELLATION: ContextVar[Callable[[], bool] | None] = ContextVar(
+    "retrieval_background_cancellation", default=None
+)
+
+
+def _begin_foreground() -> object:
+    owner = object()
+    with _FOREGROUND_CONDITION:
+        _FOREGROUND_OWNERS.add(owner)
+        for event in (*_WARMUP_CANCELLATIONS, *_BACKGROUND_WORKERS.values()):
+            event.set()
+    return owner
+
+
+def _end_foreground(owner: object | None) -> None:
+    with _FOREGROUND_CONDITION:
+        _FOREGROUND_OWNERS.discard(owner)
+        _BACKGROUND_WORKERS.pop(owner, None)
+        _FOREGROUND_CONDITION.notify_all()
+
+
+@contextmanager
+def foreground_retrieval(source_tool: str):
+    """User work preempts warmup; its spawned workers retain their own leases."""
+    if _BACKGROUND_EVENT.get() is not None:
+        yield
+        return
+    owner = _begin_foreground()
+    try:
+        yield
+    finally:
+        _end_foreground(owner)
+
+
+def _require_priority_available(deadline: float, stopping: Callable[[], bool]) -> None:
+    if stopping():
+        raise OptionalStageTimeout("retrieval warmup cancelled")
+    if time.monotonic() >= deadline:
+        raise OptionalStageTimeout("retrieval warmup idle deadline exceeded")
+
+
+def _wait_foreground_idle(deadline: float, stopping: Callable[[], bool]) -> None:
+    while _FOREGROUND_OWNERS or _BACKGROUND_WORKERS:
+        _require_priority_available(deadline, stopping)
+        remaining = deadline - time.monotonic()
+        _FOREGROUND_CONDITION.wait(min(remaining, _OPTIONAL_WAIT_POLL_SECONDS))
+    _require_priority_available(deadline, stopping)
+
+
+@contextmanager
+def warmup_priority(deadline: float, stopping: Callable[[], bool]):
+    """Wait for actual idle, then lend this warmup one cancellable ownership token."""
+    event = threading.Event()
+    with _FOREGROUND_CONDITION:
+        _wait_foreground_idle(deadline, stopping)
+        _WARMUP_CANCELLATIONS.add(event)
+
+    def cancelled() -> bool:
+        return event.is_set() or stopping() or time.monotonic() >= deadline
+
+    event_token = _BACKGROUND_EVENT.set(event)
+    token = _BACKGROUND_CANCELLATION.set(cancelled)
+    try:
+        yield cancelled
+    finally:
+        _BACKGROUND_CANCELLATION.reset(token)
+        _BACKGROUND_EVENT.reset(event_token)
+        with _FOREGROUND_CONDITION:
+            _WARMUP_CANCELLATIONS.discard(event)
+
+
+def background_cancellation() -> Callable[[], bool] | None:
+    """Capture the bound token before passing work to a different thread."""
+    return _BACKGROUND_CANCELLATION.get()
+
+
+def _optional_worker_owner() -> object:
+    event = _BACKGROUND_EVENT.get()
+    if event is None:
+        return _begin_foreground()
+    owner = object()
+    with _FOREGROUND_CONDITION:
+        _BACKGROUND_WORKERS[owner] = event
+    return owner
+
+
+def _require_optional_not_cancelled(cancelled: Callable[[], bool] | None) -> None:
+    if cancelled is not None and cancelled():
+        raise OptionalStageTimeout("optional stage cancelled")
+
+
+def _require_optional_deadline(deadline: float) -> None:
+    if deadline <= time.monotonic():
+        raise OptionalStageTimeout("optional caller deadline reached before start")
 
 
 def _normalized_filename_stem(value: str) -> str:
@@ -276,9 +384,9 @@ def _run_optional_bounded(
 ) -> Any:
     """Run optional work with a hard wait bound and capped daemon stragglers.
 
-    The stage is always started; what varies is whether the caller waits for
-    it. That split is the point: warming is never refused, only the spending of
-    a budget that cannot buy a result.
+    A live, uncancelled stage may start even when its waiting share has
+    expired. Its original caller deadline is checked at the caller boundary;
+    cancellation prevents startup and invalidates any late result or cost.
 
     `observes` reads the value the operation returned and says whether it is
     evidence of a finished run. A stage that gives up on its own deadline
@@ -289,13 +397,14 @@ def _run_optional_bounded(
     # Decided before the worker starts, and deliberately so: this run is about
     # to record its own cost, and a fast one would otherwise overwrite the
     # observation the decision is being made from.
+    _require_optional_not_cancelled(cancelled)
     admitted = _optional_stage_admitted(kind, deadline, cancelled)
     slots = _optional_stage_slots(kind)
     if not slots.acquire(blocking=False):
         raise OptionalStageNotAdmitted("optional stage capacity exhausted")
     completed = threading.Event()
     result: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
-    _start_optional_worker(operation, result, completed, slots, kind, observes)
+    _start_optional_worker(operation, result, completed, slots, kind, observes, cancelled)
     _require_admitted_optional_stage(admitted)
     _await_optional_stage(completed, deadline, cancelled)
     ok, value = result.get_nowait()
@@ -325,11 +434,16 @@ def _start_optional_worker(
     slots: threading.BoundedSemaphore,
     kind: str | None = None,
     observes: Callable[[Any], bool] = _every_value_measures,
+    cancelled: Callable[[], bool] | None = None,
 ) -> None:
+    owner = _optional_worker_owner()
+
     def run() -> None:
         started = time.monotonic()
         try:
+            _require_optional_not_cancelled(cancelled)
             value = operation()
+            _require_optional_not_cancelled(cancelled)
         except Exception as exc:  # noqa: BLE001 - an interrupt propagates
             result.put((False, exc))
         else:
@@ -341,6 +455,7 @@ def _start_optional_worker(
         finally:
             completed.set()
             slots.release()
+            _end_foreground(owner)
 
     # Registered, so a closing server waits for inference to finish rather than
     # finalizing under it. See `docs/research/2026-09-14-no-model-running-at-exit.md`.
@@ -350,6 +465,7 @@ def _start_optional_worker(
         inference_threads.start(run, name="llm-wiki-optional-retrieval")
     except BaseException:
         slots.release()
+        _end_foreground(owner)
         raise
 
 
@@ -366,7 +482,7 @@ def _await_optional_stage(
         wait = stage_deadline - time.monotonic()
         if wait <= 0:
             raise OptionalStageTimeout("optional stage deadline reached")
-        completed.wait(min(wait, 0.01))
+        completed.wait(min(wait, _OPTIONAL_WAIT_POLL_SECONDS))
 
 PROFILES = (
     "DIRECT",
@@ -1944,8 +2060,10 @@ def _call_dense(
     deadline_monotonic: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> Sequence[Mapping[str, Any]] | None:
+    _require_optional_not_cancelled(cancelled)
     if deadline_monotonic is None:
         return dense_backend(**filters)
+    _require_optional_deadline(deadline_monotonic)
     return _run_optional_bounded(
         lambda: dense_backend(**filters),
         deadline=_optional_stage_deadline(deadline_monotonic),
@@ -2229,6 +2347,7 @@ def _run_reranker(
     cancelled: Callable[[], bool] | None,
     source_stage: str | None = None,
 ) -> Sequence[Mapping[str, Any]]:
+    _require_optional_not_cancelled(cancelled)
     from reranker import rerank as _rerank
 
     def call(deadline: float | None = None) -> Sequence[Mapping[str, Any]]:
@@ -2238,6 +2357,7 @@ def _run_reranker(
             limit=pool_limit,
             text_field="content",
             deadline=deadline,
+            cancelled=cancelled,
         )
 
     if deadline_monotonic is None:
@@ -2246,6 +2366,7 @@ def _run_reranker(
     # itself. Abandoning only stops the caller waiting: the thread keeps
     # scoring, on the same four cores as the answer that is now being built
     # without it. Told when to stop, it stops between batches instead.
+    _require_optional_deadline(deadline_monotonic)
     stage_deadline = _source_rerank_deadline(deadline_monotonic, source_stage)
     kind = source_stage or "rerank"
     worker_deadline = _rerank_worker_deadline(stage_deadline, kind=kind)
@@ -2893,7 +3014,7 @@ def _generation_connection_for(
     """No seal means no readable generation, so there is nothing to open."""
     if seal is None:
         return None
-    return search_memory._generation_connection(catalog, manifest, **stop)
+    return search_memory._generation_connection(catalog, manifest, seal=seal, **stop)
 
 
 def _close_generation_handles(context: Mapping[str, Any]) -> None:

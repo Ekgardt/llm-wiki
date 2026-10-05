@@ -1138,3 +1138,49 @@ nightly completion is unverified and historical losses remain reported. Producer
 activation, representation/retrieval/full-cycle cost, remaining audit findings,
 final full-suite/security/platform checks and legacy cleanup remain open.
 Evidence: `logs/audit-2026-09-29-completed-repair-breadcrumb-final-fault-qualification*.txt`.
+
+### 2026-10-05: generic breadcrumbs and native identity
+
+The transport accepts a canonical JSON object, while the host adapter publishes
+an EventEnvelope without its event ID, content hash and two clocks. A generic
+`{"prompt":"complete prompt"}` therefore remains supported physical evidence;
+it does not gain native user-fact authority. The daily decoder previously applied
+native schema validation to every linked captured JSON object. Three genuine
+committed-journal/archive tests reproduced that refusal on the installed baseline.
+Replacing their fixtures alone would hide this compatibility defect.
+
+Complete JSON now selects native validation only through an outer
+`schema_version`/`event_type` pair or the complete existing actor metadata plus
+payload. The latter preserves refusal when both discriminators disappear from a
+native record. An isolated agent, version or event-type field, or a nested pair,
+does not declare a native format. Objects with the full native identity remain
+ambiguous native-shaped input and fail closed if incomplete or unsupported.
+Incomplete JSON retains the existing fragment recognizer separately. No schema,
+physical source proof, canonical byte check or payload rule is relaxed. Native
+multipart inputs still require a complete physical citation; generic multipart
+inputs do not manufacture decoded user facts.
+
+The alternatives were replacing generic fixtures, using string substrings as
+format identity, and dispatching on parsed outer identity. The first loses
+historical coverage; the second mistakes nested data and agent-only objects for
+native events. The selected correction changes no transport, persisted schema,
+path, dependency, database or environment contract. Historical ROOT generic-event
+occurrence was not inventoried and is not asserted.
+
+Primary sources were freshly read on 2026-10-05: [RFC 8259](https://www.rfc-editor.org/info/rfc8259/)
+(object boundaries and duplicate-member interoperability), [Python 3.10.22 JSON documentation](https://docs.python.org/3.10/library/json.html)
+(parsed dictionaries and explicit JSONDecodeError), and [JSON Schema conditional validation](https://json-schema.org/understanding-json-schema/reference/conditionals)
+(property presence before variant validation; required properties remain required).
+Three local decodes of one 1,080,203-byte EventEnvelope-derived frame took
+0.02267 seconds. This measures parsing only; it does not prove a model-backed
+compile cycle or installation. Original failures and interim fixture failures are
+retained in private diagnostic logs.
+
+Candidate qualification retained 14 original failing assertions and 17 controls.
+The final eight related modules passed 170 tests in 40.58 seconds, including all
+three unchanged generic archive scenarios and the same scenarios with real host
+EventEnvelope input. Every one of the 15 changed/new callables was measured with
+Lizard at its exact AST start line: maximum CCN 5, two if statements and two nested
+branch/loop levels. Ruff passed. A new host-fixture error was corrected by passing
+the actual selected batch inputs to apply; its strict production identity check
+was not changed. No models were called and nothing was installed or committed.

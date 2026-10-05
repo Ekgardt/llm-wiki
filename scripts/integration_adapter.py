@@ -887,7 +887,7 @@ def _pending_checkpoint(envelope: EventEnvelope, slug: str, state_key: str) -> d
     return {
         "event_id": envelope.event_id,
         "state_key": state_key,
-        "occurred_at": envelope.occurred_at.isoformat(),
+        "occurred_at": envelope.occurred_at.isoformat(timespec="microseconds"),
         "observation": _checkpoint_observation(envelope),
         "checkpoint_event": _checkpoint_event(envelope, slug, "pending"),
         "has_project_delta": isinstance(envelope.payload.get("project_delta"), Mapping),
@@ -1682,7 +1682,7 @@ def _record_inflight_state(
     decision: CheckpointDecision,
 ) -> None:
     _validate_pending_commit(state.setdefault("project_checkpoint_pending", {}).get(queue_key, []), selected, owner)
-    checkpoint_at = decision.checkpoint_at.isoformat() if decision.checkpoint_at is not None else None
+    checkpoint_at = decision.checkpoint_at.isoformat(timespec="microseconds") if decision.checkpoint_at is not None else None
     state.setdefault(INFLIGHT_STATE_KEY, {})[queue_key] = {
         "event_ids": [str(item["event_id"]) for item in selected],
         "reason": decision.reason,
@@ -2922,7 +2922,7 @@ def _capture_occurred_at(envelope: EventEnvelope) -> str | None:
     occurred = getattr(envelope, "occurred_at", None)
     if not isinstance(occurred, datetime):
         return None
-    return occurred.isoformat()
+    return occurred.isoformat(timespec="microseconds")
 
 
 def _capture_source_record(

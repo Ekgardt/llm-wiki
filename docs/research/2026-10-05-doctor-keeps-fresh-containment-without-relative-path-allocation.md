@@ -1,0 +1,19 @@
+# Fresh containment checks without unused relative paths
+
+Research date: 2026-10-05. Candidate qualification only; nothing installed.
+
+The full actual doctor profile calls `_safe_kind` 103,701 times and `_within` 103,695 times. Path resolution and relative-path construction take substantial CPU. `_within` creates a relative `Path` only to throw it away. The selected change keeps both fresh `Path.resolve()` calls and their exception behavior, then compares `os.path.commonpath` against the resolved root using the platform's `normcase`. It does not cache a filesystem verdict, replace physical resolution with a lexical prefix, or change the accepted runtime root.
+
+Primary sources fetched today:
+
+- Python 3.10.22 `os.path`: https://docs.python.org/3.10/library/os.path.html. `commonpath` compares components, accepts path-like objects, works on Unix and Windows and refuses different drives. `commonprefix` is explicitly unsuitable for this purpose. `normcase` follows platform case conventions.
+- Microsoft file and namespace documentation: https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file. Windows drive, namespace and case behavior must remain distinct from POSIX string comparisons. This candidate continues to delegate physical resolution to the existing platform `Path.resolve`.
+- Linux man-pages 6.19 `path_resolution(7)`: https://man7.org/linux/man-pages/man7/path_resolution.7.html. Symlink traversal, directory permissions and parent components affect physical containment. Both paths must still be resolved afresh. The Open Group's official POSIX pages could not be fetched (403); no claim is attributed to them.
+
+Alternatives rejected: a string-prefix comparison (sibling-prefix escape), caching the resolved root across calls (changed root authority), caching path verdicts (changed symlink authority), replacing resolution with `normpath` or non-strict `realpath` (changed handling of loops and filesystem errors), or raising the health budget without a measured cause. Directory-descriptor traversal would be a wider platform-specific change and is unnecessary for this allocation removal.
+
+A preliminary readonly comparison on 10,000 real queue-result paths produced identical verdicts: old 0.7214 s; commonpath with an unnecessary extra root resolution 0.5522 s. This sampled measurement is not proof of whole-health improvement or all-platform equivalence. Qualification must retain root-retargeting, symlink-escape, sibling-boundary and invalid-path guards, then compare the actual full transaction check under the same observation protocol. Windows syntax tests on Linux do not constitute a Windows runtime qualification.
+
+Evidence: private `logs/audit-2026-10-05-step7-installed-whole-health-profile.json` and `.prof`; eight fresh actual stdio snippets in `logs/audit-2026-10-05-step7-runtime-containment-native-navigation.json`; ROOT doctor SHA 7235b18812164d7c738bd1f4d31473464b18fab3a0b975805e3efba21ce47047. Overall graph coverage remains partial; relevant snippets are fresh and exact and were supplemented with source inspection.
+
+Qualification: a matched readonly trial on 101,646 captured real artifact paths gave identical containment verdicts. The installed implementation took 7.4553 seconds and the candidate 4.3029 seconds, retaining both fresh physical resolutions on every call. The 218 related doctor tests pass, with three explicit skips. Real parent/root symlink retargeting and sibling boundaries are covered. The old 10,050-directory fixture still creates all rows and keeps its unknown/corrupt assertions; its inspection now expires after an actual checked entry using the caller deadline, rather than relying on a removed hidden count ceiling. A complete inspection remains distinguishable from an expired one. The live transaction-profile trial still refused a changing SQL snapshot; this change is not a health or deletion-permit claim.

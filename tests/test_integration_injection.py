@@ -2086,8 +2086,14 @@ def _group_keeps_contract(key: tuple[str, int], group: dict) -> bool:
         group.get("matcher") == matcher
         and command["type"] == "command"
         and _command_texts_end_with(command, script, ending)
-        and 0 < command["timeout"] <= 15
+        and _codex_timeout_keeps_contract(key, command)
     )
+
+
+def _codex_timeout_keeps_contract(key: tuple[str, int], command: dict) -> bool:
+    if key in {("UserPromptSubmit", 0), ("PostToolUse", 1)}:
+        return "timeout" not in command
+    return 0 < command["timeout"] <= 15
 
 
 def test_codex_hook_merge_preserves_user_hooks_and_is_idempotent(tmp_path):
@@ -2208,10 +2214,11 @@ def _codex_inline_group_toml(event_name: str, group: dict) -> list[str]:
                 'type = "command"',
                 f"command = {json.dumps(handler['command'])}",
                 f"command_windows = {json.dumps(handler['commandWindows'])}",
-                f"timeout = {handler['timeout']}",
                 "",
             ]
         )
+        if "timeout" in handler:
+            lines.append(f"timeout = {handler['timeout']}")
     return lines
 
 

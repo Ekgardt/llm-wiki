@@ -8,6 +8,7 @@ import pytest
 from markdown_transaction import MarkdownChange, active_markdown_coordinator
 
 from tests.adopted_vault import adopt
+from tests.slow_machine import LONG_TIMEOUT
 
 
 def _environment(tmp_path):
@@ -151,7 +152,7 @@ def test_standalone_canonical_receipt_callback_releases_shared_lock(tmp_path, mo
         return original(logical, content, selector)
 
     monkeypatch.setattr(compiler, "daily_is_compiled", inspect)
-    reader = doctor._CompiledDaySupersession(root, coordinator.state_root, deadline=time.monotonic()+30)
+    reader = doctor._CompiledDaySupersession(root, coordinator.state_root, deadline=time.monotonic()+LONG_TIMEOUT)
     assert reader._standalone_day_compiled(first.logical_path, first.original_content) is False
     assert failures == []
     registry.release(lease)
@@ -175,7 +176,7 @@ def test_standalone_rejects_mutated_committed_operation_after_receipt_proof(tmp_
         return original(logical, content, selector)
 
     monkeypatch.setattr(compiler, "daily_is_compiled", inspect)
-    reader = doctor._CompiledDaySupersession(root, coordinator.state_root, deadline=time.monotonic()+30)
+    reader = doctor._CompiledDaySupersession(root, coordinator.state_root, deadline=time.monotonic()+LONG_TIMEOUT)
     with pytest.raises(TimeoutError, match="snapshot changed"):
         reader._standalone_day_compiled(first.logical_path, first.original_content)
 

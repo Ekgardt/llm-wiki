@@ -516,7 +516,11 @@ TYPE_FIELD_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
 SUPERSEDED_BY_RE = re.compile(r"^superseded_by:\s*\[?\[?([^\]\n]+?)\]?\]?\s*$", re.MULTILINE)
 SOURCES_FIELD_RE = re.compile(r"^sources:", re.MULTILINE)
 SOURCE_SECTION_RE = re.compile(r"^##\s*(?:Source|Evidence|Provenance)", re.MULTILINE)
-SOURCE_LINE_RE = re.compile(r"^(?:Source|Evidence|Provenance):[^\S\r\n]+\S", re.MULTILINE)
+SOURCE_LINE_RE = re.compile(
+    r"^(?:Source(?:[^\S\r\n]*/[^\S\r\n]*Evidence)?|Evidence|Provenance):"
+    r"(?:[^\S\r\n]+\S|(?:[^\S\r\n]*\r?\n)+[^\S\r\n]*[-+*][^\S\r\n]+\S)",
+    re.MULTILINE,
+)
 CANDIDATE_JSON_RE = re.compile(r"(?ms)```json[ \t]*\r?\n([^\r\n]+)\r?\n```")
 
 

@@ -13,6 +13,7 @@ import memory_state
 import pytest
 from reliable_memory import canonical_json_bytes
 
+from tests.slow_machine import LONG_TIMEOUT
 from tests.test_a_continuation_keeps_its_original_entry import _published_continuation
 from tests.test_compile_transactions import vault as vault
 from tests.test_doctor_another_legacy_receipt_is_not_the_staged_receipt import race as race
@@ -125,7 +126,7 @@ def test_failure_record_rolls_back_when_deadline_expires_before_commit(queue, mo
 
     monkeypatch.setattr(memory_queue, "_source_failure_commit_active", expired)
     with pytest.raises(TimeoutError, match="before commit"):
-        queue.record_source_failure("knowledge/daily/2026-07-14.md", "a" * 64, error_code="unprocessed", producer="compile", deadline=time.monotonic() + 2)
+        queue.record_source_failure("knowledge/daily/2026-07-14.md", "a" * 64, error_code="unprocessed", producer="compile", deadline=time.monotonic() + LONG_TIMEOUT)
     assert queue.source_failure_keys() == []
 
 
@@ -173,7 +174,7 @@ def test_valid_historical_receipt_is_cached_but_never_current_authority(race, mo
         return original(*args, **kwargs)
 
     monkeypatch.setattr(compiler, 'read_compile_receipt_v3', observed)
-    selection = compiler._receipt_predicate(coordinator, deadline=time.monotonic() + 2)
+    selection = compiler._receipt_predicate(coordinator, deadline=time.monotonic() + LONG_TIMEOUT)
     assert not selection.matches(part)
     assert not selection.matches(part)
     assert len(calls) == 1
@@ -207,14 +208,14 @@ def test_authority_trigger_detects_unprocessed_parts_despite_matching_mirror(vau
     root, state = vault
     monkeypatch.setattr(maybe_compile, "ROOT", root)
     monkeypatch.setattr(maybe_compile, "STATE_ROOT", state)
-    assert maybe_compile._has_pending_work(deadline=time.monotonic() + 2)
+    assert maybe_compile._has_pending_work(deadline=time.monotonic() + LONG_TIMEOUT)
     assert daily.exists()
 
 
 def test_saved_source_uses_context_and_canonical_authority(vault):
     daily, coordinator, part = _published_continuation(vault)
     source = compiler._v4_source_descriptor(part)
-    selection = compiler._receipt_predicate(coordinator, deadline=time.monotonic() + 2)
+    selection = compiler._receipt_predicate(coordinator, deadline=time.monotonic() + LONG_TIMEOUT)
     assert selection.matches_saved_source(source)
     daily.write_bytes(daily.read_bytes() + b"## [12:00:00] session-end | manual\n" + b"A later observation.\n" * 1000)
     assert selection.matches_saved_source(source)
@@ -274,7 +275,7 @@ def test_complete_context_receipt_stops_nonforce_trigger(vault, monkeypatch):
     compiler.apply_compile_plan(inputs, _semantic_plan(), action_key="d" * 64, trigger="manual", coordinator=coordinator, completed_at="2026-07-14T12:00:00Z", batch=batch, provider_budget={"provider": "fake", "model": "fake-v1", "max_output_tokens": 4000})
     monkeypatch.setattr(maybe_compile, "ROOT", root)
     monkeypatch.setattr(maybe_compile, "STATE_ROOT", state)
-    assert not maybe_compile._has_pending_work(deadline=time.monotonic() + 2)
+    assert not maybe_compile._has_pending_work(deadline=time.monotonic() + LONG_TIMEOUT)
     assert compiler.daily_is_compiled(daily.relative_to(root).as_posix(), daily.read_bytes(), compiler._receipt_predicate(coordinator))
 
 
