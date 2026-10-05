@@ -824,10 +824,18 @@ def run_resumable_migration(
 def _contained_runtime_metadata(path: Path, state_root: Path) -> os.stat_result:
     root = Path(state_root).resolve(strict=True)
     try:
-        path.parent.resolve(strict=True).relative_to(root)
+        parent = path.parent.resolve(strict=True)
+        _require_runtime_parent_containment(parent, root)
     except (OSError, ValueError) as exc:
         raise PermissionError("runtime file is outside the configured state root") from exc
     return path.lstat()
+
+
+def _require_runtime_parent_containment(parent: Path, root: Path) -> None:
+    normalized_root = os.path.normcase(root)
+    normalized_parent = os.path.normcase(parent)
+    if os.path.commonpath((normalized_parent, normalized_root)) != normalized_root:
+        raise ValueError("runtime parent is outside the configured state root")
 
 
 def _require_bounded_regular_file(

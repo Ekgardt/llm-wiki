@@ -792,3 +792,56 @@ def test_reopening_an_operational_database_keeps_existing_locks(tmp_path: Path) 
 
     assert before > 0
     assert after == before
+
+
+def _runtime_directory_link(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f'directory symlinks unavailable: {error}')
+
+
+def test_runtime_containment_does_not_accept_a_sibling_prefix(tmp_path: Path) -> None:
+    root = tmp_path / 'state'
+    root.mkdir()
+    sibling = tmp_path / 'state-other'
+    sibling.mkdir()
+    path = sibling / 'record'
+    path.write_bytes(b'outside')
+    with pytest.raises(PermissionError, match='outside'):
+        reliable_memory.read_runtime_bytes(path, root, max_bytes=1024)
+
+
+def test_runtime_parent_authority_is_fresh_after_symlink_retarget(tmp_path: Path) -> None:
+    root = tmp_path / 'state'
+    root.mkdir()
+    inside = root / 'inside'
+    outside = tmp_path / 'outside'
+    inside.mkdir()
+    outside.mkdir()
+    (inside / 'record').write_bytes(b'inside')
+    (outside / 'record').write_bytes(b'outside')
+    link = root / 'linked'
+    _runtime_directory_link(link, inside)
+    assert reliable_memory.read_runtime_bytes(link / 'record', root, max_bytes=1024) == b'inside'
+    link.unlink()
+    _runtime_directory_link(link, outside)
+    with pytest.raises(PermissionError, match='outside'):
+        reliable_memory.read_runtime_bytes(link / 'record', root, max_bytes=1024)
+
+
+def test_runtime_root_authority_is_fresh_after_symlink_retarget(tmp_path: Path) -> None:
+    first = tmp_path / 'first'
+    second = tmp_path / 'second'
+    first.mkdir()
+    second.mkdir()
+    (first / 'record').write_bytes(b'first')
+    (second / 'record').write_bytes(b'second')
+    root = tmp_path / 'root'
+    _runtime_directory_link(root, first)
+    assert reliable_memory.read_runtime_bytes(first / 'record', root, max_bytes=1024) == b'first'
+    root.unlink()
+    _runtime_directory_link(root, second)
+    with pytest.raises(PermissionError, match='outside'):
+        reliable_memory.read_runtime_bytes(first / 'record', root, max_bytes=1024)
+    assert reliable_memory.read_runtime_bytes(second / 'record', root, max_bytes=1024) == b'second'

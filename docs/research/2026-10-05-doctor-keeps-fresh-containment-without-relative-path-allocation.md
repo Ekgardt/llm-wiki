@@ -1,6 +1,6 @@
 # Fresh containment checks without unused relative paths
 
-Research date: 2026-10-05. Candidate qualification only; nothing installed.
+Research date: 2026-10-05. The doctor allocation change was qualified and installed during the audit; the measurements and limits below describe its evidence.
 
 The full actual doctor profile calls `_safe_kind` 103,701 times and `_within` 103,695 times. Path resolution and relative-path construction take substantial CPU. `_within` creates a relative `Path` only to throw it away. The selected change keeps both fresh `Path.resolve()` calls and their exception behavior, then compares `os.path.commonpath` against the resolved root using the platform's `normcase`. It does not cache a filesystem verdict, replace physical resolution with a lexical prefix, or change the accepted runtime root.
 
