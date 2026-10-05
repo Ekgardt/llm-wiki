@@ -147,3 +147,31 @@ must not be masked by increasing the production budget. A proposed synthetic
 large-row benchmark was not created while disk space was unsafe. An owned
 navigation-cache retirement refused before deletion because same-user process FD
 visibility was unavailable; no ROOT cache or runtime data was deleted.
+
+## Shared daily-source reader capacity — 2026-10-05
+
+Doctor's two current-day supersession reads used an independent 4 MiB bound,
+although compilation, archive payloads and evidence resolution support the existing
+16 MiB daily source family. A genuine isolated 4.205 MB day, partitioned normally
+and published through real temporary Markdown transactions with committed v4 part
+receipts, reproduced six read refusals; the above-16-MiB negative already passed.
+The candidate imports `evidence_resolver.MAX_DAILY_BYTES` for both reads, removes
+the unused independent constant, and keeps the same stable byte reader, exact
+source digest, all-part context authority and canonical committed checks.
+
+The seven controls pass, including missing receipt, foreign day, changed original,
+wrong whole digest and above-existing-capacity refusal. This is reader compatibility,
+not a newly justified optimum for the existing 16 MiB bound. No new setting, format,
+archive fallback, historical v3 authority or model call is introduced. A v3 digest
+may bind selected part bytes; it cannot be promoted to the current whole-file hash
+or accepted through matching prefixes. A read-only review of the 39 dated retained
+attempts found all their current days above the old 4 MiB bound, but none of their
+saved sizes or digests equal the current whole day. Removing the read mismatch
+therefore does not prove those attempts resolved.
+
+Research checked on 2026-10-05: [Python 3.10 pathlib](https://docs.python.org/3.10/library/pathlib.html)
+for filesystem identity versus path operations; [SQLite isolation](https://www.sqlite.org/isolation.html)
+for canonical transaction observations; [OWASP resource exhaustion](https://community.owasp.org/attacks/Denial_of_Service)
+for preserving finite resource admission. Unbounded reads and a separate new
+threshold were rejected. The CLI doctor default remains 5 seconds; nightly health
+uses its existing 60-second caller budget. No whole-health or audit closure follows.

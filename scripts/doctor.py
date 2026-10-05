@@ -31,6 +31,7 @@ import integration_hook_config as _hook_config
 import process_liveness
 import reliable_memory
 from bounded_io import read_stable_bytes
+from evidence_resolver import MAX_DAILY_BYTES
 from install_control import SCHEDULER_LIMIT_HOURS, installed_at, validate_install_state
 from iso_time import utc_text
 from markdown_transaction import MarkdownCoordinator
@@ -1663,12 +1664,11 @@ _RECEIPT_RECORD_RE = re.compile(rb"(?s)```json\n(.*?)\n```")
 # Reading a quarantined compile's staged files to see whether a later compile
 # superseded it; a file past its bound makes the check answer "not superseded", never
 # a guess. The receipt and day bounds are compile_memory.MAX_RECEIPT_BYTES and
-# MAX_SOURCE_BYTES (the writer's own bounds; doctor does not import the compile). The
+# the shared evidence_resolver.MAX_DAILY_BYTES source-family contract. The
 # largest of 5 537 staged plans on the installed vault on 2026-09-27 was 2 758 bytes,
 # so 4 MiB for a plan is a guard, not a fit.
 _MAX_STAGED_PLAN_BYTES = 4 * 1024 * 1024
 _MAX_STAGED_RECEIPT_BYTES = 1024 * 1024
-_MAX_DAY_BYTES = 4 * 1024 * 1024
 
 
 def _intended_creates(database: sqlite3.Connection, identifier: str) -> set[str]:
@@ -1924,7 +1924,7 @@ class _CompiledDaySupersession:
     def _whole_legacy_source_compiled(self, source):
         self._require_active()
         logical = source["logical_path"]
-        content = read_stable_bytes(self.vault_root / logical, _MAX_DAY_BYTES, label="daily source")
+        content = read_stable_bytes(self.vault_root / logical, MAX_DAILY_BYTES, label="daily source")
         if hashlib.sha256(content).hexdigest() != source["sha256"]:
             return False
         return self._day_compiled(logical, set())
@@ -1960,7 +1960,7 @@ class _CompiledDaySupersession:
         from compile_memory import daily_is_compiled
 
         self._require_active()
-        content = read_stable_bytes(self.vault_root / logical_path, _MAX_DAY_BYTES, label="daily source")
+        content = read_stable_bytes(self.vault_root / logical_path, MAX_DAILY_BYTES, label="daily source")
         if self.database is not None:
             return daily_is_compiled(logical_path, content, self._cached_selection())
         return self._standalone_day_compiled(logical_path, content)
