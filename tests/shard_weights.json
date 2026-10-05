@@ -572,6 +572,7 @@
   "test_evidence_resolver.py": 2.72,
   "test_export_strict.py": 0.44,
   "test_extraction_universe.py": 0.23,
+  "test_fact_key_snapshot_excludes_cooperating_writes.py": 2.1,
   "test_failure_counters_do_not_expire_by_kind_count.py": 0.55,
   "test_fake_lsp_failure_reporting.py": 0.02,
   "test_filesystem.py": 0.01,

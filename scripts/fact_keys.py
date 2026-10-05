@@ -624,9 +624,22 @@ def _provider_ask(prompt: str, system_prompt: str) -> str | None:
     return call_llm(prompt, system_prompt, 1500)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _stable_turn_snapshot(root: Path, state_root: Path, deadline: float):
+    """Freeze source bytes while cooperating Markdown writers are excluded."""
     from corpus_snapshot import collect_corpus
     from evidence_resolver import MAX_DAILY_BYTES
+    from markdown_transaction import active_or_legacy_coordinator
+
+    coordinator = active_or_legacy_coordinator(root, state_root, deadline=deadline)
+    with coordinator.writer_gate(wait_seconds=max(0.0, deadline - time.monotonic())):
+        return collect_corpus(
+            root, code_roots=(), daily_paths=_daily_paths(root), deadline=deadline,
+            max_file_bytes=MAX_DAILY_BYTES,
+            pruned_directories=("knowledge/notes", "knowledge/projects", "knowledge/raw/sessions"),
+        )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
     from memory_state import ROOT, STATE_ROOT
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -640,11 +653,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         turns, keys = store.count()
         print(f"keyed turns={turns} keys={keys} uncovered={store.uncovered()}")
         return 0
-    snapshot = collect_corpus(
-        ROOT, code_roots=(), daily_paths=_daily_paths(ROOT), deadline=deadline,
-        max_file_bytes=MAX_DAILY_BYTES,
-        pruned_directories=("knowledge/notes", "knowledge/projects", "knowledge/raw/sessions"),
-    )
+    snapshot = _stable_turn_snapshot(ROOT, STATE_ROOT, deadline)
     waiting = len(waiting_turns(store, snapshot.chunks, sources=snapshot.sources, vault=ROOT, deadline=deadline))
     keyed = key_turns(store, snapshot.chunks, _provider_ask, deadline, sources=snapshot.sources, vault=ROOT)
     print(f"keyed {keyed} of {waiting} waiting turns")
