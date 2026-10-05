@@ -677,7 +677,7 @@ def worst_case_seconds() -> float:
     """
     from self_update import WORST_CASE_SECONDS as UPDATE_SECONDS
 
-    steps = [*_intake_steps(), _compile_step(), _fact_keys_step(), *_post_compile_steps()]
+    steps = [*_intake_steps(), _fact_keys_step(), _compile_step(), *_post_compile_steps()]
     waits = COMPILE_IDLE_WAIT_SECONDS + compile_wait_seconds()
     budgets = NIGHTLY_GENERATION_BUDGET_SECONDS + HEALTH_REPORT_BUDGET_SECONDS
     tail = MAINTENANCE_TAIL_BUDGET_SECONDS + UPDATE_SECONDS
@@ -803,7 +803,8 @@ def _nightly_steps(run_step, log, _ownership: OwnerLease | None = None) -> int:
     _wait_for_compile_idle(log)
     before = _last_compile_finished()
     started_before = _last_compile_started()
-    failures += _run_steps(run_step, log, [_compile_step(), _fact_keys_step()])
+    # Finish own entity writes before compile freezes model-input targets.
+    failures += _run_steps(run_step, log, [_fact_keys_step(), _compile_step()])
 
     log.step("waiting for compile to finish...")
     if not _wait_compile_finished():

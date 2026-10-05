@@ -667,6 +667,7 @@
   "test_native_language_server.py": 0.06,
   "test_native_user_frames_keep_their_physical_evidence.py": 2.19,
   "test_navigation_dead_code_and_stale_words.py": 1.32,
+  "test_nightly_fact_keys_precede_compile_snapshot.py": 0.01,
   "test_no_estimate_inherits_full_confidence.py": 0.0,
   "test_no_model_running_at_exit.py": 0.2,
   "test_no_task_is_claimed_to_be_killed.py": 0.85,
