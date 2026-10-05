@@ -33,6 +33,12 @@ def test_adapter_continues_after_a_committed_retry(tmp_path, monkeypatch):
     processor = partial(flush_memory.process_new_capture, llm_call=_FakeNoContentProvider())
     calls = []
     diagnostic = Mock()
+    # This scenario holds the failed task until its retry time; no real clock race.
+    monkeypatch.setattr(memory_queue, "_utc_now", Mock(return_value=memory_queue._utc_now()))
+    monkeypatch.setattr(
+        memory_queue, "_RETRY_RANDOM",
+        Mock(uniform=Mock(return_value=DEFAULTS.retry_base_seconds)),
+    )
     monkeypatch.setattr(capture_diagnostics, "record_capture_failure", diagnostic)
     monkeypatch.setattr(integration_adapter, "ROOT", tmp_path)
     monkeypatch.setattr(integration_adapter, "STATE_ROOT", tmp_path)
