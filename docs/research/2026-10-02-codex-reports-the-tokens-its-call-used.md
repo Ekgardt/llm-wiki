@@ -118,3 +118,77 @@ candidate refusal was retained, then the same check passed after normalization.
 The final combined adapter, DLP, receipt-schema and weight checks passed all
 172 cases in 3.11 seconds. Earlier qualification and cost measurements are
 retained with their own source hashes; they are not a model-cycle comparison.
+
+
+## 2026-10-05: packing and dispatch share the local provider layout
+
+The installed planner omitted text that the existing Codex serializer actually
+puts into stdin: the schema instruction, task frame and SYSTEM/USER separators.
+On one immutable, genuine closed 2026-09-23 day (26,871 bytes, two parts), the
+old 32,768 target reported 27,624 and 27,742 input units, while the protected
+local stdin contained 27,929 and 28,047 UTF-8 bytes. Both exceeded the existing
+27,744 available input allowance. No inference was needed to reproduce this.
+A separate original-API control also showed DLP policy drift: the old fit passed,
+then the actual prepared payload grew from 273 to 290 bytes and was dispatched
+once through an intercepted CLI. This is a local planning/dispatch defect,
+not proof that a backend context window was exceeded.
+
+The candidate uses the existing provider-mode and serialization functions in
+llm_client. Before provider selection, byte packing covers the largest local
+layout among the configured forced/fallback candidates; a tokenizer counts each
+layout separately and takes the largest count, including the final packing
+manifest. No provider probe, executable lookup or binary hashing occurs in these
+measurements. The byte-additive path keeps its existing owned-input projection.
+For a chosen provider, the final fit uses its protected layout. An optional
+internal input budget is checked against the actual prepared Codex count before
+invocation, so a later DLP change cannot silently send a known oversized input.
+Absent batches, other providers and opaque custom backends retain their previous
+contracts. Unknown counts do not acquire a new library-wide refusal policy.
+The existing output reserve remains a planning reserve, not a Codex output cap.
+
+The same captured sources and parts were used in both no-model packing arms.
+At the existing target the candidate's local stdin was 27,691 and 27,736 bytes;
+both fit, and their measured counts matched those protected strings. The
+experimental 258,400 target produced one request: measured 253,080, protected
+253,053 after DLP. That difference is explicitly retained; unprotected planning
+is an estimate, not a guarantee that redaction never expands text. The dispatch
+check is still required. All original parts were preserved exactly once.
+Optional context changed only through the existing fit selection. The large
+experimental target still fills substantially more context; fewer batches do
+not prove full-cycle token efficiency. Neither target nor configuration was
+changed by this correction.
+
+The matched timings are observations, not isolated speed claims: old/new 32,768
+packing took 1.456/1.187 seconds, CPU 1.442/1.078 seconds, peak RSS
+59,604/61,592 KiB. The old/new experimental arm took 1.531/1.307 seconds,
+CPU 1.475/1.306 seconds, peak RSS 60,884/63,384 KiB. There were zero model calls.
+A later replay reconstructed every selected context by SHA and verified the
+exact protected stdin digests. Its checker is the NEW candidate implementation,
+including when checking OLD packed requests: old requests fail the new final-fit
+check; this must not be mistaken for the old checker's behavior. The full
+available-source list had meanwhile drifted; that initial replay refusal is
+retained and no identical full-list claim is made about the later replay.
+
+The first focused controls were 2 failures, followed by the dispatch API controls
+(2 failures/3 passes before the optional argument existed). The original-API
+control above provides the behavioral cause independently of that API error.
+The first broader run recorded 135 passes/7 failures because Ruff removed the
+existing count_tokens export; the explicit used re-export was restored without
+changing old tests. Two CCN-6 helpers were rejected and split before acceptance.
+The resulting related suite passed 441 tests; the new eight-test module also
+passed with a retained JUnit report and its measured weight. No Root installation,
+model cycle, backend full-wire capacity or audit completion is claimed here.
+
+Sources checked on 2026-10-05, independently maintained primary documentation:
+[OpenAI Codex app-server](https://learn.chatgpt.com/docs/app-server),
+[Hugging Face chat templates](https://huggingface.co/docs/transformers/main/en/chat_templating),
+and [Anthropic token counting](https://platform.claude.com/docs/en/build-with-claude/token-counting).
+The installed CLI is 0.160.0; remote documentation is current documentation,
+not a version-pinned guarantee about that binary. The first documents the
+separation between thread/config initialization and turn submission; the second
+explains that formatting/control tokens are part of model input; the third
+explicitly treats counts as estimates that may include provider-added material.
+Actual local serializer and DLP bytes establish this narrow correction.
+Alternatives rejected were copied framing in the compiler, arbitrary slack,
+raising the window, and declaring HTTP wire size from local message content.
+Full CLI bootstrap and provider tokenization remain separate qualification work.

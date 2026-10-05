@@ -484,6 +484,7 @@
   "test_compile_native_journal_parse_belongs_to_the_immutable_source.py": 0.21,
   "test_compile_packing_counts_original_entry_metadata.py": 0.01,
   "test_compile_packing_reuses_only_selected_projection.py": 0.1,
+  "test_compile_plans_the_local_provider_layout.py": 0.018000000000000002,
   "test_compile_provider_ceiling.py": 0.01,
   "test_compile_related_links_share_the_response_budget.py": 0.32,
   "test_compile_transactions.py": 9.14,

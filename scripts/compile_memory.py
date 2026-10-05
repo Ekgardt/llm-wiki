@@ -69,7 +69,8 @@ from compile_cache import (  # noqa: E402
     SourceDescriptor,
     SourceOccurrenceBounds,
 )
-from context_budget import ContextBudget, TokenCounter, count_tokens  # noqa: E402
+from context_budget import ContextBudget, TokenCounter  # noqa: E402
+from context_budget import count_tokens as count_tokens  # noqa: E402
 from contradiction_pipeline import (  # noqa: E402
     ContradictionPipeline,
     StaleLifecycleTarget,
@@ -89,7 +90,9 @@ from llm_client import (  # noqa: E402
     call_candidate,
     call_ceiling,
     chain_stops_after,
+    count_planning_input,
     forced_provider,
+    planning_input_text,
     probe_candidate,
     provider_candidates,
 )
@@ -1219,10 +1222,15 @@ class _ContextRanking:
 
 
 def _draft_prompt_text(inputs: CompileInputs) -> str:
-    return (
-        f"{DRAFT_SYSTEM}\n{canonical_json_bytes(RAW_PLAN_SCHEMA).decode()}\n"
-        f"{_draft_prompt(inputs)}"
-    )
+    text = planning_input_text(_draft_prompt(inputs), DRAFT_SYSTEM, RAW_PLAN_SCHEMA)
+    if text is None:
+        raise ValueError("compile planning input layout is unknown")
+    return text
+
+
+def _draft_prompt_count(inputs, model, adapters):
+    return count_planning_input(_draft_prompt(inputs), DRAFT_SYSTEM, RAW_PLAN_SCHEMA,
+                                model=model, adapters=adapters)
 
 
 def _batch_measure(
@@ -1248,7 +1256,7 @@ class _TokenBatchMeasure:
 
     def __call__(self, paths, optional_paths=None):
         subset = _subset_compile_inputs(self.inputs, paths, optional_paths, partitions=self.partitions, journal_indexes=self.journal_indexes)
-        count = count_tokens(_draft_prompt_text(subset), model=self.model, adapters=self.adapters)
+        count = _draft_prompt_count(subset, self.model, self.adapters)
         if count.tokens is None:
             raise ValueError("compile input token count is unknown")
         return count.tokens
@@ -1486,11 +1494,7 @@ def _compile_batch(
     partitions=None,
 ) -> CompileBatch:
     subset = _subset_compile_inputs(inputs, paths, optional_paths, journal_indexes=journal_indexes, partitions=partitions)
-    count = count_tokens(
-        _draft_prompt_text(subset),
-        model=model,
-        adapters=token_adapters,
-    )
+    count = _draft_prompt_count(subset, model, token_adapters)
     if count.tokens is None or count.source not in {"tokenizer", "estimated"}:
         raise ValueError("compile input token count is unknown")
     budget = _selected_atomic_budget(subset, budget, count.tokens, partitions=partitions)
@@ -2065,6 +2069,7 @@ class _CompileAttempt:
             model=descriptor.model,
             token_adapters=self.token_adapters,
             budget=_packing_budget(self.batch.packing, descriptor.model),
+            descriptor=descriptor,
         )
 
     def _call(
@@ -2078,6 +2083,7 @@ class _CompileAttempt:
             schema=schema,
             available=True,
             token_adapters=self.token_adapters,
+            input_budget=_packing_budget(self.batch.packing, descriptor.model) if self.batch is not None else None,
         )
 
 
@@ -2197,13 +2203,11 @@ def _compile_prompt_fits(
     model: str | None,
     token_adapters: Mapping[str, TokenCounter] | None,
     budget: ContextBudget | None = None,
+    descriptor: object | None = None,
 ) -> bool:
     budget = budget or _compile_budget(model)
-    count = count_tokens(
-        f"{system}\n{canonical_json_bytes(schema).decode()}\n{prompt}",
-        model=model,
-        adapters=token_adapters,
-    )
+    count = count_planning_input(prompt, system, schema, descriptor=descriptor, protected=True,
+                                 model=model, adapters=token_adapters)
     return count.tokens is not None and count.tokens <= budget.available_input_tokens
 
 

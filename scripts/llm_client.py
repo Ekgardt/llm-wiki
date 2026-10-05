@@ -58,7 +58,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import NamedTuple
 
-from context_budget import TokenCount, TokenCounter, TokenUsage, count_tokens
+from context_budget import ContextBudget, TokenCount, TokenCounter, TokenUsage, count_tokens
 from model_dlp import (
     DLPContentBlocked,
     DLPPolicyError,
@@ -332,6 +332,77 @@ def _protected_transport(
         return _Blocked("dlp_scan_error", _scanner_failure(exc))
 
 
+def _local_count_text(descriptor, transport, mode):
+    """Codex's local stdin, or the existing estimated content for other backends."""
+    if descriptor is not None and descriptor.provider == "codex":
+        return _codex_prompt(transport.system_prompt, transport.prompt)
+    native_schema = _native_schema_json(transport.schema, mode)
+    if _schema_unshown(transport.schema, mode, native_schema):
+        return None
+    return _count_text_parts(transport.system_prompt, native_schema, transport.prompt)
+
+
+def _planning_candidate_text(descriptor, prompt, system_prompt, schema, protected):
+    mode = _structured_mode(descriptor, schema) if descriptor is not None else "prompt"
+    system = _prompted_system(system_prompt, schema, mode)
+    transport = _Transport(system, prompt, schema, None)
+    if protected:
+        transport = _protected_transport(system, prompt, schema)
+    if isinstance(transport, _Blocked):
+        return None
+    return _local_count_text(descriptor, transport, mode)
+
+
+def _count_text_parts(system, schema, prompt):
+    return "\n\n".join(part for part in (system, schema, prompt) if part)
+
+
+def _planning_candidates(descriptor):
+    if descriptor is not None:
+        return (descriptor,)
+    return _resolved_planning_candidates() or (None,)
+
+
+def _resolved_planning_candidates():
+    return tuple(item for item in provider_candidates(forced_provider())
+                 if item.resolution_failure is None)
+
+
+def planning_input_texts(prompt, system_prompt, schema, *, descriptor=None, protected=False):
+    """Candidate-local layouts without probing or preparing an executable.
+
+    Codex is local stdin, not CLI bootstrap. Other backends retain their existing
+    estimated system/schema/user content; this does not claim full HTTP wire size.
+    """
+    return tuple(_planning_candidate_text(item, prompt, system_prompt, schema, protected)
+                 for item in _planning_candidates(descriptor))
+
+
+def planning_input_text(prompt, system_prompt, schema, *, descriptor=None, protected=False):
+    texts = planning_input_texts(prompt, system_prompt, schema, descriptor=descriptor, protected=protected)
+    known = [text for text in texts if text is not None]
+    return max(known, key=lambda text: len(text.encode("utf-8")), default=None)
+
+
+def _maximum_layout_count(counts):
+    unknown = next((count for count in counts if count.tokens is None), None)
+    if unknown is not None:
+        return unknown
+    return max(counts, key=lambda count: count.tokens, default=TokenCount())
+
+
+def count_planning_input(prompt, system_prompt, schema, *, model=None, adapters=None, descriptor=None, protected=False):
+    texts = planning_input_texts(prompt, system_prompt, schema, descriptor=descriptor, protected=protected)
+    counts = tuple(_planning_text_count(text, model, adapters) for text in texts)
+    return _maximum_layout_count(counts)
+
+
+def _planning_text_count(text, model, adapters):
+    if text is None:
+        return TokenCount()
+    return count_tokens(text, model=model, adapters=adapters)
+
+
 def _counted_tokens(
     descriptor: ProviderDescriptor,
     transport: _Transport,
@@ -345,14 +416,8 @@ def _counted_tokens(
         return count_tokens(transport.codex.payload, model=descriptor.model, adapters=token_adapters)
     if _schema_unshown(schema, mode, native_schema_json):
         return TokenCount()
-    parts = [
-        part
-        for part in (transport.system_prompt, native_schema_json, transport.prompt)
-        if part
-    ]
-    return count_tokens(
-        "\n\n".join(parts), model=descriptor.model, adapters=token_adapters
-    )
+    text = _count_text_parts(transport.system_prompt, native_schema_json, transport.prompt)
+    return count_tokens(text, model=descriptor.model, adapters=token_adapters)
 
 
 def _schema_unshown(
@@ -573,6 +638,7 @@ def _dispatched_call(
     schema: Mapping[str, object] | None,
     available: bool | None,
     token_adapters: Mapping[str, TokenCounter] | None,
+    input_budget: ContextBudget | None = None,
 ) -> LLMResult:
     mode = _structured_mode(descriptor, schema)
     caller = _BACKENDS.get(descriptor.provider)
@@ -586,24 +652,33 @@ def _dispatched_call(
         return LLMResult(
             descriptor, None, False, transport.code, mode, failure_detail=transport.detail
         )
-    return _prepared_candidate_call(descriptor, caller, transport, mode, schema, token_adapters)
+    return _prepared_candidate_call(descriptor, caller, transport, mode, schema, token_adapters, input_budget)
 
 
-def _prepared_candidate_call(descriptor, caller, transport, mode, schema, token_adapters):
+def _prepared_candidate_call(descriptor, caller, transport, mode, schema, token_adapters, input_budget=None):
     try:
         transport = _prepare_backend_transport(caller, descriptor, transport)
     except Exception as exc:  # noqa: BLE001 - executable preparation is a provider boundary
         return _failed_result(descriptor, exc, mode, TokenCount())
     native_schema_json = _native_schema_json(schema, mode)
-    return _completed_call(
-        descriptor,
-        caller,
-        transport,
-        mode,
-        _counted_tokens(
-            descriptor, transport, native_schema_json, schema, mode, token_adapters
-        ),
-    )
+    count = _counted_tokens(descriptor, transport, native_schema_json, schema, mode, token_adapters)
+    refused = _prepared_input_refusal(descriptor, transport, mode, count, input_budget)
+    if refused is not None:
+        return refused
+    return _completed_call(descriptor, caller, transport, mode, count)
+
+
+def _local_budget_exceeded(count, budget):
+    return count.tokens is not None and count.tokens > budget.available_input_tokens
+
+
+def _prepared_input_refusal(descriptor, transport, mode, count, budget):
+    if budget is None or transport.codex is None:
+        return None
+    if _local_budget_exceeded(count, budget):
+        return LLMResult(descriptor, None, True, "context_overflow", mode,
+                         input_token_count=count)
+    return None
 
 
 def _prepare_backend_transport(caller, descriptor, transport):
@@ -622,6 +697,7 @@ def call_candidate(
     schema: Mapping[str, object] | None = None,
     available: bool | None = None,
     token_adapters: Mapping[str, TokenCounter] | None = None,
+    input_budget: ContextBudget | None = None,
 ) -> LLMResult:
     """Probe and call one resolved candidate, returning a stable outcome."""
     if descriptor.resolution_failure is not None:
@@ -630,7 +706,7 @@ def call_candidate(
         )
     _require_token_contract(descriptor, max_tokens)
     return _dispatched_call(
-        descriptor, prompt, system_prompt, schema, available, token_adapters
+        descriptor, prompt, system_prompt, schema, available, token_adapters, input_budget
     )
 
 
