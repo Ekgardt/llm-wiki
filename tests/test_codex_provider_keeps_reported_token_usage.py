@@ -9,6 +9,12 @@ import llm_client
 import pytest
 from context_budget import TokenCount, TokenUsage
 
+from tests.test_codex_counts_the_prepared_invocation import (
+    codex_executable_alias as codex_executable_alias,
+)
+
+pytestmark = pytest.mark.usefixtures("codex_executable_alias")
+
 
 def _cli_response(monkeypatch, events):
     seen = []

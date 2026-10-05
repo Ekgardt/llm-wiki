@@ -40,6 +40,7 @@ import contextlib
 import contextvars
 import functools
 import hashlib
+import io
 import json
 import math
 import os
@@ -298,6 +299,7 @@ class _Transport(NamedTuple):
     prompt: str
     schema: object
     policy: object
+    codex: _PreparedCodex | None = None
 
 
 class _Blocked(NamedTuple):
@@ -339,6 +341,8 @@ def _counted_tokens(
     token_adapters: Mapping[str, TokenCounter] | None,
 ) -> TokenCount:
     """What we will send, counted — unless the native schema could not be shown."""
+    if transport.codex is not None:
+        return count_tokens(transport.codex.payload, model=descriptor.model, adapters=token_adapters)
     if _schema_unshown(schema, mode, native_schema_json):
         return TokenCount()
     parts = [
@@ -360,6 +364,8 @@ def _schema_unshown(
 def _invoked_backend(
     caller, descriptor: ProviderDescriptor, transport: _Transport, mode: str
 ):
+    if transport.codex is not None:
+        return _call_prepared_codex(descriptor, transport.codex)
     if mode == "native":
         return caller(
             descriptor, transport.prompt, transport.system_prompt, transport.schema
@@ -580,6 +586,14 @@ def _dispatched_call(
         return LLMResult(
             descriptor, None, False, transport.code, mode, failure_detail=transport.detail
         )
+    return _prepared_candidate_call(descriptor, caller, transport, mode, schema, token_adapters)
+
+
+def _prepared_candidate_call(descriptor, caller, transport, mode, schema, token_adapters):
+    try:
+        transport = _prepare_backend_transport(caller, descriptor, transport)
+    except Exception as exc:  # noqa: BLE001 - executable preparation is a provider boundary
+        return _failed_result(descriptor, exc, mode, TokenCount())
     native_schema_json = _native_schema_json(schema, mode)
     return _completed_call(
         descriptor,
@@ -590,6 +604,13 @@ def _dispatched_call(
             descriptor, transport, native_schema_json, schema, mode, token_adapters
         ),
     )
+
+
+def _prepare_backend_transport(caller, descriptor, transport):
+    if caller is not _call_codex:
+        return transport
+    prepared = _prepare_codex(descriptor, transport.prompt, transport.system_prompt)
+    return transport._replace(codex=prepared)
 
 
 def call_candidate(
@@ -1388,6 +1409,74 @@ def _call_opencode(
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _CodexExecutable:
+    path: str
+    resolved_path: str
+    identity: tuple[int, ...]
+    sha256: str
+
+
+@dataclass(frozen=True)
+class _PreparedCodex:
+    """One protected local payload and selected executable, not a wire-token proof."""
+
+    executable: _CodexExecutable | None
+    payload: str
+    model: str | None
+    reasoning: str
+
+
+def _codex_file_identity(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode)
+
+
+def _codex_stream_digest(handle):
+    digest = hashlib.sha256()
+    for block in iter(functools.partial(handle.read, io.DEFAULT_BUFFER_SIZE), b""):
+        digest.update(block)
+    return digest.hexdigest()
+
+
+def _require_codex_file_identity(actual, expected):
+    if actual != expected:
+        raise RuntimeError("selected Codex executable changed before dispatch")
+
+
+def _bind_codex_executable(path):
+    path = str(Path(path).absolute())
+    resolved = Path(path).resolve(strict=True)
+    with resolved.open("rb") as handle:
+        identity = _codex_file_identity(os.fstat(handle.fileno()))
+        digest = _codex_stream_digest(handle)
+        _require_codex_file_identity(_codex_file_identity(os.fstat(handle.fileno())), identity)
+    _require_codex_file_identity(_codex_file_identity(resolved.stat()), identity)
+    return _CodexExecutable(path, str(resolved), identity, digest)
+
+
+def _selected_codex_executable():
+    path = _find_codex_binary()
+    if path is None:
+        return None
+    return _bind_codex_executable(path)
+
+
+def _prepare_codex(descriptor, prompt, system_prompt):
+    return _PreparedCodex(
+        _selected_codex_executable(), _codex_prompt(system_prompt, prompt),
+        descriptor.model, str(descriptor.inference_settings.get("reasoning", "low")),
+    )
+
+
+def _require_codex_executable(executable):
+    _require_codex_file_identity(_bind_codex_executable(executable.path), executable)
+
+
+def _require_codex_model(descriptor, prepared):
+    if descriptor.model != prepared.model:
+        raise RuntimeError("prepared Codex model disagrees with provider descriptor")
+
+
 def _windows_codex_candidate() -> str | None:
     """`codex.ps1` is not among the spellings: CreateProcess cannot start a script.
 
@@ -1534,9 +1623,11 @@ def provider_environment() -> dict[str, str]:
     return environment
 
 
-def _codex_last_message(command: list[str], prompt_path: str, out_path: str) -> BackendResponse:
+def _codex_last_message(command: list[str], prompt_path: str, out_path: str, *, executable=None) -> BackendResponse:
     with open(prompt_path, "rb") as stdin_handle, provider_cwd() as neutral:
         try:
+            if executable is not None:
+                _require_codex_executable(executable)
             result = _run_cli(
                 command,
                 stdin=stdin_handle,
@@ -1613,19 +1704,23 @@ def _call_codex(
     schema: Mapping[str, object] | None = None,
 ) -> BackendResponse:
     """Return the final message and reported completed-turn usage."""
-    codex_bin = _find_codex_binary()
-    if not codex_bin:
+    return _call_prepared_codex(descriptor, _prepare_codex(descriptor, prompt, system_prompt))
+
+
+def _call_prepared_codex(descriptor, prepared):
+    _require_codex_model(descriptor, prepared)
+    if prepared.executable is None:
         return BackendResponse("")
-    prompt_path = _temp_text_file(_codex_prompt(system_prompt, prompt))
+    prompt_path = _temp_text_file(prepared.payload)
     out_path = _temp_text_file()
     command = _codex_command(
-        codex_bin,
-        descriptor.model,
-        str(descriptor.inference_settings.get("reasoning", "low")),
+        prepared.executable.path,
+        prepared.model,
+        prepared.reasoning,
         out_path,
     )
     try:
-        return _codex_last_message(command, prompt_path, out_path)
+        return _codex_last_message(command, prompt_path, out_path, executable=prepared.executable)
     finally:
         _remove_quietly((prompt_path, out_path))
 

@@ -20,12 +20,18 @@ from types import MappingProxyType
 
 import pytest
 
+from tests.test_codex_counts_the_prepared_invocation import (
+    codex_executable_alias as codex_executable_alias,
+)
+
 VAULT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = VAULT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import llm_client  # noqa: E402
+
+pytestmark = pytest.mark.usefixtures("codex_executable_alias")
 
 
 class _Recorder:

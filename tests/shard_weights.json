@@ -462,6 +462,7 @@
   "test_code_tool_deadlines.py": 1.14,
   "test_codex_capture_hooks.py": 0.01,
   "test_codex_config_status_has_a_platform_independent_newline.py": 0.02,
+  "test_codex_counts_the_prepared_invocation.py": 0.03,
   "test_codex_hooks_ownership.py": 0.51,
   "test_codex_probe_transport.py": 0.48,
   "test_codex_provider_keeps_reported_token_usage.py": 0.05,
