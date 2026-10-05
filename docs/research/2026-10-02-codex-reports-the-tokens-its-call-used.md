@@ -192,3 +192,123 @@ Actual local serializer and DLP bytes establish this narrow correction.
 Alternatives rejected were copied framing in the compiler, arbitrary slack,
 raising the window, and declaring HTTP wire size from local message content.
 Full CLI bootstrap and provider tokenization remain separate qualification work.
+
+### 2026-10-05: attempt-owned native Codex planning evidence (candidate)
+
+The llm-only candidate resolves the existing Codex selection before its caller
+packs input. It launches the already selected executable with the same reasoning,
+hooks, neutral directory and read-only settings as the existing provider path.
+Native `initialize`, `config/read`, ephemeral `thread/start` and
+`thread/unsubscribe` resolve the configured/default model without `turn/start`.
+The same resolved model becomes a transient existing descriptor `model` value;
+preparation retains that executable and passes that model through the existing
+`-m` option. No persistent model selection or new setting is introduced.
+
+Research checked on 2026-10-05: the pinned
+[Codex 0.160 exec implementation](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/exec/src/lib.rs)
+uses the same in-process app-server thread bootstrap; its
+[config state](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/config/src/state.rs)
+exposes loaded layer values and versions. The
+[Python 3.10 subprocess contract](https://docs.python.org/3.10/library/subprocess.html)
+requires pipe/process ownership and explicit timeout cleanup.
+[Git's racy-file analysis](https://git-scm.com/docs/racy-git) explains why file
+metadata alone does not prove unchanged bytes. These are independent primary
+sources from OpenAI, Python and Git, rather than three accounts of one mechanism.
+
+The chosen internal object owns native model/provider observations, exact
+executable identity and SHA, current configuration-file digests, an environment
+hash and the actual catalog digest. Loaded TOML values are compared with native
+layer values: a second JSON serialization would introduce Rust/Python float
+spelling differences. Preparation and dispatch recheck executable, files and
+environment. Descriptor configuration changes are refused; fallback provenance
+alone remains permitted. The object is excluded from the existing canonical
+JSON descriptor. Every other provider and ordinary Codex calls without this
+optional object retain their existing behavior.
+
+The local native catalog for the observed model advertises 272000 with 95%
+effective context, giving a planning estimate of 258400. This is qualified only
+for the observed pinned 0.160 interface/provider/catalog. Unknown advertisements,
+managed layers, profiles, configured context overrides and unsupported TOML
+projection values return unknown capacity. They do not invent a model, an output
+cap or a window for another backend. The unchanged CLI token contract remains
+`max_tokens_enforced=False` and `backend_default`. This estimate does not count
+all CLI bootstrap/wire tokens or guarantee backend acceptance.
+
+Alternatives were leaving the configured/default model unknown, treating the
+catalog's default as an independently selected model, or using EOF-only process
+communication. The first cannot ground this planning change; the second can
+change the user's selection. An actual EOF-only probe exited successfully without
+a thread reply, so it was rejected. Interactive native reply handling uses the
+existing process-tree ownership and cleanup contract. Its cost and ordinary CLI
+cache/telemetry side effects remain part of qualification; no inference or user
+payload is needed to resolve the basis.
+
+Qualification: the original preparation body repeated executable discovery after
+planning (one failing regression). The candidate retains the selected executable.
+The final related suite passed 223 tests in 24.17 seconds. New controls cover
+configuration/executable/environment/descriptor drift, missing capacity proof,
+explicit-model disagreement, Unicode config values, deadline expiry and actual
+owned protocol-process cleanup. An intermediate new test incorrectly called a
+nonexistent descriptor method (25 passed, one failure); it was corrected to the
+existing canonical serializer without changing its assertions. Earlier complexity
+checks rejected CCN 7 and 6 helpers before qualification; the final actual
+changed/nested/lambda analysis is at most 5, two `if`s and two levels.
+
+The final native candidate probe resolved the existing default to the same model
+and the advertised 258400 estimate in 2.589 seconds, without a turn or inference.
+The prior candidate probe took 2.781 seconds; both proofs and source hashes are
+retained. These observations are not an isolated latency comparison. Local
+bootstrap CPU/RSS are recorded; inference tokens and cost are inapplicable to
+these zero-turn probes. This component does not change the compiler's 32768 target,
+expand optional context, or establish useful full-cycle quality. Caller integration,
+provider-specific fallback replanning, bounded atomic capacity and a meaningful
+paired native compile/retrieval cycle remain separate qualification work.
+
+### Optional discovery compatibility, 2026-10-05
+
+Discovery is optional for historically supported implicit CLI execution. The
+owned executable's version is checked before native bootstrap. Versions whose
+bootstrap has not been qualified retain the implicit execution path and an
+unknown planning basis; they do not start an app-server. The qualified 0.160.0
+path treats only a well-formed native method-not-found error (-32601) as an
+unavailable optional capability. Invalid parameters, malformed responses,
+identity/configuration drift, deadline expiry and unverified cleanup remain
+visible failures. A telemetry label or arbitrary exception is not capability
+evidence.
+
+For the optional `debug models` command, only the pinned CLI parser's explicit
+unsupported-subcommand category with exit status 2 permits unknown capacity.
+Other failed exits and corrupt successful output remain failures. If the catalog
+is unavailable, the already resolved model, executable and configuration remain
+bound to the attempt, while the advertised window is unknown. All loaded file
+layers are checked independently, including those after an unknown managed layer.
+The comparison verifies parsed TOML/native values and the native version digest's
+shape; it does not recreate Rust's serialized version hash. Physical configuration
+file digests are still checked before dispatch.
+
+The alternatives were rejecting every unavailable optional method, which breaks
+working older CLI calls, and swallowing every discovery error, which would hide
+unsafe drift. The selected typed capability boundary preserves both compatibility
+and fail-closed identity checks. It adds no settings, persisted fields or model
+selection. Exact parser wording is qualified only for this pinned implementation;
+an unfamiliar response remains a failure until its category is established.
+
+The design uses the [JSON-RPC 2.0 error contract](https://www.jsonrpc.org/specification),
+[Python 3.10 subprocess lifecycle](https://docs.python.org/3.10/library/subprocess.html),
+and [Git's explanation of racy file identity](https://git-scm.com/docs/racy-git),
+checked on 2026-10-05. The Codex native protocol omits the JSON-RPC version member;
+this change does not impose one. The pinned
+[Codex 0.160.0 Cargo lock](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/Cargo.lock)
+names Clap 4.5.58. A local invalid-subcommand probe confirmed its parser category
+and exit status without inference; current Clap documentation alone was not used
+to claim the pinned behavior.
+
+The frozen first candidate produced three failing compatibility controls and six
+passing negative controls. A separate original control reached the actual parser
+exit through the first candidate's unchanged command path and failed with
+`ProviderExited`; it did not rely on an unsupported new keyword. The expanded
+final related suite passed 244 tests. App-server exit failure after a valid
+method-not-found reply remains a failure after verified process cleanup.
+The initial failure log remains retained; none of the earlier test assertions was
+weakened. This fixes optional-discovery compatibility, not the compiler's context
+target, full wire token accounting, or the remaining useful complete-cycle work.

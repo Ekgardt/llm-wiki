@@ -95,6 +95,8 @@ from llm_client import (  # noqa: E402
     planning_input_text,
     probe_candidate,
     provider_candidates,
+    resolve_codex_planning_basis,
+    worst_case_call_seconds,
 )
 from markdown_transaction import (  # noqa: E402
     MarkdownChange,
@@ -420,6 +422,8 @@ class CompileBatch:
     manifest: tuple[SourceDescriptor, ...]
     manifest_sha256: str
     packing: CompilePackingIdentity
+    planning_model: str | None = dataclass_field(default=None, compare=False)
+    planning_candidates: tuple | None = dataclass_field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -647,15 +651,16 @@ def _pending_daily_parts(inputs):
     return tuple(part for part in inputs.dailies if not part.already_compiled)
 
 
-def _native_part_units(parts):
+def _native_part_units(parts, *, join=None):
     units = []
+    predicate = join or _native_parts_join
     for part in parts:
-        _add_native_unit_part(units, part)
+        _add_native_unit_part(units, part, predicate)
     return units
 
 
-def _add_native_unit_part(units, part):
-    if units and _native_parts_join(units[-1][-1], part):
+def _add_native_unit_part(units, part, predicate):
+    if units and predicate(units[-1][-1], part):
         units[-1].append(part)
         return
     units.append([part])
@@ -664,7 +669,49 @@ def _add_native_unit_part(units, part):
 def _native_parts_join(left, right):
     if left.logical_path != right.logical_path or left.byte_end != right.byte_start:
         return False
-    return any(frame.byte_start < left.byte_end < frame.byte_end for frame in left.native_frames)
+    return (any(frame.byte_start < left.byte_end < frame.byte_end for frame in left.native_frames)
+            or _captured_tool_cut(left, left.byte_end))
+
+
+def _captured_tool_cut(part, offset):
+    """A pure immutable-source boundary test, never a native-user authority."""
+    original = part.original_content
+    if type(original) is not bytes or not 0 < offset < len(original):
+        return False
+    if original[offset - 1:offset] == b"\n":
+        return False
+    return _is_physical_tool_line(_line_at_source_offset(original, offset))
+
+
+def _line_at_source_offset(original, offset):
+    start = original.rfind(b"\n", 0, offset) + 1
+    end = original.find(b"\n", offset)
+    if end < 0:
+        end = len(original)
+    return original[start:end]
+
+
+def _is_physical_tool_line(line):
+    if not line.startswith(b"    {"):
+        return False
+    try:
+        record = json.loads(line[4:])
+        return (isinstance(record, dict) and record.get("event_type") == "post_tool_use"
+                and canonical_json_bytes(record) == line[4:])
+    except (TypeError, ValueError, UnicodeDecodeError):
+        return False
+
+
+def _require_tool_line_cover(parts):
+    boundaries = ((parts[0], parts[0].byte_start), (parts[-1], parts[-1].byte_end))
+    if any(_captured_tool_cut(part, offset) for part, offset in boundaries):
+        raise ValueError("captured tool line requires all covering source parts")
+
+
+def _tool_parts_join(left, right):
+    if left.logical_path != right.logical_path or left.byte_end != right.byte_start:
+        return False
+    return _captured_tool_cut(left, left.byte_end)
 
 
 def daily_is_compiled(
@@ -743,6 +790,7 @@ def _deduplicated_sources(
 def _native_unit_source(parts, *, journal_indexes=None, partitions=None):
     ordered = sorted(parts, key=lambda item: item.byte_start)
     _require_native_unit(ordered, partitions=partitions)
+    _require_tool_line_cover(ordered)
     raw = b"".join(part.content for part in ordered)
     projected = _native_prompt_content(ordered, raw, journal_indexes=journal_indexes)
     return SourceSnapshot(ordered[0].logical_path, raw, sha256_bytes(raw), projected)
@@ -1088,8 +1136,10 @@ def pack_compile_batches(
     *,
     model: str | None,
     token_adapters: Mapping[str, TokenCounter] | None = None,
+    budget: ContextBudget | None = None,
+    planning_candidates: tuple | None = None,
 ) -> tuple[CompileBatch, ...]:
-    budget = _compile_budget(model)
+    budget = _validated_packing_budget(budget, model)
     measure = _batch_measure(inputs, model, token_adapters)
     daily_paths = {item.logical_path for item in inputs.dailies}
     optional_sources = tuple(
@@ -1108,9 +1158,17 @@ def pack_compile_batches(
             ),
             journal_indexes=_packing_journal_indexes(measure),
             partitions=_measure_partitions(measure, _measure_owns_inputs(measure, inputs)),
+            planning_candidates=planning_candidates,
         )
         for paths in _group_dailies(inputs, budget, measure)
     )
+
+
+def _validated_packing_budget(budget, model):
+    selected = budget or _compile_budget(model)
+    if selected.model != model:
+        raise ValueError("compile packing model disagrees with its budget")
+    return selected
 
 
 def _packing_journal_indexes(measure):
@@ -1240,10 +1298,18 @@ def _batch_measure(
 ) -> Callable[..., int]:
     """Count the draft-prompt tokens one candidate grouping would cost."""
 
-    if model is None:
+    if not _has_compile_tokenizer(model, token_adapters):
         return _ByteBatchMeasure(inputs)
 
     return _TokenBatchMeasure(inputs, model, token_adapters)
+
+
+def _has_compile_tokenizer(model, adapters):
+    if model is None:
+        return False
+    if adapters is None:
+        return False
+    return model in adapters
 
 
 class _TokenBatchMeasure:
@@ -1492,6 +1558,7 @@ def _compile_batch(
     optional_paths: set[str] | None = None,
     journal_indexes=None,
     partitions=None,
+    planning_candidates=None,
 ) -> CompileBatch:
     subset = _subset_compile_inputs(inputs, paths, optional_paths, journal_indexes=journal_indexes, partitions=partitions)
     count = _draft_prompt_count(subset, model, token_adapters)
@@ -1511,7 +1578,8 @@ def _compile_batch(
         safety_margin_tokens=budget.safety_margin_tokens,
         measured_input_tokens=count.tokens,
     )
-    return CompileBatch(subset, manifest, sha256_bytes(manifest_bytes), packing)
+    return CompileBatch(subset, manifest, sha256_bytes(manifest_bytes), packing,
+                        model, planning_candidates)
 
 
 def _selected_atomic_budget(inputs, target, measured, *, partitions=None):
@@ -1531,6 +1599,21 @@ def _packing_algorithm(inputs):
 def _packing_budget(packing, model):
     return ContextBudget(model, packing.max_input_tokens, packing.reserved_output_tokens,
                          packing.safety_margin_tokens)
+
+
+def _attempt_input_budget(batch, descriptor):
+    if batch is None:
+        return None
+    budget = _packing_budget(batch.packing, descriptor.model)
+    basis = getattr(descriptor, "_codex_basis", None)
+    window = getattr(basis, "planning_window", None)
+    return _bounded_attempt_budget(budget, window)
+
+
+def _bounded_attempt_budget(budget, window):
+    if window is None:
+        return budget
+    return replace(budget, max_input_tokens=min(budget.max_input_tokens, window))
 
 
 def _tokenizer_identity(count_source: str, model: str | None) -> str:
@@ -1556,7 +1639,9 @@ def _refresh_compile_batch(batch: CompileBatch) -> CompileBatch:
         context.targets,
         context.vault_files,
     )
-    batches = pack_compile_batches(refreshed, model=None)
+    batches = pack_compile_batches(refreshed, model=batch.planning_model,
+                                   budget=_packing_budget(batch.packing, batch.planning_model),
+                                   planning_candidates=batch.planning_candidates)
     if len(batches) != 1 or batches[0].manifest != batch.manifest:
         raise ValueError("compile batch changed while refreshing context")
     return batches[0]
@@ -1782,13 +1867,19 @@ def _first_resolved_plan(attempt: _CompileAttempt) -> ResolvedCompilePlan | None
     would spend a second one the step was never given. `chain_stops_after` is the
     one rule all three provider chains of the product ask.
     """
-    for candidate in provider_candidates(forced_provider(), max_tokens=4000):
+    for candidate in _compile_candidate_chain(attempt.batch):
         resolved = attempt.resolve(candidate)
         if resolved is not None:
             return resolved
         if attempt.out_of_time:
             return None
     return None
+
+
+def _compile_candidate_chain(batch):
+    if batch is None or batch.planning_candidates is None:
+        return provider_candidates(forced_provider(), max_tokens=4000)
+    return batch.planning_candidates
 
 
 def _no_plan_message(lineage: Sequence[str]) -> str:
@@ -2068,7 +2159,7 @@ class _CompileAttempt:
             schema=schema,
             model=descriptor.model,
             token_adapters=self.token_adapters,
-            budget=_packing_budget(self.batch.packing, descriptor.model),
+            budget=_attempt_input_budget(self.batch, descriptor),
             descriptor=descriptor,
         )
 
@@ -2083,7 +2174,7 @@ class _CompileAttempt:
             schema=schema,
             available=True,
             token_adapters=self.token_adapters,
-            input_budget=_packing_budget(self.batch.packing, descriptor.model) if self.batch is not None else None,
+            input_budget=_attempt_input_budget(self.batch, descriptor),
         )
 
 
@@ -2907,20 +2998,42 @@ def _require_evidence_shape(evidence: object) -> None:
 def _bound_part(
     sources: list[DailySnapshot], timestamp: str, quote_bytes: bytes
 ) -> tuple[DailySnapshot, bytes, int]:
-    """The one part whose entry declares this timestamp and holds this quote."""
+    """One canonical source unit declares the timestamp and holds the whole quote."""
     bound = []
-    for source in sources:
+    ordered = sorted(sources, key=lambda part: (part.logical_path, part.byte_start))
+    for unit in _native_part_units(ordered, join=_tool_parts_join):
         try:
-            block, marker_at = _evidence_block(source, timestamp, quote_bytes)
+            block, marker_at = _evidence_unit_block(unit, timestamp, quote_bytes)
         except ValueError:
             continue
-        bound.append((source, block, marker_at))
+        bound.append((unit[0], block, marker_at))
     if len(bound) != 1:
         raise ValueError(
             "compile evidence timestamp block is ambiguous or missing: "
             f"timestamp {timestamp!r} bound in {len(bound)} of {len(sources)} part(s)"
         )
     return bound[0]
+
+
+def _evidence_unit_block(unit, timestamp, quote_bytes):
+    if len(unit) == 1:
+        return _evidence_block(unit[0], timestamp, quote_bytes)
+    _require_native_unit(unit)
+    _require_tool_line_cover(unit)
+    original = unit[0].original_content
+    declared = _declaring_entries(original, timestamp)
+    spans = _selected_unit_entry_spans(unit, declared)
+    matched = _quote_bearing(original, spans, quote_bytes)
+    if len(matched) != 1:
+        raise ValueError(_ambiguous_block_message(timestamp, declared, matched))
+    start, end = matched[0]
+    return original[start:end], start
+
+
+def _selected_unit_entry_spans(unit, declared):
+    first, last = unit[0].byte_start, unit[-1].byte_end
+    return [(max(start, first), min(end, last)) for start, end in declared
+            if start < last and end > first]
 
 
 def _evidence_binding(item: object, inputs: CompileInputs) -> dict[str, str]:
@@ -2949,6 +3062,7 @@ def _bound_evidence_block(item: object, inputs: CompileInputs) -> tuple[dict[str
         quote_start,
         quote_start + len(quote_bytes),
     )
+    _reference_parts(inputs, reference)
     EvidenceResolver(ROOT).resolve_bytes(
         reference,
         physical.content,
@@ -5937,8 +6051,7 @@ def _run(
     _announce_compile(args, dailies)
     inputs = snapshot_compile_inputs(dailies, compiled=selection)
     try:
-        packable, refused = partition_packable(inputs, model=None)
-        batches = pack_compile_batches(packable, model=None)
+        batches, refused = _pack_for_run(inputs, deadline)
     except Exception as exc:  # noqa: BLE001 - provider/cache boundary is fail-closed
         _require_compile_active(deadline, cancelled)
         failed = BatchOutcome(_record_failed_batch(inputs, exc, deadline=deadline))
@@ -5962,6 +6075,33 @@ def _run(
         )
     _require_compile_active(deadline, cancelled)
     return _finish_run(args, outcomes)
+
+
+def _pack_for_run(inputs, deadline):
+    candidates = tuple(_planned_candidate(item, deadline)
+                       for item in provider_candidates(forced_provider(), max_tokens=4000))
+    model = next((item.model for item in candidates if probe_candidate(item)), None)
+    packable, refused = partition_packable(inputs, model=model)
+    return pack_compile_batches(packable, model=model, planning_candidates=candidates), refused
+
+
+def _planned_candidate(candidate, deadline):
+    if candidate.provider != "codex" or candidate.resolution_failure is not None:
+        return candidate
+    try:
+        limit = min(deadline, time.monotonic() + worst_case_call_seconds("codex"))
+        basis = resolve_codex_planning_basis(candidate, deadline=limit)
+    except Exception as error:  # noqa: BLE001 - preserve failed provider in the fallback lineage
+        return _failed_planning_candidate(candidate, error)
+    return basis.descriptor if basis is not None else candidate
+
+
+def _failed_planning_candidate(candidate, error):
+    failure = "provider_error"
+    if isinstance(error, TimeoutError):
+        failure = "provider_timeout"
+    _report_stage_detail("planning", failure, type(error).__name__)
+    return replace(candidate, _resolution_failure=failure)
 
 
 def _finish_run(args: argparse.Namespace, outcomes: Sequence[BatchOutcome]) -> int:

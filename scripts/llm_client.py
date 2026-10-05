@@ -44,11 +44,14 @@ import io
 import json
 import math
 import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -87,6 +90,7 @@ class ProviderDescriptor:
     fallback_from: tuple[str, ...]
     _endpoint: str | None = field(default=None, repr=False, compare=False)
     _resolution_failure: str | None = field(default=None, repr=False, compare=False)
+    _codex_basis: CodexPlanningBasis | None = field(default=None, repr=False, compare=False)
 
     @property
     def identity(self) -> str:
@@ -1501,7 +1505,481 @@ class _PreparedCodex:
     payload: str
     model: str | None
     reasoning: str
+    basis: CodexPlanningBasis | None = field(default=None, repr=False, compare=False)
 
+
+@dataclass(frozen=True)
+class CodexPlanningBasis:
+    """Attempt-owned native model/catalog evidence; advertised planning, not wire capacity."""
+
+    original_descriptor: ProviderDescriptor
+    executable: _CodexExecutable
+    model: str
+    model_provider: str
+    planning_window: int | None
+    catalog_sha256: str
+    config_files: tuple[tuple[str, str | None], ...]
+    environment_sha256: str
+    cli_version: str
+
+    @property
+    def descriptor(self) -> ProviderDescriptor:
+        return replace(self.original_descriptor, model=self.model, _codex_basis=self)
+
+
+def _codex_basis_digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+
+
+def _codex_basis_remaining(deadline):
+    if _finite_number(deadline) is None:
+        raise ValueError("Codex model-resolution deadline must be finite")
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("Codex model-resolution deadline expired")
+    return remaining
+
+
+def _codex_configuration_args(reasoning):
+    return ["-c", f"model_reasoning_effort={reasoning}", "-c", "features.hooks=false"]
+
+
+def _codex_basis_command(executable, descriptor, suffix):
+    reasoning = str(descriptor.inference_settings.get("reasoning", "low"))
+    command = [executable.path, *_codex_configuration_args(reasoning),
+               "-c", 'sandbox_mode="read-only"']
+    if descriptor.model is not None:
+        command.extend(["-c", f"model={json.dumps(descriptor.model)}"])
+    return command + list(suffix)
+
+
+def _codex_basis_file_digest(path):
+    candidate = Path(path)
+    if not candidate.exists():
+        return None
+    with candidate.open("rb") as handle:
+        before = _codex_file_identity(os.fstat(handle.fileno()))
+        digest = _codex_stream_digest(handle)
+        _require_codex_file_identity(_codex_file_identity(os.fstat(handle.fileno())), before)
+    _require_codex_file_identity(_codex_file_identity(candidate.stat()), before)
+    return digest
+
+
+def _codex_layer_file(layer):
+    name = layer["name"]
+    if isinstance(name.get("file"), str):
+        return name["file"]
+    if isinstance(name.get("dotCodexFolder"), str):
+        return str(Path(name["dotCodexFolder"]) / "config.toml")
+    return None
+
+
+def _codex_config_files(config):
+    paths = {_codex_layer_file(layer) for layer in config.get("layers", ())}
+    paths.discard(None)
+    return tuple((path, _codex_basis_file_digest(path)) for path in sorted(paths))
+
+
+def _require_codex_planning_basis(basis, descriptor):
+    if replace(descriptor, model=basis.original_descriptor.model,
+               fallback_from=basis.original_descriptor.fallback_from, _codex_basis=None) != basis.original_descriptor:
+        raise RuntimeError("Codex planning descriptor changed after model resolution")
+    _require_codex_basis_model(basis, descriptor)
+    if _codex_basis_digest(provider_environment()) != basis.environment_sha256:
+        raise RuntimeError("Codex invocation environment changed after planning")
+    _require_codex_basis_files(basis.config_files)
+    _require_codex_executable(basis.executable)
+
+
+def _require_codex_basis_model(basis, descriptor):
+    if descriptor.model != basis.model:
+        raise RuntimeError("Codex planning model disagrees with descriptor")
+
+
+def _require_codex_basis_files(files):
+    for path, expected in files:
+        if _codex_basis_file_digest(path) != expected:
+            raise RuntimeError("Codex configuration changed after planning")
+
+
+class _CodexBasisRpc:
+    def __init__(self, tree, deadline):
+        self.tree = tree
+        self.deadline = deadline
+        self.replies = queue.Queue()
+        self.config = None
+        self.config_files = ()
+        self.readers = (
+            threading.Thread(target=self._read_stdout),
+            threading.Thread(target=self._read_stderr),
+        )
+        try:
+            for reader in self.readers:
+                reader.start()
+        except RuntimeError:
+            _settle_codex_basis_tree(self)
+            raise
+
+    def _read_stdout(self):
+        try:
+            for line in iter(self.tree.process.stdout.readline, b""):
+                self.replies.put((json.loads(line), None))
+        except (OSError, ValueError, UnicodeError) as error:
+            self.replies.put((None, error))
+        finally:
+            self.replies.put((None, EOFError("Codex model bootstrap closed")))
+
+    def _read_stderr(self):
+        try:
+            for _block in iter(functools.partial(self.tree.process.stderr.read1, io.DEFAULT_BUFFER_SIZE), b""):
+                pass
+        except OSError as error:
+            self.replies.put((None, error))
+
+    def send(self, method, params, identifier=None):
+        _codex_basis_remaining(self.deadline)
+        request = {"method": method, "params": params}
+        if identifier is not None:
+            request["id"] = identifier
+        self.tree.process.stdin.write(json.dumps(request).encode() + b"\n")
+        self.tree.process.stdin.flush()
+
+    def request(self, identifier, method, params):
+        self.send(method, params, identifier)
+        while True:
+            reply = self._next_reply()
+            if _codex_basis_reply_matches(reply, identifier):
+                return _codex_basis_reply_result(reply)
+
+    def _next_reply(self):
+        try:
+            reply, error = self.replies.get(timeout=_codex_basis_remaining(self.deadline))
+        except queue.Empty as error:
+            raise TimeoutError("Codex model-resolution deadline expired") from error
+        if error is not None:
+            raise error
+        if not isinstance(reply, dict):
+            raise ValueError("Codex model bootstrap response is not an object")
+        return reply
+
+    def close(self):
+        try:
+            self.tree.process.stdin.close()
+            self.tree.process.wait(timeout=_codex_basis_remaining(self.deadline))
+        finally:
+            _settle_codex_basis_tree(self)
+
+
+def _settle_codex_basis_tree(rpc):
+    from sync_memory import PROCESS_CLEANUP_TIMEOUT_SECONDS
+
+    cleanup = time.monotonic() + PROCESS_CLEANUP_TIMEOUT_SECONDS
+    rpc.tree.terminate(deadline=cleanup)
+    for reader in rpc.readers:
+        _join_started_codex_basis_reader(reader, cleanup)
+    _require_codex_basis_readers_settled(rpc.readers)
+    rpc.tree.close()
+    rpc.tree.process.stdout.close()
+    rpc.tree.process.stderr.close()
+
+
+def _join_started_codex_basis_reader(reader, deadline):
+    if reader.ident is not None:
+        reader.join(timeout=max(0.0, deadline - time.monotonic()))
+
+
+def _require_codex_basis_readers_settled(readers):
+    if any(reader.is_alive() for reader in readers):
+        raise RuntimeError("Codex model-bootstrap reader cleanup is unverified")
+
+
+class _CodexCapabilityUnavailable(RuntimeError):
+    """A structurally valid optional native method is explicitly unavailable."""
+
+
+def _codex_basis_reply_matches(reply, identifier):
+    received = reply.get("id")
+    if received is None:
+        return False
+    if type(received) is not type(identifier):
+        raise ValueError("Codex model bootstrap response has an invalid request identifier")
+    return received == identifier
+
+
+def _codex_basis_reply_result(reply):
+    if "error" in reply:
+        return _codex_basis_native_error(reply)
+    if not isinstance(reply.get("result"), dict):
+        raise ValueError("Codex model bootstrap lacks a result object")
+    return reply["result"]
+
+
+def _codex_basis_native_error(reply):
+    error = reply["error"]
+    if "result" in reply or not isinstance(error, dict):
+        raise ValueError("Codex model bootstrap has an invalid error response")
+    _require_codex_native_error_fields(error)
+    if error["code"] == -32601:
+        raise _CodexCapabilityUnavailable("Codex optional native method is unavailable")
+    raise RuntimeError("Codex model bootstrap returned a native error")
+
+
+def _require_codex_native_error_fields(error):
+    if type(error.get("code")) is not int:
+        raise ValueError("Codex native error lacks an integer code")
+    if not isinstance(error.get("message"), str) or not error["message"]:
+        raise ValueError("Codex native error lacks a message")
+
+
+def _spawn_codex_basis_rpc(command, neutral, environment, deadline):
+    from lsp_process_tree import ProcessTree
+
+    _codex_basis_remaining(deadline)
+    tree = ProcessTree.spawn_with_deadline(command, cwd=Path(neutral), env=environment, deadline=deadline)
+    return _CodexBasisRpc(tree, deadline)
+
+
+def _codex_native_basis(rpc, neutral, descriptor):
+    rpc.request(1, "initialize", {"clientInfo": {"name": "llm-wiki-memory", "version": "1.0"}})
+    rpc.send("initialized", {})
+    config = rpc.request(2, "config/read", {"includeLayers": True})
+    rpc.config = config
+    rpc.config_files = _codex_config_files(config)
+    _codex_config_layers_verified(config)
+    _require_codex_basis_files(rpc.config_files)
+    params = {"cwd": neutral, "ephemeral": True, "sandbox": "read-only", "approvalPolicy": "never"}
+    if descriptor.model is not None:
+        params["model"] = descriptor.model
+    result = rpc.request(3, "thread/start", params)
+    _require_codex_native_model(result, descriptor)
+    rpc.request(4, "thread/unsubscribe", {"threadId": result["thread"]["id"]})
+    return result, config
+
+
+def _require_codex_native_model(result, descriptor):
+    if not result["thread"].get("ephemeral"):
+        raise ValueError("Codex model bootstrap was not ephemeral")
+    if descriptor.model is not None and descriptor.model != result.get("model"):
+        raise RuntimeError("Codex selected model disagrees with explicit configuration")
+    _require_codex_model_strings(result)
+
+
+def _require_codex_model_strings(result):
+    if any(not isinstance(result.get(key), str) or not result[key] for key in ("model", "modelProvider")):
+        raise ValueError("Codex model bootstrap lacks resolved model/provider")
+
+
+def _codex_basis_local_command(executable, command, neutral, environment, deadline):
+    result = _codex_basis_command_result(executable, command, neutral, environment, deadline)
+    if _codex_catalog_command_unsupported(command, result):
+        raise _CodexCapabilityUnavailable("Codex optional model catalog is unavailable")
+    _require_codex_exited_cleanly(result)
+    return result.stdout
+
+
+def _codex_basis_command_result(executable, command, neutral, environment, deadline):
+    from sync_memory import _run_process_tree
+
+    _require_codex_executable(executable)
+    result = _run_process_tree(command, timeout=_codex_basis_remaining(deadline),
+                               cwd=neutral, env=environment, capture_output=True)
+    _require_codex_executable(executable)
+    _codex_basis_remaining(deadline)
+    return result
+
+
+def _codex_catalog_command_unsupported(command, result):
+    if tuple(command[-2:]) != ("debug", "models") or result.returncode != 2:
+        return False
+    first_line = result.stderr.splitlines()[:1]
+    return first_line in ([b"error: unrecognized subcommand 'models'"],
+                          [b"error: unrecognized subcommand 'debug'"])
+
+
+def _codex_advertised_window(catalog, model, provider, cli_version):
+    if provider != "openai" or cli_version != "codex-cli 0.160.0":
+        return None
+    row = _codex_catalog_model(catalog, model)
+    if row is None:
+        return None
+    return _codex_catalog_window(row)
+
+
+def _codex_catalog_model(catalog, model):
+    rows = catalog.get("models", ()) if isinstance(catalog, dict) else catalog
+    if not isinstance(rows, (list, tuple)):
+        return None
+    return next((row for row in rows if _codex_catalog_named(row, model)), None)
+
+
+def _codex_catalog_named(row, model):
+    return isinstance(row, dict) and row.get("slug") == model
+
+
+def _codex_catalog_window(row):
+    window = row.get("context_window")
+    percent = row.get("effective_context_window_percent")
+    if not _codex_positive_int(window) or not _codex_positive_int(percent):
+        return None
+    if percent > 100:
+        return None
+    return window * percent // 100
+
+
+def _codex_positive_int(value):
+    return type(value) is int and value > 0
+
+
+def _codex_configured_window(window, config):
+    override = config.get("config", {}).get("model_context_window")
+    if override is None or window is None:
+        return window
+    # Configured windows need their own qualified effective-window semantics.
+    return None
+
+
+def _resolved_codex_basis(descriptor, executable, result, config, neutral, environment, deadline,
+                          version=None):
+    version = version or _codex_basis_version(executable, neutral, environment, deadline)
+    files = _codex_config_files(config)
+    verified = _codex_config_layers_verified(config)
+    resolved = replace(descriptor, model=result["model"])
+    command = _codex_basis_command(executable, resolved, ("debug", "models"))
+    raw = _codex_optional_catalog(executable, command, neutral, environment, deadline)
+    window = _codex_verified_catalog_window(raw, result, version, verified)
+    _codex_config_layers_verified(config)
+    _require_codex_basis_files(files)
+    return CodexPlanningBasis(descriptor, executable, result["model"], result["modelProvider"],
+                              _codex_configured_window(window, config), hashlib.sha256(raw or b'').hexdigest(),
+                              files, _codex_basis_digest(environment), version)
+
+
+def _codex_basis_version(executable, neutral, environment, deadline):
+    raw = _codex_basis_local_command(executable, [executable.path, "--version"], neutral, environment, deadline)
+    return raw.decode().strip()
+
+
+def _codex_optional_catalog(executable, command, neutral, environment, deadline):
+    try:
+        return _codex_basis_local_command(executable, command, neutral, environment, deadline)
+    except _CodexCapabilityUnavailable:
+        _require_codex_executable(executable)
+        _codex_basis_remaining(deadline)
+        return None
+
+
+def _codex_verified_catalog_window(raw, result, version, verified):
+    if raw is None:
+        return None
+    catalog = json.loads(raw)
+    if not verified:
+        return None
+    return _codex_advertised_window(catalog, result["model"], result["modelProvider"], version)
+
+
+def _codex_config_layers_verified(config):
+    layers = config.get("layers")
+    if not isinstance(layers, list):
+        return False
+    # Unknown layers prevent a capacity claim, but cannot hide a later file drift.
+    verified = tuple(_codex_config_layer_verified(layer) for layer in layers)
+    return all(verified)
+
+
+def _codex_config_layer_verified(layer):
+    name = layer["name"]
+    if name.get("type") == "sessionFlags":
+        return True
+    if name.get("profile") is not None:
+        return False
+    return _codex_file_layer_verified(layer)
+
+
+def _codex_file_layer_verified(layer):
+    from settings import tomllib
+
+    path = _codex_layer_file(layer)
+    if path is None:
+        return False
+    candidate = Path(path)
+    document = tomllib.loads(candidate.read_text(encoding="utf-8")) if candidate.exists() else {}
+    return _require_codex_layer_version(layer, document)
+
+
+def _require_codex_layer_version(layer, document):
+    # Rust/Python serializers disagree for some floats; compare parsed values.
+    try:
+        json.dumps(document, allow_nan=False)
+    except (TypeError, ValueError):
+        return False
+    if layer.get("config") != document:
+        raise RuntimeError("Codex configuration changed during model resolution")
+    return _codex_layer_version_known(layer.get("version"))
+
+
+def _codex_layer_version_known(version):
+    if not isinstance(version, str) or not version.startswith("sha256:"):
+        return False
+    return _has_digest(version.removeprefix("sha256:"))
+
+
+def resolve_codex_planning_basis(descriptor: ProviderDescriptor, *, deadline: float) -> CodexPlanningBasis | None:
+    """Resolve once before planning; no turn, user data, persistent model selection or wire claim."""
+    if descriptor.provider != "codex":
+        return None
+    _codex_basis_remaining(deadline)
+    executable = _selected_codex_executable()
+    if executable is None:
+        return None
+    return _resolve_selected_codex_basis(descriptor, executable, deadline)
+
+
+def _resolve_selected_codex_basis(descriptor, executable, deadline):
+    environment = provider_environment()
+    with provider_cwd() as neutral:
+        version = _codex_basis_version(executable, neutral, environment, deadline)
+        if version != "codex-cli 0.160.0":
+            _require_codex_resolution_identity(executable, environment, deadline)
+            return None
+        basis = _codex_qualified_basis(descriptor, executable, neutral, environment, deadline, version)
+    if basis is None:
+        return None
+    _require_codex_planning_basis(basis, basis.descriptor)
+    _codex_basis_remaining(deadline)
+    return basis
+
+
+def _require_codex_resolution_identity(executable, environment, deadline):
+    _require_codex_executable(executable)
+    if _codex_basis_digest(provider_environment()) != _codex_basis_digest(environment):
+        raise RuntimeError("Codex invocation environment changed during resolution")
+    _codex_basis_remaining(deadline)
+
+
+def _codex_qualified_basis(descriptor, executable, neutral, environment, deadline, version):
+    command = _codex_basis_command(executable, descriptor, ("app-server", "--stdio"))
+    _require_codex_executable(executable)
+    rpc = _spawn_codex_basis_rpc(command, neutral, environment, deadline)
+    native = _codex_optional_native_basis(rpc, neutral, descriptor)
+    _require_codex_exited_cleanly(subprocess.CompletedProcess(command, rpc.tree.process.returncode, b'', b''))
+    _require_codex_resolution_identity(executable, environment, deadline)
+    _require_codex_basis_files(rpc.config_files)
+    if rpc.config is not None:
+        _codex_config_layers_verified(rpc.config)
+    if native is None:
+        return None
+    result, config = native
+    return _resolved_codex_basis(descriptor, executable, result, config, neutral, environment, deadline, version)
+
+
+def _codex_optional_native_basis(rpc, neutral, descriptor):
+    try:
+        try:
+            return _codex_native_basis(rpc, neutral, descriptor)
+        except _CodexCapabilityUnavailable:
+            return None
+    finally:
+        rpc.close()
 
 def _codex_file_identity(info):
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode)
@@ -1539,9 +2017,17 @@ def _selected_codex_executable():
 
 def _prepare_codex(descriptor, prompt, system_prompt):
     return _PreparedCodex(
-        _selected_codex_executable(), _codex_prompt(system_prompt, prompt),
-        descriptor.model, str(descriptor.inference_settings.get("reasoning", "low")),
+        _codex_attempt_executable(descriptor), _codex_prompt(system_prompt, prompt),
+        descriptor.model, str(descriptor.inference_settings.get("reasoning", "low")), descriptor._codex_basis,
     )
+
+
+def _codex_attempt_executable(descriptor):
+    basis = descriptor._codex_basis
+    if basis is None:
+        return _selected_codex_executable()
+    _require_codex_planning_basis(basis, descriptor)
+    return basis.executable
 
 
 def _require_codex_executable(executable):
@@ -1587,10 +2073,7 @@ def _codex_command(codex_bin: str, model: str | None, reasoning: str, out_path: 
         "--skip-git-repo-check",
         "--sandbox",
         "read-only",
-        "-c",
-        f"model_reasoning_effort={reasoning}",
-        "-c",
-        "features.hooks=false",
+        *_codex_configuration_args(reasoning),
         "--output-last-message",
         out_path,
     ]
@@ -1699,11 +2182,10 @@ def provider_environment() -> dict[str, str]:
     return environment
 
 
-def _codex_last_message(command: list[str], prompt_path: str, out_path: str, *, executable=None) -> BackendResponse:
+def _codex_last_message(command: list[str], prompt_path: str, out_path: str, *, executable=None, basis=None) -> BackendResponse:
     with open(prompt_path, "rb") as stdin_handle, provider_cwd() as neutral:
         try:
-            if executable is not None:
-                _require_codex_executable(executable)
+            _require_codex_dispatch_identity(executable, basis)
             result = _run_cli(
                 command,
                 stdin=stdin_handle,
@@ -1796,9 +2278,24 @@ def _call_prepared_codex(descriptor, prepared):
         out_path,
     )
     try:
-        return _codex_last_message(command, prompt_path, out_path, executable=prepared.executable)
+        return _send_prepared_codex(command, prompt_path, out_path, prepared)
     finally:
         _remove_quietly((prompt_path, out_path))
+
+
+def _require_codex_dispatch_identity(executable, basis):
+    if basis is not None:
+        _require_codex_planning_basis(basis, basis.descriptor)
+        return
+    if executable is not None:
+        _require_codex_executable(executable)
+
+
+def _send_prepared_codex(command, prompt_path, out_path, prepared):
+    if prepared.basis is None:
+        return _codex_last_message(command, prompt_path, out_path, executable=prepared.executable)
+    return _codex_last_message(command, prompt_path, out_path,
+                               executable=prepared.executable, basis=prepared.basis)
 
 
 # ---------------------------------------------------------------------------
