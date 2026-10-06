@@ -35,3 +35,67 @@ Private, source-hash-bound reports retain exact environment, workload, measureme
 Provider probing and model transport still use their independent per-call timeout contracts. This repair does not make the whole compiler respect one end-to-end clock; provider-clock propagation remains a separately recorded later task. Candidate qualification does not claim installation, native-event completeness, or original audit closure.
 
 Nor is this a whole-archiver deadline guarantee: outer writer-gate acquisition, queue source-reference and single-failure retention lookups, source fences/heartbeats, recovery, evidence traversal, and filesystem publication retain their separate existing contracts. Their exact callers remain investigation/remediation entries. The qualified scope here is archive receipt authority and canonical admission, not a redesign of retention or writer/finalization ownership.
+
+
+### 2026-10-06: graph seed membership does not multiply evidence
+
+The retrieval neighbor query joined each source occurrence to an assertion.
+Multiple occurrences of the same seed node repeated identical assertion/evidence
+rows although the returned row contains no seed-occurrence identity. A genuine
+writer-built graph control with two occurrences returned duplicate evidence;
+forty occurrences exceeded the existing row ceiling. The query now uses an IN
+subquery for seed-node membership, retaining every distinct assertion/evidence
+row, direction, edge filter, path, canonical target occurrence, ordering and
+existing deadline/row guards. It introduces no index or schema change.
+
+The original corrected fixture produced two failures and three passing controls;
+201 related tests pass after the change. Earlier fixture refusals for unsupported
+unresolved assertions and an incorrect expected incoming order were preserved
+and corrected before the genuine baseline test. No existing assertions changed.
+
+SQLite 3.45.1 EXPLAIN on the real active graph places the original seed occurrence
+join after evidence joins; the candidate has a LIST SUBQUERY instead. The sampled
+Oct2 daily path has no occurrences in that active graph, so this observation is
+not proof of the running compile's seed or its wall-time improvement. No expensive
+real neighbor query or model call was run. DISTINCT on final rows was rejected:
+it would still construct the multiplied intermediate rows.
+
+Primary sources read 2026-10-06:
+[SQLite IN semantics](https://www.sqlite.org/lang_expr.html),
+[PostgreSQL 18 subquery semantics](https://www.postgresql.org/docs/current/functions-subquery.html),
+and [Python 3.10 SQLite deadlines](https://docs.python.org/3.10/library/sqlite3.html).
+PostgreSQL is supporting relational-semantics evidence, not the deployed engine.
+
+
+### 2026-10-06: reader-owned canonical breadcrumb parsing
+
+Repeated current-source restoration validates the same canonical breadcrumb
+records. A disposable reader-owned context retains exact immutable record bytes
+paired with freshly read schema bytes. It reuses only schema/canonical-byte
+validation, returns fresh JSON objects, and refuses schema changes during that
+reader lifetime. Source, head, part, chain, path, deadline and receipt checks still
+run. Finally resets the context; standalone reads remain uncached.
+
+Original control: 28 validations for three distinct record/schema pairs. Candidate:
+138 related tests pass, including changed records, schema drift, object mutation,
+external head/part tampering and expiry. Two real captures of one unchanged daily
+source reduced validation calls 12,880 to 1,380, retaining all 2,760 external
+document reads and 22,748 frame checks. Wall time: 3.529 versus 2.819 seconds;
+peak RSS: 126,504 versus 129,400 KiB. Shared-machine observations do not prove
+whole-health completion or isolated latency improvement.
+
+Existing record-size guards remain. Memory grows with distinct records in one
+reader and is released with it. Whole-frame or authority-verdict caching was
+rejected: SQL snapshots do not stabilize filesystem evidence. Primary sources
+read 2026-10-06: [Python 3.10 immutable bytes](https://docs.python.org/3.10/library/stdtypes.html#bytes-objects),
+[Python context ownership](https://docs.python.org/3.10/library/contextvars.html),
+[SQLite isolation](https://www.sqlite.org/isolation.html), and
+[Git racy-file identity](https://git-scm.com/docs/racy-git).
+
+The subsequent actual transaction-only diagnostic retained its 60-second deadline
+and refused after 38.192 seconds: transaction snapshot changed during filesystem
+inspection. It reported 101 unresolved quarantines and read_error, with no invalid
+state proof. Peak RSS was 973,060 KiB. That diagnostic includes SQL fingerprint
+instrumentation and concurrent activity; it does not prove whole-health success
+or compare performance on matched SQL inputs. The historical authority refusal
+remains visible.

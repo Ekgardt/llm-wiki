@@ -8,16 +8,24 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 
 from memory_state import MAX_CAPTURE_INTENT_BYTES
-from reliable_memory import canonical_json_bytes, sha256_bytes, validate_schema
+from reliable_memory import (
+    SchemaValidationError,
+    canonical_json_bytes,
+    sha256_bytes,
+    validate_schema,
+)
 
 SCHEMAS = Path(__file__).with_name("schemas")
 MANIFEST_VERSION = "capture-intent/v2"
 PART_VERSION = "breadcrumb-part/v1"
 ANCHOR_VERSION = "breadcrumb-occurrence/v1"
+_RECORD_PARSING = ContextVar("breadcrumb_pure_record_parsing", default=None)
 
 
 def require_digest(value: object) -> str:
@@ -34,6 +42,10 @@ def _require_equal(actual: object, expected: object, message: str) -> None:
 
 def _record_bytes(record: Mapping[str, object], schema: str) -> bytes:
     validate_schema(dict(record), SCHEMAS / schema)
+    return _bounded_record_bytes(record)
+
+
+def _bounded_record_bytes(record):
     encoded = canonical_json_bytes(dict(record))
     if len(encoded) > MAX_CAPTURE_INTENT_BYTES:
         raise ValueError("breadcrumb physical record exceeds the capture transport")
@@ -41,12 +53,101 @@ def _record_bytes(record: Mapping[str, object], schema: str) -> bytes:
 
 
 def _read_record(data: bytes, schema: str) -> dict:
+    parsing = _RECORD_PARSING.get()
+    if parsing is not None:
+        return parsing.read(data, schema)
+    return _read_record_uncached(data, schema)
+
+
+def _read_record_uncached(data, schema):
     value = json.loads(data.decode("utf-8", errors="strict"))
     if not isinstance(value, dict):
         raise ValueError("breadcrumb record must be an object")
     encoded = _record_bytes(value, schema)
     _require_equal(data, encoded, "breadcrumb record is not canonical")
     return value
+
+
+def _schema_bytes(schema):
+    try:
+        return (SCHEMAS / schema).read_bytes()
+    except OSError as error:
+        raise SchemaValidationError(f"cannot load schema {SCHEMAS / schema}: {error}") from error
+
+
+def _schema_object(raw, schema):
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except json.JSONDecodeError as error:
+        raise SchemaValidationError(f"cannot load schema {SCHEMAS / schema}: {error}") from error
+
+
+def _canonical_record(data, schema, raw_schema):
+    from reliable_memory import validate_schema_object
+
+    value = json.loads(data.decode("utf-8", errors="strict"))
+    if not isinstance(value, dict):
+        raise ValueError("breadcrumb record must be an object")
+    validate_schema_object(value, _schema_object(raw_schema, schema))
+    _require_equal(data, _bounded_record_bytes(value), "breadcrumb record is not canonical")
+    return value
+
+
+class _RecordParsing:
+    """Immutable record/schema parsing only; every external proof stays live."""
+
+    def __init__(self, active=None):
+        self.active = active
+        self.schemas = {}
+        self.records = set()
+
+    def _active(self):
+        if self.active is not None:
+            self.active()
+
+    def _schema(self, name):
+        raw = _schema_bytes(name)
+        previous = self.schemas.setdefault(name, raw)
+        if previous != raw:
+            raise SchemaValidationError("breadcrumb schema changed during the reader snapshot")
+        return raw
+
+    def read(self, data, schema):
+        self._active()
+        raw_schema = self._schema(schema)
+        if type(data) is not bytes:
+            return self._mutable_record(data, schema, raw_schema)
+        return self._immutable_record(data, schema, raw_schema)
+
+    def _mutable_record(self, data, schema, raw_schema):
+        value = _canonical_record(data, schema, raw_schema)
+        self._active()
+        return value
+
+    def _immutable_record(self, data, schema, raw_schema):
+        key = (schema, raw_schema, data)
+        if key not in self.records:
+            _canonical_record(data, schema, raw_schema)
+            self.records.add(key)
+        return self._decoded_record(data)
+
+    def _decoded_record(self, data):
+        if len(data) > MAX_CAPTURE_INTENT_BYTES:
+            raise ValueError("breadcrumb physical record exceeds the capture transport")
+        value = json.loads(data.decode("utf-8", errors="strict"))
+        self._active()
+        return value
+
+
+@contextmanager
+def _using_record_parsing(parsing):
+    if type(parsing) is not _RecordParsing:
+        raise ValueError("breadcrumb parsing requires its canonical reader-owned context")
+    token = _RECORD_PARSING.set(parsing)
+    try:
+        yield
+    finally:
+        _RECORD_PARSING.reset(token)
 
 
 def occurrence_identity(scope: Mapping[str, object]) -> str:

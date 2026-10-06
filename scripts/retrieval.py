@@ -1241,15 +1241,17 @@ def _neighbour_rows(
                e.byte_start AS evidence_byte_start,
                e.byte_end AS evidence_byte_end, e.span_sha256,
                evidence_source.relative_path AS evidence_relative_path
-        FROM occurrence seed_occ
-        JOIN source seed_source ON seed_source.source_id = seed_occ.source_id
-        JOIN assertion a ON a.{source_column} = seed_occ.node_id
+        FROM assertion a
         JOIN node neighbor ON neighbor.node_id = a.{target_column}
         JOIN occurrence target_occ ON target_occ.node_id = neighbor.node_id
         JOIN source target_source ON target_source.source_id = target_occ.source_id
         JOIN evidence e ON e.assertion_id = a.assertion_id
         JOIN source evidence_source ON evidence_source.source_id = e.source_id
-        WHERE seed_source.relative_path = ?
+        WHERE a.{source_column} IN (
+            SELECT seed_occ.node_id FROM occurrence seed_occ
+            JOIN source seed_source ON seed_source.source_id = seed_occ.source_id
+            WHERE seed_source.relative_path = ?
+          )
           AND a.resolution = 'resolved'
           AND a.target_node_id IS NOT NULL
           AND a.edge_type IN ({edge_placeholders})

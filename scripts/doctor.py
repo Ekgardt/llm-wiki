@@ -1913,8 +1913,9 @@ class _CurrentHistoricalSourceWork:
 
         self.reader._require_active()
         raw = read_stable_bytes(self.reader.vault_root / logical, MAX_DAILY_BYTES, label="daily source")
-        frames = _native_daily_frames(logical, raw, self.reader.vault_root)
-        parts = _daily_parts(logical, raw, native_frames=frames)
+        with self.reader._breadcrumb_record_parsing():
+            frames = _native_daily_frames(logical, raw, self.reader.vault_root)
+            parts = _daily_parts(logical, raw, native_frames=frames)
         self.reader._require_active()
         self.captured[logical] = raw
         return parts
@@ -2029,6 +2030,15 @@ class _CompiledDaySupersession:
         self.database = database
         self.deadline = deadline
         self.selection = None
+        self.breadcrumb_parsing = None
+
+    def _breadcrumb_record_parsing(self):
+        from breadcrumb_protocol import _RecordParsing, _using_record_parsing
+
+        self._require_active()
+        if self.breadcrumb_parsing is None:
+            self.breadcrumb_parsing = _RecordParsing(self._require_active)
+        return _using_record_parsing(self.breadcrumb_parsing)
 
     def resolves(self, database: sqlite3.Connection, identifier: str, committed_creates: set[str]) -> bool:
         self._require_active()
