@@ -1393,6 +1393,7 @@ def _entry_fragment_sizes(dailies):
 
 
 _SOURCE_CHOICE_RESOLVER = ContextVar("source_choice_resolver", default=None)
+_SOURCE_CHOICE_PARSING = ContextVar("source_choice_parsing", default=None)
 
 
 @contextmanager
@@ -1409,8 +1410,12 @@ def _source_choice_resolution(resolver=None):
 def _measure_choice_resolution(measure):
     if measure.choice_resolver is None:
         measure.choice_resolver = EvidenceResolver(ROOT)
-    with _source_choice_resolution(measure.choice_resolver):
-        yield
+    token = _SOURCE_CHOICE_PARSING.set((measure.journal_indexes, measure.partitions))
+    try:
+        with _source_choice_resolution(measure.choice_resolver):
+            yield
+    finally:
+        _SOURCE_CHOICE_PARSING.reset(token)
 
 
 def _measure_token_subset(measure, subset):
@@ -3660,8 +3665,13 @@ def _source_has_projection(source, paths, native):
 
 def _require_projection_source(source, inputs):
     parts = tuple(part for part in inputs.dailies if part.logical_path == source.logical_path)
-    if not parts or _native_unit_source(parts) != source:
+    journal_indexes, partitions = _choice_projection_parsing()
+    if not parts or _native_unit_source(parts, journal_indexes=journal_indexes, partitions=partitions) != source:
         raise ValueError("compile evidence projection lacks canonical selected source proof")
+
+
+def _choice_projection_parsing():
+    return _SOURCE_CHOICE_PARSING.get() or (None, None)
 
 
 def _row_inside_projection(start, end, ranges):

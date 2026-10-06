@@ -222,3 +222,37 @@ passed CCN 5, two-if and two-level nesting checks. Ruff and Python 3.10
 grammar passed; six test-weight controls passed. The paired timing above
 belongs to the pre-composition pure-lookup source, not a new timing claim
 for this composition. No additional model call or publication occurred.
+
+### 2026-10-06: preserve owned pure parsing during source-choice sizing
+
+The installed October 2 manual compile spent over fifteen minutes in packing,
+before any model dispatch. A read-only py-spy stack identified source-choice
+layout validation repeatedly calling `_native_partition_ranges` for the complete
+daily file. The size measurer already owned immutable journal and partition
+parses, but the source-choice projection check omitted them. A multipart
+regression reproduced seven complete partition parses for two measurements.
+
+Use the existing measurement context to carry only these owned pure parsing
+objects, with a token restored in `finally`. Every projection is still rebuilt
+and compared; selected-part identity, original bytes and hashes, ordinals,
+contiguity, native coverage, tool-line coverage and binding checks remain.
+Independent final requests receive no measurement context. No persistent state,
+path, external environment contract, model, or limit changes. Alternatives:
+raising timeouts does not remove repeated work; caching accepted projections
+would bypass current source checks; threading parameters through every unrelated
+prompt caller would widen the change unnecessarily.
+
+Research checked on 2026-10-06: Python 3.10.22
+[contextvars](https://docs.python.org/3.10/library/contextvars.html) documents
+context-local scope and token reset; [OWASP input validation](https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html)
+supports retaining validation at trust boundaries; [W3C PROV-DM](https://www.w3.org/TR/prov-dm/)
+distinguishes derived views from source authority. These support the concrete
+scope and invariants, not a claim of measured whole-system improvement.
+
+Qualification honesty: the first static check rejected the projection function
+at CCN 6. A separately submitted test call mistakenly ran after that rejection;
+its result is retained, but is not the acceptance run. The expression was split
+into a measured helper; the final acceptance sequence uses `set -e` to prevent
+execution after failed static checks. Root production was not changed by that
+failed candidate. Whole installed compilation and health qualification remain
+required.

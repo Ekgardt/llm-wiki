@@ -437,6 +437,7 @@
   "test_capture_worker_dispatch.py": 15.65,
   "test_capture_worker_fails_instead_of_abandoning.py": 11.78,
   "test_capture_worker_reclaims_leases.py": 4.65,
+  "test_choice_measure_reuses_partition_parsing.py": 1.0,
   "test_ci_and_scheduler_gaps.py": 1.37,
   "test_ci_policy.py": 0.61,
   "test_ci_runs_a_reinstall_and_a_pass.py": 0.08,
