@@ -212,7 +212,7 @@ ALLOWED_CATEGORIES = frozenset(
     {"concepts", "decisions", "patterns", "debugging", "qa"}
 )
 DRAFT_PROGRAM = (
-    "compile-draft/v11: entry-grouped temporary source-line choices and physical containers; "
+    "compile-draft/v12: distinct output IDs and visible FILE row locators; "
     "with immutable original-entry context and derived-provenance claims"
 )
 CRITIQUE_PROGRAM = (
@@ -2610,7 +2610,7 @@ def _render_choice_prompt(base, choices):
     protected = _protected_choice_base(base)
     addresses = _source_address_table(choices)
     expected = protected + "\n\n" + addresses
-    prompt = expected + "\n\nLEGACY EVIDENCE CHOICES: prefer exactly source_line (the integer in the source_line column) and claim. The table maps each ID to its FILE block, original entry and one-based LF line inside that visible selected FILE body; count physical LF rows, including blank rows. Table IDs and embedded labels are not source quotes or durable citations. The compiler supplies authoritative Sources, Evidence and Claims; do not invent shortened daily references or retain IDs in the page body. Existing legacy/native protocols remain unchanged."
+    prompt = expected + "\n\nLEGACY EVIDENCE CHOICES: prefer exactly source_line and claim. Return the FIRST number of an offered row as source_line. Never return the SECOND number (the visible FILE LF row) as source_line. The second number only helps locate the source text; it grants no evidence authority. The table maps each ID to its FILE block, original entry and one-based LF line inside that visible selected FILE body; count physical LF rows, including blank rows. Table IDs and embedded labels are not source quotes or durable citations. The compiler supplies authoritative Sources, Evidence and Claims; do not invent shortened daily references or retain IDs in the page body. Existing legacy/native protocols remain unchanged."
     _require_choice_prefix(expected, prompt)
     return prompt
 
@@ -2674,7 +2674,7 @@ def _source_address_table(choices):
 def _source_address_group(path, rows):
     addresses = "\n".join(_source_address_entry(timestamp, group)
                           for timestamp, group in groupby(rows, key=lambda row: row['timestamp']))
-    return f"FILE: {path}\nsource_line LF-line (entry set by ENTRY header)\n{addresses}"
+    return f"FILE: {path}\nOUTPUT source_line | LOCATOR ONLY: visible FILE LF row (NOT an output ID)\n{addresses}"
 
 
 def _source_address_entry(timestamp, rows):

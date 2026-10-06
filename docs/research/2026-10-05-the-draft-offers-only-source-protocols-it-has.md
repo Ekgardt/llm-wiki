@@ -396,3 +396,50 @@ original bytes. An initial new-test assumption that every append retains a
 physical before-image was wrong: the existing append format retains original
 length/hash and reconstructs its authenticated prefix during undo. That failed
 fixture is retained separately; the corrected control tests actual recovery.
+
+## 2026-10-06: distinguish output IDs from visible FILE row locators
+
+Two retained normal Codex drafts were rejected because `source_line` was absent
+from the offered ID map. All three absent integers in one response and all five
+in the other also occurred in the table's visible FILE LF-row column. The two
+failed calls reported 75,570 tokens and 564.304486 seconds together. Their JSON
+responses were 8,267 and 9,090 bytes; reported output tokens are not a byte count
+of those responses. The precise private trace hashes and indices remain in the
+ignored read-only audit reports, without source excerpts.
+
+The transient display now names the first column `OUTPUT source_line` and the
+second `LOCATOR ONLY: visible FILE LF row (NOT an output ID)`. The instruction
+explicitly says to return the first number, never the second. Numeric ordered
+row pairs, ENTRY grouping, complete unnumbered source/context, offered integer
+IDs, protected aliases, physical references, RAW validation and the schema are
+unchanged. An invalid locator still fails membership; it is never mapped to a
+nearby or corresponding ID. `compile-draft/v12` changes the draft program hash
+so an obsolete draft cache is not reused under the changed request.
+
+The original candidate produced three failing display/program assertions and
+two passing source/authority controls. This is a regression guard for the
+observed ambiguous representation, not evidence that a model will always choose
+the correct column. A useful full draft/critic/policy/publication cycle must
+measure retries, tokens, latency and retained claims before claiming improved
+whole-cycle efficiency. Capacity, the 32,768 target, the 4,000 planning reserve
+and CLI output-limit uncertainty are unaffected.
+
+Research checked on 2026-10-06:
+
+- [JSON Schema validation](https://json-schema.org/draft/2020-12/json-schema-validation)
+  distinguishes type assertions from membership assertions. The current integer
+  type is retained; this does not establish constrained decoding in CLI prompt
+  mode. The 2020-12 dialect document is the existing dialect reference, not a
+  claim that its expired IETF draft is a newly published standard.
+- [W3C PROV-DM](https://www.w3.org/TR/prov-dm/) treats entity identity and provenance
+  as distinct from presentation. The visible row locator grants no new source
+  authority.
+- [OWASP LLM prompt-injection prevention](https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html)
+  requires treating model output as untrusted. Local ID and physical binding
+  checks therefore remain mandatory.
+
+Changing ID values, dropping the locator/its complete address mapping, silently
+repairing output IDs and weakening membership were rejected. Adding a duplicate
+ID enum to the schema would add request cost without proof of native constrained
+output, and is outside this minimal correction. No persistent format, settings,
+provider/model choice, paths or runtime location change is introduced.

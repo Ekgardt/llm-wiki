@@ -821,6 +821,7 @@
   "test_slug.py": 0.17,
   "test_slugify.py": 0.01,
   "test_small_corrections_in_the_generations_area.py": 9.55,
+  "test_source_choice_addresses_distinguish_output_ids_from_locators.py": 0.02,
   "test_source_choice_reuses_pure_entry_lookup.py": 0.03,
   "test_source_evidence_label_counts_its_citation.py": 0.01,
   "test_sql_schema_names_are_identifiers.py": 0.02,
