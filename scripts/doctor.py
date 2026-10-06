@@ -1879,12 +1879,141 @@ def _historical_compile_identity(database, identifier):
     return identity
 
 
+class _CurrentHistoricalSourceWork:
+    """Exact new source work, without granting historical offset authority."""
+
+    def __init__(self, reader, previous):
+        self.reader = reader
+        self.previous = previous
+        self.captured = {}
+        self.units = []
+        self.selector = reader._cached_selection()
+
+    def verified(self):
+        for source in self.previous["batch_manifest"]:
+            self.units.append(self._matching_unit(source))
+        descriptors = self._descriptors()
+        records = self._records()
+        if not _all_current_work_records(records):
+            return False
+        if not self._witnesses_hold(records, descriptors):
+            return False
+        self._recheck_sources()
+        return self._records() == records and self._witnesses_hold(records, descriptors)
+
+    def _records(self):
+        return [self.selector.receipt(part) for unit in self.units for part in unit]
+
+    def _witnesses_hold(self, records, descriptors):
+        witnesses = [record for record in records if record["batch_manifest"] == descriptors]
+        return bool(witnesses) and all(self._witness(record) for record in witnesses)
+
+    def _capture(self, logical):
+        from compile_memory import _daily_parts, _native_daily_frames
+
+        self.reader._require_active()
+        raw = read_stable_bytes(self.reader.vault_root / logical, MAX_DAILY_BYTES, label="daily source")
+        frames = _native_daily_frames(logical, raw, self.reader.vault_root)
+        parts = _daily_parts(logical, raw, native_frames=frames)
+        self.reader._require_active()
+        self.captured[logical] = raw
+        return parts
+
+    def _matching_unit(self, source):
+        from compile_memory import _native_part_units
+
+        parts = self._capture(source["logical_path"])
+        matches = [unit for unit in _native_part_units(parts) if self._unit_matches(unit, source)]
+        if len(matches) != 1:
+            raise ValueError("historical source lacks one complete current source unit")
+        return matches[0]
+
+    def _unit_matches(self, unit, source):
+        from compile_memory import _native_unit_source, _source_descriptor
+
+        self.reader._require_active()
+        if sum(len(part.content) for part in unit) != source["byte_size"]:
+            return False
+        snapshot = _native_unit_source(unit)
+        expected = _source_descriptor(snapshot).receipt_descriptor()
+        if expected != source:
+            return False
+        return self._unique_containment(unit, snapshot.content)
+
+    def _unique_containment(self, unit, selected):
+        raw = self.captured[unit[0].logical_path]
+        start = raw.find(selected)
+        return start == unit[0].byte_start and raw.find(selected, start + 1) == -1
+
+    def _descriptors(self):
+        from compile_memory import _v4_source_descriptor
+
+        sources = [_v4_source_descriptor(part) for unit in self.units for part in unit]
+        return sorted(sources, key=_current_work_descriptor_key)
+
+    def _witness(self, record):
+        self.reader._require_active()
+        path = f"knowledge/daily/receipts/v4-{record['source_identity']}.md"
+        raw = self.reader._historical_receipt_bytes(path)
+        fields = _snapshot_receipt_fields(raw, path)
+        _require_current_work_record(raw, fields, record)
+        if not _committed_snapshot_receipt(self.reader.database, path, raw, fields, require_create=True):
+            return False
+        self._live_outputs(record)
+        return self.reader._historical_receipt_bytes(path) == raw
+
+    def _live_outputs(self, record):
+        from compile_memory import MAX_AFTER_IMAGE_BYTES
+
+        for operation in record["operations"]:
+            self.reader._require_active()
+            path = self.reader.vault_root / operation["path"]
+            if _safe_kind(path, self.reader.vault_root)[0] != "regular":
+                raise ValueError("current historical output is unavailable")
+            raw = read_stable_bytes(path, MAX_AFTER_IMAGE_BYTES, label="compile output")
+            if hashlib.sha256(raw).hexdigest() != operation["after_sha256"]:
+                raise ValueError("current historical output changed")
+
+    def _recheck_sources(self):
+        from compile_memory import _native_unit_source
+
+        for logical, expected in self.captured.items():
+            self.reader._require_active()
+            current = read_stable_bytes(self.reader.vault_root / logical, MAX_DAILY_BYTES, label="daily source")
+            if current != expected:
+                raise ValueError("current source changed during historical work proof")
+        for unit in self.units:
+            self.reader._require_active()
+            _native_unit_source(unit)
+        self.reader._require_active()
+
+
+def _current_work_descriptor_key(source):
+    return source["logical_path"], source["byte_start"], source["byte_end"]
+
+
+def _all_current_work_records(records):
+    return bool(records) and all(records)
+
+
+def _require_current_work_record(raw, fields, expected):
+    from compile_memory import parse_compile_receipt_v4
+
+    record = parse_compile_receipt_v4(raw, logical_path=fields[0], source_sha256=fields[1])
+    if record != expected:
+        raise ValueError("current historical witness changed during verification")
+
+
 class _CompiledDaySupersession:
     """Read-only outcomes for refused compiles; quarantine remains retained.
 
     A different committed immutable v3 receipt can prove the exact historical
     source descriptor and complete batch manifest. That proof does not select
     the current day, promote v3 to v4 authority, or grant deletion permission.
+
+    A current committed v4 batch may separately prove new work on those exact
+    old bytes, only as complete current units with a matching full batch and
+    live output integrity. Current physical offsets never become v3 authority.
 
     A refused attempt that meant to create only compile receipts is history
     when every day its staged receipts name is compiled as it stands today:
@@ -1918,7 +2047,30 @@ class _CompiledDaySupersession:
     def _exact_or_source_outcome(self, identifier):
         return _compile_snapshot_was_written(
             self.database, identifier, self.vault_root, self.state_root
-        ) or self._historical_source_outcome(identifier) or self._source_context_outcome(identifier)
+        ) or self._historical_source_outcome(identifier) or self._current_historical_outcome(identifier) or self._source_context_outcome(identifier)
+
+    def _current_historical_outcome(self, identifier):
+        if self.vault_root is None:
+            return False
+        try:
+            identity = _historical_compile_identity(self.database, identifier)
+            receipts = _intended_compile_receipts(self.database, identifier)
+            directory, plan = _verified_compile_plan(self.database, identifier, self.state_root)
+            staged = _staged_receipt_operations(plan, receipts)
+            return bool(receipts) and all(self._current_staged_outcome(directory, staged[path], digest, identity)
+                                          for path, digest in receipts.items())
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError, lzma.LZMAError):
+            self._require_active()
+            return False
+
+    def _current_staged_outcome(self, directory, operation, digest, identity):
+        self._require_active()
+        if operation["after"]["sha256"] != digest:
+            raise ValueError("staged receipt hash disagrees with transaction")
+        staged = _staged_snapshot_receipt(directory, operation, self.state_root)
+        previous = _historical_receipt_record(staged, operation["path"])
+        _require_historical_request(previous, identity)
+        return _CurrentHistoricalSourceWork(self, previous).verified()
 
     def _historical_source_outcome(self, identifier):
         """A different committed v3 receipt can prove the exact historical work.
