@@ -477,6 +477,7 @@
   "test_compile_binds_the_protected_source_view.py": 0.09,
   "test_compile_bullets_keep_the_complete_physical_line.py": 0.0,
   "test_compile_cache.py": 4.97,
+  "test_compile_authored_citations.py": 0.31,
   "test_compile_ceiling_counts_only_compile_inputs.py": 0.01,
   "test_compile_claims_producer.py": 9.31,
   "test_compile_context_selection_measures_the_daily_once.py": 0.01,

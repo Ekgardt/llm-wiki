@@ -84,6 +84,7 @@ from evidence_resolver import (  # noqa: E402
     EvidenceResolver,
     _daily_part_bounds,
     daily_entries,
+    extract_evidence_references,
 )
 from iso_time import block_instant  # noqa: E402
 from llm_client import (  # noqa: E402
@@ -150,7 +151,7 @@ COMPILE_RECEIPT_V4_SCHEMA = Path(__file__).with_name("schemas") / "compile-recei
 VALIDATION_RETRIES = 2
 
 COMPILER_VERSION = "2.1.0"
-NORMALIZATION_VERSION = "normalize-v4"
+NORMALIZATION_VERSION = "normalize-v5"
 # Generic compile context pages; numerical basis remains under audit.
 # Daily readers use the existing archive contract and total compile budget.
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
@@ -2898,10 +2899,31 @@ def _validate_semantic_operation(
     evidence = operation["evidence"]
     _require_evidence_shape(evidence)
     bound = [_bound_evidence_block(item, inputs) for item in evidence]
+    _require_authored_citations(operation, bound)
     _require_claims(operation, inputs)
     normalized = json.loads(claim_json_bytes(operation))
     assert isinstance(normalized, dict)
     return _with_page_project(normalized, [block for _binding, block in bound]), [binding for binding, _block in bound]
+
+
+def _authored_citation_strings(operation: Mapping[str, object]) -> list[str]:
+    fields = [str(operation[key]) for key in ("title", "summary", "body_markdown")]
+    claims = [str(item["claim"]) for item in operation["evidence"]]
+    return fields + claims + list(operation.get("related") or [])
+
+
+def _require_authored_citations(operation, bound) -> None:
+    """Refuse prose citations the operation's source binding did not prove.
+
+    The renderer also copies model prose. Valid evidence elsewhere on a page
+    cannot authorize a malformed or unrelated reference inside that prose.
+    Existing target prose is not newly authored and is not reclassified here.
+    """
+    allowed = {EvidenceRef.parse(binding["reference"]) for binding, _block in bound}
+    for text in _authored_citation_strings(operation):
+        references = extract_evidence_references(text)
+        if not set(references).issubset(allowed):
+            raise ValueError("authored citation is not bound to operation evidence")
 
 
 # The line a captured session block names its project with; `session-end` blocks
