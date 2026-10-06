@@ -337,3 +337,62 @@ The live SourceWork failure and its 20 model calls remain counted. This candidat
 has not rerun that useful model cycle, settled historical SQL records, or closed
 point 7. The prior D matched CPU evidence concerns one layout scope only; it is
 not a complete-cycle speed claim.
+
+### 2026-10-06 — Automatic compile preserves existing decisions
+
+The canonical operating contract makes decisions immutable, except a separate
+editorial correction directly authorized by the user. The existing compiler
+checked target existence and retired status, but not the existing target's type.
+A draft could name an active decision as an update, or a drafted create could be
+converted mechanically to an update because its slug already existed. The model's
+proposed category did not establish permission to edit that page.
+
+The shared `_require_target_state` now keeps its existence checks and requires a
+mutable existing target. It reads the original `TargetSnapshot.content` through
+the existing `corpus_snapshot.read_frontmatter` reader. A decision refuses the
+whole automatic operation. Unreadable frontmatter cannot prove mutability and
+also refuses visibly. Missing frontmatter retains the existing legacy-note path;
+body text that happens to contain `type: decision` is not metadata. Quoted YAML
+values and CRLF use the common parser. No category supplied by the model can
+change the target's type. The generic transaction coordinator and operator-owned
+editorial mutation APIs are unchanged. No operation is silently discarded and no
+source is falsely marked completed.
+
+Primary design sources read on 2026-10-06:
+
+- [OWASP authorization guidance](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html):
+  validate authorization at each operation and deny by default when authority
+  cannot be established. A prompt instruction is not an enforcement boundary.
+- [W3C PROV-DM](https://www.w3.org/TR/prov-dm/): a specific provenance entity has
+  fixed aspects; a derived or revised entity is distinct. This supports preserving
+  the old decision and its evidence, rather than rewriting it automatically.
+  This 2013 Recommendation remains the current published specification; the
+  immutability obligation here comes from the user's existing operating contract.
+- [Git hash-object](https://git-scm.com/docs/git-hash-object): object identity is
+  bound to actual contents, not a proposed name or model category. The guard uses
+  already-captured original bytes; existing hash/CAS publication guards remain.
+
+Alternatives rejected: inspecting the model category permits category forgery;
+protecting only retired status misses active decisions; dropping the forbidden
+operation conceals rejected work; a generic coordinator ban would obstruct the
+existing explicit operator correction. A compiler-local shared validation rule
+protects direct plan validation, normal application and create-to-existing
+normalization without changing schema, interfaces, runtime or paths.
+
+Original regressions: seven genuine failures, with three initial positive
+controls. They cover active and quoted/CRLF decision types, direct normalized
+validation, normal application, existing-slug conversion and unreadable metadata.
+The positive controls keep normal concept updates, new decision creation and the
+operator transaction path. An additional positive control keeps explicit operator
+status/superseded_by transition available without changing the decision body.
+The existing claim-lifecycle publication path is unchanged; this guard applies to
+model-authored create/update content, not approved lifecycle operations.
+This proves an automatic-compiler boundary; it does
+not prove that any live worker changed an existing decision or close point 7.
+
+The final operator controls commit both editorial and lifecycle transactions,
+verify the exact new bytes/status, then apply normal undo and verify the exact
+original bytes. An initial new-test assumption that every append retains a
+physical before-image was wrong: the existing append format retains original
+length/hash and reconstructs its authenticated prefix during undo. That failed
+fixture is retained separately; the corrected control tests actual recovery.

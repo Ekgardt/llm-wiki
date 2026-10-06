@@ -482,6 +482,7 @@
   "test_compile_ceiling_counts_only_compile_inputs.py": 0.01,
   "test_compile_claims_producer.py": 9.31,
   "test_compile_context_selection_measures_the_daily_once.py": 0.01,
+  "test_compile_does_not_update_immutable_decisions.py": 0.76,
   "test_compile_draft_offers_only_present_evidence_styles.py": 0.01,
   "test_compile_estimate_reuses_immutable_inputs.py": 0.63,
   "test_compile_failure.py": 1.88,

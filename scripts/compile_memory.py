@@ -3242,11 +3242,33 @@ def _snapshot_action(target: TargetSnapshot | None) -> str:
 def _require_target_state(
     semantic: Mapping[str, object], target: TargetSnapshot | None
 ) -> None:
+    """Automatic compile may create decisions, but never edit an existing one."""
+    _require_existing_target_state(semantic, target)
+    _require_mutable_compile_target(target)
+
+
+def _require_existing_target_state(semantic, target) -> None:
     """A create must not overwrite, and an update must not invent."""
     if semantic["action"] == "create" and target is not None:
         raise ValueError("create target existed in the immutable snapshot")
     if semantic["action"] == "update" and target is None:
         raise ValueError("update target was absent from the immutable snapshot")
+
+
+def _require_mutable_compile_target(target) -> None:
+    if target is None:
+        return
+    if _compile_target_type(target) == "decision":
+        raise ValueError("automatic compile cannot update an immutable decision")
+
+
+def _compile_target_type(target):
+    from corpus_snapshot import read_frontmatter
+
+    metadata = read_frontmatter(target.content)
+    if metadata.problem is not None:
+        raise ValueError("compile target frontmatter cannot prove mutability")
+    return metadata.mapping.get("type")
 
 
 def _require_unique_path(paths: set[str], path: str) -> None:
