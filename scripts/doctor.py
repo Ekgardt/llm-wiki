@@ -48,7 +48,12 @@ from settings import (
     settings_path,
 )
 from settings import effective as effective_settings
-from transaction_lineage import committed_created_paths, outcome_was_written, resolved_by_lineage
+from transaction_lineage import (
+    base_operation_identity,
+    committed_created_paths,
+    outcome_was_written,
+    resolved_by_lineage,
+)
 
 try:
     import tomllib as STDLIB_TOML
@@ -1725,15 +1730,15 @@ def _snapshot_receipt_fields(raw: bytes, path: str) -> tuple[str, str]:
     return fields
 
 
-def _committed_snapshot_receipt(database, path: str, raw: bytes, fields) -> bool:
+def _committed_snapshot_receipt(database, path: str, raw: bytes, fields, *, require_create: bool = False) -> bool:
     from compile_memory import _require_operation_integrity, parse_compile_receipt_version
 
     record = parse_compile_receipt_version(raw, logical_path=fields[0], source_sha256=fields[1])
     row = database.execute(
         'SELECT t.id FROM "transaction" t JOIN operation o ON o.transaction_id=t.id '
-        "WHERE t.state='committed' AND o.path=? AND o.after_hash=? "
+        "WHERE t.state='committed' AND o.path=? AND o.after_hash=? AND (?=0 OR o.kind='create') "
         "AND (t.operation_id=? OR t.operation_id LIKE ?) ORDER BY t.created_at DESC LIMIT 1",
-        (path, hashlib.sha256(raw).hexdigest(), record["operation_id"], record["operation_id"] + "#%"),
+        (path, hashlib.sha256(raw).hexdigest(), require_create, record["operation_id"], record["operation_id"] + "#%"),
     ).fetchone()
     if row is None:
         return False
@@ -1842,8 +1847,44 @@ class _DoctorCompileAuthority(MarkdownCoordinator):
         yield self.database
 
 
+def _historical_receipt_record(raw, path):
+    from compile_memory import parse_compile_receipt_version
+
+    fields = _snapshot_receipt_fields(raw, path)
+    record = parse_compile_receipt_version(raw, logical_path=fields[0], source_sha256=fields[1])
+    if record["schema_version"] != "compile-receipt/v3":
+        raise ValueError("historical source outcome requires a legacy v3 receipt")
+    if record["source"] not in record["batch_manifest"]:
+        raise ValueError("historical source lacks a complete terminal batch binding")
+    return record
+
+
+def _same_historical_source(previous, current):
+    return (previous["source"] == current["source"]
+            and previous["batch_manifest"] == current["batch_manifest"])
+
+
+def _require_historical_request(previous, identity):
+    if previous["operation_id"] != identity:
+        raise ValueError("staged receipt disagrees with the historical compile request")
+
+
+def _historical_compile_identity(database, identifier):
+    row = database.execute('SELECT operation_id,state FROM "transaction" WHERE id=?', (identifier,)).fetchone()
+    if row is None or row["state"] != "quarantined":
+        raise ValueError("historical compile requires a retained quarantined attempt")
+    identity = base_operation_identity(row["operation_id"])
+    if not identity.startswith("compile:"):
+        raise ValueError("historical outcome is not a compile attempt")
+    return identity
+
+
 class _CompiledDaySupersession:
-    """The fourth proof: a refused compile of days that are compiled now.
+    """Read-only outcomes for refused compiles; quarantine remains retained.
+
+    A different committed immutable v3 receipt can prove the exact historical
+    source descriptor and complete batch manifest. That proof does not select
+    the current day, promote v3 to v4 authority, or grant deletion permission.
 
     A refused attempt that meant to create only compile receipts is history
     when every day its staged receipts name is compiled as it stands today:
@@ -1877,7 +1918,50 @@ class _CompiledDaySupersession:
     def _exact_or_source_outcome(self, identifier):
         return _compile_snapshot_was_written(
             self.database, identifier, self.vault_root, self.state_root
-        ) or self._source_context_outcome(identifier)
+        ) or self._historical_source_outcome(identifier) or self._source_context_outcome(identifier)
+
+    def _historical_source_outcome(self, identifier):
+        """A different committed v3 receipt can prove the exact historical work.
+
+        This does not select the current day or alter the quarantined record.
+        Both complete source descriptors and all batch members must agree.
+        """
+        if self.vault_root is None:
+            return False
+        try:
+            identity = _historical_compile_identity(self.database, identifier)
+            receipts = _intended_compile_receipts(self.database, identifier)
+            directory, plan = _verified_compile_plan(self.database, identifier, self.state_root)
+            staged = _staged_receipt_operations(plan, receipts)
+            return bool(receipts) and all(
+                self._historical_receipt_outcome(directory, staged[path], digest, identity)
+                for path, digest in receipts.items()
+            )
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError, lzma.LZMAError):
+            self._require_active()
+            return False
+
+    def _historical_receipt_outcome(self, directory, operation, digest, identity):
+        self._require_active()
+        if operation["after"]["sha256"] != digest:
+            raise ValueError("staged receipt hash disagrees with transaction")
+        path = operation["path"]
+        staged = _staged_snapshot_receipt(directory, operation, self.state_root)
+        previous = _historical_receipt_record(staged, path)
+        _require_historical_request(previous, identity)
+        raw = self._historical_receipt_bytes(path)
+        current = _historical_receipt_record(raw, path)
+        if not _same_historical_source(previous, current):
+            return False
+        fields = (current["source"]["logical_path"], current["source"]["sha256"])
+        committed = _committed_snapshot_receipt(self.database, path, raw, fields, require_create=True)
+        return committed and self._historical_receipt_bytes(path) == raw
+
+    def _historical_receipt_bytes(self, path):
+        self._require_active()
+        raw = read_stable_bytes(self.vault_root / path, _MAX_STAGED_RECEIPT_BYTES, label="compile receipt")
+        self._require_active()
+        return raw
 
     def _source_context_outcome(self, identifier):
         if self.vault_root is None:

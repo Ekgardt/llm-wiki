@@ -530,6 +530,7 @@
   "test_doctor_checkpoint_lineage.py": 0.01,
   "test_doctor_containment_reads_the_current_tree.py": 0.01,
   "test_doctor_database_reads_keep_the_caller_deadline.py": 0.05,
+  "test_doctor_exact_legacy_source_outcome.py": 14.95,
   "test_doctor_knows_the_abort_states.py": 0.0,
   "test_doctor_maintenance_owner_v3.py": 38.31,
   "test_doctor_names_hooks_older_than_the_release.py": 0.01,
