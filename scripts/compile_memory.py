@@ -2593,6 +2593,11 @@ def _draft_prompt(inputs: CompileInputs) -> str:
 
 
 def _draft_layout(inputs):
+    with _layout_protection_scope():
+        return _protected_draft_layout(inputs)
+
+
+def _protected_draft_layout(inputs):
     choices = _source_line_choices(inputs)
     prompt = _render_choice_prompt(_draft_base_prompt(inputs), choices)
     schema = _source_choice_schema(_draft_base_schema(inputs), choices)
@@ -2610,10 +2615,50 @@ def _render_choice_prompt(base, choices):
     return prompt
 
 
-def _protected_choice_base(base):
+_LAYOUT_PROTECTION = ContextVar("layout_protection", default=None)
+
+
+@contextmanager
+def _layout_protection_scope():
+    token = _LAYOUT_PROTECTION.set({})
+    try:
+        yield
+    finally:
+        _LAYOUT_PROTECTION.reset(token)
+
+
+def _choice_base_transport(base):
     from llm_client import _Blocked, _protected_transport
 
-    protected = _protected_transport("", base, None)
+    scope = _LAYOUT_PROTECTION.get()
+    if scope is None:
+        return _protected_transport("", base, None)
+    return _scoped_choice_transport(base, scope, _Blocked, _protected_transport)
+
+
+def _retain_choice_transport(base, scope, blocked, transport):
+    result = transport("", base, None)
+    if not isinstance(result, blocked):
+        scope["base"] = (base, result)
+    return result
+
+
+def _scoped_choice_transport(base, scope, blocked, transport):
+    from model_dlp import load_policy
+
+    retained = scope.get("base")
+    if retained is None:
+        return _retain_choice_transport(base, scope, blocked, transport)
+    original, result = retained
+    if base != original or load_policy() != result.policy:
+        raise ValueError("compile source choices protection identity changed")
+    return result
+
+
+def _protected_choice_base(base):
+    from llm_client import _Blocked
+
+    protected = _choice_base_transport(base)
     if isinstance(protected, _Blocked):
         raise ValueError('compile source address view blocked by DLP')
     return protected.prompt
@@ -3678,9 +3723,9 @@ def _protected_source_rows(inputs, paths, *, native):
 
 
 def _protected_prompt_rows(prompt):
-    from llm_client import _Blocked, _protected_transport
+    from llm_client import _Blocked
 
-    protected = _protected_transport("", prompt, None)
+    protected = _choice_base_transport(prompt)
     if isinstance(protected, _Blocked):
         raise ValueError("compile evidence projection is blocked by DLP")
     return _aligned_prompt_rows(prompt, protected.prompt, protected.policy)
@@ -4619,6 +4664,11 @@ def _operation_content(planned: Mapping[str, object]) -> dict[str, object]:
 def _bound_evidence(
     operation_path: str, bindings: Sequence[Mapping[str, str]], inputs=None,
 ) -> list[dict[str, str]]:
+    records = _receipt_evidence_records(operation_path, bindings, inputs)
+    return list({canonical_json_bytes(item): item for item in records}.values())
+
+
+def _receipt_evidence_records(operation_path, bindings, inputs):
     if inputs is not None:
         return [item for binding in bindings
                 for item in _part_evidence_records(operation_path, binding, inputs)]

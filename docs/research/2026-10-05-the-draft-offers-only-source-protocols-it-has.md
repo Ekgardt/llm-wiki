@@ -233,3 +233,107 @@ tuple, rather than demanding the stale tuple object after legitimate environment
 change. Unchanged candidate identities retain their original tuple. Model and
 budget guards, mandatory source identities and readiness checks remain. No
 provider choice, budget, persistent format or source partition changes.
+
+## 2026-10-06: one protected base per draft layout
+
+The observed refresh spends 2642 of 3967 nonempty sampling observations in
+`_redact_patterns` and `_redact_named_values`. Each optional-context offer builds
+one complete layout. Its exact base is protected once for choice binding and
+again for display; the appended prompt receives a third complete scan. These
+are repeated CPU work, not model wait. Sampling counts are not invocation counts
+or an isolated CPU benchmark.
+
+The candidate retains one protected base only for the lifetime of one
+`_draft_layout`, with an exact full-text comparison and a fresh policy-value
+comparison before reuse. Exceptions reset that scope. Standalone choice/prompt
+calls keep their existing fresh scans. The complete appended prompt and final
+dispatch still receive fresh full scans. No successful alias, physical-source,
+filesystem, native companion, or CAS verdict is cached across contexts/batches.
+
+The original production layout scans the same exact base twice: the regression
+fails with actual count 2 where 1 is required. Drift and unavailable policy,
+redaction of appended addresses, and a secret assembled across the base/address
+boundary remain refusals. Existing source choices, physical evidence bindings,
+whole-source transport, and no-choice behavior retain their contracts.
+
+Primary research checked 2026-10-06:
+
+- [Python 3.10 regular expressions](https://docs.python.org/3.10/library/re.html):
+  substitutions depend on the complete string and matching flags. Fragment scans
+  cannot be assumed equivalent to the current whole-prompt pipeline.
+- [Git racy-file identity](https://git-scm.com/docs/racy-git): metadata alone is
+  insufficient identity. The candidate compares exact retained text and freshly
+  loaded policy values, not path/stat identity.
+- [OWASP prompt-injection prevention](https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html):
+  model and input data remain untrusted; output/source authorization still needs
+  its independent checks.
+
+Fragment redaction and cross-context success caches were rejected: whole-string
+allow fingerprints, configured literals, cross-boundary matches, and protected
+alias ambiguity make them different security operations. This removes one
+redundant base scan, not the required whole appended/dispatch checks. It neither
+qualifies the untouched planning constants nor proves full-cycle model
+usefulness or closes the remaining problem-day backlog.
+
+The matched no-inference sample reuses one retained genuine complete unit and
+all 1734 optional offers in two independent processes. Final prompt, schema,
+protected Codex stdin, physical descriptors, selected context, packing metadata
+and target snapshots are identical. Baseline selection used 106.060 CPU seconds
+and 139.367 wall seconds; the candidate used 64.527 CPU seconds and 72.020 wall
+seconds. Peak RSS was 89324 versus 89892 KiB (+568 KiB). The host concurrently ran
+normal SourceWork, so wall times are not isolated benchmarks. This is not a
+whole-cycle token, publication, semantic-quality, or backlog-completion proof.
+The retained original RED and an initially misbound new drift-test fixture remain
+recorded; the fixture was corrected to observe both actual loader call sites.
+
+### 2026-10-06 — Preserve claims while canonicalizing receipt evidence
+
+The retained accepted plan failed publication because multiple semantic evidence
+items projected to the same receipt record. The current canonical cache entry
+SHA-256 is `15e4912ffa91cfdbf266afe47ba843eafa913ce8a25dc9bc6b754a5f75177f73`.
+Normal materialization independently reproduced 17 operations, 31 receipt records,
+28 distinct records and three duplicate groups. A single captured immutable input
+was shared by the original and candidate validators, using exact dataclass-field
+conversion between independently loaded compiler modules. All 17 rendered output
+hashes and every distinct receipt record matched. The candidate emitted 28 records.
+No model, transaction replay or live-vault mutation was performed.
+
+Receipt evidence is a projection, not the ordered semantic assertion list. The
+common `_bound_evidence` boundary now validates every binding and required source
+part first, then retains one record for each exact canonical JSON representation.
+Every record field participates, including any retained legacy extra field. The
+first occurrence determines order. Different operation paths, source paths,
+source digests and quote digests remain distinct. Semantic evidence, its indices,
+claims, rendered text and claim ledger are unchanged. The receipt schemas and
+`uniqueItems` validation remain strict. This does not grant new source authority.
+
+Primary sources checked on 2026-10-06:
+
+- [JSON Schema validation, section 6.4.3](https://json-schema.org/draft/2020-12/json-schema-validation):
+  `uniqueItems` requires distinct array values. The published draft describes the
+  assertion; the product keeps its existing local schema and validator.
+- [Python 3.10 dictionary contract](https://docs.python.org/3.10/library/stdtypes.html#mapping-types-dict):
+  dictionaries preserve insertion order. Exact canonical record bytes are keys;
+  no digest-only identity or partial-field deduplication is introduced.
+- [W3C PROV data model](https://www.w3.org/TR/prov-dm/): provenance entities and their
+  uses are distinct from semantic statements about those entities. A repeated
+  provenance projection does not justify discarding a claim.
+
+Rejected alternatives: dropping duplicate semantic evidence would risk evidence
+indices and claims; deduplicating only quote hashes would merge distinct source
+or operation provenance; relaxing the receipt schema would conceal malformed
+receipts; changing persisted formats is unnecessary. Exact canonical record
+keys add temporary storage proportional to validated receipt evidence, without a
+new cap or persistent cache.
+
+Regression evidence includes original duplicate-materialization failures and an
+original normal temporary-vault v4 publication failure at `$.evidence uniqueItems`.
+The corrected publication retains both assertions. Negative controls preserve
+source-tamper refusal, distinct record fields, legacy extra fields and strict
+schema uniqueness. Initial test/operator mistakes (module import, missing model
+argument, schema-object API, and independent-module snapshot class mismatch) are
+retained in private logs; they are not product failures or successful proof.
+The live SourceWork failure and its 20 model calls remain counted. This candidate
+has not rerun that useful model cycle, settled historical SQL records, or closed
+point 7. The prior D matched CPU evidence concerns one layout scope only; it is
+not a complete-cycle speed claim.
