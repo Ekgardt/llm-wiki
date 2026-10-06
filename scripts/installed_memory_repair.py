@@ -1336,11 +1336,13 @@ def _validate_capture_intent(row: sqlite3.Row, state_root: Path, *, deadline: fl
 
 
 def _require_capture_document(payload: bytes, row: sqlite3.Row, state_root: Path, deadline: float) -> None:
+    from breadcrumb_protocol import _RecordParsing, _using_record_parsing
     from capture_adoption import verified_capture_handler
 
     _check_deadline(deadline)
     try:
-        verified_capture_handler(state_root, dict(row), payload, deadline=deadline)
+        with _using_record_parsing(_RecordParsing(active=partial(_check_deadline, deadline))):
+            verified_capture_handler(state_root, dict(row), payload, deadline=deadline)
     except (KeyError, TypeError, RuntimeError) as error:
         raise ValueError("capture intent format or identity is invalid") from error
     _check_deadline(deadline)

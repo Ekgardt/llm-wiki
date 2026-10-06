@@ -420,6 +420,7 @@
   "test_breadcrumb_worker_process_death.py": 124.43,
   "test_build_tiers.py": 0.6,
   "test_capture_admission_does_not_scan_retained_history.py": 4.24,
+  "test_capture_bundle_validation_has_one_parsing_scope.py": 0.11,
   "test_capture_diagnostics.py": 0.92,
   "test_capture_failure_is_recorded.py": 0.43,
   "test_capture_failure_trail_names_the_event.py": 0.01,
