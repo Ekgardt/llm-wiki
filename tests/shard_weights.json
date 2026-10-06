@@ -601,6 +601,7 @@
   "test_forgotten_not_gone.py": 0.03,
   "test_four_small_capture_corrections.py": 6.79,
   "test_fresh_positions.py": 0.07,
+  "test_frontmatter_uses_optional_safe_yaml_acceleration.py": 0.02,
   "test_generation_catalog.py": 51.08,
   "test_generation_integration.py": 8.14,
   "test_generation_maintenance.py": 167.28,

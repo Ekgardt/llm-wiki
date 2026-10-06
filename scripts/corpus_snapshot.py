@@ -1705,9 +1705,19 @@ class Frontmatter:
     problem: str | None = None
 
 
+def _safe_frontmatter_yaml(text: str):
+    loader = getattr(yaml, "CSafeLoader", None)
+    if loader is None:
+        return yaml.safe_load(text)
+    try:
+        return yaml.load(text, Loader=loader)
+    except yaml.YAMLError:
+        return yaml.safe_load(text)
+
+
 def _frontmatter_mapping(raw: bytes) -> tuple[dict[str, Any], str | None]:
     try:
-        value = yaml.safe_load(raw.decode("utf-8", errors="strict"))
+        value = _safe_frontmatter_yaml(raw.decode("utf-8", errors="strict"))
     except (UnicodeDecodeError, yaml.YAMLError) as exc:
         return {}, f"frontmatter is not valid YAML ({type(exc).__name__})"
     if value is None:
