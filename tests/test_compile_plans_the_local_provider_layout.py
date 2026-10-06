@@ -1,4 +1,6 @@
 """Packing and final fit include the local Codex input's actual framing."""
+import json
+
 import compile_memory as compiler
 import llm_client as client
 from context_budget import ContextBudget
@@ -17,7 +19,10 @@ def _codex_text(prompt, system, schema):
 def test_codex_draft_planning_counts_the_complete_local_stdin(monkeypatch):
     monkeypatch.setenv('MEMORY_LLM_PROVIDER', 'codex')
     inputs = compiler.CompileInputs((), (), ())
-    actual = _codex_text(compiler._draft_prompt(inputs), compiler.DRAFT_SYSTEM, compiler.RAW_PLAN_SCHEMA)
+    schema = json.loads(compiler.canonical_json_bytes(compiler.RAW_PLAN_SCHEMA))
+    evidence = schema['properties']['operations']['items']['properties']['evidence']
+    evidence['items'] = json.loads(compiler.canonical_json_bytes(compiler._LEGACY_EVIDENCE_SCHEMA))
+    actual = _codex_text(compiler._draft_prompt(inputs), compiler.DRAFT_SYSTEM, schema)
     assert compiler._draft_prompt_text(inputs) == actual
 
 
