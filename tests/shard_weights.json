@@ -494,6 +494,7 @@
   "test_compile_packing_counts_original_entry_metadata.py": 0.01,
   "test_compile_packing_reuses_only_selected_projection.py": 0.1,
   "test_compile_plans_the_local_provider_layout.py": 0.02,
+  "test_compile_prompt_explains_decision_immutability.py": 0.01,
   "test_compile_provider_ceiling.py": 0.01,
   "test_compile_receipt_evidence_preserves_distinct_claims.py": 0.22,
   "test_compile_refresh_requalifies_changed_provider_environment.py": 0.08,
