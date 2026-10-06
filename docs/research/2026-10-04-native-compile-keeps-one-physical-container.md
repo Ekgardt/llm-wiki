@@ -126,3 +126,99 @@ Qualification checkpoint on 2026-10-04:
 
 All qualification artifacts are private local logs; the public source ships
 neither the owner's original conversation nor generated memory.
+
+
+### 2026-10-06: temporary source-line addresses, qualification pending
+
+The isolated prototype keeps the complete ordinary selected source contiguous
+in the prompt. A separate address-only table associates untrusted integer
+choices with visible FILE-block LF rows. The existing binder authenticates
+every offered row and expands a choice into the unchanged four-field legacy
+evidence before ordinary validation. Projected native sources receive no IDs.
+Duplicate aliases, partial rows, changed bytes, foreign/context IDs and boolean
+IDs remain refused. No receipt, ledger, source authority or durable schema changes.
+
+The resolver owns only a pure immutable-byte digest, UTF-8, entry and newline
+index. It retains the exact bytes object; each resolution still checks its
+requested digest, block, span and line fields. Filesystem, companion, capture,
+DLP alias and CAS verdicts are not cached. A choice map groups identical
+path/timestamp/protected-quote pairs within one complete protected prompt;
+the returned physical reference must match every offered original row.
+
+The final related suite passed 466 tests in 75.18 seconds. On the retained
+15,889-byte packet the address view offered 107 unique authenticated rows.
+Its unchanged raw protected prefix was present. Actual packing took 0.779
+seconds and produced one batch estimated at 26,914 against the unchanged
+27,744 input budget; final protected fitting passed. All retained optional
+context would estimate 30,182 and does not fit. The diagnostic token-adapter
+control counts UTF-8 bytes, not actual model tokens or the full provider wire.
+
+Full selection over 1,730 captured optional sources took 192.027 seconds
+(CPU 181.144 seconds, peak RSS 82,980 KiB) under shared test load. This is
+a substantial packing cost, not an efficiency result. Useful model quality
+and total retries/cost remain unqualified. The full quote-copy map was
+rejected for excessive layout size. Inline labels were rejected after an
+unchanged regression exposed loss of contiguous original source transport.
+Those failed measurements remain retained separately. Three malformed
+model-authored body citations remain a separate validator issue; prompt
+instructions do not repair or close it. This prototype does not close the audit.
+
+Design sources, checked 2026-10-06: [OpenAI structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs)
+(shape does not prove semantic evidence), [W3C PROV](https://www.w3.org/TR/prov-dm/)
+(specific source identity), [OWASP model-input guidance](https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html)
+(untrusted downstream output), [Python immutable bytes](https://docs.python.org/3.10/library/stdtypes.html#bytes-objects),
+[Git racy stat checks](https://git-scm.com/docs/racy-git), and
+[SQLite isolation](https://www.sqlite.org/isolation.html). These justify the
+scoped proof boundaries; they do not prove CLI grammar enforcement, useful
+model behavior or full-wire capacity. Private source text remains absent
+from this public document.
+
+
+### 2026-10-06: pure entry lookup, same-input qualification
+
+A warm diagnostic corrected the initial cold-regex interpretation: repeated
+entry scans in row timestamp lookup, block selection and canonical resolver
+validation were substantial. The resolver now indexes its own canonical
+immutable-byte entries by timestamp and starting offset. Supplied entry
+metadata can borrow this index only after equality with canonical parsing.
+Strong references retain the exact bytes and immutable metadata objects.
+Mutable or mismatching metadata takes the prior hint path and cannot
+qualify source authority. Every reference still passes the existing span,
+block, digest and line checks. DLP/context aliases, successful bindings,
+external files, companions and CAS verdicts are not cached.
+
+The corrected genuine RED used three valid entries: repeated references
+inspected all three rather than their one canonical timestamp candidate.
+An earlier new fixture had invalid heading syntax; that failure was not a
+valid computational RED and is retained separately. An introduced metadata
+exception also broke an unchanged hint-only guard and was corrected without
+changing its assertion. Five targeted controls cover repeated clocks,
+mutable metadata, forged clocks, changed bytes and wrong digests. Together
+with the prior source-choice/native/archive suites, 471 tests passed in
+59.32 seconds.
+
+One captured input (1,730 optional sources) fed two isolated sequential
+processes. All 1,731 actual local planning-layout records were byte-identical,
+including the final selected estimate of 27,699, exact sources and source
+references. Baseline selection took 182.778 seconds (whole-process CPU
+178.406 seconds, peak RSS 65,696 KiB); the indexed candidate took 90.070
+seconds (CPU 90.313 seconds, peak RSS 66,220 KiB). The measured increase
+was 524 KiB. This is an observed same-input comparison under shared host
+conditions, not an isolated latency guarantee. The remaining 90 seconds
+is substantial. No model call, publication or full-cycle efficiency result
+was added by this qualification. Existing budgets and complete context
+selection were retained. The sources and tradeoffs above remain applicable;
+Python 3.10 immutable bytes and binary search provide the pure index basis,
+while Git racy-stat guidance and SQLite snapshot boundaries exclude reuse
+of live external authority verdicts.
+
+### 2026-10-06: composition with the installed authored-citation guard
+
+The final candidate retains the installed validator for all newly authored
+page strings and uses normalization identity v6. Existing target history
+is preserved. The composed related suite passed 478 tests in 55.83 seconds;
+144 changed or new callables, including nested functions and lambdas,
+passed CCN 5, two-if and two-level nesting checks. Ruff and Python 3.10
+grammar passed; six test-weight controls passed. The paired timing above
+belongs to the pre-composition pure-lookup source, not a new timing claim
+for this composition. No additional model call or publication occurred.

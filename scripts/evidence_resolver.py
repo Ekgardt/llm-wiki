@@ -6,7 +6,7 @@ import json
 import os
 import re
 import stat
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -1252,6 +1252,9 @@ class EvidenceResolver:
         # Operation-local offsets only. Every lookup re-reads and hashes the
         # source; even a same-size edit with restored timestamps invalidates it.
         self._part_offsets: dict[Path, tuple[str, dict[str, tuple[int, int] | None]]] = {}
+        # Strong references qualify only these exact immutable byte objects.
+        self._immutable_sources = {}
+        self._immutable_entry_metadata = {}
 
     def resolve(self, reference: EvidenceRef | str) -> ResolvedEvidence:
         ref = EvidenceRef.parse(reference) if isinstance(reference, str) else reference
@@ -1291,15 +1294,69 @@ class EvidenceResolver:
         *,
         source_path: Path,
         location: str = "snapshot",
+        reuse_immutable: bool = False,
     ) -> ResolvedEvidence:
-        """Apply the same hash/block/span checks to an immutable in-memory source."""
+        """Apply hash/block/span checks; optionally reuse this resolver's raw byte proof."""
         ref = EvidenceRef.parse(reference) if isinstance(reference, str) else reference
         if not isinstance(ref, EvidenceRef) or not isinstance(content, bytes):
             raise TypeError("reference and immutable content have invalid types")
+        if reuse_immutable:
+            return self._resolve_immutable_bytes(ref, content, Path(source_path), location)
+        return self._resolve_uncached_bytes(ref, content, Path(source_path), location)
+
+    def _resolve_uncached_bytes(self, ref, content, source_path, location):
         if sha256_bytes(content) != ref.source_sha256:
             raise EvidenceResolutionError("immutable daily source hash mismatch")
-        return self._slice(ref, content, Path(source_path), location)
+        return self._slice(ref, content, source_path, location)
 
+    def _resolve_immutable_bytes(self, ref, content, source_path, location):
+        proof = self._immutable_byte_proof(content)
+        if proof[1] != ref.source_sha256:
+            raise EvidenceResolutionError("immutable daily source hash mismatch")
+        selected = _checked_evidence_span(ref, content)
+        block = _sole_entry_span(ref, proof[4].get(ref.block_id, ()))
+        return _resolved_byte_span(ref, content, source_path, location, selected, block, proof[1],
+                                   lines=_indexed_line_span(proof[3], ref.byte_start, ref.byte_end))
+
+    def _immutable_byte_proof(self, content):
+        proof = self._immutable_sources.get(id(content))
+        if proof is None or proof[0] is not content:
+            _require_utf8(content, "daily source is not UTF-8")
+            entries = tuple(daily_entries(content))
+            proof = (content, sha256_bytes(content), entries,
+                     tuple(match.start() for match in re.finditer(b"\n", content)),
+                     _entry_groups(entries), tuple(start for _block, start, _end in entries))
+            self._immutable_sources[id(content)] = proof
+        return proof
+
+    def _indexed_source_entries(self, content, entries):
+        if not isinstance(content, bytes):
+            raise TypeError("entry index requires immutable source bytes")
+        key = (id(content), id(entries))
+        cached = self._immutable_entry_metadata.get(key)
+        if cached is not None and cached[0] is content and cached[1] is entries:
+            return cached[2]
+        return self._checked_entry_metadata(content, entries, key)
+
+    def _checked_entry_metadata(self, content, entries, key):
+        proof = self._immutable_byte_proof(content)
+        if tuple(entries) != proof[2]:
+            return None
+        if type(entries) is tuple:
+            self._immutable_entry_metadata[key] = (content, entries, proof)
+        return proof
+
+    def declaring_entries(self, content, entries, timestamp):
+        proof = self._indexed_source_entries(content, entries)
+        if proof is None:
+            return [(start, end) for block, start, end in entries if block == timestamp]
+        return [(start, end) for _block, start, end in proof[4].get(timestamp, ())]
+
+    def entry_ids_at(self, content, entries, offset):
+        proof = self._indexed_source_entries(content, entries)
+        if proof is None:
+            return tuple(sorted({block for block, start, end in entries if start <= offset < end}))
+        return _indexed_entry_ids_at(proof, offset)
     def _resolve_archive(self, ref: EvidenceRef) -> ResolvedEvidence:
         month = self.archive_root / ref.daily_id[:7]
         if not month.exists():
@@ -1357,25 +1414,47 @@ class EvidenceResolver:
         ref: EvidenceRef, content: bytes, source_path: Path, location: str
     ) -> ResolvedEvidence:
         _require_utf8(content, "daily source is not UTF-8")
-        if ref.byte_end > len(content):
-            raise EvidenceResolutionError("evidence byte span exceeds the source")
-        selected = content[ref.byte_start : ref.byte_end]
-        _require_utf8(selected, "evidence span is not on UTF-8 boundaries")
-        block_start, block_end = _sole_block_span(content, ref)
-        line_start, line_end = _line_span(content, ref.byte_start, ref.byte_end)
-        return ResolvedEvidence(
-            reference=ref,
-            bytes=selected,
-            sha256=sha256_bytes(selected),
-            source_sha256=sha256_bytes(content),
-            block_sha256=sha256_bytes(content[block_start:block_end]),
-            byte_start=ref.byte_start,
-            byte_end=ref.byte_end,
-            line_start=line_start,
-            line_end=line_end,
-            location=location,
-            source_path=source_path,
-        )
+        selected = _checked_evidence_span(ref, content)
+        block = _sole_block_span(content, ref)
+        return _resolved_byte_span(ref, content, source_path, location, selected, block, sha256_bytes(content))
+
+
+def _indexed_entry_ids_at(proof, offset):
+    index = bisect_right(proof[5], offset) - 1
+    if index < 0:
+        return ()
+    block, start, end = proof[2][index]
+    return (block,) if start <= offset < end else ()
+
+
+def _entry_groups(entries):
+    groups = {}
+    for entry in entries:
+        groups.setdefault(entry[0], []).append(entry)
+    return {key: tuple(value) for key, value in groups.items()}
+
+
+def _checked_evidence_span(ref, content):
+    if ref.byte_end > len(content):
+        raise EvidenceResolutionError("evidence byte span exceeds the source")
+    selected = content[ref.byte_start:ref.byte_end]
+    _require_utf8(selected, "evidence span is not on UTF-8 boundaries")
+    return selected
+
+
+def _indexed_line_span(newlines, start, end):
+    return bisect_left(newlines, start) + 1, bisect_left(newlines, end - 1) + 2
+
+
+def _resolved_byte_span(ref, content, source_path, location, selected, block, digest, *, lines=None):
+    block_start, block_end = block
+    line_start, line_end = lines or _line_span(content, ref.byte_start, ref.byte_end)
+    return ResolvedEvidence(
+        reference=ref, bytes=selected, sha256=sha256_bytes(selected), source_sha256=digest,
+        block_sha256=sha256_bytes(content[block_start:block_end]), byte_start=ref.byte_start,
+        byte_end=ref.byte_end, line_start=line_start, line_end=line_end,
+        location=location, source_path=source_path,
+    )
 
 
 def _flat_source(flat: Path) -> bytes | None:
@@ -1403,9 +1482,13 @@ def _sole_block_span(content: bytes, ref: EvidenceRef) -> tuple[int, int]:
     repeated id stopped the compile of a whole day and every day after it
     (docs/research/2026-09-26-an-evidence-span-names-its-own-block.md).
     """
+    return _sole_entry_span(ref, daily_entries(content))
+
+
+def _sole_entry_span(ref, entries):
     matching = [
         (start, end)
-        for block_id, start, end in daily_entries(content)
+        for block_id, start, end in entries
         if block_id == ref.block_id and _span_inside(ref, start, end)
     ]
     if len(matching) != 1:
