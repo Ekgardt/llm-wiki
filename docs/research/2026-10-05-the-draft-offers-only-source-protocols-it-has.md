@@ -84,3 +84,152 @@ output. OpenAI and OWASP sources above were checked again on the same date.
 Evidence: `tests/test_compile_binds_the_protected_source_view.py`;
 `scripts/compile_memory.py::_protected_source_rows`;
 `scripts/compile_memory.py::_bound_protected_legacy_evidence`.
+
+### 2026-10-06: repeated address metadata must not strand a legal source part
+
+The unchanged long-entry regression exposed a new display cost. Its 83,020-byte
+ordinary source already becomes seven legal physical parts. A 16,367-byte part
+has 402 eligible addresses. Repeating its eight-character entry timestamp on
+all rows makes the address table 6,732 bytes and the actual local planning
+estimate 30,344 bytes, above the unchanged available input of 27,744 bytes.
+This is display redundancy, not an oversized native atomic unit.
+
+The derived table now groups consecutive rows under `ENTRY <timestamp>` inside
+their `FILE` block. Every ordered integer ID and visible LF-line address remains
+present. A timestamp appearing again later starts another group; no sorting or
+merging of physical source spans occurs. The selected raw source, physical part
+boundaries, receipt identities, evidence schema, binding and DLP checks, and
+input budget are unchanged. The draft identity becomes compile-draft/v11;
+normalization remains normalize-v6 because normalized evidence is unchanged.
+The same part has a 3,151-byte table and a 26,761-byte local estimate. This is an
+estimated local serialized-input measurement, not a model wire-token guarantee.
+
+Research read on 2026-10-06: Python 3.10's official
+[itertools.groupby contract](https://docs.python.org/3.10/library/itertools.html#itertools.groupby)
+groups consecutive equal keys without sorting; the W3C's stable 2013
+[PROV-DM Recommendation](https://www.w3.org/TR/prov-dm/) separates derived views
+from identified source versions; the official
+[JSON Schema object reference](https://json-schema.org/understanding-json-schema/reference/object)
+clarifies that existing required fields and additional-property restrictions
+remain the validation boundary. These sources justify lossless display grouping,
+not new source authority or inference quality. Raising the budget, changing
+physical partitions, omitting eligible addresses, and caching successful DLP or
+binding verdicts were rejected.
+
+The original isolated run retained three failures and three passing controls:
+the old long-entry assertion and two lossless display regressions fail on the
+old representation. The first measurement operator had an incorrect
+ContextBudget constructor and was retained as a failed qualification attempt;
+its corrected run uses the real `_compile_budget(None)`. An initial related-test
+command named a nonexistent file and collected zero tests; the corrected focused
+run passed 74 tests. No model calls or knowledge changes were made. Fewer display
+bytes do not establish full-cycle model usefulness, and other genuinely
+oversized requests must still be refused by the existing fit checks.
+
+The final identity string is two characters shorter than the interim display
+prototype. Thus internal model_start character offsets shift by two, while all
+integer IDs, FILE line ordinals, quoted text, timestamps and source paths remain
+identical. Matched metadata hashes exclude only model_start; they do not claim
+identical whole derived dictionaries. Extending the measurement initially
+exceeded CCN 5 and was refactored before execution; attempting to pass a tuple
+to the strict canonical-JSON helper failed and was retained before using an
+explicit deterministic diagnostic JSON serialization. No production checks were
+relaxed. Related final-v11 checks passed 338 tests in 116.85 seconds.
+
+### 2026-10-06: select context once at the point where a batch will execute
+
+The normal run eagerly packed every group with optional context, then called
+`_refresh_compile_batch` immediately before executing each group. Refresh takes a
+new context/target snapshot and performs the complete ranking and fitting again.
+The initial optional selection is therefore unused model-input work. Removing
+refresh would instead leave later groups bound to context from before earlier
+publications, so refresh remains mandatory.
+
+Public `pack_compile_batches` continues to return ready batches. Its one shared
+packing pipeline also serves internal mandatory-only run planning. A provisional
+batch retains the exact complete source parts, manifest, selected provider/model
+and budget, and sets the transient `context_pending` field. This field defaults
+to false for existing callers, is excluded from comparison, and never enters the
+explicit persisted packing dictionary. It is misuse prevention, not authority.
+Resolution, cache lookup, low-level fit/dispatch and publication reject such a
+batch. Normal refresh performs the one full fresh selection, verifies unchanged
+manifest/model/candidate ownership/budget, and emits a ready batch with the final
+measured packing. Complete context remains available for selection; no offer cap,
+source omission, DLP verdict cache, budget change or durable format is added.
+
+Design sources read on 2026-10-06: Python 3.10's official
+[dataclass field/replace documentation](https://docs.python.org/3.10/library/dataclasses.html)
+explains transient fields and comparison (frozen objects are not a security
+boundary); official [SQLite isolation documentation](https://www.sqlite.org/isolation.html)
+does not grant filesystem snapshot authority; MITRE's
+[CWE-367](https://cwe.mitre.org/data/definitions/367.html)
+explains why earlier checks cannot replace checks at use. Existing physical
+source, native/tool companion, target, writer and CAS guards remain outside the
+provisional state. Alternatives rejected were removing refresh, caching stale
+initial optional selections, disabling context, or making public ready packing
+implicitly lazy. This is internal ephemeral orchestration, not a new setting,
+path, environment variable, authority or receipt contract.
+
+The first original regression run retained six failures and one passing control;
+the restored original with expanded guards retained eleven failures and three
+passing controls. The original unused-selection test observes a real selection
+call, rather than relying only on a missing new field. The candidate's 308 related
+tests passed. Existing test files and assertions remain unchanged. Pure paired
+measurement uses one complete genuine physical unit and one captured full context
+for both processes. Its context callback intentionally holds that snapshot for a
+matched packing comparison; this measures packing, not fresh collection or model
+quality. Live physical/frame checks are still performed normally. Full-cycle speed,
+provider quality and overall audit completion require separate evidence.
+
+The matched sample has 1,734 available context sources. Old initial selection
+used 106.886 seconds and old refresh 107.854 seconds; mandatory-only planning
+used 0.148 seconds and candidate refresh 106.280 seconds. Observed selection
+passes changed from two to one. CPU totals were 210.179 and 105.363 seconds;
+peak RSS was 89,604 and 89,692 KiB respectively. Every final prompt/schema,
+protected Codex-local stdin, physical descriptor, packing field, selected source
+and captured target matched exactly; the final local stdin was 27,678 bytes.
+This is a shared-host, one-unit observation with retained context, not a measured
+32-unit improvement, full-wire token guarantee or useful-model cycle. It also
+shows that the remaining necessary final selection is still expensive.
+The measurement operator initially exceeded CCN 5 and was refactored before
+execution. No model/bootstrap/protocol calls, SQL changes or Root edits occurred.
+
+
+## 2026-10-06 — Requalify the same provider after local environment changes
+
+The real local reranker-load diagnostic took 15.774 seconds, with peak RSS
+2,341,972 KiB and zero model turns. The existing environment digest guard passed
+before loading and refused afterward. Only the observed names are retained here:
+KMP_DUPLICATE_LIB_OK, KMP_INIT_AT_FORK and TORCHINDUCTOR_CACHE_DIR. A fresh native
+qualification passed afterward with the same client and reranker source bytes.
+This proves a possible shared cause; the earlier production error recorded only
+RuntimeError, so its exact message is not retrospectively established.
+
+Before a refreshed batch, compare its retained basis with the current provider
+environment. If changed, perform normal qualification under the original caller
+deadline and require the same provider, model, inference settings, fallback and
+backend identity. Unknown candidates keep their existing behavior. The original
+strict dispatch guard remains. Ignoring selected environment names, freezing old
+environment values and preloading the model were rejected because they obscure
+the actual executable environment or move the cost without proving equivalence.
+
+Primary sources read on 2026-10-06:
+
+- [Python 3.10 os.environ](https://docs.python.org/3.10/library/os.html#os.environ):
+  process environment is observable and mutable through the mapping.
+- [Linux execve](https://man7.org/linux/man-pages/man2/execve.2.html): the invoked
+  program receives its supplied environment.
+- [SQLite isolation](https://www.sqlite.org/isolation.html): database snapshots
+  do not authenticate a later provider environment or filesystem state.
+
+The isolated provider candidate passed 38 related tests. Its native observation
+was initialization and local loading, not inference or a successful compile.
+
+## 2026-10-06 — Combined qualification scope
+
+The address display, environment requalification and single final context
+selection share one compiler. Refresh verifies the newly qualified candidate
+tuple, rather than demanding the stale tuple object after legitimate environment
+change. Unchanged candidate identities retain their original tuple. Model and
+budget guards, mandatory source identities and readiness checks remain. No
+provider choice, budget, persistent format or source partition changes.

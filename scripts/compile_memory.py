@@ -42,6 +42,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import datetime, timezone
+from itertools import groupby
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -90,6 +91,7 @@ from evidence_resolver import (  # noqa: E402
 )
 from iso_time import block_instant  # noqa: E402
 from llm_client import (  # noqa: E402
+    _codex_basis_digest,
     call_candidate,
     call_ceiling,
     chain_stops_after,
@@ -98,6 +100,7 @@ from llm_client import (  # noqa: E402
     planning_input_text,
     probe_candidate,
     provider_candidates,
+    provider_environment,
     resolve_codex_planning_basis,
     worst_case_call_seconds,
 )
@@ -209,7 +212,7 @@ ALLOWED_CATEGORIES = frozenset(
     {"concepts", "decisions", "patterns", "debugging", "qa"}
 )
 DRAFT_PROGRAM = (
-    "compile-draft/v10: input-qualified temporary source-line choices and physical containers; "
+    "compile-draft/v11: entry-grouped temporary source-line choices and physical containers; "
     "with immutable original-entry context and derived-provenance claims"
 )
 CRITIQUE_PROGRAM = (
@@ -427,6 +430,7 @@ class CompileBatch:
     packing: CompilePackingIdentity
     planning_model: str | None = dataclass_field(default=None, compare=False)
     planning_candidates: tuple | None = dataclass_field(default=None, compare=False, repr=False)
+    context_pending: bool = dataclass_field(default=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -1142,29 +1146,40 @@ def pack_compile_batches(
     budget: ContextBudget | None = None,
     planning_candidates: tuple | None = None,
 ) -> tuple[CompileBatch, ...]:
+    return _pack_compile_batches(inputs, model=model, token_adapters=token_adapters,
+                                 budget=budget, planning_candidates=planning_candidates)
+
+
+def _pack_compile_batches(inputs, *, model, token_adapters=None, budget=None,
+                          planning_candidates=None, context_pending=False):
     budget = _validated_packing_budget(budget, model)
     measure = _batch_measure(inputs, model, token_adapters)
-    daily_paths = {item.logical_path for item in inputs.dailies}
-    optional_sources = tuple(
-        item for item in inputs.sources if item.logical_path not in daily_paths
-    )
-    ranking = _ContextRanking(optional_sources)
+    ranking = _packing_context_ranking(inputs, context_pending)
     return tuple(
         _compile_batch(
-            inputs,
-            paths,
-            budget,
-            model,
-            token_adapters,
-            optional_paths=_fitting_context(
-                paths, ranking.ordered(_measure_batch_text(inputs, paths, measure)), budget, measure
-            ),
+            inputs, paths, budget, model, token_adapters,
+            optional_paths=_packing_context_paths(inputs, paths, ranking, budget, measure),
             journal_indexes=_packing_journal_indexes(measure),
             partitions=_measure_partitions(measure, _measure_owns_inputs(measure, inputs)),
-            planning_candidates=planning_candidates,
+            planning_candidates=planning_candidates, context_pending=context_pending,
         )
         for paths in _group_dailies(inputs, budget, measure)
     )
+
+
+def _packing_context_ranking(inputs, context_pending):
+    if context_pending:
+        return None
+    daily_paths = {item.logical_path for item in inputs.dailies}
+    optional = tuple(item for item in inputs.sources if item.logical_path not in daily_paths)
+    return _ContextRanking(optional)
+
+
+def _packing_context_paths(inputs, paths, ranking, budget, measure):
+    if ranking is None:
+        return set()
+    return _fitting_context(paths, ranking.ordered(_measure_batch_text(inputs, paths, measure)),
+                            budget, measure)
 
 
 def _validated_packing_budget(budget, model):
@@ -1663,6 +1678,7 @@ def _compile_batch(
     journal_indexes=None,
     partitions=None,
     planning_candidates=None,
+    context_pending=False,
 ) -> CompileBatch:
     subset = _subset_compile_inputs(inputs, paths, optional_paths, journal_indexes=journal_indexes, partitions=partitions)
     count = _draft_prompt_count(subset, model, token_adapters)
@@ -1683,7 +1699,7 @@ def _compile_batch(
         measured_input_tokens=count.tokens,
     )
     return CompileBatch(subset, manifest, sha256_bytes(manifest_bytes), packing,
-                        model, planning_candidates)
+                        model, planning_candidates, context_pending)
 
 
 def _selected_atomic_budget(inputs, target, measured, *, partitions=None):
@@ -1726,7 +1742,7 @@ def _tokenizer_identity(count_source: str, model: str | None) -> str:
     return "utf8-byte-estimate/v1"
 
 
-def _refresh_compile_batch(batch: CompileBatch) -> CompileBatch:
+def _refresh_compile_batch(batch: CompileBatch, *, deadline: float = math.inf) -> CompileBatch:
     context = snapshot_compile_inputs(())
     daily_sources = tuple(
         SourceSnapshot(item.logical_path, item.content, item.sha256)
@@ -1743,12 +1759,60 @@ def _refresh_compile_batch(batch: CompileBatch) -> CompileBatch:
         context.targets,
         context.vault_files,
     )
+    candidates = _refreshed_batch_candidates(batch, deadline)
     batches = pack_compile_batches(refreshed, model=batch.planning_model,
                                    budget=_packing_budget(batch.packing, batch.planning_model),
-                                   planning_candidates=batch.planning_candidates)
+                                   planning_candidates=candidates)
     if len(batches) != 1 or batches[0].manifest != batch.manifest:
         raise ValueError("compile batch changed while refreshing context")
+    _require_refresh_identity(batch, batches[0], candidates)
     return batches[0]
+
+
+def _require_refresh_identity(previous, refreshed, candidates):
+    if previous.planning_model != refreshed.planning_model or candidates is not refreshed.planning_candidates:
+        raise ValueError("compile model changed while refreshing context")
+    before = _packing_budget(previous.packing, previous.planning_model)
+    after = _packing_budget(refreshed.packing, refreshed.planning_model)
+    if before != after:
+        raise ValueError("compile budget changed while refreshing context")
+
+
+def _require_ready_compile_batch(batch):
+    if batch is not None and getattr(batch, "context_pending", False):
+        raise ValueError("compile context must refresh before resolution or publication")
+
+
+def _refreshed_batch_candidates(batch, deadline):
+    candidates = batch.planning_candidates
+    if candidates is None:
+        return None
+    refreshed = tuple(_refreshed_batch_candidate(candidate, deadline) for candidate in candidates)
+    return candidates if all(old is new for old, new in zip(candidates, refreshed)) else refreshed
+
+
+def _refreshed_batch_candidate(candidate, deadline):
+    basis = getattr(candidate, "_codex_basis", None)
+    if basis is None:
+        return candidate
+    if _codex_basis_digest(provider_environment()) == basis.environment_sha256:
+        return candidate
+    refreshed = _planned_candidate(basis.original_descriptor, deadline)
+    _require_refreshed_batch_candidate(candidate, refreshed)
+    return refreshed
+
+
+def _require_refreshed_batch_candidate(previous, current):
+    if current.resolution_failure is not None:
+        raise ValueError(f"compile provider revalidation failed: {current.resolution_failure}")
+    if _batch_provider_identity(previous) != _batch_provider_identity(current):
+        raise ValueError("compile batch provider, model or settings changed during revalidation")
+
+
+def _batch_provider_identity(candidate):
+    basis = getattr(candidate, "_codex_basis", None)
+    return (candidate.provider, candidate.model, dict(candidate.inference_settings),
+            candidate.fallback_from, getattr(basis, "model_provider", None))
 
 
 def _receipt_path(digest: str) -> Path:
@@ -1954,6 +2018,7 @@ def resolve_compile_plan(
     token_adapters: Mapping[str, TokenCounter] | None = None,
 ) -> ResolvedCompilePlan:
     """Resolve a validated semantic plan without entering the writer gate."""
+    _require_ready_compile_batch(batch)
     _assert_external_work_allowed(coordinator)
     if batch is not None and batch.inputs != inputs:
         raise ValueError("compile batch inputs disagree")
@@ -2023,6 +2088,7 @@ class _CompileAttempt:
         batch: CompileBatch | None,
         token_adapters: Mapping[str, TokenCounter] | None,
     ) -> None:
+        _require_ready_compile_batch(batch)
         self.inputs = inputs
         self.cache = cache
         self.batch = batch
@@ -2255,6 +2321,7 @@ class _CompileAttempt:
         self, prompt: str, system: str, schema: object, descriptor: object
     ) -> bool:
         """Without a batch there is no declared input budget to respect."""
+        _require_ready_compile_batch(self.batch)
         if self.batch is None:
             return True
         return _compile_prompt_fits(
@@ -2270,6 +2337,7 @@ class _CompileAttempt:
     def _call(
         self, descriptor: object, prompt: str, system: str, schema: object
     ) -> object:
+        _require_ready_compile_batch(self.batch)
         return call_candidate(
             descriptor,
             prompt,
@@ -2559,8 +2627,14 @@ def _source_address_table(choices):
 
 
 def _source_address_group(path, rows):
-    addresses = "\n".join(f"{row['source_line']} {row['timestamp']} {row['file_line']}" for row in rows)
-    return f"FILE: {path}\nsource_line entry LF-line\n{addresses}"
+    addresses = "\n".join(_source_address_entry(timestamp, group)
+                          for timestamp, group in groupby(rows, key=lambda row: row['timestamp']))
+    return f"FILE: {path}\nsource_line LF-line (entry set by ENTRY header)\n{addresses}"
+
+
+def _source_address_entry(timestamp, rows):
+    addresses = "\n".join(f"{row['source_line']} {row['file_line']}" for row in rows)
+    return f"ENTRY {timestamp}\n{addresses}"
 
 
 def _require_choice_prefix(expected, prompt):
@@ -5034,6 +5108,7 @@ def _require_apply_arguments(
     batch: CompileBatch | None,
     provider_budget: Mapping[str, object] | None,
 ) -> None:
+    _require_ready_compile_batch(batch)
     validate_compile_plan(plan, inputs)
     if not re.fullmatch(r"[0-9a-f]{64}", action_key):
         raise ValueError("action key must be a SHA-256 digest")
@@ -6628,7 +6703,7 @@ def _run(
         # docs/research/2026-09-27-one-bad-day-does-not-hold-the-rest.md).
         outcomes.append(
             _run_batch(
-                _refresh_compile_batch(batch),
+                _refresh_compile_batch(batch, deadline=deadline),
                 args,
                 coordinator=coordinator,
                 deadline=deadline,
@@ -6645,7 +6720,8 @@ def _pack_for_run(inputs, deadline):
                        for item in provider_candidates(forced_provider(), max_tokens=4000))
     model = next((item.model for item in candidates if probe_candidate(item)), None)
     packable, refused = partition_packable(inputs, model=model)
-    return pack_compile_batches(packable, model=model, planning_candidates=candidates), refused
+    return _pack_compile_batches(packable, model=model, planning_candidates=candidates,
+                                 context_pending=True), refused
 
 
 def _planned_candidate(candidate, deadline):
@@ -6719,6 +6795,7 @@ def _run_batch(
     owner: OwnerLease | None,
 ) -> BatchOutcome:
     """Resolve and apply one batch; a non-zero status marks it failed, not the run over."""
+    _require_ready_compile_batch(batch)
     try:
         resolved = resolve_compile_plan(
             batch.inputs,
