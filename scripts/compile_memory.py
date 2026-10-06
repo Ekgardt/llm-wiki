@@ -4285,13 +4285,9 @@ def _with_claim_ledger(page: bytes, records: Sequence[Mapping[str, object]]) -> 
 
 
 def _append_log_bytes(content: bytes, entry: str) -> bytes:
-    text = content.decode("utf-8")
-    line = entry.rstrip() + "\n"
-    marker = "\n## Editorial note"
-    if marker in text:
-        head, separator, tail = text.partition(marker)
-        return (head.rstrip() + "\n" + line + separator + tail).encode("utf-8")
-    return (text + line).encode("utf-8")
+    """Append new editorial bytes without changing any authenticated history."""
+    content.decode("utf-8")
+    return content + (entry.rstrip() + "\n").encode("utf-8")
 
 
 def _receipt_bytes(

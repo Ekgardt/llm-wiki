@@ -99,3 +99,54 @@ state proof. Peak RSS was 973,060 KiB. That diagnostic includes SQL fingerprint
 instrumentation and concurrent activity; it does not prove whole-health success
 or compare performance on matched SQL inputs. The historical authority refusal
 remains visible.
+
+
+### 2026-10-06: authenticated unchanged history at model publication
+
+The compile publication guard treated the entire resulting file as newly authored
+model output, including old operator-owned history. Safe additions to an existing
+protected history were refused. A second producer defect inserted new log entries
+before an editorial marker and stripped prior whitespace. The log helper now
+validates existing UTF-8 and appends only new encoded bytes, preserving all prior
+bytes and markers in their original order.
+
+The common transaction engine obtains the prior bytes exclusively from its
+authenticated before state and checks their SHA against the operation's before
+hash. The DLP boundary still loads fresh policy and scans the entire exact after
+image. A completed protected-content finding may qualify only when raw after
+starts with the exact authenticated before prefix and scrubbed(after) equals
+scrubbed(before) plus the unchanged raw delta. All other cases keep the original
+full guard. This is provenance recognition, not a new allowlist or authorization
+to copy secrets elsewhere. Creates have no prior prefix. Existing full-payload
+fingerprint allowances retain their policy-defined semantics.
+
+A private finding exception distinguishes completed scans from scanner failures;
+both remain subclasses of the existing public refusal type. Initial or fallback
+scanner failure refuses and quarantines without publishing partial results. New
+secrets, repeated old secrets, cross-boundary matches, changed prior bytes, missing
+policy and invalid prior hashes still refuse. Existing target CAS checks remain.
+
+Original adopted-transaction control: two failures/eight passing controls. The
+producer control separately failed three cases and passed one before its fix.
+Final related checks: 319 passed, five platform skips, 33.36 seconds. Earlier
+operator/test mistakes and failed checks were retained, including a missing test
+module and an incorrect before-image error classification corrected to the
+original full-guard fallback. No old assertions or durable formats changed.
+
+Alternatives rejected: disabling the guard, minting an allowlist, rewriting old
+history, trusting provider-declared prefixes, scanning only the delta, or permitting
+arbitrary edited historical segments. Cost increases only for protected preserved
+history: the full image and its exact prefix are rescanned under the same freshly
+loaded policy. This security qualification is not useful model-cycle completion.
+Primary sources read 2026-10-06: [OWASP 2026 improper output handling](https://github.com/GenAI-Security-Project/GenAI-LLM-Top10/blob/main/2026/final/LLM10_ImproperOutputHandling.md),
+[W3C provenance](https://www.w3.org/TR/prov-dm/), and
+[Git exact-content identity](https://git-scm.com/docs/git-hash-object). W3C is the
+2013 Recommendation read for stable provenance principles, not a new runtime API.
+
+A read-only retained-image check preserved all three original failed after images:
+the exact-prefix guard still refuses each. The new producer layout was computed
+only after reconstructing the complete prior producer result byte for byte from
+the verified image and unchanged entry. That counterfactual layout preserves the
+whole prior prefix and passes the new boundary. Guard time was about 0.27 seconds
+for the original refusal and 0.79–0.82 seconds for each accepted counterfactual.
+No transaction, receipt, source outcome or model result was replayed or published.

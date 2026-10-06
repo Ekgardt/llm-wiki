@@ -671,6 +671,7 @@
   "test_merge_claude_settings.py": 1.28,
   "test_migrate_to_okf_exemptions.py": 0.04,
   "test_model_policy.py": 0.46,
+  "test_model_publication_authenticates_preserved_prefix.py": 8.69,
   "test_native_compile_companion_adopted.py": 2.21,
   "test_native_compile_rejects_invalid_existing_ledger.py": 0.01,
   "test_native_compile_uses_whole_container.py": 2.14,

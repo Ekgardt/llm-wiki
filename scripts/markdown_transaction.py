@@ -9863,7 +9863,7 @@ class MarkdownCoordinator:
             raise TransactionImageError(
                 f"transaction after-image is corrupt for {row['path']}"
             )
-        self._require_safe_model_output(content)
+        self._require_safe_model_output(content, row, operation_plan)
         return content
 
     def _materialized_state(self, row: sqlite3.Row, state: Mapping[str, object]) -> bytes:
@@ -9888,10 +9888,30 @@ class MarkdownCoordinator:
             raise TargetStateMismatch("before", str(row["path"]))
         return content
 
-    def _require_safe_model_output(self, content: bytes) -> None:
-        """Model-authored bytes pass the publication guard before they are written."""
-        if getattr(self._local, "content_guard", None) == "model_output":
+    def _authenticated_publication_prefix(self, row: sqlite3.Row, plan: Mapping[str, object]) -> bytes | None:
+        """The engine's exact before state, never a provider-declared prefix."""
+        if row["before_hash"] == ABSENT:
+            return None
+        before = plan["before"]
+        if not isinstance(before, dict):
+            return None
+        return self._hashed_publication_prefix(row, before)
+
+    def _hashed_publication_prefix(self, row: sqlite3.Row, before: Mapping[str, object]) -> bytes | None:
+        content = self._materialized_state(row, before)
+        if sha256_bytes(content) != row["before_hash"]:
+            return None
+        return content
+
+    def _require_safe_model_output(self, content: bytes, row: sqlite3.Row, plan: Mapping[str, object]) -> None:
+        """Scan the full after-image with only engine-authenticated provenance."""
+        if getattr(self._local, "content_guard", None) != "model_output":
+            return
+        prefix = self._authenticated_publication_prefix(row, plan)
+        if prefix is None:
             require_safe_publication(content)
+            return
+        require_safe_publication(content, preserved_prefix=prefix)
 
     def _publish_at_parent(
         self,
