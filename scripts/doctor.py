@@ -2453,7 +2453,8 @@ def _transaction_check(
         incomplete = _scan_transaction_database(
             path, state_root, now, deadline, details, states, vault_root=vault_root
         )
-    except (OSError, sqlite3.Error, TimeoutError, ValueError):
+    except (OSError, sqlite3.Error, TimeoutError, ValueError) as error:
+        details["read_error_class"] = type(error).__name__
         return _unreadable_transactions(details, "Transaction state is unreadable.")
     if incomplete is not None:
         return incomplete

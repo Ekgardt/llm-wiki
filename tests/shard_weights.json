@@ -562,6 +562,7 @@
   "test_doctor_reconciles_verified_terminal_changes.py": 13.78,
   "test_doctor_releases_snapshot_before_artifact_work.py": 5.62,
   "test_doctor_requires_current_source_context.py": 0.51,
+  "test_doctor_retains_transaction_scan_failure_class.py": 0.24,
   "test_doctor_transaction_inventory_uses_its_deadline.py": 1.2,
   "test_doctor_waits_out_a_busy_admission.py": 1.04,
   "test_durability_stand.py": 28.91,
