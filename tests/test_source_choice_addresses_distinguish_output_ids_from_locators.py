@@ -1,10 +1,10 @@
 """Source IDs and visible FILE row locators must have explicit different roles."""
-import re
 
 import compile_memory as compiler
 import pytest
 
 from tests.test_compile_binds_the_protected_source_view import _legacy_packet
+from tests.test_compile_source_address_groups_preserve_every_row import _decoded_rows
 
 
 def test_address_columns_name_output_and_non_output_roles():
@@ -12,14 +12,14 @@ def test_address_columns_name_output_and_non_output_roles():
                  timestamp='13:51:26', source_line=144, file_line=44)]
     table = compiler._source_address_table(rows)
     assert 'OUTPUT source_line | LOCATOR ONLY: visible FILE LF row (NOT an output ID)' in table
-    assert re.findall(r'^(\d+) (\d+)$', table, re.MULTILINE) == [('144', '44')]
+    assert _decoded_rows(table) == [(144, 44)]
 
 
 def test_rendered_request_explicitly_forbids_returning_locator_column(tmp_path, monkeypatch):
     inputs = _legacy_packet(tmp_path, monkeypatch, ['A durable exact fact.'])
     prompt = compiler._draft_prompt(inputs)
-    assert 'Return the FIRST number of an offered row as source_line.' in prompt
-    assert 'Never return the SECOND number (the visible FILE LF row) as source_line.' in prompt
+    assert 'Return only the integer labelled source_line from an offered row' in prompt
+    assert 'The locator=LF: label is a display-only address inside the visible FILE body, never an output ID or output field.' in prompt
 
 
 def test_visible_locator_never_gains_source_authority(tmp_path, monkeypatch):
@@ -43,10 +43,10 @@ def test_display_keeps_raw_source_context_and_exact_binding(tmp_path, monkeypatc
     prompt = compiler._draft_prompt(inputs)
     assert inputs.dailies[0].content.decode() in prompt
     assert raw.decode() in prompt
-    assert re.findall(r'^(\d+) (\d+)$', prompt, re.MULTILINE) == [(str(item['source_line']), str(item['file_line'])) for item in choices]
+    assert _decoded_rows(prompt) == [(item['source_line'], item['file_line']) for item in choices]
     assert bound['source_digest'] == inputs.dailies[0].sha256
     assert evidence['quoted_text'] == 'A durable exact fact.'
 
 
 def test_changed_address_program_has_a_new_draft_cache_identity():
-    assert compiler.DRAFT_PROGRAM.startswith('compile-draft/v12:')
+    assert compiler.DRAFT_PROGRAM.startswith('compile-draft/v15:')
