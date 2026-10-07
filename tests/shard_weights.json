@@ -471,6 +471,7 @@
   "test_codex_probe_transport.py": 0.48,
   "test_codex_provider_keeps_reported_token_usage.py": 0.05,
   "test_codex_rendered_hooks.py": 0.08,
+  "test_codex_windows_handle_identity_preserves_change_guards.py": 0.03,
   "test_codex_wrapper_preserves_failures.py": 0.83,
   "test_cold_authority_open_has_one_deadline.py": 1.75,
   "test_common_symbol_names_share_the_graph_reader_budget.py": 1.38,

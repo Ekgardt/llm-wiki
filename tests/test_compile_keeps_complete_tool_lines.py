@@ -12,7 +12,7 @@ def _tool_parts():
     record = {"event_type": "post_tool_use", "payload": {
         "tool_name": "exec_command", "target": "я" * 12000}}
     raw = canonical_json_bytes(record)
-    anchor = {"occurred_at": "2026-10-02T12:34:56Z", "intent_id": "physical-tool-control"}
+    anchor = {"occurred_at": "2026-10-02T12:34:56+00:00", "intent_id": "physical-tool-control"}
     head = "knowledge/raw/sessions/2026-10-02/physical-tool-control.breadcrumb.md"
     day = b"# 2026-10-02\n" + _journal_block(anchor, head, raw).encode()
     parts = compiler._daily_parts("knowledge/daily/2026-10-02.md", day)

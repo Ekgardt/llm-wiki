@@ -116,9 +116,9 @@ def test_the_installer_rewrites_an_earlier_entry_and_reports_it_verified(tmp_pat
     )
     env = {**os.environ, "TEST_VAULT": ROOT.as_posix(), "TEST_PYTHON": Path(sys.executable).as_posix(), "TEST_CONFIG": config.as_posix()}
 
-    result = subprocess.run(["bash", str(runner)], env=env, capture_output=True, text=True, timeout=60, check=False)
+    result = subprocess.run(["bash", "-x", str(runner)], env=env, capture_output=True, text=True, timeout=60, check=False)
 
-    assert (result.returncode, codex_memory.codex_mcp_config_state(config, ROOT)) == (0, "equivalent"), result.stderr
+    assert (result.returncode, codex_memory.codex_mcp_config_state(config, ROOT)) == (0, "equivalent"), {"stdout": result.stdout, "stderr": result.stderr}
     assert tomllib.loads(config.read_text(encoding="utf-8"))["model"] == "gpt-5.6"
 
 

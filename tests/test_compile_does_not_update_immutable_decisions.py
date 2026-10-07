@@ -93,7 +93,7 @@ def test_approved_operator_transaction_remains_available(vault, status):
     path = _existing(root)
     before = path.read_bytes()
     coordinator = MarkdownCoordinator(root, state)
-    transaction = coordinator.prepare([MarkdownChange.replace(str(path.relative_to(root)), before.replace(b'status: active', status)+b'\nApproved editorial correction.\n')], operation_id='operator-editorial-test', preconditions={str(path.relative_to(root)): sha256_bytes(before)})
+    transaction = coordinator.prepare([MarkdownChange.replace(path.relative_to(root).as_posix(), before.replace(b'status: active', status)+b'\nApproved editorial correction.\n')], operation_id='operator-editorial-test', preconditions={path.relative_to(root).as_posix(): sha256_bytes(before)})
     assert transaction.operations[0].before_hash == sha256_bytes(before)
     committed = coordinator.apply(transaction.id)
     assert committed.state == "committed"

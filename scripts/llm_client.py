@@ -1557,11 +1557,12 @@ def _codex_basis_file_digest(path):
     candidate = Path(path)
     if not candidate.exists():
         return None
+    resolved = candidate.resolve(strict=True)
     with candidate.open("rb") as handle:
         before = _codex_file_identity(os.fstat(handle.fileno()))
         digest = _codex_stream_digest(handle)
         _require_codex_file_identity(_codex_file_identity(os.fstat(handle.fileno())), before)
-    _require_codex_file_identity(_codex_file_identity(candidate.stat()), before)
+        _require_codex_path_binding(candidate, resolved, handle, before, digest, posix_path=candidate)
     return digest
 
 
@@ -1997,6 +1998,29 @@ def _require_codex_file_identity(actual, expected):
         raise RuntimeError("selected Codex executable changed before dispatch")
 
 
+
+def _require_codex_path_binding(path, resolved, handle, identity, digest, *, posix_path=None):
+    if sys.platform != "win32":
+        _require_codex_file_identity(_codex_file_identity((posix_path or resolved).stat()), identity)
+        return
+    _require_codex_windows_binding(path, resolved, handle, identity, digest)
+
+
+def _require_codex_windows_binding(path, resolved, handle, identity, digest):
+    _require_codex_file_identity(path.resolve(strict=True), resolved)
+    with path.open("rb") as reopened:
+        _require_codex_handle_identity(reopened, identity)
+        _require_codex_file_identity(_codex_stream_digest(reopened), digest)
+        _require_codex_handle_identity(reopened, identity)
+        _require_codex_handle_identity(handle, identity)
+        _require_codex_file_identity(path.resolve(strict=True), resolved)
+        _require_codex_handle_identity(reopened, identity)
+        _require_codex_handle_identity(handle, identity)
+
+
+def _require_codex_handle_identity(handle, identity):
+    _require_codex_file_identity(_codex_file_identity(os.fstat(handle.fileno())), identity)
+
 def _bind_codex_executable(path):
     path = str(Path(path).absolute())
     resolved = Path(path).resolve(strict=True)
@@ -2004,7 +2028,7 @@ def _bind_codex_executable(path):
         identity = _codex_file_identity(os.fstat(handle.fileno()))
         digest = _codex_stream_digest(handle)
         _require_codex_file_identity(_codex_file_identity(os.fstat(handle.fileno())), identity)
-    _require_codex_file_identity(_codex_file_identity(resolved.stat()), identity)
+        _require_codex_path_binding(Path(path), resolved, handle, identity, digest)
     return _CodexExecutable(path, str(resolved), identity, digest)
 
 
