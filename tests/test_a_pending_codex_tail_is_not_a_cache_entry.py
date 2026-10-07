@@ -103,4 +103,4 @@ def test_refused_tail_plan_still_publishes_a_complete_durable_capture(codex, mon
     assert len(records) == 1
     assert records[0]['session'] == 'current'
     assert records[0]['source_event_id'] == 'fallback-turn'
-    assert records[0]['evidence'][0]['parts'][0]['text'] == transcript.read_text()
+    assert records[0]['evidence'][0]['parts'][0]['text'] == transcript.read_bytes().decode('utf-8')
