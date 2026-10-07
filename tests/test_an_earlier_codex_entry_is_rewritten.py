@@ -24,6 +24,9 @@ except ModuleNotFoundError:  # Python 3.10
 import codex_memory
 import pytest
 
+from tests.test_installer_bootstrap import _powershell_functions, _pwsh
+from tests.test_the_installer_says_what_it_needs import STUB_ENV, UV_STUB_PS1
+
 ROOT = Path(__file__).resolve().parent.parent
 EARLIER = (
     '# my settings\nmodel = "gpt-5.6"\n\n'
@@ -99,12 +102,42 @@ def _shell_function(source: str, name: str) -> str:
 
 
 def test_the_installer_rewrites_an_earlier_entry_and_reports_it_verified(tmp_path: Path) -> None:
+    config = _config(tmp_path, EARLIER)
+    original = config.read_bytes()
+    result = _installer_rewrite(tmp_path, config)
+    assert (result.returncode, codex_memory.codex_mcp_config_state(config, ROOT)) == (0, "equivalent"), {"stdout": result.stdout, "stderr": result.stderr}
+    rewritten = config.read_text(encoding="utf-8")
+    assert tomllib.loads(rewritten)["model"] == "gpt-5.6"
+    _assert_the_rest_is_kept(rewritten)
+    assert _preimages(config) == [original]
+
+
+def _installer_rewrite(tmp_path, config):
+    if os.name == 'nt':
+        return _powershell_installer_rewrite(config)
+    return _bash_installer_rewrite(tmp_path, config)
+
+
+def _powershell_installer_rewrite(config):
+    executable = _pwsh()
+    assert executable is not None, 'The Windows installer requires PowerShell'
+    functions = _powershell_functions(ROOT / 'install.ps1', (
+        'Install-CodexMcp', 'Get-CodexMcpInstallState', 'Update-CodexMcpEntry',
+        'Complete-CodexMcpInstall', 'Add-CodexMcpEntry', 'Get-CodexMcpSeparator'))
+    command = (UV_STUB_PS1 + functions +
+               '\n$ErrorActionPreference = "Stop"\n'
+               'exit (Install-CodexMcp -VaultRoot $env:TEST_VAULT -Config $env:TEST_CONFIG)\n')
+    environment = {**STUB_ENV, 'TEST_VAULT': str(ROOT), 'TEST_CONFIG': str(config)}
+    return subprocess.run([executable, '-NoProfile', '-NonInteractive', '-Command', command],
+                          env=environment, capture_output=True, text=True, timeout=60, check=False)
+
+
+def _bash_installer_rewrite(tmp_path, config):
     source = (ROOT / "install.sh").read_text(encoding="utf-8")
     functions = "\n".join(
         _shell_function(source, name)
         for name in ("codex_mcp_state_status", "replace_codex_mcp", "configure_codex_mcp")
     )
-    config = _config(tmp_path, EARLIER)
     runner = tmp_path / "runner.sh"
     runner.write_text(
         "set -euo pipefail\n"
@@ -116,10 +149,7 @@ def test_the_installer_rewrites_an_earlier_entry_and_reports_it_verified(tmp_pat
     )
     env = {**os.environ, "TEST_VAULT": ROOT.as_posix(), "TEST_PYTHON": Path(sys.executable).as_posix(), "TEST_CONFIG": config.as_posix()}
 
-    result = subprocess.run(["bash", "-x", str(runner)], env=env, capture_output=True, text=True, timeout=60, check=False)
-
-    assert (result.returncode, codex_memory.codex_mcp_config_state(config, ROOT)) == (0, "equivalent"), {"stdout": result.stdout, "stderr": result.stderr}
-    assert tomllib.loads(config.read_text(encoding="utf-8"))["model"] == "gpt-5.6"
+    return subprocess.run(["bash", "-x", str(runner)], env=env, capture_output=True, text=True, timeout=60, check=False)
 
 
 def test_doctor_names_the_one_step_codex_trust_needs(tmp_path: Path) -> None:

@@ -2108,7 +2108,7 @@ def _codex_command(codex_bin: str, model: str | None, reasoning: str, out_path: 
 
 def _temp_text_file(content: str = "") -> str:
     with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False, encoding="utf-8"
+        mode="w", suffix=".txt", delete=False, encoding="utf-8", newline="\n"
     ) as handle:
         handle.write(content)
         return handle.name

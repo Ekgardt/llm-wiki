@@ -25,7 +25,7 @@ def _snapshot(tmp_path):
     words = "Earlier context. " * 110 + "My bicycle is named Polaris."
     body = "# 2026-10-01\n\n## [10:00:00] session_end | proof\n\n**user:** " + words + "\n"
     path.write_text(body)
-    return collect_corpus(tmp_path, code_roots=(), daily_paths=(str(path.relative_to(tmp_path)),)), words
+    return collect_corpus(tmp_path, code_roots=(), daily_paths=(path.relative_to(tmp_path).as_posix(),)), words
 
 
 def test_the_tail_fact_keeps_the_original_source_span(tmp_path):
