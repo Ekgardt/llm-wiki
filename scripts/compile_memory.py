@@ -163,7 +163,6 @@ NORMALIZATION_VERSION = "normalize-v6"
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
 MAX_PROVIDER_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_OPERATIONS = 100
-MAX_EVIDENCE_PER_OPERATION = 32
 MAX_AFTER_IMAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 # One compile receipt; the largest on the live vault is 16.6 KB (2026-09-27). 1 MiB refuses a
 # corrupted receipt before it is parsed.
@@ -196,7 +195,6 @@ CLAIM_CANDIDATE_SCHEMA = {
         "evidence_index": {
             "type": "integer",
             "minimum": 0,
-            "maximum": MAX_EVIDENCE_PER_OPERATION - 1,
         },
         "subject": {
             "type": "string", "minLength": 1, "maxLength": 4000,
@@ -213,7 +211,7 @@ ALLOWED_CATEGORIES = frozenset(
     {"concepts", "decisions", "patterns", "debugging", "qa"}
 )
 DRAFT_PROGRAM = (
-    "compile-draft/v15: scoped durable facts and lossless source choices; "
+    "compile-draft/v16: actual-list citation indices, scoped durable facts and lossless source choices; "
     "with immutable original-entry context and derived-provenance claims"
 )
 CRITIQUE_PROGRAM = (
@@ -244,7 +242,7 @@ RAW_PLAN_SCHEMA = {
                     "body_section": {"enum": ["Lesson", "Decision", "Symptom / Cause / Resolution", "Answer"]},
                     "body_markdown": {"type": "string", "minLength": 1, "maxLength": 20000},
                     "evidence": {
-                        "type": "array", "minItems": 1, "maxItems": MAX_EVIDENCE_PER_OPERATION,
+                        "type": "array", "minItems": 1,
                         "items": {
                             "type": "object",
                             "required": ["daily_date", "timestamp", "quoted_text", "claim"],
@@ -3861,7 +3859,6 @@ def _require_evidence_shape(evidence: object) -> None:
     if (
         not isinstance(evidence, list)
         or not evidence
-        or len(evidence) > MAX_EVIDENCE_PER_OPERATION
     ):
         raise ValueError("compile operation requires evidence")
 
