@@ -1601,6 +1601,7 @@ def _entry_fragment_sizes(dailies):
 
 _SOURCE_CHOICE_RESOLVER = ContextVar("source_choice_resolver", default=None)
 _SOURCE_CHOICE_PARSING = ContextVar("source_choice_parsing", default=None)
+_SOURCE_CHOICE_ORIGINAL = ContextVar("source_choice_original", default=None)
 
 
 @contextmanager
@@ -3055,12 +3056,34 @@ def _collect_choice_pair(pair, locations, inputs, choices):
     path, timestamp, quote = pair
     item = dict(daily_date=Path(path).stem, timestamp=timestamp, quoted_text=quote, claim='Selected source line.')
     try:
-        binding = _evidence_binding(item, inputs)
+        binding = _source_choice_binding(item, locations, inputs)
     except ValueError:
         return
     if binding['source_path'] != path:
         return
     _offer_choice_physical_row(binding, locations, item, choices)
+
+
+def _source_choice_binding(item, locations, inputs):
+    token = _SOURCE_CHOICE_ORIGINAL.set(_original_choice_proof(item, locations, inputs))
+    try:
+        return _evidence_binding(item, inputs)
+    finally:
+        _SOURCE_CHOICE_ORIGINAL.reset(token)
+
+
+def _original_choice_proof(item, locations, inputs):
+    if any(_choice_row_changed(location, item['quoted_text']) for _, location, _ in locations):
+        return None
+    return (inputs, *_require_evidence_fields(item))
+
+
+def _choice_row_changed(location, quote):
+    part, offset = location
+    content = _physical_source(part).content
+    start, end = _line_bounds(content, offset, 0)
+    original = content[start:end].decode('utf-8', errors='strict')
+    return _without_bullet(original) != quote
 
 
 def _offer_choice_physical_row(binding, locations, item, choices):
@@ -3841,10 +3864,17 @@ def _bound_evidence_block(item: object, inputs: CompileInputs) -> tuple[dict[str
     try:
         return _bound_legacy_evidence(date, timestamp, quote, inputs)
     except ValueError:
-        projected = _bound_protected_legacy_evidence(date, timestamp, quote, inputs)
+        projected = _bound_choice_projection(date, timestamp, quote, inputs)
         if projected is None:
             raise
         return projected
+
+
+def _bound_choice_projection(date, timestamp, quote, inputs):
+    proof = _SOURCE_CHOICE_ORIGINAL.get()
+    if proof is not None and proof[0] is inputs and proof[1:] == (date, timestamp, quote):
+        return None
+    return _bound_protected_legacy_evidence(date, timestamp, quote, inputs)
 
 
 def _bound_legacy_evidence(date, timestamp, quote, inputs):
