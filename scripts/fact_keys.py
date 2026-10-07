@@ -209,19 +209,16 @@ class _NativeSourceAuthority:
         self._require_native_physical_input(head)
 
     def _validate_native_input(self, head):
-        from event_envelope import _native_encoded_user_text, native_encoding_candidate
+        from event_envelope import _native_selected_user_text
 
         content = self._input(head).decode("utf-8")
-        if native_encoding_candidate(content):
-            _native_encoded_user_text(content)
+        _native_selected_user_text(content)
 
     def _require_native_physical_input(self, head):
-        from event_envelope import _native_encoded_user_text, native_encoding_candidate
+        from event_envelope import _native_selected_user_text
 
         content = self._input(head).decode("utf-8")
-        if not native_encoding_candidate(content):
-            return
-        said = _native_encoded_user_text(content)
+        said = _native_selected_user_text(content)
         if said is not None and not self._has_daily_frame(head):
             raise ValueError("native user frame has no complete physical citation; remains pending")
 

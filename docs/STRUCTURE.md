@@ -725,6 +725,23 @@ or nonzero active state remains fail-closed.
 - `integrations/` — thin host wiring: claude-code (settings.json) and codex
   (hooks.json). MCP is the common read/action interface.
   Obsidian is an optional Markdown viewer and requires no bundled integration.
+  The owner approved the following launch contract on 2026-10-07; implementation
+  and platform qualification remain pending. Own Codex hooks and MCP commands
+  may carry the existing nonsecret installed provider bundle through a fixed
+  same-process Python bootstrap in the existing uv invocation. Presence of any
+  existing provider key, including an empty value, preserves the entire explicit
+  host environment; otherwise the complete installed bundle applies. Malformed
+  payloads refuse before target execution. The original script, arguments,
+  imports, stdin, output and exit behavior must be qualified. No new environment
+  key, runtime file, storage schema, process or global Codex setting is added.
+  Exact command/root ownership, foreign and disabled registrations, preimages,
+  CAS, uninstall and rollback drift guards remain required. MCP registration
+  remains outside installer transaction ownership. Doctor's expected bundle
+  requires the complete verified manifest/transaction/root/resource/desired
+  snapshot chain and stable read identities; an old manifest without a bundle
+  cannot establish the expected model. Changed native hook commands require
+  normal user trust confirmation; trusted hashes are never written automatically.
+  See `knowledge/notes/codex-installed-provider-bootstrap-decision.md`.
 - `benchmark/` — retrieval and frozen contradiction corpora/runners, including
   `run_benchmark.py`, `run_retrieval_v2.py`, `retrieval-v2.json`,
   `retrieval-v2.schema.json`, `legacy-60-v1.json`,

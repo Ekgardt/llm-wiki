@@ -170,13 +170,29 @@ def native_user_text(text: str) -> str | None:
     if not text.startswith("    {\""):
         return None
     encoded = text[4:].rstrip("\r\n")
-    if not native_encoding_candidate(encoded):
+    return _native_selected_user_text(encoded)
+
+
+def _native_selected_user_text(encoded: str) -> str | None:
+    event = _decoded_native_user_record(encoded)
+    if event is None:
         return None
-    return _native_encoded_user_text(encoded)
+    return _native_record_user_text(event, encoded)
 
 
-def _native_encoded_user_text(encoded: str) -> str | None:
-    event = json.loads(encoded)
+def _decoded_native_user_record(encoded: str) -> dict | None:
+    try:
+        event = json.loads(encoded)
+    except json.JSONDecodeError:
+        if _native_fragment_candidate(encoded):
+            raise
+        return None
+    if not _native_record_candidate(event):
+        return None
+    return event
+
+
+def _native_record_user_text(event: dict, encoded: str) -> str | None:
     _require_native_record(event, encoded)
     if event["event_type"] != "user_prompt":
         return None
@@ -196,7 +212,7 @@ def native_part_user_text(text: str, *, allow_fragment: bool = False) -> str | N
 
 def _native_part_prompt(record: dict, allow_fragment: bool) -> str | None:
     encoded = record["text"]
-    if record["index"] != 0 or not native_encoding_candidate(encoded):
+    if record["index"] != 0:
         return None
     return _native_part_content(encoded, allow_fragment)
 
@@ -244,7 +260,7 @@ def _physical_json_object(encoded: str, allow_fragment: bool) -> dict | None:
 
 def _native_part_content(encoded: str, allow_fragment: bool) -> str | None:
     try:
-        return _native_encoded_user_text(encoded)
+        return _native_selected_user_text(encoded)
     except json.JSONDecodeError as exc:
         if allow_fragment:
             return None
