@@ -496,6 +496,7 @@
   "test_compile_integration.py": 1.39,
   "test_compile_keeps_complete_tool_lines.py": 0.05,
   "test_compile_keeps_physically_overlapping_existing_context.py": 3.87,
+  "test_compile_literal_quote_search_preserves_unique_span.py": 0.02,
   "test_compile_native_journal_parse_belongs_to_the_immutable_source.py": 0.21,
   "test_compile_one_layout_protects_its_base_once.py": 0.03,
   "test_compile_packing_counts_original_entry_metadata.py": 0.01,

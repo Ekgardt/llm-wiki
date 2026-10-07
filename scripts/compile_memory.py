@@ -4503,10 +4503,10 @@ def _ambiguous_block_message(
 
 def _sole_quote_offset(block: bytes, quote_bytes: bytes) -> int:
     """An ambiguous quote is refused: one entry must name one span."""
-    offsets = [match.start() for match in re.finditer(re.escape(quote_bytes), block)]
-    if len(offsets) != 1:
+    offset = block.find(quote_bytes)
+    if offset < 0 or block.find(quote_bytes, offset + max(len(quote_bytes), 1)) >= 0:
         raise ValueError("compile evidence does not match the immutable snapshot")
-    return offsets[0]
+    return offset
 
 
 def _line_bounds(block: bytes, quote_offset: int, quote_length: int) -> tuple[int, int]:
