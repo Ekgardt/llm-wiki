@@ -4901,7 +4901,7 @@ def _provider_security_identity(handle):
             native_handle, win32security.SE_FILE_OBJECT, flags)
     except pywintypes.error as exc:
         raise InstallControlError("install_provider_security_unverified") from exc
-    return file_identity, descriptor.GetSecurityDescriptorBinaryForm()
+    return file_identity, bytes(descriptor)
 
 
 def _provider_handle_identity(handle):

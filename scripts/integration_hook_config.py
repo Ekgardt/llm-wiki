@@ -1018,7 +1018,13 @@ def _codex_windows_words(command: str) -> list[str]:
 
         return win32api.CommandLineToArgv(command)
     words = shlex.split(command, posix=False)
-    return [word[1:-1] if word.startswith('"') and word.endswith('"') else word for word in words]
+    return [_codex_windows_word(word) for word in words]
+
+
+def _codex_windows_word(word: str) -> str:
+    if word.startswith('"') and word.endswith('"'):
+        return word[1:-1]
+    return word
 
 
 def _codex_parsed_launch(command: str, windows: bool) -> tuple[Path, dict[str, str]]:

@@ -13,6 +13,17 @@ BUNDLE = {'MEMORY_LLM_PROVIDER': 'codex', 'MEMORY_CODEX_MODEL': 'gpt-6-luna',
           'MEMORY_CODEX_REASONING': 'max'}
 
 
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX executable redirector control; native Windows exercises its own launcher')
+def test_same_process_check_measures_interpreter_after_launcher(tmp_path, monkeypatch):
+    launcher = tmp_path / 'python-redirector'
+    original = sys.executable
+    launcher.write_bytes(('#!' + original + '\nimport subprocess\nimport sys\n\n'
+                          + f'raise SystemExit(subprocess.call([{original!r},*sys.argv[1:]]))\n').encode())
+    launcher.chmod(0o700)
+    monkeypatch.setattr(sys, 'executable', str(launcher))
+    test_target_executes_in_the_original_python_process(tmp_path)
+
+
 def _installed_choice(monkeypatch):
     for key in hooks.PROVIDER_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
@@ -112,10 +123,13 @@ def test_target_executes_in_the_original_python_process(tmp_path):
     path = _script(tmp_path, 'mcp_server.py')
     path.write_text('import os\nprint(os.getpid())\n', encoding='utf-8')
     args = hooks.codex_launch_args(tmp_path, 'mcp_server.py', (), {})
-    process = subprocess.Popen([sys.executable, *args[6:]], cwd=tmp_path,
-                               env=_host_environment(), stdout=subprocess.PIPE)
-    output, _error = process.communicate()
-    assert (process.returncode, int(output)) == (0, process.pid)
+    arguments = args[6:]
+    arguments[1] = 'import os\nimport sys\n\nsys.stderr.write(str(os.getpid()) + "\\n")\n' + arguments[1]
+    process = subprocess.Popen([sys.executable, *arguments], cwd=tmp_path,
+                               env=_host_environment(), stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE)
+    output, interpreter_pid = process.communicate()
+    assert (process.returncode, int(output)) == (0, int(interpreter_pid))
 
 
 def test_windows_form_quotes_each_argument_without_changing_pair_binding(tmp_path):
@@ -180,12 +194,49 @@ def test_existing_safe_path_environment_is_not_relaxed(tmp_path):
     assert wrapped == direct
 
 
+def _uv_project_environment():
+    return dict(_host_environment(), UV_PYTHON=sys.executable,
+                UV_PROJECT_ENVIRONMENT=sys.prefix)
+
+
+def _uv_project(root):
+    (root / 'pyproject.toml').write_bytes(
+        b'[project]\nname="provider-launch-probe"\nversion="0.0.0"\n'
+        b'requires-python=">=3.10"\ndependencies=[]\n')
+    subprocess.run(['uv', 'lock', '--offline', '--directory', str(root)],
+                   env=_uv_project_environment(), capture_output=True, check=True)
+
+
+@pytest.mark.parametrize('project', [False, True])
+def test_uv_project_fixture_preserves_exact_streams_and_exit(tmp_path, project):
+    target = _script(tmp_path, 'mcp_server.py')
+    target.write_bytes(b'import sys\nsys.stdout.buffer.write(b"output\\r\\n")\n'
+                       b'sys.stderr.buffer.write(b"error\\r\\n")\nraise SystemExit(7)\n')
+    if project:
+        _uv_project(tmp_path)
+    direct = ['uv', 'run', '--locked', '--no-sync', '--directory', str(tmp_path),
+              'python', 'scripts/mcp_server.py']
+    wrapped = ['uv', *hooks.codex_launch_args(tmp_path, 'mcp_server.py', (), {},
+                                             relative_target=True)]
+    results = [subprocess.run(args, cwd=tmp_path, env=_uv_project_environment(),
+                              capture_output=True, check=False) for args in [direct, wrapped]]
+    first, second = results
+    assert (first.returncode, first.stdout, first.stderr) == (
+        second.returncode, second.stdout, second.stderr)
+    assert (first.returncode, first.stdout) == (7, b'output\r\n')
+    if project:
+        assert first.stderr == b'error\r\n'
+        return
+    assert b'--locked' in first.stderr and b'--no-sync' in first.stderr
+    assert first.stderr.endswith(b'error\r\n')
+
+
 def _configured_powershell_result(shell, root, bundle, *, arguments=None):
     import shutil
 
     executable = shutil.which(shell)
     assert executable is not None, shell
-    env = dict(_host_environment(), UV_PYTHON=sys.executable)
+    env = _uv_project_environment()
     args = arguments
     if args is None:
         args = ['uv', *hooks.codex_launch_args(root, 'mcp_server.py', ['literal value'], bundle,
@@ -202,6 +253,7 @@ def _configured_powershell_result(shell, root, bundle, *, arguments=None):
 def test_native_configured_powershell_keeps_direct_script_parity_and_provider_bundle(tmp_path, shell):
     root = tmp_path / 'Café & Ω vault'
     _parity_script(root)
+    _uv_project(root)
     result = _configured_powershell_result(shell, root, {})
     assert result.returncode == 0, result.stderr.decode('utf-8', errors='replace')
     assert json.loads(result.stdout) == _parity_result(['scripts/mcp_server.py', 'literal value'], root)

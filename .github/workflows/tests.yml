@@ -392,6 +392,7 @@ jobs:
       - run: uv sync --locked
       - run: uv run --locked --no-sync pytest tests/test_installer_bootstrap.py tests/test_installer_config.py tests/test_install_smoke.py -q
       - run: uv run --locked --no-sync pytest tests/test_integration_injection.py -q -k installer
+      - run: uv run --locked --no-sync pytest tests/test_codex_installed_provider_bundle_reaches_launch.py tests/test_codex_provider_bootstrap_preserves_runtime_choice.py tests/test_codex_provider_bundle_manifest_proves_desired.py -q
       - run: uv run --locked --no-sync pytest tests/test_dependency_environments.py -q -k installer
 
   # The jobs above drive pieces of the installers with fake runners; none of them

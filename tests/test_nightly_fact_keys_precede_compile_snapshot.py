@@ -14,7 +14,7 @@ def _step_runner(path, logical, snapshots, seen):
     def step(command, log, name, *, timeout):
         seen.append(name)
         if name == "fact_keys":
-            path.write_text("committed entity facts\n")
+            path.write_bytes(b"committed entity facts\n")
         if name == "maybe_compile":
             snapshots.append(compiler.CompileInputs((), (), (
                 compiler.TargetSnapshot(logical, path.read_bytes(), hashlib.sha256(path.read_bytes()).hexdigest()),
@@ -27,7 +27,7 @@ def _step_runner(path, logical, snapshots, seen):
 def _finish_runner(path, logical, snapshots, external_edit):
     def finish():
         if external_edit:
-            path.write_text("independent external change\n")
+            path.write_bytes(b"independent external change\n")
         compiler._require_current_compile_targets(snapshots[0], _manifest(path, logical))
         return True
 
@@ -38,7 +38,7 @@ def _night(tmp_path, monkeypatch, external_edit):
     logical = "knowledge/notes/ledger-test.md"
     path = tmp_path / logical
     path.parent.mkdir(parents=True)
-    path.write_text("before entity facts\n")
+    path.write_bytes(b"before entity facts\n")
     snapshots = []
     seen = []
 

@@ -2381,10 +2381,11 @@ def test_codex_mcp_config_state_accepts_exact_enabled_table(tmp_path, quoted):
 
     config = tmp_path / "config.toml"
     table = '[mcp_servers."llm-wiki"]' if quoted else "[mcp_servers.llm-wiki]"
+    from integration_hook_config import codex_launch_args
+
+    args = codex_launch_args(ROOT, "mcp_server.py", (), relative_target=True)
     config.write_text(
-        f'{table}\ncommand = "uv"\n'
-        f'args = ["run", "--locked", "--no-sync", "--directory", {json.dumps(str(ROOT))}, '
-        '"python", "scripts/mcp_server.py"]\nenabled = true\n',
+        f'{table}\ncommand = "uv"\nargs = {json.dumps(args)}\nenabled = true\n',
         encoding="utf-8",
     )
 
@@ -3601,19 +3602,12 @@ def _mcp_config_kept(config: Path, scenario: str, original: str, before: bytes) 
 
 def _codex_mcp_toml(vault: Path, *, quoted: bool, conflicting: bool = False) -> str:
     table = '[mcp_servers."llm-wiki"]' if quoted else "[mcp_servers.llm-wiki]"
-    args = (
-        ["python", "other.py"]
-        if conflicting
-        else [
-            "run",
-            "--locked",
-            "--no-sync",
-            "--directory",
-            str(vault),
-            "python",
-            "scripts/mcp_server.py",
-        ]
-    )
+    _ensure_scripts_on_path()
+    from integration_hook_config import codex_launch_args
+
+    args = codex_launch_args(vault, "mcp_server.py", (), relative_target=True)
+    if conflicting:
+        args = ["python", "other.py"]
     return f'{table}\ncommand = "uv"\nargs = {json.dumps(args)}\n'
 
 
@@ -3649,13 +3643,17 @@ def test_unix_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario
     runner.write_text(
         function
         + "\nuv() {\n"
-        + "  while [[ $# -gt 0 && $1 != config-state && $1 != config-replace ]]; do shift; done\n"
+        + "  while [[ $# -gt 0 && $1 != config-state && $1 != config-replace && $1 != config-block ]]; do shift; done\n"
         + '  command "$TEST_PYTHON" "$TEST_VAULT/scripts/codex_memory.py" "$@"\n'
         + "}\nset +e\n"
         + 'configure_codex_mcp "$TEST_VAULT" "$HOME/.codex/config.toml"\n'
         + "exit $?\n",
         encoding="utf-8",
     )
+    from tests.test_shell_functions_stay_simple import _shape_violations, _violations
+
+    assert _violations(runner.read_bytes()) == {}
+    assert _shape_violations(runner.read_bytes()) == []
     env = os.environ.copy()
     env.update(HOME=str(home), TEST_VAULT=str(ROOT), TEST_PYTHON=sys.executable)
 
@@ -3711,15 +3709,25 @@ def test_windows_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scena
         }}
         function uv {{
             $all = @($args)
-            $index = [Array]::IndexOf($all, 'config-state')
-            if ($index -lt 0) {{ $index = [Array]::IndexOf($all, 'config-replace') }}
-            if ($index -lt 0) {{ throw 'config-state missing' }}
+            $index = -1
+            foreach ($command in @('config-state', 'config-replace', 'config-block')) {{
+                $index = [Array]::IndexOf($all, $command)
+                if ($index -ge 0) {{ break }}
+            }}
+            if ($index -lt 0) {{ throw 'config command missing' }}
             & {ps_literal(sys.executable)} {ps_literal(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
         }}
         $code = Install-CodexMcp -VaultRoot {ps_literal(str(ROOT))} -Config {ps_literal(str(config))}
         exit $code
         """
     )
+
+    from tests.test_powershell_functions_stay_simple import _measure, _problems
+
+    emitted = tmp_path / "installer-mcp-contract.ps1"
+    emitted.write_text(command, encoding="utf-8")
+    assert [problem for record in _measure([emitted], tmp_path)
+            for problem in _problems(record)] == []
 
     result = subprocess.run(
         [require_tool("pwsh"), "-NoProfile", "-NonInteractive", "-Command", command],
@@ -4416,18 +4424,15 @@ def test_install_scripts_generate_context(tmp_path):
         }
     }
     sh_codex_mcp = _shell_functions(install_sh, "write_codex_mcp_block", "add_codex_mcp_block", "codex_mcp_state_status", "configure_codex_mcp")
+    ps_codex_mcp = install_ps1.split("function Add-CodexMcpEntry {", 1)[1].split("\nfunction ", 1)[0]
     assert (
         _unmet_substrings(
             (
                 ('CODEX_CONFIG="$HOME/.codex/config.toml"', sh_codex, True),
                 ("config-state", sh_codex_mcp, True),
-                ("[mcp_servers.llm-wiki]", sh_codex_mcp, True),
-                ('command = "uv"', sh_codex_mcp, True),
-                (
-                    'args = [\\"run\\", \\"--locked\\", \\"--no-sync\\", \\"--directory\\"',
-                    sh_codex_mcp,
-                    True,
-                ),
+                ('uv run --locked --no-sync --directory "$vault_root" python scripts/codex_memory.py', sh_codex_mcp, True),
+                ('config-block --vault-root "$vault_root"', sh_codex_mcp, True),
+                ('write_codex_mcp_block "$block" "$config"', sh_codex_mcp, True),
                 ("config.bak", sh_codex_mcp, True),
                 ("grep", sh_codex_mcp, False),
                 ("$CODEX_HOOKS_STATE", sh_codex, True),
@@ -4458,9 +4463,9 @@ def test_install_scripts_generate_context(tmp_path):
                 ('$codexConfig = Join-Path $env:USERPROFILE ".codex\\config.toml"', ps_codex, True),
                 ("function Install-CodexMcp", install_ps1, True),
                 ("config-state", install_ps1, True),
-                ("[mcp_servers.llm-wiki]", install_ps1, True),
-                ('command = "uv"', install_ps1, True),
-                ('args = ["run", "--locked", "--no-sync", "--directory"', install_ps1, True),
+                ('uv run --locked --no-sync --directory $VaultRoot python scripts/codex_memory.py', ps_codex_mcp, True),
+                ('config-block --vault-root $VaultRoot', ps_codex_mcp, True),
+                ('$block = $blockLines -join "`n"', ps_codex_mcp, True),
                 ("Copy-Item -LiteralPath $Config", install_ps1, True),
                 ("Config.bak", install_ps1, True),
                 ("codex-memory-wrapper", ps_codex, True),

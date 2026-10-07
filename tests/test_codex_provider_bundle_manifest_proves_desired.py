@@ -395,3 +395,66 @@ def test_native_windows_proof_detects_dacl_change_with_identical_file_bytes(tmp_
     monkeypatch.setattr(install, '_codex_desired_bundle', grant_after_proof)
     with pytest.raises(install.InstallControlError, match='snapshot_changed'):
         install.installed_codex_provider_bundle(root, state, home)
+
+
+def _buffer_descriptor_platform(monkeypatch, descriptor):
+    import sys
+    from types import SimpleNamespace
+
+    def get_security(handle, kind, flags):
+        assert (handle, kind, flags) == (71, 1, 7)
+        return descriptor
+
+    monkeypatch.setattr(install, 'os', SimpleNamespace(name='nt'))
+    monkeypatch.setitem(sys.modules, 'msvcrt', SimpleNamespace(get_osfhandle=lambda fd: 71))
+    monkeypatch.setitem(sys.modules, 'pywintypes', SimpleNamespace(error=OSError))
+    monkeypatch.setitem(sys.modules, 'windows_workspace',
+                        SimpleNamespace(identity=lambda handle, directory: ('file-id', handle)))
+    monkeypatch.setitem(sys.modules, 'win32security', SimpleNamespace(
+        OWNER_SECURITY_INFORMATION=1, GROUP_SECURITY_INFORMATION=2,
+        DACL_SECURITY_INFORMATION=4, SE_FILE_OBJECT=1, GetSecurityInfo=get_security))
+
+
+def test_security_descriptor_buffer_contract_preserves_entire_binary_snapshot(tmp_path, monkeypatch):
+    descriptor = bytearray(b'owner\0group\0DACL\0\xff')
+    _buffer_descriptor_platform(monkeypatch, descriptor)
+    path = tmp_path / 'resource'
+    path.write_bytes(b'same physical bytes')
+    with path.open('rb') as handle:
+        original = install._provider_security_identity(handle)
+    assert original == (('file-id', 71), b'owner\0group\0DACL\0\xff')
+    descriptor[0] = ord('O')
+    assert original[1] == b'owner\0group\0DACL\0\xff'
+
+
+@pytest.mark.parametrize('offset', [0, 6, 12], ids=['owner', 'group', 'dacl'])
+def test_binary_security_change_refuses_unchanged_file_content(tmp_path, monkeypatch, offset):
+    descriptor = bytearray(b'owner\0group\0DACL\0')
+    _buffer_descriptor_platform(monkeypatch, descriptor)
+    path = tmp_path / 'resource'
+    path.write_bytes(b'same physical bytes')
+    with path.open('rb') as handle:
+        original = install._provider_security_identity(handle)
+        descriptor[offset] ^= 1
+        changed = install._provider_security_identity(handle)
+    assert path.read_bytes() == b'same physical bytes'
+    with pytest.raises(install.InstallControlError, match='snapshot_changed'):
+        install._require_provider_identity(changed, original)
+
+
+@pytest.mark.skipif(__import__('os').name != 'nt', reason='requires actual pywin32 security descriptor')
+def test_native_security_descriptor_snapshot_uses_the_supported_buffer(tmp_path):
+    import msvcrt
+
+    import win32security
+
+    path = tmp_path / 'resource'
+    path.write_bytes(b'same physical bytes')
+    flags = (win32security.OWNER_SECURITY_INFORMATION | win32security.GROUP_SECURITY_INFORMATION
+             | win32security.DACL_SECURITY_INFORMATION)
+    with path.open('rb') as handle:
+        _identity, snapshot = install._provider_security_identity(handle)
+        descriptor = win32security.GetSecurityInfo(
+            msvcrt.get_osfhandle(handle.fileno()), win32security.SE_FILE_OBJECT, flags)
+        assert snapshot == memoryview(descriptor).tobytes()
+        assert snapshot == bytes(descriptor)

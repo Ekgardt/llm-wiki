@@ -649,6 +649,7 @@
   "test_install_smoke.py": 1.24,
   "test_installer_bootstrap.py": 14.42,
   "test_installer_config.py": 1.17,
+  "test_installer_mcp_fixture_uses_current_provider_contract.py": 0.008,
   "test_integration_hook_config.py": 1.42,
   "test_integration_injection.py": 20.89,
   "test_intent_conditional_trust.py": 0.01,
