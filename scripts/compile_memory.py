@@ -213,7 +213,7 @@ ALLOWED_CATEGORIES = frozenset(
     {"concepts", "decisions", "patterns", "debugging", "qa"}
 )
 DRAFT_PROGRAM = (
-    "compile-draft/v13: explain immutable decision targets and distinct source IDs; "
+    "compile-draft/v14: explicit output IDs and current offered-ID schema; "
     "with immutable original-entry context and derived-provenance claims"
 )
 CRITIQUE_PROGRAM = (
@@ -1502,7 +1502,8 @@ def _source_choice_schema(schema, choices):
     evidence = copy['properties']['operations']['items']['properties']['evidence']
     evidence['items'] = {'oneOf': [evidence['items'], {
         'type': 'object', 'required': ['source_line', 'claim'],
-        'properties': {'source_line': {'type': 'integer'},
+        'properties': {'source_line': {'type': 'integer',
+                                             'enum': [row['source_line'] for row in choices]},
                        'claim': _LEGACY_EVIDENCE_SCHEMA['properties']['claim']},
         'additionalProperties': False}]}
     return copy
@@ -2809,7 +2810,7 @@ def _render_choice_prompt(base, choices):
     protected = _protected_choice_base(base)
     addresses = _source_address_table(choices)
     expected = protected + "\n\n" + addresses
-    prompt = expected + "\n\nLEGACY EVIDENCE CHOICES: prefer exactly source_line and claim. Return the FIRST number of an offered row as source_line. Never return the SECOND number (the visible FILE LF row) as source_line. The second number only helps locate the source text; it grants no evidence authority. The table maps each ID to its FILE block, original entry and one-based LF line inside that visible selected FILE body; count physical LF rows, including blank rows. Table IDs and embedded labels are not source quotes or durable citations. The compiler supplies authoritative Sources, Evidence and Claims; do not invent shortened daily references or retain IDs in the page body. Existing legacy/native protocols remain unchanged."
+    prompt = expected + "\n\nLEGACY EVIDENCE CHOICES: prefer exactly source_line and claim. Return only the integer labelled source_line from an offered row, with exactly two keys: source_line (an offered integer) and claim (supported text). The locator=LF: label is a display-only address inside the visible FILE body, never an output ID or output field. Never add quoted_text, locator, daily_date or timestamp to a source_line evidence object. A legacy evidence object instead has all four legacy fields and no source_line. The locator only helps locate the source text; it grants no evidence authority. The table maps each ID to its FILE block, original entry and one-based LF line inside that visible selected FILE body; count physical LF rows, including blank rows. Table IDs and embedded labels are not source quotes or durable citations. The compiler supplies authoritative Sources, Evidence and Claims; do not invent shortened daily references or retain IDs in the page body. Existing legacy/native protocols remain unchanged."
     _require_choice_prefix(expected, prompt)
     return prompt
 
@@ -2877,7 +2878,7 @@ def _source_address_group(path, rows):
 
 
 def _source_address_entry(timestamp, rows):
-    addresses = "\n".join(f"{row['source_line']} {row['file_line']}" for row in rows)
+    addresses = "\n".join(f"source_line={row['source_line']} locator=LF:{row['file_line']}" for row in rows)
     return f"ENTRY {timestamp}\n{addresses}"
 
 

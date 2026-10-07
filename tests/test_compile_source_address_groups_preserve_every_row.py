@@ -6,8 +6,8 @@ import compile_memory as compiler
 
 def _decoded_groups(text):
     return [(timestamp, int(source_line), int(file_line))
-            for timestamp, body in re.findall(r'ENTRY ([^\n]+)\n((?:\d+ \d+\n?)+)', text)
-            for source_line, file_line in re.findall(r'(\d+) (\d+)', body)]
+            for timestamp, body in re.findall(r'ENTRY ([^\n]+)\n((?:source_line=\d+ locator=LF:\d+\n?)+)', text)
+            for source_line, file_line in re.findall(r'source_line=(\d+) locator=LF:(\d+)', body)]
 
 
 def test_address_groups_preserve_every_ordered_row_and_repeated_entry():
