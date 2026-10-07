@@ -302,9 +302,35 @@ def _windows_replace_open_target(source, target):
     handle = win32file.CreateFile(str(source.resolve()), 0x00010000, 7, None, 3,
                                   0x00200000, None)
     try:
+        _observe_native_destination('before', handle, source, target)
         _set_rename_information(handle, _rename_information(target))
+        _observe_native_destination('after', handle, source, target)
     finally:
         handle.Close()
+
+
+def _native_handle_snapshot(handle):
+    import win32file
+
+    return {'final_name': win32file.GetFinalPathNameByHandle(handle, 0),
+            'file_information': win32file.GetFileInformationByHandle(handle)}
+
+
+def _native_path_snapshot(path):
+    if not path.exists():
+        return {'exists': False}
+    handle = generation_catalog._windows_read_handle(path)
+    try:
+        return _native_handle_snapshot(handle)
+    finally:
+        _close_native_stage_handle(handle)
+
+
+def _observe_native_destination(stage, handle, source, target):
+    print('native_destination', repr({'stage': stage, 'requested_target': str(target.resolve()),
+                                     'source_handle': _native_handle_snapshot(handle),
+                                     'target_handle': _native_path_snapshot(target),
+                                     'source_path_exists': source.exists()}))
 
 
 def _replace_open_target(source, target):
@@ -344,6 +370,8 @@ def test_native_fixture_writer_closes_source_handle_when_rename_refuses(tmp_path
         raise OSError('native rename refused')
     monkeypatch.setitem(sys.modules, 'win32file', SimpleNamespace(CreateFile=create))
     monkeypatch.setattr(sys.modules[__name__], '_set_rename_information', refused)
+    monkeypatch.setattr(sys.modules[__name__], '_observe_native_destination',
+                        lambda *_arguments: None)
     source, target = tmp_path / 'source', tmp_path / 'target'
     with pytest.raises(OSError, match='native rename refused'):
         _windows_replace_open_target(source, target)
