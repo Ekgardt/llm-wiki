@@ -366,6 +366,8 @@ def test_native_rename_buffer_keeps_full_utf16_path_and_only_posix_replace_flags
     assert record.length == len(encoded)
     offset = _RenameInformation.name.offset
     assert buffer.raw[offset:offset + record.length] == encoded
+    assert len(buffer) >= offset + record.length + ctypes.sizeof(ctypes.c_uint16)
+    assert buffer.raw[offset + record.length:offset + record.length + 2] == b'\0\0'
     assert _RenameInformation.root.offset >= ctypes.sizeof(ctypes.c_uint32)
     assert _RenameInformation.root.offset % ctypes.alignment(ctypes.c_void_p) == 0
     assert _RenameInformation.length.offset == (_RenameInformation.root.offset
