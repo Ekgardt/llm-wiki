@@ -397,7 +397,6 @@ class _HookFamily(NamedTuple):
     env_keys: tuple[str, ...] = ()
 
 
-CLAUDE_ENV_KEYS = ("LLM_WIKI_ROOT", "LLM_WIKI_STATE_ROOT", "MEMORY_LLM_PROVIDER", "MEMORY_CLAUDE_MODEL")
 # Everything that shapes a provider call at install time, persisted wherever the
 # code runs unattended: the hooks' env block and the scheduler units. Issue #22:
 # an install run with MEMORY_LLM_PROVIDER=claude left the nightly unit to
@@ -421,6 +420,8 @@ PROVIDER_ENV_KEYS = (
     "OLLAMA_NO_CLOUD",
 )
 
+
+CLAUDE_ENV_KEYS = ("LLM_WIKI_ROOT", "LLM_WIKI_STATE_ROOT", *PROVIDER_ENV_KEYS)
 
 # The test provider is never persisted: it exists so a suite can run without
 # a backend, and a hook that inherited it would answer every capture with a
