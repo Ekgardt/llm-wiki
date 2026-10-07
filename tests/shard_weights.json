@@ -740,6 +740,7 @@
   "test_orphaned_checkpoint_names_are_repaired.py": 20.21,
   "test_our_older_hooks_are_ours.py": 0.13,
   "test_ownership_actor_is_the_agent.py": 15.5,
+  "test_ownership_probe_controls_reply_delivery.py": 0.08,
   "test_ownership_reclaim_under_process_death.py": 37.76,
   "test_page_status.py": 0.04,
   "test_parity_gold_resolves.py": 0.13,

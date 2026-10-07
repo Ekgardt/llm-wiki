@@ -189,6 +189,99 @@ class _OwnershipProbeError(RuntimeError):
         self.code = code
 
 
+class _ProbeReplyDelivery:
+    """Defer only this probe's real reply; never block the reader or invent a terminal."""
+
+    _NAMES = ("_queue_request_message", "_handle_response")
+
+    def __init__(self, protocol: object) -> None:
+        self.protocol = protocol
+        self.nonce = protocol.generation_nonce
+        self.queue = protocol._queue_request_message
+        self.response = protocol._handle_response
+        self.previous = {name: vars(protocol).get(name) for name in self._NAMES}
+        self.present = {name: name in vars(protocol) for name in self._NAMES}
+        self.lock = threading.Lock()
+        self.released = threading.Event()
+        self.key = None
+        self.deferred = []
+        self.reply_count = 0
+
+    def __enter__(self):
+        if getattr(self.protocol, "_benchmark_probe_delivery", None) is not None:
+            raise _OwnershipProbeError("overlapping_probe", "ownership reply scopes overlap")
+        self.protocol._benchmark_probe_delivery = self
+        try:
+            self.protocol._queue_request_message = self._queue
+            self.protocol._handle_response = self._response
+        except BaseException:
+            self._restore()
+            raise
+        return self
+
+    def __exit__(self, error_type, error, traceback):
+        try:
+            self._restore()
+        finally:
+            self._release()
+
+    def _restore_name(self, name):
+        if self.present[name]:
+            setattr(self.protocol, name, self.previous[name])
+            return
+        vars(self.protocol).pop(name, None)
+
+    def _restore(self):
+        for name in self._NAMES:
+            self._restore_name(name)
+        assert self.protocol._benchmark_probe_delivery is self
+        del self.protocol._benchmark_probe_delivery
+
+    def _remember(self, message, key):
+        if not _is_ownership_probe(message):
+            return
+        with self.lock:
+            if self.key is not None:
+                raise _OwnershipProbeError("duplicate_probe", "ownership scope queued multiple probes")
+            assert key == (self.nonce, message["id"])
+            self.key = key
+
+    def _queue(self, message, *, deadline, key):
+        self._remember(message, key)
+        return self.queue(message, deadline=deadline, key=key)
+
+    def _hold(self, message, nonce):
+        with self.lock:
+            if self.released.is_set() or (nonce, message["id"]) != self.key:
+                return False
+            self.deferred.append((message, nonce))
+            return True
+
+    def _response(self, message, nonce):
+        if self._hold(message, nonce):
+            return
+        return self.response(message, nonce)
+
+    def _release(self):
+        with self.lock:
+            self.released.set()
+            replies = tuple(self.deferred)
+            self.deferred.clear()
+        self.reply_count = len(replies)
+        for message, nonce in replies:
+            self.response(message, nonce)
+        if self.reply_count > 1:
+            raise _OwnershipProbeError("duplicate_response", "ownership probe received duplicate replies")
+
+
+def _is_ownership_probe(message):
+    return (
+        isinstance(message, dict)
+        and message.get("method") == _OWNERSHIP_PROBE_METHOD
+        and message.get("params") == {"query": "__llm_wiki_ownership_probe_no_match__"}
+    )
+
+
 # The resolution of the clock every probe deadline is read on. Python 3.10 on
 # Windows reads `time.monotonic()` from GetTickCount64, about 15.6 ms, against a
 # 50 ms probe budget; each unmeasured attempt's message carries it, so a failure
@@ -1694,6 +1787,24 @@ class _RealNavigationRuntime:
             raise _CleanupProofError("ownership probe request owner did not stop")
 
     def _observe_inflight_interruption(
+        self,
+        process: object,
+        scenario: str,
+        deadline: float,
+    ) -> None:
+        delivery = _ProbeReplyDelivery(process.protocol)
+        try:
+            with delivery:
+                self._interrupt_probe(process, scenario, deadline)
+        finally:
+            self._ownership_record("ownership_reply_faults")[scenario] = {
+                "mode": "deferred_exact_probe_reply",
+                "request_key": delivery.key,
+                "reply_count": delivery.reply_count,
+                "released": delivery.released.is_set(),
+            }
+
+    def _interrupt_probe(
         self,
         process: object,
         scenario: str,
