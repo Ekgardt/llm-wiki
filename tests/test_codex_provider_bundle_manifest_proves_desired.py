@@ -516,3 +516,40 @@ def _observe_create_file(monkeypatch):
 
     monkeypatch.setattr(generation_catalog, '_create_file', observed)
     return calls
+
+
+def _close_native_stage_handle(handle):
+    assert generation_catalog._close_handle(handle)
+
+
+def _raw_native_reader(stack, path):
+    handle = generation_catalog._windows_read_handle(path)
+    stack.callback(_close_native_stage_handle, handle)
+
+
+def _transferred_native_reader(stack, path):
+    descriptor = generation_catalog._windows_read_descriptor(path)
+    stack.callback(os.close, descriptor)
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requires actual Windows raw HANDLE and CRT transfer')
+@pytest.mark.parametrize('record', ['manifest', 'transaction', 'desired'])
+@pytest.mark.parametrize('boundary', ['raw_handle', 'transferred_descriptor'])
+def test_native_replacement_identifies_handle_transfer_boundary(
+        tmp_path, monkeypatch, record, boundary):
+    _root, state, _home, _resource = _installed(tmp_path)
+    path = _proof_paths(state)[record]
+    original = path.read_bytes()
+    info = path.stat()
+    print('authority_attributes', (record, boundary, info.st_mode, info.st_file_attributes))
+    assert info.st_mode & stat.S_IWRITE
+    assert not info.st_file_attributes & stat.FILE_ATTRIBUTE_READONLY
+    calls = _observe_create_file(monkeypatch)
+    readers = {'raw_handle': _raw_native_reader,
+               'transferred_descriptor': _transferred_native_reader}
+    with ExitStack() as stack:
+        readers[boundary](stack, path)
+        print('native_open_access_and_sharing', repr(calls))
+        _same_bytes_replacement(path)
+        assert path.read_bytes() == original
+    assert path.read_bytes() == original
