@@ -1,9 +1,13 @@
 """A desired install resource supplies expected bundle authority, not a live hook."""
 import json
+import os
+import stat
+from contextlib import ExitStack
 from pathlib import Path
 
 import codex_memory
 import doctor
+import generation_catalog
 import install_control as install
 import integration_hook_config as hooks
 import pytest
@@ -458,3 +462,57 @@ def test_native_security_descriptor_snapshot_uses_the_supported_buffer(tmp_path)
             msvcrt.get_osfhandle(handle.fileno()), win32security.SE_FILE_OBJECT, flags)
         assert snapshot == memoryview(descriptor).tobytes()
         assert snapshot == bytes(descriptor)
+
+
+def _no_held_reader(_stack, _path):
+    return None
+
+
+def _shared_reader(stack, path):
+    return stack.enter_context(install._provider_binary_file(path))
+
+
+def _security_reader(stack, path):
+    handle = install._provider_open(stack, path)
+    install._provider_handle_identity(handle)
+    return handle
+
+
+@pytest.mark.parametrize('record', ['manifest', 'transaction', 'desired'])
+@pytest.mark.parametrize('boundary', ['unheld', 'shared_reader', 'security_reader'])
+def test_installed_authority_replacement_reaches_identity_check(
+        tmp_path, monkeypatch, record, boundary):
+    _root, state, _home, _resource = _installed(tmp_path)
+    path = _proof_paths(state)[record]
+    info = path.stat()
+    details = (os.name, record, boundary, info.st_mode,
+               getattr(info, 'st_file_attributes', None))
+    assert info.st_mode & stat.S_IWRITE, details
+    assert not getattr(info, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_READONLY, details
+    original = path.read_bytes()
+    print("authority_attributes", repr(details))
+    calls = _observe_create_file(monkeypatch)
+    readers = {'unheld': _no_held_reader, 'shared_reader': _shared_reader,
+               'security_reader': _security_reader}
+    with ExitStack() as stack:
+        handle = readers[boundary](stack, path)
+        print("native_open_access_and_sharing", repr(calls))
+        _same_bytes_replacement(path)
+        assert path.read_bytes() == original
+        if handle is not None:
+            assert handle.read() == original
+    assert path.read_bytes() == original
+
+
+def _observe_create_file(monkeypatch):
+    calls = []
+    original = getattr(generation_catalog, '_create_file', None)
+    if original is None:
+        return calls
+
+    def observed(*arguments):
+        calls.append((arguments[1], arguments[2], arguments[4], arguments[5]))
+        return original(*arguments)
+
+    monkeypatch.setattr(generation_catalog, '_create_file', observed)
+    return calls
