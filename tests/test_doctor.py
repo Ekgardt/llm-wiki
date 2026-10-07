@@ -103,8 +103,13 @@ def _codex_hooks_fixture() -> dict:
     }
 
 
-def _runtime_hooks(root: Path, *, trust: str = "trusted", enabled: bool = True) -> dict:
+def _runtime_hooks(root: Path, *, trust: str = "trusted", enabled: bool = True,
+                   provider_bundle: dict | None = None) -> dict:
     template = _codex_hooks_fixture()["hooks"]
+    if provider_bundle is not None:
+        from integration_hook_config import codex_rendered_template
+
+        template = codex_rendered_template(root, _codex_hooks_fixture(), provider_bundle)["hooks"]
     hooks = []
     for event_name, groups in template.items():
         group = groups[0]
@@ -121,6 +126,21 @@ def _runtime_hooks(root: Path, *, trust: str = "trusted", enabled: bool = True) 
             }
         )
     return {"data": [{"cwd": str(root), "hooks": hooks, "warnings": [], "errors": []}]}
+
+
+def _installed_codex_fixture(root: Path, state_root: Path, home: Path) -> dict:
+    from install_control import install_resources
+    from integration_hook_config import codex_hooks_resource
+
+    from tests.test_install_control import _release
+
+    bundle = {"MEMORY_LLM_PROVIDER": "codex", "MEMORY_CODEX_MODEL": "gpt-6-luna",
+              "MEMORY_CODEX_REASONING": "max"}
+    resource = codex_hooks_resource(home / ".codex/hooks.json", _codex_hooks_fixture(),
+                                     root=root, provider_bundle=bundle)
+    install_resources(state_root=state_root, vault_root=root, release=_release(),
+                      scheduler_backend="cron", resources=[resource], control_version=2)
+    return bundle
 
 
 def _create_index(path: Path, paths: list[str] | None = None, manifest: bool = True) -> None:
@@ -777,9 +797,10 @@ def test_codex_doctor_prefers_trusted_runtime_hooks(tmp_path, monkeypatch):
     (codex_dir / "hooks.json").write_bytes(
         (root / "integrations" / "codex" / "hooks.json").read_bytes()
     )
+    bundle = _installed_codex_fixture(root, state_root, home)
 
     monkeypatch.setattr(
-        doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: _runtime_hooks(root)
+        doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: _runtime_hooks(root, provider_bundle=bundle)
     )
     check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations")
     codex = check["details"]["hosts"]["codex"]
@@ -795,13 +816,16 @@ def test_codex_runtime_hook_health_is_decoupled_from_mcp_config(tmp_path, monkey
 
     root, state_root, home = _build_root(tmp_path)
     (home / ".codex").mkdir()
+    bundle = _installed_codex_fixture(root, state_root, home)
     monkeypatch.setattr(
-        doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: _runtime_hooks(root)
+        doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: _runtime_hooks(root, provider_bundle=bundle)
     )
 
     check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations")
 
     assert check["details"]["hosts"]["codex"]["status"] == "ok"
+    assert check["details"]["hosts"]["codex"]["provider_transport"]["status"] == "degraded"
+    assert check["status"] == "degraded"
 
 
 @pytest.mark.parametrize("trust", ["untrusted", "modified"])
@@ -812,10 +836,11 @@ def test_codex_runtime_untrusted_or_modified_is_degraded_without_capture(
 
     root, state_root, home = _build_root(tmp_path)
     (home / ".codex").mkdir()
+    bundle = _installed_codex_fixture(root, state_root, home)
     monkeypatch.setattr(
         doctor,
         "_probe_codex_hooks_list",
-        lambda *_args, **_kwargs: _runtime_hooks(root, trust=trust),
+        lambda *_args, **_kwargs: _runtime_hooks(root, trust=trust, provider_bundle=bundle),
     )
 
     codex = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations")[
@@ -832,7 +857,8 @@ def test_codex_runtime_probe_warnings_are_degraded(tmp_path, monkeypatch):
 
     root, state_root, home = _build_root(tmp_path)
     (home / ".codex").mkdir()
-    response = _runtime_hooks(root)
+    bundle = _installed_codex_fixture(root, state_root, home)
+    response = _runtime_hooks(root, provider_bundle=bundle)
     response["data"][0]["warnings"] = ["configuration warning"]
     monkeypatch.setattr(doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: response)
 
@@ -850,6 +876,7 @@ def test_codex_unavailable_probe_reports_unverified_and_no_capture(tmp_path, mon
 
     root, state_root, home = _build_root(tmp_path)
     (home / ".codex").mkdir()
+    _installed_codex_fixture(root, state_root, home)
     monkeypatch.setattr(doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: None)
 
     codex = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations")[
@@ -887,8 +914,9 @@ def test_codex_configured_wrapper_is_reported_as_heartbeat_fallback(tmp_path, mo
 def test_codex_hooks_probe_skips_spawn_when_deadline_budget_is_too_small(tmp_path, monkeypatch):
     import doctor
 
-    root, _, home = _build_root(tmp_path)
+    root, state_root, home = _build_root(tmp_path)
     (home / ".codex").mkdir()
+    _installed_codex_fixture(root, state_root, home)
     monkeypatch.setattr(
         doctor,
         "_codex_app_server_command",
@@ -902,7 +930,7 @@ def test_codex_hooks_probe_skips_spawn_when_deadline_budget_is_too_small(tmp_pat
 
     deadline = time.monotonic() + doctor.CODEX_HOOK_PROBE_STARTUP_SECONDS / 2
     response = doctor._probe_codex_hooks_list(root, home, deadline=deadline)
-    check = doctor._integration_check(root, home, deadline=deadline)
+    check = doctor._integration_check(root, home, deadline=deadline, state_root=state_root)
 
     assert response is None
     codex = check["details"]["hosts"]["codex"]
@@ -1133,11 +1161,12 @@ def test_codex_doctor_rejects_runtime_disabled_hooks(tmp_path, monkeypatch):
     hooks = json.loads((root / "integrations" / "codex" / "hooks.json").read_text(encoding="utf-8"))
     hooks["hooks"]["Stop"][0]["hooks"][0]["timeout"] = 999
     (codex_dir / "hooks.json").write_text(json.dumps(hooks), encoding="utf-8")
+    bundle = _installed_codex_fixture(root, state_root, home)
 
     monkeypatch.setattr(
         doctor,
         "_probe_codex_hooks_list",
-        lambda *_args, **_kwargs: _runtime_hooks(root, enabled=False),
+        lambda *_args, **_kwargs: _runtime_hooks(root, enabled=False, provider_bundle=bundle),
     )
     check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations")
     codex = check["details"]["hosts"]["codex"]
@@ -1181,10 +1210,11 @@ def test_codex_hook_health_does_not_use_local_toml_parser(tmp_path, monkeypatch)
         '[mcp_servers.llm-wiki]\ncommand = "uv"\nargs = ["scripts/mcp_server.py"]\n',
         encoding="utf-8",
     )
+    bundle = _installed_codex_fixture(root, state_root, home)
     monkeypatch.setattr(doctor, "STDLIB_TOML", None, raising=False)
     monkeypatch.setattr(doctor, "TOMLI", None, raising=False)
     monkeypatch.setattr(
-        doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: _runtime_hooks(root)
+        doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: _runtime_hooks(root, provider_bundle=bundle)
     )
 
     check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations")

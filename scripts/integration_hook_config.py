@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import NamedTuple
 
+from codex_hook_identity import OUR_CODEX_COMMANDS, OUR_CODEX_SCRIPTS
 from install_control import InstallControlError, ManagedResource, file_resource
 from integration_config_backup import publish_configuration
 from reliable_memory import canonical_json_bytes, fsync_directory
@@ -687,7 +688,8 @@ def _names_this_installation(current: bytes, desired: bytes) -> bool:
     `docs/research/2026-09-28-an-update-replaces-what-it-owns.md`.
     """
     have, want = _installation_env(current), _installation_env(desired)
-    return all(have.get(key, want.get(key)) == want.get(key) for key in _INSTALLATION_KEYS)
+    return (all(have.get(key, want.get(key)) == want.get(key) for key in _INSTALLATION_KEYS)
+            and _codex_projection_matches(current, desired))
 
 
 def _hook_family_resource(
@@ -793,10 +795,326 @@ def claude_settings_template(root: Path) -> dict[str, object]:
     return template
 
 
+# The payload is nonsecret quoting transport, never a global Codex preference.
+_CODEX_BOOTSTRAP_BODY = '''import base64
+import builtins
+import json
+import os
+import sys
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+from types import ModuleType
+
+KEYS={keys!r}
+SCRIPTS={scripts!r}
+def require_values(value):
+    if type(value) is not dict or not set(value).issubset(KEYS):
+        raise ValueError("invalid installed provider keys")
+    if any(type(item) is not str for item in value.values()):
+        raise ValueError("invalid installed provider values")
+    return value
+def require_payload(encoded):
+    value=require_values(json.loads(base64.b64decode(encoded,validate=True)))
+    canonical=base64.b64encode(json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()).decode()
+    if encoded != canonical:
+        raise ValueError("noncanonical installed provider payload")
+    if value.get("MEMORY_LLM_PROVIDER","").strip().lower() == "fake":
+        raise ValueError("test provider cannot be installed")
+    return value
+def target_path(argument):
+    target=Path(argument)
+    absolute=Path(os.path.abspath(target))
+    if absolute.resolve(strict=True) != absolute or not absolute.is_file():
+        raise ValueError("invalid installed provider target")
+    if absolute.parent.name != "scripts" or absolute.name not in SCRIPTS:
+        raise ValueError("invalid installed provider script")
+    return absolute
+def script_module(target):
+    module=ModuleType("__main__")
+    module.__dict__.update(__file__=str(target),__package__=None,__spec__=None,
+        __cached__=None,__loader__=SourceFileLoader("__main__",str(target)),__builtins__=builtins)
+    return module
+def prepare_import_path(target):
+    if getattr(sys.flags,"safe_path",False) or sys.flags.isolated:
+        return
+    sys.path[0]=str(target.parent)
+def launch():
+    bundle=require_payload(sys.argv[1])
+    target=target_path(sys.argv[2])
+    source=target.read_bytes()
+    if set(KEYS).isdisjoint(os.environ):
+        os.environ.update(bundle)
+    sys.argv=sys.argv[2:]
+    prepare_import_path(target)
+    module=script_module(target)
+    sys.modules["__main__"]=module
+    exec(compile(source,str(target),"exec",dont_inherit=True),module.__dict__)
+launch()
+'''
+
+
+def codex_provider_bootstrap() -> str:
+    import base64
+
+    program = _CODEX_BOOTSTRAP_BODY.format(keys=PROVIDER_ENV_KEYS, scripts=(*OUR_CODEX_SCRIPTS, "mcp_server.py"))
+    encoded = base64.b64encode(program.encode("utf-8")).decode("ascii")
+    return f"exec(__import__('base64').b64decode('{encoded}'))"
+
+
+def _require_codex_provider_bundle(bundle: Mapping[str, str]) -> dict[str, str]:
+    if not isinstance(bundle, Mapping) or not set(bundle).issubset(PROVIDER_ENV_KEYS):
+        raise ValueError("invalid installed provider keys")
+    if any(type(value) is not str for value in bundle.values()):
+        raise ValueError("invalid installed provider values")
+    return _require_persistable_provider(dict(bundle))
+
+
+def _require_persistable_provider(bundle: dict[str, str]) -> dict[str, str]:
+    if bundle.get("MEMORY_LLM_PROVIDER", "").strip().lower() in _UNPERSISTED_PROVIDERS:
+        raise ValueError("test provider cannot be installed")
+    return bundle
+
+
+def codex_provider_payload(bundle: Mapping[str, str]) -> str:
+    import base64
+
+    value = _require_codex_provider_bundle(bundle)
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return base64.b64encode(encoded.encode("utf-8")).decode("ascii")
+
+
+def codex_provider_from_payload(payload: str) -> dict[str, str]:
+    import base64
+
+    value = _require_codex_provider_bundle(json.loads(base64.b64decode(payload, validate=True)))
+    if codex_provider_payload(value) != payload:
+        raise ValueError("noncanonical installed provider payload")
+    return value
+
+
+def codex_launch_args(root: Path, script: str, tail: Sequence[str],
+                      bundle: Mapping[str, str] | None = None, *, relative_target: bool = False) -> list[str]:
+    root = root.resolve()
+    target = root / "scripts" / script
+    if script not in (*OUR_CODEX_SCRIPTS, "mcp_server.py"):
+        raise ValueError("invalid installed Codex target")
+    installed = provider_environment() if bundle is None else bundle
+    return ["run", "--locked", "--no-sync", "--directory", str(root), "python", "-c",
+            codex_provider_bootstrap(), codex_provider_payload(installed),
+            f"scripts/{script}" if relative_target else str(target), *tail]
+
+
+def codex_launch_bundle(args: Sequence[object], root: Path) -> dict[str, str]:
+    if len(args) < 10 or list(args[:7]) != ["run", "--locked", "--no-sync", "--directory",
+                                        str(root.resolve()), "python", "-c"]:
+        raise ValueError("invalid installed Codex arguments")
+    if args[7] != codex_provider_bootstrap() or type(args[8]) is not str:
+        raise ValueError("invalid installed Codex bootstrap")
+    return _codex_target_bundle(args, root)
+
+
+def _codex_target_bundle(args: Sequence[object], root: Path) -> dict[str, str]:
+    target = Path(str(args[9]))
+    target = target if target.is_absolute() else root.resolve() / target
+    if target.parent != root.resolve() / "scripts" or target.name not in (*OUR_CODEX_SCRIPTS, "mcp_server.py"):
+        raise ValueError("invalid installed Codex target")
+    return codex_provider_from_payload(str(args[8]))
+
+
+def _codex_template_arguments(command: str, root: Path) -> list[str]:
+    import shlex
+
+    return [item.replace('$LLM_WIKI_ROOT', str(root)).replace('%LLM_WIKI_ROOT%', str(root))
+            for item in shlex.split(command)]
+
+
+def _codex_template_launch(command: str, root: Path, bundle: Mapping[str, str]) -> list[str]:
+    args = _codex_template_arguments(command, root)
+    index = args.index("python")
+    target = Path(args[index + 1])
+    return [args[0], *codex_launch_args(root, target.name, args[index + 2:], bundle)]
+
+
+def _codex_handler_render(handler: Mapping[str, object], root: Path,
+                          bundle: Mapping[str, str]) -> dict[str, object]:
+    import shlex
+
+    command = handler.get("command")
+    if not isinstance(command, str) or not _codex_handler_is_ours(handler):
+        return dict(handler)
+    args = _codex_template_launch(command, root, bundle)
+    return dict(handler, command=shlex.join(args), commandWindows=_codex_windows_command(args))
+
+
+def _codex_windows_argument(argument: str) -> str:
+    import subprocess
+
+    rendered = subprocess.list2cmdline([argument])
+    if rendered.startswith('"'):
+        return rendered
+    trailing = len(argument) - len(argument.rstrip('\\'))
+    return '"' + rendered + '\\' * trailing + '"'
+
+
+def _codex_windows_command(arguments: Sequence[str]) -> str:
+    return arguments[0] + " " + " ".join(_codex_windows_argument(item) for item in arguments[1:])
+
+
+def codex_rendered_template(root: Path, template: Mapping[str, object],
+                            bundle: Mapping[str, str]) -> dict[str, object]:
+    rendered = json.loads(json.dumps(template))
+    for groups in _family_hooks(rendered, CODEX_FAMILY).values():
+        for group in groups:
+            group["hooks"] = [_codex_handler_render(handler, root, bundle)
+                              for handler in _block_hooks(group)]
+    return rendered
+
+
+def _codex_resource_template(template: Mapping[str, object], root: Path | None,
+                             bundle: Mapping[str, str]) -> Mapping[str, object]:
+    if root is not None:
+        return codex_rendered_template(root, template, bundle)
+    if not bundle:
+        return template
+    return codex_rendered_template(_codex_template_root(template), template, bundle)
+
+
+def _codex_template_root(template: Mapping[str, object]) -> Path:
+    import shlex
+
+    roots = set()
+    for groups in _family_hooks(template, CODEX_FAMILY).values():
+        for group in groups:
+            roots.update(_codex_handler_roots(_block_hooks(group), shlex.split))
+    if len(roots) != 1:
+        raise ValueError("installed Codex root is ambiguous")
+    return Path(roots.pop())
+
+
+def _codex_handler_roots(handlers: Sequence[object], split: Callable) -> set[str]:
+    roots = set()
+    for handler in handlers:
+        command = handler.get("command", "")
+        args = split(command)
+        if "--directory" in args:
+            roots.add(args[args.index("--directory") + 1])
+    return roots
+
+
+
+def _codex_command_words(command: str, windows: bool) -> list[str]:
+    import shlex
+
+    if windows:
+        return _codex_windows_words(command)
+    return shlex.split(command)
+
+
+def _codex_windows_words(command: str) -> list[str]:
+    import shlex
+
+    if os.name == "nt":
+        import win32api
+
+        return win32api.CommandLineToArgv(command)
+    words = shlex.split(command, posix=False)
+    return [word[1:-1] if word.startswith('"') and word.endswith('"') else word for word in words]
+
+
+def _codex_parsed_launch(command: str, windows: bool) -> tuple[Path, dict[str, str]]:
+    import shlex
+
+    words = _codex_command_words(command, windows)
+    root = Path(words[words.index("--directory") + 1])
+    bundle = codex_launch_bundle(words[1:], root)
+    _require_codex_hook_tail(words[1:])
+    canonical = _codex_windows_command(words) if windows else shlex.join(words)
+    if words[0] != "uv" or canonical != command:
+        raise ValueError("noncanonical installed Codex command")
+    return root, bundle
+
+
+def _require_codex_hook_tail(args: Sequence[str]) -> None:
+    target = Path(args[9]).name
+    tail = " " + " ".join(args[10:])
+    if (target, tail) not in OUR_CODEX_COMMANDS:
+        raise ValueError("invalid installed Codex hook tail")
+
+
+def codex_command_launch(command: str) -> tuple[Path, dict[str, str]]:
+    for windows in (False, True):
+        try:
+            return _codex_parsed_launch(command, windows)
+        except (ValueError, TypeError, IndexError, UnicodeError):
+            continue
+    raise ValueError("invalid installed Codex command")
+
+
+def _codex_projection_roots(projection: bytes) -> set[Path]:
+    roots = set()
+    for groups in _family_hooks(_decode_object(projection), CODEX_FAMILY).values():
+        for group in groups:
+            roots.update(_codex_block_roots(_block_hooks(group)))
+    return roots
+
+
+def _codex_block_roots(handlers: Sequence[object]) -> set[Path]:
+    roots = set()
+    for handler in handlers:
+        command = handler.get("command", "")
+        if "exec(__import__" in command:
+            roots.add(codex_command_launch(command)[0])
+    return roots
+
+
+def _codex_projection_matches(current: bytes, desired: bytes) -> bool:
+    have, want = _codex_projection_roots(current), _codex_projection_roots(desired)
+    return not have or have == want
+
+
+def codex_projection_bundle(projection: bytes, root: Path) -> dict[str, str]:
+    bundles = []
+    for groups in _family_hooks(_decode_object(projection), CODEX_FAMILY).values():
+        for group in groups:
+            bundles.extend(_codex_block_bundles(_block_hooks(group), root))
+    return _required_uniform_codex_bundle(bundles)
+
+
+def _required_uniform_codex_bundle(bundles: Sequence[dict[str, str]]) -> dict[str, str]:
+    if not bundles:
+        raise ValueError("installed Codex provider bundle is absent")
+    if any(bundle != bundles[0] for bundle in bundles):
+        raise ValueError("installed Codex provider bundle is ambiguous")
+    return bundles[0]
+
+
+def _codex_block_bundles(handlers: Sequence[object], root: Path) -> list[dict[str, str]]:
+    return [_codex_paired_command_bundle(handler, root) for handler in handlers]
+
+
+def _codex_paired_command_bundle(handler: Mapping[str, object], root: Path) -> dict[str, str]:
+    import shlex
+
+    command = handler.get("command")
+    bundle = _codex_matching_command_bundle(command, root)
+    if handler.get("commandWindows") != _codex_windows_command(shlex.split(command)):
+        raise ValueError("installed Codex platform commands disagree")
+    return bundle
+
+
+def _codex_matching_command_bundle(command: object, root: Path) -> dict[str, str]:
+    if not isinstance(command, str):
+        raise ValueError("installed Codex command is absent")
+    actual, bundle = codex_command_launch(command)
+    if actual != root.resolve():
+        raise ValueError("installed Codex command belongs to another vault")
+    return bundle
+
 # --- Codex hooks --------------------------------------------------------------
 #
-# Codex owns no environment: its handlers reach the vault through the profile
-# fragment the same transaction writes. Whether the hooks may be written at all
+# Codex has no owned top-level environment fragment. The installed provider bundle
+# travels atomically in each owned command, and any explicit host provider key wins.
+# Whether the hooks may be written at all
 # is a separate question — inline hooks in `config.toml` can disable, duplicate,
 # or contradict the file ones — and that check stays where it is, in
 # `codex_memory`, ahead of the install.
@@ -819,6 +1137,8 @@ def codex_hooks_resource(
     destination: Path,
     template: Mapping[str, object],
     *,
+    root: Path | None = None,
+    provider_bundle: Mapping[str, str] | None = None,
     config_existed: bool | None = None,
 ) -> ManagedResource:
     """Own exactly the Codex hook blocks whose handlers are all ours."""
@@ -828,7 +1148,8 @@ def codex_hooks_resource(
         kind="codex_hooks_fragment",
         path=path,
         family=CODEX_FAMILY,
-        desired=_family_desired(template, {}, CODEX_FAMILY),
+        desired=_family_desired(_codex_resource_template(template, root,
+            provider_environment() if provider_bundle is None else provider_bundle), {}, CODEX_FAMILY),
         config_existed=path.exists() if config_existed is None else config_existed,
         finish=_no_finish,
     )

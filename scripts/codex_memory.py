@@ -140,6 +140,9 @@ def parse_args() -> argparse.Namespace:
     hooks_state.add_argument("--source", required=True)
     hooks_state.add_argument("--config", required=True)
 
+    config_block = sub.add_parser("config-block")
+    config_block.add_argument("--vault-root", required=True)
+
     config_state = sub.add_parser("config-state")
     config_state.add_argument("--config", required=True)
     config_state.add_argument("--vault-root", required=True)
@@ -670,21 +673,16 @@ def _llm_wiki_table(table: object) -> dict[str, Any] | str:
     return table
 
 
-def _mcp_expected_args(vault_root: Path) -> list[str]:
-    return [
-        "run",
-        "--locked",
-        "--no-sync",
-        "--directory",
-        str(vault_root),
-        "python",
-        "scripts/mcp_server.py",
-    ]
+def _mcp_expected_args(vault_root: Path, provider_bundle: dict[str, str] | None = None) -> list[str]:
+    from integration_hook_config import codex_launch_args
+
+    return codex_launch_args(vault_root, "mcp_server.py", (), provider_bundle, relative_target=True)
 
 
 # The keys this product has ever written into its Codex entry, and the tail every
 # form of its arguments ended with: `uv run [--locked --no-sync] --directory <vault>
-# python scripts/mcp_server.py` (2026-07-13 through today). An entry of that shape
+# python scripts/mcp_server.py` (the pre-bootstrap form retained for migration).
+# An entry of that shape
 # with other arguments is this product's own earlier entry, `stale`, and the installer
 # rewrites it; anything else is the operator's (`conflict`), and an entry switched
 # off with `enabled = false` is the operator's choice (`disabled`).
@@ -693,29 +691,36 @@ _OUR_ENTRY_KEYS = frozenset({"command", "args", "enabled"})
 _OUR_ENTRY_TAIL = ["python", "scripts/mcp_server.py"]
 
 
-def _mcp_entry_state(table: dict[str, Any], vault_root: Path) -> str:
+def _mcp_entry_state(table: dict[str, Any], vault_root: Path,
+                     provider_bundle: dict[str, str] | None = None) -> str:
     """The first state whose test the entry meets, in the order they are listed."""
-    states = (
-        ("disabled", _switched_off),
-        ("equivalent", _is_expected_entry),
-        ("stale", _written_by_this_product),
-    )
-    return next((name for name, test in states if test(table, vault_root)), "conflict")
+    if _switched_off(table, vault_root):
+        return "disabled"
+    if table.get("command") == "uv" and table.get("args") == _mcp_expected_args(vault_root, provider_bundle):
+        return "equivalent"
+    return "stale" if _written_by_this_product(table, vault_root) else "conflict"
 
 
 def _switched_off(table: dict[str, Any], _vault_root: Path) -> bool:
     return table.get("enabled", True) is False
 
 
-def _is_expected_entry(table: dict[str, Any], vault_root: Path) -> bool:
-    return table.get("command") == "uv" and table.get("args") == _mcp_expected_args(vault_root)
-
 
 def _written_by_this_product(table: dict[str, Any], _vault_root: Path) -> bool:
     args = table.get("args")
     if table.get("command") != "uv" or not isinstance(args, list):
         return False
-    return set(table) <= _OUR_ENTRY_KEYS and _our_argument_shape(args)
+    return set(table) <= _OUR_ENTRY_KEYS and (_our_argument_shape(args) or _owned_bootstrap_mcp(args, _vault_root))
+
+
+def _owned_bootstrap_mcp(args: list[object], vault_root: Path) -> bool:
+    from integration_hook_config import codex_launch_bundle
+
+    try:
+        codex_launch_bundle(args, vault_root)
+        return args[9:] == ["scripts/mcp_server.py"]
+    except (ValueError, TypeError, UnicodeError):
+        return False
 
 
 def _our_argument_shape(args: list[object]) -> bool:
@@ -810,20 +815,22 @@ def _read_codex_document(config: Path) -> dict[str, Any] | str:
         return "invalid"
 
 
-def codex_mcp_config_state(config: Path, vault_root: Path) -> str:
+def codex_mcp_config_state(config: Path, vault_root: Path,
+                           provider_bundle: dict[str, str] | None = None) -> str:
     """Classify the existing Codex MCP entry without modifying TOML."""
     if not config.exists():
         return "absent"
-    return _document_mcp_state(_read_codex_document(config), vault_root)
+    return _document_mcp_state(_read_codex_document(config), vault_root, provider_bundle)
 
 
-def _document_mcp_state(document: dict[str, Any] | str, vault_root: Path) -> str:
+def _document_mcp_state(document: dict[str, Any] | str, vault_root: Path,
+                        provider_bundle: dict[str, str] | None = None) -> str:
     if isinstance(document, str):
         return document
     entry = _mcp_entry(document)
     if isinstance(entry, str):
         return entry
-    return _mcp_entry_state(entry, vault_root)
+    return _mcp_entry_state(entry, vault_root, provider_bundle)
 
 
 def _read_hooks_document(path: Path, *, missing_ok: bool) -> dict[str, Any]:
@@ -1177,6 +1184,11 @@ def _write_config_status(status: str) -> None:
     sys.stdout.buffer.write((status + "\n").encode("utf-8"))
 
 
+def command_config_block(args: argparse.Namespace) -> int:
+    sys.stdout.buffer.write(_mcp_block(Path(args.vault_root)).encode("utf-8"))
+    return 0
+
+
 def command_config_replace(args: argparse.Namespace) -> int:
     _write_config_status(replace_codex_mcp_entry(Path(args.config), Path(args.vault_root), foreign=args.foreign))
     return 0
@@ -1197,6 +1209,7 @@ _COMMANDS = {
     "hooks-state": command_hooks_state,
     "config-state": command_config_state,
     "config-replace": command_config_replace,
+    "config-block": command_config_block,
     "config-advice": command_config_advice,
 }
 

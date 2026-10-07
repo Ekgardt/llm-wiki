@@ -7153,9 +7153,14 @@ def _template_hooks_table(template_path: Path) -> dict:
     return hooks
 
 
-def _expected_codex_runtime_hooks(template_path: Path) -> list[dict[str, Any]]:
+def _expected_codex_runtime_hooks(template_path: Path,
+                                  provider_bundle: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
     expected = []
-    for event_name, groups in _template_hooks_table(template_path).items():
+    table = _template_hooks_table(template_path)
+    if provider_bundle is not None:
+        table = _hook_config.codex_rendered_template(template_path.parents[2],
+            {"hooks": table}, provider_bundle)["hooks"]
+    for event_name, groups in table.items():
         if not isinstance(event_name, str):
             raise ValueError("invalid Codex hook template")
         expected.extend(
@@ -7230,10 +7235,11 @@ def _codex_owned_hooks(hooks: list) -> list:
     return [hook for hook in hooks if _codex_owned_hook(hook)]
 
 
-def _expected_codex_hooks(root: Path, ours: list) -> tuple[list | None, str]:
+def _expected_codex_hooks(root: Path, ours: list,
+                          provider_bundle: Mapping[str, str] | None = None) -> tuple[list | None, str]:
     try:
         expected = _expected_codex_runtime_hooks(
-            root / "integrations" / "codex" / "hooks.json"
+            root / "integrations" / "codex" / "hooks.json", provider_bundle
         )
     except ValueError:
         return None, "runtime_hooks_template_invalid"
@@ -7265,7 +7271,7 @@ def _rendered_script_paths(rendered: str, root: Path) -> str:
 
 
 def _codex_hook_commands(root: Path, command: str) -> set[str]:
-    if os.name == "nt" or not command.startswith("uv "):
+    if os.name == "nt" or not command.startswith("uv ") or "exec(__import__" in command:
         return {command}
     return {command, _rendered_codex_hook_command(root, command)}
 
@@ -7307,8 +7313,9 @@ def _codex_hook_problem(wanted: dict, ours: list, root: Path) -> str:
     return "" if trusted else _codex_hook_trust_code(trust)
 
 
-def _codex_hooks_verdict(root: Path, ours: list) -> tuple[bool, str]:
-    expected, problem = _expected_codex_hooks(root, ours)
+def _codex_hooks_verdict(root: Path, ours: list,
+                         provider_bundle: Mapping[str, str] | None = None) -> tuple[bool, str]:
+    expected, problem = _expected_codex_hooks(root, ours, provider_bundle)
     if expected is None:
         return False, problem
     for wanted in expected:
@@ -7318,7 +7325,8 @@ def _codex_hooks_verdict(root: Path, ours: list) -> tuple[bool, str]:
     return True, "runtime_hooks_active"
 
 
-def _codex_entry_hooks_verdict(entry: dict, root: Path) -> tuple[bool, str]:
+def _codex_entry_hooks_verdict(entry: dict, root: Path,
+                               provider_bundle: Mapping[str, str] | None = None) -> tuple[bool, str]:
     """The hook verdict for one probe entry that was read successfully."""
     problem = _codex_entry_problem(entry, root)
     if problem:
@@ -7326,11 +7334,12 @@ def _codex_entry_hooks_verdict(entry: dict, root: Path) -> tuple[bool, str]:
     hooks = _codex_hook_list(entry)
     if hooks is None:
         return False, "runtime_hooks_invalid"
-    return _codex_hooks_verdict(root, _codex_owned_hooks(hooks))
+    return _codex_hooks_verdict(root, _codex_owned_hooks(hooks), provider_bundle)
 
 
 def _codex_runtime_hooks_state(
-    root: Path, home: Path, *, deadline: float = float("inf")
+    root: Path, home: Path, *, deadline: float = float("inf"),
+    provider_bundle: Mapping[str, str] | None = None
 ) -> tuple[bool, str]:
     if deadline - time.monotonic() < CODEX_HOOK_PROBE_STARTUP_SECONDS:
         return False, "runtime_hooks_not_completed"
@@ -7338,7 +7347,7 @@ def _codex_runtime_hooks_state(
     entry, problem = _codex_probe_entry(response)
     if entry is None:
         return False, problem
-    return _codex_entry_hooks_verdict(entry, root)
+    return _codex_entry_hooks_verdict(entry, root, provider_bundle)
 
 
 def _codex_wrapper_configured(root: Path, home: Path) -> bool:
@@ -7431,18 +7440,60 @@ def _codex_degraded_result(root: Path, home: Path, reason: str) -> dict[str, obj
     return result
 
 
-def _codex_host_result(root: Path, home: Path, deadline: float) -> dict[str, object]:
+def _codex_host_result(root: Path, home: Path, deadline: float,
+                       state_root: Path | None = None) -> dict[str, object]:
+    from install_control import InstallControlError, installed_codex_provider_bundle
+
     if not (home / ".codex").exists():
         return {"status": "skipped", "message": "Optional host not installed."}
-    hooks_active, reason = _codex_runtime_hooks_state(root, home, deadline=deadline)
-    if hooks_active:
-        return {
-            "status": "ok",
-            "message": "Official Codex hooks are active and trusted; review changes in /hooks.",
-            "capture_mode": "official-hooks",
-            "trust": "review-with-/hooks",
-        }
-    return _codex_degraded_result(root, home, reason)
+    state = state_root or Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(root)))
+    try:
+        bundle = installed_codex_provider_bundle(root, state, home)
+    except (InstallControlError, OSError, ValueError):
+        return _codex_unqualified_host_result(root, home, deadline)
+    return _codex_qualified_host_result(root, home, deadline, bundle)
+
+
+def _codex_unqualified_host_result(root: Path, home: Path, deadline: float) -> dict[str, object]:
+    active, reason = _codex_runtime_hooks_state(root, home, deadline=deadline)
+    result = _codex_legacy_hook_result(root, home, active, reason)
+    result.update(provider_bundle="unknown", provider_transport={"status": "degraded",
+                  "reason": "runtime_provider_bundle_unverified"})
+    return result
+
+
+def _codex_legacy_hook_result(root: Path, home: Path, active: bool, reason: str) -> dict[str, object]:
+    if active:
+        return {"status": "degraded", "reason": "runtime_provider_bundle_unverified",
+                "message": "Legacy native hooks are trusted; installed provider choice is unverified.",
+                "capture_mode": "official-hooks", "native_hook_status": "ok"}
+    return dict(_codex_degraded_result(root, home, reason), native_hook_status="degraded")
+
+
+def _codex_qualified_host_result(root: Path, home: Path, deadline: float,
+                                 bundle: dict[str, str]) -> dict[str, object]:
+    hooks_active, reason = _codex_runtime_hooks_state(root, home, deadline=deadline,
+                                                    provider_bundle=bundle)
+    if not hooks_active:
+        return _codex_degraded_result(root, home, reason)
+    problem = _codex_mcp_provider_problem(root, home, bundle)
+    return {"status": "ok", "message": "Official Codex hooks are active and trusted; review changes in /hooks.",
+            "capture_mode": "official-hooks", "trust": "review-with-/hooks",
+            "provider_bundle": "verified-installed-desired",
+            "provider_transport": _codex_mcp_transport_result(problem)}
+
+
+def _codex_mcp_transport_result(problem: str) -> dict[str, str]:
+    if problem:
+        return {"status": "degraded", "reason": problem}
+    return {"status": "ok", "mcp_entry": "equivalent"}
+
+
+def _codex_mcp_provider_problem(root: Path, home: Path, bundle: dict[str, str]) -> str:
+    from codex_memory import codex_mcp_config_state
+
+    state = codex_mcp_config_state(home / ".codex/config.toml", root, bundle)
+    return "" if state == "equivalent" else f"runtime_mcp_provider_{state}"
 
 
 # Delegates deleted on 2026-09-17 that an older install's hooks still name; the
@@ -7490,17 +7541,19 @@ def _integration_host_result(
     name: str,
     config: tuple[Path, list[tuple[Path, tuple[str, ...]]]] | None,
     deadline: float,
+    state_root: Path | None = None,
 ) -> dict[str, object]:
     if name == "codex":
-        return _codex_host_result(root, home, deadline)
+        return _codex_host_result(root, home, deadline, state_root)
     return _generic_host_result(*_required_host_config(config))
 
 
-def _integration_hosts(root: Path, home: Path, deadline: float) -> dict[str, dict[str, object]]:
+def _integration_hosts(root: Path, home: Path, deadline: float,
+                       state_root: Path | None = None) -> dict[str, dict[str, object]]:
     configs = _integration_host_configs(home)
     names = ("claude", "opencode", "codex")
     return {
-        name: _integration_host_result(root, home, name, configs.get(name), deadline)
+        name: _integration_host_result(root, home, name, configs.get(name), deadline, state_root)
         for name in names
     }
 
@@ -7511,15 +7564,21 @@ def _integration_summary(
     missing_sources = sum(not available for available in source_details.values())
     if missing_sources:
         return "error", f"{missing_sources} integration source adapter(s) are missing."
-    configured_missing = sum(host.get("status") == "degraded" for host in hosts.values())
+    configured_missing = sum(_integration_host_degraded(host) for host in hosts.values())
     if configured_missing:
         return "degraded", f"{configured_missing} installed host(s) lack current integration config."
     return "ok", "Integration sources are available; optional hosts were checked."
 
 
-def _integration_check(root: Path, home: Path, *, deadline: float = float("inf")) -> dict:
+def _integration_host_degraded(host: Mapping[str, object]) -> bool:
+    provider = host.get("provider_transport", {})
+    return host.get("status") == "degraded" or provider.get("status") == "degraded"
+
+
+def _integration_check(root: Path, home: Path, *, deadline: float = float("inf"),
+                       state_root: Path | None = None) -> dict:
     source_details = {name: path.is_file() for name, path in _integration_sources(root).items()}
-    hosts = _integration_hosts(root, home, deadline)
+    hosts = _integration_hosts(root, home, deadline, state_root)
     status, message = _integration_summary(source_details, hosts)
     return _result("integrations", status, message, {"sources": source_details, "hosts": hosts})
 
@@ -9636,7 +9695,7 @@ def _deferrable_checks(
         ("mcp", lambda _budget: _mcp_check(root_path)),
         (
             "integrations",
-            lambda budget: _integration_check(root_path, home_path, deadline=budget),
+            lambda budget: _integration_check(root_path, home_path, deadline=budget, state_root=state_path),
         ),
         (
             "pyright",

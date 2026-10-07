@@ -156,13 +156,10 @@ write_codex_mcp_block() {
 
 add_codex_mcp_block() {
   local vault_root="$1" config="$2"
-  local vault_json block
+  local block
   mkdir -p "$(dirname "$config")" || return 1
-  vault_json="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$vault_root")" || return 1
-  block="$(printf '%s\n' \
-    '[mcp_servers.llm-wiki]' \
-    'command = "uv"' \
-    "args = [\"run\", \"--locked\", \"--no-sync\", \"--directory\", $vault_json, \"python\", \"scripts/mcp_server.py\"]")"
+  block="$(uv run --locked --no-sync --directory "$vault_root" python scripts/codex_memory.py \
+    config-block --vault-root "$vault_root")" || return 1
   write_codex_mcp_block "$block" "$config"
 }
 

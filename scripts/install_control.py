@@ -20,7 +20,8 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import partial
@@ -212,7 +213,7 @@ def _read_state_bytes(path: Path) -> bytes:
         raise InstallControlError("install_state_unsafe")
     if path.stat().st_size > MAX_RECORD_BYTES:
         raise InstallControlError("install_state_oversized")
-    return path.read_bytes()
+    return _provider_proof_bytes(path, MAX_RECORD_BYTES)
 
 
 def _strict_json_object(raw: bytes) -> dict[str, object]:
@@ -255,12 +256,7 @@ def _install_schema(value: Mapping[str, object], record_type: str) -> Path:
 
 
 def _read_install_record(path: Path, record_type: str) -> dict[str, object]:
-    value = _strict_json_object(_read_state_bytes(path))
-    try:
-        validate_schema(value, _install_schema(value, record_type))
-    except ValueError as exc:
-        raise InstallControlError("install_state_schema_invalid") from exc
-    return value
+    return _validated_install_record(_read_state_bytes(path), record_type)
 
 
 def _optional_install_record(path: Path, record_type: str) -> dict[str, object] | None:
@@ -2400,7 +2396,7 @@ def _read_preimage(path: Path) -> bytes:
         raise InstallControlError("install_preimage_invalid")
     if path.stat().st_size > MAX_PREIMAGE_BYTES:
         raise InstallControlError("install_preimage_invalid")
-    return path.read_bytes()
+    return _provider_proof_bytes(path, MAX_PREIMAGE_BYTES)
 
 
 def _read_origin(install_root: Path, origin: Mapping[str, object]) -> bytes | None:
@@ -4884,6 +4880,167 @@ def _active_install_health_for_schema(
     return _active_install_health(install_root, manifest, transaction)
 
 
+_PROVIDER_READ_PROOF = ContextVar("install_provider_read_proof", default=None)
+
+
+def _provider_security_identity(handle):
+    if os.name != "nt":
+        return None
+    import msvcrt
+
+    import pywintypes
+    import win32security
+    import windows_workspace
+
+    native_handle = msvcrt.get_osfhandle(handle.fileno())
+    file_identity = windows_workspace.identity(native_handle, directory=False)
+    flags = (win32security.OWNER_SECURITY_INFORMATION | win32security.GROUP_SECURITY_INFORMATION
+             | win32security.DACL_SECURITY_INFORMATION)
+    try:
+        descriptor = win32security.GetSecurityInfo(
+            native_handle, win32security.SE_FILE_OBJECT, flags)
+    except pywintypes.error as exc:
+        raise InstallControlError("install_provider_security_unverified") from exc
+    return file_identity, descriptor.GetSecurityDescriptorBinaryForm()
+
+
+def _provider_handle_identity(handle):
+    info = os.fstat(handle.fileno())
+    metadata = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    return metadata, _provider_security_identity(handle)
+
+
+def _require_provider_identity(actual, expected):
+    if actual != expected:
+        raise InstallControlError("install_provider_snapshot_changed")
+
+
+def _provider_open(stack, path):
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    handle = stack.enter_context(os.fdopen(os.open(path, flags), "rb"))
+    if path.is_symlink() or not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+        raise InstallControlError("install_provider_snapshot_changed")
+    return handle
+
+
+@dataclass
+class _ProviderReadProof:
+    stack: ExitStack
+    reads: list = field(default_factory=list)
+
+    def read(self, path, limit):
+        resolved = path.resolve(strict=True)
+        handle = _provider_open(self.stack, path)
+        identity = _provider_handle_identity(handle)
+        raw = handle.read(limit + 1)
+        if len(raw) > limit:
+            raise InstallControlError("install_provider_snapshot_changed")
+        _require_provider_identity(_provider_handle_identity(handle), identity)
+        _require_provider_identity(path.resolve(strict=True), resolved)
+        self.reads.append((path, resolved, handle, identity, raw))
+        return raw
+
+    def verify(self):
+        for record in self.reads:
+            _verify_provider_read(record)
+
+
+def _verify_provider_read(record):
+    path, resolved, original, identity, raw = record
+    _require_provider_identity(path.resolve(strict=True), resolved)
+    with ExitStack() as stack:
+        reopened = _provider_open(stack, path)
+        _require_provider_identity(_provider_handle_identity(reopened), identity)
+        _require_provider_identity(reopened.read(len(raw) + 1), raw)
+        _require_provider_identity(_provider_handle_identity(reopened), identity)
+        _require_provider_identity(_provider_handle_identity(original), identity)
+        _require_provider_identity(path.resolve(strict=True), resolved)
+
+
+def _provider_proof_bytes(path, limit):
+    proof = _PROVIDER_READ_PROOF.get()
+    if proof is None:
+        return path.read_bytes()
+    return proof.read(path, limit)
+
+
+@contextmanager
+def _provider_snapshot_proof():
+    with ExitStack() as stack:
+        proof = _ProviderReadProof(stack)
+        token = _PROVIDER_READ_PROOF.set(proof)
+        try:
+            yield
+            proof.verify()
+        finally:
+            _PROVIDER_READ_PROOF.reset(token)
+
+
+def installed_codex_provider_bundle(root: Path, state_root: Path, home: Path) -> dict[str, str]:
+    """Hold fresh proof-file identities until the entire desired chain is validated."""
+    with _provider_snapshot_proof():
+        return _installed_codex_provider_bundle(root, state_root, home)
+
+
+def _validated_install_record(raw, record_type):
+    value = _strict_json_object(raw)
+    try:
+        validate_schema(value, _install_schema(value, record_type))
+    except ValueError as exc:
+        raise InstallControlError("install_state_schema_invalid") from exc
+    return value
+
+
+def _installed_codex_provider_bundle(root, state_root, home):
+    install_root = state_root.resolve() / "run/install"
+    manifest_raw = _read_state_bytes(install_root / "manifest.json")
+    transaction_raw = _read_state_bytes(install_root / "transaction.json")
+    manifest = _validated_install_record(manifest_raw, "install-manifest/")
+    transaction = _validated_install_record(transaction_raw, "install-transaction/")
+    record = _qualified_codex_desired_record(install_root, manifest, transaction, root, state_root, home)
+    desired = _read_v2_snapshot(install_root, record["desired"])
+    return _codex_desired_bundle(desired, root)
+
+
+def _qualified_codex_desired_record(install_root: Path, manifest: Mapping[str, object],
+                                    transaction: Mapping[str, object], root: Path,
+                                    state_root: Path, home: Path) -> dict[str, object]:
+    _require_record_roots(manifest, root.resolve(), state_root.resolve())
+    health = _active_install_health_for_schema(install_root, manifest, transaction)
+    if health["status"] != "active" or health["health"] != "ok":
+        raise InstallControlError("install_provider_state_unverified")
+    return _single_codex_desired_record(manifest, home)
+
+
+def _single_codex_desired_record(manifest: Mapping[str, object], home: Path) -> dict[str, object]:
+    records = [record for record in _transaction_resources(manifest)
+               if record.get("id") == "codex-user-hooks"]
+    if len(records) != 1:
+        raise InstallControlError("install_provider_resource_absent")
+    return _qualified_codex_resource(records[0], home)
+
+
+def _qualified_codex_resource(record: dict[str, object], home: Path) -> dict[str, object]:
+    expected = str(_codex_hooks_destination(home.resolve()))
+    if record.get("kind") != "codex_hooks_fragment" or record.get("locator") != expected:
+        raise InstallControlError("install_provider_resource_mismatch")
+    if record.get("state") != "verified" or not isinstance(record.get("desired"), Mapping):
+        raise InstallControlError("install_provider_resource_unverified")
+    return record
+
+
+def _codex_desired_bundle(desired: bytes | None, root: Path) -> dict[str, str]:
+    from integration_hook_config import codex_projection_bundle
+
+    if desired is None:
+        raise InstallControlError("install_provider_desired_absent")
+    try:
+        return codex_projection_bundle(desired, root)
+    except (ValueError, TypeError, UnicodeError) as exc:
+        raise InstallControlError("install_provider_desired_invalid") from exc
+
+
 def _inactive_committed_health(transaction: Mapping[str, object]) -> dict[str, object]:
     if transaction.get("operation") != "uninstall":
         raise InstallControlError("install_transaction_orphaned")
@@ -5270,6 +5427,7 @@ def _ide_hook_factories(
         "codex-user-hooks": lambda: codex_hooks_resource(
             _codex_hooks_destination(home),
             codex_hooks_template(root),
+            root=root,
             config_existed=_recorded_config_existed(metadata, "codex-user-hooks"),
         ),
     }

@@ -285,12 +285,10 @@ function Add-CodexMcpEntry {
     param([string]$VaultRoot, [string]$Config)
     $directory = Split-Path $Config -Parent
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
-    $tomlVault = $VaultRoot.Replace("\", "\\").Replace('"', '\"')
-    $block = @"
-[mcp_servers.llm-wiki]
-command = "uv"
-args = ["run", "--locked", "--no-sync", "--directory", "$tomlVault", "python", "scripts/mcp_server.py"]
-"@
+    $blockLines = uv run --locked --no-sync --directory $VaultRoot python scripts/codex_memory.py `
+        config-block --vault-root $VaultRoot
+    if ($LASTEXITCODE -ne 0) { return 1 }
+    $block = $blockLines -join "`n"
     $encoding = [System.Text.UTF8Encoding]::new($false)
     if (Test-Path $Config) {
         Copy-Item -LiteralPath $Config -Destination "$Config.bak" -Force
