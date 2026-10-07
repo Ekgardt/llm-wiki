@@ -280,7 +280,7 @@ def _rename_information(path):
     encoded = str(path.resolve()).encode('utf-16-le')
     offset = _RenameInformation.name.offset
     buffer = ctypes.create_string_buffer(max(ctypes.sizeof(_RenameInformation),
-                                            offset + len(encoded)))
+                                            offset + len(encoded) + ctypes.sizeof(ctypes.c_uint16)))
     record = _RenameInformation.from_buffer(buffer)
     record.flags = 3  # REPLACE_IF_EXISTS | POSIX_SEMANTICS; no readonly bypass.
     record.length = len(encoded)
@@ -304,6 +304,9 @@ def _windows_replace_open_target(source, target):
     try:
         _observe_native_destination('before', handle, source, target)
         _set_rename_information(handle, _rename_information(target))
+        actual_name = win32file.GetFinalPathNameByHandle(handle, 0)
+        expected_name = generation_catalog._windows_long_path(target)
+        assert actual_name == expected_name, (actual_name, expected_name)
         _observe_native_destination('after', handle, source, target)
     finally:
         handle.Close()
@@ -338,6 +341,18 @@ def _replace_open_target(source, target):
         _windows_replace_open_target(source, target)
         return
     source.replace(target)
+
+
+@pytest.mark.parametrize('name', ['target.json', 'проверка-𐐀.json'])
+def test_native_rename_name_stops_before_unrelated_memory(tmp_path, name):
+    path = tmp_path / name
+    buffer = _rename_information(path)
+    record = _RenameInformation.from_buffer(buffer)
+    adjacent = 'UNRELATED MEMORY'.encode('utf-16-le') + b'\0\0'
+    name_memory = buffer.raw[_RenameInformation.name.offset:] + adjacent
+    interpreted = name_memory.decode('utf-16-le').split('\0', 1)[0]
+    assert interpreted == str(path.resolve())
+    assert record.length == len(str(path.resolve()).encode('utf-16-le'))
 
 
 @pytest.mark.parametrize('name', ['target.json', 'проверка-𐐀.json'])
