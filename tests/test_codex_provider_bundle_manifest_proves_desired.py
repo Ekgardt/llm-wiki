@@ -1,9 +1,12 @@
 """A desired install resource supplies expected bundle authority, not a live hook."""
+import ctypes
 import json
 import os
 import stat
+import sys
 from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
 
 import codex_memory
 import doctor
@@ -264,7 +267,107 @@ def _same_bytes_replacement(path):
     replacement = path.with_suffix('.replacement')
     replacement.write_bytes(path.read_bytes())
     replacement.chmod(path.stat().st_mode & 0o777)
-    replacement.replace(path)
+    _replace_open_target(replacement, path)
+
+
+class _RenameInformation(ctypes.Structure):
+    # SDK FILE_RENAME_INFO: DWORD Flags union, HANDLE, DWORD, WCHAR[1].
+    _fields_ = [('flags', ctypes.c_uint32), ('root', ctypes.c_void_p),
+                ('length', ctypes.c_uint32), ('name', ctypes.c_uint16 * 1)]
+
+
+def _rename_information(path):
+    encoded = str(path.resolve()).encode('utf-16-le')
+    offset = _RenameInformation.name.offset
+    buffer = ctypes.create_string_buffer(max(ctypes.sizeof(_RenameInformation),
+                                            offset + len(encoded)))
+    record = _RenameInformation.from_buffer(buffer)
+    record.flags = 3  # REPLACE_IF_EXISTS | POSIX_SEMANTICS; no readonly bypass.
+    record.length = len(encoded)
+    ctypes.memmove(ctypes.addressof(buffer) + offset, encoded, len(encoded))
+    return buffer
+
+
+def _set_rename_information(handle, buffer):
+    function = ctypes.WinDLL('kernel32', use_last_error=True).SetFileInformationByHandle
+    function.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    function.restype = ctypes.c_int
+    if not function(int(handle), 22, buffer, len(buffer)):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _windows_replace_open_target(source, target):
+    import win32file
+
+    handle = win32file.CreateFile(str(source.resolve()), 0x00010000, 7, None, 3,
+                                  0x00200000, None)
+    try:
+        _set_rename_information(handle, _rename_information(target))
+    finally:
+        handle.Close()
+
+
+def _replace_open_target(source, target):
+    if os.name == 'nt':
+        _windows_replace_open_target(source, target)
+        return
+    source.replace(target)
+
+
+@pytest.mark.parametrize('name', ['target.json', 'проверка-𐐀.json'])
+def test_native_rename_buffer_keeps_full_utf16_path_and_only_posix_replace_flags(tmp_path, name):
+    path = tmp_path / name
+    buffer = _rename_information(path)
+    record = _RenameInformation.from_buffer(buffer)
+    encoded = str(path.resolve()).encode('utf-16-le')
+    assert record.flags == 3
+    assert record.root is None
+    assert record.length == len(encoded)
+    offset = _RenameInformation.name.offset
+    assert buffer.raw[offset:offset + record.length] == encoded
+    assert _RenameInformation.root.offset >= ctypes.sizeof(ctypes.c_uint32)
+    assert _RenameInformation.root.offset % ctypes.alignment(ctypes.c_void_p) == 0
+    assert _RenameInformation.length.offset == (_RenameInformation.root.offset
+                                               + ctypes.sizeof(ctypes.c_void_p))
+    assert offset == _RenameInformation.length.offset + ctypes.sizeof(ctypes.c_uint32)
+
+
+def test_native_fixture_writer_closes_source_handle_when_rename_refuses(tmp_path, monkeypatch):
+    observed = []
+    handle = SimpleNamespace(Close=lambda: observed.append('closed'))
+    def create(*arguments):
+        observed.append(arguments)
+        return handle
+    def refused(actual_handle, buffer):
+        assert actual_handle is handle
+        assert _RenameInformation.from_buffer(buffer).flags == 3
+        raise OSError('native rename refused')
+    monkeypatch.setitem(sys.modules, 'win32file', SimpleNamespace(CreateFile=create))
+    monkeypatch.setattr(sys.modules[__name__], '_set_rename_information', refused)
+    source, target = tmp_path / 'source', tmp_path / 'target'
+    with pytest.raises(OSError, match='native rename refused'):
+        _windows_replace_open_target(source, target)
+    assert observed == [(str(source.resolve()), 0x00010000, 7, None, 3, 0x00200000, None),
+                        'closed']
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Actual Windows open-target rename semantics')
+@pytest.mark.parametrize('name', ['target.json', 'проверка-𐐀.json'])
+def test_native_posix_replacement_reaches_held_identity_while_movefileex_refuses(tmp_path, name):
+    path, source = tmp_path / name, tmp_path / 'replacement.json'
+    path.write_bytes(b'original')
+    source.write_bytes(b'changed')
+    with install._provider_binary_file(path) as held:
+        previous = os.fstat(held.fileno())
+        with pytest.raises(PermissionError) as refusal:
+            source.replace(path)
+        assert refusal.value.winerror == 5
+        assert path.read_bytes() == b'original'
+        _windows_replace_open_target(source, path)
+        assert held.read() == b'original'
+        assert path.read_bytes() == b'changed'
+        assert (previous.st_dev, previous.st_ino) != (path.stat().st_dev, path.stat().st_ino)
+    assert not source.exists()
 
 
 @pytest.mark.parametrize('record', ['manifest', 'transaction', 'desired'])
