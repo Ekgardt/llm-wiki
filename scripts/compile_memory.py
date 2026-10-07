@@ -1287,8 +1287,32 @@ def _attach_required_context(measure, inputs, candidates):
 def _required_selection_budget(measure, paths, target):
     required = _required_context_paths(measure, paths)
     measured = measure(paths, required)
-    return _mandatory_context_budget(target, measured, required,
-                                     getattr(measure, 'planning_candidates', None))
+    candidates = getattr(measure, 'planning_candidates', None)
+    return _complete_source_budget(target, measured, required, candidates)
+
+
+def _complete_source_budget(target, measured, required, candidates):
+    window = _mandatory_planning_window(candidates, target.model)
+    if window is None:
+        return _mandatory_context_budget(target, measured, required, candidates)
+    bounded = _bounded_attempt_budget(target, window)
+    return _expanded_required_budget(bounded, measured, window)
+
+
+def _source_grouping_budget(target, measure):
+    window = _measure_planning_window(target, measure)
+    if window is None:
+        return target
+    if window <= target.reserved_output_tokens + target.safety_margin_tokens:
+        return target
+    return replace(target, max_input_tokens=window)
+
+
+def _measure_planning_window(target, measure):
+    candidates = getattr(measure, 'planning_candidates', None)
+    if not candidates:
+        return None
+    return _mandatory_planning_window(candidates, target.model)
 
 
 def _mandatory_context_budget(target, measured, required, candidates):
@@ -1329,6 +1353,9 @@ def _matching_basis_window(basis, model):
 def _unit_admission_budget(unit, target, count, measure):
     paths = {part.part_key for part in unit}
     required = _required_context_paths(measure, paths)
+    candidates = getattr(measure, 'planning_candidates', None)
+    if _measure_planning_window(target, measure) is not None:
+        return _complete_source_budget(target, count, required, candidates)
     if required:
         return _mandatory_context_budget(target, count, required,
                                          getattr(measure, 'planning_candidates', None))
@@ -1784,7 +1811,8 @@ def _starts_a_new_group(
         return False
     if unit[0].logical_path in days and not _qualified_same_day_join(current_parts, unit, partitions, source_bound):
         return True
-    return measure(current | {part.part_key for part in unit}) > budget.available_input_tokens
+    admitted = _source_grouping_budget(budget, measure)
+    return measure(current | {part.part_key for part in unit}) > admitted.available_input_tokens
 
 
 def _measure_partitions(measure, source_bound):
@@ -1903,6 +1931,8 @@ def _required_context_tuple(paths):
 
 
 def _final_context_budget(subset, target, measured, required, candidates, partitions):
+    if _mandatory_planning_window(candidates, target.model) is not None:
+        return _complete_source_budget(target, measured, required, candidates)
     if required:
         return _mandatory_context_budget(target, measured, required, candidates)
     return _selected_atomic_budget(subset, target, measured, partitions=partitions)
@@ -3005,12 +3035,38 @@ def _collect_choice_row(left, right, protected, bounds, selected, inputs, choice
     if not bounds[0] <= left < bounds[1] or right > bounds[1]:
         return
     source, parts = selected
-    raw_offset = len(source.content.decode('utf-8')[:left - bounds[0]].encode('utf-8'))
+    raw_offset, file_line = _choice_row_position(source, left - bounds[0])
     location = _choice_physical_location(parts, raw_offset)
     for timestamp in _choice_row_timestamps(location):
         pair = (source.logical_path, timestamp, _without_bullet(protected))
-        file_line = source.content[:raw_offset].count(b'\n') + 1
         choices.setdefault(pair, []).append((left, location, file_line))
+
+
+def _choice_row_position(source, character_offset):
+    scope = _LAYOUT_PROTECTION.get()
+    if scope is None:
+        offset = len(source.content.decode('utf-8')[:character_offset].encode('utf-8'))
+        return offset, source.content[:offset].count(b'\n') + 1
+    return _scoped_choice_row_position(source.content, character_offset, scope)
+
+
+def _scoped_choice_row_position(content, character_offset, scope):
+    rows = scope.setdefault('raw_row_positions', {})
+    retained = rows.get(id(content))
+    if retained is None or retained[0] is not content:
+        retained = (content, _raw_choice_row_positions(content))
+        rows[id(content)] = retained
+    return retained[1][character_offset]
+
+
+def _raw_choice_row_positions(content):
+    rows = {}
+    character_offset, byte_offset = 0, 0
+    for file_line, line in enumerate(content.decode('utf-8').split('\n'), 1):
+        rows[character_offset] = byte_offset, file_line
+        character_offset += len(line) + 1
+        byte_offset += len(line.encode('utf-8')) + 1
+    return rows
 
 
 def _choice_physical_location(parts, offset):
