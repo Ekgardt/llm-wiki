@@ -15,6 +15,7 @@ import sys
 import time
 import tracemalloc
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -109,13 +110,18 @@ def test_a_deadline_that_expires_mid_walk_stops_the_walk(tmp_path, monkeypatch):
     """A live deadline stops a walk that is already running."""
     _workspace(tmp_path, 400)
     counter = _CancelAfter(monkeypatch, 10**9)
+    original_monotonic = time.monotonic
+    clock = SimpleNamespace(monotonic=lambda: float(counter.parsed))
+    monkeypatch.setattr(import_resolver, "time", clock)
 
     with pytest.raises(TimeoutError, match="deadline"):
         import_resolver.build_python_symbol_registry(
-            tmp_path, deadline=time.monotonic() + 0.05
+            tmp_path, deadline=20.0
         )
 
     assert 0 < counter.parsed < 400
+    assert counter.parsed == 20
+    assert time.monotonic is original_monotonic
 
 
 def test_the_registry_is_unchanged_when_no_stop_is_requested(tmp_path):

@@ -766,6 +766,7 @@
   "test_provenance_join.py": 0.04,
   "test_provider_exit_is_not_an_empty_answer.py": 0.01,
   "test_provider_http_destination.py": 13.57,
+  "test_provider_read_proof_keeps_replacement_observable.py": 0.004,
   "test_provider_runs_outside_the_vault.py": 0.02,
   "test_provider_temp_file_preserves_prepared_utf8_bytes.py": 0.01,
   "test_provider_timeout_is_not_an_empty_answer.py": 0.0,

@@ -4916,9 +4916,19 @@ def _require_provider_identity(actual, expected):
         raise InstallControlError("install_provider_snapshot_changed")
 
 
+def _provider_binary_file(path):
+    from generation_catalog import _open_read_descriptor
+
+    descriptor = _open_read_descriptor(path)
+    try:
+        return os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def _provider_open(stack, path):
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    handle = stack.enter_context(os.fdopen(os.open(path, flags), "rb"))
+    handle = stack.enter_context(_provider_binary_file(path))
     if path.is_symlink() or not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
         raise InstallControlError("install_provider_snapshot_changed")
     return handle
