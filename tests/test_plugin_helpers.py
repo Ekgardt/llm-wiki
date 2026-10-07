@@ -310,7 +310,11 @@ def test_delegate_receives_only_normalized_redacted_payload(monkeypatch, capsys,
     secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
     observed = {}
 
-    def fake_run(*args, **kwargs):
+    real_run = integration_adapter.subprocess.run
+
+    def fake_run(command, *args, **kwargs):
+        if command[:2] != [sys.executable, str(SCRIPTS_DIR / "session_end_project_tag.py")]:
+            return real_run(command, *args, **kwargs)
         observed.update(kwargs)
         return SimpleNamespace(returncode=0, stdout="context", stderr=secret)
 

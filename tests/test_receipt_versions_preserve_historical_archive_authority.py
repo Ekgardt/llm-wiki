@@ -23,7 +23,7 @@ def _restore_v3_bag(directory):
     for name, text in files.items():
         path = directory / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text)
+        path.write_bytes(text.encode("utf-8"))
     DailyArchiver._seal(directory)
     return directory
 

@@ -589,8 +589,8 @@ def test_unusable_receipts_are_discarded_only_when_asked(tmp_path, monkeypatch):
     receipts.mkdir(parents=True)
     good = receipts / "v3-good.md"
     bad = receipts / "v3-bad.md"
-    good.write_text('---\n---\n```json\n{"schema_version": "compile-receipt/v3", "source": {"logical_path": "d.md", "sha256": "a"}}\n```\n', encoding="utf-8")
-    bad.write_text('---\n---\n```json\n{"schema_version": "compile-receipt/v3", "source": {"logical_path": "d.md", "sha256": "broken"}}\n```\n', encoding="utf-8")
+    good.write_bytes(b'---\n---\n```json\n{"schema_version": "compile-receipt/v3", "source": {"logical_path": "d.md", "sha256": "a"}}\n```\n')
+    bad.write_bytes(b'---\n---\n```json\n{"schema_version": "compile-receipt/v3", "source": {"logical_path": "d.md", "sha256": "broken"}}\n```\n')
     monkeypatch.setattr(compile_memory, "DAILY_DIR", tmp_path / "knowledge/daily")
 
     def parse(raw, *, logical_path, source_sha256):

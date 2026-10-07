@@ -49,57 +49,57 @@ _NAMED_VALUE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(rf"(?i)({_CREDENTIAL_NAME}(?:{_QUOTE})?{_SAME_LINE}[=:]{_SAME_LINE}){_VALUE}"),
 )
 
-_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+_PATTERN_RULES: list[tuple[re.Pattern[str], str, tuple[str, ...]]] = [
     # A provider key starts a token. Without this guard `sk-` matched inside
     # `dead-task-retirement-and-restore-decision`, the fail-closed DLP boundary
     # quarantined the write, and this vault could publish no knowledge at all.
     # Punctuation is still a boundary, so `KEY=sk-…`, `"sk-…"` and `(sk-…)` are
     # caught as before. See docs/research/2026-08-22-secret-prefix-boundaries.md.
-    (re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9][A-Za-z0-9_-]{18,}"), "[REDACTED_API_KEY]"),
+    (re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9][A-Za-z0-9_-]{18,}"), "[REDACTED_API_KEY]", ('sk-',)),
     # GitHub ships six prefixes, not one, and the fine-grained tokens carry a
     # seventh shape. See docs/research/2026-08-25-which-secret-shapes-are-worth-a-pattern.md.
     (
         re.compile(r"(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{20,}"),
         "[REDACTED_GITHUB_TOKEN]",
-    ),
+     ('gh',)),
     (
         re.compile(r"(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{20,}"),
         "[REDACTED_GITHUB_TOKEN]",
-    ),
+     ('github_pat_',)),
     # Underscore keys (Stripe and everyone who copied the shape). The existing
     # `sk-` rule never saw these, and the prefix does not name the vendor, so
     # the replacement does not claim one.
     (
         re.compile(r"(?<![A-Za-z0-9])[sr]k_(live|test)_[A-Za-z0-9]{16,}"),
         "[REDACTED_API_KEY]",
-    ),
-    (re.compile(r"(?<![A-Za-z0-9])npm_[A-Za-z0-9]{30,}"), "[REDACTED_API_KEY]"),
-    (re.compile(r"(?<![A-Za-z0-9])hf_[A-Za-z0-9]{30,}"), "[REDACTED_API_KEY]"),
-    (re.compile(r"(?<![A-Za-z0-9])pypi-[A-Za-z0-9_-]{30,}"), "[REDACTED_API_KEY]"),
-    (re.compile(r"(?<![A-Za-z0-9])GOCSPX-[A-Za-z0-9_-]{20,}"), "[REDACTED_API_KEY]"),
-    (re.compile(r"(?<![A-Za-z0-9])xapp-[0-9]-[A-Za-z0-9-]{10,}"), "[REDACTED_SLACK_TOKEN]"),
-    (re.compile(r"(?<![A-Za-z0-9])xox[baprs]-[A-Za-z0-9-]{10,}"), "[REDACTED_SLACK_TOKEN]"),
-    (re.compile(r"(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}"), "[REDACTED_AWS_KEY]"),
-    (re.compile(r"(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{35}"), "[REDACTED_GOOGLE_KEY]"),
+     ('k_',)),
+    (re.compile(r"(?<![A-Za-z0-9])npm_[A-Za-z0-9]{30,}"), "[REDACTED_API_KEY]", ('npm_',)),
+    (re.compile(r"(?<![A-Za-z0-9])hf_[A-Za-z0-9]{30,}"), "[REDACTED_API_KEY]", ('hf_',)),
+    (re.compile(r"(?<![A-Za-z0-9])pypi-[A-Za-z0-9_-]{30,}"), "[REDACTED_API_KEY]", ('pypi-',)),
+    (re.compile(r"(?<![A-Za-z0-9])GOCSPX-[A-Za-z0-9_-]{20,}"), "[REDACTED_API_KEY]", ('GOCSPX-',)),
+    (re.compile(r"(?<![A-Za-z0-9])xapp-[0-9]-[A-Za-z0-9-]{10,}"), "[REDACTED_SLACK_TOKEN]", ('xapp-',)),
+    (re.compile(r"(?<![A-Za-z0-9])xox[baprs]-[A-Za-z0-9-]{10,}"), "[REDACTED_SLACK_TOKEN]", ('xox',)),
+    (re.compile(r"(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}"), "[REDACTED_AWS_KEY]", ('AKIA',)),
+    (re.compile(r"(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{35}"), "[REDACTED_GOOGLE_KEY]", ('AIza',)),
     (
         re.compile(
             r"(?<![A-Za-z0-9])eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
         ),
         "[REDACTED_JWT]",
-    ),
+     ('eyJ',)),
     # A key with no END line (`head id_rsa`) is redacted to the end of the text: what
     # follows its BEGIN line is the key until something proves otherwise.
     (
         re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)"),
         "[REDACTED_PEM_KEY]",
-    ),
+     ('PRIVATE KEY-----',)),
     # Google OAuth access tokens, Telegram bot tokens, Slack incoming webhooks
     # (audit 2026-09-27 B-4, docs/research/2026-09-27-the-redactor-knows-the-missing-shapes.md).
-    (re.compile(r"(?<![A-Za-z0-9])ya29\.[A-Za-z0-9_-]{20,}"), "[REDACTED_GOOGLE_TOKEN]"),
+    (re.compile(r"(?<![A-Za-z0-9])ya29\.[A-Za-z0-9_-]{20,}"), "[REDACTED_GOOGLE_TOKEN]", ('ya29.',)),
     # A bot id, a colon and the secret: the Bot API documents `123456:ABC-DEF1234ghIkl-…`
     # (a 34-character secret); issued secrets run 35. From 30 on it is a token, not a clock.
-    (re.compile(r"(?<![\w:])\d{6,10}:[A-Za-z0-9_-]{30,}(?![\w-])"), "[REDACTED_TELEGRAM_TOKEN]"),
-    (re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9/_-]+"), "[REDACTED_SLACK_WEBHOOK]"),
+    (re.compile(r"(?<![\w:])\d{6,10}:[A-Za-z0-9_-]{30,}(?![\w-])"), "[REDACTED_TELEGRAM_TOKEN]", ()),
+    (re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9/_-]+"), "[REDACTED_SLACK_WEBHOOK]", ('https://hooks.slack.com/services/',)),
     # A credential in a URL query (`?api_key=…`, `&access_token=…`, a signed URL's `sig=`).
     (
         re.compile(
@@ -107,20 +107,30 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
             r"password|passwd|pwd|auth|sig|signature|key)=)[^&\s#\"'<>]+"
         ),
         r"\1[REDACTED]",
-    ),
-    (re.compile(r"(?<![A-Za-z0-9])glpat-[\w-]{20,}"), "[REDACTED_GITLAB_TOKEN]"),
+     ('?', '&')),
+    (re.compile(r"(?<![A-Za-z0-9])glpat-[\w-]{20,}"), "[REDACTED_GITLAB_TOKEN]", ('glpat-',)),
     # The password in `scheme://user:password@host` (RFC 3986 3.2.1 deprecates it
     # for exactly this reason); the user and the host stay readable.
     # Up to the LAST `@` of the authority (`user:p@ss@host`), never a port alone.
     # A scheme starts where no scheme character precedes it: `\b` let the scheme run
     # start at every dot of `a.a.a…` and rescan it, 6.7 s on 40 KB (audit 2026-09-27 B-6).
-    (re.compile(r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://[^\s/:@]+:)(?!\d+@)[^\s/]+(@)"), r"\1[REDACTED]\2"),
+    (re.compile(r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://[^\s/:@]+:)(?!\d+@)[^\s/]+(@)"), r"\1[REDACTED]\2", ('://',)),
     # `--password=X`, `--password X` (docker login, podman, many CLIs).
-    (re.compile(r"(?<![\w-])(--password(?:=|[^\S\r\n]+))(?![$-])[^\s]+"), r"\1[REDACTED]"),
+    (re.compile(r"(?<![\w-])(--password(?:=|[^\S\r\n]+))(?![$-])[^\s]+"), r"\1[REDACTED]", ('--password',)),
     # MySQL's `-pPASSWORD`, `sshpass -p` and `docker login -p` are redacted by
     # `_redact_command_passwords`, one pass per line (a lazy scan per command name was
     # quadratic: 2.5 s on 40 KB of `mysql `, audit 2026-09-27 B-6).
 ]
+
+# A prerequisite is certified by the unchanged rule's exact source and flags.
+# Unknown or changed rules run their full regex. Case-insensitive rules use
+# punctuation only, preserving Python's Unicode case matching.
+_PATTERNS = [(pattern, replacement) for pattern, replacement, _ in _PATTERN_RULES]
+_PATTERN_PREREQUISITES = {
+    (pattern.pattern, pattern.flags): literals
+    for pattern, _replacement, literals in _PATTERN_RULES if literals
+}
+
 
 # A command whose `-p` takes a password: MySQL clients only attached (`-pX`; `-p db`
 # prompts and names a database), sshpass and docker login attached or separated.
@@ -211,10 +221,26 @@ def _shannon_entropy(data: str) -> float:
     return -sum((f / n) * math.log2(f / n) for f in freq.values())
 
 
+def _pattern_may_match(pattern: re.Pattern[str], text: str) -> bool:
+    if not isinstance(pattern, re.Pattern):
+        return True
+    key = (getattr(pattern, "pattern", None), getattr(pattern, "flags", None))
+    literals = _PATTERN_PREREQUISITES.get(key)
+    if literals is None:
+        return True
+    return any(literal in text for literal in literals)
+
+
+def _apply_pattern(pattern: re.Pattern[str], replacement: str, text: str) -> str:
+    if not _pattern_may_match(pattern, text):
+        return text
+    return pattern.sub(replacement, text)
+
+
 def _redact_patterns(text: str) -> str:
     out = text
     for pattern, replacement in _PATTERNS:
-        out = pattern.sub(replacement, out)
+        out = _apply_pattern(pattern, replacement, out)
     return out
 
 

@@ -812,6 +812,14 @@ def test_runtime_containment_does_not_accept_a_sibling_prefix(tmp_path: Path) ->
         reliable_memory.read_runtime_bytes(path, root, max_bytes=1024)
 
 
+def _assert_inside_runtime_directory_link(path: Path, root: Path) -> None:
+    if os.name == "nt":
+        with pytest.raises(PermissionError, match="bounded regular file"):
+            reliable_memory.read_runtime_bytes(path, root, max_bytes=1024)
+        return
+    assert reliable_memory.read_runtime_bytes(path, root, max_bytes=1024) == b"inside"
+
+
 def test_runtime_parent_authority_is_fresh_after_symlink_retarget(tmp_path: Path) -> None:
     root = tmp_path / 'state'
     root.mkdir()
@@ -823,7 +831,7 @@ def test_runtime_parent_authority_is_fresh_after_symlink_retarget(tmp_path: Path
     (outside / 'record').write_bytes(b'outside')
     link = root / 'linked'
     _runtime_directory_link(link, inside)
-    assert reliable_memory.read_runtime_bytes(link / 'record', root, max_bytes=1024) == b'inside'
+    _assert_inside_runtime_directory_link(link / 'record', root)
     link.unlink()
     _runtime_directory_link(link, outside)
     with pytest.raises(PermissionError, match='outside'):

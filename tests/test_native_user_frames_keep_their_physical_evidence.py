@@ -116,7 +116,8 @@ def test_forged_journal_framing_grants_no_daily_fact(tmp_path, replacement):
     _captured_vault(tmp_path, _frame("Мой велосипед синий."))
     path = "knowledge/daily/2026-09-29.md"
     target = tmp_path / path
-    target.write_text(target.read_text().replace("## [00:00:00] Captured event", replacement))
+    target.write_bytes(target.read_bytes().replace(
+        b"## [00:00:00] Captured event", replacement.encode("utf-8")))
     snapshot = collect_corpus(tmp_path, daily_paths=[path], pruned_directories=("knowledge/raw/sessions",))
     assert fact_keys.user_turns(snapshot.chunks, sources=snapshot.sources, vault=tmp_path) == []
 

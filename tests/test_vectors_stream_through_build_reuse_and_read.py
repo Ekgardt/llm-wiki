@@ -1,5 +1,6 @@
 """Streaming vectors must survive all three consumers of the same sealed format."""
 import json
+import os
 import sqlite3
 import time
 from contextlib import closing
@@ -15,6 +16,56 @@ from tests.test_generation_rebuild_reuse import (
     _snapshot_from,
 )
 
+
+def _windows_acl_snapshot(path):
+    import win32security
+
+    descriptor = win32security.GetNamedSecurityInfo(
+        str(path), win32security.SE_FILE_OBJECT,
+        win32security.OWNER_SECURITY_INFORMATION | win32security.DACL_SECURITY_INFORMATION,
+    )
+    owner = win32security.ConvertSidToStringSid(descriptor.GetSecurityDescriptorOwner())
+    control, _revision = descriptor.GetSecurityDescriptorControl()
+    acl = descriptor.GetSecurityDescriptorDacl()
+    assert acl is not None, "NULL DACL grants unrestricted access"
+    entries = tuple(_windows_ace(acl.GetAce(index)) for index in range(acl.GetAceCount()))
+    return owner, bool(control & win32security.SE_DACL_PROTECTED), entries
+
+
+def _windows_ace(ace):
+    import win32security
+
+    assert len(ace) == 3, "unsupported ACE shape"
+    (kind, flags), mask, sid = ace
+    return kind, flags, mask, win32security.ConvertSidToStringSid(sid)
+
+
+def _owner_can_use_copy(entry, owner, current_sid):
+    _kind, flags, mask, sid = entry
+    identities = {owner, current_sid, "S-1-3-4"}
+    return sid in identities and mask & 0x001F01FF == 0x001F01FF and not flags & 0x08
+
+
+def _assert_windows_private_acl(owner, protected, entries, current_sid, require_protected):
+    assert owner in {current_sid, "S-1-5-32-544"}
+    assert protected or not require_protected
+    assert entries
+    allowed = {current_sid, "S-1-3-4", "S-1-5-18", "S-1-5-32-544"}
+    assert all(entry[0] == 0 and entry[3] in allowed for entry in entries)
+    assert any(_owner_can_use_copy(entry, owner, current_sid) for entry in entries)
+
+
+def _assert_private_copy(captured):
+    if os.name != "nt":
+        assert captured.parent.stat().st_mode & 0o777 == 0o700
+        return
+    from operational_ownership import current_actor_identity
+
+    actor = current_actor_identity()
+    assert actor.startswith("windows-sid:")
+    sid = actor.removeprefix("windows-sid:")
+    _assert_windows_private_acl(*_windows_acl_snapshot(captured.parent), sid, True)
+    _assert_windows_private_acl(*_windows_acl_snapshot(captured), sid, False)
 
 def _parent(tmp_path):
     snapshot = _snapshot_from(tmp_path / "vault", {"page.md": "# H\nx\n" * 257})
@@ -94,7 +145,7 @@ def test_private_parent_copy_survives_original_truncation_and_is_removed(tmp_pat
     (directory / "vectors.npy").write_bytes(b"")
     assert np.array_equal(matrix, expected)
     assert captured != directory / "vectors.npy"
-    assert captured.parent.stat().st_mode & 0o777 == 0o700
+    _assert_private_copy(captured)
     search._close_vector_matrix(matrix)
     assert not captured.parent.exists()
 
