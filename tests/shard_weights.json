@@ -513,6 +513,7 @@
   "test_compile_provider_ceiling.py": 0.01,
   "test_compile_receipt_evidence_preserves_distinct_claims.py": 0.22,
   "test_compile_refresh_does_not_shrink_declared_budget.py": 0.22,
+  "test_compile_refresh_requalifies_changed_codex_configuration.py": 0.07,
   "test_compile_refresh_requalifies_changed_provider_environment.py": 0.08,
   "test_compile_refresh_selects_context_once.py": 0.32,
   "test_compile_related_links_share_the_response_budget.py": 0.32,

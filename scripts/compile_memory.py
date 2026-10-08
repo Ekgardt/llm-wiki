@@ -93,6 +93,7 @@ from evidence_resolver import (  # noqa: E402
 from iso_time import block_instant  # noqa: E402
 from llm_client import (  # noqa: E402
     _codex_basis_digest,
+    _codex_basis_file_digest,
     call_candidate,
     call_ceiling,
     chain_stops_after,
@@ -2044,11 +2045,17 @@ def _refreshed_batch_candidate(candidate, deadline):
     basis = getattr(candidate, "_codex_basis", None)
     if basis is None:
         return candidate
-    if _codex_basis_digest(provider_environment()) == basis.environment_sha256:
+    if _batch_provider_basis_current(basis):
         return candidate
     refreshed = _planned_candidate(basis.original_descriptor, deadline)
     _require_refreshed_batch_candidate(candidate, refreshed)
     return refreshed
+
+
+def _batch_provider_basis_current(basis):
+    if _codex_basis_digest(provider_environment()) != basis.environment_sha256:
+        return False
+    return all(_codex_basis_file_digest(path) == expected for path, expected in basis.config_files)
 
 
 def _require_refreshed_batch_candidate(previous, current):
