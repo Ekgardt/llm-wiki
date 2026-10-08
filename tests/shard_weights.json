@@ -391,6 +391,7 @@
   "test_bad_intents_do_not_use_up_the_adoption_bound.py": 1.11,
   "test_beam_becomes_a_question_this_stand_can_read.py": 0.01,
   "test_benchmark.py": 0.01,
+  "test_benchmark_question_replacement_preserves_other_runs.py": 0.02,
   "test_bitemporal_claims.py": 0.09,
   "test_blackboard.py": 299.02,
   "test_blackboard_inputs_use_the_journal_contract.py": 7.4,

@@ -180,3 +180,46 @@ Relevant primary references:
 
 Private reproduction and measurements are retained under logs/step7-*20261008*
 and the corresponding /dev/shm test reports. No source content is published here.
+
+
+## Repeated benchmark inputs and safe replacement
+
+Research date: 2026-10-08. Five hundred staged question files from two completed
+LongMemEval runs have identical SHA-256 and bytes, accounting for 257,915,665
+avoidable duplicate bytes. Their historical result files differ and must stay.
+No copies have been removed or shared during this qualification.
+
+Both LongMemEval and consolidation runners wrote questions in place. A causal
+regression links two staging inputs, updates one through the real runner and
+checks the other remains byte-identical. Both original runners fail this check.
+They now use the existing durable atomic_write boundary: complete sibling staging,
+fsync, checked publication and atomic replacement. The correction also preserves
+the existing stale-result deletion and failed-worker reporting. Forty-nine related
+checks pass on CPython 3.10.20; the broader runner/reader/refusal/thread and atomic
+writer selection passes 106 checks. Actual analysis of four changed callables reports
+maximum CCN 3. This is a prerequisite for safe deduplication, not evidence that
+production duplicate files have already been consolidated.
+
+Alternatives: deleting historical inputs would lose calibration provenance;
+sharing writable inodes before changing both producers would corrupt another
+run; introducing a content-addressed directory would change paths and require
+architectural approval. Atomic replacement reuses the established writer and
+keeps every existing path and result format. Filesystem sharing, if subsequently
+qualified, must verify all bytes, ownership, live consumers and every writer.
+Active and fallback memory generation artifacts remain independent.
+
+Primary sources, checked on the research date:
+
+- [Python 3.10 os.replace](https://docs.python.org/3.10/library/os.html#os.replace):
+  replacement and same-filesystem constraints.
+- [Linux rename(2)](https://man7.org/linux/man-pages/man2/rename.2.html): other hard
+  links retain the original file when a directory entry is replaced.
+- [Microsoft hard links](https://learn.microsoft.com/en-us/windows/win32/fileio/hard-links-and-junctions):
+  linked files share contents; writing through a link changes every linked view.
+
+Separately, two pre-existing operator-owned systemd drop-ins overrode the installed
+medium reasoning preference with max. They were updated to the owner's requested
+medium with verified preimages; both services' effective environment confirms it.
+A running Codex host still carries its older max environment, which the explicitly
+approved provider-override contract preserves. That contract was not silently
+changed, and a future host refresh remains necessary for that inherited setting.
