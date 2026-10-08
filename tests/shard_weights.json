@@ -692,6 +692,7 @@
   "test_mcp_http.py": 0.24,
   "test_mcp_server.py": 71.21,
   "test_mcp_source_selection_keeps_chunks_lazy.py": 0.0,
+  "test_memory_graph_pages_do_not_waste_small_source_payloads.py": 0.4,
   "test_memory_queue.py": 165.96,
   "test_memory_queue_cli.py": 116.93,
   "test_memory_queue_migration.py": 47.4,

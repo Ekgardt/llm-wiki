@@ -532,6 +532,14 @@ def _configure_write(database: sqlite3.Connection) -> None:
     database.execute("PRAGMA trusted_schema=OFF")
 
 
+def _configure_generation_page_size(database: sqlite3.Connection, page_size: int) -> None:
+    if type(page_size) is not int:
+        raise TypeError("Evidence Graph page size must be an integer")
+    database.execute(f"PRAGMA page_size={page_size}")
+    if database.execute("PRAGMA page_size").fetchone()[0] != page_size:
+        raise ValueError("Evidence Graph page size is unsupported by SQLite")
+
+
 def _require_regular_parent(path: Path) -> None:
     metadata = path.parent.lstat()
     reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -1000,9 +1008,11 @@ def _built_generation_database(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
     monotonic: Callable[[], float],
+    page_size: int = 4096,
 ) -> None:
     database = sqlite3.connect(temporary)
     try:
+        _configure_generation_page_size(database, page_size)
         _configure_write(database)
         database.set_progress_handler(
             _build_progress_handler(deadline, cancelled, monotonic),
@@ -1077,6 +1087,7 @@ def create_generation_database(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    page_size: int = 4096,
 ) -> GraphSchema:
     """Create one immutable database using only the explicitly selected schema."""
     if not isinstance(schema, GraphSchema):
@@ -1097,7 +1108,7 @@ def create_generation_database(
             monotonic,
         )
         _built_generation_database(
-            temporary, schema, normalized, deadline, cancelled, monotonic
+            temporary, schema, normalized, deadline, cancelled, monotonic, page_size=page_size
         )
         _published_database(temporary, path, schema, deadline, cancelled, monotonic)
         return schema

@@ -106,6 +106,66 @@ adds a representation and recovery contract. PostgreSQL adds a server outside th
 product's contract; LMDB would replace SQL constraints and joins with additional
 application machinery. None has been installed.
 
+## Selected physical-page correction
+
+The complete memory/code comparison preserves every column in every graph table,
+passes integrity and foreign-key checks, and measures distributed source lookups.
+The qualified operator has nine measured callables, maximum CCN 4 and compliant
+if-count/nesting. Its earlier inline experiment is retained as exploratory evidence;
+it is not the operator-complexity qualification.
+
+For the memory graph, 8/16/32/64 KiB pages produce 574,005,248 / 560,250,880 /
+553,910,272 / 549,650,432 bytes, versus 825,307,136 bytes. At 8 KiB, the distributed
+warm source lookups are fastest among the measured alternatives. Larger pages save
+only another 14–24 MB while those lookups get slower. For the code graph, all four
+alternatives increase storage: 343,785,472 / 346,177,536 / 345,178,112 / 344,850,432
+bytes, versus 339,603,456 bytes. Cold-disk latency is not established by this test.
+
+The builder therefore uses 8 KiB physical pages for memory-only generations and
+keeps code generations at 4 KiB. Direct database construction retains its existing
+4 KiB default. The same exact v2 schema, hashes, sources, foreign keys, rollback
+journal, FULL synchronization, paths and runtime root are retained. All SQLite
+supported page sizes remain available to direct construction; unsupported values
+are refused rather than silently ignored. Existing immutable generations are not
+edited in place. Tiny memory generations may use more space because their empty
+table/index pages are larger; the selected tradeoff addresses the measured installed
+memory workload without imposing the same storage cost on code indexes.
+
+The original 400-source regression produces identical 1,986,560-byte baseline and
+builder databases and fails the required storage improvement. After the correction,
+all 119 direct graph/builder/reuse tests pass. Broader corpus/generation/repository/
+vector coverage passes 690 tests with six existing skips on CPython 3.10.20.
+Thirteen changed callables pass actual complexity analysis, maximum CCN 5, and Ruff
+passes. Installed-vault compaction and full-cycle qualification remain separate
+steps; the measured database reduction alone does not claim them complete.
+
+## Confirmed memory pressure and completed diagnostic cleanup
+
+The kernel records global OOM kills on 2026-10-08 at 10:05–10:08, including the
+user's D-Bus process, systemd user manager, codebase-memory processes and Python.
+The system journal independently records user@1000.service killed by OOM and
+failed with signal 9. This explains the unavailable scheduler, not a scheduler
+backend configuration change. The nearly full 7.7 GiB diagnostic tmpfs consumed
+RAM. Its contribution to memory pressure is established; its precise share of the
+compile's disk reads is not.
+
+Complete ownership checks qualified the finished Oct 5 pytest fixtures and the
+completed derived ordinal-investigation index. Historical test reports and the
+original failed test's generated files were preserved. Cleanup removed
+2,565,902,336 allocated tmpfs bytes. A generated read-only BagIt fixture caused the
+first attempt to fail; retry removed only that qualified test tree. Production
+knowledge, operational state and historical capture/undo evidence were preserved.
+The existing systemd user service was restarted, and both installed timers are
+active/enabled with their original schedules. Backups remain owner-paused.
+
+A separate operator mistake passed a partial plan to repository retention's private
+helper, whose orphan-hint phase requires the complete plan. Ten disposable hint
+tables were removed unexpectedly. All ten were reconstructed from their untouched
+generations, and the removed-checkout set is checked against the restored set.
+Subsequent retention must use the complete public plan or the repository-specific
+retirement operation, with a check that unrelated retained hints survive. The
+failed installation and partial-cleanup attempts are not counted as success.
+
 Relevant primary references:
 
 - [SQLite WITHOUT ROWID](https://www.sqlite.org/withoutrowid.html): clustered tables

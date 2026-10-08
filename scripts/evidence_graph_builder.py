@@ -825,6 +825,7 @@ def build_full_generation(
         database_path = generation_path / "evidence.sqlite3"
         _write_generation_database(
             database_path,
+            page_size=_generation_page_size(policy),
             graph_schema=graph_schema,
             sources_list=sources_list,
             source_bytes_snapshot=source_bytes_snapshot,
@@ -937,6 +938,7 @@ def _write_generation_database(
     records: Mapping[str, list[Mapping[str, object]]],
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    page_size: int = 4096,
 ) -> None:
     evidence_graph.create_generation_database(
         database_path,
@@ -951,7 +953,18 @@ def _write_generation_database(
         dependencies=records["dependencies"],
         deadline=deadline,
         cancelled=cancelled,
+        page_size=page_size,
     )
+
+
+def _generation_page_size(policy: Mapping[str, object] | None) -> int:
+    # Complete 2026-10-08 memory/code pairs: 8 KiB removes small-source
+    # overflow waste in memory, but increases code storage. Keep code at 4 KiB.
+    # This changes physical pages only, never the v2 schema or source bytes.
+    # See docs/research/2026-10-08-compile-configuration-refresh-and-disk-amplification.md.
+    if _policy_code_roots(policy):
+        return 4096
+    return 8192
 
 
 def _generation_search_artifact(
