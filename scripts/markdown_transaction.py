@@ -788,16 +788,6 @@ _SPENT_TRANSACTION_STATES = frozenset(
     {"discarded", "aborted", "conflicted", "quarantined"}
 )
 
-LIKE_ESCAPE = "\\"
-
-
-def _like_prefix(value: str) -> str:
-    """Quote an operation id so LIKE reads it as literal text."""
-    for character in (LIKE_ESCAPE, "%", "_"):
-        value = value.replace(character, LIKE_ESCAPE + character)
-    return value
-
-
 def _coordinator_migration_error(
     code: str, message: str
 ) -> OperationalDatabaseContractError:
@@ -6014,10 +6004,10 @@ class MarkdownCoordinator:
     def _committed_attempt_by_ordinal(self, operation_id: str, *, deadline: float | None = None):
         with self._authority_read_connection(deadline) as database:
             row = database.execute(
-                'SELECT id FROM "transaction" WHERE operation_id LIKE ? ESCAPE ? '
+                'SELECT id FROM "transaction" WHERE operation_id >= ? AND operation_id < ? '
                 "AND state = 'committed' ORDER BY created_at DESC, rowid DESC "
                 "LIMIT 1",
-                (_like_prefix(operation_id) + "#%", LIKE_ESCAPE),
+                (operation_id + "#", operation_id + "$"),
             ).fetchone()
         if row is None:
             return None
