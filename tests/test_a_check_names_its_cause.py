@@ -113,3 +113,56 @@ def test_nul_path_is_rejected_even_when_resolution_is_permissive(tmp_path, monke
         code = repair_installed_memory.main(arguments)
     assert code == 2
     assert "ValueError: embedded null byte" in printed.getvalue()
+
+
+def test_expired_certification_sql_is_a_timeout_not_invalid_records(adopted, monkeypatch):
+    from types import SimpleNamespace
+
+    import installed_memory_repair as repair
+    import reliable_memory
+
+    expired = [False]
+    monkeypatch.setattr(reliable_memory, "time", SimpleNamespace(monotonic=lambda: 101.0 if expired[0] else 99.0))
+
+    def certify(database_name, database):
+        expired[0] = True
+        database.execute(
+            "WITH RECURSIVE work(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM work WHERE n<?) SELECT sum(n) FROM work",
+            (reliable_memory._OPERATIONAL_PROGRESS_VM_STEPS * 2,),
+        ).fetchone()
+
+    monkeypatch.setattr(repair, "_certify_active_database_contents", certify)
+    root, state_root = adopted
+    with pytest.raises(TimeoutError):
+        repair.require_reliability_v3_adopted(root=root, state_root=state_root, deadline=100.0)
+
+
+@pytest.mark.parametrize("deadline,now,code,message", [
+    (None, 101.0, 9, "interrupted"),
+    (100.0, 99.0, 9, "interrupted"),
+    (100.0, 101.0, 11, "interrupted"),
+    (100.0, 101.0, 11, "database disk image is malformed"),
+])
+def test_sqlite_deadline_normalization_preserves_other_causes(monkeypatch, deadline, now, code, message):
+    from types import SimpleNamespace
+
+    import installed_memory_repair as repair
+    import reliable_memory
+
+    monkeypatch.setattr(reliable_memory, "time", SimpleNamespace(monotonic=lambda: now))
+    error = sqlite3.OperationalError(message)
+    error.sqlite_errorcode = code
+    with pytest.raises(sqlite3.OperationalError) as observed:
+        repair._raise_adoption_sqlite_error(error, deadline)
+    assert observed.value is error
+
+
+def test_sqlite_interrupt_without_structured_code_supports_python310(monkeypatch):
+    from types import SimpleNamespace
+
+    import installed_memory_repair as repair
+    import reliable_memory
+
+    monkeypatch.setattr(reliable_memory, "time", SimpleNamespace(monotonic=lambda: 101.0))
+    with pytest.raises(TimeoutError):
+        repair._raise_adoption_sqlite_error(sqlite3.OperationalError("interrupted"), 100.0)

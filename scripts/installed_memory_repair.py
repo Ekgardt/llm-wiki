@@ -350,24 +350,45 @@ def _active_database_snapshot(record: dict[str, object], *, database_name: str, 
         mutable=True,
         max_bytes=None,
     )
-    with contextlib.closing(
-        open_readonly_operational_db(
-            path,
-            state_root,
-            max_bytes=None,
-            owner_only=True,
-            contract=_database_contract(database_name),
-            deadline=deadline,
-        )
-    ) as database:
-        database.execute("BEGIN")
-        if not _database_schema_complete(database_name, database):
-            raise ValueError("active database schema is incomplete")
-        _require_database_metadata(record, _active_database_metadata(database))
-        operational_deadline_active(deadline)
-        yield database
-        operational_deadline_active(deadline)
+    try:
+        with contextlib.closing(
+            open_readonly_operational_db(
+                path,
+                state_root,
+                max_bytes=None,
+                owner_only=True,
+                contract=_database_contract(database_name),
+                deadline=deadline,
+            )
+        ) as database:
+            database.execute("BEGIN")
+            if not _database_schema_complete(database_name, database):
+                raise ValueError("active database schema is incomplete")
+            _require_database_metadata(record, _active_database_metadata(database))
+            operational_deadline_active(deadline)
+            yield database
+            operational_deadline_active(deadline)
+    except sqlite3.OperationalError as error:
+        _raise_adoption_sqlite_error(error, deadline)
 
+
+
+
+
+def _sqlite_interrupted(error: sqlite3.OperationalError) -> bool:
+    code = getattr(error, "sqlite_errorcode", None)
+    if code is None:
+        return str(error) == "interrupted"
+    return int(code) & 0xff == 9  # SQLITE_INTERRUPT; also available on Python 3.10.
+
+
+def _raise_adoption_sqlite_error(error: sqlite3.OperationalError, deadline: float | None) -> None:
+    if not _sqlite_interrupted(error):
+        raise error
+    if deadline is None:
+        raise error
+    operational_deadline_active(deadline)
+    raise error
 
 
 def _active_database_metadata(database: sqlite3.Connection) -> dict[str, object]:
