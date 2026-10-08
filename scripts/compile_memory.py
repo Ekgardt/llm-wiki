@@ -1325,6 +1325,8 @@ def _mandatory_context_budget(target, measured, required, candidates):
 
 def _expanded_required_budget(target, measured, window):
     minimum = measured + target.reserved_output_tokens + target.safety_margin_tokens
+    if minimum <= target.max_input_tokens:
+        return target
     if window is None or minimum > window:
         return target
     return replace(target, max_input_tokens=minimum)
@@ -1601,6 +1603,7 @@ class _TokenBatchMeasure:
         self.batch_texts = _BatchTextLookup(inputs)
         self.journal_indexes, self.partitions = _measurement_proofs(inputs)
         self.choice_resolver = None
+        self.choice_bindings = {}
 
     def __call__(self, paths, optional_paths=None):
         optional_paths = _with_required_context(self, paths, optional_paths)
@@ -1627,6 +1630,7 @@ def _entry_fragment_sizes(dailies):
 _SOURCE_CHOICE_RESOLVER = ContextVar("source_choice_resolver", default=None)
 _SOURCE_CHOICE_PARSING = ContextVar("source_choice_parsing", default=None)
 _SOURCE_CHOICE_ORIGINAL = ContextVar("source_choice_original", default=None)
+_SOURCE_CHOICE_BINDINGS = ContextVar("source_choice_bindings", default=None)
 
 
 @contextmanager
@@ -1644,10 +1648,12 @@ def _measure_choice_resolution(measure):
     if measure.choice_resolver is None:
         measure.choice_resolver = EvidenceResolver(ROOT)
     token = _SOURCE_CHOICE_PARSING.set((measure.journal_indexes, measure.partitions))
+    bindings = _SOURCE_CHOICE_BINDINGS.set(measure.choice_bindings)
     try:
         with _source_choice_resolution(measure.choice_resolver):
             yield
     finally:
+        _SOURCE_CHOICE_BINDINGS.reset(bindings)
         _SOURCE_CHOICE_PARSING.reset(token)
 
 
@@ -1682,6 +1688,7 @@ class _ByteBatchMeasure:
         self.projection_bytes = 0
         self.journal_indexes, self.partitions = _measurement_proofs(inputs)
         self.choice_resolver = None
+        self.choice_bindings = {}
 
     def _size(self, item: SourceSnapshot) -> int:
         if item not in self.sizes:
@@ -2009,7 +2016,9 @@ def _require_refresh_identity(previous, refreshed, candidates):
         raise ValueError("compile model changed while refreshing context")
     before = _packing_budget(previous.packing, previous.planning_model)
     after = _packing_budget(refreshed.packing, refreshed.planning_model)
-    if before != after:
+    expected = _final_context_budget(refreshed.inputs, before,
+        refreshed.packing.measured_input_tokens, refreshed.required_context_paths, candidates, None)
+    if expected != after:
         raise ValueError("compile budget changed while refreshing context")
 
 
@@ -3119,11 +3128,34 @@ def _collect_choice_pair(pair, locations, inputs, choices):
 
 
 def _source_choice_binding(item, locations, inputs):
-    token = _SOURCE_CHOICE_ORIGINAL.set(_original_choice_proof(item, locations, inputs))
+    proof = _original_choice_proof(item, locations, inputs)
+    token = _SOURCE_CHOICE_ORIGINAL.set(proof)
     try:
-        return _evidence_binding(item, inputs)
+        return _measured_original_choice_binding(item, inputs, proof)
     finally:
         _SOURCE_CHOICE_ORIGINAL.reset(token)
+
+
+def _measured_original_choice_binding(item, inputs, proof):
+    """Reuse only original-byte calculations inside one immutable sizing measure.
+
+    Protected aliases still bind afresh. Source membership and hashes are checked
+    by each layout before this call; final model answers use the uncached binder.
+    Retaining the selected parts prevents reuse of an object-identity key.
+    """
+    scope = _SOURCE_CHOICE_BINDINGS.get()
+    if proof is None or scope is None:
+        return _evidence_binding(item, inputs)
+    bindings = _immutable_choice_bindings(scope, inputs.dailies)
+    key = proof[1:]
+    if key not in bindings:
+        bindings[key] = _evidence_binding(item, inputs)
+    return dict(bindings[key])
+
+
+def _immutable_choice_bindings(scope, parts):
+    key = tuple(id(part) for part in parts)
+    return scope.setdefault(key, (parts, {}))[1]
 
 
 def _original_choice_proof(item, locations, inputs):

@@ -22,4 +22,4 @@ def test_rule_preserves_new_decisions_and_required_knowledge(tmp_path, monkeypat
 
 
 def test_prompt_program_invalidates_pre_rule_cached_drafts():
-    assert compiler.DRAFT_PROGRAM.startswith('compile-draft/v15:')
+    assert compiler.DRAFT_PROGRAM.startswith('compile-draft/v16:')
