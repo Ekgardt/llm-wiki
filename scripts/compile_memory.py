@@ -3148,12 +3148,14 @@ def _measured_original_choice_binding(item, inputs, proof):
 
     Protected aliases still bind afresh. Source membership and hashes are checked
     by each layout before this call; final model answers use the uncached binder.
-    Retaining the selected parts prevents reuse of an object-identity key.
+    Every selected part of the evidence day remains a dependency; another day
+    cannot change this binding. Strong references prevent object-identity reuse.
     """
     scope = _SOURCE_CHOICE_BINDINGS.get()
     if proof is None or scope is None:
         return _evidence_binding(item, inputs)
-    bindings = _immutable_choice_bindings(scope, inputs.dailies)
+    parts = tuple(_dailies_for_evidence(inputs, proof[1]))
+    bindings = _immutable_choice_bindings(scope, parts)
     key = proof[1:]
     if key not in bindings:
         bindings[key] = _evidence_binding(item, inputs)

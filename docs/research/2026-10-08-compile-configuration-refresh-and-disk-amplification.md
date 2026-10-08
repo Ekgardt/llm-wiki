@@ -187,7 +187,7 @@ and the corresponding /dev/shm test reports. No source content is published here
 Research date: 2026-10-08. Five hundred staged question files from two completed
 LongMemEval runs have identical SHA-256 and bytes, accounting for 257,915,665
 avoidable duplicate bytes. Their historical result files differ and must stay.
-No copies have been removed or shared during this qualification.
+At the initial qualification no copies had been removed or shared.
 
 Both LongMemEval and consolidation runners wrote questions in place. A causal
 regression links two staging inputs, updates one through the real runner and
@@ -223,3 +223,97 @@ medium with verified preimages; both services' effective environment confirms it
 A running Codex host still carries its older max environment, which the explicitly
 approved provider-override contract preserves. That contract was not silently
 changed, and a future host refresh remains necessary for that inherited setting.
+
+## Completed cleanup and current corpus qualification
+
+After both producers were installed, the complete inventory of 2,090 staged
+benchmark questions found 500 duplicate groups spanning 1,476 paths. Exact-byte
+sharing under the existing paths recovered 505,430,016 allocated disk bytes.
+All 2,090 paths and SHA-256 digests compare identically before and after; historical
+results remain separate and untouched. Complete initial and final ownership
+inventories found no consumers and no unreadable processes. A refresh of the
+ownership report immediately before cleanup failed because root could not replace
+a user-owned file under sticky tmpfs; cleanup used the earlier complete inventory.
+The refresh failure is retained explicitly, and the final complete check succeeded.
+Fifty-nine related checks pass after cleanup. This operator mistake is not counted
+as a successful pre-cleanup refresh.
+
+One approximately 382 MiB derived code index belonged to a completed, installed
+diagnostic. Its source checkout, unique SQL evidence and reports are retained.
+Repository-specific fenced retirement removed only that index and its hint;
+the active memory generation and all unrelated hints remained identical.
+Twenty-eight retention and hint checks pass after retirement.
+
+The measured current corpus has 107,490 selected sources, 224,426 chunks and
+141,417,366 source bytes. Collection took 260.365 seconds and peak RSS was
+786,628 KiB. Existing operator source/entry budgets were requalified from physical
+inventory using the previous warning-share rule; the byte budget did not change.
+This qualifies that inventory, not every future workload or every historical limit.
+
+## Date-local dependencies during immutable quote measurement
+
+The measurement cache used every selected day as a binding dependency. Adding an
+unrelated day therefore repeated the original day's physical-byte binding. The
+uncached binder and reference-cover check both depend on every selected part of
+the evidence day, not other days. The cache now retains exactly those immutable
+part objects while retaining the full date/time/quote key. Another part of the
+same day, a replacement object, changed hashes and protected aliases still require
+fresh checks. Final model answers retain the uncached binder.
+
+A causal regression fails on the original because adding another day binds the
+same original quote twice. The correction passes all three new checks and 100
+related CPython 3.10.20 checks, including full prompt/schema equality and rejection
+of ambiguity introduced by another part of the same day. Five changed callables
+pass actual analysis, maximum CCN 4, with compliant if-count and nesting; Ruff
+passes. The new test-file weight is measured from its JUnit durations. This is
+an internal dependency correction, not a claim of whole-cycle token improvement.
+
+Alternatives were disabling caching, caching by quote alone, or indexing the key
+by the binder's actual immutable dependencies. Disabling repeats proven pure work;
+quote-only reuse would lose source authority and ambiguity checks. Dependency-local
+reuse preserves the complete request without a global cache or new limit.
+
+Primary sources, checked on 2026-10-08:
+
+- [Python 3.10 memoization](https://docs.python.org/3.10/library/functools.html#functools.lru_cache):
+  keys distinguish arguments and retained references preserve their lifetime.
+- [Bazel caching](https://bazel.build/remote/caching): reusable work requires its
+  relevant inputs, and concurrent input changes invalidate assumptions.
+- [Rust incremental compilation](https://rustc-dev-guide.rust-lang.org/queries/incremental-compilation.html):
+  dependency tracking governs reuse, including indirect dependencies.
+
+## Whole generation deadlines still need correction
+
+A normal 900-second refresh deferred after 905.107 seconds. A manual 1,812-second
+refresh then completed vector computation and wrote all declared artifacts, but
+ran out of time during candidate validation: 262.638 seconds for capture, 6.222
+for the parent and 1,543.146 in build. It deferred after 1,812.724 seconds, never
+activated the candidate and removed its unfinished directory normally. The old
+active generation remained intact. Completed artifact writes alone are not
+publication or an installed reduction in storage.
+
+The manual estimate was insufficient: it did not allow the complete validation
+and source-publication stages. The installed two-minute post-compile refresh is
+also shorter than current corpus collection alone. Repeated construction lost
+work at the deadline; further qualification must measure the final stages rather
+than treating another timeout or larger arbitrary constant as completion.
+
+Complete deep validation of the retained parent in a fresh process took 52.784
+seconds, 52.417 CPU seconds and peak RSS 358,204 KiB. It minted the normal
+process-local validation capability without registering or activating anything.
+Publication's source check verifies the captured manifest in memory; it does not
+re-collect the live corpus, so another whole collection is not its measured cost.
+
+A short test run in the live checkout passed nine assertions but failed the
+session teardown because new native breadcrumb records appeared during the run.
+That attempt is not green. The records are retained; validation moves to a fresh
+isolated checkout at the same committed baseline without weakening the write guard.
+The fresh isolated checkout then passes all 106 related and test-weight checks
+on CPython 3.10.20, with only the two existing record_property warnings.
+
+During this measurement a second native auto compiler inherited the old host's
+max setting and performed approximately 4.73 GB of logical reads before a
+cooperative, PID-identity-bound interruption. Its native configuration and source
+records were preserved. The operator temporarily held the existing real compile
+lock during the generation check and released it on normal process termination;
+no permanent lock or new control plane was introduced.

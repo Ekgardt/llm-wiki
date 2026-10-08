@@ -483,6 +483,7 @@
   "test_community_takes_a_symbol_anchor.py": 0.0,
   "test_comparative_benchmark.py": 11.32,
   "test_compile_authored_citations.py": 0.31,
+  "test_compile_binding_cache_tracks_all_parts_of_its_day.py": 0.06,
   "test_compile_binds_the_protected_source_view.py": 0.09,
   "test_compile_bullets_keep_the_complete_physical_line.py": 0.0,
   "test_compile_cache.py": 4.97,
