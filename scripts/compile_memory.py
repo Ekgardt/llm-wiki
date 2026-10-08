@@ -50,7 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import maybe_compile  # noqa: E402
 import process_liveness  # noqa: E402
 from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
-from claim_tree_manifest import snapshot_claim_tree  # noqa: E402
+from claim_tree_manifest import snapshot_claim_tree, snapshot_claim_tree_with_content  # noqa: E402
 from claims import (  # noqa: E402
     LEDGER_SCHEMA,
     RELATIONS,
@@ -60,7 +60,9 @@ from claims import (  # noqa: E402
     _semantic_payload,
     claim_json_bytes,
     claim_ledger_document,
+    claim_ledger_fingerprint,
     claim_ledger_match,
+    parse_claim_ledger,
     validate_claim_record,
 )
 from compile_cache import (  # noqa: E402
@@ -5627,6 +5629,7 @@ class _ApplyPlan:
         self.operations = _plan_operations(plan)
         self.claim_index: ClaimIndex | None = None
         self.claim_tree_manifest: dict[str, object] | None = None
+        self.claim_ledger_snapshot: dict[str, str] = {}
         self.claim_groups: list[tuple[ContradictionPipeline, tuple[object, ...]]] = []
         self.changes: list[MarkdownChange] = []
         self.preconditions: dict[str, object] = {}
@@ -5648,7 +5651,8 @@ class _ApplyPlan:
         self.claim_tree_manifest = snapshot_claim_tree(ROOT)
         _require_current_compile_targets(self.inputs, self.claim_tree_manifest)
         self.claim_index = ClaimIndex(self.coordinator.state_root, vault=ROOT)
-        self.claim_index.rebuild(self._claim_tree_paths)
+        self.claim_index.rebuild(self._claim_tree_paths,
+                                 ledger_snapshot=self.claim_ledger_snapshot)
         candidates: list[IndexedClaim] = []
         for planned in self.operations:
             self._assess_operation(planned, candidates)
@@ -5716,6 +5720,18 @@ class _ApplyPlan:
         # A-13, docs/research/2026-09-25-a-quarantined-claim-does-not-hold-its-day.md).
         return self._publish_changes()
 
+    def _refresh_claim_tree_precondition(self) -> None:
+        if self.claim_tree_manifest is None:
+            return
+        manifest, contents = snapshot_claim_tree_with_content(ROOT)
+        current = {path: claim_ledger_fingerprint(parse_claim_ledger(content))
+                   for path, content in contents.items()}
+        if current != self.claim_ledger_snapshot:
+            raise TransactionFailure("assessed claim ledger snapshot changed",
+                                     "precondition_failed", "quarantined")
+        _require_current_compile_targets(self.inputs, manifest)
+        self.claim_tree_manifest = manifest
+        self.preconditions["claim_tree_manifest"] = manifest
 
     def _require_companion_receipts(self) -> None:
         selection = _receipt_predicate(self.coordinator, deadline=self.deadline)
@@ -5731,6 +5747,7 @@ class _ApplyPlan:
         quarantine = self._apply_claim_policy()
         if quarantine is not None:
             return quarantine
+        self._refresh_claim_tree_precondition()
         self._append_index_and_log()
         self._append_receipts()
         return self._commit()

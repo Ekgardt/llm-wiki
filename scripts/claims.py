@@ -845,6 +845,16 @@ def _require_observation(record: Mapping[str, object], ref: EvidenceRef) -> None
         raise ValueError("claim observation does not match its evidence block")
 
 
+def claim_ledger_fingerprint(ledger: dict[str, object] | None) -> str:
+    """Bind the validated ledger consumed by assessment, including its absence."""
+    return sha256_bytes(canonical_json_bytes(ledger))
+
+
+def _record_ledger_snapshot(snapshot, relative, ledger) -> None:
+    if snapshot is not None:
+        snapshot[relative] = claim_ledger_fingerprint(ledger)
+
+
 def parse_claim_ledger(content: bytes) -> dict[str, object] | None:
     match = claim_ledger_match(content)
     if match is None:
@@ -1297,6 +1307,7 @@ class ClaimIndex:
         *,
         deadline: float = float("inf"),
         cancelled: Callable[[], bool] | None = None,
+        ledger_snapshot: dict[str, str] | None = None,
     ) -> None:
         if time.monotonic() >= deadline or bool(cancelled and cancelled()):
             raise TimeoutError("claim rebuild cancelled or deadline reached")
@@ -1306,7 +1317,8 @@ class ClaimIndex:
             pass
         with _exclusive_file_lock(self.lock_path):
             pages = self._rebuild_pages(sources)
-            self._rebuild_locked(pages, deadline=deadline, cancelled=cancelled)
+            self._rebuild_locked(pages, deadline=deadline, cancelled=cancelled,
+                                 ledger_snapshot=ledger_snapshot)
 
     def _rebuild_pages(
         self,
@@ -1351,13 +1363,14 @@ class ClaimIndex:
         *,
         deadline: float = float("inf"),
         cancelled: Callable[[], bool] | None = None,
+        ledger_snapshot: dict[str, str] | None = None,
     ) -> None:
         rows: list[tuple[object, ...]] = []
         diagnostics: list[tuple[str, str, str]] = []
         seen_pages: set[str] = set()
         for page in pages:
             _require_rebuild_active(deadline, cancelled)
-            self._collect_page(Path(page), seen_pages, rows, diagnostics)
+            self._collect_page(Path(page), seen_pages, rows, diagnostics, ledger_snapshot)
         _require_rebuild_active(deadline, cancelled)
         self._write_index(rows, diagnostics)
 
@@ -1367,12 +1380,14 @@ class ClaimIndex:
         seen_pages: set[str],
         rows: list[tuple[object, ...]],
         diagnostics: list[tuple[str, str, str]],
+        ledger_snapshot: dict[str, str] | None = None,
     ) -> None:
         relative, content = self._page_bytes(page)
         if relative in seen_pages:
             raise ValueError("claim index page list contains duplicates")
         seen_pages.add(relative)
         ledger = parse_claim_ledger(content)
+        _record_ledger_snapshot(ledger_snapshot, relative, ledger)
         if ledger is None:
             return
         for record in ledger["claims"]:

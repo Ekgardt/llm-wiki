@@ -1006,11 +1006,11 @@ def test_postcommit_claim_index_rebuild_failure_invalidates_without_failing_comm
     original_rebuild = ClaimIndex.rebuild
     calls = 0
 
-    def fail_after_commit(self, sources=None):
+    def fail_after_commit(self, sources=None, **kwargs):
         nonlocal calls
         calls += 1
         if calls == 1:
-            return original_rebuild(self, sources)
+            return original_rebuild(self, sources, **kwargs)
         raise OSError("derived cache failure")
 
     monkeypatch.setattr(ClaimIndex, "rebuild", fail_after_commit)
@@ -2608,3 +2608,136 @@ def test_complete_quote_schema_reuses_the_durable_literal_contract():
     assert evidence["quoted_text"] == literal
     assert "native_event" in branches[1]["required"]
     assert branches[1]["additionalProperties"] is False
+
+
+def _claim_plan_for_live_handoff(root):
+    import compile_memory
+
+    daily = _daily(root)
+    record = _claim_record(root, claim_id="new", value="red",
+                           text="A durable exact-byte observation.", authority="user")
+    operation = json.loads(_semantic_plan()["operations"][0]["content"])
+    operation["claims"] = [record]
+    plan = {"schema_version": "compile-plan/v2", "operations": [{
+        "kind": "create", "path": "knowledge/notes/exact-byte-pattern.md",
+        "content": canonical_json_bytes(operation).decode(),
+    }]}
+    return compile_memory.snapshot_compile_inputs([daily]), plan
+
+
+def test_live_handoff_prose_does_not_repeat_claim_assessment(vault, monkeypatch):
+    import compile_memory
+
+    root, state_root = vault
+    state = root / "knowledge/projects/foreign/state.md"
+    state.parent.mkdir()
+    state.write_bytes(b"---\ntype: project-state\n---\n# State\nInitial task.\n")
+    inputs, plan = _claim_plan_for_live_handoff(root)
+    original = compile_memory._ApplyPlan.assess_claims
+    calls = []
+
+    def assess_then_project_next_handoff(self):
+        original(self)
+        calls.append(True)
+        state.write_bytes(b"---\ntype: project-state\n---\n# State\nTask " + str(len(calls)).encode() + b".\n")
+
+    monkeypatch.setattr(compile_memory._ApplyPlan, "assess_claims", assess_then_project_next_handoff)
+    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+    result = compile_memory.apply_compile_plan(inputs, plan, action_key="7" * 64,
+        trigger="manual", coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:00:00Z")
+    assert result.state == "committed"
+    assert len(calls) == 1
+    assert (root / "knowledge/notes/exact-byte-pattern.md").is_file()
+    assert state.read_bytes().endswith(b"Task 1.\n")
+
+
+def test_live_handoff_claim_change_requires_fresh_assessment(vault, monkeypatch):
+    import compile_memory
+
+    root, state_root = vault
+    state = root / "knowledge/projects/foreign/state.md"
+    state.parent.mkdir()
+    state.write_bytes(b"---\ntype: project-state\n---\n# State\nInitial task.\n")
+    inputs, plan = _claim_plan_for_live_handoff(root)
+    record = _claim_record(root, claim_id="foreign", value="red",
+                           text="The prior state is blue.", authority="web")
+    changed = (b"---\ntype: project-state\n---\n# State\n## Claims\n```json\n"
+               + canonical_json_bytes({"schema_version": "claim-ledger/v1", "claims": [record]})
+               + b"\n```\n")
+    original = compile_memory._ApplyPlan.assess_claims
+    calls = []
+
+    def assess_then_change_ledger(self):
+        original(self)
+        calls.append(True)
+        state.write_bytes(changed)
+
+    monkeypatch.setattr(compile_memory._ApplyPlan, "assess_claims", assess_then_change_ledger)
+    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+    result = compile_memory.apply_compile_plan(inputs, plan, action_key="8" * 64,
+        trigger="manual", coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:00:00Z")
+    assert result.state == "committed"
+    assert len(calls) == 2
+    assert state.read_bytes() == changed
+
+
+def test_live_handoff_malformed_claim_ledger_refuses_publication(vault, monkeypatch):
+    import compile_memory
+
+    root, state_root = vault
+    state = root / "knowledge/projects/foreign/state.md"
+    state.parent.mkdir()
+    state.write_bytes(b"---\ntype: project-state\n---\n# State\nInitial task.\n")
+    inputs, plan = _claim_plan_for_live_handoff(root)
+    original = compile_memory._ApplyPlan.assess_claims
+
+    def assess_then_break_ledger(self):
+        original(self)
+        state.write_bytes(b"---\ntype: project-state\n---\n# State\n## Claims\n```json\n{broken}\n```\n")
+
+    monkeypatch.setattr(compile_memory._ApplyPlan, "assess_claims", assess_then_break_ledger)
+    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+    with pytest.raises(ValueError):
+        compile_memory.apply_compile_plan(inputs, plan, action_key="9" * 64,
+            trigger="manual", coordinator=MarkdownCoordinator(root, state_root),
+            completed_at="2026-07-14T12:00:00Z")
+    assert not (root / "knowledge/notes/exact-byte-pattern.md").exists()
+    assert not list((root / "knowledge/daily/receipts").glob("*.md"))
+
+
+def test_live_handoff_ledger_restore_does_not_hide_assessed_bytes(vault, monkeypatch):
+    import compile_memory
+    from claims import ClaimIndex
+
+    root, state_root = vault
+    state = root / "knowledge/projects/foreign/state.md"
+    state.parent.mkdir()
+    original_bytes = b"---\ntype: project-state\n---\n# State\nInitial task.\n"
+    state.write_bytes(original_bytes)
+    inputs, plan = _claim_plan_for_live_handoff(root)
+    record = _claim_record(root, claim_id="foreign", value="red",
+                           text="The prior state is blue.", authority="web")
+    changed = (b"---\ntype: project-state\n---\n# State\n## Claims\n```json\n"
+               + canonical_json_bytes({"schema_version": "claim-ledger/v1", "claims": [record]})
+               + b"\n```\n")
+    original = ClaimIndex.rebuild
+    calls = []
+
+    def rebuild_transient_ledger(self, sources=None, **kwargs):
+        calls.append(True)
+        if len(calls) == 1:
+            state.write_bytes(changed)
+        original(self, sources, **kwargs)
+        state.write_bytes(original_bytes)
+
+    monkeypatch.setattr(ClaimIndex, "rebuild", rebuild_transient_ledger)
+    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+    result = compile_memory.apply_compile_plan(inputs, plan, action_key="a" * 64,
+        trigger="manual", coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:00:00Z")
+    assert result.state == "committed"
+    # Two assessments plus the established post-commit rebuild.
+    assert len(calls) == 3
+    assert state.read_bytes() == original_bytes
