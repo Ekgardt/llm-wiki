@@ -1521,6 +1521,7 @@ class CodexPlanningBasis:
     config_files: tuple[tuple[str, str | None], ...]
     environment_sha256: str
     cli_version: str
+    mcp_server_names: tuple[str, ...] = ()
 
     @property
     def descriptor(self) -> ProviderDescriptor:
@@ -1541,7 +1542,31 @@ def _codex_basis_remaining(deadline):
 
 
 def _codex_configuration_args(reasoning):
-    return ["-c", f"model_reasoning_effort={reasoning}", "-c", "features.hooks=false"]
+    return ["-c", f"model_reasoning_effort={reasoning}", "-c", "features.hooks=false",
+            "-c", "features.apps=false", "-c", "features.plugins=false"]
+
+
+def _codex_mcp_names(config):
+    effective = config.get("config", {})
+    if not isinstance(effective, dict):
+        raise ValueError("Codex effective configuration is not an object")
+    return _codex_validated_mcp_names(effective.get("mcp_servers", {}))
+
+
+def _codex_validated_mcp_names(servers):
+    if not isinstance(servers, dict):
+        raise ValueError("Codex MCP configuration is not an object")
+    if not all(_codex_mcp_entry_valid(name, value) for name, value in servers.items()):
+        raise ValueError("Codex MCP configuration contains an invalid server")
+    return tuple(sorted(servers))
+
+
+def _codex_mcp_entry_valid(name, value):
+    return isinstance(name, str) and bool(name) and isinstance(value, dict)
+
+
+def _codex_closed_mcp(names):
+    return {name: {"enabled": False} for name in names}
 
 
 def _codex_basis_command(executable, descriptor, suffix):
@@ -1748,7 +1773,8 @@ def _codex_native_basis(rpc, neutral, descriptor):
     rpc.config_files = _codex_config_files(config)
     _codex_config_layers_verified(config)
     _require_codex_basis_files(rpc.config_files)
-    params = {"cwd": neutral, "ephemeral": True, "sandbox": "read-only", "approvalPolicy": "never"}
+    params = {"cwd": neutral, "ephemeral": True, "sandbox": "read-only", "approvalPolicy": "never",
+              "config": {"mcp_servers": _codex_closed_mcp(_codex_mcp_names(config))}}
     if descriptor.model is not None:
         params["model"] = descriptor.model
     result = rpc.request(3, "thread/start", params)
@@ -1852,7 +1878,7 @@ def _resolved_codex_basis(descriptor, executable, result, config, neutral, envir
     _require_codex_basis_files(files)
     return CodexPlanningBasis(descriptor, executable, result["model"], result["modelProvider"],
                               _codex_configured_window(window, config), hashlib.sha256(raw or b'').hexdigest(),
-                              files, _codex_basis_digest(environment), version)
+                              files, _codex_basis_digest(environment), version, _codex_mcp_names(config))
 
 
 def _codex_basis_version(executable, neutral, environment, deadline):
@@ -2094,6 +2120,7 @@ def _codex_command(codex_bin: str, model: str | None, reasoning: str, out_path: 
         codex_bin,
         "exec",
         "--json",
+        "--ephemeral",
         "--skip-git-repo-check",
         "--sandbox",
         "read-only",
@@ -2163,7 +2190,7 @@ def _run_cli(
     from sync_memory import _run_process_tree
 
     return _run_process_tree(
-        command, timeout=_timeout_s(), input=stdin_text, **options
+        command, timeout=options.pop("timeout", _timeout_s()), input=stdin_text, **options
     )
 
 
@@ -2209,15 +2236,20 @@ def provider_environment() -> dict[str, str]:
 def _codex_last_message(command: list[str], prompt_path: str, out_path: str, *, executable=None, basis=None) -> BackendResponse:
     with open(prompt_path, "rb") as stdin_handle, provider_cwd() as neutral:
         try:
+            deadline = time.monotonic() + _timeout_s()
             _require_codex_dispatch_identity(executable, basis)
+            environment = provider_environment()
+            names = _codex_dispatch_mcp_names(command, executable, basis, neutral, environment, deadline)
+            command = command + _codex_exec_mcp_args(names)
             result = _run_cli(
                 command,
                 stdin=stdin_handle,
                 capture_output=True,
                 cwd=neutral,
-                env=provider_environment(),
+                env=environment,
+                timeout=_codex_basis_remaining(deadline),
             )
-        except subprocess.TimeoutExpired as exc:
+        except (subprocess.TimeoutExpired, TimeoutError) as exc:
             raise ProviderTimeout(
                 f"codex did not answer within {_timeout_s()}s{_cleanup_note(exc)}"
             ) from exc
@@ -2228,6 +2260,39 @@ def _codex_last_message(command: list[str], prompt_path: str, out_path: str, *, 
     except OSError:
         text = ""
     return BackendResponse(text, usage)
+
+
+def _codex_dispatch_mcp_names(command, executable, basis, neutral, environment, deadline):
+    if basis is not None:
+        return basis.mcp_server_names
+    executable = executable or _bind_codex_executable(command[0])
+    discovery = [executable.path, *_codex_configuration_args("low"), "mcp", "list", "--json"]
+    raw = _codex_basis_local_command(executable, discovery, neutral, environment, deadline)
+    return _codex_mcp_list_names(raw)
+
+
+def _codex_mcp_list_names(raw):
+    servers = json.loads(raw)
+    if not isinstance(servers, list):
+        raise ValueError("Codex MCP list is not an array")
+    names = tuple(_codex_mcp_list_name(server) for server in servers)
+    if len(set(names)) != len(names):
+        raise ValueError("Codex MCP list has duplicate server names")
+    return tuple(sorted(names))
+
+
+def _codex_mcp_list_name(server):
+    if not isinstance(server, dict):
+        raise ValueError("Codex MCP list contains a non-object server")
+    name = server.get("name")
+    if not isinstance(name, str) or not name:
+        raise ValueError("Codex MCP list contains an invalid server name")
+    return name
+
+
+def _codex_exec_mcp_args(names):
+    entries = ",".join(json.dumps(name, ensure_ascii=True) + "={enabled=false}" for name in names)
+    return ["-c", "mcp_servers={" + entries + "}"]
 
 
 def _codex_usage(output: str | bytes) -> TokenUsage:
