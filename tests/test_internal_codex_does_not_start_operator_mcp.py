@@ -58,7 +58,9 @@ def test_native_exec_disables_all_operator_servers_without_editing_configuration
     home = tmp_path / 'codex-home'
     home.mkdir()
     config = home / 'config.toml'
-    original = '[mcp_servers.memory]\ncommand="false"\n[mcp_servers."other.server"]\ncommand="false"\n'
+    original = ('[mcp_servers.memory]\ncommand="false"\n'
+                '[mcp_servers."other.server"]\ncommand="false"\n'
+                '[mcp_servers."сервер🚀"]\ncommand="false"\n')
     config.write_text(original)
     monkeypatch.setenv('CODEX_HOME', str(home))
     output = tmp_path / 'reply'
@@ -78,9 +80,23 @@ def test_native_exec_disables_all_operator_servers_without_editing_configuration
     executable = lc._bind_codex_executable(binary)
     command = lc._codex_command(binary, None, 'medium', str(output))
     assert lc._codex_last_message(command, str(prompt), str(output), executable=executable).text == 'ok'
-    assert {server['name'] for server in observed} == {'memory', 'other.server'}
+    assert {server['name'] for server in observed} == {'memory', 'other.server', 'сервер🚀'}
     assert all(server['enabled'] is False for server in observed)
     assert config.read_text() == original
+
+
+def test_native_internal_configuration_disables_readers_and_delegation(monkeypatch, tmp_path):
+    binary = shutil.which('codex')
+    if binary is None:
+        pytest.skip('native Codex CLI is not installed')
+    monkeypatch.setenv('CODEX_HOME', str(tmp_path))
+    command = lc._codex_command(binary, None, 'medium', '/unused-result')
+    result = subprocess.run([binary, *_configuration_arguments(command), 'features', 'list'],
+                            capture_output=True, text=True, timeout=lc._timeout_s(), check=True)
+    features = {line.split()[0]: line.split()[-1] for line in result.stdout.splitlines()}
+    required = ('shell_tool', 'view_image', 'browser_use', 'computer_use', 'multi_agent',
+                'image_generation', 'skill_search', 'sleep_tool', 'code_mode_host')
+    assert {name: features.get(name) for name in required} == dict.fromkeys(required, 'false')
 
 
 @pytest.mark.parametrize('raw', ['{}', '[null]', '[{"name":""}]',

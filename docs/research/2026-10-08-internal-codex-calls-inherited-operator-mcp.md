@@ -49,3 +49,27 @@ passed all 33 changed or new callables with maximum complexity 4.
 An actual short protected model call returned the expected answer. That is
 transport evidence only. Full compilation quality, total token efficiency,
 installed generation completion and the overall audit remain unqualified.
+
+## Follow-up: readers and Unicode names
+
+The closed packet also disables native shell, image viewing, browser, computer,
+image generation, skill discovery, agent delegation, sleeping and code-mode
+host features, plus web search. These capabilities are unnecessary for reading
+the supplied packet and could otherwise fetch content outside its DLP boundary.
+This policy is limited to internal calls; the operator's configuration and
+packet bytes remain unchanged. Native feature metadata verifies the reader and
+delegation switches. A real protected model call still produced the expected
+short answer. Full useful-cycle efficiency remains unqualified.
+
+The real CLI regression also covers a Cyrillic server name containing an emoji.
+JSON's ASCII encoding produced surrogate escapes that TOML cannot parse as
+Unicode scalar values. Names are now escaped as UTF-8 JSON strings, which also
+serve as quoted TOML keys. The original configuration file remains unchanged.
+The [TOML 1.0 specification](https://toml.io/en/v1.0.0), checked 2026-10-08,
+defines the relevant quoted keys and Unicode escapes. Both the reader-capability
+guard and the Unicode case failed on the earlier implementation and pass after
+the correction. This does not claim an OS sandbox or disable every harmless
+built-in operation. The combined provider, journal and timeout-policy set passed
+1,175 tests across 60 files; the targeted Python 3.10 set passed six cases.
+All nine changed or new callables passed actual AST and Lizard analysis, with
+maximum complexity 5.

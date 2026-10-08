@@ -1811,7 +1811,8 @@ def test_simultaneous_projectors_append_once_per_event(vault: Path, state_root: 
     def write(index: int):
         store = ProjectStore(vault, state_root)
         barrier.wait()
-        for _ in range(100):
+        deadline = time.monotonic() + LONG_TIMEOUT
+        while time.monotonic() < deadline:
             try:
                 return store.checkpoint(
                     "demo",
@@ -1846,6 +1847,29 @@ def test_simultaneous_projectors_append_once_per_event(vault: Path, state_root: 
         in ProjectStore(vault, state_root).read_journal("demo")
         for record in records
     )
+
+
+@pytest.mark.parametrize('loss,args', [
+    (ProjectLeaseBusy, ('controlled contention',)),
+    (ProjectFenceError, ('controlled contention',)),
+    (ProjectPendingPriorError, ('demo', 2, 1)),
+])
+def test_simultaneous_projectors_do_not_exhaust_a_counter_before_a_legal_retry(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch, loss, args
+):
+    checkpoint = ProjectStore.checkpoint
+    attempts = {}
+
+    def transient_loss(store, project, event, owner):
+        attempts[owner] = attempts.get(owner, 0) + 1
+        if attempts[owner] <= 100:
+            raise loss(*args)
+        return checkpoint(store, project, event, owner)
+
+    monkeypatch.setattr(ProjectStore, 'checkpoint', transient_loss)
+    test_simultaneous_projectors_append_once_per_event(vault, state_root)
+    assert set(attempts) == {'agent-0', 'agent-1'}
+    assert all(count > 100 for count in attempts.values())
 
 
 def test_same_owner_simultaneous_projectors_retry_without_sharing_lease(

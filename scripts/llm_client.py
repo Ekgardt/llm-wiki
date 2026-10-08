@@ -1541,9 +1541,18 @@ def _codex_basis_remaining(deadline):
     return remaining
 
 
+_CODEX_INTERNAL_DISABLED_FEATURES = (
+    "hooks", "apps", "plugins", "shell_tool", "view_image", "browser_use",
+    "computer_use", "multi_agent", "multi_agent_v2", "image_generation",
+    "skill_search", "sleep_tool", "code_mode", "code_mode_host", "code_mode_only",
+)
+
+
 def _codex_configuration_args(reasoning):
-    return ["-c", f"model_reasoning_effort={reasoning}", "-c", "features.hooks=false",
-            "-c", "features.apps=false", "-c", "features.plugins=false"]
+    closed = [part for name in _CODEX_INTERNAL_DISABLED_FEATURES
+              for part in ("-c", f"features.{name}=false")]
+    return ["-c", f"model_reasoning_effort={reasoning}",
+            "-c", 'web_search="disabled"', *closed]
 
 
 def _codex_mcp_names(config):
@@ -2291,7 +2300,7 @@ def _codex_mcp_list_name(server):
 
 
 def _codex_exec_mcp_args(names):
-    entries = ",".join(json.dumps(name, ensure_ascii=True) + "={enabled=false}" for name in names)
+    entries = ",".join(json.dumps(name, ensure_ascii=False) + "={enabled=false}" for name in names)
     return ["-c", "mcp_servers={" + entries + "}"]
 
 
