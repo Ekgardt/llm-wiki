@@ -833,6 +833,9 @@ def build_full_generation(
             deadline=deadline,
             cancelled=cancelled,
         )
+        # SQLite now owns the complete persisted rows. Do not overlap these
+        # disposable Python containers with search/vector encoding and validation.
+        del records, nodes, occurrences, assertions, evidence, observations, dependencies
         _check_stop(deadline, cancelled)
         fsync_file(database_path)
         fsync_directory(generation_path)
@@ -1853,17 +1856,20 @@ def build_incremental_generation(
         dependency_rows,
         dependency_total,
     )
+    # These intermediates are no longer used; the persisted manifest retains
+    # the source ownership evidence needed by the next generation.
+    del runner, ownership, records_by_owner, entry_by_id, parent_entries, parent_manifest
     _check_stop(deadline, cancelled)
     built = build_full_generation(
         catalog,
         sources=sources_list,
         source_bytes=source_snapshot,
-        nodes=merged["nodes"].values(),
-        occurrences=merged["occurrences"].values(),
-        assertions=merged["assertions"].values(),
-        evidence=merged["evidence"].values(),
-        observations=merged["observations"].values(),
-        dependencies=merged["dependencies"].values(),
+        nodes=_owned_record_iterator(merged, "nodes"),
+        occurrences=_owned_record_iterator(merged, "occurrences"),
+        assertions=_owned_record_iterator(merged, "assertions"),
+        evidence=_owned_record_iterator(merged, "evidence"),
+        observations=_owned_record_iterator(merged, "observations"),
+        dependencies=_owned_record_iterator(merged, "dependencies"),
         generation_id=generation_id,
         parent_generation_id=parent_generation_id,
         policy=policy,
@@ -1893,6 +1899,11 @@ def build_incremental_generation(
         reused_sources=tuple(sorted(reused)),
         rebuilt_sources=tuple(sorted(rebuild)),
     )
+
+
+def _owned_record_iterator(merged, collection):
+    """Transfer one locally owned family; exhaustion releases its dictionary."""
+    return iter(merged.pop(collection).values())
 
 
 def _validated_incremental_inputs(

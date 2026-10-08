@@ -624,6 +624,7 @@
   "test_fresh_positions.py": 0.07,
   "test_frontmatter_uses_optional_safe_yaml_acceleration.py": 0.02,
   "test_generation_catalog.py": 51.08,
+  "test_generation_graph_rows_released_before_vectors.py": 0.37,
   "test_generation_integration.py": 8.14,
   "test_generation_maintenance.py": 167.28,
   "test_generation_rebuild_reuse.py": 5.87,
