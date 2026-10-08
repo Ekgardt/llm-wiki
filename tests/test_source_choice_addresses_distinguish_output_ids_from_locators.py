@@ -49,4 +49,4 @@ def test_display_keeps_raw_source_context_and_exact_binding(tmp_path, monkeypatc
 
 
 def test_changed_address_program_has_a_new_draft_cache_identity():
-    assert compiler.DRAFT_PROGRAM.startswith('compile-draft/v15:')
+    assert compiler.DRAFT_PROGRAM.startswith('compile-draft/v16:')
