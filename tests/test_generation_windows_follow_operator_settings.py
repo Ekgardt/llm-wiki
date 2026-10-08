@@ -57,7 +57,11 @@ def test_an_invalid_window_is_not_silently_ignored(monkeypatch):
         compile_memory._refresh_generation_after_compile()
 
 
-def test_powershell_registers_the_supplied_windows_limits(tmp_path):
+@pytest.mark.parametrize(('options', 'expected'), [
+    ('-NightlyLimitHours 17 -WeeklyLimitHours 7', [[17, True], [7, True]]),
+    ('', [[4, True], [6, True]]),
+])
+def test_powershell_registers_the_supplied_windows_limits(tmp_path, options, expected):
     from tests.powershell_literal import ps_literal
     from tests.test_a_changed_task_setting_reaches_an_installed_machine import SCRIPT, STUBS, _run
 
@@ -67,12 +71,12 @@ def test_powershell_registers_the_supplied_windows_limits(tmp_path):
     command = STUBS + (
         f"\n. {ps_literal(str(SCRIPT))} -VaultRoot {ps_literal(str(tmp_path))} "
         f"-StateRoot {ps_literal(str(tmp_path))} -UvPath {ps_literal(str(tmp_path / 'uv.exe'))} "
-        '-NightlyLimitHours 17 -WeeklyLimitHours 7 6>$null\n'
+        f'{options} 6>$null\n'
         'ConvertTo-Json -Compress $script:registered\n'
     )
     result = _run(command)
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout.splitlines()[-1]) == [[17, True], [7, True]]
+    assert json.loads(result.stdout.splitlines()[-1]) == expected
 
 
 @pytest.mark.parametrize('hours', [True, 0, -1, '17', None])

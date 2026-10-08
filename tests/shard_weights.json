@@ -630,7 +630,7 @@
   "test_generation_rebuild_reuse.py": 5.87,
   "test_generation_reuse_scope_identity.py": 0.02,
   "test_generation_validation_streams_sources.py": 0.1,
-  "test_generation_windows_follow_operator_settings.py": 0.54,
+  "test_generation_windows_follow_operator_settings.py": 1.01,
   "test_generic_breadcrumb_is_not_a_native_event.py": 4.77,
   "test_get_decisions_returns_what_was_asked.py": 0.03,
   "test_graph_hint.py": 1.99,

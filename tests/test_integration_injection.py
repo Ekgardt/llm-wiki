@@ -4617,13 +4617,15 @@ def test_windows_scheduler_status_accepts_only_the_registered_contract(tmp_path)
 
     command = textwrap.dedent(
         f"""
+        $ErrorActionPreference = 'Stop'
         $tokens = $null
         $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
             {ps_literal(str(script))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         foreach ($name in @(
-            'Get-LLMWikiLimitHours', 'New-LLMWikiScheduledAction', 'Test-LLMWikiTaskSpec',
+            'Get-LLMWikiLimitHours', 'Get-LLMWikiConfiguredLimitHours',
+            'New-LLMWikiScheduledAction', 'Test-LLMWikiTaskSpec',
             'Test-LLMWikiScheduledTasks', 'Test-LLMWikiTaskAction', 'Test-LLMWikiTaskSchedule',
             'Test-LLMWikiTaskIdentity', 'Write-LLMWikiTaskStatus', 'Test-LLMWikiTaskRegistration'
         )) {{
