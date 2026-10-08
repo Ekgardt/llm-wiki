@@ -194,6 +194,23 @@ refusal at one names the setting that raises it. Decision and sources:
 `docs/research/2026-09-27-every-limit-states-its-reason.md`; inventory:
 `docs/LIMITS-2026-09-27.md`.
 
+### Generation maintenance windows (decision approved 2026-10-08)
+
+The existing settings registry exposes `generation.nightly_seconds` and
+`generation.post_compile_seconds`, including its standard environment overrides
+`LLM_WIKI_GENERATION_NIGHTLY_SECONDS` and
+`LLM_WIKI_GENERATION_POST_COMPILE_SECONDS`. The bounded builder keeps complete
+sources, vectors, validation and catalog CAS activation. Windows task and Linux
+service definitions must outlast the configured pass; persisted definitions keep
+their original values for rollback. Values are qualified from a complete measured
+pass and reconsidered after corpus growth or machine changes. No runtime root,
+directory, database, daemon or MCP tool is added. The defaults are 2131 seconds,
+an estimate from the 2026-10-08 full-build attempt plus independently measured
+validation and collection variation; the complete installed build remains
+unqualified after a kernel OOM. Installation and full-cycle qualification are
+separate checks, and the windows must be remeasured after resource changes.
+Decision: `knowledge/notes/generation-measured-time-budget-decision-20261008.md`.
+
 ## External integration configuration preimages
 
 Claude and Codex configuration merges may create byte-exact sibling preimages

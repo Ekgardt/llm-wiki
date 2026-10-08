@@ -140,7 +140,7 @@ def test_a_successful_compile_refreshes_the_generation(monkeypatch):
         lambda _root, _state, *, time_budget_seconds: calls.append(time_budget_seconds) or {"status": "current"},
     )
 
-    assert (compile_memory.main(), calls) == (0, [compile_memory.POST_COMPILE_GENERATION_SECONDS])
+    assert (compile_memory.main(), calls) == (0, [compile_memory.setting_value("generation.post_compile_seconds", compile_memory.ROOT)])
 
 
 def test_a_failed_or_dry_compile_does_not_refresh(monkeypatch):

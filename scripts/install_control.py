@@ -689,7 +689,23 @@ SCHEDULER_LIMIT_HOURS = {"nightly": 4, "weekly": 6}
 
 # A oneshot service has no start timeout by default, so a hung pass would hold its
 # lease forever. See `docs/research/2026-09-14-ci-and-scheduler-gaps.md`.
-SYSTEMD_START_LIMITS = {kind: f"{hours}h" for kind, hours in SCHEDULER_LIMIT_HOURS.items()}
+def scheduler_limit_hours(root: Path) -> dict[str, int]:
+    """Retain the installed floors and outlast each configured pass plus startup."""
+    import math
+
+    import scheduled_nightly
+    import scheduled_weekly
+
+    bounds = {
+        "nightly": scheduled_nightly.worst_case_seconds(root),
+        "weekly": scheduled_weekly.worst_case_seconds(),
+    }
+    return {
+        kind: max(SCHEDULER_LIMIT_HOURS[kind], math.ceil(
+            (seconds + scheduled_nightly.STEP_START_MARGIN_SECONDS) / 3600
+        ))
+        for kind, seconds in bounds.items()
+    }
 
 
 def _systemd_service(root: Path, state_root: Path, uv_path: Path, kind: str) -> bytes:
@@ -702,7 +718,7 @@ def _systemd_service(root: Path, state_root: Path, uv_path: Path, kind: str) -> 
         "",
         "[Service]",
         "Type=oneshot",
-        f"TimeoutStartSec={SYSTEMD_START_LIMITS[kind]}",
+        f"TimeoutStartSec={scheduler_limit_hours(root)[kind]}h",
         f"Environment={_systemd_quote(f'LLM_WIKI_ROOT={Path(root).resolve()}')}",
         f"Environment={_systemd_quote(f'LLM_WIKI_STATE_ROOT={Path(state_root).resolve()}')}",
         *(f"Environment={_systemd_quote(f'{key}={value}')}" for key, value in _provider_items()),
@@ -1818,7 +1834,7 @@ def render_windows_task_spec(root: Path, state_root: Path, uv_path: Path) -> byt
         "root": str(Path(root).resolve()),
         "spec": WINDOWS_TASK_SPEC_VERSION,
         "state_root": str(Path(state_root).resolve()),
-        "tasks": _expected_windows_tasks(),
+        "tasks": _expected_windows_tasks(root),
         "uv_path": str(_stable_uv_path(uv_path)),
     }
     return canonical_json_bytes(value)
@@ -1836,23 +1852,46 @@ def _legacy_windows_tasks() -> list[dict[str, object]]:
     ]
 
 
-def _expected_windows_tasks() -> list[dict[str, object]]:
+def _expected_windows_tasks(root: Path | None = None) -> list[dict[str, object]]:
+    limits = WINDOWS_TASK_LIMIT_HOURS if root is None else scheduler_limit_hours(root)
     return [
-        {**task, "limit_hours": WINDOWS_TASK_LIMIT_HOURS[str(task["kind"])]}
+        {**task, "limit_hours": limits[str(task["kind"])]}
         for task in _legacy_windows_tasks()
     ]
 
 
+def _windows_task_limit(task: object, legacy: dict[str, object]) -> int:
+    if not isinstance(task, dict):
+        raise InstallControlError("install_windows_task_spec_invalid")
+    hours = task.get("limit_hours")
+    valid = type(hours) is int and hours > 0
+    if not valid or task != {**legacy, "limit_hours": hours}:
+        raise InstallControlError("install_windows_task_spec_invalid")
+    return hours
+
+
+def _validated_windows_tasks(tasks: object) -> list[dict[str, object]]:
+    legacy = _legacy_windows_tasks()
+    if not isinstance(tasks, list) or len(tasks) != len(legacy):
+        raise InstallControlError("install_windows_task_spec_invalid")
+    return [
+        {**template, "limit_hours": _windows_task_limit(task, template)}
+        for task, template in zip(tasks, legacy)
+    ]
+
+
+def _windows_spec_shape(version: int, tasks: object) -> tuple[set[str], object]:
+    if version == 1:
+        return {"root", "state_root", "tasks", "uv_path"}, _legacy_windows_tasks()
+    return {"root", "spec", "state_root", "tasks", "uv_path"}, _validated_windows_tasks(tasks)
+
+
 def _windows_spec_version(value: Mapping[str, object]) -> int:
     """Which script contract a decoded specification was registered under."""
-    shapes = {
-        1: ({"root", "state_root", "tasks", "uv_path"}, _legacy_windows_tasks()),
-        2: ({"root", "spec", "state_root", "tasks", "uv_path"}, _expected_windows_tasks()),
-    }
     version = value.get("spec", 1)
-    if type(version) is not int or version not in shapes:
+    if type(version) is not int or version not in {1, 2}:
         raise InstallControlError("install_windows_task_spec_invalid")
-    keys, tasks = shapes[version]
+    keys, tasks = _windows_spec_shape(version, value.get("tasks"))
     if set(value) != keys or value.get("tasks") != tasks:
         raise InstallControlError("install_windows_task_spec_invalid")
     return int(version)
@@ -1917,7 +1956,7 @@ def _windows_task_command_from_spec(
     script_path: Path,
     mode: str | None,
 ) -> tuple[str, ...]:
-    return _windows_task_command(
+    command = _windows_task_command(
         powershell=powershell,
         script_path=script_path,
         root=Path(str(spec["root"])),
@@ -1926,6 +1965,11 @@ def _windows_task_command_from_spec(
         mode=mode,
         spec_version=_windows_spec_version(spec),
     )
+    if spec.get("spec", 1) == 1:
+        return command
+    limits = {str(task["kind"]): task["limit_hours"] for task in spec["tasks"]}
+    return (*command, "-NightlyLimitHours", str(limits["nightly"]),
+            "-WeeklyLimitHours", str(limits["weekly"]))
 
 
 def _windows_task_state_value(output: bytes) -> str:
@@ -2024,12 +2068,10 @@ def windows_task_scheduler_resource(
 ) -> ManagedResource:
     script_path = Path(script_path).resolve(strict=False)
     desired = render_windows_task_spec(root, state_root, uv_path)
-    command = _windows_task_command(
+    command = _windows_task_command_from_spec(
+        _decode_windows_task_spec(desired, root, state_root),
         powershell=powershell,
         script_path=script_path,
-        root=root,
-        state_root=state_root,
-        uv_path=uv_path,
         mode=None,
     )
     persisted_path = Path(state_root) / "run" / "install" / "scheduler" / "windows" / "tasks.json"

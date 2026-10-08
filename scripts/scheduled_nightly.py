@@ -58,13 +58,6 @@ from repository_retention import RETIRE_BUDGET_SECONDS  # noqa: E402
 from secret_redact import describe_error  # noqa: E402
 from settings import setting_value  # noqa: E402
 
-# How long the nightly pass will spend rebuilding the evidence generation.
-# The interactive default is one minute, which is the right bound for a doctor
-# run someone is waiting on. A nightly window is not that: on this vault a full
-# build of 762 sources takes 98 seconds, so a one-minute bound deferred every
-# night and the generation was never rebuilt at all. The unit itself has no
-# start timeout, so the only bound that matters is this one.
-NIGHTLY_GENERATION_BUDGET_SECONDS = 15 * 60
 # The refresh of every registered foreign repository shares one bound, the
 # child's own (`repository_index.REFRESH_ALL_BUDGET_SECONDS`); the refresh is
 # incremental (measured 2026-09-10: 16 s after one edited file in a 1 022-file
@@ -84,7 +77,7 @@ def _generation_result() -> dict:
     return run_generation_maintenance(
         root=ROOT,
         state_root=STATE_ROOT,
-        time_budget_seconds=NIGHTLY_GENERATION_BUDGET_SECONDS,
+        time_budget_seconds=setting_value("generation.nightly_seconds", ROOT),
         max_sources=setting_value("corpus.max_files", ROOT),
     )
 
@@ -665,7 +658,7 @@ COMPILE_IDLE_WAIT_SECONDS = 30
 MAINTENANCE_TAIL_BUDGET_SECONDS = 120
 
 
-def worst_case_seconds() -> float:
+def worst_case_seconds(root: Path | None = None) -> float:
     """The longest a pass can run by its own bounds, as configured right now.
 
     Every step's timeout (with the margin a provider call really needs), every
@@ -679,7 +672,7 @@ def worst_case_seconds() -> float:
 
     steps = [*_intake_steps(), _fact_keys_step(), _compile_step(), *_post_compile_steps()]
     waits = COMPILE_IDLE_WAIT_SECONDS + compile_wait_seconds()
-    budgets = NIGHTLY_GENERATION_BUDGET_SECONDS + HEALTH_REPORT_BUDGET_SECONDS
+    budgets = setting_value("generation.nightly_seconds", ROOT if root is None else root) + HEALTH_REPORT_BUDGET_SECONDS
     tail = MAINTENANCE_TAIL_BUDGET_SECONDS + UPDATE_SECONDS
     return float(sum(step.timeout for step in steps) + waits + budgets + tail)
 

@@ -71,7 +71,7 @@ def test_a_past_branch_skip_is_not_presented_as_a_current_branch_probe(reason, m
 def test_units_older_than_the_release_are_named(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     _unit(tmp_path, "nightly", None)
-    _unit(tmp_path, "weekly", install_control.SYSTEMD_START_LIMITS["weekly"])
+    _unit(tmp_path, "weekly", doctor._expected_unit_limit("weekly"))
 
     verdict = doctor._unit_limit_verdict(tmp_path)
 
@@ -97,7 +97,7 @@ def test_one_table_sets_every_scheduler_limit() -> None:
     hours = install_control.SCHEDULER_LIMIT_HOURS
 
     assert install_control.WINDOWS_TASK_LIMIT_HOURS == hours
-    assert install_control.SYSTEMD_START_LIMITS == {kind: f"{value}h" for kind, value in hours.items()}
+    assert install_control.scheduler_limit_hours(Path.cwd()) == hours
 
 
 @pytest.mark.parametrize("compile_status", ["running", "ok", "failed"])

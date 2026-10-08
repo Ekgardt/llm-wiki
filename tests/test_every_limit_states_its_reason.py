@@ -38,6 +38,8 @@ REPLACED = {
     "retention.benchmark_run_days": 30,
     "retention.config_backup_days": 90,
     # Was COMPILE_PROVIDER_CEILING_S = 300; raised to 600 on the 2026-09-27 measurements.
+    "generation.nightly_seconds": 2131,
+    "generation.post_compile_seconds": 2131,
     "provider.draft_ceiling_seconds": 600,
     # Not a replaced constant: recall and get_decisions had MCP_OPERATION_SECONDS (10 s);
     # 14 s is the budget measured for the reranker (B-9).

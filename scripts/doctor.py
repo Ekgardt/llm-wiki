@@ -6397,16 +6397,16 @@ def _scheduler_check(
     details["last_weekly_status"] = state.get("last_weekly_status")
     details["last_weekly_at"] = state.get("last_weekly_at")
     details["last_update"] = state.get("last_update")
-    verdicts = _scheduler_verdicts(state, now, home or Path.home())
+    verdicts = _scheduler_verdicts(state, now, home or Path.home(), root)
     nightly = _nightly_result(state, now, details, installed_at(state_root))
     return _with_findings(nightly, verdicts)
 
 
-def _scheduler_verdicts(state: dict, now: datetime, home: Path) -> tuple[tuple[str, str] | None, ...]:
+def _scheduler_verdicts(state: dict, now: datetime, home: Path, root: Path | None = None) -> tuple[tuple[str, str] | None, ...]:
     return (
         _weekly_verdict(state, now),
         _update_verdict(state.get("last_update")),
-        _unit_limit_verdict(home),
+        _unit_limit_verdict(home, root),
         _scheduled_program_verdict(home),
     )
 
@@ -6448,9 +6448,9 @@ def _update_verdict(record: object) -> tuple[str, str] | None:
     return "degraded", " ".join(messages)
 
 
-def _unit_limit_verdict(home: Path) -> tuple[str, str] | None:
+def _unit_limit_verdict(home: Path, root: Path | None = None) -> tuple[str, str] | None:
     """(status, message) when an installed systemd unit lacks this release's time limit."""
-    stale = [kind for kind, limit in _installed_unit_limits(home).items() if limit != _expected_unit_limit(kind)]
+    stale = [kind for kind, limit in _installed_unit_limits(home).items() if limit != _expected_unit_limit(kind, root)]
     if not stale:
         return None
     # The installer replaces units edited outside it, keeps the edited copy and moves a
@@ -6536,10 +6536,12 @@ def _read_small_bytes(path: Path) -> bytes | None:
         return None
 
 
-def _expected_unit_limit(kind: str) -> str:
-    from install_control import SYSTEMD_START_LIMITS
+def _expected_unit_limit(kind: str, root: Path | None = None) -> str:
+    from install_control import scheduler_limit_hours
+    from memory_state import ROOT
 
-    return SYSTEMD_START_LIMITS[kind]
+    vault = ROOT if root is None else root
+    return f"{scheduler_limit_hours(vault)[kind]}h"
 
 
 def _installed_unit_limits(home: Path) -> dict[str, str | None]:

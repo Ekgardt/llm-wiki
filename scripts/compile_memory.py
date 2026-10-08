@@ -7010,17 +7010,15 @@ def main() -> int:
 # right after the compile is a no-op (`status: current`) when nothing changed and
 # defers when the nightly holds the fence. See
 # `docs/research/2026-09-24-an-answer-says-how-old-its-index-is.md`.
-POST_COMPILE_GENERATION_SECONDS = 120.0
-
-
 def _refresh_generation_after_compile() -> None:
     """Make what the compile wrote searchable now, not after the next nightly."""
     from doctor import run_generation_maintenance
     from secret_redact import describe_error
 
+    seconds = setting_value("generation.post_compile_seconds", ROOT)
     try:
         outcome = run_generation_maintenance(
-            ROOT, STATE_ROOT, time_budget_seconds=POST_COMPILE_GENERATION_SECONDS
+            ROOT, STATE_ROOT, time_budget_seconds=seconds
         )
     except Exception as error:  # noqa: BLE001 - the compile already succeeded
         print(f"compile_memory: generation refresh failed: {describe_error(error)}", file=sys.stderr)

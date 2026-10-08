@@ -22,6 +22,8 @@ param(
     # description and the time limits below. 1 is what machines installed before
     # 2026-09-17 carry; the install control plane passes it to take such tasks back.
     [ValidateSet(1, 2)][int]$SpecVersion = 2,
+    [ValidateScript({ $_ -gt 0 })][int]$NightlyLimitHours,
+    [ValidateScript({ $_ -gt 0 })][int]$WeeklyLimitHours,
     [switch]$Uninstall,
     [switch]$Status,
     [switch]$StateJson,
@@ -39,7 +41,13 @@ $tasks = @("LLMWiki-Nightly", "LLMWiki-Weekly")
 # A function, not only a script variable: the status check calls it, so a caller
 # that loads the check alone still reads the same table.
 function Get-LLMWikiLimitHours { return @{ nightly = 4; weekly = 6 } }
-$LimitHours = Get-LLMWikiLimitHours
+function Get-LLMWikiConfiguredLimitHours {
+    $limits = Get-LLMWikiLimitHours
+    if ($NightlyLimitHours -gt 0) { $limits.nightly = $NightlyLimitHours }
+    if ($WeeklyLimitHours -gt 0) { $limits.weekly = $WeeklyLimitHours }
+    return $limits
+}
+$LimitHours = Get-LLMWikiConfiguredLimitHours
 
 # Detect dot-sourcing at TOP LEVEL (outside any function).
 # Inside a function, $MyInvocation.CommandOrigin is always 'Internal',
@@ -162,7 +170,7 @@ function Test-LLMWikiScheduledTasks {
         [Parameter(Mandatory = $true)][string]$UvPath,
         [ValidateSet(1, 2)][int]$SpecVersion = 2
     )
-    $limits = Get-LLMWikiLimitHours
+    $limits = Get-LLMWikiConfiguredLimitHours
     $specifications = @(
         @{ Name = "LLMWiki-Nightly"; Kind = "nightly"; LimitHours = $limits.nightly },
         @{ Name = "LLMWiki-Weekly"; Kind = "weekly"; LimitHours = $limits.weekly }
