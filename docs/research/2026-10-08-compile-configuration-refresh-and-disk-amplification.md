@@ -143,7 +143,7 @@ steps; the measured database reduction alone does not claim them complete.
 
 The kernel records global OOM kills on 2026-10-08 at 10:05–10:08, including the
 user's D-Bus process, systemd user manager, codebase-memory processes and Python.
-The system journal independently records user@1000.service killed by OOM and
+The system journal independently records the systemd user-manager service killed by OOM and
 failed with signal 9. This explains the unavailable scheduler, not a scheduler
 backend configuration change. The nearly full 7.7 GiB diagnostic tmpfs consumed
 RAM. Its contribution to memory pressure is established; its precise share of the

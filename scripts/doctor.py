@@ -3571,6 +3571,8 @@ def _run_deletion_check(
     collected: dict[str, dict] | None = None,
 ) -> dict:
     """Return an immediate, non-permitting observation of adopted runtime state."""
+    if _deadline_reached(deadline):
+        return _deletion_snapshot(["run_deletion_state_unknown"])
     del collected
     from installed_memory_repair import (
         ReliabilityV3ValidationError,
@@ -3587,8 +3589,6 @@ def _run_deletion_check(
         return _deletion_snapshot([exc.code])
 
     snapshot_deadline = deadline
-    if _deadline_reached(snapshot_deadline):
-        return _deletion_snapshot(["run_deletion_state_unknown"])
     registry = OwnershipRegistry._from_adopted_database(  # noqa: SLF001
         state_path,
         state_path / "run" / "markdown-transactions-v3.sqlite3",

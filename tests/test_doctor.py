@@ -2171,7 +2171,7 @@ def test_run_doctor_executes_lsp_check_after_budget_exhaustion(tmp_path, monkeyp
 
     assert calls == [deadline]
     assert _check(report, "lsp")["details"]["codes"] == ["lsp_state_unreadable"]
-    assert report["run_deletion"]["blockers"] == [{"code": "legacy_protocol_unquiesced"}]
+    assert report["run_deletion"]["blockers"] == [{"code": "run_deletion_state_unknown"}]
 
 
 def test_doctor_reports_mismatched_pyright(tmp_path, monkeypatch) -> None:
@@ -4477,3 +4477,20 @@ def test_a_stale_nightly_that_skipped_names_its_reason():
     )
     assert _stale_nightly_message(ran_later) == "Nightly maintenance is stale."
     assert _stale_nightly_message({}) == "Nightly maintenance is stale."
+
+
+@pytest.mark.parametrize("deadline", [99.0, 100.0])
+def test_expired_deletion_observation_does_not_start_adoption_validation(tmp_path, monkeypatch, deadline):
+    from datetime import datetime, timezone
+    from unittest.mock import Mock
+
+    import doctor
+    import installed_memory_repair
+
+    validation = Mock(side_effect=AssertionError("expired observation started database validation"))
+    monkeypatch.setattr(installed_memory_repair, "require_reliability_v3_adopted", validation)
+    monkeypatch.setattr(doctor.time, "monotonic", lambda: 100.0)
+    result = doctor._run_deletion_check(tmp_path, datetime.now(timezone.utc), deadline=deadline)
+    assert result["quiescent"] is False
+    assert result["blockers"] == [{"code": "run_deletion_state_unknown"}]
+    validation.assert_not_called()
