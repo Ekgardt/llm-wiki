@@ -746,6 +746,7 @@
   "test_operational_ownership.py": 30.27,
   "test_optional_stage_budget_reserve.py": 0.01,
   "test_optional_stage_capacity_is_partitioned.py": 0.01,
+  "test_ordinal_authority_uses_the_operation_index.py": 0.58,
   "test_orphaned_checkpoint_names_are_repaired.py": 20.21,
   "test_our_older_hooks_are_ours.py": 0.13,
   "test_ownership_actor_is_the_agent.py": 15.5,
