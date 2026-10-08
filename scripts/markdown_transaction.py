@@ -3770,11 +3770,11 @@ def _validate_adoption_with_retry(vault: Path, state_root: Path, *, deadline: fl
     _retry_adoption_validation(vault, state_root, require_reliability_v3_admission, deadline=deadline)
 
 
-def require_adopted_through_contention(vault: Path, state_root: Path) -> None:
+def require_adopted_through_contention(vault: Path, state_root: Path, *, deadline: float | None = None) -> None:
     """Doctor's complete adoption certification, with ordinary contention retried."""
     from installed_memory_repair import require_reliability_v3_adopted
 
-    _retry_adoption_validation(vault, state_root, require_reliability_v3_adopted)
+    _retry_adoption_validation(vault, state_root, require_reliability_v3_adopted, deadline=deadline)
 
 
 def _adoption_retry_pause(error: Exception, deadline: float) -> None:
@@ -3791,12 +3791,6 @@ def _invoke_adoption_validator(validate, vault: Path, state_root: Path, deadline
     validate(root=vault, state_root=state_root, deadline=deadline)
 
 
-def _adoption_validator_deadline(caller: float | None, retry_deadline: float) -> float | None:
-    if caller is None:
-        return None
-    return retry_deadline
-
-
 def _retry_adoption_validation(vault: Path, state_root: Path, validate, *, deadline: float | None = None) -> None:
     operational_deadline_active(deadline)
     retry_deadline = time.monotonic() + _ADOPTION_VALIDATION_SECONDS
@@ -3804,7 +3798,7 @@ def _retry_adoption_validation(vault: Path, state_root: Path, validate, *, deadl
         retry_deadline = min(retry_deadline, deadline)
     while True:
         try:
-            _invoke_adoption_validator(validate, vault, state_root, _adoption_validator_deadline(deadline, retry_deadline))
+            _invoke_adoption_validator(validate, vault, state_root, deadline)
             operational_deadline_active(deadline)
             return
         except Exception as exc:

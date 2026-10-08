@@ -15,3 +15,9 @@ Independent primary sources:
 - Trio documents absolute cancellation deadlines and cooperative checkpoints; it is a comparison, not a proposed dependency: https://trio.readthedocs.io/en/stable/reference-core.html#cancellation-and-timeouts
 
 Qualification remains separate: this correction does not declare the installed health report healthy or the full compile complete.
+
+## The caller deadline also has to reach adoption validation
+
+The installed post-build report on 2026-10-08 certified adoption but exhausted the caller budget before the filesystem and transaction checks. Native navigation and source inspection show that the collector omitted its deadline when calling adoption, and the contention wrapper accepted no caller deadline. A separate causal test shows that the existing retry helper also substituted its 30-second contention window for a longer caller validation deadline.
+
+Forward the existing caller deadline through certification to the complete validator. Keep the existing contention window for retries, and keep the caller deadline for validation work. The complete history and both database contracts are still validated. Deadline exhaustion produces an explicitly incomplete diagnostic and an unknown, non-permitting deletion observation; an earlier unrelated timeout remains an error. Direct callers that omit a deadline retain their existing behavior. Increasing the configured budget or replacing complete validation with writer admission would conceal or weaken the affected contract. No new limit or configuration is introduced. The primary references above apply to this extension.

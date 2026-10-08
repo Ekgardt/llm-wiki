@@ -3584,9 +3584,9 @@ def _run_deletion_check(
     state_path = Path(state_root)
     root_path = _deletion_root(root, state_path)
     try:
-        require_reliability_v3_adopted(root=root_path, state_root=state_path)
-    except ReliabilityV3ValidationError as exc:
-        return _deletion_snapshot([exc.code])
+        require_reliability_v3_adopted(root=root_path, state_root=state_path, deadline=deadline)
+    except (ReliabilityV3ValidationError, TimeoutError) as exc:
+        return _deletion_snapshot([getattr(exc, "code", "run_deletion_state_unknown")])
 
     snapshot_deadline = deadline
     registry = OwnershipRegistry._from_adopted_database(  # noqa: SLF001
@@ -9522,7 +9522,7 @@ def _adoption_refusal_message(code: str, cause: str, strays: list[str]) -> str:
     return message + " Repair: `uv run python scripts/doctor.py --repair`."
 
 
-def _adoption_check(root: Path, state_root: Path) -> dict:
+def _adoption_check(root: Path, state_root: Path, *, deadline: float | None = None) -> dict:
     """Certify the adopted pair and name the cause of any diagnostic failure.
 
     Writers verify the adoption evidence and both database contracts before
@@ -9546,12 +9546,22 @@ def _adoption_check(root: Path, state_root: Path) -> dict:
         "quarantined_candidates": _quarantined_candidates(state_root),
     }
     try:
-        require_adopted_through_contention(Path(root), state_root)
+        require_adopted_through_contention(Path(root), state_root, deadline=deadline)
     except ReliabilityV3ValidationError as exc:
         details.update(code=exc.code, cause=describe_error_chain(exc))
         message = _adoption_refusal_message(exc.code, details["cause"], strays)
         return _result("adoption", "error", message, details)
+    except TimeoutError as exc:
+        return _adoption_timeout_result(exc, deadline, details)
     return _result("adoption", "ok", "The adoption record admits writers.", details)
+
+
+def _adoption_timeout_result(error: TimeoutError, deadline: float | None, details: dict) -> dict:
+    if deadline is None or not _deadline_reached(deadline):
+        raise error
+    result = _unfinished_result("adoption")
+    result["details"].update(details)
+    return result
 
 
 def _retire_stray_candidate(context: _RepairContext) -> None:
@@ -9769,7 +9779,7 @@ def _collect_checks(
     runs = [
         ("environment", lambda: _environment_check(root_path, state_path)),
         ("runtime", lambda: _runtime_check(state_path)),
-        ("adoption", lambda: _adoption_check(root_path, state_path)),
+        ("adoption", lambda: _adoption_check(root_path, state_path, deadline=deadline)),
         ("filesystem", lambda: _filesystem_check(state_path, deadline)),
         (
             "transactions",

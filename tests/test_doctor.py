@@ -4494,3 +4494,78 @@ def test_expired_deletion_observation_does_not_start_adoption_validation(tmp_pat
     assert result["quiescent"] is False
     assert result["blockers"] == [{"code": "run_deletion_state_unknown"}]
     validation.assert_not_called()
+
+
+def test_adoption_diagnostic_receives_the_collector_deadline(monkeypatch):
+    from unittest.mock import Mock
+
+    import doctor
+
+    _fix_cheap_checks(doctor, monkeypatch)
+    monkeypatch.setattr(doctor, "_deferrable_checks", lambda *args: ())
+    diagnostic = Mock(return_value=doctor._result("adoption", "ok", "ok", {}))
+    monkeypatch.setattr(doctor, "_adoption_check", diagnostic)
+    deadline = time.monotonic() + LONG_TIMEOUT
+    doctor._collect_checks(Path("."), Path("."), Path("."), datetime.now(timezone.utc), deadline)
+    diagnostic.assert_called_once_with(Path("."), Path("."), deadline=deadline)
+
+
+def test_adoption_certification_keeps_the_callers_validation_deadline(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    import installed_memory_repair
+    import markdown_transaction
+
+    validation = Mock()
+    monkeypatch.setattr(installed_memory_repair, "require_reliability_v3_adopted", validation)
+    deadline = time.monotonic() + LONG_TIMEOUT
+    markdown_transaction.require_adopted_through_contention(tmp_path, tmp_path, deadline=deadline)
+    validation.assert_called_once_with(root=tmp_path, state_root=tmp_path, deadline=deadline)
+
+
+def test_contention_window_does_not_shorten_the_callers_validation_deadline(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    import markdown_transaction
+
+    validation = Mock()
+    monkeypatch.setattr(markdown_transaction.time, "monotonic", lambda: 100.0)
+    markdown_transaction._retry_adoption_validation(tmp_path, tmp_path, validation, deadline=200.0)
+    validation.assert_called_once_with(root=tmp_path, state_root=tmp_path, deadline=200.0)
+
+
+@pytest.mark.parametrize("kwargs,clock,incomplete", [({}, 101.0, False), ({"deadline": 100.0}, 99.0, False), ({"deadline": 100.0}, 101.0, True)])
+def test_adoption_timeout_is_incomplete_only_after_the_callers_deadline(tmp_path, monkeypatch, kwargs, clock, incomplete):
+    from unittest.mock import Mock
+
+    import doctor
+    import markdown_transaction
+
+    monkeypatch.setattr(markdown_transaction, "_reliability_v3_records_present", lambda _: True)
+    monkeypatch.setattr(markdown_transaction, "require_adopted_through_contention", Mock(side_effect=TimeoutError("validation timed out")))
+    monkeypatch.setattr(doctor, "_stray_candidates", lambda _: [])
+    monkeypatch.setattr(doctor, "_quarantined_candidates", lambda _: 0)
+    monkeypatch.setattr(doctor.time, "monotonic", lambda: clock)
+    if incomplete:
+        result = doctor._adoption_check(tmp_path, tmp_path, **kwargs)
+        assert result["status"] == "degraded"
+        assert result["details"]["budget_exhausted"] is True
+        return
+    with pytest.raises(TimeoutError, match="validation timed out"):
+        doctor._adoption_check(tmp_path, tmp_path, **kwargs)
+
+
+def test_deletion_certification_uses_the_deadline_and_retains_unknown_state(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    import doctor
+    import installed_memory_repair
+
+    validation = Mock(side_effect=TimeoutError("validation timed out"))
+    monkeypatch.setattr(installed_memory_repair, "require_reliability_v3_adopted", validation)
+    deadline = time.monotonic() + LONG_TIMEOUT
+    result = doctor._run_deletion_check(tmp_path, datetime.now(timezone.utc), deadline=deadline)
+    validation.assert_called_once_with(root=tmp_path, state_root=tmp_path, deadline=deadline)
+    assert result["quiescent"] is False
+    assert result["permit"] is False
+    assert result["blockers"] == [{"code": "run_deletion_state_unknown"}]
