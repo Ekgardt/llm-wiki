@@ -214,7 +214,7 @@ ALLOWED_CATEGORIES = frozenset(
     {"concepts", "decisions", "patterns", "debugging", "qa"}
 )
 DRAFT_PROGRAM = (
-    "compile-draft/v16: actual-list citation indices, scoped durable facts and lossless source choices; "
+    "compile-draft/v17: verified native citation addresses, actual-list citation indices and lossless source choices; "
     "with immutable original-entry context and derived-provenance claims"
 )
 CRITIQUE_PROGRAM = (
@@ -1054,10 +1054,14 @@ def _native_prompt_frame(frame):
     record = json.loads(frame.encoded)
     payload = dict(record["payload"])
     payload.pop("prompt")
+    lines = frame.text.splitlines(keepends=True)
     return json.dumps({
         "native_event": {"source_path": frame.source_path, "byte_start": frame.byte_start},
+        "evidence_address": {"daily_date": Path(frame.source_path).stem,
+                             "timestamp": frame.timestamp,
+                             "user_line_indices": list(range(len(lines)))},
         "metadata": {**record, "payload": payload},
-        "user_lines": frame.text.splitlines(keepends=True),
+        "user_lines": lines,
     }, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
@@ -2828,7 +2832,9 @@ Every create or update must cite one complete source line in quoted_text. For a 
 bullet, omit only its leading bullet marker and surrounding outer whitespace.
 For a verified native_event projection, choose one complete user_lines entry, omitting
 only its line terminator, and include native_event with source_path, byte_start and the
-zero-based line_index. Do not quote metadata or copy the raw JSON container. The code
+zero-based line_index from evidence_address.user_line_indices. Copy daily_date and
+timestamp exactly from evidence_address; never infer them from payload metadata or user text.
+Do not quote metadata or copy the raw JSON container. The code
 verifies this selector and binds the whole original physical container locally.
 An operation may also carry claims: each one is a single settled fact stated by one of
 that operation's own evidence lines, written as subject, relation and value, with
