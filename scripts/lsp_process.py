@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import errno
 import json
 import math
 import os
@@ -1209,22 +1210,51 @@ class _StderrWake:
     owns `write_fd`.
     """
 
-    read_fd: int
+    read_fd: int | None
     write_fd: int | None
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    close_errors: dict[str, BaseException] = field(default_factory=dict, repr=False)
+
+    def _close_end(self, name: str) -> None:
+        """Retire ownership before closing; an uncertain close is never retried."""
+        with self.lock:
+            error = self.close_errors.get(name)
+            if error is not None:
+                raise error
+            descriptor = getattr(self, name)
+            if descriptor is None:
+                return
+            setattr(self, name, None)
+            try:
+                os.close(descriptor)
+            except BaseException as error:
+                self.close_errors[name] = error
+                raise
 
     def request(self) -> None:
         """Ask the drain thread to finish; asking twice is harmless."""
+        self._close_end("write_fd")
+
+    def close_read(self) -> None:
+        """The drain owner, or cleanup of an unstarted drain, closes this end once."""
+        self._close_end("read_fd")
+
+    def require_known_closes(self) -> None:
         with self.lock:
-            descriptor, self.write_fd = self.write_fd, None
-        if descriptor is not None:
-            os.close(descriptor)
+            if self.close_errors:
+                raise next(iter(self.close_errors.values()))
+
+    def owned_read_fd(self) -> int:
+        with self.lock:
+            descriptor = self.read_fd
+        if descriptor is None:
+            raise OSError(errno.EBADF, "LSP stderr wake read ownership was released")
+        return descriptor
 
     def abandon(self) -> None:
         """Both ends, for a drain thread that was never started."""
         self.request()
-        with contextlib.suppress(OSError):
-            os.close(self.read_fd)
+        self.close_read()
 
 
 @dataclass(slots=True)
@@ -6018,20 +6048,31 @@ def _close_one_pipe(
 
 
 def _stop_stderr_drain(generation: _Generation, deadline: float) -> bool:
-    """Wake the drain thread and wait for it within the deadline; True once it is gone.
-
-    The thread closes stderr itself. Closing it from here while the thread sat
-    in a read waited for the read, and the read waited for a process outside
-    the group: a cleanup that no deadline covered.
-    """
+    """Join the stderr owner, preserving any uncertainty about its pipe closes."""
     thread = generation.stderr_thread
     wake = generation.stderr_wake
     if thread is None or _thread_never_started(thread):
         _abandon_stderr_wake(wake)
         return True
+    _request_stderr_wake(wake)
+    return _joined_stderr_drain(thread, wake, deadline)
+
+
+def _request_stderr_wake(wake: _StderrWake | None) -> None:
     if wake is not None:
         wake.request()
-    return _join_owned_thread(thread, deadline)
+
+
+def _joined_stderr_drain(thread, wake: _StderrWake | None, deadline: float) -> bool:
+    if not _join_owned_thread(thread, deadline):
+        return False
+    _require_known_stderr_closes(wake)
+    return True
+
+
+def _require_known_stderr_closes(wake: _StderrWake | None) -> None:
+    if wake is not None:
+        wake.require_known_closes()
 
 
 def _abandon_stderr_wake(wake: _StderrWake | None) -> None:
@@ -7110,7 +7151,7 @@ def _drain_stderr(
             stream.close()
         if wake is not None:
             with contextlib.suppress(OSError):
-                os.close(wake.read_fd)
+                wake.close_read()
 
 
 def _take_stderr_chunk(descriptor: int, ring: _StderrRing) -> bool:
@@ -7160,8 +7201,9 @@ def _read_stderr_forever(
         return
     with selectors.DefaultSelector() as selector:
         selector.register(descriptor, selectors.EVENT_READ)
-        selector.register(wake.read_fd, selectors.EVENT_READ)
-        _read_stderr_until_woken(selector, descriptor, wake.read_fd, ring)
+        wake_fd = wake.owned_read_fd()
+        selector.register(wake_fd, selectors.EVENT_READ)
+        _read_stderr_until_woken(selector, descriptor, wake_fd, ring)
 
 
 def _trim_stderr_chunks(chunks: deque[bytes], size: list[int]) -> None:

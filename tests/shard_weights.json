@@ -698,6 +698,7 @@
   "test_lsp_security.py": 15.43,
   "test_lsp_server_profile.py": 0.06,
   "test_lsp_stderr_is_read_as_it_arrives_and_never_stalls_cleanup.py": 4.62,
+  "test_lsp_stderr_wake_does_not_close_reused_descriptors.py": 0.02,
   "test_maintenance_helpers.py": 1.24,
   "test_markdown_transaction.py": 80.79,
   "test_markdown_transaction_recovery.py": 138.87,
