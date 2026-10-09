@@ -507,7 +507,7 @@
   "test_compile_keeps_physically_overlapping_existing_context.py": 3.87,
   "test_compile_literal_quote_search_preserves_unique_span.py": 0.02,
   "test_compile_measure_reuses_only_immutable_line_bindings.py": 2.42,
-  "test_compile_native_journal_parse_belongs_to_the_immutable_source.py": 0.21,
+  "test_compile_native_journal_parse_belongs_to_the_immutable_source.py": 0.32,
   "test_compile_one_layout_protects_its_base_once.py": 0.03,
   "test_compile_packing_counts_original_entry_metadata.py": 0.01,
   "test_compile_packing_reuses_only_selected_projection.py": 0.1,

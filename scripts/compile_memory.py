@@ -1927,7 +1927,7 @@ def _compile_batch(
     required_paths=None,
 ) -> CompileBatch:
     subset = _subset_compile_inputs(inputs, paths, optional_paths, journal_indexes=journal_indexes, partitions=partitions)
-    count = _draft_prompt_count(subset, model, token_adapters)
+    count = _count_with_partition_proofs(subset, model, token_adapters, journal_indexes, partitions)
     if count.tokens is None or count.source not in {"tokenizer", "estimated"}:
         raise ValueError("compile input token count is unknown")
     budget = _final_context_budget(subset, budget, count.tokens, required_paths, planning_candidates, partitions)
@@ -1947,6 +1947,15 @@ def _compile_batch(
     )
     return CompileBatch(subset, manifest, sha256_bytes(manifest_bytes), packing,
                         model, planning_candidates, context_pending, _required_context_tuple(required_paths))
+
+
+def _count_with_partition_proofs(subset, model, adapters, journal_indexes, partitions):
+    """Reuse immutable parsing while canonical projection and heads verify afresh."""
+    token = _SOURCE_CHOICE_PARSING.set((journal_indexes, partitions))
+    try:
+        return _draft_prompt_count(subset, model, adapters)
+    finally:
+        _SOURCE_CHOICE_PARSING.reset(token)
 
 
 def _required_context_tuple(paths):

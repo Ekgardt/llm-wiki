@@ -110,3 +110,39 @@ def test_mutable_bytes_do_not_enter_the_immutable_parse_memo(monkeypatch):
     assert memo.for_content(content) == {}
     assert len(seen) == 2
     assert memo.sources == {}
+
+
+def test_final_count_restores_previous_partition_context(monkeypatch):
+    previous = ({"old": object()}, {"old": object()})
+    expected = ({"new": object()}, {"new": object()})
+    token = compiler._SOURCE_CHOICE_PARSING.set(previous)
+
+    def count(*args):
+        assert compiler._SOURCE_CHOICE_PARSING.get() is not previous
+        assert compiler._SOURCE_CHOICE_PARSING.get() == expected
+        return 17
+
+    monkeypatch.setattr(compiler, "_draft_prompt_count", count)
+    try:
+        assert compiler._count_with_partition_proofs(None, None, None, *expected) == 17
+        assert compiler._SOURCE_CHOICE_PARSING.get() is previous
+    finally:
+        compiler._SOURCE_CHOICE_PARSING.reset(token)
+
+
+def test_final_count_restores_context_and_propagates_error(monkeypatch):
+    previous = ({"old": object()}, {"old": object()})
+    token = compiler._SOURCE_CHOICE_PARSING.set(previous)
+    failure = ValueError("invalid original source")
+
+    def count(*args):
+        raise failure
+
+    monkeypatch.setattr(compiler, "_draft_prompt_count", count)
+    try:
+        with pytest.raises(ValueError) as caught:
+            compiler._count_with_partition_proofs(None, None, None, {}, {})
+        assert caught.value is failure
+        assert compiler._SOURCE_CHOICE_PARSING.get() is previous
+    finally:
+        compiler._SOURCE_CHOICE_PARSING.reset(token)
