@@ -190,7 +190,41 @@ def _command_line(line: str) -> str:
 
 
 def _redact_command_passwords(text: str) -> str:
-    return "".join(_command_line(line) for line in text.splitlines(keepends=True))
+    # This stage already sees one complete splitlines row at a time. Reuse only
+    # its reviewed pure rules within the existing measurement-owned scope;
+    # the curl, entropy, policy and transport passes still see their full text.
+    scope = _LINE_REDACTION_CACHE.get()
+    if scope is None or not _command_rules_are_original():
+        return "".join(_command_line(line) for line in text.splitlines(keepends=True))
+    cache = scope.setdefault("command_lines", {})
+    return "".join(_cached_command_line(line, cache) for line in text.splitlines(keepends=True))
+
+
+_COMMAND_LINE_CALLBACK = _command_line
+_COMMAND_LINE_CODE = _command_line.__code__
+_COMMAND_LINE_RULESET_SHA256 = "dfd6db0b86559355283ca82d45e0c4ec058afe783610f88b8888a15d779670e0"
+
+
+def _command_rules_are_original():
+    return (_command_line is _COMMAND_LINE_CALLBACK
+            and _command_line.__code__ is _COMMAND_LINE_CODE
+            and _command_rule_fingerprint() == _COMMAND_LINE_RULESET_SHA256)
+
+
+def _command_rule_fingerprint():
+    try:
+        rules = [(pattern.pattern, pattern.flags) for pattern in
+                 (_PASSWORD_COMMAND, _ATTACHED_PASSWORD, _ANY_PASSWORD)]
+        encoded = json.dumps(rules, separators=(",", ":")).encode()
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _cached_command_line(line, cache):
+    if line not in cache:
+        cache[line] = _command_line(line)
+    return cache[line]
 
 _HIGH_ENTROPY_RE = re.compile(
     r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9+/=])"
