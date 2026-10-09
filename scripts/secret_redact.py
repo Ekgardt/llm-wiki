@@ -7,6 +7,7 @@ is NOT a full DLP scanner. For CI secret scanning, rely on gitleaks.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -135,6 +136,8 @@ _PATTERN_RULES: list[tuple[re.Pattern[str], str, tuple[str, ...]]] = [
 _PATTERNS = [(pattern, replacement) for pattern, replacement, _ in _PATTERN_RULES]
 _LF_NAMED_RULES = _NAMED_VALUE_PATTERNS
 _LF_TOKEN_RULES = tuple(_PATTERNS)
+# Exact reviewed regex source/flags/order; new rules keep the full-text path.
+_LINE_LOCAL_RULESET_SHA256 = "4d5f9e2ef116dfbb7343eb47bfd4bdff48836d20b5dbf81989c4cbf3b352df49"
 _LINE_REDACTION_CACHE = ContextVar("line_redaction_cache", default=None)
 
 _PATTERN_PREREQUISITES = {
@@ -481,6 +484,14 @@ def describe_error_chain(error: BaseException) -> str:
     return " <- ".join(parts)
 
 
+_LF_PIPELINE_CALLBACKS = {name: globals()[name] for name in (
+    "_redact_named_values", "_redact_patterns", "_replace_named_value", "_value_is_credential",
+    "_value_is_code", "_bare_value_is_credential", "_is_symbol_reference", "_matches_known_secret_shape",
+    "_split_value", "_indexed_named_values", "_named_pattern_sub", "_rewrite_named_matches",
+    "_append_named_match", "_apply_pattern", "_pattern_may_match",
+)}
+
+
 @contextmanager
 def line_redaction_scope(cache):
     """Reuse pure LF-local passes only during an explicitly owned measurement."""
@@ -494,7 +505,23 @@ def line_redaction_scope(cache):
 def _line_rules_are_original(text):
     return ("PRIVATE KEY-----" not in text
             and _NAMED_VALUE_PATTERNS == _LF_NAMED_RULES
-            and tuple(_PATTERNS) == _LF_TOKEN_RULES)
+            and tuple(_PATTERNS) == _LF_TOKEN_RULES
+            and _line_rule_fingerprint() == _LINE_LOCAL_RULESET_SHA256
+            and _line_callbacks_are_original())
+
+
+def _line_rule_fingerprint():
+    try:
+        rules = ([(pattern.pattern, pattern.flags) for pattern in _NAMED_VALUE_PATTERNS],
+                 [(pattern.pattern, pattern.flags, replacement) for pattern, replacement in _PATTERNS])
+        encoded = json.dumps(rules, separators=(",", ":")).encode()
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _line_callbacks_are_original():
+    return all(globals()[name] is original for name, original in _LF_PIPELINE_CALLBACKS.items())
 
 
 def _line_redaction_configuration():

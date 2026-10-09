@@ -2,20 +2,25 @@ import secret_redact as redactor
 
 
 def test_repeated_source_lines_do_not_repeat_original_pattern_passes(monkeypatch):
+    import sys
     seen = []
-    original = redactor._redact_patterns
+    original = redactor._redact_patterns.__code__
 
-    def observed(text):
-        seen.append(text)
-        return original(text)
+    def observed(frame, event, arg):
+        if event == "call" and frame.f_code is original:
+            seen.append(frame.f_locals["text"])
 
-    monkeypatch.setattr(redactor, '_redact_patterns', observed)
     scope = getattr(redactor, 'line_redaction_scope', None)
     from contextlib import nullcontext
     context = nullcontext() if scope is None else scope({})
-    with context:
-        first = redactor.redact_secrets('api_key=exampleexampleexample\ncommon unchanged source\nfirst context')
-        second = redactor.redact_secrets('api_key=exampleexampleexample\ncommon unchanged source\nsecond context')
+    previous = sys.getprofile()
+    sys.setprofile(observed)
+    try:
+        with context:
+            first = redactor.redact_secrets('api_key=exampleexampleexample\ncommon unchanged source\nfirst context')
+            second = redactor.redact_secrets('api_key=exampleexampleexample\ncommon unchanged source\nsecond context')
+    finally:
+        sys.setprofile(previous)
     assert first == 'api_key=[REDACTED]\ncommon unchanged source\nfirst context'
     assert second == 'api_key=[REDACTED]\ncommon unchanged source\nsecond context'
     assert seen.count('common unchanged source') == 1
@@ -103,3 +108,21 @@ def test_whole_text_allow_fingerprint_is_not_a_line_cache_authority():
     with redactor.line_redaction_scope({}):
         assert redact_for_transport(text, policy) == text
         assert redact_for_transport(text + '\nadditional context', policy).startswith('api_key="[REDACTED]"')
+
+
+def test_current_registry_cannot_approve_an_unreviewed_multiline_rule(monkeypatch):
+    import re
+    changed = [*redactor._PATTERNS, (re.compile('first\nsecond'), '[CUSTOM]')]
+    monkeypatch.setattr(redactor, '_PATTERNS', changed)
+    monkeypatch.setattr(redactor, '_LF_TOKEN_RULES', tuple(changed))
+    with redactor.line_redaction_scope({}):
+        assert redactor.redact_secrets('first\nsecond') == '[CUSTOM]'
+
+
+def test_replaced_callback_keeps_full_text_context(monkeypatch):
+    def context_sensitive(match):
+        return '[WHOLE]' if '\n' in match.string else '[LINE]'
+
+    monkeypatch.setattr(redactor, '_replace_named_value', context_sensitive)
+    with redactor.line_redaction_scope({}):
+        assert redactor.redact_secrets('api_key="exampleexampleexample"\ncontext') == '[WHOLE]\ncontext'
