@@ -1653,12 +1653,14 @@ def _source_choice_resolution(resolver=None):
 
 @contextmanager
 def _measure_choice_resolution(measure):
+    from secret_redact import line_redaction_scope
+
     if measure.choice_resolver is None:
         measure.choice_resolver = EvidenceResolver(ROOT)
     token = _SOURCE_CHOICE_PARSING.set((measure.journal_indexes, measure.partitions))
     bindings = _SOURCE_CHOICE_BINDINGS.set(measure.choice_bindings)
     try:
-        with _source_choice_resolution(measure.choice_resolver):
+        with _source_choice_resolution(measure.choice_resolver), line_redaction_scope(getattr(measure, "redaction_lines", None)):
             yield
     finally:
         _SOURCE_CHOICE_BINDINGS.reset(bindings)
@@ -1697,6 +1699,7 @@ class _ByteBatchMeasure:
         self.journal_indexes, self.partitions = _measurement_proofs(inputs)
         self.choice_resolver = None
         self.choice_bindings = {}
+        self.redaction_lines = {}
 
     def _size(self, item: SourceSnapshot) -> int:
         if item not in self.sizes:

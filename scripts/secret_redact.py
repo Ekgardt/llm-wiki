@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import math
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 # A credential-named key followed by a value. The name alone decides nothing:
 # `lease_token: str` is a type annotation, `token = next(iterator)` is an
@@ -131,6 +133,10 @@ _PATTERN_RULES: list[tuple[re.Pattern[str], str, tuple[str, ...]]] = [
 # Unknown or changed rules run their full regex. Case-insensitive rules use
 # punctuation only, preserving Python's Unicode case matching.
 _PATTERNS = [(pattern, replacement) for pattern, replacement, _ in _PATTERN_RULES]
+_LF_NAMED_RULES = _NAMED_VALUE_PATTERNS
+_LF_TOKEN_RULES = tuple(_PATTERNS)
+_LINE_REDACTION_CACHE = ContextVar("line_redaction_cache", default=None)
+
 _PATTERN_PREREQUISITES = {
     (pattern.pattern, pattern.flags): literals
     for pattern, _replacement, literals in _PATTERN_RULES if literals
@@ -475,6 +481,57 @@ def describe_error_chain(error: BaseException) -> str:
     return " <- ".join(parts)
 
 
+@contextmanager
+def line_redaction_scope(cache):
+    """Reuse pure LF-local passes only during an explicitly owned measurement."""
+    token = _LINE_REDACTION_CACHE.set(cache)
+    try:
+        yield
+    finally:
+        _LINE_REDACTION_CACHE.reset(token)
+
+
+def _line_rules_are_original(text):
+    return ("PRIVATE KEY-----" not in text
+            and _NAMED_VALUE_PATTERNS == _LF_NAMED_RULES
+            and tuple(_PATTERNS) == _LF_TOKEN_RULES)
+
+
+def _line_redaction_configuration():
+    return (_NAMED_VALUE_PATTERNS, tuple(_PATTERNS),
+            tuple(_PATTERN_PREREQUISITES.items()), _redact_named_values, _redact_patterns,
+            _replace_named_value, _value_is_credential, _value_is_code,
+            _bare_value_is_credential, _is_symbol_reference, _matches_known_secret_shape,
+            _split_value, _MIN_CREDENTIAL_VALUE_CHARS, _MIN_ALPHA_SECRET_CHARS,
+            _VALUE_END_RE, _INTERPOLATION_MARKS, frozenset(_CODE_CHARACTERS),
+            _ASSIGNMENT_HEAD, _CREDENTIAL_VALUE_PATTERN, _indexed_named_values,
+            _named_pattern_sub, _rewrite_named_matches, _append_named_match,
+            _apply_pattern, _pattern_may_match,
+            _IDENTIFIER_RE, _QUOTED_VALUE_RE, _LOCATION_RE)
+
+
+def _configured_line_cache(scope):
+    configuration = _line_redaction_configuration()
+    if scope.get("configuration") != configuration:
+        scope.clear()
+        scope.update(configuration=configuration, lines={})
+    return scope["lines"]
+
+
+def _cached_pattern_line(line, cache):
+    if line not in cache:
+        cache[line] = _redact_patterns(_redact_named_values(line))
+    return cache[line]
+
+
+def _pattern_redaction(text):
+    scope = _LINE_REDACTION_CACHE.get()
+    if scope is None or not _line_rules_are_original(text):
+        return _redact_patterns(_redact_named_values(text))
+    cache = _configured_line_cache(scope)
+    return "\n".join(_cached_pattern_line(line, cache) for line in text.split("\n"))
+
+
 def redact_secrets(text: str) -> str:
     """Return text with common secret patterns replaced."""
     if not text or not isinstance(text, str):
@@ -484,7 +541,7 @@ def redact_secrets(text: str) -> str:
     # `token=[REDACTED_API_KEY]`. Splitting them into their own pass must not
     # renumber that — the marker is asserted, hashed and stored downstream.
     return _redact_high_entropy(_redact_command_passwords(_CURL_COMMAND.sub(
-        _curl_command, _redact_patterns(_redact_named_values(text))
+        _curl_command, _pattern_redaction(text)
     )))
 
 
