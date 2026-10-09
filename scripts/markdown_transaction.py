@@ -4993,6 +4993,10 @@ def _apply_windows_acl(
         raise PermissionError(f"could not apply owner-only ACL to {path}: {exc}") from exc
     if changed.returncode != 0:
         _acl_failure(path, changed)
+    return _read_windows_acl(path)
+
+
+def _read_windows_acl(path: Path) -> subprocess.CompletedProcess[bytes]:
     try:
         verified = _run_acl_command(["icacls", str(path)])
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -5015,7 +5019,7 @@ def _verified_owner_acl_line(
 
 def _verify_no_other_acl(path: Path, acl_lines: list[str], identity: str) -> None:
     for line in acl_lines:
-        if identity.casefold() not in line.casefold():
+        if not _acl_line_names_owner(line, identity):
             raise PermissionError(f"owner-only ACL verification failed for {path}")
 
 
@@ -5023,8 +5027,17 @@ def _harden_windows_acl(path: Path) -> None:
     identity = _windows_acl_identity()
     permission = _acl_permission(path, identity)
     verified = _apply_windows_acl(path, permission)
+    _require_verified_windows_owner_acl(path, verified, identity)
+
+
+def _verify_windows_owner_acl(path: Path) -> None:
+    """Read and enforce the same explicit owner-only ACL used by initial hardening."""
+    _require_verified_windows_owner_acl(path, _read_windows_acl(path), _windows_acl_identity())
+
+
+def _require_verified_windows_owner_acl(path, verified, identity):
     acl_lines = _acl_lines_naming(verified.stdout, identity)
-    owner_lines = [line for line in acl_lines if identity.casefold() in line.casefold()]
+    owner_lines = [line for line in acl_lines if _acl_line_names_owner(line, identity)]
     _verified_owner_acl_line(path, owner_lines)
     _verify_no_other_acl(path, acl_lines, identity)
 
@@ -5060,8 +5073,14 @@ def _acl_entry_lines(output: str) -> list[str]:
     return [line.strip() for line in output.splitlines() if ":(" in line]
 
 
+def _acl_line_names_owner(line: str, identity: str) -> bool:
+    """Match the complete ACE principal, following an optional icacls path prefix."""
+    pattern = r"(?:^|\s)" + re.escape(identity.casefold()) + r":\("
+    return re.search(pattern, line.casefold()) is not None
+
+
 def _names_identity(acl_lines: list[str], identity: str) -> bool:
-    return any(identity.casefold() in line.casefold() for line in acl_lines)
+    return any(_acl_line_names_owner(line, identity) for line in acl_lines)
 
 
 def _acl_lines_naming(stdout: bytes | str | None, identity: str) -> list[str]:

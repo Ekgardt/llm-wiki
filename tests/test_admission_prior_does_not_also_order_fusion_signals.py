@@ -88,7 +88,7 @@ def test_markdown_fallback_preserves_both_existing_and_relevance_candidates(tmp_
     pages = [useful, *decisions]
     original = search_memory._direct_markdown_hits('needle context', pages, limit=1,
         project=None, since=None, as_of=None, deadline=None, cancelled=None)
-    assert set(_paths(original)) == {str(path.relative_to(tmp_path)) for path in decisions}
+    assert set(_paths(original)) == {path.relative_to(tmp_path).as_posix() for path in decisions}
     extended = search_memory._direct_markdown_hits('needle context', pages, limit=1,
         project=None, since=None, as_of=None, deadline=None, cancelled=None, include_unweighted=True)
     assert set(_paths(original)).issubset(_paths(extended))

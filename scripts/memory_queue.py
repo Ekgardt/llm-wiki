@@ -3469,7 +3469,9 @@ def _windows_acl_lines(path: Path, identity: str) -> list[str] | None:
 
 
 def _acl_owner_lines(acl_lines: list[str], folded: str) -> list[str]:
-    return [line for line in acl_lines if folded in line.casefold()]
+    from markdown_transaction import _acl_line_names_owner
+
+    return [line for line in acl_lines if _acl_line_names_owner(line, folded)]
 
 
 def _acl_is_owner_only(acl_lines: list[str], identity: str) -> bool:

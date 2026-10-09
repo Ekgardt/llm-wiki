@@ -1243,8 +1243,15 @@ def begin_immediate(
 
 
 def fsync_file(path: Path) -> None:
-    with Path(path).open("rb+") as handle:
+    with Path(path).open(_file_sync_mode()) as handle:
         os.fsync(handle.fileno())
+
+
+def _file_sync_mode() -> str:
+    # Windows FlushFileBuffers requires write access; POSIX fsync does not.
+    if os.name == "nt":
+        return "rb+"
+    return "rb"
 
 
 def _fsync_directory_windows(path: Path) -> None:
@@ -1480,11 +1487,21 @@ def publish_runtime_file(
     _write_staged_bytes(staged, data, mode)
     _harden_runtime_owner_only(staged, mode)
     _publish_staged(staged, destination, parent, data, create_only, expected)
-    _harden_runtime_owner_only(destination, mode)
+    _verify_published_runtime_permissions(destination, mode)
     published = capture_runtime_file_identity(destination, state_root=root)
     if published.size != len(data):
         raise RuntimeError("published runtime file size changed during read-back")
     return published
+
+
+def _verify_published_runtime_permissions(path: Path, mode: int) -> None:
+    """Same-parent publication preserves permissions; any drift must remain a refusal."""
+    if os.name == "nt":
+        from markdown_transaction import _verify_windows_owner_acl
+
+        _verify_windows_owner_acl(path)
+        return
+    _require_applied_mode(path, mode)
 
 
 def _require_runtime_mode(mode: object) -> None:

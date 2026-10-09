@@ -1992,13 +1992,26 @@ def _packing_budget(packing, model):
                          packing.safety_margin_tokens)
 
 
-def _attempt_input_budget(batch, descriptor):
+def _attempt_input_budget(batch, descriptor, *, needs_correction=False):
     if batch is None:
         return None
     budget = _packing_budget(batch.packing, descriptor.model)
     basis = getattr(descriptor, "_codex_basis", None)
     window = getattr(basis, "planning_window", None)
-    return _bounded_attempt_budget(budget, window)
+    bounded = _bounded_attempt_budget(budget, window)
+    if not needs_correction:
+        return bounded
+    return _correction_input_budget(bounded, descriptor)
+
+
+def _correction_input_budget(budget, descriptor):
+    """A validated repair may use the selected model's verified remaining capacity."""
+    if getattr(descriptor, "provider", None) != "codex":
+        return budget
+    window = _matching_basis_window(getattr(descriptor, "_codex_basis", None), descriptor.model)
+    if window is None:
+        return budget
+    return replace(budget, max_input_tokens=window)
 
 
 def _bounded_attempt_budget(budget, window):
@@ -2301,6 +2314,7 @@ def resolve_compile_plan(
     coordinator: MarkdownCoordinator,
     batch: CompileBatch | None = None,
     token_adapters: Mapping[str, TokenCounter] | None = None,
+    critic_feedback: tuple[str, ...] = (),
 ) -> ResolvedCompilePlan:
     """Resolve a validated semantic plan without entering the writer gate."""
     _require_ready_compile_batch(batch)
@@ -2308,10 +2322,28 @@ def resolve_compile_plan(
     if batch is not None and batch.inputs != inputs:
         raise ValueError("compile batch inputs disagree")
     attempt = _CompileAttempt(inputs, cache, batch, token_adapters)
+    attempt.critic_feedback = critic_feedback
     resolved = _first_resolved_plan(attempt)
     if resolved is None:
-        raise RuntimeError(_no_plan_message(attempt.lineage))
+        raise _unresolved_compile_error(attempt)
     return resolved
+
+
+class _CompileRepairCapacityError(RuntimeError):
+    """Validated review work that cannot fit beside its complete source group."""
+
+    def __init__(self, message, feedback):
+        super().__init__(message)
+        self.feedback = feedback
+
+
+def _unresolved_compile_error(attempt):
+    message = _no_plan_message(attempt.lineage)
+    last = next(iter(reversed(attempt.lineage)), '')
+    capacity = last.startswith('draft:') and last.endswith(':input_budget')
+    if attempt.critic_feedback and capacity:
+        return _CompileRepairCapacityError(message, attempt.critic_feedback)
+    return RuntimeError(message)
 
 
 def _first_resolved_plan(attempt: _CompileAttempt) -> ResolvedCompilePlan | None:
@@ -2451,6 +2483,8 @@ class _CompileAttempt:
     def _cached(
         self, actions: tuple[object, object], descriptor: object
     ) -> ResolvedCompilePlan | None:
+        if self.critic_feedback:
+            return None
         for action in actions:
             cached = self.cache.get(action, self._validator)
             if cached is None:
@@ -2634,7 +2668,8 @@ class _CompileAttempt:
             schema=schema,
             model=descriptor.model,
             token_adapters=self.token_adapters,
-            budget=_attempt_input_budget(self.batch, descriptor),
+            budget=_attempt_input_budget(
+                self.batch, descriptor, needs_correction=bool(self.critic_feedback)),
             descriptor=descriptor,
         )
 
@@ -2650,7 +2685,8 @@ class _CompileAttempt:
             schema=schema,
             available=True,
             token_adapters=self.token_adapters,
-            input_budget=_attempt_input_budget(self.batch, descriptor),
+            input_budget=_attempt_input_budget(
+                self.batch, descriptor, needs_correction=bool(self.critic_feedback)),
         )
 
 
@@ -7392,8 +7428,8 @@ def _run(
         # batches are independent snapshots, and stopping here held every later
         # day behind one bad day (audit 2026-09-27 A-3,
         # docs/research/2026-09-27-one-bad-day-does-not-hold-the-rest.md).
-        outcomes.append(
-            _run_batch(
+        outcomes.extend(
+            _run_repairable_batch(
                 _refresh_compile_batch(batch, deadline=deadline),
                 args,
                 coordinator=coordinator,
@@ -7484,16 +7520,14 @@ def _run_batch(
     deadline: float,
     cancelled: Callable[[], bool] | None,
     owner: OwnerLease | None,
+    critic_feedback: tuple[str, ...] = (),
 ) -> BatchOutcome:
     """Resolve and apply one batch; a non-zero status marks it failed, not the run over."""
     _require_ready_compile_batch(batch)
     try:
-        resolved = resolve_compile_plan(
-            batch.inputs,
-            CompileCache(STATE_ROOT),
-            coordinator=coordinator,
-            batch=batch,
-        )
+        resolved = _resolve_batch_work(batch, coordinator, critic_feedback)
+    except _CompileRepairCapacityError:
+        raise
     except Exception as exc:  # noqa: BLE001 - provider/cache boundary is fail-closed
         _require_compile_active(deadline, cancelled)
         return BatchOutcome(_record_failed_batch(batch.inputs, exc, deadline=deadline))
@@ -7514,6 +7548,142 @@ def _run_batch(
         cancelled=cancelled,
         owner=owner,
     )
+
+
+def _resolve_batch_work(batch, coordinator, feedback):
+    options = {'coordinator': coordinator, 'batch': batch}
+    if feedback:
+        options['critic_feedback'] = feedback
+    return resolve_compile_plan(batch.inputs, CompileCache(STATE_ROOT), **options)
+
+
+def _run_repairable_batch(batch, args, *, coordinator, deadline, cancelled, owner,
+                          critic_feedback=()):
+    options = dict(coordinator=coordinator, deadline=deadline, cancelled=cancelled, owner=owner)
+    try:
+        return [_run_batch(batch, args, critic_feedback=critic_feedback, **options)]
+    except _CompileRepairCapacityError as error:
+        _require_compile_active(deadline, cancelled)
+        children = _repartition_compile_repair(batch, error.feedback)
+        if not children:
+            return [BatchOutcome(_record_failed_batch(batch.inputs, error, deadline=deadline))]
+        print(f'compile_memory: {error}; retrying complete source partitions with every reviewed proposal.',
+              flush=True)
+        return _run_repair_children(children, args, options)
+
+
+def _run_repair_children(children, args, options):
+    outcomes = []
+    for child, feedback in children:
+        _require_compile_active(options['deadline'], options['cancelled'])
+        outcomes.extend(_run_repair_child(child, feedback, args, options))
+    return outcomes
+
+
+def _run_repair_child(child, feedback, args, options):
+    try:
+        refreshed = _refresh_compile_batch(child, deadline=options['deadline'])
+        _require_repair_context(child, refreshed)
+    except Exception as error:  # noqa: BLE001 - a failed child cannot discard its independent sibling
+        _require_compile_active(options['deadline'], options['cancelled'])
+        return [BatchOutcome(_record_failed_batch(child.inputs, error, deadline=options['deadline']))]
+    return _run_repairable_batch(refreshed, args, critic_feedback=feedback, **options)
+
+
+def _require_repair_context(previous, refreshed):
+    context = _repair_context_paths(previous.inputs)
+    if not context.issubset(source.logical_path for source in refreshed.inputs.sources):
+        raise ValueError('complete selected context was lost while repartitioning repair work')
+
+
+def _repair_context_paths(inputs):
+    daily_paths = {part.logical_path for part in inputs.dailies}
+    return {source.logical_path for source in inputs.sources if source.logical_path not in daily_paths}
+
+
+def _repartition_compile_repair(batch, feedback):
+    units = _native_part_units(batch.inputs.dailies)
+    if len(units) < 2:
+        return ()
+    measure = _batch_measure(batch.inputs, batch.planning_model, None)
+    _attach_required_context(measure, batch.inputs, batch.planning_candidates)
+    for cut in _balanced_repair_cuts(units):
+        children = _repair_partition_at(batch, units, cut, feedback, measure)
+        if children is not None:
+            return children
+    return ()
+
+
+def _balanced_repair_cuts(units):
+    sizes = [sum(len(part.content) for part in unit) for unit in units]
+    total = sum(sizes)
+    return sorted(range(1, len(units)), key=lambda cut: abs(2 * sum(sizes[:cut]) - total))
+
+
+def _repair_partition_at(batch, units, cut, feedback, measure):
+    children = (_repair_child(batch, units[:cut], measure),
+                _repair_child(batch, units[cut:], measure))
+    selected = _partition_repair_feedback(feedback, children)
+    if selected is None:
+        return None
+    return tuple(zip(children, selected))
+
+
+def _repair_child(batch, units, measure):
+    keys = {part.part_key for unit in units for part in unit}
+    context = _repair_context_paths(batch.inputs)
+    return _compile_batch(batch.inputs, keys,
+        _packing_budget(batch.packing, batch.planning_model), batch.planning_model, None,
+        optional_paths=context, journal_indexes=_packing_journal_indexes(measure),
+        partitions=_measure_partitions(measure, _measure_owns_inputs(measure, batch.inputs)),
+        planning_candidates=batch.planning_candidates,
+        required_paths=_required_context_paths(measure, keys))
+
+
+def _partition_repair_feedback(feedback, children):
+    selected = ([], [])
+    for encoded in feedback:
+        divided = _partition_review_record(json.loads(encoded), children)
+        if divided is None:
+            return None
+        _append_partition_reviews(selected, divided)
+    return tuple(tuple(records) for records in selected)
+
+
+def _partition_review_record(record, children):
+    operations = ([], [])
+    for operation in record['operations']:
+        index = _repair_operation_partition(operation, children)
+        if index is None:
+            return None
+        operations[index].append(operation)
+    return tuple(_partition_review_feedback(items, record['reviews']) for items in operations)
+
+
+def _partition_review_feedback(operations, reviews):
+    if not operations:
+        return ()
+    return _validated_critique_feedback(operations, reviews)
+
+
+def _repair_operation_partition(operation, children):
+    for index, child in enumerate(children):
+        if _repair_operation_present(operation, child.inputs):
+            return index
+    return None
+
+
+def _repair_operation_present(operation, inputs):
+    try:
+        _critique_prompt(inputs, [operation])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return True
+
+
+def _append_partition_reviews(selected, divided):
+    for destination, records in zip(selected, divided):
+        destination.extend(records)
 
 
 def _apply_batch(
