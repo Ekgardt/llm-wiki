@@ -42,12 +42,16 @@ def test_ambiguous_protected_alias_is_not_offered(tmp_path, monkeypatch):
     assert not any(row['quoted_text'] == 'The label is [REDACTED_LITERAL].' for row in compiler._source_line_choices(inputs))
 
 
-def test_context_only_and_native_sources_offer_no_choices(tmp_path, monkeypatch):
+def test_context_only_native_sources_offer_no_choices(tmp_path, monkeypatch):
     from tests.test_native_compile_uses_whole_container import _native_inputs
 
     inputs, _ = _native_inputs(tmp_path, monkeypatch, 'A genuine native fact.')
     inputs = compiler._subset_compile_inputs(inputs, {part.part_key for part in inputs.dailies})
-    assert compiler._source_line_choices(inputs) == ()
+    choices = compiler._source_line_choices(inputs)
+    assert len(choices) == 1 and choices[0]['quoted_text'] == 'A genuine native fact.'
+    evidence = compiler._expand_source_line_evidence(
+        {'source_line': choices[0]['source_line'], 'claim': 'A genuine native fact.'}, inputs)
+    assert compiler._evidence_binding(evidence, inputs)
     assert compiler._source_line_choices(compiler.CompileInputs((), inputs.sources, ())) == ()
 
 

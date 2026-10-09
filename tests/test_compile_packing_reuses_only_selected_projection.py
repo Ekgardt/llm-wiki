@@ -46,11 +46,13 @@ def test_changed_selection_replaces_the_projection(tmp_path, monkeypatch):
     plain = compiler._daily_parts("knowledge/daily/2026-10-03.md", b"# Day\nPlain fact.\n")[0]
     inputs = replace(inputs, dailies=(*inputs.dailies, plain))
     native = _frame_covering_keys(inputs, inputs.dailies[0].original_content)
+    selections = (native, {plain.part_key}, native)
+    expected = [len(compiler._draft_prompt_text(compiler._subset_compile_inputs(inputs, keys)).encode())
+                for keys in selections]
     seen = _observe(monkeypatch)
     measure = compiler._ByteBatchMeasure(inputs)
-    for keys in (native, {plain.part_key}, native):
-        assert measure(keys) == len(compiler._draft_prompt_text(compiler._subset_compile_inputs(inputs, keys)).encode())
-    assert len(seen) == 6  # Three independent expected requests plus three selected projections.
+    assert [measure(keys) for keys in selections] == expected
+    assert len(seen) == 3  # Exactly one producer call per changed sizing selection.
 
 
 def test_replaced_same_key_forged_frame_is_not_cached(tmp_path, monkeypatch):

@@ -214,7 +214,7 @@ ALLOWED_CATEGORIES = frozenset(
     {"concepts", "decisions", "patterns", "debugging", "qa"}
 )
 DRAFT_PROGRAM = (
-    "compile-draft/v17: verified native citation addresses, actual-list citation indices and lossless source choices; "
+    "compile-draft/v18: verified native source choices, actual-list citation indices and lossless source choices; "
     "with immutable original-entry context and derived-provenance claims"
 )
 CRITIQUE_PROGRAM = (
@@ -1615,6 +1615,7 @@ class _TokenBatchMeasure:
     def __call__(self, paths, optional_paths=None):
         optional_paths = _with_required_context(self, paths, optional_paths)
         subset = _subset_compile_inputs(self.inputs, paths, optional_paths, partitions=self.partitions, journal_indexes=self.journal_indexes)
+        _record_measured_projection(self.choice_bindings, subset.dailies, subset.sources)
         count = _measure_token_subset(self, subset)
         if count.tokens is None:
             raise ValueError("compile input token count is unknown")
@@ -1729,6 +1730,7 @@ class _ByteBatchMeasure:
             self.projection_key = key
             self.projection_sources = sources
             self.projection_bytes = sum(len(_source_blob(item).encode("utf-8")) for item in sources)
+            _record_measured_projection(self.choice_bindings, selected, sources)
         return self.projection_sources
 
 
@@ -1755,9 +1757,18 @@ def _choice_measure_bytes(inputs, selected, sources, context):
 
 
 def _choice_layout_needed(selected, sources):
+    return _ordinary_choice_layout_needed(selected, sources) or _native_choice_layout_needed(selected, sources)
+
+
+def _ordinary_choice_layout_needed(selected, sources):
     ordinary = {source.logical_path for source in sources if source.prompt_content is None}
     parts = tuple(part for part in selected if part.logical_path in ordinary)
     return bool(_choice_timestamps(parts))
+
+
+def _native_choice_layout_needed(selected, sources):
+    paths = {source.logical_path for source in sources if source.prompt_content is not None}
+    return any(part.native_frames for part in selected if part.logical_path in paths)
 
 
 class _ByteContextSelection:
@@ -2873,8 +2884,21 @@ def _render_choice_prompt(base, choices):
     addresses = _source_address_table(choices)
     expected = protected + "\n\n" + addresses
     prompt = expected + "\n\nLEGACY EVIDENCE CHOICES: prefer exactly source_line and claim. Return only the integer labelled source_line from an offered row, with exactly two keys: source_line (an offered integer) and claim (supported text). The locator=LF: label is a display-only address inside the visible FILE body, never an output ID or output field. Never add quoted_text, locator, daily_date or timestamp to a source_line evidence object. A legacy evidence object instead has all four legacy fields and no source_line. A..B means every integer A through B, paired in order. Locators grant no evidence authority. The table maps each ID to its FILE block, original entry and one-based LF line inside that visible selected FILE body; count physical LF rows, including blank rows. Table IDs and embedded labels are not source quotes or durable citations. The compiler supplies authoritative Sources, Evidence and Claims; do not invent shortened daily references or retain IDs in the page body."
+    prompt += _native_choice_instruction(choices)
     _require_choice_prefix(expected, prompt)
     return prompt
+
+
+def _native_choice_instruction(choices):
+    if not any('native_event' in row for row in choices):
+        return ''
+    return ("\n\nNATIVE EVIDENCE CHOICES: prefer exactly source_line and claim for native sources too. "
+            "The offered output ID selects one complete protected user_lines entry in the verified event "
+            "identified by FILE, ENTRY and byte_start. locator=user_lines: is its zero-based array index, "
+            "never an output ID or output field. Paired ranges map IDs to indices in order. "
+            "Do not copy or shorten the quote, or add native_event, timestamp or daily_date to a source_line "
+            "object. The compiler supplies those exact existing evidence fields and validates the complete "
+            "original container. Manual native evidence remains available with all required native fields.")
 
 
 _LAYOUT_PROTECTION = ContextVar("layout_protection", default=None)
@@ -2927,10 +2951,40 @@ def _protected_choice_base(base):
 
 
 def _source_address_table(choices):
+    ordinary = tuple(row for row in choices if 'native_event' not in row)
+    native = tuple(row for row in choices if 'native_event' in row)
+    return '\n\n'.join(filter(None, (_legacy_source_address_table(ordinary),
+                                     _native_source_address_table(native))))
+
+
+def _legacy_source_address_table(choices):
+    if not choices:
+        return ''
     groups = {}
     for choice in choices:
         groups.setdefault(choice['source_path'], []).append(choice)
     return "LEGACY SOURCE ADDRESSES\n" + "\n".join(_source_address_group(path, rows) for path, rows in groups.items())
+
+
+def _native_source_address_table(choices):
+    if not choices:
+        return ''
+    grouped = groupby(choices, key=_native_address_identity)
+    return 'NATIVE SOURCE ADDRESSES\n' + '\n'.join(
+        _native_source_address_group(identity, tuple(rows)) for identity, rows in grouped)
+
+
+def _native_address_identity(row):
+    return row['source_path'], row['timestamp'], row['native_event']['byte_start']
+
+
+def _native_source_address_group(identity, rows):
+    path, timestamp, start = identity
+    runs = groupby(enumerate(rows), key=_source_address_run_key)
+    addresses = '\n'.join(_source_address_run(tuple(row for _index, row in run), locator='user_lines')
+                          for _key, run in runs)
+    return (f'FILE: {path}\nENTRY {timestamp} byte_start={start}\n'
+            'OUTPUT source_line | LOCATOR ONLY: native user_lines index (NOT an output ID)\n' + addresses)
 
 
 def _source_address_group(path, rows):
@@ -2951,12 +3005,12 @@ def _source_address_run_key(indexed):
     return row['source_line'] - index, row['file_line'] - index
 
 
-def _source_address_run(rows):
+def _source_address_run(rows, *, locator='LF'):
     first, last = rows[0], rows[-1]
     if len(rows) == 1:
-        return f"source_line={first['source_line']} locator=LF:{first['file_line']}"
+        return f"source_line={first['source_line']} locator={locator}:{first['file_line']}"
     return (f"source_line={first['source_line']}..{last['source_line']} "
-            f"locator=LF:{first['file_line']}..{last['file_line']} (paired in order)")
+            f"locator={locator}:{first['file_line']}..{last['file_line']} (paired in order)")
 
 
 def _require_choice_prefix(expected, prompt):
@@ -2970,7 +3024,7 @@ def _require_choice_prefix(expected, prompt):
 
 
 def _source_line_choices(inputs):
-    if not any(_ordinary_choice_parts(source, inputs) for source in inputs.sources):
+    if not _choice_layout_needed(inputs.dailies, inputs.sources):
         return ()
     with _source_choice_resolution():
         return _collect_source_line_choices(inputs)
@@ -2987,7 +3041,56 @@ def _collect_source_line_choices(inputs):
     for pair, locations in groups.items():
         _collect_choice_pair(pair, locations, inputs, choices)
     ordered = sorted(choices.values(), key=lambda item: item['model_start'])
-    return _assign_source_choice_ids(base, ordered)
+    ordinary = _assign_source_choice_ids(base, ordered)
+    native = _collect_native_source_choices(inputs, pairs, ranges)
+    first = max((row['source_line'] for row in ordinary), default=0) + 1
+    return ordinary + tuple(dict(source_line=first + index, **row) for index, row in enumerate(native))
+
+
+def _collect_native_source_choices(inputs, pairs, ranges):
+    choices = []
+    for source, start, end in ranges:
+        if source.prompt_content is not None:
+            choices.extend(_native_source_choices(source, start, end, pairs, inputs))
+    return tuple(choices)
+
+
+def _native_source_choices(source, start, end, pairs, inputs):
+    _require_projection_source(source, inputs)
+    frames = _native_source_frame_index(source, inputs)
+    choices = []
+    for left, right, original, protected in pairs:
+        if start <= left and right <= end:
+            choices.extend(_native_row_choices(frames, original, protected))
+    return choices
+
+
+def _native_source_frame_index(source, inputs):
+    parts = sorted((part for part in inputs.dailies if part.logical_path == source.logical_path),
+                   key=lambda part: part.byte_start)
+    return {_native_prompt_frame(frame).decode(): frame for frame in _overlapping_native_frames(parts)}
+
+
+def _native_row_choices(frames, original, protected):
+    frame = frames.get(original.strip())
+    if frame is None:
+        return ()
+    try:
+        value = json.loads(protected)
+    except json.JSONDecodeError:
+        return ()
+    rows = (_native_choice_row(frame, index, _native_projection_line(value, frame, index))
+            for index in range(len(frame.text.splitlines())))
+    return tuple(filter(None, rows))
+
+
+def _native_choice_row(frame, index, quote):
+    if quote is None or not quote.strip():
+        return None
+    return {'source_path': frame.source_path, 'daily_date': Path(frame.source_path).stem,
+            'timestamp': frame.timestamp, 'quoted_text': quote, 'file_line': index,
+            'native_event': {'source_path': frame.source_path, 'byte_start': frame.byte_start,
+                             'line_index': index}}
 
 
 def _assign_source_choice_ids(base, choices):
@@ -3213,7 +3316,13 @@ def _expand_choice_fields(item, choices):
     if set(item) != {'source_line', 'claim'}:
         raise ValueError('source line choice has extra or missing fields')
     choice = _require_source_choice(item['source_line'], choices)
-    return {key: choice[key] for key in ('daily_date', 'timestamp', 'quoted_text')} | {'claim': item['claim']}
+    return {key: choice[key] for key in ('daily_date', 'timestamp', 'quoted_text')} | _choice_native_fields(choice) | {'claim': item['claim']}
+
+
+def _choice_native_fields(choice):
+    if 'native_event' not in choice:
+        return {}
+    return {'native_event': dict(choice['native_event'])}
 
 
 def _require_source_choice(value, choices):
@@ -3249,6 +3358,17 @@ def _entry_context(inputs: CompileInputs) -> str:
 
 
 def _part_entry_ids(part: DailySnapshot) -> list[str]:
+    scope = _SOURCE_CHOICE_BINDINGS.get()
+    if scope is None:
+        return _uncached_part_entry_ids(part)
+    cache = scope.setdefault("entry_ids", {})
+    identity = id(part)
+    if identity not in cache:
+        cache[identity] = (part, tuple(_uncached_part_entry_ids(part)))
+    return list(cache[identity][1])
+
+
+def _uncached_part_entry_ids(part: DailySnapshot) -> list[str]:
     return [
         block_id for block_id, start, end in part.original_entries
         if start < part.byte_end and end > part.byte_start
@@ -4193,9 +4313,46 @@ def _source_has_projection(source, paths, native):
 
 def _require_projection_source(source, inputs):
     parts = tuple(part for part in inputs.dailies if part.logical_path == source.logical_path)
+    if _measured_projection_matches(source, parts):
+        return
+    _require_uncached_projection_source(source, parts)
+
+
+def _require_uncached_projection_source(source, parts):
     journal_indexes, partitions = _choice_projection_parsing()
     if not parts or _native_unit_source(parts, journal_indexes=journal_indexes, partitions=partitions) != source:
         raise ValueError("compile evidence projection lacks canonical selected source proof")
+
+
+def _record_measured_projection(scope, parts, sources):
+    """Retain the producer's current immutable selection for sizing only.
+
+    Replacing this one entry releases the prior projections. Each protected
+    layout still verifies its DLP view. Final subset construction and evidence
+    binding run outside this sizing scope and revalidate permanent authority.
+    """
+    scope['native_projection'] = (tuple(parts), tuple(sources))
+
+
+def _measured_projection_matches(source, parts):
+    proof = _retained_measure_projection()
+    if source.prompt_content is None or proof is None:
+        return False
+    selected, sources = proof
+    present = any(candidate is source for candidate in sources)
+    return present and _source_part_identities(selected, source.logical_path) == _part_identities(parts)
+
+
+def _retained_measure_projection():
+    return (_SOURCE_CHOICE_BINDINGS.get() or {}).get('native_projection')
+
+
+def _source_part_identities(parts, path):
+    return _part_identities(part for part in parts if part.logical_path == path)
+
+
+def _part_identities(parts):
+    return tuple(sorted(id(part) for part in parts))
 
 
 def _choice_projection_parsing():

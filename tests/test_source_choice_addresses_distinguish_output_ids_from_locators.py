@@ -49,12 +49,15 @@ def test_display_keeps_raw_source_context_and_exact_binding(tmp_path, monkeypatc
 
 
 def test_changed_address_program_has_a_new_draft_cache_identity():
-    assert compiler.DRAFT_PROGRAM.startswith('compile-draft/v17:')
+    assert compiler.DRAFT_PROGRAM.startswith('compile-draft/v18:')
     previous_program = (
         "compile-draft/v16: actual-list citation indices, scoped durable facts and lossless source choices; "
         "with immutable original-entry context and derived-provenance claims"
     )
-    previous_hash = compiler.sha256_bytes(compiler.canonical_json_bytes({
-        "program": previous_program, "system": compiler.DRAFT_SYSTEM,
-        "schema": compiler.RAW_PLAN_SCHEMA}))
-    assert compiler.DRAFT_PROGRAM_HASH != previous_hash
+    previous_programs = (previous_program,
+        "compile-draft/v17: verified native citation addresses, actual-list citation indices and lossless source choices; "
+        "with immutable original-entry context and derived-provenance claims")
+    previous_hashes = {compiler.sha256_bytes(compiler.canonical_json_bytes({
+        "program": program, "system": compiler.DRAFT_SYSTEM,
+        "schema": compiler.RAW_PLAN_SCHEMA})) for program in previous_programs}
+    assert compiler.DRAFT_PROGRAM_HASH not in previous_hashes

@@ -1,18 +1,20 @@
 """Known citation overlap is necessary context, independent of word ranking."""
 import compile_memory as cm
+import pytest
 
 from tests.test_compile_claims_producer import QUOTE, _daily, _evidence
 from tests.test_compile_claims_producer import vault as vault
 
 
-def _overlap_inputs(root):
+def _overlap_inputs(root, newline="\n"):
     daily = _daily(root)
+    daily.write_bytes(daily.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", newline.encode()))
     initial = cm.snapshot_compile_inputs([daily])
     binding, _block = cm._bound_evidence_block(_evidence(), initial)
     note = root / 'knowledge/notes/project-rule.md'
-    note.write_text('---\ntype: decision\n---\n# Accepted project boundary\n' + 'z' * 19000 + '\n\nEvidence: ' + binding['reference'] + '\n')
+    note.write_text('---\ntype: decision\n---\n# Accepted project boundary\n' + 'z' * 19000 + '\n\nEvidence: ' + binding['reference'] + '\n', encoding='utf-8', newline=newline)
     other = root / 'knowledge/notes/lexical.md'
-    other.write_text('---\ntype: pattern\n---\n' + (QUOTE + '\n') * 160)
+    other.write_text('---\ntype: pattern\n---\n' + (QUOTE + '\n') * 160, encoding='utf-8', newline=newline)
     return cm.snapshot_compile_inputs([daily]), note.read_bytes()
 
 
@@ -325,3 +327,21 @@ def test_original_absolute_span_keeps_its_exact_repeated_part_origin(vault):
     required = _required(current)
     assert required.for_paths({first.part_key}) == {'knowledge/notes/repeated-part.md'}
     assert required.for_paths({second.part_key}) == set()
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_complete_required_context_is_preserved_at_measured_platform_size(vault, newline):
+    root, _state = vault
+    inputs, original = _overlap_inputs(root, newline)
+    paths = {part.part_key for part in inputs.dailies}
+    required = {"knowledge/notes/project-rule.md"}
+    subset = cm._subset_compile_inputs(inputs, paths, required)
+    model = "platform-context-model"
+    count = cm._draft_prompt_count(subset, model, None).tokens
+    target = cm._compile_budget(model)
+    minimum = count + target.reserved_output_tokens + target.safety_margin_tokens
+    batch = cm.pack_compile_batches(inputs, model=model, planning_candidates=_basis(model, minimum))[0]
+    source = next(source for source in batch.inputs.sources if source.logical_path in required)
+    assert source.content == original
+    assert batch.packing.measured_input_tokens == count
+    assert batch.packing.max_input_tokens == minimum
