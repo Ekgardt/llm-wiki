@@ -1252,6 +1252,9 @@ class EvidenceResolver:
         # Operation-local offsets only. Every lookup re-reads and hashes the
         # source; even a same-size edit with restored timestamps invalidates it.
         self._part_offsets: dict[Path, tuple[str, dict[str, tuple[int, int] | None]]] = {}
+        # Only parsed offsets are retained. Every live lookup still reads and
+        # hashes its file; changed content replaces that file's whole parse map.
+        self._flat_entry_metadata = {}
         # Strong references qualify only these exact immutable byte objects.
         self._immutable_sources = {}
         self._immutable_entry_metadata = {}
@@ -1269,11 +1272,29 @@ class EvidenceResolver:
     def _resolve_flat(self, ref: EvidenceRef, content: bytes, flat: Path):
         current_digest = sha256_bytes(content)
         if current_digest == ref.source_sha256:
-            return self._slice(ref, content, flat, "flat")
+            return self._slice_live_source(ref, content, flat, "flat", current_digest)
         part = self._historical_part(flat, content, current_digest, ref.source_sha256)
         if part is None:
             raise EvidenceResolutionError("flat daily source hash mismatch")
-        return self._slice(ref, part, flat, "flat-part")
+        return self._slice_live_source(ref, part, flat, "flat-part", current_digest)
+
+    def _live_entry_metadata(self, ref, content, flat, current_digest):
+        cached = self._flat_entry_metadata.get(flat)
+        if cached is None or cached[0] != current_digest:
+            cached = (current_digest, {})
+            self._flat_entry_metadata[flat] = cached
+        metadata = cached[1]
+        if ref.source_sha256 not in metadata:
+            metadata[ref.source_sha256] = _daily_entry_metadata(content)
+        return metadata[ref.source_sha256]
+
+    def _slice_live_source(self, ref, content, flat, location, current_digest):
+        entries, newlines = self._live_entry_metadata(ref, content, flat, current_digest)
+        selected = _checked_evidence_span(ref, content)
+        block = _sole_entry_span(ref, entries.get(ref.block_id, ()))
+        return _resolved_byte_span(ref, content, flat, location, selected, block,
+                                  ref.source_sha256,
+                                  lines=_indexed_line_span(newlines, ref.byte_start, ref.byte_end))
 
     def _historical_part(
         self, flat: Path, content: bytes, current_digest: str, source_digest: str
@@ -1432,6 +1453,13 @@ def _entry_groups(entries):
     for entry in entries:
         groups.setdefault(entry[0], []).append(entry)
     return {key: tuple(value) for key, value in groups.items()}
+
+
+def _daily_entry_metadata(content):
+    _require_utf8(content, "daily source is not UTF-8")
+    entries = tuple(daily_entries(content))
+    newlines = tuple(match.start() for match in re.finditer(b"\n", content))
+    return _entry_groups(entries), newlines
 
 
 def _checked_evidence_span(ref, content):

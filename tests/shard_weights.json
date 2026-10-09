@@ -684,6 +684,7 @@
   "test_lint_evidence.py": 0.05,
   "test_lint_orphan_pages.py": 0.04,
   "test_litragbench_becomes_a_question_this_stand_can_read.py": 0.01,
+  "test_live_evidence_reuses_only_a_content_verified_parse.py": 0.03,
   "test_llm_descriptors.py": 0.13,
   "test_lock_probe_preserves_corpus_root.py": 0.02,
   "test_locomo_becomes_a_question_this_stand_can_read.py": 0.01,
