@@ -41,12 +41,17 @@ _QUOTE = r"\\?[\"']"
 # A quoted value whole (spaces included) or a bare one that stops before a
 # backslash, so an escaped closing quote of a JSON string is never swallowed.
 _VALUE = r"(\\?\"[^\"\r\n\\]*\\?\"|'[^'\r\n]*'|[^\s\\]+)"
+# Candidate starts are a superset; the original pattern still decides every match.
+_CREDENTIAL_VALUE_PATTERN = re.compile(
+    rf"(?i)({_CREDENTIAL_NAME}(?:{_QUOTE})?{_SAME_LINE}[=:]{_SAME_LINE}){_VALUE}"
+)
+_ASSIGNMENT_HEAD = re.compile(rf"(?<![\w.-])[\w.-]+(?:{_QUOTE})?{_SAME_LINE}[=:]")
 _NAMED_VALUE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         rf"(?i)(authorization(?:{_QUOTE})?{_SAME_LINE}:{_SAME_LINE}(?:{_QUOTE})?"
         rf"(?:bearer|basic|token)[^\S\r\n])([^\s\\\"']+)"
     ),
-    re.compile(rf"(?i)({_CREDENTIAL_NAME}(?:{_QUOTE})?{_SAME_LINE}[=:]{_SAME_LINE}){_VALUE}"),
+    _CREDENTIAL_VALUE_PATTERN,
 )
 
 _PATTERN_RULES: list[tuple[re.Pattern[str], str, tuple[str, ...]]] = [
@@ -327,8 +332,38 @@ def _replace_named_value(match: re.Match[str]) -> str:
 def _redact_named_values(text: str) -> str:
     out = text
     for pattern in _NAMED_VALUE_PATTERNS:
-        out = pattern.sub(_replace_named_value, out)
+        out = _named_pattern_sub(pattern, out)
     return out
+
+
+def _named_pattern_sub(pattern, text: str) -> str:
+    if pattern is _CREDENTIAL_VALUE_PATTERN:
+        return _indexed_named_values(text)
+    return pattern.sub(_replace_named_value, text)
+
+
+def _indexed_named_values(text: str) -> str:
+    matches = (_CREDENTIAL_VALUE_PATTERN.match(text, head.start())
+               for head in _ASSIGNMENT_HEAD.finditer(text))
+    return _rewrite_named_matches(text, matches)
+
+
+def _rewrite_named_matches(text: str, matches) -> str:
+    pieces = []
+    cursor = 0
+    for match in matches:
+        cursor = _append_named_match(text, match, cursor, pieces)
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+def _append_named_match(text: str, match, cursor: int, pieces) -> int:
+    if match is None:
+        return cursor
+    if match.start() < cursor:
+        return cursor
+    pieces.extend((text[cursor:match.start()], _replace_named_value(match)))
+    return match.end()
 
 
 def _looks_like_path(token: str) -> bool:

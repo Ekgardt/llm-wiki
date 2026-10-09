@@ -709,6 +709,7 @@
   "test_migrate_to_okf_exemptions.py": 0.04,
   "test_model_policy.py": 0.46,
   "test_model_publication_authenticates_preserved_prefix.py": 8.69,
+  "test_named_redaction_indexes_assignment_candidates.py": 0.1,
   "test_native_compile_companion_adopted.py": 2.21,
   "test_native_compile_projection_has_complete_citation_address.py": 0.13,
   "test_native_compile_rejects_invalid_existing_ledger.py": 0.01,
