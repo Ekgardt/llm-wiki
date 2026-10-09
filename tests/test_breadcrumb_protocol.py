@@ -20,7 +20,10 @@ def _encoded(content: bytes, intent_id: str = "a" * 64):
     return anchor, parts, manifest
 
 
-@pytest.mark.parametrize("text", ["small", '日\\"\n' * 1000, "x" * 1_048_576, "🧠" * 300_000])
+@pytest.mark.parametrize(
+    "text", ["small", '日\\"\n' * 1000, "x" * 1_048_576, "🧠" * 300_000],
+    ids=["plain-prompt", "escaped-unicode", "ascii-1-mib", "unicode-1200000-bytes"],
+)
 def test_every_byte_is_restored_and_every_record_fits_the_existing_transport(text):
     content = text.encode("utf-8")
     started = time.perf_counter()

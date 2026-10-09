@@ -24,7 +24,7 @@ def _source(content: bytes):
 @pytest.mark.parametrize("content", [
     b"a complete prompt", ('```\n---\n# quoted heading\n"\\\u2028\u65e5' * 1000).encode(),
     b"x" * (2 * 1_048_576),
-])
+], ids=["small", "quoted-unicode", "ascii-2-mib"])
 def test_permanent_markdown_reconstructs_the_complete_source_without_runtime(content):
     head, documents = _source(content)
 

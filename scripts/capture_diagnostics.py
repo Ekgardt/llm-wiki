@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 from contextlib import contextmanager, suppress
 from datetime import datetime
@@ -266,6 +267,38 @@ def _write_trail_line(descriptor: int, data: bytes, locking, pause=time.sleep) -
 # the trail itself is a lock on a file the trim is about to rename away.
 # Research: `docs/research/2026-09-17-a-trim-never-drops-a-line-it-did-not-read.md`.
 TRAIL_LOCK_SUFFIX = ".lock"
+_TRAIL_OWNER = threading.local()
+
+
+def _trail_lock_identity(descriptor: int):
+    try:
+        path = _trail_lock_path()
+        opened, current = os.fstat(descriptor), path.stat()
+        if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            return None
+        return (os.getpid(), str(path.absolute()), opened.st_dev, opened.st_ino, descriptor)
+    except OSError:
+        return None
+
+
+def _owns_trail_lock() -> bool:
+    owner = getattr(_TRAIL_OWNER, "identity", None)
+    if owner is None:
+        return False
+    return owner == _trail_lock_identity(owner[-1])
+
+
+@contextmanager
+def _remember_trail_lock(held: bool, descriptor: int):
+    if not held:
+        yield False
+        return
+    previous = getattr(_TRAIL_OWNER, "identity", None)
+    _TRAIL_OWNER.identity = _trail_lock_identity(descriptor)
+    try:
+        yield True
+    finally:
+        _TRAIL_OWNER.identity = previous
 
 
 def _trail_lock_path() -> Path:
@@ -320,7 +353,9 @@ def trail_lock(pause=time.sleep):
         yield False
         return
     try:
-        yield _await_trail_lock(descriptor, pause)
+        held = _await_trail_lock(descriptor, pause)
+        with _remember_trail_lock(held, descriptor) as acquired:
+            yield acquired
     finally:
         with suppress(OSError):
             os.close(descriptor)
@@ -349,11 +384,16 @@ def _append_failure_line(record: dict[str, str]) -> bool:
     `docs/research/2026-09-17-two-failures-at-once-both-reach-the-trail.md`.
 
     The trail's own lock is taken around the open and the write, so the file this
-    line is appended to is not one a trim has already replaced. A line is never
-    lost to that lock: when the bounded wait runs out the line is written anyway.
+    line is appended to is not one a trim has already replaced. Expired or failed
+    acquisition refuses the write. A caller already holding this same live lock
+    in its own thread can append without acquiring a conflicting descriptor.
     """
     line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
-    with trail_lock():
+    if _owns_trail_lock():
+        return _write_failure_line(line)
+    with trail_lock() as held:
+        if not held:
+            return False
         return _write_failure_line(line)
 
 

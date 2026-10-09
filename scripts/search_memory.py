@@ -3911,6 +3911,7 @@ def _generation_result(
         # docs/research/2026-09-27-a-row-that-carries-its-text-carries-no-cut-of-it.md).
         "content": content,
         "score": score,
+        "_signal_score": -float(row["rank"]),
         "project": _row_text(row, "project"),
         "timestamp": _row_text(row, "valid_from")[:10],
         "chunk_id": row["chunk_id"],
@@ -4072,7 +4073,38 @@ def _boost_generation_results(
     query_words = set(query.casefold().split())
     for result in results:
         _check_generation_stop(deadline, cancelled)
-        result["score"] = _boosted_generation_score(result, query_words, project)
+        _boost_admission_and_signal(result, query_words, project)
+
+
+def _boost_admission_and_signal(result, query_words, project):
+    result["score"] = _boosted_generation_score(result, query_words, project)
+    if "_signal_score" in result:
+        raw = {**result, "score": result["_signal_score"]}
+        result["_signal_score"] = _boosted_generation_score(raw, query_words, project)
+
+
+def _signal_pool_order(row):
+    return -float(row["_signal_score"]), str(row["candidate_id"])
+
+
+def _union_signal_rows(rows):
+    return list({str(row["candidate_id"]): row for row in rows}.values())
+
+
+def _literal_signal_pool(rows, limit, include_unweighted):
+    curated = rows[:limit]
+    if not include_unweighted:
+        return curated
+    relevance = sorted(rows, key=_signal_pool_order)[:limit]
+    return _union_signal_rows([*curated, *relevance])
+
+
+def _generation_signal_pool(rows, limit, include_unweighted):
+    curated = _admit_source_tiers(rows, limit)
+    if not include_unweighted:
+        return curated
+    relevance = _admit_source_tiers(sorted(rows, key=_signal_pool_order), limit)
+    return _union_signal_rows([*curated, *relevance])
 
 
 def _generation_fts_search(
@@ -4087,6 +4119,7 @@ def _generation_fts_search(
     as_of: str | None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    include_unweighted: bool = False,
 ) -> list[dict[str, object]]:
     """BM25 over one generation, with an exact filename match kept in front."""
     with _generation_sqlite_guard(connection, deadline, cancelled):
@@ -4122,7 +4155,7 @@ def _generation_fts_search(
     filtered = apply_hard_filters(
         results, project=project, since=since, as_of=as_of, scope=scope
     )
-    return _admit_source_tiers(filtered, limit)
+    return _generation_signal_pool(filtered, limit, include_unweighted)
 
 
 def _vectors_match_manifest(
@@ -4300,6 +4333,7 @@ def _vector_scored_result(row, score, generation_id, project):
     result = _generation_result(row, generation_id, apply_weight=False)
     if project and str(result["project"]).casefold() == project.casefold():
         score *= 1.5
+    result["_signal_score"] = score
     score *= _chunk_weight(result.get("authority"), result.get("type"), result.get("content"), result.get("path"))
     result["score"] = round(score, 4)
     result["requested_mode"], result["effective_mode"] = "hybrid", "hybrid"
@@ -4327,8 +4361,49 @@ def _vector_tier_filter(filters, values, sessions):
     return filters + f" AND source_path {operator} ?", (*values, _SESSION_SOURCE_PREFIX + "%")
 
 
+class _WorstSignalFirst:
+    """Invert the existing deterministic key so a bounded heap exposes its worst row."""
+
+    __slots__ = ("key",)
+
+    def __init__(self, key):
+        self.key = key
+
+    def __lt__(self, other):
+        return other.key < self.key
+
+    def __eq__(self, other):
+        return self.key == other.key
+
+
+def _offer_vector_candidate(heap, order, row, serial, limit):
+    key = order(row)
+    entry = (_WorstSignalFirst(key), serial, row)
+    if len(heap) < limit:
+        heapq.heappush(heap, entry)
+        return
+    if key < heap[0][0].key:
+        heapq.heapreplace(heap, entry)
+
+
+def _heap_signal_rows(heaps):
+    return _union_signal_rows([entry[2] for _order, heap in heaps for entry in heap])
+
+
+def _vector_admission(rows, limit, include_unweighted):
+    if limit <= 0:
+        return []
+    if not include_unweighted:
+        return heapq.nsmallest(limit, rows, key=_dense_order_key)
+    heaps = [(_dense_order_key, []), (_signal_pool_order, [])]
+    for serial, row in enumerate(rows):
+        for order, heap in heaps:
+            _offer_vector_candidate(heap, order, row, serial, limit)
+    return _heap_signal_rows(heaps)
+
+
 def _vector_scored_rows(connection, similarities, generation_id, *, scope, since, as_of,
-                        project, deadline, cancelled, limit=None):
+                        project, deadline, cancelled, limit=None, include_unweighted=False):
     """Preserve exact trust-weighted tier admission without retaining all prose."""
     filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
     if limit is None:
@@ -4339,7 +4414,7 @@ def _vector_scored_rows(connection, similarities, generation_id, *, scope, since
         tier_filters, tier_values = _vector_tier_filter(filters, values, sessions)
         rows = _vector_score_rows(connection, similarities, generation_id, tier_filters,
                                   tier_values, project, deadline, cancelled)
-        results.extend(heapq.nsmallest(limit, rows, key=_dense_order_key))
+        results.extend(_vector_admission(rows, limit, include_unweighted))
     return sorted(results, key=_dense_order_key)
 
 
@@ -4370,7 +4445,7 @@ def _stored_vectors_are_trustworthy(
 
 def _generation_vector_rows(query, connection, manifest, directory, generation_id, *,
                             embedder, model_id, model_revision, scope, limit, project,
-                            since, as_of, deadline, cancelled):
+                            since, as_of, deadline, cancelled, include_unweighted=False):
     with closing(_read_vector_metadata(directory, deadline, cancelled,
                                         expected=_expected_vector_metadata(manifest))) as metadata:
         matrix = _loaded_generation_vector_matrix(directory, manifest, len(metadata["chunk_ids"]),
@@ -4378,7 +4453,7 @@ def _generation_vector_rows(query, connection, manifest, directory, generation_i
         try:
             return _query_generation_vector_matrix(query, connection, manifest, generation_id,
                                                    metadata, matrix, embedder, model_id, model_revision,
-                                                   scope, limit, project, since, as_of, deadline, cancelled)
+                                                   scope, limit, project, since, as_of, deadline, cancelled, include_unweighted)
         finally:
             _close_vector_matrix(matrix)
 
@@ -4401,7 +4476,7 @@ def _loaded_generation_vector_matrix(directory, manifest, rows, deadline, cancel
 
 def _query_generation_vector_matrix(query, connection, manifest, generation_id, metadata, matrix,
                                     embedder, model_id, model_revision, scope, limit, project,
-                                    since, as_of, deadline, cancelled):
+                                    since, as_of, deadline, cancelled, include_unweighted=False):
     import numpy as np
 
     _check_generation_stop(deadline, cancelled)
@@ -4416,17 +4491,18 @@ def _query_generation_vector_matrix(query, connection, manifest, generation_id, 
     if not _usable_query_vector(query_matrix, dimensions):
         return None
     return _admitted_generation_vector_rows(connection, matrix, query_matrix[0], generation_id,
-                                             scope, limit, project, since, as_of, deadline, cancelled)
+                                             scope, limit, project, since, as_of, deadline, cancelled, include_unweighted)
 
 
 def _admitted_generation_vector_rows(connection, matrix, query_vector, generation_id,
-                                     scope, limit, project, since, as_of, deadline, cancelled):
+                                     scope, limit, project, since, as_of, deadline, cancelled, include_unweighted=False):
     similarities = _cosine_similarities(matrix, query_vector, deadline=deadline, cancelled=cancelled)
     results = _vector_scored_rows(connection, similarities, generation_id, scope=scope,
                                   since=since, as_of=as_of, project=project,
-                                  deadline=deadline, cancelled=cancelled, limit=limit * 3)
+                                  deadline=deadline, cancelled=cancelled, limit=limit * 3,
+                                  include_unweighted=include_unweighted)
     _check_generation_stop(deadline, cancelled)
-    return _admit_source_tiers(results, limit * 3)
+    return _generation_signal_pool(results, limit * 3, include_unweighted)
 
 
 def _generation_vectors_search(
@@ -4445,6 +4521,7 @@ def _generation_vectors_search(
     as_of: str | None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    include_unweighted: bool = False,
 ) -> list[dict[str, object]] | None:
     """Cosine search over one generation's vectors, or None when unusable."""
     _check_generation_stop(deadline, cancelled)
@@ -4469,6 +4546,7 @@ def _generation_vectors_search(
             as_of=as_of,
             deadline=deadline,
             cancelled=cancelled,
+            include_unweighted=include_unweighted,
         )
     except TimeoutError:
         raise
@@ -4618,13 +4696,15 @@ def _page_read_eligible(
     )
 
 
-def _page_hit(read: _PageRead, *, score: float, bm25_score: float) -> dict:
-    return {
+def _page_hit(read: _PageRead, *, score: float, bm25_score: float,
+              signal_score: float | None = None) -> dict:
+    result = {
         "path": read.relative_path,
         "title": read.title,
         "summary": read.summary[:120],
         "score": score,
         "bm25_score": bm25_score,
+        "type": read.page_type,
         "project": read.project,
         "timestamp": read.timestamp,
         "candidate_id": legacy_candidate_id(read.relative_path),
@@ -4634,6 +4714,9 @@ def _page_hit(read: _PageRead, *, score: float, bm25_score: float) -> dict:
         "generation": "legacy",
         "authority": read.authority,
     }
+    if signal_score is not None:
+        result["_signal_score"] = signal_score
+    return result
 
 
 def _exact_page_hit(
@@ -4654,7 +4737,7 @@ def _exact_page_hit(
     if not _page_read_eligible(read, project=project, since=since, as_of=as_of):
         return None
     score = round(10.0 * trust_weight(read.authority, read.page_type, read.relative_path), 2)
-    return _page_hit(read, score=score, bm25_score=0.0)
+    return _page_hit(read, score=score, bm25_score=0.0, signal_score=10.0)
 
 
 def _project_matches(page_project: str, project: str | None) -> bool:
@@ -4786,7 +4869,7 @@ def _document_terms(page: Path, title: str, summary: str, body: str) -> set[str]
     return set(re.findall(r"\w+", haystack))
 
 
-def _direct_match_score(
+def _literal_relevance_score(
     page: Path, read: _PageRead, query_terms: set[str], shared: set[str]
 ) -> float:
     """Literal matching has no BM25, so the count of shared terms carries the base score.
@@ -4801,6 +4884,11 @@ def _direct_match_score(
         score *= 3.0
     if query_terms.issubset(set(re.findall(r"\w+", page.stem.casefold()))):
         score *= 4.0
+    return score
+
+
+def _direct_match_score(page, read, query_terms, shared):
+    score = _literal_relevance_score(page, read, query_terms, shared)
     return score * trust_weight(read.authority, read.page_type, read.relative_path)
 
 
@@ -4830,7 +4918,8 @@ def _direct_page_hit(
         return None
     score = round(_direct_match_score(page, read, query_terms, shared), 2)
     return {
-        **_page_hit(read, score=score, bm25_score=score),
+        **_page_hit(read, score=score, bm25_score=score,
+                    signal_score=_literal_relevance_score(page, read, query_terms, shared)),
         "fallback_reason": "no_active_generation",
         "partial": True,
     }
@@ -4846,6 +4935,7 @@ def _direct_markdown_hits(
     as_of: str | None,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    include_unweighted: bool = False,
 ) -> list[dict]:
     """Return bounded literal matches from authoritative Markdown only.
 
@@ -4870,7 +4960,7 @@ def _direct_markdown_hits(
         if hit is not None:
             results.append(hit)
     results.sort(key=lambda item: (-float(item["score"]), str(item["path"])))
-    return results[: max(limit * 3, limit)]
+    return _literal_signal_pool(results, max(limit * 3, limit), include_unweighted)
 
 
 def markdown_hits(
@@ -4884,6 +4974,7 @@ def markdown_hits(
     page_paths: list[Path] | None = None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    include_unweighted: bool = False,
 ) -> list[dict]:
     """The lexical signal when no generation is active: Markdown, read directly.
 
@@ -4906,10 +4997,11 @@ def markdown_hits(
         as_of=as_of,
         deadline=deadline,
         cancelled=cancelled,
+        include_unweighted=include_unweighted,
     )
     hits.extend(_direct_breadcrumb_hits(
         query, scope=scope, limit=limit, project=project, since=since,
-        as_of=as_of, deadline=deadline, cancelled=cancelled,
+        as_of=as_of, deadline=deadline, cancelled=cancelled, include_unweighted=include_unweighted,
     ))
     hits.sort(key=lambda item: (-float(item["score"]), str(item["path"])))
     normalized_stem = _normalized_filename_stem(query)
@@ -4929,7 +5021,7 @@ def _breadcrumb_literal_row(chunk, terms: set[str]) -> dict | None:
         "span_sha256": chunk.span_sha256, "content": chunk.text,
         "heading_ancestry": list(chunk.heading_ancestry),
         "title": next(iter(chunk.heading_ancestry), Path(chunk.source_path).stem),
-        "score": score, "bm25_score": score, "project": chunk.project,
+        "score": score, "bm25_score": score, "_signal_score": float(len(shared)), "project": chunk.project,
         "type": chunk.type, "authority": chunk.authority, "confidence": chunk.confidence,
         "status": chunk.status, "valid_from": chunk.valid_from, "valid_to": chunk.valid_to,
         "timestamp": (chunk.valid_from or "")[:10], "language": chunk.language,
@@ -4948,7 +5040,7 @@ def _breadcrumb_literal_rows(snapshot, terms, deadline, cancelled) -> list[dict]
 
 
 def _direct_breadcrumb_hits(
-    query, *, scope, limit, project, since, as_of, deadline, cancelled,
+    query, *, scope, limit, project, since, as_of, deadline, cancelled, include_unweighted=False,
 ) -> list[dict]:
     """Reuse complete-source verification and chunking under the caller's deadline."""
     from corpus_snapshot import collect_corpus
@@ -4962,7 +5054,7 @@ def _direct_breadcrumb_hits(
     rows = _breadcrumb_literal_rows(snapshot, _evidence_terms(query), deadline, cancelled)
     rows = apply_hard_filters(rows, project=project, since=since, as_of=as_of, scope=scope)
     rows.sort(key=lambda row: (-float(row["score"]), row["path"], row["candidate_id"]))
-    return rows[:max(limit * 3, limit)]
+    return _literal_signal_pool(rows, max(limit * 3, limit), include_unweighted)
 
 
 def _resolved_pages(

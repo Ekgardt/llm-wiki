@@ -2873,7 +2873,7 @@ def _filtered_hits(
     """Backend rows as candidate hits, with the caller's hard filters applied."""
     import search_memory
 
-    hits = [_backend_hit_from_legacy(row) for row in rows]
+    hits = _fusion_signal_hits(rows)
     return search_memory.apply_hard_filters(
         hits,
         project=filters.get("project"),
@@ -2881,6 +2881,28 @@ def _filtered_hits(
         as_of=filters.get("as_of"),
         scope=filters.get("scope", "all"),
     )
+
+
+def _fusion_signal_hit(row):
+    hit = _backend_hit_from_legacy(row)
+    if "_signal_score" not in row:
+        return hit
+    hit["score"] = float(row["_signal_score"])
+    for field in ("bm25_score", "vector_score"):
+        if field in hit:
+            hit[field] = hit["score"]
+    return hit
+
+
+def _fusion_signal_order(hit):
+    return -float(hit["score"]), str(hit["path"])
+
+
+def _fusion_signal_hits(rows):
+    hits = [_fusion_signal_hit(row) for row in rows]
+    if not any("_signal_score" in row for row in rows):
+        return hits
+    return sorted(hits, key=_fusion_signal_order)
 
 
 def _require_unchanged_generation(
@@ -3302,6 +3324,7 @@ def _dense_hits_or_none(
         project=filters["project"],
         since=filters["since"],
         as_of=filters["as_of"],
+        include_unweighted=True,
         **stop,
     )
     require_seal()
@@ -3330,6 +3353,7 @@ def _generation_lexical_hits(
         project=filters["project"],
         since=filters["since"],
         as_of=filters["as_of"],
+        include_unweighted=True,
         **stop,
     )
     _require_unchanged_generation(catalog, context, stop)
@@ -4994,6 +5018,7 @@ class _SearchRun:
             page_paths=self.page_paths,
             deadline=self.deadline,
             cancelled=self.cancelled,
+            include_unweighted=True,
         )
         self.legacy_fallback = _first_fallback_reason(rows, self.legacy_fallback)
         return _filtered_hits(rows, filters)
