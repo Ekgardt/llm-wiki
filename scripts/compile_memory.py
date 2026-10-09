@@ -2026,13 +2026,24 @@ def _tokenizer_identity(count_source: str, model: str | None) -> str:
     return "utf8-byte-estimate/v1"
 
 
-def _refresh_compile_batch(batch: CompileBatch, *, deadline: float = math.inf) -> CompileBatch:
+def _refresh_compile_batch(batch: CompileBatch, *, deadline: float = math.inf,
+                           retained_context: bool = False) -> CompileBatch:
+    refreshed = _fresh_compile_batch_inputs(batch)
+    candidates = _refreshed_batch_candidates(batch, deadline)
+    batches = _refreshed_context_batches(batch, refreshed, candidates, retained_context)
+    if len(batches) != 1 or batches[0].manifest != batch.manifest:
+        raise ValueError("compile batch changed while refreshing context")
+    _require_refresh_identity(batch, batches[0], candidates)
+    return batches[0]
+
+
+def _fresh_compile_batch_inputs(batch):
     context = snapshot_compile_inputs(())
     daily_sources = tuple(
         SourceSnapshot(item.logical_path, item.content, item.sha256)
         for item in batch.inputs.dailies
     )
-    refreshed = CompileInputs(
+    return CompileInputs(
         batch.inputs.dailies,
         tuple(
             sorted(
@@ -2043,14 +2054,26 @@ def _refresh_compile_batch(batch: CompileBatch, *, deadline: float = math.inf) -
         context.targets,
         context.vault_files,
     )
-    candidates = _refreshed_batch_candidates(batch, deadline)
-    batches = pack_compile_batches(refreshed, model=batch.planning_model,
-                                   budget=_packing_budget(batch.packing, batch.planning_model),
-                                   planning_candidates=candidates)
-    if len(batches) != 1 or batches[0].manifest != batch.manifest:
-        raise ValueError("compile batch changed while refreshing context")
-    _require_refresh_identity(batch, batches[0], candidates)
-    return batches[0]
+
+
+def _refreshed_context_batches(batch, refreshed, candidates, retained_context):
+    if retained_context:
+        return (_refresh_retained_context_batch(batch, refreshed, candidates),)
+    return pack_compile_batches(refreshed, model=batch.planning_model,
+        budget=_packing_budget(batch.packing, batch.planning_model), planning_candidates=candidates)
+
+
+def _refresh_retained_context_batch(batch, inputs, candidates):
+    _require_repair_context(batch, replace(batch, inputs=inputs))
+    measure = _batch_measure(inputs, batch.planning_model, None)
+    _attach_required_context(measure, inputs, candidates)
+    keys = {part.part_key for part in inputs.dailies}
+    context = _repair_context_paths(batch.inputs) | _required_context_paths(measure, keys)
+    return _compile_batch(inputs, keys,
+        _packing_budget(batch.packing, batch.planning_model), batch.planning_model, None,
+        optional_paths=context, journal_indexes=_packing_journal_indexes(measure),
+        partitions=_measure_partitions(measure, _measure_owns_inputs(measure, inputs)),
+        planning_candidates=candidates, required_paths=context)
 
 
 def _require_refresh_identity(previous, refreshed, candidates):
@@ -7582,7 +7605,7 @@ def _run_repair_children(children, args, options):
 
 def _run_repair_child(child, feedback, args, options):
     try:
-        refreshed = _refresh_compile_batch(child, deadline=options['deadline'])
+        refreshed = _refresh_compile_batch(child, deadline=options['deadline'], retained_context=True)
         _require_repair_context(child, refreshed)
     except Exception as error:  # noqa: BLE001 - a failed child cannot discard its independent sibling
         _require_compile_active(options['deadline'], options['cancelled'])
