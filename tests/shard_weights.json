@@ -1033,6 +1033,7 @@
   "test_wikilinks_tracked.py": 0.1,
   "test_windows_fixture_permissions.py": 0.01,
   "test_windows_handles_keep_their_width_and_their_error.py": 0.02,
+  "test_windows_hook_acl_time_is_observed_without_changing_capture.py": 0.0,
   "test_windows_workspace.py": 0.25,
   "test_work_does_not_count_a_capture_it_cannot_claim.py": 2.71,
   "test_working_before_the_claims.py": 0.06,
