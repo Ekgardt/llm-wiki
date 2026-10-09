@@ -11,3 +11,9 @@ Actual AST/Lizard analysis of all three observer functions gives CCN 2, zero if 
 This diagnostic is retained until actual Windows command measurements establish or refute the candidate cause and an appropriate regression proves the correction. Remove it after that evidence is preserved and permanent regression coverage is installed; it is not a new product feature. The macOS EBADF's exact cause also remains unproven. Neither failure may be retired merely because a subsequent run is green.
 
 Source: `tests/test_windows_hook_acl_time_is_observed_without_changing_capture.py`; unchanged `tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py`; `scripts/integration_adapter.py::_ensure_capture_intent_directories`; `scripts/markdown_transaction.py::_run_acl_command`; original CI job 113964026387; private observer complexity report.
+
+## Actual Windows evidence and observer correction
+
+CI 37979502512 completed successfully with all 58 jobs on commit ecab0151. The observer measured host ingestion of 1.063/1.078 seconds on Python 3.10, 0.704/0.687 on 3.12, and 0.630/0.684 on 3.14 for prompt/post-tool respectively. Each host interval contained 34 ACL commands, taking 0.172–0.420 seconds in total. These passing measurements do not explain the earlier 8.469-second failure. They refute a claim that the command count alone proves the historical cause.
+
+The first observer omitted the original module's `shipped_append_budgets` mark. Calling a test function directly does not inherit its module marks; the autouse fixture consequently selected its content-test append budgets. The observer now carries the same mark as the original. The original test, production budgets and five-second assertion are unchanged. The measurements above remain historical diagnostic evidence with that fixture limitation, not strict qualification of the corrected observer.

@@ -11,7 +11,10 @@ from tests.test_a_prompt_checkpoint_does_not_outwait_its_host import (
     test_capture_keeps_its_checkpoint_pending_without_waiting_past_host as original_capture,
 )
 
-pytestmark = pytest.mark.skipif(os.name != "nt", reason="actual Windows ACL command timing")
+pytestmark = [
+    pytest.mark.shipped_append_budgets,
+    pytest.mark.skipif(os.name != "nt", reason="actual Windows ACL command timing"),
+]
 
 
 def _observed_acl(command, *, original, observations, phase):
