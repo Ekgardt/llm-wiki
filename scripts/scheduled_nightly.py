@@ -523,11 +523,8 @@ def _run_steps(run_step, log, steps: list[_Step]) -> int:
 
 
 def _compile_running() -> bool:
-    """Best effort: an unreadable status counts as finished, as before."""
-    try:
-        return bool(maybe_compile.status()["compile_running"])
-    except Exception:  # noqa: BLE001
-        return False
+    """Unreadable ownership cannot establish that a compiler finished."""
+    return bool(maybe_compile.status()["compile_running"])
 
 
 def _safe_state() -> dict:
@@ -794,6 +791,8 @@ def _nightly_steps(run_step, log, _ownership: OwnerLease | None = None) -> int:
 
     # The compile step must not be skipped just because a hook-triggered one runs.
     _wait_for_compile_idle(log)
+    if _defer_entity_writes_for_running_compile(log):
+        return failures
     before = _last_compile_finished()
     started_before = _last_compile_started()
     # Finish own entity writes before compile freezes model-input targets.
@@ -810,6 +809,15 @@ def _nightly_steps(run_step, log, _ownership: OwnerLease | None = None) -> int:
         return failures
     failures += _report_compile_outcome(log, before, started_before) + _report_deferred_loss(log)
     return failures + _post_compile_pass(run_step, log)
+
+
+def _defer_entity_writes_for_running_compile(log) -> bool:
+    if not _compile_running():
+        return False
+    log("WARNING: compile still running after idle wait — entity writes and compile deferred to the next pass")
+    log("  compile outcome is unknown; the idle wait does not establish that its owner finished")
+    _remember_deferred_compile(log)
+    return True
 
 
 DEFERRED_COMPILE_KEY = "nightly_deferred_compile"
