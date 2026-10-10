@@ -3,6 +3,9 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import compile_memory as compiler
+import pytest
+
+from tests.test_compile_binds_the_protected_source_view import _legacy_packet
 
 
 class ObservedEntries(tuple):
@@ -48,3 +51,57 @@ def test_replacement_with_the_same_source_key_is_a_different_metadata_input():
         assert compiler._part_entry_ids(changed) == ['replacement']
         assert compiler._part_entry_ids(part) == ['selected']
     assert entries.scans == 1
+
+
+def _actual_parts(tmp_path, monkeypatch):
+    inputs = _legacy_packet(tmp_path, monkeypatch, ['A complete durable fact.'])
+    daily = inputs.dailies[0]
+    part = compiler._daily_parts(daily.logical_path, daily.content)[0]
+    return replace(inputs, dailies=(part,))
+
+
+def _observed_overlap_scans(monkeypatch):
+    calls = []
+    original = compiler._uncached_part_entry_ids
+
+    def observed(part):
+        calls.append(part)
+        return original(part)
+
+    monkeypatch.setattr(compiler, '_uncached_part_entry_ids', observed)
+    return calls
+
+
+def _byte_count(measure, inputs):
+    return measure({part.part_key for part in inputs.dailies})
+
+
+def _context_selection(measure, inputs):
+    paths = {part.part_key for part in inputs.dailies}
+    return measure.fitting_context(paths, (), compiler._compile_budget(None))
+
+
+def _token_count(measure, inputs):
+    return compiler._measure_token_subset(measure, inputs)
+
+
+def _token_measure(inputs):
+    return compiler._TokenBatchMeasure(inputs, None, {})
+
+
+@pytest.mark.parametrize('route', ['bytes', 'context', 'tokens'])
+def test_layout_probe_uses_the_measure_owned_entry_overlap(tmp_path, monkeypatch, route):
+    inputs = _actual_parts(tmp_path, monkeypatch)
+    scans = _observed_overlap_scans(monkeypatch)
+    factories = {'bytes': compiler._ByteBatchMeasure,
+                 'context': compiler._ByteBatchMeasure, 'tokens': _token_measure}
+    calls = {'bytes': _byte_count, 'context': _context_selection, 'tokens': _token_count}
+    measure = factories[route](inputs)
+    scans.clear()
+
+    first = calls[route](measure, inputs)
+    assert calls[route](measure, inputs) == first
+    assert len(scans) == 1
+    assert compiler._SOURCE_CHOICE_BINDINGS.get() is None
+    assert compiler._part_entry_ids(inputs.dailies[0]) == ['13:51:26']
+    assert len(scans) == 2

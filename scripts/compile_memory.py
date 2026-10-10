@@ -37,7 +37,7 @@ import sys
 import time
 import weakref
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
@@ -112,6 +112,7 @@ from markdown_transaction import (  # noqa: E402
     MarkdownChange,
     MarkdownCoordinator,
     TransactionFailure,
+    _writer_wait_window,
     active_or_legacy_coordinator,
 )
 from memory_queue import active_or_legacy_memory_queue  # noqa: E402
@@ -1675,8 +1676,14 @@ def _measure_choice_resolution(measure):
         _SOURCE_CHOICE_PARSING.reset(token)
 
 
+def _measured_choice_layout_needed(measure, selected, sources):
+    """The sizing probe shares its measure's immutable entry-overlap cache."""
+    with _measure_choice_resolution(measure):
+        return _choice_layout_needed(selected, sources)
+
+
 def _measure_token_subset(measure, subset):
-    if not _choice_layout_needed(subset.dailies, subset.sources):
+    if not _measured_choice_layout_needed(measure, subset.dailies, subset.sources):
         return _draft_prompt_count(subset, measure.model, measure.adapters)
     with _measure_choice_resolution(measure):
         return _draft_prompt_count(subset, measure.model, measure.adapters)
@@ -1719,7 +1726,7 @@ class _ByteBatchMeasure:
         selected = _selected_buckets(self.dailies, paths)
         sources = self._projection(selected)
         context = _selected_buckets(self.context, optional_paths)
-        if _choice_layout_needed(selected, sources):
+        if _measured_choice_layout_needed(self, selected, sources):
             with _measure_choice_resolution(self):
                 return _choice_measure_bytes(self.inputs, selected, sources, context)
         frames = (*sources, *context)
@@ -1753,7 +1760,7 @@ class _ByteBatchMeasure:
     def fitting_context(self, paths, optional_sources, budget):
         selected = _selected_buckets(self.dailies, paths)
         sources = self._projection(selected)
-        if _choice_layout_needed(selected, sources) or _required_context_paths(self, paths):
+        if _measured_choice_layout_needed(self, selected, sources) or _required_context_paths(self, paths):
             return _fitting_measured_context(paths, optional_sources, budget, self)
         selection = _ByteContextSelection(self, paths, budget)
         for source in optional_sources:
@@ -5915,6 +5922,27 @@ def apply_compile_plan(
     )
 
 
+@contextmanager
+def _compile_writer_gate(coordinator, owner, deadline, cancelled):
+    """Retry only admission, within the caller's existing whole-call budget."""
+    with ExitStack() as stack:
+        _enter_compile_writer_gate(stack, coordinator, owner, deadline, cancelled)
+        _require_compile_active(deadline, cancelled)
+        yield
+
+
+def _enter_compile_writer_gate(stack, coordinator, owner, deadline, cancelled):
+    while True:
+        _require_compile_active(deadline, cancelled)
+        wait = min(_writer_wait_window(None), max(0.0, deadline - time.monotonic()))
+        try:
+            return stack.enter_context(coordinator.writer_gate(owner=owner, wait_seconds=wait))
+        except TimeoutError as exc:
+            if str(exc) != "timed out waiting for the global Markdown writer gate":
+                raise
+            print("compile_memory: writer admission busy; retaining the validated plan and waiting within the compile deadline", file=sys.stderr)
+
+
 def _published_once(
     publication: _ApplyPlan,
     coordinator: MarkdownCoordinator,
@@ -5922,12 +5950,12 @@ def _published_once(
     deadline: float,
     cancelled: Callable[[], bool] | None,
 ) -> CompileApplyResult:
-    with coordinator.writer_gate(owner=owner):
+    with _compile_writer_gate(coordinator, owner, deadline, cancelled):
         committed = publication.completed()
     if committed is not None:
         return committed
     publication.assess_claims()
-    with coordinator.writer_gate(owner=owner):
+    with _compile_writer_gate(coordinator, owner, deadline, cancelled):
         coordinator.recover(owner=owner, deadline=deadline, cancelled=cancelled)
         return publication.publish()
 
