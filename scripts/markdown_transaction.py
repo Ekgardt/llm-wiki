@@ -4729,6 +4729,18 @@ class _AppendStall:
             )
 
 
+def _require_append_retry_preconditions(
+    coordinator: MarkdownCoordinator,
+    extra_preconditions: Mapping[str, object] | None,
+) -> None:
+    """Retry a fresh target CAS only while the caller's claim still holds."""
+    if not extra_preconditions:
+        return
+    expected = coordinator._validate_preconditions(extra_preconditions)
+    with coordinator._connect() as database:
+        coordinator._check_preconditions(expected, {}, database=database)
+
+
 def _append_until_committed(
     coordinator: MarkdownCoordinator,
     operation_id: str,
@@ -4764,6 +4776,7 @@ def _append_until_committed(
         if isinstance(outcome, TransactionRecord):
             return outcome
         if outcome == "advance":
+            _require_append_retry_preconditions(coordinator, extra_preconditions)
             parent = _refused_parent(coordinator, candidate_id) or parent
             attempt += 1
             stall.progressed()
