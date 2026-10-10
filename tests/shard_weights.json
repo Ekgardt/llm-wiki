@@ -377,6 +377,7 @@
   "test_an_update_says_what_it_did_not_bring_into_force.py": 7.63,
   "test_answer_budget.py": 0.03,
   "test_answer_cost.py": 0.06,
+  "test_append_lost_capture_precondition.py": 2.65,
   "test_append_race_lineage.py": 102.04,
   "test_architecture_depth_argument.py": 0.02,
   "test_archive_daily_bagit.py": 249.33,
