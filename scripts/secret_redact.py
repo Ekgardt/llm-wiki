@@ -202,23 +202,14 @@ def _redact_command_passwords(text: str) -> str:
 
 _COMMAND_LINE_CALLBACK = _command_line
 _COMMAND_LINE_CODE = _command_line.__code__
-_COMMAND_LINE_RULESET_SHA256 = "dfd6db0b86559355283ca82d45e0c4ec058afe783610f88b8888a15d779670e0"
+_COMMAND_LINE_PATTERNS = (_PASSWORD_COMMAND, _ATTACHED_PASSWORD, _ANY_PASSWORD)
 
 
 def _command_rules_are_original():
+    patterns = (_PASSWORD_COMMAND, _ATTACHED_PASSWORD, _ANY_PASSWORD)
     return (_command_line is _COMMAND_LINE_CALLBACK
             and _command_line.__code__ is _COMMAND_LINE_CODE
-            and _command_rule_fingerprint() == _COMMAND_LINE_RULESET_SHA256)
-
-
-def _command_rule_fingerprint():
-    try:
-        rules = [(pattern.pattern, pattern.flags) for pattern in
-                 (_PASSWORD_COMMAND, _ATTACHED_PASSWORD, _ANY_PASSWORD)]
-        encoded = json.dumps(rules, separators=(",", ":")).encode()
-    except (AttributeError, TypeError, ValueError):
-        return None
-    return hashlib.sha256(encoded).hexdigest()
+            and all(current is original for current, original in zip(patterns, _COMMAND_LINE_PATTERNS)))
 
 
 def _cached_command_line(line, cache):

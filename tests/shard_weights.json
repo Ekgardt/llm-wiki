@@ -525,7 +525,7 @@
   "test_compile_related_links_share_the_response_budget.py": 0.32,
   "test_compile_repair_feedback_cannot_use_an_old_cache.py": 0.04,
   "test_compile_reuses_raw_row_positions_within_one_layout.py": 3.13,
-  "test_compile_sizing_reuses_only_pure_command_lines.py": 0.06,
+  "test_compile_sizing_reuses_only_pure_command_lines.py": 0.03,
   "test_compile_sizing_reuses_only_pure_line_redaction.py": 0.01,
   "test_compile_source_address_groups_preserve_every_row.py": 0.01,
   "test_compile_source_address_runs_are_lossless.py": 11.32,

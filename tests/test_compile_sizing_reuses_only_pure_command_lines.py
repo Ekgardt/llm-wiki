@@ -94,6 +94,23 @@ def test_a_changed_broken_rule_keeps_its_original_error(monkeypatch):
             redactor.redact_secrets(text)
 
 
+def test_a_replaced_pattern_cannot_claim_purity_through_copied_metadata(monkeypatch):
+    original = redactor._PASSWORD_COMMAND
+
+    class ChangedPattern:
+        pattern = original.pattern
+        flags = original.flags
+
+        def search(self, line):
+            return original.search('mysql')
+
+    text = 'other -ppasswordvalue\n'
+    with redactor.line_redaction_scope({}):
+        assert redactor.redact_secrets(text) == text
+        monkeypatch.setattr(redactor, '_PASSWORD_COMMAND', ChangedPattern())
+        assert redactor.redact_secrets(text) == 'other -p[REDACTED]\n'
+
+
 def test_policy_changes_still_apply_to_reused_command_lines():
     from model_dlp import DLPPolicy, redact_for_transport
 
