@@ -190,6 +190,15 @@ def test_source_scan_fallback_honors_expired_deadline(fake_graph):
             )
 
 
+@pytest.mark.parametrize("cached", [None, {}, {"seed.md": ["neighbor.md"]}])
+def test_expired_deadline_does_not_enter_graph_reader(fake_graph, cached):
+    fake_graph._link_graph_cache = cached
+    with patch.object(fake_graph, "_read_active_link_graph") as read:
+        with pytest.raises(TimeoutError, match="deadline"):
+            fake_graph.get_link_graph(deadline=time.monotonic() - 1)
+    read.assert_not_called()
+
+
 @pytest.mark.parametrize("bind_generation", [True, False], ids=("other-repository", "legacy-unbound"))
 def test_shared_state_generation_for_another_repository_uses_honest_fallback(
     fake_graph, tmp_path, monkeypatch, bind_generation

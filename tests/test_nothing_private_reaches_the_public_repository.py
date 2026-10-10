@@ -183,6 +183,33 @@ def _named_slugs(text: str, slugs: set[str]) -> set[str]:
     }
 
 
+def _ordinary_plural(slug: str, vocabulary: set[str]) -> bool:
+    """A plural of a word already used in public paths is ambiguous in prose.
+
+    It still counts in an explicit project reference; it is never globally
+    allowlisted. This distinguishes ordinary reports from a project named reports.
+    """
+    return slug.endswith("s") and slug[:-1].casefold() in vocabulary
+
+
+def _explicit_project_reference(text: str, slug: str) -> bool:
+    name = re.escape(slug)
+    patterns = (
+        rf"knowledge/projects/{name}(?:/|\b)",
+        rf"\bproject[\s:=]+[`\"']?{name}(?![\w-])",
+        rf"[`\"']{name}[`\"']\s+project\b",
+    )
+    return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
+
+
+def _project_mentions(text: str, slugs: set[str], vocabulary: set[str]) -> set[str]:
+    named = _named_slugs(text, slugs)
+    return {
+        slug for slug in named
+        if not _ordinary_plural(slug, vocabulary) or _explicit_project_reference(text, slug)
+    }
+
+
 # The same private string in its other spelling. A code-navigation project is
 # keyed by an absolute path with the separators turned into hyphens, so the home
 # directory arrives as `home-<account>-<vault>` and the account name travels into
@@ -240,10 +267,17 @@ def test_no_tracked_file_names_another_project() -> None:
     developer document, five research notes, four source comments and three tests.
     """
     slugs = _other_project_slugs()
-
-    offenders = _offenders(lambda text: _named_slugs(text, slugs))
+    vocabulary = _repository_vocabulary()
+    offenders = _offenders(lambda text: _project_mentions(text, slugs, vocabulary))
 
     assert not offenders, f"tracked files name other projects: {offenders}"
+
+
+@pytest.mark.parametrize("slug, singular", [("reports", "report"), ("workers", "worker")])
+def test_a_public_plural_needs_project_context(slug, singular):
+    assert _project_mentions(f"the command writes {slug}", {slug}, {singular}) == set()
+    assert _project_mentions(f"knowledge/projects/{slug}/state.md", {slug}, {singular}) == {slug}
+    assert _project_mentions(f'the "{slug}" project', {slug}, {singular}) == {slug}
 
 
 def test_no_tracked_file_carries_a_home_path_or_an_address() -> None:

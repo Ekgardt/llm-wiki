@@ -34,13 +34,17 @@ def test_a_malformed_hook_input_is_a_recorded_loss(trail: Path) -> None:
     assert (parsed, _kinds(trail)) == ([{}, {}, {}], ["tool_input", "tool_input"])
 
 
-def test_a_prompt_count_that_cannot_be_kept_is_recorded(trail: Path, monkeypatch) -> None:
+def test_a_prompt_counter_failure_reaches_the_accepted_followup_reporter(trail: Path, monkeypatch) -> None:
     def refuse(*_args, **_kwargs):
         raise TimeoutError("state lock busy")
 
     monkeypatch.setattr(user_prompt_capture, "update_state", refuse)
 
-    assert (user_prompt_capture._increment_prompt_count("s1", "demo"), _kinds(trail)) == (0, ["prompt_counter"])
+    with pytest.raises(TimeoutError, match="state lock busy"):
+        user_prompt_capture._increment_prompt_count("s1", "demo")
+    # Accepted content is already durable. The caller reports the auxiliary
+    # failure; counting it as a lost event contradicts durable acceptance.
+    assert not trail.exists()
 
 
 def _hook_errors(state_root: Path) -> list[str]:

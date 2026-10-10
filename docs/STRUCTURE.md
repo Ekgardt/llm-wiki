@@ -31,6 +31,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── pyright_profile.py            pinned identity discovery and qualification
 │   ├── install_pyright.py            explicit managed-package installer
 │   ├── install_control.py            resumable install/update/rollback ownership
+│   ├── install_takeover.py           keeps and retires copies of replaced owned files, plans drop-ins
 │   ├── integration_hook_config.py    bounded host hook-config projections
 │   ├── pyright_session.py            Pyright readiness, sync, and semantic provider
 │   ├── workspace_revision.py         bounded pre/post freshness proofs
@@ -131,6 +132,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   │   ├── transaction.json            resumable install/upgrade/rollback state
 │   │   ├── install.lock                process-lifetime advisory writer lock
 │   │   ├── preimages/                  verified owned-fragment/value preimages
+│   │   ├── displaced/                  readable copies of owned files an update replaced
 │   │   └── scheduler/                  non-secret native scheduler definitions
 │   └── state.json.lock
 │
@@ -163,6 +165,18 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 | `$LLM_WIKI_DLP_POLICY` | Unset | Optional absolute path to an external bounded-literal/fingerprint policy. Invalid or digest-mismatched required policy fails closed. |
 | `$LLM_WIKI_<SECTION>_<KEY>` | Unset | One run's override of a registered limit in `scripts/settings.py` (for example `LLM_WIKI_CORPUS_MAX_FILES`); beats `llm-wiki.toml`. An invalid value stops the caller with its name. |
 
+### SQLite locking probe (approved 2026-10-01)
+
+The temporary two-connection SQLite locking probe belongs in the existing
+`run/` directory of the configured runtime root, on the same filesystem.
+It must not create temporary files at the vault root: doing so changes the
+root identity while the corpus reader verifies its sealed ancestor chain.
+Runtime initialization creates `run/` before probing. A read-only health check
+with no `run/` reports the probe unavailable and creates no directory.
+Unsafe linked/reparse paths or a different filesystem are refused. The probe
+keeps actual SQLite locking verification and removes only its own files.
+No persistent database, runtime directory, setting, daemon, or tool is added.
+
 ### Operator limits (`llm-wiki.toml`, 2026-09-27)
 
 Limits that depend on the vault and the machine are declared once in
@@ -180,6 +194,23 @@ refusal at one names the setting that raises it. Decision and sources:
 `docs/research/2026-09-27-every-limit-states-its-reason.md`; inventory:
 `docs/LIMITS-2026-09-27.md`.
 
+### Generation maintenance windows (decision approved 2026-10-08)
+
+The existing settings registry exposes `generation.nightly_seconds` and
+`generation.post_compile_seconds`, including its standard environment overrides
+`LLM_WIKI_GENERATION_NIGHTLY_SECONDS` and
+`LLM_WIKI_GENERATION_POST_COMPILE_SECONDS`. The bounded builder keeps complete
+sources, vectors, validation and catalog CAS activation. Windows task and Linux
+service definitions must outlast the configured pass; persisted definitions keep
+their original values for rollback. Values are qualified from a complete measured
+pass and reconsidered after corpus growth or machine changes. No runtime root,
+directory, database, daemon or MCP tool is added. The defaults are 2131 seconds,
+an estimate from the 2026-10-08 full-build attempt plus independently measured
+validation and collection variation; the complete installed build remains
+unqualified after a kernel OOM. Installation and full-cycle qualification are
+separate checks, and the windows must be remeasured after resource changes.
+Decision: `knowledge/notes/generation-measured-time-budget-decision-20261008.md`.
+
 ## External integration configuration preimages
 
 Claude and Codex configuration merges may create byte-exact sibling preimages
@@ -191,12 +222,12 @@ back. A no-op merge creates no backup.
 
 Only files with the destination's exact `.bak-llm-wiki-` prefix are owned by this
 retention contract. After changed configuration is published and verified, each
-integration retains at most 10 backups, no backup older than 90 days when a newer
+integration retains no backup older than the configured retention age (90 days by default) when a newer
 restore point exists, and at most 100 MiB in aggregate when older files can be
 removed. The newest verified or sole preimage is never deleted. These files preserve
 bytes only, not owner, ACL, alternate streams, or complete filesystem metadata. They
 are not runtime state and do not replace private-vault backup/restore. See
-`knowledge/notes/integration-config-backup-retention-decision.md`.
+`knowledge/notes/integration-config-backup-retention-decision.md`. The redundant ten-copy cap was removed on 2026-09-30; see `docs/research/2026-09-30-backup-retention-uses-age-and-bytes.md`.
 
 ## Approved audit-closure boundary
 
@@ -287,6 +318,32 @@ is retained for uninstall; the prior installed projection supports only the late
 committed-update rollback. Restoration requires the exact expected installed value and
 never overwrites a concurrent user edit.
 
+Files the installer owns whole -- the systemd units, the launchd plists, and the OpenCode
+plugin -- are replaced by every install or update even when they were changed outside
+it (2026-09-28). The changed version becomes the transaction's rollback point, and
+`install_takeover.py` first keeps a readable copy under
+`run/install/displaced/<time>-<resource-id>/` and reports what the new version does not
+carry. A line added to a systemd unit moves to `<unit>.d/50-local.conf`; a line that
+replaced one of ours with the same key is reported instead, because in a drop-in it would
+add to ours, and an existing `50-local.conf` is never planned or touched. The drop-in is
+a released resource of that update's transaction (`systemd_drop_in`): written after the
+units, each write reloading systemd, reverted with the transaction on failure, kept out
+of the manifest, and removed only by the `rollback` of that same generation, first, before
+the unit is restored. launchd has no drop-ins, so its copy and the report keep the edit.
+Copies older than `retention.config_backup_days` go on the next install unless their
+digest is referenced by the active manifest or transaction. Shared files (the profile block, the cron block, the Claude and
+Codex hook files, Windows variables and tasks) keep the fragment rules: a change outside
+the installer is refused with the resource, its location, and `--adopt <resource-id>`
+where it can be adopted. A transaction matches resources by id, kind and location, so a
+rerun that drops resources or moves one (a profile in another file) is one update: the
+new set is written and verified first, what it no longer owns goes back to its origin
+last, and a failure reverts both; `rollback` restores the previous set first and takes
+the new one back after. A set change that involves a cron entry or a Windows task, which
+cannot be read back, is still taken back before its replacement and restored if that
+fails; the installer says so, and a refusal names the entry and the uninstall command.
+See `docs/research/2026-09-28-an-update-replaces-what-it-owns.md` and
+`docs/research/2026-09-28-what-an-update-created-its-rollback-takes-back.md`.
+
 `manifest.json`, `transaction.json`, preimages, and scheduler definitions are bounded,
 digest-verified, and durably published on the supported local-filesystem boundary.
 Whole profiles, whole crontabs, whole user hook files, unrelated task definitions,
@@ -322,12 +379,83 @@ decision record, and deterministic transaction adoption before any provider retr
 Exact replay uses stable source event identity plus complete redacted-input digest;
 an identity collision with different bytes fails closed.
 
-Compile authority is `compile-receipt/v3`. V3 receipt filenames are
+### Durable breadcrumb repair contract (2026-09-29; installed 2026-09-30)
+
+For this repair the owner delegated decisions to the agent under the nine mandatory
+development laws. The selected contract is recorded privately in
+`knowledge/notes/durable-breadcrumb-delivery-decision.md`; research and qualification
+requirements are in `docs/research/2026-09-29-breadcrumb-durability-proposal.md`.
+The storage, deterministic worker, terminal/purge proof and recovery components
+are implemented. Host adapters and compatibility hook scripts publish through the
+common durable ingress before follow-ups. The running vault adopted these producers
+on 2026-09-30 under the existing quiescence fence, after the full candidate suite
+passed. A real Codex tool event passed complete terminal/source/journal verification.
+The qualified retrieval and answer-cost evidence, and its limits, are recorded in
+`docs/research/2026-09-30-durable-capture-installation.md`.
+
+Prompt/tool events use distinct versioned manifests and integrity-linked parts
+inside the existing `run/capture-intents/` layout. The manifest becomes ready only
+after complete durable publication. Existing v1 session readers remain supported.
+The worker processes breadcrumbs deterministically without a model. Before terminal
+completion, it publishes the complete redacted event as immutable linked raw-source
+Markdown inside the existing private `knowledge/raw/sessions/<date>/` tree and
+commits the journal entry for the original occurrence day. A short journal reference
+cannot authorize deletion of the only complete copy in runtime. Terminal proof and
+purge validation bind permanent evidence, the input and the journal transaction.
+Parts obey existing encoded-record and Markdown-reader contracts; no new logical
+event-size or part-count ceiling is introduced. Readers, recovery, diagnostics and
+cleanup must be qualified before producer cutover under the existing maintenance
+fence. No new runtime root, database, daemon, MCP tool or dependency is introduced.
+
+Both worker and nightly recovery discover complete pending manifests before
+database indexing and preserve supported v1 session dispatch. Indexed recovery
+advances past failed rows without a failed-row prefix cap. Read-only diagnostics
+verify full linked evidence, distinguish complete pending from incomplete
+publication, and report inaccessible directories. Inspection observes its caller
+deadline and releases each SQLite metadata read before checking source files.
+The replaced direct-append and state-based content/time suppression functions are
+removed from the installed product, including the now-unused capture_operation module.
+The two hook script entrypoints and historical --background/--delegate arguments
+remain compatible because existing installed host configurations still name them.
+Supported v1 session readers remain necessary for retained session records/tasks.
+
+Only complete verified breadcrumb heads and their integrity-linked parts join the
+existing session source kind in the corpus; ordinary session dumps and orphan
+parts remain excluded. Search and its no-generation fallback return physical
+chunks with verifiable source hashes and byte spans. Reranker admission uses
+semantic scores when available; provenance still weighs the final model score.
+Mixed primary/event pools use sequential scoring with separate cost observations
+and the same semaphore and caller deadline. No output quota or larger default
+request budget is introduced. Three paired answer tasks reached all new facts in
+one call each; a separately tested smaller caller budget retained those answers.
+This small fixture does not qualify a globally smaller answer window or prove
+billed token savings.
+
+Historical path-bound compile authority is `compile-receipt/v3`. V3 receipt filenames are
 `knowledge/daily/receipts/v3-<source-identity-sha256>.md`; source identity hashes
 canonical logical path plus content digest. Every receipt binds a sorted batch
 manifest and one validated disposition to each source. Historical v2 digest-only
 receipts remain readable as evidence but cannot authorize automatic skip or archive
 under the path-bound v3 contract.
+
+Installed source-context receipt contract (approved 2026-10-03, installed
+2026-10-04): `compile-receipt/v4` additionally binds the
+original daily SHA-256, its byte count, and the absolute selected part bounds.
+The v4 source identity hashes those context fields with logical path and part
+digest; `knowledge/daily/receipts/v4-<source-identity-sha256>.md` remains create-only.
+V3 schema, identity, filenames and retained historical authority stay unchanged.
+A context-aware skip verifies committed authority and the exact saved-length
+prefix of the current daily. Benign appends preserve unchanged-part completion;
+changed prefixes and legacy records without context are explicitly unverified.
+Citation syntax and physical block/span validation remain unchanged. Archive
+and Doctor readers dispatch by receipt version; old consumers are accounted
+for before writer activation or source retirement. No env contract, runtime
+root, database, daemon or MCP tool is added. See the approved proposal in
+`docs/research/2026-10-03-source-context-receipt-proposal.md` and the owner's
+private `knowledge/notes/compile-source-context-receipt-decision.md` and
+`knowledge/notes/compile-source-context-receipt-installation-decision.md`.
+Installation qualification does not establish completion of the later native
+capture, full nightly, or complete resource-limit audit steps.
 
 `queue-task/v3` describes production serialization. `input_hash` is SHA-256 over
 the exact canonical stored payload. It is recomputed before every insertion, lease,
@@ -338,6 +466,14 @@ Capture, project/Markdown writers, queue workers, compilers, Doctor, nightly, we
 and LSP use `maintenance_owners` in `markdown-transactions-v3.sqlite3` as the
 canonical admission registry. Queue workers project the same token and epoch into
 `queue_ownership` in `queue-v3.sqlite3`; the active database count remains two.
+Normal admission verifies immutable adoption evidence, both active file identities,
+complete schemas, and operational connection settings in read snapshots; it does not
+certify every retained transaction before each event. Mutation paths still verify
+record hashes, leases and fencing epochs. Complete adoption/doctor/candidate/backup
+certification retains whole-file integrity and foreign-key checks and the coordinator's
+operation and cross-table invariants. The admission cache tracks both database files;
+a replacement invalidates the cached verdict. No directory or database is added.
+See `docs/research/2026-10-02-capture-admission-is-not-history-certification.md`.
 Expiry permits takeover only with positive process-death proof; unknown liveness
 blocks.
 Since 2026-09-10 the nightly and weekly passes take the `nightly`/`weekly`
@@ -353,7 +489,9 @@ migration removes them. Explicit offline repair retains the exact v2 database by
 replacements, and puts immutable JSON tombstones at the legacy active paths. Partial
 adoption disables v3 mutation and requires the vault to remain offline. After complete
 adoption, known v2 queue and transaction clients cannot open active v3 state. Doctor
-reports a protected quiescent snapshot only after complete adoption; before that it
+reports a protected quiescent snapshot only after complete adoption; a normal doctor
+owner admits capture while a before/after comparison of canonical admission epochs and
+physical database identity rejects intervening activity. Before complete adoption it
 reports an unconditional legacy-protocol blocker. The snapshot is not a durable deletion permit;
 `run/` deletion remains an offline operator action.
 
@@ -389,6 +527,20 @@ membership, hashes, collection policy, and collector/extractor identity. The
 Evidence Graph and FTS artifacts are both built from that exact immutable
 `CorpusSnapshot`; live membership and hashes are recaptured immediately before
 publication.
+
+The owner approved sequential derived-generation processing on 2026-10-04.
+The implementation is pending qualification. The internal chunk sequence retains
+its length, stable order, indexed access, fields, hashes and physical spans while
+deriving chunks from the captured immutable sources without retaining the complete
+object corpus. FTS writing and validation use successive rows; vector construction
+uses the existing temporary `.npy` artifact through memory mapping, with successive
+metadata processing. Consumers must not rematerialize the complete chunk corpus.
+This changes no persistent database, directory, runtime root, environment contract,
+generation schema, dependency or MCP tool. Source rechecks, fenced ownership,
+deadlines, artifact integrity and complete-or-absent activation remain mandatory.
+The unsupported global chunk ceiling is replaced only after memory, compatibility,
+failure and real-corpus qualification; this approval does not remove unrelated
+resource contracts. See the private `streamed-derived-generations-decision.md`.
 
 `search.sqlite3` also carries the **ledger of things and events** (approved
 2026-09-22): one table, `ledger`, whose rows are posted by the nightly fact-keys
@@ -565,14 +717,48 @@ or nonzero active state remains fail-closed.
   MIT notices.
 - `scripts/schemas/` — closed JSON Schemas for transaction, project checkpoint,
   queue task, compile plan/receipt, archive manifest, and claim records.
+  On 2026-10-04 the owner approved a separate `claim-ledger-v2.json` for
+  `claim-ledger/v2` and `claim/v2`. The compatible readers and native compiler
+  are installed; controlled publication/consumer tests and one actual native
+  compile-and-retrieve cycle in the supported base profile are qualified.
+  Installed hybrid retrieval, whole-day compilation and full nightly
+  qualification remain pending.
+  Historical v1 schemas and records remain strict. V2 preserves the complete
+  physical citation, its source range and hash; a transient native logical-line
+  selector is verified against the canonical capture before that citation is
+  bound. All source parts covering the container must participate together.
+  Admission uses existing full-source and full-page byte budgets, without a new
+  literal-length cap. Readers must support both versions before v2 publication;
+  unknown versions refuse explicitly. This adds no runtime root, database,
+  environment variable, daemon or MCP tool. Historical readers remain necessary
+  while retained pages, archives, undo or live consumers require v1.
 - `skills/` — 9 SKILL.md files (knowledge-compile, knowledge-lookup,
   knowledge-review, knowledge-qa-file-back, contradict-check,
   crystallize-playbook, bridge-promote-insight, session-memory-compile,
   session-memory-review).
-- `rules/` — 3 rule files (wiki-files, raw-files, output-files).
+- `rules/` — 4 rule files (wiki-files, raw-files, output-files, development-laws).
+  `development-laws.md` preserves the user's nine mandatory development laws verbatim;
+  both `AGENTS.md` and `CLAUDE.md` require reading and following them.
 - `integrations/` — thin host wiring: claude-code (settings.json) and codex
   (hooks.json). MCP is the common read/action interface.
   Obsidian is an optional Markdown viewer and requires no bundled integration.
+  The owner approved the following launch contract on 2026-10-07; implementation
+  and platform qualification remain pending. Own Codex hooks and MCP commands
+  may carry the existing nonsecret installed provider bundle through a fixed
+  same-process Python bootstrap in the existing uv invocation. Presence of any
+  existing provider key, including an empty value, preserves the entire explicit
+  host environment; otherwise the complete installed bundle applies. Malformed
+  payloads refuse before target execution. The original script, arguments,
+  imports, stdin, output and exit behavior must be qualified. No new environment
+  key, runtime file, storage schema, process or global Codex setting is added.
+  Exact command/root ownership, foreign and disabled registrations, preimages,
+  CAS, uninstall and rollback drift guards remain required. MCP registration
+  remains outside installer transaction ownership. Doctor's expected bundle
+  requires the complete verified manifest/transaction/root/resource/desired
+  snapshot chain and stable read identities; an old manifest without a bundle
+  cannot establish the expected model. Changed native hook commands require
+  normal user trust confirmation; trusted hashes are never written automatically.
+  See `knowledge/notes/codex-installed-provider-bootstrap-decision.md`.
 - `benchmark/` — retrieval and frozen contradiction corpora/runners, including
   `run_benchmark.py`, `run_retrieval_v2.py`, `retrieval-v2.json`,
   `retrieval-v2.schema.json`, `legacy-60-v1.json`,
@@ -594,9 +780,9 @@ or nonzero active state remains fail-closed.
   `observed_at` is that reading converted to UTC (2026-09-27,
   `docs/research/2026-09-27-the-daily-log-keeps-one-clock.md`).
 - `knowledge/daily/receipts/` — authoritative immutable Markdown compile receipts.
-  Current v2 is keyed by source digest. The proposed v3 target above adds logical
-  path identity and commits one source receipt with compile output; v2 then remains
-  historical evidence only.
+  Installed v3 binds logical path plus source-part digest; v2 is historical only.
+  The approved v4 target additionally binds original source context as described
+  above. V4 activation is not implied by recording the decision.
 - `knowledge/notes/` — durable OKF pages, flat `<slug>.md`. All gitignored:
   the repository ships no memory (2026-09-10). The decision pages named in
   this document are the owner's private record; the contracts are stated here.
@@ -770,9 +956,13 @@ as a blocker. A complete validated
 tombstone/adoption set does not independently block otherwise eligible whole-`run/`
 deletion. Validated capture terminal records survive ordinary purge but cease to be
 independent blockers after 30 days; deleting the whole eligible runtime deliberately
-forfeits their replay suppression. Proposed Doctor acquires an admission gate while
-checking but reports only a quiescent snapshot; it does not authorize a later
-concurrent deletion. Deletion remains an offline operator action.
+forfeits their replay suppression. Doctor uses the existing shared `doctor` admission
+role and renews its lease under the caller deadline. It checks canonical owner epochs
+and physical database identity before and after validation, and refuses a quiescent
+verdict if another owner appears, the observation changes, ownership is lost or the
+deadline expires. It reports only a snapshot and never authorizes a later concurrent
+deletion. The exclusive `runtime-deletion-check` role still protects offline actions.
+See [health/capture qualification](research/2026-09-30-health-observation-does-not-refuse-capture.md).
 
 ## Forbidden at vault root
 

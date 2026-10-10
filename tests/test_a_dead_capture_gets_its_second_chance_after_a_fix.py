@@ -147,7 +147,8 @@ def test_the_purge_keeps_a_capture_it_cannot_prove_and_takes_the_rest(tmp_path: 
     assert (receipt.task_ids, receipt.retained) == ((finished,), (dead,))
 
 
-def test_the_nightly_redrives_before_the_queue_worker_runs() -> None:
+def test_the_nightly_redrives_before_the_queue_worker_runs(monkeypatch) -> None:
+    monkeypatch.setattr(scheduled_nightly, "head_arrival_time", lambda: LONG_AGO.isoformat())
     labels = [step.label for step in scheduled_nightly._intake_steps()]
 
     assert labels.index("dead_capture_redrive") < labels.index("work")

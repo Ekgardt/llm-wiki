@@ -71,9 +71,6 @@ MAX_NODE_FILTER = 512
 # aggregate refuses by name through the same `limit + 1` fetch; it is never
 # silently truncated.
 MAX_AGGREGATE_ROWS = 200_000
-# Bounded caller-supplied name-prefix exclusions for `nodes_without_edges` (untrusted
-# input); more are refused. Basis unknown: value predates measurement.
-MAX_NAME_PREFIX_FILTER = 32
 # Units of traversal work one walk may spend before it is refused by name, never
 # truncated. Basis unknown: value predates measurement.
 MAX_WORK = 100_000
@@ -533,6 +530,14 @@ def _configure_write(database: sqlite3.Connection) -> None:
     database.execute("PRAGMA synchronous=FULL")
     database.execute("PRAGMA foreign_keys=ON")
     database.execute("PRAGMA trusted_schema=OFF")
+
+
+def _configure_generation_page_size(database: sqlite3.Connection, page_size: int) -> None:
+    if type(page_size) is not int:
+        raise TypeError("Evidence Graph page size must be an integer")
+    database.execute(f"PRAGMA page_size={page_size}")
+    if database.execute("PRAGMA page_size").fetchone()[0] != page_size:
+        raise ValueError("Evidence Graph page size is unsupported by SQLite")
 
 
 def _require_regular_parent(path: Path) -> None:
@@ -1003,9 +1008,11 @@ def _built_generation_database(
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
     monotonic: Callable[[], float],
+    page_size: int = 4096,
 ) -> None:
     database = sqlite3.connect(temporary)
     try:
+        _configure_generation_page_size(database, page_size)
         _configure_write(database)
         database.set_progress_handler(
             _build_progress_handler(deadline, cancelled, monotonic),
@@ -1080,6 +1087,7 @@ def create_generation_database(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    page_size: int = 4096,
 ) -> GraphSchema:
     """Create one immutable database using only the explicitly selected schema."""
     if not isinstance(schema, GraphSchema):
@@ -1100,7 +1108,7 @@ def create_generation_database(
             monotonic,
         )
         _built_generation_database(
-            temporary, schema, normalized, deadline, cancelled, monotonic
+            temporary, schema, normalized, deadline, cancelled, monotonic, page_size=page_size
         )
         _published_database(temporary, path, schema, deadline, cancelled, monotonic)
         return schema
@@ -2378,11 +2386,6 @@ def _argument_binding_row(row: sqlite3.Row) -> dict[str, object]:
 def _validated_prefix_values(prefixes: object) -> tuple[str, ...]:
     if isinstance(prefixes, (str, bytes)) or not isinstance(prefixes, Sequence):
         raise ValueError("exclude_name_prefixes must be a bounded sequence")
-    if len(prefixes) > MAX_NAME_PREFIX_FILTER:
-        raise ValueError(
-            f"exclude_name_prefixes cannot contain more than "
-            f"{MAX_NAME_PREFIX_FILTER} values"
-        )
     return tuple(sorted({_text(value, "name prefix", maximum=256) for value in prefixes}))
 
 
@@ -2399,9 +2402,15 @@ def _name_prefix_exclusions(prefixes: Sequence[str], parameters: list[object]) -
     convention that a `test_` function is not a dead-code candidate.
     """
     values = _validated_prefix_values(prefixes)
-    parameters.extend(_like_prefix(value) for value in values)
-    clause = " AND json_extract(metadata_json, '$.name') NOT LIKE ? ESCAPE '\\'"
-    return clause * len(values)
+    if not values:
+        return ""
+    parameters.append(json.dumps([_like_prefix(value) for value in values]))
+    return (
+        " AND json_extract(metadata_json, '$.name') IS NOT NULL"
+        " AND NOT EXISTS (SELECT 1 FROM json_each(?) AS excluded_prefix"
+        " WHERE json_extract(metadata_json, '$.name') LIKE excluded_prefix.value"
+        " ESCAPE '\\')"
+    )
 
 
 def _without_edge_clause(

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import errno
-import hashlib
 import importlib
 import io
 import json
@@ -104,8 +103,13 @@ def _codex_hooks_fixture() -> dict:
     }
 
 
-def _runtime_hooks(root: Path, *, trust: str = "trusted", enabled: bool = True) -> dict:
+def _runtime_hooks(root: Path, *, trust: str = "trusted", enabled: bool = True,
+                   provider_bundle: dict | None = None) -> dict:
     template = _codex_hooks_fixture()["hooks"]
+    if provider_bundle is not None:
+        from integration_hook_config import codex_rendered_template
+
+        template = codex_rendered_template(root, _codex_hooks_fixture(), provider_bundle)["hooks"]
     hooks = []
     for event_name, groups in template.items():
         group = groups[0]
@@ -122,6 +126,21 @@ def _runtime_hooks(root: Path, *, trust: str = "trusted", enabled: bool = True) 
             }
         )
     return {"data": [{"cwd": str(root), "hooks": hooks, "warnings": [], "errors": []}]}
+
+
+def _installed_codex_fixture(root: Path, state_root: Path, home: Path) -> dict:
+    from install_control import install_resources
+    from integration_hook_config import codex_hooks_resource
+
+    from tests.test_install_control import _release
+
+    bundle = {"MEMORY_LLM_PROVIDER": "codex", "MEMORY_CODEX_MODEL": "gpt-6-luna",
+              "MEMORY_CODEX_REASONING": "max"}
+    resource = codex_hooks_resource(home / ".codex/hooks.json", _codex_hooks_fixture(),
+                                     root=root, provider_bundle=bundle)
+    install_resources(state_root=state_root, vault_root=root, release=_release(),
+                      scheduler_backend="cron", resources=[resource], control_version=2)
+    return bundle
 
 
 def _create_index(path: Path, paths: list[str] | None = None, manifest: bool = True) -> None:
@@ -164,6 +183,9 @@ def _create_generation(root: Path, state_root: Path) -> None:
     from generation_catalog import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
+    # A test vault owns its Git boundary and must not inherit an ancestor's
+    # possibly inaccessible repository marker from the execution environment.
+    subprocess.run(["git", "init", "--quiet", str(root)], check=True, capture_output=True)
     snapshot = corpus_snapshot.collect_corpus(root)
     build_full_generation(
         GenerationCatalog(state_root),
@@ -599,6 +621,7 @@ def test_filesystem_health_runs_bounded_probe_and_leaves_no_artifacts(tmp_path, 
 
     state_root = tmp_path / "state"
     state_root.mkdir()
+    (state_root / "run").mkdir()
     before = _snapshot(tmp_path)
     calls = []
     real_probe = reliable_memory._sqlite_lock_probe
@@ -617,7 +640,7 @@ def test_filesystem_health_runs_bounded_probe_and_leaves_no_artifacts(tmp_path, 
         bool(calls) and calls[0][0] == state_root,
         calls[0][1] != float("inf"),
         _snapshot(tmp_path) == before,
-        list(state_root.glob(".llm-wiki-lock-probe-*")),
+        list(state_root.rglob(".llm-wiki-lock-probe-*")),
     ) == ("ok", True, True, True, [])
 
 
@@ -774,9 +797,10 @@ def test_codex_doctor_prefers_trusted_runtime_hooks(tmp_path, monkeypatch):
     (codex_dir / "hooks.json").write_bytes(
         (root / "integrations" / "codex" / "hooks.json").read_bytes()
     )
+    bundle = _installed_codex_fixture(root, state_root, home)
 
     monkeypatch.setattr(
-        doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: _runtime_hooks(root)
+        doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: _runtime_hooks(root, provider_bundle=bundle)
     )
     check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations")
     codex = check["details"]["hosts"]["codex"]
@@ -792,13 +816,16 @@ def test_codex_runtime_hook_health_is_decoupled_from_mcp_config(tmp_path, monkey
 
     root, state_root, home = _build_root(tmp_path)
     (home / ".codex").mkdir()
+    bundle = _installed_codex_fixture(root, state_root, home)
     monkeypatch.setattr(
-        doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: _runtime_hooks(root)
+        doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: _runtime_hooks(root, provider_bundle=bundle)
     )
 
     check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations")
 
     assert check["details"]["hosts"]["codex"]["status"] == "ok"
+    assert check["details"]["hosts"]["codex"]["provider_transport"]["status"] == "degraded"
+    assert check["status"] == "degraded"
 
 
 @pytest.mark.parametrize("trust", ["untrusted", "modified"])
@@ -809,10 +836,11 @@ def test_codex_runtime_untrusted_or_modified_is_degraded_without_capture(
 
     root, state_root, home = _build_root(tmp_path)
     (home / ".codex").mkdir()
+    bundle = _installed_codex_fixture(root, state_root, home)
     monkeypatch.setattr(
         doctor,
         "_probe_codex_hooks_list",
-        lambda *_args, **_kwargs: _runtime_hooks(root, trust=trust),
+        lambda *_args, **_kwargs: _runtime_hooks(root, trust=trust, provider_bundle=bundle),
     )
 
     codex = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations")[
@@ -829,7 +857,8 @@ def test_codex_runtime_probe_warnings_are_degraded(tmp_path, monkeypatch):
 
     root, state_root, home = _build_root(tmp_path)
     (home / ".codex").mkdir()
-    response = _runtime_hooks(root)
+    bundle = _installed_codex_fixture(root, state_root, home)
+    response = _runtime_hooks(root, provider_bundle=bundle)
     response["data"][0]["warnings"] = ["configuration warning"]
     monkeypatch.setattr(doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: response)
 
@@ -847,6 +876,7 @@ def test_codex_unavailable_probe_reports_unverified_and_no_capture(tmp_path, mon
 
     root, state_root, home = _build_root(tmp_path)
     (home / ".codex").mkdir()
+    _installed_codex_fixture(root, state_root, home)
     monkeypatch.setattr(doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: None)
 
     codex = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations")[
@@ -884,8 +914,9 @@ def test_codex_configured_wrapper_is_reported_as_heartbeat_fallback(tmp_path, mo
 def test_codex_hooks_probe_skips_spawn_when_deadline_budget_is_too_small(tmp_path, monkeypatch):
     import doctor
 
-    root, _, home = _build_root(tmp_path)
+    root, state_root, home = _build_root(tmp_path)
     (home / ".codex").mkdir()
+    _installed_codex_fixture(root, state_root, home)
     monkeypatch.setattr(
         doctor,
         "_codex_app_server_command",
@@ -899,7 +930,7 @@ def test_codex_hooks_probe_skips_spawn_when_deadline_budget_is_too_small(tmp_pat
 
     deadline = time.monotonic() + doctor.CODEX_HOOK_PROBE_STARTUP_SECONDS / 2
     response = doctor._probe_codex_hooks_list(root, home, deadline=deadline)
-    check = doctor._integration_check(root, home, deadline=deadline)
+    check = doctor._integration_check(root, home, deadline=deadline, state_root=state_root)
 
     assert response is None
     codex = check["details"]["hosts"]["codex"]
@@ -1130,11 +1161,12 @@ def test_codex_doctor_rejects_runtime_disabled_hooks(tmp_path, monkeypatch):
     hooks = json.loads((root / "integrations" / "codex" / "hooks.json").read_text(encoding="utf-8"))
     hooks["hooks"]["Stop"][0]["hooks"][0]["timeout"] = 999
     (codex_dir / "hooks.json").write_text(json.dumps(hooks), encoding="utf-8")
+    bundle = _installed_codex_fixture(root, state_root, home)
 
     monkeypatch.setattr(
         doctor,
         "_probe_codex_hooks_list",
-        lambda *_args, **_kwargs: _runtime_hooks(root, enabled=False),
+        lambda *_args, **_kwargs: _runtime_hooks(root, enabled=False, provider_bundle=bundle),
     )
     check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations")
     codex = check["details"]["hosts"]["codex"]
@@ -1178,10 +1210,11 @@ def test_codex_hook_health_does_not_use_local_toml_parser(tmp_path, monkeypatch)
         '[mcp_servers.llm-wiki]\ncommand = "uv"\nargs = ["scripts/mcp_server.py"]\n',
         encoding="utf-8",
     )
+    bundle = _installed_codex_fixture(root, state_root, home)
     monkeypatch.setattr(doctor, "STDLIB_TOML", None, raising=False)
     monkeypatch.setattr(doctor, "TOMLI", None, raising=False)
     monkeypatch.setattr(
-        doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: _runtime_hooks(root)
+        doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: _runtime_hooks(root, provider_bundle=bundle)
     )
 
     check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations")
@@ -1655,10 +1688,13 @@ def test_run_doctor_uses_supplied_absolute_deadline_after_queue_delay(tmp_path, 
     )
     monkeypatch.setattr(doctor, "_filesystem_check", filesystem)
 
-    with pytest.raises(RuntimeError, match="deadline capture"):
-        doctor.run_doctor(root=root, state_root=state, deadline=50.0)
+    report = doctor.run_doctor(root=root, state_root=state, deadline=50.0)
 
-    assert captured == [50.0]
+    filesystem_check = next(check for check in report["checks"] if check["id"] == "filesystem")
+    assert (captured, filesystem_check["message"]) == (
+        [50.0],
+        "The filesystem check could not finish: RuntimeError: stop after deadline capture",
+    )
 
 
 def test_budget_exhaustion_degrades_overall_and_health_summary(tmp_path):
@@ -1849,6 +1885,8 @@ def test_doctor_pyright_maps_infinite_deadline_to_api_none(tmp_path, monkeypatch
     import doctor
     import pyright_profile
     import repository_scope
+
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
 
     observed: list[tuple[str, float | None]] = []
     real_resolve = repository_scope.resolve_repository_scope
@@ -2133,7 +2171,7 @@ def test_run_doctor_executes_lsp_check_after_budget_exhaustion(tmp_path, monkeyp
 
     assert calls == [deadline]
     assert _check(report, "lsp")["details"]["codes"] == ["lsp_state_unreadable"]
-    assert report["run_deletion"]["blockers"] == [{"code": "legacy_protocol_unquiesced"}]
+    assert report["run_deletion"]["blockers"] == [{"code": "run_deletion_state_unknown"}]
 
 
 def test_doctor_reports_mismatched_pyright(tmp_path, monkeypatch) -> None:
@@ -2414,7 +2452,7 @@ def test_doctor_lsp_production_live_lease_blocks_deletion(tmp_path, monkeypatch)
     monkeypatch.setattr(
         doctor,
         "_lsp_pid_state",
-        lambda pid: "alive" if pid in {1111, 2222} else "dead",
+        lambda pid, _identity=None: "alive" if pid in {1111, 2222} else "dead",
     )
 
     check = doctor._lsp_runtime_check(tmp_path, now, deadline=time.monotonic() + SHORT_TIMEOUT)
@@ -2453,7 +2491,7 @@ def test_doctor_lsp_pid_probe_deadline_crossing_fails_closed(tmp_path, monkeypat
     deadline = 2.0
     probed: list[int] = []
 
-    def pid_state(pid: int) -> str:
+    def pid_state(pid: int, _identity=None) -> str:
         probed.append(pid)
         clock[0] = deadline
         return "alive"
@@ -2464,7 +2502,7 @@ def test_doctor_lsp_pid_probe_deadline_crossing_fails_closed(tmp_path, monkeypat
     check = doctor._lsp_runtime_check(tmp_path, now, deadline=deadline)
     deletion = doctor._run_deletion_check(tmp_path, now, collected={"lsp": check})
 
-    assert probed == [1111]
+    assert probed == [2222]
     assert check["details"]["owners"] == []
     assert check["details"]["codes"] == ["lsp_state_unreadable"]
     assert deletion["blockers"] == [{"code": "legacy_protocol_unquiesced"}]
@@ -2496,7 +2534,7 @@ def test_doctor_lsp_unknown_pid_probe_fails_closed(tmp_path, monkeypatch) -> Non
     monkeypatch.setattr(
         doctor,
         "_lsp_pid_state",
-        lambda pid: "unknown",
+        lambda pid, _identity=None: "unknown",
         raising=False,
     )
 
@@ -2543,7 +2581,7 @@ def test_doctor_lsp_dead_owner_uses_last_heartbeat_as_crash_evidence(tmp_path, m
         heartbeat_at=now - timedelta(days=1),
         expires_at=now - timedelta(days=1) + timedelta(seconds=30),
     )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(doctor, "_lsp_pid_state", lambda _pid, _identity=None: "dead")
 
     check = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))
 
@@ -2575,7 +2613,7 @@ def test_doctor_lsp_crash_evidence_expires_at_exact_seven_day_boundary(
         heartbeat_at=now - timedelta(days=7),
         expires_at=now - timedelta(days=7) + timedelta(seconds=30),
     )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(doctor, "_lsp_pid_state", lambda _pid, _identity=None: "dead")
 
     check = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))
     deletion = doctor._run_deletion_check(tmp_path, now, collected={"lsp": check})
@@ -2657,7 +2695,7 @@ def test_doctor_lsp_dead_owner_without_lease_uses_owner_start_time(tmp_path, mon
         started_at=now - timedelta(days=8),
         owner_pid=2222,
     )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(doctor, "_lsp_pid_state", lambda _pid, _identity=None: "dead")
 
     check = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))
 
@@ -2798,24 +2836,29 @@ def test_doctor_lsp_rejects_nonproduction_record_schema(tmp_path, monkeypatch, r
         started_at=now - timedelta(days=8),
         owner_pid=2222,
     )
-    if record_name == "lease.json":
-        _write_lsp_lease(
-            owner,
-            owner_nonce=owner_nonce,
-            generation_nonce=generation_nonce,
-            manager_pid=1111,
-            server_pid=2222,
-            heartbeat_at=now - timedelta(seconds=5),
-            expires_at=now + timedelta(seconds=25),
-        )
-    elif record_name == "failure.json":
-        _write_lsp_failure(
-            owner,
-            owner_nonce=owner_nonce,
-            generation_nonce=generation_nonce,
-            timestamp=now - timedelta(days=8),
-            server_pid=2222,
-        )
+    def write_selected_record():
+        if record_name == "lease.json":
+            _write_lsp_lease(
+                owner,
+                owner_nonce=owner_nonce,
+                generation_nonce=generation_nonce,
+                manager_pid=1111,
+                server_pid=2222,
+                heartbeat_at=now - timedelta(seconds=5),
+                expires_at=now + timedelta(seconds=25),
+            )
+            return
+        if record_name == "failure.json":
+            _write_lsp_failure(
+                owner,
+                owner_nonce=owner_nonce,
+                generation_nonce=generation_nonce,
+                timestamp=now - timedelta(days=8),
+                server_pid=2222,
+            )
+            return
+
+    write_selected_record()
     path = owner / record_name
     record = json.loads(path.read_text(encoding="utf-8"))
     record["unexpected"] = True
@@ -2853,12 +2896,12 @@ def test_doctor_lsp_rejects_non_integer_lease_schema_version(tmp_path, monkeypat
     lease = json.loads(lease_path.read_text(encoding="utf-8"))
     lease["schema_version"] = 1.0
     lease_path.write_text(json.dumps(lease), encoding="utf-8")
-    monkeypatch.setattr(doctor, "_lsp_pid_state", lambda _pid: "alive")
+    monkeypatch.setattr(doctor, "_lsp_pid_state", lambda _pid, _identity=None: "alive")
 
     check = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))
 
     assert "lsp_state_unreadable" in check["details"]["codes"]
-    assert "lsp_owner_live" not in check["details"]["codes"]
+    assert "lsp_owner_live" in check["details"]["codes"]
 
 
 def test_doctor_reads_a_restarted_owner_as_live(tmp_path, monkeypatch) -> None:
@@ -2892,7 +2935,7 @@ def test_doctor_reads_a_restarted_owner_as_live(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         doctor,
         "_lsp_pid_state",
-        lambda pid: "alive" if pid in {1111, 3333} else "dead",
+        lambda pid, _identity=None: "alive" if pid in {1111, 3333} else "dead",
     )
 
     codes = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))["details"][
@@ -2925,7 +2968,7 @@ def test_doctor_rejects_a_lease_belonging_to_another_owner(
         heartbeat_at=now - timedelta(seconds=5),
         expires_at=now + timedelta(seconds=25),
     )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(doctor, "_lsp_pid_state", lambda _pid, _identity=None: "dead")
 
     codes = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))["details"][
         "codes"
@@ -2934,9 +2977,11 @@ def test_doctor_rejects_a_lease_belonging_to_another_owner(
     assert ("lsp_state_unreadable" in codes, "lsp_owner_live" in codes) == (True, False)
 
 
-def test_doctor_accepts_failure_evidence_from_a_later_generation(tmp_path) -> None:
+def test_doctor_accepts_failure_evidence_from_a_later_generation(tmp_path, monkeypatch) -> None:
     """The generation that failed is the one that was running, not the first."""
     import doctor
+
+    monkeypatch.setattr(doctor, "_lsp_pid_state", lambda _pid, _identity=None: "dead")
 
     now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
     owner_nonce = "a" * 32
@@ -2982,7 +3027,7 @@ def test_doctor_lsp_rejects_lease_heartbeat_before_owner_start(tmp_path, monkeyp
         heartbeat_at=now - timedelta(minutes=2),
         expires_at=now + timedelta(seconds=25),
     )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(doctor, "_lsp_pid_state", lambda _pid, _identity=None: "dead")
 
     check = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))
 
@@ -3540,7 +3585,7 @@ def test_doctor_lsp_live_owner_and_failure_block_deletion(tmp_path, monkeypatch)
     monkeypatch.setattr(
         doctor,
         "_lsp_pid_state",
-        lambda pid: "alive" if pid in {1111, 2222} else "dead",
+        lambda pid, _identity=None: "alive" if pid in {1111, 2222} else "dead",
     )
 
     check = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))
@@ -4083,45 +4128,52 @@ def test_a_refused_attempt_whose_pages_nobody_wrote_still_needs_attention(
 _REFUSED_DAY = "knowledge/daily/2026-08-25.md"
 
 
-def _day_receipt_path(logical_path: str, content: bytes) -> str:
-    from reliable_memory import canonical_json_bytes
+def _refuse_day_receipts(coordinator, staged_day):
+    from markdown_transaction import MarkdownChange, TransactionFailure
 
-    part = hashlib.sha256(content).hexdigest()
-    identity = hashlib.sha256(canonical_json_bytes([logical_path, part])).hexdigest()
-    return f"knowledge/daily/receipts/v3-{identity}.md"
+    record = json.dumps({"schema_version": "compile-receipt/v3", "source": {"logical_path": staged_day}})
+    raw = b"---\ntype: compile-receipt\n---\n\n## Record\n```json\n" + record.encode() + b"\n```\n"
+    changes = [MarkdownChange.create(f"knowledge/daily/receipts/v3-{digit * 64}.md", raw)
+               for digit in ("1", "2")]
+    transaction = coordinator.prepare(changes, operation_id="compile:refused-day",
+                                      preconditions={"knowledge/notes/absent.md": "0" * 64})
+    with pytest.raises(TransactionFailure):
+        coordinator.apply(transaction.id)
+    assert coordinator.transaction_state(transaction.id) == "quarantined"
 
 
-def _stage_refused_receipts(state_root: Path, identifier: str, staged: dict[str, str]) -> None:
-    """The plan and `after` artifacts a refused compile left under run/transactions/."""
-    directory = state_root / "run" / "transactions" / identifier
-    (directory / "after").mkdir(parents=True, exist_ok=True)
-    operations = []
-    for position, (path, logical_path) in enumerate(sorted(staged.items()), start=1):
-        artifact = f"after/{position:06d}.bin"
-        record = json.dumps({"schema_version": "compile-receipt/v3", "source": {"logical_path": logical_path}})
-        (directory / artifact).write_bytes(
-            b"---\ntype: compile-receipt\n---\n\n## Record\n```json\n" + record.encode() + b"\n```\n"
-        )
-        operations.append({"path": path, "kind": "create", "before": "absent", "after": {"artifact": artifact}})
-    (directory / "plan.json").write_text(json.dumps({"operations": operations}), encoding="utf-8")
+def _publish_current_day(root, state_root, monkeypatch, coordinator):
+    import compile_memory
+
+    mapping = {"ROOT": root, "STATE_ROOT": state_root, "MEMORY": root / "knowledge",
+               "DAILY_DIR": root / "knowledge/daily", "KNOWLEDGE": root / "knowledge/notes",
+               "INDEX": root / "knowledge/index.md", "LOG": root / "knowledge/log.md", "AGENTS": root / "AGENTS.md"}
+    for name, path in mapping.items():
+        monkeypatch.setattr(compile_memory, name, path)
+    inputs = compile_memory.snapshot_compile_inputs([root / _REFUSED_DAY])
+    batch = compile_memory.pack_compile_batches(inputs, model=None)[0]
+    compile_memory.apply_compile_plan(
+        batch.inputs, {"schema_version": "compile-plan/v2", "operations": []},
+        action_key="b" * 64, trigger="manual", coordinator=coordinator, batch=batch,
+        provider_budget={"provider": "fake", "model": "test", "max_output_tokens": 4000},
+    )
 
 
 def _refused_compile_of_a_day(tmp_path, monkeypatch, *, compiled_now: bool, staged_day: str = _REFUSED_DAY):
     import doctor
+    from markdown_transaction import MarkdownCoordinator
 
     root, state_root, home = _build_root(tmp_path)
     monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
-    day = b"# 2026-08-25\n\n## 10:00\nThe day as it stands now.\n"
-    (root / _REFUSED_DAY).parent.mkdir(parents=True, exist_ok=True)
+    day = b"# 2026-08-25\n\n## [10:00:00] event\nThe day as it stands now.\n"
+    (root / "knowledge/daily/receipts").mkdir(parents=True)
     (root / _REFUSED_DAY).write_bytes(day)
-    refused_receipts = ["knowledge/daily/receipts/v3-" + "1" * 64 + ".md", "knowledge/daily/receipts/v3-" + "2" * 64 + ".md"]
-    committed = [_day_receipt_path(_REFUSED_DAY, day)] if compiled_now else []
-    _transaction_database(
-        state_root,
-        [("a" * 32, "quarantined", None), ("b" * 32, "committed", None)],
-        creates={"a" * 32: refused_receipts, "b" * 32: committed},
-    )
-    _stage_refused_receipts(state_root, "a" * 32, {path: staged_day for path in refused_receipts})
+    for relative in ("knowledge/index.md", "knowledge/log.md", "AGENTS.md"):
+        (root / relative).write_bytes(b"# Synthetic test fixture\n")
+    coordinator = MarkdownCoordinator(root, state_root)
+    _refuse_day_receipts(coordinator, staged_day)
+    if compiled_now:
+        _publish_current_day(root, state_root, monkeypatch, coordinator)
     return _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "transactions")
 
 
@@ -4425,3 +4477,95 @@ def test_a_stale_nightly_that_skipped_names_its_reason():
     )
     assert _stale_nightly_message(ran_later) == "Nightly maintenance is stale."
     assert _stale_nightly_message({}) == "Nightly maintenance is stale."
+
+
+@pytest.mark.parametrize("deadline", [99.0, 100.0])
+def test_expired_deletion_observation_does_not_start_adoption_validation(tmp_path, monkeypatch, deadline):
+    from datetime import datetime, timezone
+    from unittest.mock import Mock
+
+    import doctor
+    import installed_memory_repair
+
+    validation = Mock(side_effect=AssertionError("expired observation started database validation"))
+    monkeypatch.setattr(installed_memory_repair, "require_reliability_v3_adopted", validation)
+    monkeypatch.setattr(doctor.time, "monotonic", lambda: 100.0)
+    result = doctor._run_deletion_check(tmp_path, datetime.now(timezone.utc), deadline=deadline)
+    assert result["quiescent"] is False
+    assert result["blockers"] == [{"code": "run_deletion_state_unknown"}]
+    validation.assert_not_called()
+
+
+def test_adoption_diagnostic_receives_the_collector_deadline(monkeypatch):
+    from unittest.mock import Mock
+
+    import doctor
+
+    _fix_cheap_checks(doctor, monkeypatch)
+    monkeypatch.setattr(doctor, "_deferrable_checks", lambda *args: ())
+    diagnostic = Mock(return_value=doctor._result("adoption", "ok", "ok", {}))
+    monkeypatch.setattr(doctor, "_adoption_check", diagnostic)
+    deadline = time.monotonic() + LONG_TIMEOUT
+    doctor._collect_checks(Path("."), Path("."), Path("."), datetime.now(timezone.utc), deadline)
+    diagnostic.assert_called_once_with(Path("."), Path("."), deadline=deadline)
+
+
+def test_adoption_certification_keeps_the_callers_validation_deadline(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    import installed_memory_repair
+    import markdown_transaction
+
+    validation = Mock()
+    monkeypatch.setattr(installed_memory_repair, "require_reliability_v3_adopted", validation)
+    deadline = time.monotonic() + LONG_TIMEOUT
+    markdown_transaction.require_adopted_through_contention(tmp_path, tmp_path, deadline=deadline)
+    validation.assert_called_once_with(root=tmp_path, state_root=tmp_path, deadline=deadline)
+
+
+def test_contention_window_does_not_shorten_the_callers_validation_deadline(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    import markdown_transaction
+
+    validation = Mock()
+    monkeypatch.setattr(markdown_transaction.time, "monotonic", lambda: 100.0)
+    markdown_transaction._retry_adoption_validation(tmp_path, tmp_path, validation, deadline=200.0)
+    validation.assert_called_once_with(root=tmp_path, state_root=tmp_path, deadline=200.0)
+
+
+@pytest.mark.parametrize("kwargs,clock,incomplete", [({}, 101.0, False), ({"deadline": 100.0}, 99.0, False), ({"deadline": 100.0}, 101.0, True)])
+def test_adoption_timeout_is_incomplete_only_after_the_callers_deadline(tmp_path, monkeypatch, kwargs, clock, incomplete):
+    from unittest.mock import Mock
+
+    import doctor
+    import markdown_transaction
+
+    monkeypatch.setattr(markdown_transaction, "_reliability_v3_records_present", lambda _: True)
+    monkeypatch.setattr(markdown_transaction, "require_adopted_through_contention", Mock(side_effect=TimeoutError("validation timed out")))
+    monkeypatch.setattr(doctor, "_stray_candidates", lambda _: [])
+    monkeypatch.setattr(doctor, "_quarantined_candidates", lambda _: 0)
+    monkeypatch.setattr(doctor.time, "monotonic", lambda: clock)
+    if incomplete:
+        result = doctor._adoption_check(tmp_path, tmp_path, **kwargs)
+        assert result["status"] == "degraded"
+        assert result["details"]["budget_exhausted"] is True
+        return
+    with pytest.raises(TimeoutError, match="validation timed out"):
+        doctor._adoption_check(tmp_path, tmp_path, **kwargs)
+
+
+def test_deletion_certification_uses_the_deadline_and_retains_unknown_state(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    import doctor
+    import installed_memory_repair
+
+    validation = Mock(side_effect=TimeoutError("validation timed out"))
+    monkeypatch.setattr(installed_memory_repair, "require_reliability_v3_adopted", validation)
+    deadline = time.monotonic() + LONG_TIMEOUT
+    result = doctor._run_deletion_check(tmp_path, datetime.now(timezone.utc), deadline=deadline)
+    validation.assert_called_once_with(root=tmp_path, state_root=tmp_path, deadline=deadline)
+    assert result["quiescent"] is False
+    assert result["permit"] is False
+    assert result["blockers"] == [{"code": "run_deletion_state_unknown"}]

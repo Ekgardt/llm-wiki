@@ -11,9 +11,9 @@ Every failure lands here:
 * one bounded JSONL trail (`logs/capture-failures.jsonl`) carrying the reason,
 * one counter per failure kind in `state.json` for the health surfaces.
 
-Both are bounded: the trail is trimmed to the newest entries under a byte cap,
-and the counter map keeps the most recent kinds only. Recording is itself
-best-effort — diagnostics must never become the reason a hook fails.
+The trail is trimmed to the newest entries under a byte cap. Cumulative counters
+retain every trusted producer kind; cache pressure must not erase health history.
+Recording is itself best-effort — diagnostics must never become the reason a hook fails.
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 from contextlib import contextmanager, suppress
 from datetime import datetime
@@ -42,9 +43,6 @@ FAILURE_LOG = REPORTS_DIR / "capture-failures.jsonl"
 # measurement; review when a burst of failures pushes a day's records out before doctor reads
 # them.
 MAX_FAILURE_LOG_BYTES = 256 * 1024
-# Failure kinds counted in hook state; past it the least recently seen kind is dropped so the
-# state file stays bounded. The live state counts 5 kinds (2026-09-27).
-MAX_FAILURE_KINDS = 32
 # A failure reason is redacted, then cut to one bounded line of the capture-failure log (itself
 # capped by MAX_FAILURE_LOG_BYTES). Live reasons reach this cap (logs/capture-failures.jsonl,
 # 2026-09-27), so long ones are cut; Basis unknown: value predates measurement; review when a cut
@@ -65,6 +63,22 @@ STATE_LOCK_TIMEOUT = 0.5
 CONTENTION_OWNERSHIP_CODES = frozenset({"owner_busy"})
 # SQLITE_BUSY and SQLITE_LOCKED; the driver reports them from Python 3.11 on.
 SQLITE_CONTENTION_CODES = frozenset({5, 6})
+
+
+def record_hook_error(state_root: Path | None, kind: str, message: str) -> bool:
+    """Append a redacted diagnostic; report failure without changing the hook outcome."""
+    if state_root is None:
+        return False
+    try:
+        line = " ".join(redact_secrets(f"{kind}: {message}").split())
+        log_path = state_root / "logs" / "hook-errors.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        with log_path.open("a", encoding="utf-8") as stream:
+            stream.write(f"[{timestamp}] {line}\n")
+        return True
+    except Exception:  # noqa: BLE001 - diagnostics must not replace the primary failure
+        return False
 
 
 def _sqlite_contention(error: BaseException) -> bool:
@@ -253,6 +267,38 @@ def _write_trail_line(descriptor: int, data: bytes, locking, pause=time.sleep) -
 # the trail itself is a lock on a file the trim is about to rename away.
 # Research: `docs/research/2026-09-17-a-trim-never-drops-a-line-it-did-not-read.md`.
 TRAIL_LOCK_SUFFIX = ".lock"
+_TRAIL_OWNER = threading.local()
+
+
+def _trail_lock_identity(descriptor: int):
+    try:
+        path = _trail_lock_path()
+        opened, current = os.fstat(descriptor), path.stat()
+        if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            return None
+        return (os.getpid(), str(path.absolute()), opened.st_dev, opened.st_ino, descriptor)
+    except OSError:
+        return None
+
+
+def _owns_trail_lock() -> bool:
+    owner = getattr(_TRAIL_OWNER, "identity", None)
+    if owner is None:
+        return False
+    return owner == _trail_lock_identity(owner[-1])
+
+
+@contextmanager
+def _remember_trail_lock(held: bool, descriptor: int):
+    if not held:
+        yield False
+        return
+    previous = getattr(_TRAIL_OWNER, "identity", None)
+    _TRAIL_OWNER.identity = _trail_lock_identity(descriptor)
+    try:
+        yield True
+    finally:
+        _TRAIL_OWNER.identity = previous
 
 
 def _trail_lock_path() -> Path:
@@ -307,7 +353,9 @@ def trail_lock(pause=time.sleep):
         yield False
         return
     try:
-        yield _await_trail_lock(descriptor, pause)
+        held = _await_trail_lock(descriptor, pause)
+        with _remember_trail_lock(held, descriptor) as acquired:
+            yield acquired
     finally:
         with suppress(OSError):
             os.close(descriptor)
@@ -336,11 +384,16 @@ def _append_failure_line(record: dict[str, str]) -> bool:
     `docs/research/2026-09-17-two-failures-at-once-both-reach-the-trail.md`.
 
     The trail's own lock is taken around the open and the write, so the file this
-    line is appended to is not one a trim has already replaced. A line is never
-    lost to that lock: when the bounded wait runs out the line is written anyway.
+    line is appended to is not one a trim has already replaced. Expired or failed
+    acquisition refuses the write. A caller already holding this same live lock
+    in its own thread can append without acquiring a conflicting descriptor.
     """
     line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
-    with trail_lock():
+    if _owns_trail_lock():
+        return _write_failure_line(line)
+    with trail_lock() as held:
+        if not held:
+            return False
         return _write_failure_line(line)
 
 
@@ -377,18 +430,15 @@ def _bump_counter(state: dict, record: dict[str, str]) -> None:
         "count": int(entry.get("count", 0)) + 1,
         "deferred": deferred,
         "last_at": record["at"],
+        "last_loss_at": _loss_moment_after(entry, record),
         "last_reason": record["reason"],
     }
-    _drop_oldest_kinds(counters)
 
 
-def _drop_oldest_kinds(counters: dict) -> None:
-    """Keep the most recently seen kinds so the counter map stays bounded."""
-    if len(counters) <= MAX_FAILURE_KINDS:
-        return
-    ranked = sorted(counters.items(), key=lambda kv: str(kv[1].get("last_at", "")))
-    for kind, _ in ranked[: len(counters) - MAX_FAILURE_KINDS]:
-        counters.pop(kind, None)
+def _loss_moment_after(entry: dict, record: dict[str, str]) -> str:
+    if record["outcome"] == "lost":
+        return record["at"]
+    return _recorded_moment(entry)
 
 
 def hook_object(raw: str, kind: str) -> dict:
@@ -516,11 +566,15 @@ def _trail_pointer() -> str:
 def _recorded_moment(entry: object) -> str:
     if not isinstance(entry, dict):
         return ""
-    return str(entry.get("last_at", ""))
+    if _lost_count(entry) == 0:
+        return ""
+    # Older counters did not distinguish a last loss from a last deferral.
+    # Keep that historical timestamp conservatively, without fabricating one.
+    return str(entry.get("last_loss_at", entry.get("last_at", "")))
 
 
 def last_capture_failure_at(state: dict) -> str:
-    """The most recent moment a capture kind was recorded, or an empty string."""
+    """The most recent recorded loss; a later deferral cannot refresh it."""
     return _last_moment(_counter_entries(state))
 
 

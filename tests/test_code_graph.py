@@ -20,8 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from code_graph import (  # noqa: E402
     LANGUAGE_MAP,
-    _get_parser,
     _louvain_communities,
+    _parser_attempt,
     detect_communities,
     detect_language,
     enrich_python_semantics,
@@ -872,7 +872,7 @@ class TestParseFile:
         imported = []
         monkeypatch.setattr(code_graph.importlib, "import_module", lambda name: imported.append(name) or (_ for _ in ()).throw(ImportError(name)))
 
-        assert _get_parser("go") is None
+        assert _parser_attempt("go") == (None, "ImportError: tree_sitter_go")
         assert imported == ["tree_sitter_go"]
 
     def test_each_language_has_a_materialized_query_file(self):
@@ -948,7 +948,7 @@ class TestParseFile:
         assert "demo.app" not in imports
 
     def test_all_new_languages_have_useful_regex_fallback(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("code_graph._get_parser", lambda language: None)
+        monkeypatch.setattr("code_graph._parser_attempt", lambda language: (None, None))
 
         for filename, source, function, class_name, call, imported in FALLBACK_CASES:
             result = _parsed_language_case(tmp_path, filename, source)

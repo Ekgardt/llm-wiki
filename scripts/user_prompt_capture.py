@@ -1,25 +1,9 @@
-"""UserPromptSubmit hook — lightweight prompt tagger.
+"""UserPromptSubmit compatibility entrypoint for durable, non-LLM capture.
 
-Appends a single non-LLM breadcrumb line per user prompt to today's
-daily log, so the episodic record shows WHAT was asked (not just when
-sessions ended). Pairs with PostToolUse capture to give compile_memory
-the input signal it needs to decide what's worth lifting.
-
-Design constraints (Phase 1):
-- NON-LLM. No SDK calls. ms-fast.
-- Rate-limited: at most one line per (slug, prompt_hash) per 30s window
-  to avoid log explosion during rapid re-prompts.
-- Skips empty/whitespace prompts.
-- Never fails the hook once it runs (a failure is recorded, exit 0); a module
-  that cannot import exits non-zero and the adapter records the loss.
-- Writes for sessions anywhere, the vault included: the memory's own processes
-  are filtered by the adapter's reentry marker, which is what the old
-  "vault-internal sessions are maintenance" rule stood in for (2026-09-24).
-
-Input (Claude Code UserPromptSubmit hook JSON on stdin):
-    {"session_id": "...", "prompt": "user text", "cwd": "..."}
-
-Output: a JSON `{"continue": true}` on stdout (or empty — both work).
+The common adapter preserves the complete redacted occurrence before advisory
+or project follow-ups. Delivery to the original day's journal is recoverable.
+Empty prompts are ignored; separate meaningful occurrences are never suppressed
+by their text, size, or frequency. Failures are recorded without blocking the host.
 """
 from __future__ import annotations
 
@@ -27,7 +11,6 @@ import io
 import json
 import os
 import sys
-from datetime import datetime
 from pathlib import Path
 
 # Force UTF-8 stdout (Windows console default is cp1251 — breaks emoji
@@ -43,47 +26,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # and silently wrote nothing; now the import fails, the process exits non-zero,
 # and the adapter records the lost capture (`_record_failed_delegate`).
 from memory_state import ROOT as _MS_ROOT  # noqa: E402
-from memory_state import STATE_ROOT as _MS_STATE  # noqa: E402
 from memory_state import spawn_detached, update_state  # noqa: E402
 
 ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(_MS_ROOT))).resolve()
-STATE_ROOT = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(_MS_STATE))).resolve()
 
 from capture_diagnostics import hook_object, record_capture_failure  # noqa: E402
-from capture_operation import claim_operation, complete_operation  # noqa: E402
-from event_envelope import build_event_envelope  # noqa: E402
-from iso_time import local_now  # noqa: E402
 from memory_state import HOOK_STATE_LOCK_TIMEOUT  # noqa: E402
-from secret_redact import redact_secrets  # noqa: E402
 from session_start_project_state import _compute_slug  # noqa: E402
 
-DAILY_DIR = ROOT / "knowledge" / "daily"
-
-# Rate-limit window per (slug, prompt-hash). Prevents log explosion
-# during rapid re-prompts or autocomplete-style submissions.
-RATE_LIMIT_SECONDS = 30
-
-# Skip prompts shorter than this — they are usually autocomplete noise
-# or accidental Enter presses, not real user intent.
-MIN_PROMPT_CHARS = 5
-
-# How many chars of the prompt to log. Long prompts (paste of files,
-# stack traces) shouldn't blow up the daily log.
-MAX_PROMPT_PREVIEW = 140
+# Legacy full-transcript checkpoint cadence; every prompt now has independent
+# durable ingress. Basis unknown for this unchanged interval; pending Law 9 review.
 FLUSH_MESSAGE_INTERVAL = 20
+# Legacy advisory cadence, independent of capture acceptance. Basis unknown for
+# this unchanged interval; pending Law 9 review, not proof of an optimal budget.
 ADVISORY_REFRESH_INTERVAL = 10
-
-
-def _read_stdin() -> str:
-    try:
-        return sys.stdin.read()
-    except Exception:  # noqa: BLE001
-        return ""
 
 
 def _read_hook_input() -> dict:
     """Parse Claude Code hook JSON from stdin. Tolerant of empty stdin."""
-    return hook_object(_read_stdin(), "prompt_input")
+    # Read errors belong to main's existing recorded-failure boundary; they
+    # must not be turned into an ordinary empty host invocation.
+    return hook_object(sys.stdin.read(), "prompt_input")
 
 
 def _compute_slug_from_cwd(cwd: str) -> str:
@@ -99,33 +62,8 @@ def _compute_slug_from_cwd(cwd: str) -> str:
         return Path(cwd).name.lower().replace(" ", "-") or "unknown"
 
 
-def _claim_prompt_operation(
-    slug: str, prompt_hash: str, *, source_event_id: str | None = None
-) -> str | None:
-    key = f"{slug}::{prompt_hash}"
-    return claim_operation(
-        lambda mutate: update_state(mutate, lock_timeout=HOOK_STATE_LOCK_TIMEOUT),
-        namespace="prompt_capture_dedupe",
-        key=key,
-        prefix="user-prompt",
-        source_event_id=source_event_id,
-        rate_limit_seconds=RATE_LIMIT_SECONDS,
-        max_entries=100,
-        now=datetime.now(),
-    )
 
 
-def _complete_prompt_operation(
-    slug: str, prompt_hash: str, operation_id: str
-) -> None:
-    key = f"{slug}::{prompt_hash}"
-    complete_operation(
-        lambda mutate: update_state(mutate, lock_timeout=HOOK_STATE_LOCK_TIMEOUT),
-        namespace="prompt_capture_dedupe",
-        key=key,
-        operation_id=operation_id,
-        now=datetime.now(),
-    )
 
 
 def _prompt_counter_key(session_id: str, slug: str) -> str:
@@ -158,13 +96,10 @@ def _increment_prompt_count(session_id: str, slug: str) -> int:
         counters[key] = count
         _forget_oldest_counts(counters)
 
-    try:
-        update_state(_mutate, lock_timeout=HOOK_STATE_LOCK_TIMEOUT)
-        return count
-    except Exception as error:  # noqa: BLE001 - a hook never fails its host
-        # Counted as nothing, so the periodic capture is not started: said, not silent.
-        record_capture_failure("prompt_counter", "prompt count not updated", error=error)
-        return 0
+    # Durable ingress already accepted the event. Its follow-up boundary reports
+    # this error without falsely counting that accepted event as a lost capture.
+    update_state(_mutate, lock_timeout=HOOK_STATE_LOCK_TIMEOUT)
+    return count
 
 
 def _spawn_periodic_flush(hook: dict, session_id: str) -> None:
@@ -213,48 +148,8 @@ def _write_advisory_output(advisory: str) -> None:
     }, ensure_ascii=False))
 
 
-def _append_prompt_tag(
-    slug: str, session_id: str, preview: str, operation_id: str | None = None
-) -> bool:
-    """Append a one-line breadcrumb to today's daily log."""
-    try:
-        from daily_log_append import (
-            BREADCRUMB_APPEND_BUDGET_SECONDS,
-            append_daily,
-            append_deadline,
-        )
-
-        ts = local_now().strftime("%H:%M:%S")
-        # One line: a newline in the prompt started a real daily-log entry
-        # (docs/research/2026-09-26-an-evidence-span-names-its-own-block.md).
-        safe = " ".join(redact_secrets(preview).split())[:MAX_PROMPT_PREVIEW]
-        block = (
-            f"- `[{ts}] prompt | {session_id[:8]} | {slug}` "
-            f"{safe}"
-        )
-        # A deadline inside the host's: without one the append retried until the
-        # host cancelled the hook, and the lost breadcrumb left no reason.
-        append_daily(
-            slug,
-            session_id,
-            block,
-            operation_id=operation_id,
-            deadline=append_deadline(BREADCRUMB_APPEND_BUDGET_SECONDS),
-        )
-        return True
-    except Exception as error:  # noqa: BLE001
-        record_capture_failure(
-            "user_prompt_append",
-            f"{type(error).__name__}: {error}",
-            error=error,
-            slug=slug,
-            session_id=session_id,
-        )
-        return False
 
 
-def _optional_string(value: object) -> str | None:
-    return value if isinstance(value, str) else None
 
 
 def _hook_cwd(hook: dict) -> str:
@@ -266,31 +161,16 @@ def _hook_session(hook: dict) -> str:
 
 
 def _should_skip(prompt: str) -> bool:
-    """Too short to be a prompt worth a line.
+    """Only empty input is skipped.
 
     It also skipped every prompt inside the vault, as "maintenance loops"; the
     adapter's reentry marker has named the memory's own processes exactly since
     2026-09-17, and the vault rule only hid the owner's own sessions there. See
     `docs/research/2026-09-24-a-long-session-in-the-vault-is-captured.md`.
     """
-    return len(prompt) < MIN_PROMPT_CHARS
+    return not prompt.strip()
 
 
-def _prompt_envelope(hook: dict, safe_prompt: str, slug: str):
-    """Build the canonical event envelope for one captured prompt."""
-    source_cwd = hook.get("cwd")
-    source_session = hook.get("session_id")
-    return build_event_envelope(
-        event_type="user_prompt",
-        payload={"prompt": safe_prompt},
-        agent=_optional_string(hook.get("agent")),
-        session=str(source_session) if source_session is not None else None,
-        project=slug if source_cwd else None,
-        worktree=str(source_cwd) if source_cwd else None,
-        severity=_optional_string(hook.get("severity")),
-        parent_event_id=_optional_string(hook.get("parent_event_id")),
-        source_event_id=_optional_string(hook.get("event_id")),
-    )
 
 
 def _maybe_periodic_work(hook: dict, session_id: str, prompt_count: int) -> None:
@@ -307,37 +187,27 @@ def _periodic_work(hook: dict, session_id: str, prompt_count: int) -> None:
         _spawn_periodic_flush(hook, session_id)
 
 
-def _record_prompt(hook: dict, prompt: str) -> None:
-    """Claim, append, and complete one prompt capture."""
+def after_prompt_capture(hook: dict, slug: str | None) -> None:
+    """Run advisory work only after the common ingress accepted the event."""
     session_id = _hook_session(hook)
-    slug = _compute_slug_from_cwd(_hook_cwd(hook))
-    envelope = _prompt_envelope(hook, redact_secrets(prompt), slug)
+    slug = slug or _compute_slug_from_cwd(_hook_cwd(hook))
     _maybe_periodic_work(hook, session_id, _increment_prompt_count(session_id, slug))
 
-    # Rate-limit by the redacted payload hash so capture state cannot
-    # become a side channel for source secrets.
-    prompt_hash = envelope.content_hash[:12]
-    operation_id = _claim_prompt_operation(
-        slug,
-        prompt_hash,
-        source_event_id=envelope.source_event_id,
+
+def _record_prompt(hook: dict, prompt: str) -> None:
+    """Direct hook invocations use the same durable publisher as host adapters."""
+    from integration_adapter import ingest_event, normalize_occurrence_event
+
+    envelope = normalize_occurrence_event(
+        str(hook.get("agent") or "claude"), "user_prompt", {**hook, "prompt": prompt},
     )
-    if operation_id is None:
-        return
-    appended = _append_prompt_tag(
-        slug,
-        session_id,
-        envelope.payload["prompt"],
-        operation_id=operation_id,
-    )
-    if appended:
-        _complete_prompt_operation(slug, prompt_hash, operation_id)
+    ingest_event(envelope)
 
 
 def main() -> int:
     try:
         hook = _read_hook_input()
-        prompt = str(hook.get("prompt") or "").strip()
+        prompt = str(hook.get("prompt") or "")
         if _should_skip(prompt):
             return 0
         _record_prompt(hook, prompt)

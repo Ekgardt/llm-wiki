@@ -15,12 +15,14 @@ pytestmark = pytest.mark.skipif(os.name != "posix", reason="links and byte names
 
 
 def _odd_repository(tmp_path: Path) -> Path:
+    from corpus_snapshot import MAX_CORPUS_FILE_BYTES
+
     repository = _repository(
         tmp_path / "repo",
         {"src/alpha.py": ALPHA, "web/app.ts": "export const a = 1;\n", ".gitignore": "node_modules/\n"},
     )
     (repository / "src" / "linked.py").symlink_to(repository / "src" / "alpha.py")
-    (repository / "src" / "huge.py").write_bytes(b"#" * (8 * 1024 * 1024 + 1))
+    (repository / "src" / "huge.py").write_bytes(b"#" * (MAX_CORPUS_FILE_BYTES + 1))
     (repository / "web" / "node_modules" / "dep").mkdir(parents=True)
     (repository / "web" / "node_modules" / "dep" / "index.js").write_text("module.exports = 1;\n", encoding="utf-8")
     (repository / "web" / "node_modules" / ".bin").mkdir()

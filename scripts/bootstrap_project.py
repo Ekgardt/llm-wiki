@@ -24,7 +24,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
+from markdown_transaction import ABSENT, mutate_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
@@ -188,7 +188,7 @@ def _extract_docs_structure(cwd: str) -> list[str]:
     return files[:15]
 
 
-def bootstrap(cwd: str, apply: bool = False) -> str:
+def bootstrap(cwd: str, apply: bool = False, *, if_missing: bool = False) -> str:
     """Generate a bootstrap context for a new project."""
     slug = _compute_slug(cwd)
     project_dir = PROJECTS_DIR / slug
@@ -196,11 +196,21 @@ def bootstrap(cwd: str, apply: bool = False) -> str:
     if not apply:
         return content
     bootstrap_path = project_dir / "bootstrap.md"
+    if if_missing and bootstrap_path.exists():
+        return f"Exists: {bootstrap_path.relative_to(ROOT)}"
     encoded = _bootstrap_page(slug, content).encode("utf-8")
-    mutate_knowledge(
-        stable_operation_id("bootstrap", slug, encoded), {bootstrap_path: encoded}
+    expected = {bootstrap_path.relative_to(ROOT).as_posix(): ABSENT} if if_missing else None
+    record = mutate_knowledge(
+        stable_operation_id("bootstrap", slug, encoded), {bootstrap_path: encoded},
+        preconditions=expected,
     )
+    _require_bootstrap_commit(record)
     return f"Written: {bootstrap_path.relative_to(ROOT)}"
+
+
+def _require_bootstrap_commit(record) -> None:
+    if record.state != "committed":
+        raise RuntimeError(f"bootstrap publication did not commit: {record.state}")
 
 
 def _redacted(items: list[str]) -> list[str]:
@@ -268,9 +278,10 @@ def main() -> int:
     p = argparse.ArgumentParser(description="Bootstrap a project into the vault.")
     p.add_argument("--cwd", required=True, help="Project directory")
     p.add_argument("--apply", action="store_true", help="Write to vault (default: dry-run)")
+    p.add_argument("--if-missing", action="store_true", help="With --apply, preserve an existing bootstrap.")
     args = p.parse_args()
 
-    result = bootstrap(args.cwd, args.apply)
+    result = bootstrap(args.cwd, args.apply, if_missing=args.if_missing)
     print(result)
     return 0
 

@@ -73,7 +73,6 @@ def test_every_reader_of_a_knowledge_page_shares_one_ceiling() -> None:
         "guardrails": claim_tree_manifest.MAX_GUARDRAIL_SOURCE_FILE_BYTES,
         "claims": claims.MAX_CLAIM_PAGE_BYTES,
         "lint": lint_memory.MAX_LINT_PAGE_BYTES,
-        "corpus": corpus_snapshot.MAX_CORPUS_FILE_BYTES,
         "search": search_memory.MAX_PAGE_BYTES,
         "after_image": compile_memory.MAX_AFTER_IMAGE_BYTES,
         "index": rebuild_memory_index.MAX_PAGE_BYTES,
@@ -83,3 +82,8 @@ def test_every_reader_of_a_knowledge_page_shares_one_ceiling() -> None:
 
     assert set(ceilings.values()) == {bounded_io.MAX_KNOWLEDGE_PAGE_BYTES}
     assert bounded_io.MAX_KNOWLEDGE_PAGE_BYTES == 8 * 1024 * 1024
+    # The corpus also reads immutable daily evidence, whose separate budget is
+    # deliberately larger. The page writer remains in the exact family above.
+    assert corpus_snapshot.MAX_CORPUS_FILE_BYTES == max(
+        bounded_io.MAX_KNOWLEDGE_PAGE_BYTES, compile_memory.MAX_DAILY_BYTES
+    )

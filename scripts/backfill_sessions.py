@@ -39,7 +39,6 @@ DEFAULT_SOURCE_ROOTS = host_transcript_roots()
 # One transcript can be tens of megabytes; the record itself is bounded to 512 KB
 # by the writer, so reading more than this only costs time.
 MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024
-MAX_TRANSCRIPTS = 10_000
 TRANSCRIPT_SUFFIXES = (".jsonl", ".json")
 # A memory call runs from a temporary directory with this prefix
 # (`llm_client.provider_cwd`); its saved session is the vault's own prompt, not a
@@ -59,7 +58,6 @@ class Outcome:
     empty: int = 0
     refused: int = 0
     bytes_written: int = 0
-    unscanned: int = 0
     refused_sessions: list[str] = field(default_factory=list)
 
     def as_lines(self, applied: bool) -> list[str]:
@@ -70,16 +68,6 @@ class Outcome:
             f"already present: {self.present}",
             f"nothing to keep: {self.empty}",
             f"refused by the writer: {self.refused}",
-            *self._cap_lines(),
-        ]
-
-    def _cap_lines(self) -> list[str]:
-        """The cap is named when it cut the scan, so a short pass is never silent."""
-        if not self.unscanned:
-            return []
-        return [
-            f"left unscanned by the {MAX_TRANSCRIPTS}-transcript cap: {self.unscanned}"
-            " (run again after these are recorded)"
         ]
 
 
@@ -88,10 +76,6 @@ def _found_transcripts(roots: tuple[Path, ...]) -> list[Path]:
     for root in roots:
         found.extend(_transcripts_under(root))
     return sorted(found)
-
-
-def _transcripts(roots: tuple[Path, ...]) -> list[Path]:
-    return _found_transcripts(roots)[:MAX_TRANSCRIPTS]
 
 
 def _transcripts_under(root: Path) -> list[Path]:
@@ -240,8 +224,7 @@ def backfill(vault: Path, roots: tuple[Path, ...], *, apply: bool) -> Outcome:
     """Write one record per past transcript; existing records are left alone."""
     outcome = Outcome()
     found = _found_transcripts(roots)
-    outcome.unscanned = max(0, len(found) - MAX_TRANSCRIPTS)
-    for path in found[:MAX_TRANSCRIPTS]:
+    for path in found:
         planned = _plan_one(vault, path, outcome)
         if planned is None:
             continue

@@ -26,10 +26,12 @@ from pathlib import Path
 BENCHMARK_DIR = Path(__file__).resolve().parent
 if str(BENCHMARK_DIR) not in sys.path:
     sys.path.insert(0, str(BENCHMARK_DIR))
+sys.path.insert(0, str(BENCHMARK_DIR.parent / "scripts"))
 
 import longmemeval_coverage  # noqa: E402
 import longmemeval_data  # noqa: E402
 import longmemeval_score  # noqa: E402
+from memory_state import atomic_write  # noqa: E402
 
 WORKER = BENCHMARK_DIR / "longmemeval_vault.py"
 RESULTS_DIR = longmemeval_data.DATASET_DIR
@@ -238,7 +240,7 @@ def _run_worker(question: dict, staging: Path, args: argparse.Namespace) -> dict
     question_id = str(question["question_id"])
     question_file = staging / f"{question_id}.question.json"
     out_file = staging / f"{question_id}.result.json"
-    question_file.write_text(json.dumps(question, ensure_ascii=False), encoding="utf-8")
+    atomic_write(question_file, json.dumps(question, ensure_ascii=False))
     out_file.unlink(missing_ok=True)
     try:
         completed = subprocess.run(

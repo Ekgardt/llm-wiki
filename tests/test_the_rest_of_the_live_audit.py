@@ -144,12 +144,19 @@ def test_a_dry_run_moves_no_clock(monkeypatch) -> None:
 
 
 def _failure_root(state_root: Path, index: int, age_days: float, now: datetime) -> Path:
+    from tests.test_a_dead_owner_root_is_swept_when_the_next_server_starts import finished_process
+
+    pid, identity = finished_process()
     nonce = f"{index:032x}"
     started = now - timedelta(days=age_days, minutes=1)
     owner = _write_lsp_owner(
-        state_root, owner_nonce=nonce, generation_nonce="f" * 32, started_at=started, owner_pid=999_999
+        state_root, owner_nonce=nonce, generation_nonce="f" * 32, started_at=started, owner_pid=pid
     )
-    _write_lsp_failure(owner, owner_nonce=nonce, generation_nonce="f" * 32, timestamp=now - timedelta(days=age_days), server_pid=999_999)
+    owner_path = owner / "owner.json"
+    record = json.loads(owner_path.read_text())
+    record["owner_start_identity"] = identity
+    owner_path.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")))
+    _write_lsp_failure(owner, owner_nonce=nonce, generation_nonce="f" * 32, timestamp=now - timedelta(days=age_days), server_pid=pid)
     return owner
 
 

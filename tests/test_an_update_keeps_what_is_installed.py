@@ -17,11 +17,16 @@ if str(SCRIPTS) not in sys.path:
 import self_update  # noqa: E402
 
 
-def test_the_update_syncs_exactly_as_the_project_baseline_does():
+def test_only_a_sync_that_names_every_extra_is_exact():
+    """The update names every extra and group the vault has, so it may remove the rest;
+    `sync_memory`'s baseline step names none, so it must stay inexact
+    (docs/research/2026-09-29-a-sync-removes-what-the-lock-no-longer-names.md)."""
     import sync_memory
 
-    assert self_update.BASELINE_SYNC_COMMAND == sync_memory._SYNC_STEP.command
-    assert "--inexact" in self_update.BASELINE_SYNC_COMMAND
+    assert ("--inexact" in self_update.BASELINE_SYNC_COMMAND, "--inexact" in sync_memory._SYNC_STEP.command) == (
+        False,
+        True,
+    )
 
 
 def test_a_failed_fetch_names_what_git_said(tmp_path, monkeypatch):

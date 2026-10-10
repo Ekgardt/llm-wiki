@@ -1723,13 +1723,13 @@ def _lock_mentions_pyright(
         return False
     lockfile_version = value.get("lockfileVersion")
     if lockfile_version == 1:
-        entries = value.get("dependencies")
-        key = "pyright"
-    elif lockfile_version in {2, 3}:
-        entries = value.get("packages")
-        key = "node_modules/pyright"
-    else:
-        return False
+        return _contains_lock_entry(value.get("dependencies"), "pyright")
+    if lockfile_version in {2, 3}:
+        return _contains_lock_entry(value.get("packages"), "node_modules/pyright")
+    return False
+
+
+def _contains_lock_entry(entries: object, key: str) -> bool:
     return isinstance(entries, dict) and key in entries
 
 

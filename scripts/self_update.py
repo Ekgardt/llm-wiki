@@ -15,17 +15,13 @@ See knowledge/notes/automatic-code-update-decision.md.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # pragma: no cover - 3.10 reads the same documents through tomli
-    import tomli as tomllib
 
 from secret_redact import describe_error
 
@@ -34,12 +30,14 @@ FETCH_TIMEOUT_SECONDS = 120.0
 # One git call of the nightly update, which fetches over the network; the local-only git calls elsewhere allow 10-20 s.
 GIT_TIMEOUT_SECONDS = 60.0
 SYNC_TIMEOUT_SECONDS = 600.0
-# The project's baseline sync, as `sync_memory` runs it. Without `--inexact` an
-# exact sync removes every package the lock selection does not name: dry-run on
-# the live environment said "Would uninstall 93 packages", torch and the models
-# among them. See `docs/research/2026-09-14-an-update-that-keeps-what-is-installed.md`.
+# The update's sync, before the selection it names. It is exact: every extra and
+# group the vault has is named (`sync_selection`), so what the lock no longer names
+# is removed — 2.7 GB of CUDA wheels stayed behind on the owner's vault after torch
+# moved to its CPU build. Inexact was right while the update named no extra
+# (docs/research/2026-09-14-an-update-that-keeps-what-is-installed.md); see
+# docs/research/2026-09-29-a-sync-removes-what-the-lock-no-longer-names.md.
 BASELINE_SYNC_COMMAND = (
-    "uv", "sync", "--locked", "--inexact", "--no-default-groups", "--no-python-downloads", "--quiet",
+    "uv", "sync", "--locked", "--no-default-groups", "--no-python-downloads", "--quiet",
 )
 FETCH_DETAIL_CHARS = 300
 
@@ -142,14 +140,20 @@ def _modified_paths(root: Path) -> set[str]:
     return _diff_paths(root) | _diff_paths(root, "--cached")
 
 
-def _sync_command(extras: Sequence[str]) -> tuple[str, ...]:
-    """The baseline sync plus every extra the operator chose, in one inexact call."""
-    chosen = tuple(argument for extra in extras for argument in ("--extra", extra))
-    return (*BASELINE_SYNC_COMMAND, *chosen)
+def selection_arguments(extras: Sequence[str], groups: Sequence[str] = ()) -> tuple[str, ...]:
+    """`--extra` for each extra and `--group` for each group, in that order."""
+    named = [("--extra", extra) for extra in extras] + [("--group", group) for group in groups]
+    return tuple(argument for pair in named for argument in pair)
+
+
+def _sync_command(extras: Sequence[str], groups: Sequence[str] = ()) -> tuple[str, ...]:
+    """The exact sync of the baseline and every extra and group the vault has."""
+    return (*BASELINE_SYNC_COMMAND, *selection_arguments(extras, groups))
 
 
 def _synced_dependencies(root: Path, extras: Sequence[str]) -> bool:
-    completed = _run(_sync_command(extras), cwd=root, timeout=SYNC_TIMEOUT_SECONDS)
+    command = _sync_command(extras, chosen_groups(root))
+    completed = _run(command, cwd=root, timeout=SYNC_TIMEOUT_SECONDS)
     return completed.returncode == 0
 
 
@@ -285,7 +289,7 @@ def sync_dependencies(root: Path | str) -> str:
     (audit 2026-09-26 B-24).
     """
     root = Path(root)
-    return _dependency_state(root, chosen_extras(root))
+    return _dependency_state(root, update_extras(root))
 
 
 def canonical_name(name: str) -> str:
@@ -335,12 +339,21 @@ def _chosen_by_itself(
     return bool((exclusive & installed.keys()) - pulled_in)
 
 
-def _project(root: Path) -> dict:
-    """The `[project]` table; a checkout without one declares no extras to keep."""
+def _pyproject(root: Path) -> dict:
+    """The whole `pyproject.toml`; a checkout without one declares nothing to keep."""
     path = root / "pyproject.toml"
     if not path.is_file():
         return {}
-    return tomllib.loads(path.read_text(encoding="utf-8")).get("project", {})
+    if sys.version_info >= (3, 11):
+        import tomllib
+    else:  # pragma: no cover - Python 3.10 uses the provisioned TOML reader
+        import tomli as tomllib
+    return tomllib.loads(path.read_text(encoding="utf-8"))
+
+
+def _project(root: Path) -> dict:
+    """The `[project]` table."""
+    return _pyproject(root).get("project", {})
 
 
 def _own_names(project: dict) -> dict[str, set[str]]:
@@ -360,15 +373,45 @@ def _exclusive_names(project: dict) -> dict[str, set[str]]:
     chosen by itself; its parts are.
     """
     base = {_requirement_name(value) for value in project.get("dependencies", [])}
-    own = _own_names(project)
+    return _exclusive(_own_names(project), base)
+
+
+def _exclusive(owned: dict[str, set[str]], shared: set[str]) -> dict[str, set[str]]:
+    """What each set names that no other set and nothing in `shared` names."""
     exclusive: dict[str, set[str]] = {}
-    for extra, names in own.items():
-        others = set().union(*(other for name, other in own.items() if name != extra))
-        exclusive[extra] = names - others - base
+    for key, names in owned.items():
+        others = set().union(*(other for name, other in owned.items() if name != key))
+        exclusive[key] = names - others - shared
     return exclusive
 
 
-def chosen_extras(root: Path) -> tuple[str, ...]:
+def _group_names(document: dict) -> dict[str, set[str]]:
+    """Each dependency group and the distributions it names (an include names none)."""
+    groups = document.get("dependency-groups", {})
+    return {
+        canonical_name(group): {_requirement_name(value) for value in values if isinstance(value, str)} - {""}
+        for group, values in groups.items()
+    }
+
+
+def chosen_groups(root: Path, installed: dict[str, set[str]] | None = None) -> tuple[str, ...]:
+    """The dependency groups the operator installed, found as chosen extras are.
+
+    A group is chosen when a distribution only it brings is installed and nothing
+    else pulled it in: `pytest` means `dev`. An exact sync that did not name it
+    would uninstall the operator's test tools.
+    """
+    document = _pyproject(root)
+    project = document.get("project", {})
+    groups = _group_names(document)
+    shared = {_requirement_name(value) for value in project.get("dependencies", [])}
+    shared |= set().union(*_own_names(project).values())
+    present = _installed_distributions() if installed is None else installed
+    exclusive = _exclusive(groups, shared)
+    return tuple(sorted(group for group, names in exclusive.items() if _chosen_by_itself(names, groups[group], present)))
+
+
+def chosen_extras(root: Path, installed: dict[str, set[str]] | None = None) -> tuple[str, ...]:
     """The extras the operator chose: those with a distribution only they bring installed.
 
     Nothing records the choice, so the environment is the record. The update syncs
@@ -376,13 +419,36 @@ def chosen_extras(root: Path) -> tuple[str, ...]:
     code that needs it. See
     `docs/research/2026-09-25-an-update-brings-the-extras-the-operator-chose.md`.
     """
-    installed = _installed_distributions()
+    installed = _installed_distributions() if installed is None else installed
     project = _project(root)
     own = _own_names(project)
     exclusive = _exclusive_names(project)
     return tuple(
         sorted(extra for extra, names in exclusive.items() if _chosen_by_itself(names, own[extra], installed))
     )
+
+
+def update_extras(root: Path, installed: dict[str, set[str]] | None = None) -> tuple[str, ...]:
+    """What an update syncs: every extra an install brings, and any the operator added.
+
+    Syncing only what was installed kept a vault updated by the nightly alone on the
+    components of the release it was first installed from; the default set grows
+    with the product (docs/research/2026-09-29-every-install-brings-every-component.md).
+    """
+    from installer_config import DEFAULT_EXTRAS
+
+    return tuple(sorted(set(DEFAULT_EXTRAS) | set(chosen_extras(root, installed))))
+
+
+def sync_selection(root: Path, installed: dict[str, set[str]] | None = None) -> dict[str, list[str]]:
+    """What an exact sync of this vault must name: the extras and the groups.
+
+    One rule for the nightly update and the installer; the installer asks the
+    environment's own interpreter for its distribution inventory, because only
+    that one sees what is installed there.
+    """
+    extras, groups = update_extras(root, installed), chosen_groups(root, installed)
+    return {"extras": list(extras), "groups": list(groups), "arguments": list(selection_arguments(extras, groups))}
 
 
 # What the installer renders owned resources from — units, plists, task settings,
@@ -480,7 +546,7 @@ def _fast_forward_over(root: Path, fetched: str, copies: list[str]) -> None:
 def _merged_update(root: Path, head: str, fetched: str, copies: list[str]) -> dict:
     changed = _changed_paths(root, head, fetched)
     _fast_forward_over(root, fetched, copies)
-    extras = chosen_extras(root)
+    extras = update_extras(root)
     return _outcome(
         "updated",
         None,
@@ -541,8 +607,15 @@ def update_target_note(root: Path | str) -> str:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Say what the nightly code update does with a checkout.")
-    parser.add_argument("--note", type=Path, required=True, metavar="ROOT", help="the checkout to describe")
+    chosen = parser.add_mutually_exclusive_group(required=True)
+    chosen.add_argument("--note", type=Path, metavar="ROOT", help="the checkout to describe")
+    chosen.add_argument(
+        "--selection", type=Path, metavar="ROOT", help="print the extras and groups an exact sync names, as JSON"
+    )
     args = parser.parse_args(argv)
+    if args.selection is not None:
+        print(json.dumps(sync_selection(args.selection), sort_keys=True))
+        return 0
     print(update_target_note(args.note))
     return 0
 

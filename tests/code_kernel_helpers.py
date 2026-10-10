@@ -193,7 +193,9 @@ def use_pyright_install_artifact_identity(
 
 
 def copy_python_fixture(destination: Path) -> Path:
-    shutil.copytree(FIXTURE_ROOT, destination)
+    shutil.copytree(
+        FIXTURE_ROOT, destination, ignore=shutil.ignore_patterns("__pycache__", "*.pyc")
+    )
     return destination
 
 

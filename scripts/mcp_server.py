@@ -64,7 +64,7 @@ if __name__ == "__main__" and os.environ.get("LLM_WIKI_MCP_WORKER") != "1":
 
     raise SystemExit(mcp_supervisor.main(sys.argv[1:]))
 
-from bounded_io import read_stable_bytes  # noqa: E402
+from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
 
 # A queue commit locks readers out for milliseconds; wait it out instead of
 # reporting a live queue as unreadable.
@@ -72,28 +72,13 @@ QUEUE_READ_BUSY_MS = 1_000
 # Bounds on what one tool call reads or accepts. The input bounds are published in
 # the tools' JSON schemas (`maxLength`, `maxItems`, `maximum`), so a client sees them
 # before calling, and a value past one is refused with an error, never cut.
-# A page read whole: the largest note on the installed vault on 2026-09-27 was about
-# 19 KB, so 4 MiB refuses only a file that is not a note (slugs cannot reach journals).
-MAX_MCP_PAGE_BYTES = 4 * 1024 * 1024
 # One cited evidence slice and all of an answer's slices together; past either the
 # answer fails by name rather than quoting a cut span. Basis unknown: values predate
 # measurement; review if grounded answers are refused for their evidence size.
 MAX_MCP_EVIDENCE_BYTES = 64 * 1024
 MAX_MCP_TOTAL_EVIDENCE_BYTES = 256 * 1024
-# A search question (characters). Basis unknown: value predates measurement; a
-# question is a sentence, so 8 192 only refuses a pasted document.
-MAX_MCP_QUERY_LENGTH = 8_192
 # A page slug is one file name: NAME_MAX, 255 bytes on ext4/APFS/NTFS.
 MAX_MCP_SLUG_LENGTH = 255
-# get_context's lists: pages per call, and the `include` list the tool still accepts
-# for compatibility and ignores (bounded so an ignored argument costs nothing). Basis
-# unknown: values predate measurement.
-MAX_MCP_CONTEXT_SLUGS = 20
-MAX_MCP_CONTEXT_INCLUDE = 10
-MAX_MCP_INCLUDE_LENGTH = 64
-# The largest token_budget a caller may ask get_context for. Basis unknown: value
-# predates measurement; review if a client's context window makes it too small.
-MAX_MCP_CONTEXT_TOKENS = 32_768
 # An error message returned to a client, after secret redaction: a display bound so a
 # failing tool never answers with a whole traceback.
 MAX_MCP_ERROR_CHARS = 256
@@ -634,7 +619,6 @@ TOOL_INPUT_SCHEMAS = {
         "properties": {
             "query": {
                 "type": "string",
-                "maxLength": MAX_MCP_QUERY_LENGTH,
                 "description": "Search query",
             },
             "limit": {
@@ -682,7 +666,6 @@ TOOL_INPUT_SCHEMAS = {
         "properties": {
             "query": {
                 "type": "string",
-                "maxLength": MAX_MCP_QUERY_LENGTH,
                 "description": "Optional filter query",
             },
             "limit": {
@@ -699,23 +682,21 @@ TOOL_INPUT_SCHEMAS = {
             "slugs": {
                 "type": "array",
                 "minItems": 1,
-                "maxItems": MAX_MCP_CONTEXT_SLUGS,
                 "uniqueItems": True,
                 "items": {"type": "string", "maxLength": MAX_MCP_SLUG_LENGTH},
                 "description": "List of page slugs",
             },
             "include": {
                 "type": "array",
-                "maxItems": MAX_MCP_CONTEXT_INCLUDE,
                 "uniqueItems": True,
-                "items": {"type": "string", "maxLength": MAX_MCP_INCLUDE_LENGTH},
+                "items": {"type": "string"},
                 "description": "Accepted for compatibility and ignored; page content is already in `text`",
             },
             "token_budget": {
                 "type": "integer",
-                "minimum": 256,
-                "maximum": MAX_MCP_CONTEXT_TOKENS,
+                "minimum": 1,
                 "default": 8192,
+                "description": "Estimated token allowance for the context package; MCP envelope and telemetry add overhead",
             },
         },
         "required": ["slugs"],
@@ -910,8 +891,8 @@ def _search_vault(
     Every tool that answers from the corpus comes through here, so each gets the
     same deadline reserve, lexical fallback and trace (audit 2026-09-26 C-10).
     """
-    if not isinstance(query, str) or len(query) > MAX_MCP_QUERY_LENGTH:
-        raise ValueError("query exceeds the MCP retrieval bound")
+    if not isinstance(query, str):
+        raise ValueError("query must be a string")
     operation_deadline = _search_deadline(deadline)
     # The hybrid run stops a reserved second early, so the lexical fallback has
     # time left to answer in (audit B-18,
@@ -1056,16 +1037,19 @@ def _retrieval_trace(
     an empty result names the generation it searched; rows alone are the path
     for callers that predate the sink.
     """
-    if _carries_trace(reported, generation_key="corpus_generation"):
-        trace = _reported_trace(reported)
-    elif results and _carries_trace(results[0], generation_key="generation"):
-        trace = _row_trace(results[0])
-    else:
-        trace = _unreported_trace(query)
     from reliable_memory import validate_schema
 
+    trace = _selected_retrieval_trace(query, results, reported)
     validate_schema(trace, RETRIEVAL_TRACE_SCHEMA)
     return trace
+
+
+def _selected_retrieval_trace(query: str, results: list[dict], reported) -> dict:
+    if _carries_trace(reported, generation_key="corpus_generation"):
+        return _reported_trace(reported)
+    if results and _carries_trace(results[0], generation_key="generation"):
+        return _row_trace(results[0])
+    return _unreported_trace(query)
 
 
 def _read_page(
@@ -1156,7 +1140,7 @@ def _page_content(page_path: Path):
     """Return the decoded page, or the error dict the caller must hand back."""
     try:
         return read_stable_bytes(
-            page_path, MAX_MCP_PAGE_BYTES, label="MCP page"
+            page_path, MAX_KNOWLEDGE_PAGE_BYTES, label="MCP page"
         ).decode("utf-8", errors="strict")
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         return {"error": f"Page read failed: {_safe_page_read_error(exc)}"}
@@ -1360,13 +1344,12 @@ def _get_decisions(
     docs/research/2026-09-25-get-decisions-returns-what-was-asked.md).
     """
     from retrieval import CANDIDATE_FANOUT
-    from search_memory import MAX_SEARCH_LIMIT
 
     _require_decision_query(query)
     effective_query = query or "decision"
     candidates = _search_vault(
         effective_query,
-        min(limit * CANDIDATE_FANOUT, MAX_SEARCH_LIMIT),
+        limit * CANDIDATE_FANOUT,
         deadline=deadline,
         trace_sink=trace_sink,
         caller=DECISIONS_CALLER,
@@ -1388,8 +1371,8 @@ def _decision_pages(candidates: list[dict], limit: int) -> list[dict]:
 def _require_decision_query(query) -> None:
     if query is None:
         return
-    if not isinstance(query, str) or len(query) > MAX_MCP_QUERY_LENGTH:
-        raise ValueError("query exceeds the MCP retrieval bound")
+    if not isinstance(query, str):
+        raise ValueError("query must be a string")
 
 
 def _is_decision_result(result: dict) -> bool:
@@ -1517,29 +1500,25 @@ def _slug_exceeds_bound(slug) -> bool:
     return not isinstance(slug, str) or len(slug) > MAX_MCP_SLUG_LENGTH
 
 
-def _include_exceeds_bound(item) -> bool:
-    return not isinstance(item, str) or len(item) > MAX_MCP_INCLUDE_LENGTH
-
-
 def _require_context_slugs(slugs) -> None:
-    if not isinstance(slugs, list) or not 1 <= len(slugs) <= MAX_MCP_CONTEXT_SLUGS:
+    if not isinstance(slugs, list) or not slugs:
         raise ValueError("slugs exceed the MCP context bound")
     if any(_slug_exceeds_bound(slug) for slug in slugs):
         raise ValueError("slug exceeds the MCP context bound")
 
 
 def _require_context_include(include) -> None:
-    if not isinstance(include, list) or len(include) > MAX_MCP_CONTEXT_INCLUDE:
+    if not isinstance(include, list):
         raise ValueError("include exceeds the MCP context bound")
-    if any(_include_exceeds_bound(item) for item in include):
+    if any(not isinstance(item, str) for item in include):
         raise ValueError("include item exceeds the MCP context bound")
 
 
 def _require_context_token_budget(token_budget) -> None:
     if isinstance(token_budget, bool) or not isinstance(token_budget, int):
-        raise ValueError("token_budget exceeds the MCP context bound")
-    if not 256 <= token_budget <= MAX_MCP_CONTEXT_TOKENS:
-        raise ValueError("token_budget exceeds the MCP context bound")
+        raise ValueError("token_budget must be a positive integer")
+    if token_budget < 1:
+        raise ValueError("token_budget must be a positive integer")
 
 
 def _validated_context_request(slugs, include, token_budget):
@@ -1568,10 +1547,10 @@ def _selected_sources(snapshot, requested: set) -> tuple:
     )
 
 
-def _selected_chunks(snapshot, selected_paths: set) -> tuple:
-    return tuple(
-        chunk for chunk in snapshot.chunks if chunk.parent_page in selected_paths
-    )
+def _selected_chunks(snapshot, selected_paths: set):
+    from corpus_snapshot import select_snapshot_chunks
+
+    return select_snapshot_chunks(snapshot, selected_paths)
 
 
 def _missing_context_slugs(sources, requested: set) -> list:
@@ -3964,7 +3943,9 @@ def _doctor_queue_read(context: dict) -> dict:
 def _doctor_queue_cancel(context: dict) -> dict:
     from memory_queue import active_or_legacy_memory_queue
 
-    queue = active_or_legacy_memory_queue(context["root"], context["state_root"])
+    queue = active_or_legacy_memory_queue(
+        context["root"], context["state_root"], deadline=context["deadline"]
+    )
     changed = queue.cancel(
         str(context["target_id"]),
         deadline=context["deadline"],
@@ -3991,7 +3972,9 @@ def _redrive_error_code(error) -> str:
 def _doctor_queue_redrive(context: dict) -> dict:
     from memory_queue import QueueOperationError, active_or_legacy_memory_queue
 
-    queue = active_or_legacy_memory_queue(context["root"], context["state_root"])
+    queue = active_or_legacy_memory_queue(
+        context["root"], context["state_root"], deadline=context["deadline"]
+    )
     try:
         replacement = queue.redrive(
             str(context["target_id"]),
@@ -4027,7 +4010,9 @@ def _transaction_result(action: str, records) -> dict:
 def _transaction_coordinator(context: dict):
     from markdown_transaction import active_or_legacy_coordinator
 
-    return active_or_legacy_coordinator(context["root"], context["state_root"])
+    return active_or_legacy_coordinator(
+        context["root"], context["state_root"], deadline=context["deadline"]
+    )
 
 
 def _doctor_transaction_recover(context: dict) -> dict:
@@ -4660,7 +4645,7 @@ def _safe_exception_text(error: BaseException, operation: str = "mcp") -> str:
 def _safe_page_read_error(error: BaseException) -> str:
     message = " ".join(str(error).split())
     allowed = {
-        f"MCP page exceeds {MAX_MCP_PAGE_BYTES} bytes",
+        f"MCP page exceeds {MAX_KNOWLEDGE_PAGE_BYTES} bytes",
         "MCP page parent must be a regular directory",
         "MCP page must be a regular non-symlink file",
         "MCP page changed before open",
@@ -5574,7 +5559,7 @@ def _changed_since(root: Path, path: Path, recorded: dict[str, str], built: int)
 
 def _file_sha256(path: Path) -> str | None:
     try:
-        return hashlib.sha256(read_stable_bytes(path, MAX_MCP_PAGE_BYTES, label="indexed source")).hexdigest()
+        return hashlib.sha256(read_stable_bytes(path, MAX_KNOWLEDGE_PAGE_BYTES, label="indexed source")).hexdigest()
     except (OSError, ValueError):
         return None
 
@@ -6418,27 +6403,24 @@ def _build_resource_definitions() -> list:
     ]
 
 
+def _resource_data(uri: str, deadline: float) -> dict:
+    if uri == HEALTH_RESOURCE_URI:
+        return _call_with_deadline(_vault_status, deadline=deadline)
+    if uri == CONTEXT_RESOURCE_URI:
+        return {
+            "overview": _call_with_deadline(_wiki_overview, deadline=deadline),
+            "status": _call_with_deadline(_vault_status, deadline=deadline),
+        }
+    return {"error": f"Unknown resource: {uri}"}
+
+
 def _handle_resource_read(uri: str, deadline: float | None = None) -> str:
     """Return one resource as a JSON text envelope."""
 
     operation_deadline = _operation_deadline(deadline)
     deadline_token = _OPERATION_DEADLINE.set(operation_deadline)
     try:
-        if uri == HEALTH_RESOURCE_URI:
-            data = _call_with_deadline(
-                _vault_status, deadline=operation_deadline
-            )
-        elif uri == CONTEXT_RESOURCE_URI:
-            data = {
-                "overview": _call_with_deadline(
-                    _wiki_overview, deadline=operation_deadline
-                ),
-                "status": _call_with_deadline(
-                    _vault_status, deadline=operation_deadline
-                ),
-            }
-        else:
-            data = {"error": f"Unknown resource: {uri}"}
+        data = _resource_data(uri, operation_deadline)
     except Exception as error:
         data = {"error": _safe_exception_text(error, f"mcp.resource:{uri}")}
     try:
@@ -6568,6 +6550,7 @@ WARMUP_PASSES = 2
 
 def _warmup_pass(deadline_seconds: float) -> None:
     """One throwaway question down the real path, so nothing is warmed by proxy."""
+    from retrieval import background_cancellation
     from search_memory import search
 
     search(
@@ -6578,6 +6561,7 @@ def _warmup_pass(deadline_seconds: float) -> None:
         rerank=True,
         source_tool="warmup",
         emit_telemetry=False,
+        cancelled=background_cancellation(),
         deadline_monotonic=time.monotonic() + deadline_seconds,
     )
 
@@ -6610,23 +6594,36 @@ def _record_warmup_failure(stage: str, error: Exception) -> None:
     )
 
 
-def _warmup_stage(stage: str, run) -> bool:
-    """One stage of the warm-up; a failure is recorded, never raised.
+def _attempt_prioritized_warmup(run, deadline: float) -> bool:
+    import inference_threads
+    from retrieval import _require_optional_not_cancelled, warmup_priority
 
-    A server that is shutting down stops the warm-up here, between stages, so no
-    model is mid-inference when the interpreter finalizes. See
-    `docs/research/2026-09-14-no-model-running-at-exit.md`.
-    """
+    with warmup_priority(deadline, inference_threads.stopping.is_set) as cancelled:
+        try:
+            run()
+            _require_optional_not_cancelled(cancelled)
+        except Exception:
+            if cancelled():
+                return False
+            raise
+    return True
+
+
+def _warmup_stage(stage: str, run, deadline_seconds: float = WARMUP_LIMIT_SECONDS) -> bool:
+    """Only a complete idle pass warms; preempted work retries within its original clock."""
     import inference_threads
 
-    if inference_threads.stopping.is_set():
-        return False
-    try:
-        run()
-    except Exception as error:  # noqa: BLE001 - recorded in the health answer
-        _record_warmup_failure(stage, error)
-        return False
-    return True
+    deadline = time.monotonic() + deadline_seconds
+    while not inference_threads.stopping.is_set():
+        try:
+            if _attempt_prioritized_warmup(run, deadline):
+                return True
+        except Exception as error:  # noqa: BLE001 - recorded in the health answer
+            if inference_threads.stopping.is_set():
+                return False
+            _record_warmup_failure(stage, error)
+            return False
+    return False
 
 
 def warmup_retrieval_path(deadline_seconds: float = WARMUP_LIMIT_SECONDS) -> None:
@@ -6659,10 +6656,10 @@ def warmup_retrieval_path(deadline_seconds: float = WARMUP_LIMIT_SECONDS) -> Non
     """
     started = time.monotonic()
     _set_warmup(status="running")
-    if not _warmup_stage("reranker", _warm_reranker):
+    if not _warmup_stage("reranker", _warm_reranker, deadline_seconds):
         return
     for index in range(WARMUP_PASSES):
-        if not _warmup_stage(f"pass_{index + 1}", lambda: _warmup_pass(deadline_seconds)):
+        if not _warmup_stage(f"pass_{index + 1}", lambda: _warmup_pass(deadline_seconds), deadline_seconds):
             return
     _set_warmup(status="warm", seconds=round(time.monotonic() - started, 3))
 
@@ -6688,14 +6685,18 @@ def _start_encoder_warmup() -> None:
     ~1.1 GiB resident, so the first semantic question of a session always fell
     back to lexical-only. The owner accepted that price on 2026-08-27: every
     resident server pays the memory up front, and the first `recall` answers
-    with the dense leg. The load runs on a daemon thread so serving starts
+    with the dense leg in that measured corpus. This is not a guarantee for
+    the current corpus or a cold fourteen-second answer. The load runs on a
+    tracked background thread so serving starts
     immediately, and it shares `search_memory._get_embedder`'s module cache
     with the dense leg — a straggler racing it wastes one load, never a vector.
     Set LLMWIKI_NO_ENCODER_WARMUP=1 to keep the old lazy behaviour.
 
     What it loads is now the whole path rather than the encoder alone, because
     loading was never the part that was missing; `warmup_retrieval_path` says
-    what was.
+    what was. Foreground search and its still-running workers now have
+    priority: cooperating warm-up stages yield and retry only after actual
+    settlement, within their original clocks. Native forwards are not killed.
     """
     if os.environ.get("LLMWIKI_NO_ENCODER_WARMUP") == "1":
         return

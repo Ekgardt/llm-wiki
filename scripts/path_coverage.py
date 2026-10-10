@@ -171,13 +171,13 @@ def _parse_status(errors: list[dict]) -> str:
 
 
 def _tree_sitter_parse(language: str, content: bytes) -> dict:
-    from code_graph import GRAMMAR_LOADERS, _get_parser
+    from code_graph import GRAMMAR_LOADERS, _parser_attempt
 
     if language not in GRAMMAR_LOADERS:
         return {"status": "unsupported_language", "language": language}
-    parser = _get_parser(language)
+    parser, cause = _parser_attempt(language)
     if parser is None:
-        return {"status": "not_parsed", "language": language, "reason": "grammar unavailable"}
+        return {"status": "not_parsed", "language": language, "reason": f"grammar unavailable: {cause}"}
     errors, truncated = _error_ranges(parser.parse(content).root_node)
     return {
         "status": _parse_status(errors),

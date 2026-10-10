@@ -11,12 +11,17 @@ stops allocating there, and an unbounded caller gets the identical registry.
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 import time
 import tracemalloc
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+from tests.slow_machine import LONG_TIMEOUT
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS) not in sys.path:
@@ -70,26 +75,41 @@ def test_a_cancelled_walk_stops_parsing_where_it_was_cancelled(tmp_path, monkeyp
     )
 
 
-def test_a_cancelled_walk_stops_allocating(tmp_path, monkeypatch):
+def _registry_allocation_stats(root, stop_after=None):
+    probe = Path(__file__).with_name("symbol_registry_allocation_probe.py")
+    command = [sys.executable, str(probe), str(root)]
+    if stop_after is not None:
+        command.append(str(stop_after))
+    result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=LONG_TIMEOUT)
+    return json.loads(result.stdout)
+
+
+def test_a_cancelled_walk_stops_allocating(tmp_path):
     """The abandoned run must cost a fraction of the full run's allocation."""
     _workspace(tmp_path, 200)
-
-    tracemalloc.start()
-    import_resolver.build_python_symbol_registry(tmp_path)
-    whole = tracemalloc.get_traced_memory()[1]
-    tracemalloc.stop()
-
-    cancelled = _CancelAfter(monkeypatch, 20)
-    tracemalloc.start()
-    with pytest.raises(TimeoutError):
-        import_resolver.build_python_symbol_registry(tmp_path, cancelled=cancelled)
-    abandoned = tracemalloc.get_traced_memory()[1]
-    tracemalloc.stop()
-
+    complete = _registry_allocation_stats(tmp_path)
+    stopped = _registry_allocation_stats(tmp_path, 20)
+    assert (complete["parsed"], complete["stopped"]) == (200, False)
+    assert (stopped["parsed"], stopped["stopped"]) == (20, True), "cancelled walk did not stop at 20 files"
+    whole, abandoned = complete["peak_bytes"], stopped["peak_bytes"]
     assert abandoned < whole / 2, (
         f"the abandoned run peaked at {abandoned / 2**20:.2f} MiB against the "
         f"full run's {whole / 2**20:.2f} MiB; it kept allocating after the stop"
     )
+
+
+def test_registry_allocation_measurement_excludes_unrelated_parent_allocations(tmp_path):
+    """The old process-wide peak counted unrelated work as abandoned allocation."""
+    _workspace(tmp_path, 200)
+    tracemalloc.start()
+    try:
+        noise = bytearray(8 * 1024 * 1024)
+        stopped = _registry_allocation_stats(tmp_path, 20)
+        assert (stopped["parsed"], stopped["stopped"]) == (20, True)
+        assert 0 < stopped["peak_bytes"] < len(noise) / 2, "unrelated parent memory entered the registry peak"
+        assert tracemalloc.get_traced_memory()[1] >= len(noise)
+    finally:
+        tracemalloc.stop()
 
 
 def test_an_expired_deadline_stops_the_walk_before_any_file_is_parsed(tmp_path, monkeypatch):
@@ -109,13 +129,18 @@ def test_a_deadline_that_expires_mid_walk_stops_the_walk(tmp_path, monkeypatch):
     """A live deadline stops a walk that is already running."""
     _workspace(tmp_path, 400)
     counter = _CancelAfter(monkeypatch, 10**9)
+    original_monotonic = time.monotonic
+    clock = SimpleNamespace(monotonic=lambda: float(counter.parsed))
+    monkeypatch.setattr(import_resolver, "time", clock)
 
     with pytest.raises(TimeoutError, match="deadline"):
         import_resolver.build_python_symbol_registry(
-            tmp_path, deadline=time.monotonic() + 0.05
+            tmp_path, deadline=20.0
         )
 
     assert 0 < counter.parsed < 400
+    assert counter.parsed == 20
+    assert time.monotonic is original_monotonic
 
 
 def test_the_registry_is_unchanged_when_no_stop_is_requested(tmp_path):

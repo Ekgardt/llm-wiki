@@ -32,7 +32,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
-from markdown_transaction import ABSENT, mutate_knowledge, stable_operation_id  # noqa: E402
+from markdown_transaction import (  # noqa: E402
+    ABSENT,
+    MAX_KNOWLEDGE_TARGET_BYTES,
+    mutate_knowledge,
+    stable_operation_id,
+)
 from memory_state import ROOT  # noqa: E402
 from okf_types import (  # noqa: E402
     DEFAULT_AGE_DAYS,
@@ -64,11 +69,6 @@ _STATUS_LINE_RE = re.compile(r"^status:\s*.+$", re.MULTILINE)
 # shape restore may therefore remove whole.
 _INSERTED_FIELD = "status: archived"
 _INSERTED_BLOCK = f"---\n{_INSERTED_FIELD}\n---"
-
-# The largest page archiving or restore will read whole. Basis unknown: value predates
-# measurement and is twice bounded_io.MAX_KNOWLEDGE_PAGE_BYTES (8 MiB), which a page
-# written by the product cannot exceed; review when the two bounds are reconciled.
-MAX_ARCHIVE_PAGE_BYTES = 16 * 1024 * 1024
 
 # One read-only git question may not hold the weekly pass up: the whole set of
 # them costs 0.14 s on this vault, and a hang here would stall the archiver.
@@ -400,7 +400,7 @@ def _archive_page(md: Path, apply: bool) -> str:
         return f"WOULD ARCHIVE: {rel}"
     try:
         source_bytes = read_stable_bytes(
-            md, MAX_ARCHIVE_PAGE_BYTES, label="stale archive source"
+            md, MAX_KNOWLEDGE_TARGET_BYTES, label="stale archive source"
         )
         content = _with_archived_status(source_bytes.decode("utf-8"))
     except (OSError, UnicodeDecodeError, ValueError):
@@ -544,7 +544,7 @@ def _restore_one(source: Path, apply: bool) -> str:
 def _restored(source: Path, destination: Path) -> str:
     try:
         source_bytes = read_stable_bytes(
-            source, MAX_ARCHIVE_PAGE_BYTES, label="restore source"
+            source, MAX_KNOWLEDGE_TARGET_BYTES, label="restore source"
         )
     except (OSError, ValueError):
         return f"READ_ERROR: {source}"

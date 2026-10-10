@@ -11,9 +11,9 @@ session without conflict — Claude Code runs all registered hooks and
 concatenates their additionalContext output.
 
 Contract (hard requirements):
-    * Must exit 0 on ANY error. Breaking a session is worse than missing
-      context. All exceptions are swallowed and logged to
-      $LLM_WIKI_STATE_ROOT/hook-errors.log (best-effort).
+    * Failed context preparation or delivery exits 1. The lifecycle adapter
+      handles session continuation separately from delegate success. Errors
+      go to $LLM_WIKI_STATE_ROOT/logs/hook-errors.log (best-effort).
     * Must no-op if LLM_WIKI_ROOT is unset or its knowledge/projects/ is missing.
     * Output: a single JSON object on stdout with the shape Claude Code
       expects (see schema: hookSpecificOutput.additionalContext).
@@ -46,9 +46,9 @@ import sys
 import tempfile
 import traceback
 import unicodedata
-from datetime import datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from capture_diagnostics import record_hook_error  # noqa: E402
 from markdown_transaction import mutate_knowledge, stable_operation_id
 from project_journal import (
     ProjectStore,
@@ -123,22 +123,15 @@ def _resolve_state_root() -> Path | None:
 
 
 def _safe_write_error(err: str) -> None:
-    """Best-effort error log. Silent on failure."""
+    """Keep the hook available when its diagnostic destination is unavailable."""
     try:
-        state_root = _resolve_state_root()
-        if state_root is None:
-            return
-        log_path = state_root / "logs" / "hook-errors.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().astimezone().isoformat(timespec="seconds")
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(f"[{ts}] session_start_project_state: {err}\n")
-    except Exception:  # noqa: BLE001
-        pass
+        record_hook_error(_resolve_state_root(), "session_start_project_state", err)
+    except Exception:  # noqa: BLE001 - resolving the diagnostic root can itself fail
+        return
 
 
 def _emit(additional_context: str) -> int:
-    """Write the hook's JSON response and return 0."""
+    """Return success only after writing and flushing the hook response."""
     out = {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
@@ -146,10 +139,10 @@ def _emit(additional_context: str) -> int:
         }
     }
     try:
-        print(json.dumps(out, ensure_ascii=False))
-    except Exception:  # noqa: BLE001
-        # Even stdout can fail (broken pipe, encoding); swallow.
-        pass
+        print(json.dumps(out, ensure_ascii=False), flush=True)
+    except Exception as error:  # noqa: BLE001
+        _safe_write_error(f"context output failed: {type(error).__name__}: {error}")
+        return 1
     return 0
 
 
@@ -604,9 +597,9 @@ def _build_context(state_path: Path, slug: str, is_new: bool) -> str:
 def main() -> int:
     try:
         return _run_session_start()
-    except Exception:  # noqa: BLE001 — hook MUST exit 0
+    except Exception:  # noqa: BLE001
         _safe_write_error("unhandled:\n" + traceback.format_exc())
-        return _emit_empty()
+        return 1
 
 
 def _run_session_start() -> int:
@@ -631,6 +624,7 @@ def _emit_project_context(
     state_root = _resolve_state_root()
     if state_root is None:
         return _emit_empty()
+    _bootstrap_existing_project(vault, project_dir, projects_dir / slug / "state.md")
     # Recover reservations even before the first journal file is published.
     handoff = recover_project_handoff(
         ProjectStore(vault, state_root),
@@ -654,6 +648,15 @@ def _emit_state_context(
     if not _create_project_state(vault, projects_dir, project_dir, slug, state_path):
         return _emit_empty()
     return _emit(_build_context(state_path, slug, True))
+
+
+def _bootstrap_existing_project(vault: Path, project_dir: Path, state_path: Path) -> None:
+    """Revisit an interrupted bootstrap before either kind of project handoff."""
+    if not state_path.is_file():
+        return
+    if not _has_project_marker(project_dir):
+        return
+    _bootstrap_new_project(vault, project_dir, state_path)
 
 
 def _create_project_state(
@@ -684,8 +687,8 @@ def _create_project_state(
 
 # Measured 2026-09-18: `bootstrap_project.py` takes 0.09 s on a one-commit
 # repository and 0.12 s on this one. The old bound was 30 s, which no
-# measurement chose. A run that does not finish writes no `bootstrap.md`, so the
-# next session start of the project runs it again and nothing is lost. See
+# measurement chose. Failure is recorded in the hook log; a later session revisits
+# a missing bootstrap for an existing recognized project. See
 # `docs/research/2026-09-18-a-slug-the-journal-refuses-is-not-a-slug.md`.
 BOOTSTRAP_BUDGET_SECONDS = 5.0
 
@@ -702,15 +705,15 @@ def _bootstrap_new_project(vault: Path, project_dir: Path, state_path: Path) -> 
         import subprocess as _sp
         _sp.run(
             [sys.executable, str(vault / "scripts" / "bootstrap_project.py"),
-             "--cwd", str(project_dir), "--apply"],
-            capture_output=True, timeout=BOOTSTRAP_BUDGET_SECONDS, check=False,
+             "--cwd", str(project_dir), "--apply", "--if-missing"],
+            capture_output=True, timeout=BOOTSTRAP_BUDGET_SECONDS, check=True,
             cwd=str(vault),
         )
-    except Exception:  # noqa: BLE001
-        # Nothing is written on failure or timeout, so the next session start of
-        # this project tries again; session start itself is never blocked longer
-        # than the budget above.
-        pass
+    except Exception as error:  # noqa: BLE001 - keep the host session available
+        _safe_write_error(
+            f"bootstrap failed: {type(error).__name__}: {error}; "
+            f"stderr={getattr(error, 'stderr', None)!r}"
+        )
 
 
 if __name__ == "__main__":

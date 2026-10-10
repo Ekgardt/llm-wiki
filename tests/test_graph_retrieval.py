@@ -528,6 +528,7 @@ def test_generation_search_seals_graph_artifact_and_uses_same_generation(
 
     sealed: list[tuple[str, ...]] = []
     closed: list[str] = []
+    connection_seals = []
 
     class Connection:
         def close(self):
@@ -569,7 +570,11 @@ def test_generation_search_seals_graph_artifact_and_uses_same_generation(
         lambda _catalog, _manifest, names: sealed.append(tuple(names)) or ("seal",),
     )
     monkeypatch.setattr(search_memory, "_generation_consumption_unchanged", lambda *_a: True)
-    monkeypatch.setattr(search_memory, "_generation_connection", lambda *_a: Connection())
+    def connection(*_args, seal=None):
+        connection_seals.append(seal)
+        return Connection()
+
+    monkeypatch.setattr(search_memory, "_generation_connection", connection)
     monkeypatch.setattr(
         search_memory,
         "_generation_fts_search",
@@ -599,6 +604,7 @@ def test_generation_search_seals_graph_artifact_and_uses_same_generation(
     assert any("evidence.sqlite3" in names for names in sealed)
     assert next(row for row in rows if row["candidate_id"] == "target")["generation"] == "gen-22"
     assert closed == ["graph", "search"]
+    assert connection_seals == [("seal",)]
 
 
 def test_graph_expansion_honors_cancellation_before_query() -> None:

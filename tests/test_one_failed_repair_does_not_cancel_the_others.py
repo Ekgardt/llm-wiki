@@ -70,6 +70,22 @@ def test_the_failed_repair_is_named_and_its_checks_marked_deferred(
     ) == (False, {"generation"})
 
 
+@pytest.mark.parametrize(('action', 'check_id'), [
+    ('generations', 'generation'), ('indexes', 'claims'), ('queue', 'queue'),
+])
+def test_the_report_preserves_the_actual_repair_failure(tmp_path, action, check_id):
+    context = _context(tmp_path)
+    doctor._repair_or_record(action, _raises(ValueError('source cannot be verified')), context)
+    checks = [doctor._result(check_id, 'degraded', 'repair needed', {})]
+
+    doctor._apply_repair_outcomes(checks, context)
+
+    assert checks[0]['status'] == 'error'
+    assert 'source cannot be verified' in checks[0]['details']['repair_errors'][0]
+    assert 'holds the repair lock' not in checks[0]['message']
+    assert 'repair_deferred' not in checks[0]['details']
+
+
 @pytest.mark.parametrize(
     "error",
     [doctor.MaintenanceFenceLost("heartbeat", {}), TimeoutError("deadline")],

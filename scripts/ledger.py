@@ -44,6 +44,7 @@ import hashlib
 import math
 import re
 import sqlite3
+import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -108,7 +109,6 @@ COLUMNS = (
 )
 _SELECT = f"SELECT {', '.join(COLUMNS)} FROM {LEDGER_TABLE}"
 _INSERT = f"INSERT OR IGNORE INTO {LEDGER_TABLE} VALUES ({', '.join('?' for _ in COLUMNS)})"
-_WORD = re.compile(r"[A-Za-z][A-Za-z'-]*")
 _DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 _DAILY_DAY = re.compile(r"(\d{4}-\d{2}-\d{2})\.md$")
 _UNDISTINGUISHING = frozenset(
@@ -223,8 +223,27 @@ def _stem(word: str) -> str:
 
 def canonical(text: str) -> str:
     """The words that tell one thing from another, stemmed, in order."""
-    words = (word.casefold() for word in _WORD.findall(text or ""))
+    words = (word.casefold() for word in _word_tokens(text))
     return " ".join(_stem(word) for word in words if word not in _UNDISTINGUISHING)
+
+
+def _word_tokens(text: str) -> list[str]:
+    normalized = unicodedata.normalize("NFC", text or "")
+    separated = _word_separators(normalized)
+    return [word for token in separated.split() if (word := _trim_word_start(token))]
+
+
+def _word_separators(text: str) -> str:
+    return "".join(character if _word_character(character) else " " for character in text)
+
+
+def _word_character(character: str) -> bool:
+    return character.isalpha() or unicodedata.category(character).startswith("M") or character in "'-"
+
+
+def _trim_word_start(word: str) -> str:
+    start = next((index for index, character in enumerate(word) if character.isalpha()), len(word))
+    return word[start:]
 
 
 def canonical_kind(text: str) -> str:
@@ -282,7 +301,7 @@ def _record_of(item: object, turn: object, by_user: bool) -> Record | None:
         kind=kind,
         thing=thing,
         event=canonical(_text_field(item, "event", MAX_EVENT_CHARS)),
-        day=stated or day_of_path(turn.source_path),
+        day=stated or _capture_day(turn),
         quantity=_quantity_field(item),
         by_user=by_user,
         dated=bool(stated),
@@ -292,6 +311,10 @@ def _record_of(item: object, turn: object, by_user: bool) -> Record | None:
         byte_end=turn.byte_end,
         span_sha256=turn.span_sha256,
     )
+
+
+def _capture_day(turn: object) -> str:
+    return getattr(turn, "capture_day", "") or day_of_path(turn.source_path)
 
 
 def _record_items(value: object) -> list[object]:

@@ -9,7 +9,7 @@ The checks (`CHECK_NAMES` is the full list; Phase 2 expanded the original seven 
  3. orphan_daily_logs — daily logs with no compile recorded in state.json.
  4. stale_compiled — daily log hash changed after last compile.
  5. missing_backlinks — page A links to page B, but B does not link back.
- 6. sparse_pages — pages under a word-count floor (default 200 words).
+ 6. sparse_pages — empty page bodies, or an explicitly requested word-count floor.
  7. contradictions — LLM-judged conflicts between pages (opt-in, --contradictions).
  8. missing_frontmatter — page has no YAML `---` block (OKF violation).
  9. missing_required_type — frontmatter exists but `type:` is absent/empty.
@@ -50,9 +50,10 @@ from claim_tree_manifest import (  # noqa: E402
     PROJECT_CLAIM_FILES,
 )
 from claims import (  # noqa: E402
-    CANDIDATE_SCHEMA,
     MAX_CLAIM_PAGE_BYTES,
+    claim_json_bytes,
     parse_claim_ledger,
+    validate_claim_candidate,
     validate_claim_record,
 )
 from evidence_resolver import (  # noqa: E402
@@ -75,7 +76,6 @@ from okf_types import (
     TYPE_ALIASES,  # noqa: E402
 )
 from page_status import is_retired  # noqa: E402
-from reliable_memory import canonical_json_bytes, validate_schema  # noqa: E402
 from vault_editorial import (  # noqa: E402
     BACKLINK_EXEMPT_NAMES,
     BROKEN_LINK_SKIP_NAMES,
@@ -92,7 +92,9 @@ REPORTS = REPORTS_DIR
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:\|[^\]]+)?\]\]")
 WORD_RE = re.compile(r"\b\w+\b")
 
-DEFAULT_SPARSE_WORDS = 200
+# Nonempty body, not a length quota; --sparse-words can request an editorial floor.
+# See docs/research/2026-09-29-a-short-page-still-needs-evidence.md.
+DEFAULT_SPARSE_WORDS = 1
 # The claim tree's ceiling: lint reads the same project journals the claim
 # index does, so it accepts what the journal may be. See
 # `docs/research/2026-09-10-one-ceiling-for-every-reader-of-a-journal.md`.
@@ -157,6 +159,7 @@ def _is_body_line(line: str) -> bool:
 
 def _word_count(md: Path) -> int:
     text = md.read_text(encoding="utf-8", errors="ignore")
+    text = FRONTMATTER_RE.sub("", text, count=1)
     body = "\n".join(line for line in text.splitlines() if _is_body_line(line))
     return len(WORD_RE.findall(body))
 
@@ -433,13 +436,22 @@ def _backlink_pairs(link_map: dict[Path, list[Path]]) -> list[tuple[Path, Path]]
 def _pair_owes_backlink(source: Path, target: Path) -> bool:
     if source == target or _is_backlink_exempt(source):
         return False
-    if _is_retired(target):
-        # A superseded or archived page is history. Making it link forward to
-        # every later page that mentions it would rewrite that history, which
-        # the vault forbids for decisions — and the repair pass would have to
-        # edit an immutable page to clear a finding nobody wants cleared.
+    content = read_stable_bytes(target, MAX_LINT_PAGE_BYTES, label="backlink target")
+    if not backlink_target_is_mutable(content):
         return False
     return not _is_backlink_exempt(target)
+
+
+def backlink_target_is_mutable(content: bytes) -> bool:
+    """A later mention cannot rewrite an immutable decision or retired page."""
+    from corpus_snapshot import read_frontmatter
+
+    metadata = read_frontmatter(content)
+    return (
+        metadata.problem is None
+        and metadata.mapping.get("type") != "decision"
+        and not is_retired(metadata.mapping.get("status"))
+    )
 
 
 def missing_backlink_pairs(
@@ -482,7 +494,7 @@ def check_sparse_pages(pages: list[Path], min_words: int) -> list[str]:
         if md.name in EDITORIAL_NAMES:
             continue
         wc = _word_count(md)
-        if wc < min_words:
+        if wc == 0 or wc < min_words:
             out.append(f"{_rel(md)} ({wc} words < {min_words})")
     return out
 
@@ -504,6 +516,11 @@ TYPE_FIELD_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
 SUPERSEDED_BY_RE = re.compile(r"^superseded_by:\s*\[?\[?([^\]\n]+?)\]?\]?\s*$", re.MULTILINE)
 SOURCES_FIELD_RE = re.compile(r"^sources:", re.MULTILINE)
 SOURCE_SECTION_RE = re.compile(r"^##\s*(?:Source|Evidence|Provenance)", re.MULTILINE)
+SOURCE_LINE_RE = re.compile(
+    r"^(?:Source(?:[^\S\r\n]*/[^\S\r\n]*Evidence)?|Evidence|Provenance):"
+    r"(?:[^\S\r\n]+\S|(?:[^\S\r\n]*\r?\n)+[^\S\r\n]*[-+*][^\S\r\n]+\S)",
+    re.MULTILINE,
+)
 CANDIDATE_JSON_RE = re.compile(r"(?ms)```json[ \t]*\r?\n([^\r\n]+)\r?\n```")
 
 
@@ -650,7 +667,7 @@ def _candidate_record(page: Path, text: str) -> dict:
     if candidate_root not in Path(page).resolve(strict=True).parents:
         raise ValueError("claim-candidate is allowed only under knowledge/inbox/claims")
     candidate = _embedded_canonical_record(text)
-    validate_schema(candidate, CANDIDATE_SCHEMA)
+    validate_claim_candidate(candidate)
     validate_claim_record(candidate["claim"])
     return candidate["claim"]
 
@@ -661,7 +678,7 @@ def _embedded_canonical_record(text: str) -> dict:
         raise ValueError("claim-candidate must embed exactly one JSON record")
     encoded = matches[0].encode("utf-8")
     candidate = json.loads(encoded)
-    if canonical_json_bytes(candidate) != encoded:
+    if claim_json_bytes(candidate) != encoded:
         raise ValueError("claim-candidate record is not restricted canonical JSON")
     return candidate
 
@@ -729,16 +746,10 @@ def _project_claim_pages(projects_root: Path) -> list[Path]:
 
 
 def _needs_source_citation(md: Path) -> bool:
-    """Claim-bearing pages long enough to have said something.
-
-    Skills, rules, and project state are operational and cite nothing; a page
-    under fifty words is a stub, not yet a claim.
-    """
+    """A claim-bearing page needs provenance regardless of its word count."""
     if md.name in EDITORIAL_NAMES:
         return False
-    if _page_type(md) not in CLAIM_BEARING_TYPES:
-        return False
-    return _word_count(md) >= 50
+    return _page_type(md) in CLAIM_BEARING_TYPES
 
 
 def _cites_a_source(md: Path) -> bool:
@@ -746,7 +757,7 @@ def _cites_a_source(md: Path) -> bool:
         content = md.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return True
-    if SOURCE_SECTION_RE.search(content):
+    if SOURCE_SECTION_RE.search(content) or SOURCE_LINE_RE.search(content):
         return True
     frontmatter = FRONTMATTER_RE.match(content)
     return bool(frontmatter and SOURCES_FIELD_RE.search(frontmatter.group(1)))

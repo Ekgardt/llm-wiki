@@ -13,6 +13,8 @@ import hashlib
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
@@ -93,6 +95,19 @@ def _extract(**files: bytes):
     )
 
 
+def test_a_long_literal_client_path_keeps_its_route_edge():
+    path = "/" + "segment/" * 80
+    service = f"""from fastapi import APIRouter
+router = APIRouter()
+@router.get({path!r})
+def handler():
+    return 1
+""".encode()
+    client = f"import requests\ndef fetch():\n    return requests.get({path!r})\n".encode()
+    result = _extract(service=service, client=client)
+    assert len(_edges(result, "HTTP_CALLS")) == 1
+
+
 def _edges(result, edge_type: str) -> list[dict]:
     return [item for item in result.assertions if item["edge_type"] == edge_type]
 
@@ -162,18 +177,24 @@ def test_a_client_call_reaches_the_route_of_the_same_method_and_path():
     )
 
 
-def test_bindings_are_bounded_in_count_and_bytes():
-    from code_extractor import MAX_BINDINGS, _bounded_bindings
+def _wide_call(count, width):
+    parameters = [f"p{'x' * width}{number}" for number in range(count)]
+    arguments = [f"a{'x' * width}{number}" for number in range(count)]
+    source = (
+        f"def receive({','.join(parameters)}):\n    return None\n"
+        f"def send({','.join(arguments)}):\n    return receive({','.join(arguments)})\n"
+    ).encode()
+    expected = ",".join(f"{argument}->{parameter}" for argument, parameter in zip(arguments, parameters))
+    return source, expected
 
-    pairs = [f"argument{index}->parameter{index}" for index in range(20)]
-    bounded = _bounded_bindings(pairs)
-    long_pairs = [f"{'a' * 120}->{'b' * 120}", "second->second"]
 
-    assert (bounded.endswith(f"+{20 - MAX_BINDINGS} more"), len(bounded.encode()) <= 256) == (
-        True,
-        True,
-    )
-    assert _bounded_bindings(long_pairs).endswith("+1 more")
+@pytest.mark.parametrize("count, width", [(20, 1), (2, 120)])
+def test_every_proven_binding_is_stored_without_a_display_cut(count, width):
+    source, expected = _wide_call(count, width)
+    result = _extract(caller=source)
+    bindings = _edges(result, "BINDS_ARGUMENTS")
+    assert [item["literal"] for item in bindings] == [expected]
+    assert [_callee_of(result, item) for item in bindings] == ["receive"]
 
 
 def test_an_annotation_with_a_comma_does_not_invent_a_parameter():

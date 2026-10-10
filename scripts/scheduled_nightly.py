@@ -18,6 +18,7 @@ $LLM_WIKI_STATE_ROOT/logs/nightly-YYYY-MM-DD.md.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
@@ -57,13 +58,6 @@ from repository_retention import RETIRE_BUDGET_SECONDS  # noqa: E402
 from secret_redact import describe_error  # noqa: E402
 from settings import setting_value  # noqa: E402
 
-# How long the nightly pass will spend rebuilding the evidence generation.
-# The interactive default is one minute, which is the right bound for a doctor
-# run someone is waiting on. A nightly window is not that: on this vault a full
-# build of 762 sources takes 98 seconds, so a one-minute bound deferred every
-# night and the generation was never rebuilt at all. The unit itself has no
-# start timeout, so the only bound that matters is this one.
-NIGHTLY_GENERATION_BUDGET_SECONDS = 15 * 60
 # The refresh of every registered foreign repository shares one bound, the
 # child's own (`repository_index.REFRESH_ALL_BUDGET_SECONDS`); the refresh is
 # incremental (measured 2026-09-10: 16 s after one edited file in a 1 022-file
@@ -83,7 +77,7 @@ def _generation_result() -> dict:
     return run_generation_maintenance(
         root=ROOT,
         state_root=STATE_ROOT,
-        time_budget_seconds=NIGHTLY_GENERATION_BUDGET_SECONDS,
+        time_budget_seconds=setting_value("generation.nightly_seconds", ROOT),
         max_sources=setting_value("corpus.max_files", ROOT),
     )
 
@@ -529,11 +523,8 @@ def _run_steps(run_step, log, steps: list[_Step]) -> int:
 
 
 def _compile_running() -> bool:
-    """Best effort: an unreadable status counts as finished, as before."""
-    try:
-        return bool(maybe_compile.status()["compile_running"])
-    except Exception:  # noqa: BLE001
-        return False
+    """Unreadable ownership cannot establish that a compiler finished."""
+    return bool(maybe_compile.status()["compile_running"])
 
 
 def _safe_state() -> dict:
@@ -664,7 +655,7 @@ COMPILE_IDLE_WAIT_SECONDS = 30
 MAINTENANCE_TAIL_BUDGET_SECONDS = 120
 
 
-def worst_case_seconds() -> float:
+def worst_case_seconds(root: Path | None = None) -> float:
     """The longest a pass can run by its own bounds, as configured right now.
 
     Every step's timeout (with the margin a provider call really needs), every
@@ -676,9 +667,9 @@ def worst_case_seconds() -> float:
     """
     from self_update import WORST_CASE_SECONDS as UPDATE_SECONDS
 
-    steps = [*_intake_steps(), _compile_step(), _fact_keys_step(), *_post_compile_steps()]
+    steps = [*_intake_steps(), _fact_keys_step(), _compile_step(), *_post_compile_steps()]
     waits = COMPILE_IDLE_WAIT_SECONDS + compile_wait_seconds()
-    budgets = NIGHTLY_GENERATION_BUDGET_SECONDS + HEALTH_REPORT_BUDGET_SECONDS
+    budgets = setting_value("generation.nightly_seconds", ROOT if root is None else root) + HEALTH_REPORT_BUDGET_SECONDS
     tail = MAINTENANCE_TAIL_BUDGET_SECONDS + UPDATE_SECONDS
     return float(sum(step.timeout for step in steps) + waits + budgets + tail)
 
@@ -800,9 +791,12 @@ def _nightly_steps(run_step, log, _ownership: OwnerLease | None = None) -> int:
 
     # The compile step must not be skipped just because a hook-triggered one runs.
     _wait_for_compile_idle(log)
+    if _defer_entity_writes_for_running_compile(log):
+        return failures
     before = _last_compile_finished()
     started_before = _last_compile_started()
-    failures += _run_steps(run_step, log, [_compile_step(), _fact_keys_step()])
+    # Finish own entity writes before compile freezes model-input targets.
+    failures += _run_steps(run_step, log, [_fact_keys_step(), _compile_step()])
 
     log.step("waiting for compile to finish...")
     if not _wait_compile_finished():
@@ -810,11 +804,20 @@ def _nightly_steps(run_step, log, _ownership: OwnerLease | None = None) -> int:
         # is unknown, and the steps that read its output wait for the next
         # pass. Counting it as a failure turned a slow healthy night red (#21).
         log("WARNING: compile still running past the wait bound — lint/index/graph deferred to the next pass")
-        log("  a service manager that owns this pass (systemd) stops that compile when the pass exits")
+        log("  compile outcome is unknown; ending this pass does not establish whether its owner stops it")
         _remember_deferred_compile(log)
         return failures
     failures += _report_compile_outcome(log, before, started_before) + _report_deferred_loss(log)
     return failures + _post_compile_pass(run_step, log)
+
+
+def _defer_entity_writes_for_running_compile(log) -> bool:
+    if not _compile_running():
+        return False
+    log("WARNING: compile still running after idle wait — entity writes and compile deferred to the next pass")
+    log("  compile outcome is unknown; the idle wait does not establish that its owner finished")
+    _remember_deferred_compile(log)
+    return True
 
 
 DEFERRED_COMPILE_KEY = "nightly_deferred_compile"
@@ -823,8 +826,9 @@ DEFERRED_COMPILE_KEY = "nightly_deferred_compile"
 def _remember_deferred_compile(log) -> None:
     """Keep the deferred compile's start stamp, so the next pass can miss it.
 
-    Under systemd the unit ends here and the compile ends with it; the loss used
-    to be invisible, because the next pass compares against its own start stamp.
+    A compiler owned by this systemd unit can end with the unit; a compiler
+    already running under another owner need not. Record its start stamp so a
+    later pass can establish the outcome without predicting its lifecycle.
     Research: docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
     """
     started = _last_compile_started()
@@ -1160,7 +1164,8 @@ def record_scheduled_failure(today: str, exc: BaseException) -> None:
         print(f"scheduled_nightly: could not record failure: {failure}", file=sys.stderr)
 
 
-def main() -> int:
+def main(argv: list[str] | tuple[str, ...] = ()) -> int:
+    argparse.ArgumentParser(description=__doc__).parse_args(argv)
     today = datetime.now().strftime("%Y-%m-%d")
     try:
         fence = take_scheduled_fence("nightly")
@@ -1180,4 +1185,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

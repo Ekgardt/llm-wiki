@@ -73,7 +73,7 @@ def test_the_reopened_day_is_offered_to_the_next_compile(vault, monkeypatch):
     _corrupt_receipt(vault)
     _mirror_says_compiled(vault)
     monkeypatch.setattr(
-        compile_memory, "_receipt_predicate", lambda _coordinator: lambda *_a: False
+        compile_memory, "_receipt_predicate", lambda _coordinator, **_kwargs: lambda *_a: False
     )
 
     compile_memory.discard_unusable_receipts()

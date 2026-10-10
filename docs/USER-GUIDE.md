@@ -174,7 +174,10 @@ globs, and a hook never blocks or fails a tool call. See
 
 Managed IDE hooks preserve unrelated configuration and use verified sibling preimages.
 Malformed configuration, ownership conflicts, or drift fail closed instead of being
-overwritten. `doctor` reports active, absent, or conflicting structural ownership and
+overwritten; the installer names the file and, where it can, the way on
+(`--adopt <resource-id>` keeps the file as it is as the rollback point). The OpenCode
+plugin is the installer's own file: an update replaces it and keeps a changed copy under
+`run/install/displaced/`. `doctor` reports active, absent, or conflicting structural ownership and
 never repairs these files implicitly.
 
 The MCP server exposes 12 task-shaped tools, including `doctor`. All tools use
@@ -276,6 +279,30 @@ keeps the pre-first-install projection for uninstall and one latest committed up
 projection for explicit rollback. Recovery uses persisted historical definitions, not
 the current checkout templates. Rerun the native installer to reconcile owned state;
 do not edit generated task, plist, unit, or owned hook definitions in place.
+
+An update replaces the systemd units and launchd plists even if they were edited by
+hand. It keeps a readable copy of the edited files under
+`run/install/displaced/<time>-<resource-id>/`, and `install_control.py rollback` puts
+them back. A line you added to a systemd unit is moved into
+`~/.config/systemd/user/<unit>.d/50-local.conf`, so the setting keeps working; the
+installer prints what it moved and anything it could not carry over (a changed line of
+ours, or an existing `50-local.conf`, which it never touches). The drop-in is yours once
+the update commits: only `install_control.py rollback` of that same update removes it,
+so the restored unit does not run a moved line twice. Copies older than the setting
+`retention.config_backup_days` (90 days) are retired by the next install, except the one
+the current rollback point needs. Keep local settings in such a drop-in, for example:
+
+```ini
+# ~/.config/systemd/user/llm-wiki-nightly.service.d/50-local.conf
+[Service]
+Environment=MEMORY_CLAUDE_MODEL=claude-sonnet-5
+```
+
+A rerun that drops an agent integration or moves the profile to another shell's file
+writes the new set first and takes the old one back last; if anything fails, both are
+reverted. A change to or from cron (or a Windows task) cannot work that way, because
+those cannot be read back: the installer says so, takes the old set back first, and puts
+it back if the new one fails.
 
 Inspect the control-plane state without mutation:
 
@@ -718,16 +745,19 @@ when it would touch a locally modified file, and the nightly commit of the
 pushes either; it provides no persistent daemon, cloud
 service, remote queue/cache, or SQLite knowledge source.
 
-### Limits you can raise (`llm-wiki.toml`)
+### Limits you can configure (`llm-wiki.toml`)
 
 A few pipelines hold their whole input in memory, so each stops at a size ceiling:
 the index rebuild and the compile at 2 000 pages or 32 MiB, the search corpus at
-10 000 files or 64 MiB, and a few more. When your vault grows past one, the pipeline
+50 000 files or 64 MiB, and a few more. The default file and extraction-source
+counts share the existing directory-entry budget; they no longer add a separate
+10 000-source cutoff. Explicit smaller file/environment overrides still apply. When your vault grows past one, the pipeline
 stops with a message that names the setting to raise, for example
 `raise corpus.max_files in llm-wiki.toml or LLM_WIKI_CORPUS_MAX_FILES`. `doctor`
 warns earlier, once the vault is at 80 % of a ceiling.
 
-To raise one, create `llm-wiki.toml` in the vault root (it is gitignored):
+To select a different budget, create `llm-wiki.toml` in the vault root (it is
+gitignored). This example selects a smaller file budget than the default:
 
 ```toml
 [corpus]
@@ -747,7 +777,9 @@ How long the vault keeps its own disposable history is a setting too (section
   reports under `logs/` and their step output;
 - `telemetry_days` (90) — retrieval telemetry;
 - `benchmark_run_days` (30) — benchmark run directories under `cache/benchmarks/`;
-- `config_backup_days` (90) — backups of agent configuration the installer rewrote.
+- `config_backup_days` (90) — backups of agent configuration the installer rewrote, and
+  the copies of edited units and plugin files under `run/install/displaced/` (a copy the
+  current rollback point needs is kept whatever its age).
 
 One more, section `[provider]`: `draft_ceiling_seconds` (600) is how long one compile
 draft or episode batch may wait for the model. Drafts measured 99 to 418 s on a loaded

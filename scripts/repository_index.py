@@ -41,7 +41,7 @@ from pathlib import Path
 from repository_refusal import SCHEMA_VERSION, RepositoryIndexRefused  # noqa: E402
 
 # A listing names repositories, not files. 128 is far above the number of
-# repositories one operator keeps on one machine and far below MAX_GENERATIONS.
+# repositories one operator keeps on one machine; listing truncation is explicit.
 MAX_LISTED_REPOSITORIES = 128
 # Bounded path evidence in a change report. The counts are always exact; the
 # named paths are the first of each kind in sorted order.

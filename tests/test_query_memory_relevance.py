@@ -49,3 +49,26 @@ def test_a_flag_that_differs_is_refused_like_a_number():
             "retire dead tasks with --include-dead",
             "purge exports first with --export before anything is removed",
         )
+
+
+@pytest.mark.parametrize("term", ["Go", "C", "IP", "R"])
+def test_a_short_term_does_not_bypass_citation_relevance(term):
+    from query_memory import GroundedQAError, _require_citation_touches_claim
+
+    with pytest.raises(GroundedQAError):
+        _require_citation_touches_claim(term, "unrelated storage policy")
+
+
+@pytest.mark.parametrize("term", ["Go", "C", "IP", "R"])
+def test_a_short_term_can_match_its_actual_evidence(term):
+    from query_memory import _content_tokens, _require_citation_touches_claim
+
+    assert term.casefold() in _content_tokens(term)
+    _require_citation_touches_claim(term, f"The configured choice is {term}.")
+
+
+def test_short_function_words_do_not_create_support():
+    from query_memory import GroundedQAError, _require_citation_touches_claim
+
+    with pytest.raises(GroundedQAError):
+        _require_citation_touches_claim("storage is on disk", "the calendar is on paper")

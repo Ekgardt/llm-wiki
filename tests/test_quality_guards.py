@@ -72,8 +72,12 @@ def _assert_docs_clean(relative_paths, check) -> None:
         check(relative_path)
 
 
+# A scope modifier (`$script:name`) names the variable after the colon.
+_PS_SCOPE = r"(?:(?:script|global|local|private|using):)?"
+
+
 def _powershell_variables(content: str) -> set[str]:
-    return set(re.findall(r"\$([A-Za-z_]\w*)", content))
+    return set(re.findall(r"\$" + _PS_SCOPE + r"([A-Za-z_]\w*)", content))
 
 
 def _powershell_parameter_names(content: str) -> set[str]:
@@ -87,7 +91,7 @@ def _powershell_parameter_names(content: str) -> set[str]:
 
 
 def _powershell_assigned_variables(content: str) -> set[str]:
-    assigned = set(re.findall(r"\$([A-Za-z_]\w*)\s*=", content))
+    assigned = set(re.findall(r"\$" + _PS_SCOPE + r"([A-Za-z_]\w*)\s*=", content))
     assigned |= _powershell_parameter_names(content)
     assigned |= set(re.findall(r"foreach\s*\(\s*\$([A-Za-z_]\w*)\s+in\b", content))
     return assigned
@@ -379,7 +383,10 @@ _SHELL_SMOKE_FORBIDDEN = (
 )
 _SHELL_SMOKE_REQUIRED_PATTERNS = (
     r"trap .*EXIT",
-    r'uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds "\$smokeDeadlineSeconds"\s*&',
+    # The report file is the only argument allowed after the deadline (it keeps the JSON
+    # out of the operator's terminal); the launch is still in the background.
+    r'uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds "\$smokeDeadlineSeconds"'
+    r'(?: \\\n\s+--report "\$STATE_ROOT/logs/install-smoke\.json")?\s*&',
 )
 _SHELL_SMOKE_FORBIDDEN_PATTERNS = (r'=\s*"\$\(uv run .*install_smoke',)
 
@@ -520,7 +527,7 @@ _ARCHITECTURE_REQUIRED = (
     "MCP READS + ACTIONS",
     "LLM BACKEND (CLASSIFY + COMPILE ONLY)",
     "5 backends including Ollama",
-    "### Optional semantic tier",
+    "### Semantic tier",
     "### Hybrid tier",
 )
 # The casefolded tuples are compared with the casefolded document.

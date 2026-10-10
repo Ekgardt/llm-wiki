@@ -56,7 +56,7 @@ def test_the_three_legacy_locks_ask_the_same_probe(monkeypatch) -> None:
     assert doctor._lsp_pid_state(4242) == "unknown"
 
 
-def test_linux_identity_binds_boot_id_and_start_ticks(monkeypatch) -> None:
+def test_linux_identity_binds_scope_and_start_ticks(monkeypatch) -> None:
     stat = b"42 (worker name) S " + b" ".join(str(value).encode() for value in range(1, 23))
 
     def read(path: Path, _maximum: int) -> bytes:
@@ -65,9 +65,12 @@ def test_linux_identity_binds_boot_id_and_start_ticks(monkeypatch) -> None:
         return b"550e8400-e29b-41d4-a716-446655440000\n"
 
     monkeypatch.setattr(process_liveness, "_read_bounded_system_file", read)
+    monkeypatch.setattr(process_liveness, "_linux_observer_scope", lambda: (
+        "-", "550e8400-e29b-41d4-a716-446655440000", "4", "100", "4.200"
+    ))
 
     assert process_liveness._linux_process_start_identity(42) == (
-        "linux:550e8400-e29b-41d4-a716-446655440000:19"
+        "linux-v2:-:550e8400-e29b-41d4-a716-446655440000:4:100:4.200:19"
     )
 
 
@@ -129,18 +132,21 @@ def test_a_darwin_process_that_runs_keeps_its_start_identity(monkeypatch) -> Non
 
 
 def test_a_reused_pid_is_dead_to_the_owner_that_recorded_its_identity(monkeypatch) -> None:
-    monkeypatch.setattr(process_liveness, "process_start_identity", lambda _pid: "linux:boot:99")
+    identity = process_liveness.process_start_identity(os.getpid())
+    previous = identity.rsplit(":", 1)[0] + ":1234567890123456789"
+    monkeypatch.setattr(process_liveness, "process_start_identity", lambda _pid: identity)
 
-    assert process_liveness.owner_alive(4242, "linux:boot:12") is False
-    assert process_liveness.owner_alive(4242, "linux:boot:99") is True
+    assert process_liveness.owner_alive(4242, previous) is False
+    assert process_liveness.owner_alive(4242, identity) is True
 
 
-def test_without_a_recorded_identity_the_answer_is_the_pid_probe(monkeypatch) -> None:
-    """A lock written before this release still reads exactly as it did."""
+def test_non_linux_owner_without_birth_identity_is_preserved(monkeypatch) -> None:
+    """A local PID probe cannot establish an unidentified persisted owner's death."""
+    monkeypatch.setattr(process_liveness, "_platform_system", lambda: "Darwin")
     monkeypatch.setattr(process_liveness, "process_state", lambda _pid: "dead")
 
-    assert process_liveness.owner_alive(4242) is False
-    assert process_liveness.owner_alive(4242, "") is False
+    assert process_liveness.owner_alive(4242) is True
+    assert process_liveness.owner_alive(4242, "") is True
 
 
 def test_an_unsettled_probe_leaves_the_owner_alive(monkeypatch) -> None:
@@ -164,3 +170,11 @@ def test_a_pid_beyond_the_platform_range_is_never_alive_by_guess() -> None:
     state = process_liveness.process_state(2**40)
     assert state in {"dead", "unknown"}
     assert process_liveness.pid_alive(2**40) is (state != "dead")
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Windows"])
+@pytest.mark.parametrize("identity", [None, ""])
+def test_owner_without_birth_identity_stays_unknown(system, identity, monkeypatch):
+    monkeypatch.setattr(process_liveness, "_platform_system", lambda: system)
+    monkeypatch.setattr(process_liveness, "process_state", lambda _pid: "dead")
+    assert process_liveness.recorded_process_state(4000000, identity) == "unknown"

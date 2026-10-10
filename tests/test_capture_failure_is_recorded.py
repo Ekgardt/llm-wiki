@@ -20,6 +20,10 @@ from unittest.mock import patch
 
 import integration_adapter
 
+from tests.test_breadcrumb_storage import _bundle
+from tests.test_breadcrumb_worker import _ingress_event
+from tests.test_breadcrumb_worker import ingress as ingress
+
 
 class _Recorder:
     def __init__(self):
@@ -153,36 +157,24 @@ def test_an_empty_path_is_no_transcript_at_all() -> None:
     assert integration_adapter._capture_path_evidence(None) is None
 
 
-def test_a_dropped_capture_operation_write_is_counted(monkeypatch):
-    """Audit OPS-21: a lost race is not a hook failure, but it is counted."""
-    import capture_diagnostics
-    import capture_operation
+def test_counter_failure_after_acceptance_is_reported_without_claiming_capture_loss(ingress, monkeypatch):
+    """The replaced state-based dedupe is gone; auxiliary counter failures remain visible."""
+    import user_prompt_capture
 
     recorded: list[tuple] = []
     monkeypatch.setattr(
-        capture_diagnostics,
+        user_prompt_capture,
         "record_capture_failure",
         lambda kind, reason, **fields: recorded.append((kind, reason, fields.get("error"))),
     )
 
-    def refused(_mutate):
+    def refused(_mutate, **_options):
         raise RuntimeError("state lock refused")
 
-    from datetime import datetime
-
-    answer = capture_operation.claim_operation(
-        refused,
-        namespace="capture_operations",
-        key="k",
-        prefix="capture",
-        source_event_id="e",
-        rate_limit_seconds=0,
-        max_entries=8,
-        now=datetime(2026, 9, 10, 23, 0, 0),
-    )
-
-    assert isinstance(answer, str) and answer
-    assert [(kind, reason) for kind, reason, _ in recorded] == [
-        ("capture_operation_state", "RuntimeError: state lock refused")
-    ]
-    assert isinstance(recorded[0][2], RuntimeError)
+    monkeypatch.setattr(user_prompt_capture, 'update_state', refused)
+    adapter, queue, _coordinator = ingress
+    result = adapter.ingest_event(_ingress_event(adapter, 'user_prompt'))
+    assert result['capture_durable'] is True
+    assert 'state lock refused' in result['post_capture_error']
+    assert recorded == []
+    assert _bundle(queue.state_root, result['capture_intent_ids'][0]).content

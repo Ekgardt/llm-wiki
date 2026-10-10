@@ -43,7 +43,7 @@ def test_the_intent_carries_the_moment_the_session_ended():
 
     source = integration_adapter._capture_source_record(envelope, "slug", "clear", "text")
 
-    assert source["occurred_at"] == YESTERDAY.isoformat()
+    assert source["occurred_at"] == YESTERDAY.isoformat(timespec="microseconds")
 
 
 def test_a_session_drained_the_next_morning_keeps_its_own_day():

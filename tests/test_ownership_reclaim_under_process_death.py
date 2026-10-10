@@ -9,14 +9,13 @@ reclaimable only when its lease has expired **and** the OS says its process is
 gone. A live owner, or one whose liveness cannot be established, is still
 refused by name. See `docs/research/2026-08-28-ownership-reclaim-under-process-death.md`.
 
-The dead process here is real, not simulated by a probe: the owner row names
-this process's pid with a start identity that is not this process's, so the
-platform probe answers `dead` on every supported OS without any injection.
+The dead process is a real child whose scoped identity is captured before it
+exits. The abandoned rows model the crash boundary; the liveness probe is real
+and is never replaced by a canned `dead` response.
 """
 from __future__ import annotations
 
 import contextlib
-import os
 import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
@@ -57,14 +56,16 @@ def _queue(state_root: Path):
 
 
 def _dead_identity() -> ownership.ProcessIdentity:
-    """This pid with a start identity that is not this process's start identity."""
-    return ownership.ProcessIdentity(
-        pid=os.getpid(), start_identity="llm-wiki-test:killed-process"
-    )
+    """A captured process identity whose child has exited and been reaped."""
+    from tests.test_a_dead_owner_root_is_swept_when_the_next_server_starts import finished_process
+
+    pid, identity = finished_process()
+    return ownership.ProcessIdentity(pid=pid, start_identity=identity)
 
 
 def _run_as_dead_process(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ownership, "current_process_identity", _dead_identity)
+    dead = _dead_identity()
+    monkeypatch.setattr(ownership, "current_process_identity", lambda: dead)
 
 
 def _run_as_this_process(monkeypatch: pytest.MonkeyPatch) -> None:

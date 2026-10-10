@@ -1811,7 +1811,8 @@ def test_simultaneous_projectors_append_once_per_event(vault: Path, state_root: 
     def write(index: int):
         store = ProjectStore(vault, state_root)
         barrier.wait()
-        for _ in range(100):
+        deadline = time.monotonic() + LONG_TIMEOUT
+        while time.monotonic() < deadline:
             try:
                 return store.checkpoint(
                     "demo",
@@ -1846,6 +1847,29 @@ def test_simultaneous_projectors_append_once_per_event(vault: Path, state_root: 
         in ProjectStore(vault, state_root).read_journal("demo")
         for record in records
     )
+
+
+@pytest.mark.parametrize('loss,args', [
+    (ProjectLeaseBusy, ('controlled contention',)),
+    (ProjectFenceError, ('controlled contention',)),
+    (ProjectPendingPriorError, ('demo', 2, 1)),
+])
+def test_simultaneous_projectors_do_not_exhaust_a_counter_before_a_legal_retry(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch, loss, args
+):
+    checkpoint = ProjectStore.checkpoint
+    attempts = {}
+
+    def transient_loss(store, project, event, owner):
+        attempts[owner] = attempts.get(owner, 0) + 1
+        if attempts[owner] <= 100:
+            raise loss(*args)
+        return checkpoint(store, project, event, owner)
+
+    monkeypatch.setattr(ProjectStore, 'checkpoint', transient_loss)
+    test_simultaneous_projectors_append_once_per_event(vault, state_root)
+    assert set(attempts) == {'agent-0', 'agent-1'}
+    assert all(count > 100 for count in attempts.values())
 
 
 def test_same_owner_simultaneous_projectors_retry_without_sharing_lease(
@@ -2154,3 +2178,54 @@ def test_a_deleted_project_directory_is_rebuilt_from_its_committed_checkpoints(
     assert _state_body(store.render_state(rebuilt, _validated=True)) == _state_body(expected_state)
     store.checkpoint("demo", checkpoint_event("evt-4", "rb:event-4"), "agent-a")
     assert len(project_journal.parse_journal_events("demo", journal.read_bytes())) == 4
+
+
+def _corrupt_checkpoint(store: ProjectStore, replacement: dict) -> None:
+    _checkpoints(store, 1)
+    _replace_checkpoint_payload(store, replacement)
+
+
+def _replace_checkpoint_payload(store: ProjectStore, replacement: dict) -> None:
+    with store.coordinator._connect() as database:
+        event = json.loads(database.execute(
+            "SELECT event_json FROM project_checkpoints WHERE project='demo' AND sequence=1"
+        ).fetchone()[0])
+        event.update(replacement)
+        database.execute(
+            "UPDATE project_checkpoints SET event_json=? WHERE project='demo' AND sequence=1",
+            (canonical_json_bytes(event).decode(),),
+        )
+        database.commit()
+
+
+@pytest.mark.parametrize("replacement", [{"project": "other"}, {"sequence": 2}, {"delta": []}])
+def test_committed_checkpoint_reader_rejects_corrupt_payload(project_store, replacement):
+    _corrupt_checkpoint(project_store, replacement)
+    with pytest.raises((ValueError, SchemaValidationError)):
+        project_store.committed_events("demo")
+
+
+@pytest.mark.parametrize("replacement", [{"project": "other"}, {"sequence": 2}, {"delta": []}])
+def test_rebuild_refuses_corrupt_checkpoint_without_replacing_markdown(
+    project_store, vault, replacement
+):
+    _corrupt_checkpoint(project_store, replacement)
+    paths = [vault / "knowledge/projects/demo" / name for name in ("journal.md", "state.md")]
+    before = [path.read_bytes() for path in paths]
+    with pytest.raises((ValueError, SchemaValidationError)):
+        project_store.rebuild_journal("demo")
+    assert [path.read_bytes() for path in paths] == before
+
+
+@pytest.mark.parametrize("replacement", [{"project": "other"}, {"sequence": 2}, {"delta": []}])
+def test_pending_checkpoint_recovery_refuses_corrupt_payload(project_store, vault, replacement):
+    lease = project_store.acquire_lease("demo", "test-recovery")
+    try:
+        project_store._reserve("demo", checkpoint_event(), lease)
+    finally:
+        project_store._release(lease)
+    _replace_checkpoint_payload(project_store, replacement)
+    with pytest.raises((ValueError, SchemaValidationError)):
+        project_store.recover("demo")
+    assert not (vault / "knowledge/projects/demo/journal.md").exists()
+    assert not (vault / "knowledge/projects/demo/state.md").exists()

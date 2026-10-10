@@ -145,7 +145,6 @@ def test_apply_merge_enforces_backup_retention_without_deleting_unrelated_files(
 
     backups = list(tmp_path.glob("settings.json.bak-llm-wiki-*"))
     assert not old.exists()
-    assert len(backups) <= 10
     assert sum(path.stat().st_size for path in backups) <= 100 * 1024 * 1024
     assert any(path.read_bytes() == original for path in backups)
     assert unrelated.read_bytes() == b"keep"
@@ -172,7 +171,7 @@ def test_backup_timestamp_collision_rolls_into_the_next_second(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("destination_exists", [True, False])
-def test_publish_prunes_owned_backups_when_no_new_preimage_is_created(
+def test_publish_keeps_unexpired_small_backups_when_no_new_preimage_is_created(
     tmp_path, destination_exists
 ):
     destination = tmp_path / "settings.json"
@@ -180,9 +179,12 @@ def test_publish_prunes_owned_backups_when_no_new_preimage_is_created(
         destination.write_bytes(b"current")
     now = time.time()
     backups = []
+    expected = []
     for index in range(11):
         backup = tmp_path / f"settings.json.bak-llm-wiki-20260801-000000-{index:06d}"
-        backup.write_bytes(str(index).encode("ascii"))
+        payload = str(index).encode("ascii")
+        backup.write_bytes(payload)
+        expected.append(payload)
         os.utime(backup, (now + index, now + index))
         backups.append(backup)
 
@@ -190,9 +192,8 @@ def test_publish_prunes_owned_backups_when_no_new_preimage_is_created(
 
     assert changed is not destination_exists
     assert backup is None
-    assert not backups[0].exists()
-    assert backups[-1].exists()
-    assert len(list(tmp_path.glob("settings.json.bak-llm-wiki-*"))) == 10
+    assert list(map(Path.read_bytes, backups)) == expected
+    assert sum(path.stat().st_size for path in backups) < icb.MAX_BACKUP_BYTES
 
 
 def test_publish_keeps_newest_backup_when_it_alone_exceeds_size_limit(tmp_path):
@@ -263,3 +264,12 @@ def test_the_shipped_allowlist_grants_only_read_only_forms():
         "Bash(uv run python scripts/lookup_mode.py *)",
     ]
     assert not (mcs.RETIRED_ALLOW & set(allow))
+
+
+def test_recent_small_backups_are_kept_inside_the_existing_byte_budget(tmp_path):
+    destination = tmp_path / "settings.json"
+    originals = [f"original-{index}".encode() for index in range(11)]
+    backups = [icb._create_verified_backup(destination, original) for original in originals]
+    icb._prune_backups(destination, backups[-1])
+    assert sum(len(original) for original in originals) < icb.MAX_BACKUP_BYTES
+    assert [backup.read_bytes() for backup in backups] == originals

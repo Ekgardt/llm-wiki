@@ -113,7 +113,7 @@ def test_v2_receipt_is_readable_history_but_never_authorizes_archive(
     root, state_root, daily = archive_vault
     import compile_memory
 
-    v3 = next((root / "knowledge/daily/receipts").glob("v3-*.md"))
+    v3 = next((root / "knowledge/daily/receipts").glob("v4-*.md"))
     v3.unlink()
     inputs = compile_memory.snapshot_compile_inputs([daily])
     compile_memory.apply_compile_plan(
@@ -136,7 +136,7 @@ def test_v2_receipt_is_readable_history_but_never_authorizes_archive(
 
 def test_eligibility_rejects_nonterminal_compile_operation(archive_vault) -> None:
     root, state_root, daily = archive_vault
-    receipt = next((root / "knowledge/daily/receipts").glob("v3-*.md"))
+    receipt = next((root / "knowledge/daily/receipts").glob("v4-*.md"))
     record = json.loads(
         receipt.read_text(encoding="utf-8").split("```json\n", 1)[1].split("\n```", 1)[0]
     )
@@ -150,7 +150,8 @@ def test_eligibility_rejects_nonterminal_compile_operation(archive_vault) -> Non
     result = _archiver(root, state_root).eligible(daily, hot_days=90)
 
     assert not result.eligible
-    assert "nonterminal_compile_operation" in result.reasons
+    # The context reader refuses a receipt whose writer is no longer committed.
+    assert "compile_receipt_context_invalid" in result.reasons
 
 
 def test_archive_queries_release_transaction_database(archive_vault) -> None:
@@ -159,7 +160,8 @@ def test_archive_queries_release_transaction_database(archive_vault) -> None:
     digest = sha256_bytes(daily.read_bytes())
 
     assert archiver._receipt_operation_state(
-        f"knowledge/daily/{daily.name}", digest
+        f"knowledge/daily/{daily.name}", digest,
+        path=next((root / "knowledge/daily/receipts").glob("v4-*.md")),
     ) == "committed"
     archiver._transaction_references(daily.name, transaction_retention_days=30)
 
@@ -400,7 +402,7 @@ def test_forged_embedded_receipt_fails_after_outer_hashes_are_rebuilt(
     embedded = forged / "compile-receipt.md"
     embedded.write_bytes(
         embedded.read_bytes().replace(
-            b'"schema_version":"compile-receipt/v3"',
+            b'"schema_version":"compile-receipt/v4"',
             b'"schema_version":"compile-receipt/xx"',
         )
     )
@@ -1162,8 +1164,8 @@ def test_archive_winning_finalization_race_deletes_before_failure_records(
 
     monkeypatch.setattr(archiver.coordinator, "apply", pause_delete)
 
-    def observe_failure_connection(queue: MemoryQueue):
-        connection = original_connect(queue)
+    def observe_failure_connection(queue: MemoryQueue, *, busy_ms=None, deadline=None):
+        connection = original_connect(queue, busy_ms=busy_ms, deadline=deadline)
         if threading.current_thread().name == "archive-failure-writer":
             failure_connected.set()
         return connection

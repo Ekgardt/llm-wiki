@@ -12,7 +12,9 @@ be removed (audit M-B6). Research:
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -65,20 +67,28 @@ def test_the_spawner_keeps_the_token_when_it_records_the_child(lock_file) -> Non
 
 def test_the_spawn_command_names_the_lock_token(lock_file, monkeypatch) -> None:
     commands: list[list[str]] = []
-    monkeypatch.setattr(maybe_compile, "_has_pending_work", lambda *_args: True)
+    deadlines: list[float] = []
+
+    def pending(_closed_days_only, *, deadline):
+        deadlines.append(deadline)
+        return True
+
+    monkeypatch.setattr(maybe_compile, "_has_pending_work", pending)
     monkeypatch.setattr(
         maybe_compile,
         "spawn_detached",
         lambda command, **_kwargs: commands.append(command) or os.getpid(),
     )
 
-    spawned, reason = maybe_compile.spawn_compile_if_idle()
+    deadline = time.monotonic() + 10
+    spawned, reason = maybe_compile.spawn_compile_if_idle(deadline=deadline)
 
     assert (spawned, "--lock-token" in commands[0]) == (True, True)
     assert commands[0][commands[0].index("--lock-token") + 1] == (
         maybe_compile.lock_owner_token()
     )
     assert reason.startswith("spawned compile")
+    assert deadlines == [deadline]
 
 
 def test_an_empty_lock_inside_the_spawn_window_is_a_write_in_progress(
@@ -102,4 +112,52 @@ def test_an_empty_lock_older_than_the_window_is_removed(lock_file) -> None:
     compile_memory._lock_lines(lock_file)
 
     assert state[0] == "stale"
+    assert not lock_file.exists()
+
+
+def test_direct_compile_recovers_a_reaped_process_lock(lock_file) -> None:
+    with subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE,
+    ) as child:
+        maybe_compile._write_lock(child.pid)
+        child.communicate(timeout=10)
+
+    handle, reason = compile_memory._acquire_compile_lock()
+
+    assert reason == "claimed"
+    assert handle == maybe_compile.lock_owner_token()
+    assert maybe_compile._read_lock()["pid"] == os.getpid()
+    compile_memory._release_compile_lock(handle)
+    assert not lock_file.exists()
+
+
+@pytest.mark.parametrize("content", [b"", b" \n"])
+def test_cleanup_preserves_a_lock_still_being_written(lock_file, content) -> None:
+    lock_file.write_bytes(content)
+
+    assert maybe_compile._clear_lock() is False
+    assert lock_file.read_bytes() == content
+    assert compile_memory._acquire_compile_lock()[0] is None
+    assert lock_file.read_bytes() == content
+
+
+@pytest.mark.parametrize("state", ["alive", "unknown"])
+def test_direct_compile_preserves_another_possible_owner(lock_file, monkeypatch, state):
+    lock_file.write_text("123456\n2026-01-01T00:00:00\nother-owner\n\n")
+    original = lock_file.read_bytes()
+    monkeypatch.setattr(maybe_compile.process_liveness, "process_state", lambda _pid: state)
+
+    assert compile_memory._acquire_compile_lock()[0] is None
+    assert lock_file.read_bytes() == original
+
+
+def test_direct_compile_recovers_an_expired_empty_placeholder(lock_file) -> None:
+    lock_file.write_bytes(b"")
+    past = lock_file.stat().st_mtime - maybe_compile._PID0_TTL_SECONDS - 60
+    os.utime(lock_file, (past, past))
+
+    handle, reason = compile_memory._acquire_compile_lock()
+
+    assert reason == "claimed"
+    compile_memory._release_compile_lock(handle)
     assert not lock_file.exists()

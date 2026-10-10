@@ -22,6 +22,8 @@ param(
     # description and the time limits below. 1 is what machines installed before
     # 2026-09-17 carry; the install control plane passes it to take such tasks back.
     [ValidateSet(1, 2)][int]$SpecVersion = 2,
+    [ValidateScript({ $_ -gt 0 })][int]$NightlyLimitHours,
+    [ValidateScript({ $_ -gt 0 })][int]$WeeklyLimitHours,
     [switch]$Uninstall,
     [switch]$Status,
     [switch]$StateJson,
@@ -39,7 +41,13 @@ $tasks = @("LLMWiki-Nightly", "LLMWiki-Weekly")
 # A function, not only a script variable: the status check calls it, so a caller
 # that loads the check alone still reads the same table.
 function Get-LLMWikiLimitHours { return @{ nightly = 4; weekly = 6 } }
-$LimitHours = Get-LLMWikiLimitHours
+function Get-LLMWikiConfiguredLimitHours {
+    $limits = Get-LLMWikiLimitHours
+    if ($NightlyLimitHours -gt 0) { $limits.nightly = $NightlyLimitHours }
+    if ($WeeklyLimitHours -gt 0) { $limits.weekly = $WeeklyLimitHours }
+    return $limits
+}
+$LimitHours = Get-LLMWikiConfiguredLimitHours
 
 # Detect dot-sourcing at TOP LEVEL (outside any function).
 # Inside a function, $MyInvocation.CommandOrigin is always 'Internal',
@@ -94,6 +102,67 @@ function Test-LLMWikiTaskSpec {
     return $limit -eq (New-TimeSpan -Hours $LimitHours)
 }
 
+function Test-LLMWikiTaskAction {
+    param($Action, [string[]]$Expected)
+    if ([string]::IsNullOrWhiteSpace([string]$Action.Execute) -or
+        [string]$Action.Arguments -notmatch '-EncodedCommand\s+(\S+)\s*$') { return $false }
+    try {
+        $decoded = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($Matches[1]))
+        return @($Expected | Where-Object { -not $decoded.Contains($_) }).Count -eq 0
+    } catch { return $false }
+}
+
+function Test-LLMWikiTaskSchedule {
+    param($Task, [string[]]$Expected)
+    if ($Task.Actions.Count -ne 1 -or $Task.Triggers.Count -ne 1) { return $false }
+    $trigger = $Task.Triggers[0]
+    if ([string]::IsNullOrWhiteSpace([string]$trigger.StartBoundary) -or
+        $trigger.Enabled -eq $false) { return $false }
+    return Test-LLMWikiTaskAction -Action $Task.Actions[0] -Expected $Expected
+}
+
+function Test-LLMWikiTaskIdentity {
+    param($Task)
+    $stateValid = -not [string]::IsNullOrWhiteSpace([string]$Task.State) -and $Task.State -ne "Disabled"
+    $principalValid = [string]$Task.Principal.LogonType -eq "Interactive" -and
+        -not [string]::IsNullOrWhiteSpace([string]$Task.Principal.UserId)
+    return $stateValid -and $principalValid
+}
+
+function Write-LLMWikiTaskStatus {
+    param($Task, $Info, [string]$Name, [bool]$Valid)
+    $color = if ($Valid) { "Green" } else { "Yellow" }
+    Write-Host "  ${Name}:" -ForegroundColor $color
+    Write-Host "    State:        $($Task.State)"
+    Write-Host "    Logon type:   $($Task.Principal.LogonType)"
+    Write-Host "    Last run:     $($Info.LastRunTime)"
+    Write-Host "    Last result:  $($Info.LastTaskResult)"
+    Write-Host "    Next run:     $($Info.NextRunTime)"
+}
+
+function Test-LLMWikiTaskRegistration {
+    param($Specification, [string[]]$Paths, [int]$SpecVersion)
+    $name = $Specification.Name
+    $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+    if ($null -eq $task) {
+        Write-Host "  ${name}: NOT INSTALLED" -ForegroundColor Yellow
+        return $false
+    }
+    try { $info = $task | Get-ScheduledTaskInfo -ErrorAction Stop }
+    catch {
+        Write-Host "  ${name}: STATUS UNAVAILABLE" -ForegroundColor Yellow
+        return $false
+    }
+    $checks = @(
+        (Test-LLMWikiTaskIdentity -Task $task),
+        (Test-LLMWikiTaskSchedule -Task $task -Expected (@($Specification.Kind) + $Paths)),
+        (Test-LLMWikiTaskSpec -Task $task -SpecVersion $SpecVersion -LimitHours $Specification.LimitHours)
+    )
+    $valid = $checks -notcontains $false
+    Write-LLMWikiTaskStatus -Task $task -Info $info -Name $name -Valid $valid
+    return $valid
+}
+
 function Test-LLMWikiScheduledTasks {
     param(
         [Parameter(Mandatory = $true)][string]$VaultRoot,
@@ -101,80 +170,16 @@ function Test-LLMWikiScheduledTasks {
         [Parameter(Mandatory = $true)][string]$UvPath,
         [ValidateSet(1, 2)][int]$SpecVersion = 2
     )
-    $verified = $true
-    $limits = Get-LLMWikiLimitHours
+    $limits = Get-LLMWikiConfiguredLimitHours
     $specifications = @(
         @{ Name = "LLMWiki-Nightly"; Kind = "nightly"; LimitHours = $limits.nightly },
         @{ Name = "LLMWiki-Weekly"; Kind = "weekly"; LimitHours = $limits.weekly }
     )
-    foreach ($specification in $specifications) {
-        $name = $specification.Name
-        $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
-        if ($null -eq $task) {
-            Write-Host "  ${name}: NOT INSTALLED" -ForegroundColor Yellow
-            $verified = $false
-            continue
-        }
-        try {
-            $info = $task | Get-ScheduledTaskInfo -ErrorAction Stop
-        } catch {
-            Write-Host "  ${name}: STATUS UNAVAILABLE" -ForegroundColor Yellow
-            $verified = $false
-            continue
-        }
-        $taskValid = $true
-        if ([string]::IsNullOrWhiteSpace([string]$task.State) -or $task.State -eq "Disabled") {
-            $taskValid = $false
-        }
-        if ($task.Actions.Count -ne 1 -or $task.Triggers.Count -ne 1) {
-            $taskValid = $false
-        } else {
-            $action = $task.Actions[0]
-            $trigger = $task.Triggers[0]
-            if ([string]::IsNullOrWhiteSpace([string]$action.Execute) -or
-                [string]$action.Arguments -notmatch '-EncodedCommand\s+(\S+)\s*$') {
-                $taskValid = $false
-            } else {
-                try {
-                    $decoded = [Text.Encoding]::Unicode.GetString(
-                        [Convert]::FromBase64String($Matches[1])
-                    )
-                    foreach ($expected in @(
-                        $specification.Kind,
-                        [System.IO.Path]::GetFullPath($VaultRoot),
-                        [System.IO.Path]::GetFullPath($StateRoot),
-                        [System.IO.Path]::GetFullPath($UvPath)
-                    )) {
-                        if (-not $decoded.Contains($expected)) { $taskValid = $false }
-                    }
-                } catch {
-                    $taskValid = $false
-                }
-            }
-            if ([string]::IsNullOrWhiteSpace([string]$trigger.StartBoundary) -or
-                $trigger.Enabled -eq $false) {
-                $taskValid = $false
-            }
-        }
-        if ([string]$task.Principal.LogonType -ne "Interactive" -or
-            [string]::IsNullOrWhiteSpace([string]$task.Principal.UserId)) {
-            $taskValid = $false
-        }
-        if (-not (Test-LLMWikiTaskSpec `
-                -Task $task `
-                -SpecVersion $SpecVersion `
-                -LimitHours $specification.LimitHours)) {
-            $taskValid = $false
-        }
-        Write-Host "  ${name}:" -ForegroundColor $(if ($taskValid) { "Green" } else { "Yellow" })
-        Write-Host "    State:        $($task.State)"
-        Write-Host "    Logon type:   $($task.Principal.LogonType)"
-        Write-Host "    Last run:     $($info.LastRunTime)"
-        Write-Host "    Last result:  $($info.LastTaskResult)"
-        Write-Host "    Next run:     $($info.NextRunTime)"
-        if (-not $taskValid) { $verified = $false }
-    }
-    return $verified
+    $paths = @($VaultRoot, $StateRoot, $UvPath) | ForEach-Object { [IO.Path]::GetFullPath($_) }
+    $checks = @($specifications | ForEach-Object {
+        Test-LLMWikiTaskRegistration -Specification $_ -Paths $paths -SpecVersion $SpecVersion
+    })
+    return $checks -notcontains $false
 }
 
 function Get-LLMWikiScheduledTaskState {
@@ -196,7 +201,11 @@ function Get-LLMWikiScheduledTaskState {
         -StateRoot $StateRoot `
         -UvPath $UvPath `
         -SpecVersion $SpecVersion 6>$null
-    if ($verified) { return "equivalent" }
+    return Get-LLMWikiVerificationState -Verified $verified
+}
+
+function Get-LLMWikiVerificationState([bool]$Verified) {
+    if ($Verified) { return "equivalent" }
     return "conflict"
 }
 

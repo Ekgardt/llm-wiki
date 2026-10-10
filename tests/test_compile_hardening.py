@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from argparse import Namespace
 from pathlib import Path
 from types import MappingProxyType
@@ -10,6 +12,8 @@ from compile_cache import CompileCache
 from llm_client import LLMResult, ProviderDescriptor
 from markdown_transaction import MarkdownCoordinator, TransactionFailure
 from reliable_memory import canonical_json_bytes, sha256_bytes
+
+from tests.slow_machine import LONG_TIMEOUT
 
 
 @pytest.fixture
@@ -112,6 +116,12 @@ def _compile(root: Path, state_root: Path, daily: Path):
     return coordinator, inputs, result
 
 
+def _context_test_receipt_path(source):
+    import compile_memory
+
+    return compile_memory._context_receipt_path(compile_memory._v4_source_descriptor(source))
+
+
 def test_all_filters_committed_receipts_and_keeps_uncompiled_mixed_source(vault):
     root, state_root = vault
     first = _daily(root)
@@ -152,7 +162,11 @@ def test_native_semantic_schema_is_closed_through_evidence_fields():
     operation = compile_memory.RAW_PLAN_SCHEMA["properties"]["operations"]["items"]
     evidence = operation["properties"]["evidence"]["items"]
     assert operation["additionalProperties"] is False
-    assert evidence["additionalProperties"] is False
+    assert len(evidence["oneOf"]) == 2
+    assert all(branch["additionalProperties"] is False for branch in evidence["oneOf"])
+    native = evidence["oneOf"][1]["properties"]["native_event"]
+    assert native["additionalProperties"] is False
+    assert set(native["required"]) == {"source_path", "byte_start", "line_index"}
     assert operation["properties"]["action"]["enum"] == ["create", "update"]
     assert operation["properties"]["category"]["enum"] == sorted(
         compile_memory.ALLOWED_CATEGORIES
@@ -202,26 +216,22 @@ def test_target_changed_after_snapshot_conflicts_with_frozen_update(vault):
 
 
 def test_receipt_copy_is_rejected_without_matching_committed_transaction(vault):
+    from dataclasses import replace
+
     root, state_root = vault
     daily = _daily(root)
     coordinator, inputs, _result = _compile(root, state_root, daily)
     import compile_memory
 
     source = inputs.dailies[0]
-    identity = compile_memory.compile_source_identity(
-        source.logical_path, source.sha256
-    )
-    receipt = root / f"knowledge/daily/receipts/v3-{identity}.md"
+    receipt = _context_test_receipt_path(source)
     forged_path = "knowledge/daily/2099-01-01.md"
-    forged_identity = compile_memory.compile_source_identity(
-        forged_path, source.sha256
-    )
-    forged = root / f"knowledge/daily/receipts/v3-{forged_identity}.md"
+    forged = _context_test_receipt_path(replace(source, logical_path=forged_path))
     forged.write_bytes(receipt.read_bytes())
 
     with pytest.raises(ValueError, match="receipt"):
-        compile_memory.read_compile_receipt_v3(
-            forged_path, source.sha256, coordinator
+        compile_memory.read_compile_receipt_version(
+            forged_path, source.sha256, coordinator, path=forged
         )
 
 
@@ -321,6 +331,34 @@ def test_resolve_requires_coordinator_and_checks_persisted_gate_before_probe(
             )
 
 
+def test_external_work_can_overlap_an_unrelated_process_writer(vault):
+    import compile_memory
+
+    root, state_root = vault
+    observer = MarkdownCoordinator(root, state_root)
+    scripts = Path(compile_memory.__file__).parent
+    command = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from markdown_transaction import MarkdownCoordinator
+owner = MarkdownCoordinator(Path(sys.argv[2]), Path(sys.argv[3]))
+with owner.writer_gate():
+    print('writer-held', flush=True)
+    sys.stdin.read()
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", command, str(scripts), str(root), str(state_root)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        assert process.stdout.readline().strip() == "writer-held"
+        compile_memory._assert_external_work_allowed(observer)
+    finally:
+        _, error = process.communicate("", timeout=LONG_TIMEOUT)
+    assert process.returncode == 0, error
+
+
 def test_critique_failure_lineage_records_stage_provider_and_stable_code(
     vault, monkeypatch
 ):
@@ -410,22 +448,53 @@ def test_receipt_evidence_is_source_scoped_and_operation_associated(vault):
     import compile_memory
 
     source = inputs.dailies[0]
-    record = compile_memory.read_compile_receipt_v3(
-        source.logical_path, source.sha256, coordinator
+    record = compile_memory.read_compile_receipt_version(
+        source.logical_path, source.sha256, coordinator, path=_context_test_receipt_path(source)
     )
     assert record is not None
     assert "completed_at" not in record
     assert record["evidence"] == [
         {
-            "source_identity": compile_memory.compile_source_identity(
-                source.logical_path, source.sha256
-            ),
+            "source_identity": compile_memory.compile_context_source_identity(compile_memory._v4_source_descriptor(source)),
             "operation_path": "knowledge/notes/safe-note.md",
             "quote_sha256": sha256_bytes(b"durable fact"),
             "source_digest": source.sha256,
             "source_path": "knowledge/daily/2026-07-14.md",
         }
     ]
+
+
+def test_a_verified_committed_receipt_retires_a_retained_source_failure(vault):
+    import compile_memory
+    from memory_queue import MemoryQueue
+
+    root, state_root = vault
+    daily = _daily(root)
+    coordinator, inputs, _result = _compile(root, state_root, daily)
+    source = inputs.dailies[0]
+    queue = MemoryQueue(state_root)
+    queue.record_source_failure(
+        source.logical_path, source.sha256, error_code="ValueError", producer="compile"
+    )
+    compile_memory._retire_stale_source_failures(state_root)
+    assert queue.source_failure_keys() == []
+
+
+def test_a_missing_receipt_preserves_the_current_source_failure(vault):
+    import compile_memory
+    from memory_queue import MemoryQueue
+
+    root, state_root = vault
+    daily = _daily(root)
+    coordinator, inputs, _result = _compile(root, state_root, daily)
+    source = inputs.dailies[0]
+    queue = MemoryQueue(state_root)
+    queue.record_source_failure(
+        source.logical_path, source.sha256, error_code="ValueError", producer="compile"
+    )
+    _context_test_receipt_path(source).unlink()
+    compile_memory._retire_stale_source_failures(state_root)
+    assert queue.source_failure_keys() == [(source.logical_path, source.sha256)]
 
 
 def test_index_rejects_invalid_utf8_instead_of_replacement_decoding(vault):
@@ -520,8 +589,8 @@ def test_unusable_receipts_are_discarded_only_when_asked(tmp_path, monkeypatch):
     receipts.mkdir(parents=True)
     good = receipts / "v3-good.md"
     bad = receipts / "v3-bad.md"
-    good.write_text('---\n---\n```json\n{"source": {"logical_path": "d.md", "sha256": "a"}}\n```\n', encoding="utf-8")
-    bad.write_text('---\n---\n```json\n{"source": {"logical_path": "d.md", "sha256": "broken"}}\n```\n', encoding="utf-8")
+    good.write_bytes(b'---\n---\n```json\n{"schema_version": "compile-receipt/v3", "source": {"logical_path": "d.md", "sha256": "a"}}\n```\n')
+    bad.write_bytes(b'---\n---\n```json\n{"schema_version": "compile-receipt/v3", "source": {"logical_path": "d.md", "sha256": "broken"}}\n```\n')
     monkeypatch.setattr(compile_memory, "DAILY_DIR", tmp_path / "knowledge/daily")
 
     def parse(raw, *, logical_path, source_sha256):

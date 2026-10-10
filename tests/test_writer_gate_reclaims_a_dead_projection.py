@@ -44,8 +44,10 @@ def _coordinator(state_root: Path):
 
 
 def _dead_identity() -> ownership.ProcessIdentity:
+    from tests.process_identity_fixture import reused_current_process_identity
+
     return ownership.ProcessIdentity(
-        pid=os.getpid(), start_identity="llm-wiki-test:killed-process"
+        pid=os.getpid(), start_identity=reused_current_process_identity()
     )
 
 

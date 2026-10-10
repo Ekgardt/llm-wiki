@@ -10,12 +10,14 @@ from dataclasses import dataclass
 
 from corpus_snapshot import CapturedSource
 from knowledge_extractor import (
-    MAX_RECORDS,
     ExtractionResult,
     _evidence,
     _identifier,
     _node,
     _occurrence,
+    _record_budget_at_capacity,
+    _record_budget_exceeded,
+    _require_optional_record_budget,
     source_ceiling,
 )
 from project_journal import parse_journal_events
@@ -52,7 +54,7 @@ def extract_projects(
     sources: Sequence[CapturedSource],
     *,
     max_sources: int | None = None,
-    max_records: int = MAX_RECORDS,
+    max_records: int | None = None,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     cancelled: Callable[[], bool] | None = None,
@@ -63,7 +65,7 @@ def extract_projects(
     _check_stop(deadline, monotonic, cancelled)
     _require_intact_sources(sources)
     extraction = _ProjectExtraction(
-        min(max_records, MAX_RECORDS), lambda: _check_stop(deadline, monotonic, cancelled)
+        max_records, lambda: _check_stop(deadline, monotonic, cancelled)
     )
     for source in sorted(sources, key=lambda item: item.record.relative_path):
         extraction.add_source(source)
@@ -71,11 +73,11 @@ def extract_projects(
 
 
 def _require_extraction_options(
-    sources: object, max_sources: int, max_records: int, cancelled: Callable[[], bool] | None
+    sources: object, max_sources: int, max_records: int | None, cancelled: Callable[[], bool] | None
 ) -> None:
     _require_source_sequence(sources)
     _require_positive("max_sources", max_sources)
-    _require_positive("max_records", max_records)
+    _require_optional_record_budget(max_records)
     if cancelled is not None and not callable(cancelled):
         raise TypeError("cancelled must be callable")
     if len(sources) > max_sources:
@@ -157,9 +159,9 @@ def _ordered(rows: Mapping[str, dict[str, object]], key: str) -> tuple[dict[str,
 
 
 class _ProjectExtraction:
-    """Nodes, occurrences, assertions and evidence of every project journal, under one ceiling."""
+    """Nodes, occurrences, assertions and evidence of every project journal, with an optional caller record budget."""
 
-    def __init__(self, record_limit: int, check_stop: Callable[[], None]) -> None:
+    def __init__(self, record_limit: int | None, check_stop: Callable[[], None]) -> None:
         self.record_limit = record_limit
         self.check_stop = check_stop
         self.nodes: dict[str, dict[str, object]] = {}
@@ -172,7 +174,7 @@ class _ProjectExtraction:
 
     def check_work(self) -> None:
         self.check_stop()
-        if self._record_count() >= self.record_limit:
+        if _record_budget_at_capacity(self._record_count, self.record_limit):
             raise ValueError("project extraction record ceiling exceeded")
 
     def relation(self, source: CapturedSource, source_node: str, edge: str, target: str, start: int, end: int) -> None:
@@ -222,7 +224,7 @@ class _ProjectExtraction:
         span = _EventSpan(source, slug, checkpoint_id, event_start, event_end)
         self._add_delta(span, event["delta"])
         self._add_evidence_events(span, event["evidence_event_ids"])
-        if self._record_count() > self.record_limit:
+        if _record_budget_exceeded(self._record_count, self.record_limit):
             raise ValueError("project extraction record ceiling exceeded")
         return event_end
 

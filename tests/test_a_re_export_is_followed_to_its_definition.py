@@ -4,7 +4,10 @@ docs/research/2026-09-26-a-re-export-is-followed-to-its-definition.md
 """
 from __future__ import annotations
 
-from code_extractor import extract_code
+import time
+
+import pytest
+from code_extractor import ExtractionLimits, _Collector, extract_code
 
 from tests.test_a_decorator_is_a_call_until_it_is_a_route import _call_target_names, _source
 
@@ -27,3 +30,19 @@ def test_a_re_export_cycle_resolves_to_nothing_and_ends() -> None:
     result = extract_code(tuple(_source(path, content) for path, content in files.items()), repository_id="repo")
 
     assert _call_target_names(result) == []
+
+
+def test_a_long_reexport_chain_reaches_its_definition() -> None:
+    files = {f"p{index}.py": f"from p{index + 1} import compute\n".encode() for index in range(12)}
+    files.update({"p12.py": b"def compute():\n    return 1\n", "app.py": b"from p0 import compute\ndef run():\n    return compute()\n"})
+    result = extract_code(tuple(_source(path, content) for path, content in files.items()), repository_id="repo")
+    assert _call_target_names(result) == ["compute"]
+
+
+def test_reexport_resolution_obeys_the_callers_deadline() -> None:
+    collector = _Collector((), "repo", ExtractionLimits(), time.monotonic() - 1, None)
+    collector.modules = {"p0": ["m0"], "p1": ["m1"]}
+    collector.module_name_index = {"p0": ("p0",), "p1": ("p1",)}
+    collector.reexports = {("p0", "compute"): [("p1", "compute")]}
+    with pytest.raises(TimeoutError, match="extraction deadline"):
+        collector._reexported_targets("p0", "compute")

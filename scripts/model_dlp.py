@@ -8,6 +8,7 @@ import hmac
 import json
 import os
 import re
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,10 @@ class DLPPolicyError(ValueError):
 
 class DLPContentBlocked(ValueError):
     """Sensitive model output must not cross the durable boundary."""
+
+
+class _ModelOutputFinding(DLPContentBlocked):
+    """A completed scan found protected output, distinct from scanner failure."""
 
 
 @dataclass(frozen=True)
@@ -296,7 +301,22 @@ def require_safe_model_output(text: str, policy: DLPPolicy) -> None:
         return
     scrubbed = _scrubbed(text, policy)
     if scrubbed != text and not _findings_allowlisted(text, scrubbed, policy):
-        raise DLPContentBlocked("model output contains protected content")
+        raise _ModelOutputFinding(
+            f"model output contains protected content ({_finding_kinds(text, scrubbed)})"
+        )
+
+
+_MARKER_RE = re.compile(r"\[REDACTED[A-Z_]*\]")
+
+
+def _finding_kinds(text: str, scrubbed: str) -> str:
+    """Which rules fired, by their markers and counts, never the content they matched.
+
+    A refusal that named nothing left 72 captures on the live vault blocked on
+    every retry with no way to tell a real secret from a false positive.
+    """
+    counts = Counter(_MARKER_RE.findall(scrubbed)) - Counter(_MARKER_RE.findall(text))
+    return ", ".join(f"{marker.strip('[]')} x{counts[marker]}" for marker in sorted(counts)) or "unnamed"
 
 
 def require_safe_content(content: bytes, policy: DLPPolicy) -> None:
@@ -312,6 +332,25 @@ def require_safe_content(content: bytes, policy: DLPPolicy) -> None:
         raise DLPContentBlocked("content scan failed") from exc
 
 
-def require_safe_publication(content: bytes) -> None:
-    """Recheck exact after-image bytes immediately before durable publication."""
-    require_safe_content(content, load_policy())
+def _only_preserved_findings(content: bytes, prefix: bytes | None, policy: DLPPolicy) -> bool:
+    """Accept only findings confined to an authenticated unchanged byte prefix."""
+    if prefix is None or not content.startswith(prefix):
+        return False
+    try:
+        text = content.decode("utf-8", errors="surrogateescape")
+        before = prefix.decode("utf-8", errors="surrogateescape")
+        appended = content[len(prefix):].decode("utf-8", errors="surrogateescape")
+        return _scrubbed(text, policy) == _scrubbed(before, policy) + appended
+    except Exception as error:
+        raise DLPContentBlocked("preserved publication scan failed") from error
+
+
+def require_safe_publication(content: bytes, *, preserved_prefix: bytes | None = None) -> None:
+    """Scan exact after bytes; authenticated unchanged history is not new output."""
+    policy = load_policy()
+    try:
+        require_safe_content(content, policy)
+    except DLPContentBlocked as error:
+        if isinstance(error.__cause__, _ModelOutputFinding) and _only_preserved_findings(content, preserved_prefix, policy):
+            return
+        raise

@@ -72,6 +72,13 @@ _REPORT_REASON = (
 )
 
 
+# One existing discovery entry budget also bounds the default number of sources.
+# Retained from corpus_snapshot: no additional numeric value is selected here.
+# Its independent numerical basis remains under review; source defaults must not
+# introduce a smaller second ceiling than this bounded walk already enforces.
+MAX_CORPUS_INSPECTED_ENTRIES = 50_000
+
+
 @dataclass(frozen=True)
 class Setting:
     """One tunable limit: its default, unit, lower bound and reason."""
@@ -105,11 +112,11 @@ REGISTRY: tuple[Setting, ...] = (
     Setting("index", "max_total_bytes", 32 * MIB, "bytes", "the notes the index is rebuilt from; " + _HELD_IN_MEMORY),
     Setting("compile", "max_sources", 2_000, "sources", "daily logs and notes one compile reads; " + _HELD_IN_MEMORY),
     Setting("compile", "max_total_source_bytes", 32 * MIB, "bytes", "the sources one compile reads; " + _HELD_IN_MEMORY),
-    Setting("corpus", "max_files", 10_000, "files", "the corpus a search generation is built from; " + _HELD_IN_MEMORY),
+    Setting("corpus", "max_files", MAX_CORPUS_INSPECTED_ENTRIES, "files", "shares the existing corpus discovery entry budget; " + _HELD_IN_MEMORY),
     Setting("corpus", "max_total_bytes", 64 * MIB, "bytes", "the corpus a search generation is built from; " + _HELD_IN_MEMORY),
     Setting("claims", "max_pages", 10_000, "pages", "notes and journals the claim tree hashes; " + _HELD_IN_MEMORY),
     Setting("claims", "max_total_bytes", 32 * MIB, "bytes", "the pages the claim tree hashes; " + _HELD_IN_MEMORY),
-    Setting("extraction", "max_sources", 10_000, "sources", "sources one knowledge extraction reads; " + _HELD_IN_MEMORY),
+    Setting("extraction", "max_sources", MAX_CORPUS_INSPECTED_ENTRIES, "sources", "shares the existing corpus discovery entry budget; " + _HELD_IN_MEMORY),
     Setting("search", "max_pages", 10_000, "pages", "notes a search without a generation walks; " + _HELD_IN_MEMORY),
     Setting("impact", "max_note_files", 2_000, "files", "notes one impact request scans; " + _HELD_IN_MEMORY),
     Setting("impact", "max_total_note_bytes", 32 * MIB, "bytes", "the notes one impact request scans; " + _HELD_IN_MEMORY),
@@ -118,7 +125,9 @@ REGISTRY: tuple[Setting, ...] = (
     Setting("retention", "report_bytes", 32 * MIB, "bytes", _REPORT_REASON + "; the only bound on the scheduler's own log"),
     Setting("retention", "telemetry_days", 90, "days", "retrieval telemetry is kept for the archive's 90 hot days"),
     Setting("retention", "benchmark_run_days", 30, "days", "a benchmark run directory is evidence for the report written from it"),
-    Setting("retention", "config_backup_days", 90, "days", "agent-config backups undo an installer rewrite; the archive's 90 hot days"),
+    Setting("retention", "config_backup_days", 90, "days", "agent-config backups and displaced owned files undo an installer rewrite; the archive's 90 hot days"),
+    Setting("generation", "nightly_seconds", 2131, "seconds", "107490-source measured full build exceeded 1812 s; plus 53 s validation scaled by corpus growth and 260 s collection variation; remeasure after growth (2026-10-08)"),
+    Setting("generation", "post_compile_seconds", 2131, "seconds", "same complete generation builder and measured corpus as nightly; a 120 s window could not finish its 260 s collection (2026-10-08)"),
     Setting("provider", "draft_ceiling_seconds", 600, "seconds", _DRAFT_CEILING_REASON),
     Setting("mcp", "retrieval_seconds", 14, "seconds", _RETRIEVAL_BUDGET_REASON, lower=5),
 )

@@ -199,16 +199,18 @@ def _assert_directory_is_the_only_requirement(tools, name: str) -> None:
 
 
 def _assert_query_and_slug_bounds(schemas) -> None:
-    assert schemas["recall"]["properties"]["query"]["maxLength"] == 8192
-    assert schemas["get_decisions"]["properties"]["query"]["maxLength"] == 8192
+    assert "maxLength" not in schemas["recall"]["properties"]["query"]
+    assert "maxLength" not in schemas["get_decisions"]["properties"]["query"]
     assert schemas["read_page"]["properties"]["slug"]["maxLength"] == 255
 
 
 def _assert_context_array_bounds(slugs, include) -> None:
-    assert (slugs["minItems"], slugs["maxItems"], slugs["uniqueItems"]) == (1, 20, True)
+    assert (slugs["minItems"], slugs["uniqueItems"]) == (1, True)
+    assert "maxItems" not in slugs
     assert slugs["items"]["maxLength"] == 255
-    assert (include["maxItems"], include["uniqueItems"]) == (10, True)
-    assert include["items"]["maxLength"] == 64
+    assert include["uniqueItems"] is True
+    assert "maxItems" not in include
+    assert include["items"] == {"type": "string"}
 
 
 class TestToolDefinitions:
@@ -845,7 +847,7 @@ class TestHelperFunctions:
             {"reference": None, "error": "not_an_evidence_reference"}
         ]
 
-        page.write_bytes(b"x" * (mcp_server.MAX_MCP_PAGE_BYTES + 1))
+        page.write_bytes(b"x" * (mcp_server.MAX_KNOWLEDGE_PAGE_BYTES + 1))
         result = mcp_server._read_page("page")
         assert "error" in result
         assert "exceeds" in result["error"]
@@ -1208,12 +1210,14 @@ class TestHelperFunctions:
         package = mcp_server._get_context(["first", "first", "second"])
         assert package["missing_slugs"] == ["first", "second"]
         assert reads == []
-        with pytest.raises(ValueError, match="slugs"):
-            mcp_server._get_context([f"page-{index}" for index in range(21)])
+        requested = [f"page-{index}" for index in range(21)]
+        assert mcp_server._get_context(requested)["missing_slugs"] == sorted(requested)
         with pytest.raises(ValueError, match="slug"):
             mcp_server._get_context(["x" * 256])
+        included = [f"compatibility-{index}-" + "x" * 65 for index in range(11)]
+        assert mcp_server._get_context(["page"], included)["include"] == included
         with pytest.raises(ValueError, match="include"):
-            mcp_server._get_context(["page"], ["x" * 65])
+            mcp_server._get_context(["page"], [True])
 
     def test_recall_and_decisions_pass_distinct_source_tools(self, monkeypatch):
         import mcp_server
@@ -2170,8 +2174,8 @@ class TestHandleToolCall:
         received = []
 
         class Queue:
-            def __init__(self, root):
-                del root
+            def __init__(self, root, *, deadline=None):
+                del root, deadline
 
             def cancel(self, target_id, *, deadline, cancelled):
                 received.append((target_id, deadline, cancelled()))
@@ -2208,8 +2212,8 @@ class TestHandleToolCall:
             error_code = None
 
         class Coordinator:
-            def __init__(self, *args):
-                del args
+            def __init__(self, *args, deadline=None):
+                del args, deadline
 
             def undo(self, target_id, *, deadline, cancelled):
                 received.append(("undo", target_id, deadline, cancelled()))
@@ -2274,7 +2278,7 @@ class TestHandleToolCall:
                 raise
 
         monkeypatch.setattr(memory_queue, "begin_immediate", delayed_begin)
-        monkeypatch.setattr(memory_queue, "MemoryQueue", lambda _root: queue)
+        monkeypatch.setattr(memory_queue, "MemoryQueue", lambda _root, *, deadline=None: queue)
         monkeypatch.setattr(memory_state, "ROOT", vault)
         monkeypatch.setattr(memory_state, "STATE_ROOT", state_root)
         # The operation has to reach its commit before the budget expires;
@@ -2755,14 +2759,12 @@ class TestHandleToolCall:
     @pytest.mark.parametrize(
         ("tool_name", "arguments"),
         [
-            ("recall", {"query": "x" * 8193}),
-            ("get_decisions", {"query": "x" * 8193}),
+            ("recall", {"query": 42}),
+            ("get_decisions", {"query": True}),
             ("read_page", {"slug": "x" * 256}),
             ("get_context", {"slugs": []}),
-            ("get_context", {"slugs": [f"page-{index}" for index in range(21)]}),
+            ("get_context", {"slugs": ["page"], "include": [True]}),
             ("get_context", {"slugs": ["same", "same"]}),
-            ("get_context", {"slugs": ["page"], "include": [str(index) for index in range(11)]}),
-            ("get_context", {"slugs": ["page"], "include": ["x" * 65]}),
         ],
     )
     def test_retrieval_bounds_are_rejected_before_helper_dispatch(
@@ -3133,8 +3135,8 @@ class TestHandleToolCall:
         received = []
 
         class Coordinator:
-            def __init__(self, *args):
-                pass
+            def __init__(self, *args, deadline=None):
+                del args, deadline
 
             def recover(self, **kwargs):
                 received.append(kwargs)
@@ -3179,8 +3181,8 @@ class TestHandleToolCall:
                 connection.execute("CREATE TABLE tasks(id, state, error_code)")
         else:
             class Queue:
-                def __init__(self, root):
-                    pass
+                def __init__(self, root, *, deadline=None):
+                    del root, deadline
 
                 def cancel(self, target_id, **kwargs):
                     del kwargs
@@ -3546,7 +3548,7 @@ class TestCallbackCompatibility:
         monkeypatch.setattr(mcp_server, "MCP_STRUCTURED_OUTPUT_AVAILABLE", False)
         mcp_server._register_tools(server, [])
         payload = mcp_server._timeout_envelope_text().replace(
-            '"operation_timeout"', json.dumps("x" * (mcp_server.MAX_MCP_PAGE_BYTES - 1024)), 1
+            '"operation_timeout"', json.dumps("x" * (mcp_server.MAX_KNOWLEDGE_PAGE_BYTES - 1024)), 1
         )
         real_format = mcp_server._format_tool_result
         started = threading.Event()
@@ -3575,7 +3577,7 @@ class TestCallbackCompatibility:
         heartbeat, result = asyncio.run(exercise())
 
         assert heartbeat is True
-        assert len(result[0].text) >= mcp_server.MAX_MCP_PAGE_BYTES - 2048
+        assert len(result[0].text) >= mcp_server.MAX_KNOWLEDGE_PAGE_BYTES - 2048
 
     def test_registered_callback_answers_while_the_payload_formatter_is_stuck(
         self, monkeypatch
@@ -6146,3 +6148,57 @@ class TestWarmupIsInTheHealthAnswer:
         state = mcp_server.warmup_state()
         assert state["status"] == "warm"
         assert isinstance(state["seconds"], float)
+
+
+@pytest.mark.parametrize("tool", ["recall", "get_decisions"])
+def test_a_long_query_reaches_retrieval_whole_under_the_callers_deadline(monkeypatch, tool):
+    import mcp_server
+    import search_memory
+
+    query = "evidence " * 1025
+    received = []
+    monkeypatch.setattr(search_memory, "search", lambda text, **kwargs: received.append((text, kwargs)) or [])
+    monkeypatch.setattr(mcp_server, "_record_decision_impressions", lambda *_args: None)
+    calls = {"recall": mcp_server._search_vault, "get_decisions": mcp_server._get_decisions}
+    deadline = time.monotonic() + LONG_TIMEOUT
+    assert calls[tool](query, deadline=deadline) == []
+    assert received[0][0] == query
+    assert received[0][1]["deadline_monotonic"] <= deadline
+
+
+@pytest.mark.parametrize("invalid", [True, 42, [], {}])
+def test_removing_query_length_refusal_preserves_type_validation(invalid):
+    import mcp_server
+
+    with pytest.raises(ValueError, match="query must be a string"):
+        mcp_server._search_vault(invalid)
+    with pytest.raises(ValueError, match="query must be a string"):
+        mcp_server._get_decisions(invalid)
+
+
+@pytest.mark.parametrize("tool", ["recall", "get_decisions"])
+def test_public_query_schema_dispatches_a_long_string_whole(monkeypatch, tool):
+    import mcp_server
+
+    query = "evidence " * 1025
+    received = []
+    monkeypatch.setattr(mcp_server, TOOL_HELPERS[tool], lambda text, *args, **kwargs: received.append(text) or [])
+    envelope = json.loads(asyncio.run(mcp_server._handle_tool_call(tool, {"query": query})))
+    assert envelope["data"]["results"] == []
+    assert "error" not in envelope["data"]
+    assert received == [query]
+
+
+def test_a_page_accepted_by_knowledge_remains_readable_and_hashable_by_mcp(tmp_path, monkeypatch):
+    import mcp_server
+    import memory_state
+
+    notes = tmp_path / "knowledge/notes"
+    notes.mkdir(parents=True)
+    page = notes / "page.md"
+    content = b"x" * (4 * 1024 * 1024 + 1)
+    page.write_bytes(content)
+    monkeypatch.setattr(memory_state, "ROOT", tmp_path)
+    result = mcp_server._read_page("page", emit_telemetry=False, resolve_evidence=False)
+    assert result["content"].encode() == content
+    assert mcp_server._file_sha256(page) == hashlib.sha256(content).hexdigest()
