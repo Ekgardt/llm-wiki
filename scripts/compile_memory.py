@@ -953,8 +953,16 @@ def _bound_capture_proofs(context, inputs):
 
 def _join_partition(part, partitions):
     if partitions is None:
-        return _partition_for_join(part)
+        return _sizing_partition_for_join(part)
     return partitions.for_part(part)
+
+
+def _sizing_partition_for_join(part):
+    """Use only the current sizing pass's canonical immutable partition parser."""
+    _journal, partitions = _choice_projection_parsing()
+    if type(partitions) is _DailyPartitionProofs:
+        return partitions.for_part(part)
+    return _partition_for_join(part)
 
 
 def _same_day_parts_join(current_parts, unit, partitions):
