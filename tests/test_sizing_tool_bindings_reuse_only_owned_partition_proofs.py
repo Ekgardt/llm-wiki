@@ -3,6 +3,7 @@ from dataclasses import replace
 from unittest.mock import Mock
 
 import compile_memory as compiler
+import evidence_resolver
 import pytest
 from evidence_resolver import EvidenceRef
 
@@ -81,3 +82,64 @@ def test_an_arbitrary_context_object_cannot_supply_partition_authority(packet):
         compiler._SOURCE_CHOICE_PARSING.reset(token)
     assert actual == expected
     forged.for_part.assert_not_called()
+
+
+def test_joined_binding_reuses_canonical_entry_boundaries(packet, monkeypatch):
+    inputs, measure, item = packet
+    expected = compiler._evidence_binding(item, inputs)
+    with compiler._measure_choice_resolution(measure):
+        measure.choice_resolver._immutable_byte_proof(inputs.dailies[0].original_content)
+        parsing = Mock(wraps=compiler.daily_entries)
+        monkeypatch.setattr(compiler, "daily_entries", parsing)
+        assert compiler._evidence_binding(item, inputs) == expected
+        assert compiler._evidence_binding(item, inputs) == expected
+    assert parsing.call_count == 0
+
+
+@pytest.mark.parametrize("timestamp", ("12:34:56", "23:59:59"))
+def test_canonical_declaring_entries_match_full_parse(packet, monkeypatch, timestamp):
+    inputs, measure, _item = packet
+    content = inputs.dailies[0].original_content
+    expected = compiler._declaring_entries(content, timestamp)
+    with compiler._measure_choice_resolution(measure):
+        measure.choice_resolver._immutable_byte_proof(content)
+        parsing = Mock(wraps=compiler.daily_entries)
+        monkeypatch.setattr(compiler, "daily_entries", parsing)
+        assert compiler._declaring_entries(content, timestamp) == expected
+        assert compiler._declaring_entries(content, timestamp) == expected
+    assert parsing.call_count == 0
+
+
+def test_declaring_entries_parse_afresh_after_sizing(packet, monkeypatch):
+    inputs, measure, _item = packet
+    content = inputs.dailies[0].original_content
+    with compiler._measure_choice_resolution(measure):
+        expected = compiler._declaring_entries(content, "12:34:56")
+    parsing = Mock(wraps=compiler.daily_entries)
+    monkeypatch.setattr(compiler, "daily_entries", parsing)
+    assert compiler._declaring_entries(content, "12:34:56") == expected
+    assert parsing.call_count == 1
+
+
+def test_foreign_resolver_cannot_supply_canonical_entries(packet):
+    inputs, _measure, _item = packet
+    content = inputs.dailies[0].original_content
+    expected = compiler._declaring_entries(content, "12:34:56")
+    forged = Mock()
+    with compiler._source_choice_resolution(forged):
+        assert compiler._declaring_entries(content, "12:34:56") == expected
+    forged.canonical_declaring_entries.assert_not_called()
+
+
+def test_changed_immutable_bytes_require_a_new_canonical_parse(packet, monkeypatch):
+    inputs, measure, _item = packet
+    original = inputs.dailies[0].original_content
+    changed = original + b"\nChanged source bytes.\n"
+    expected = compiler._declaring_entries(changed, "12:34:56")
+    with compiler._measure_choice_resolution(measure):
+        measure.choice_resolver._immutable_byte_proof(original)
+        parsing = Mock(wraps=evidence_resolver.daily_entries)
+        monkeypatch.setattr(evidence_resolver, "daily_entries", parsing)
+        assert compiler._declaring_entries(changed, "12:34:56") == expected
+        assert compiler._declaring_entries(changed, "12:34:56") == expected
+    assert parsing.call_count == 1

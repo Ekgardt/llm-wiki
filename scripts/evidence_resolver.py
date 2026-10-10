@@ -1367,6 +1367,11 @@ class EvidenceResolver:
             self._immutable_entry_metadata[key] = (content, entries, proof)
         return proof
 
+    def canonical_declaring_entries(self, content, timestamp):
+        """Read the canonical entry index of strongly held immutable source bytes."""
+        proof = self._immutable_byte_proof(content)
+        return [(start, end) for _block, start, end in proof[4].get(timestamp, ())]
+
     def declaring_entries(self, content, entries, timestamp):
         proof = self._indexed_source_entries(content, entries)
         if proof is None:

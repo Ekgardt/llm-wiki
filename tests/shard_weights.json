@@ -876,7 +876,7 @@
   "test_session_record_uses_the_owned_gate.py": 4.16,
   "test_shared_server_warms_the_same_way.py": 0.0,
   "test_shell_functions_stay_simple.py": 0.04,
-  "test_sizing_tool_bindings_reuse_only_owned_partition_proofs.py": 0.04,
+  "test_sizing_tool_bindings_reuse_only_owned_partition_proofs.py": 0.07,
   "test_slow_machine.py": 5.79,
   "test_slug.py": 0.17,
   "test_slugify.py": 0.01,

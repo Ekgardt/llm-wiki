@@ -4925,6 +4925,9 @@ def _source_content(source: object) -> bytes:
 
 
 def _declaring_entries(content: bytes, timestamp: str) -> list[tuple[int, int]]:
+    resolver = _SOURCE_CHOICE_RESOLVER.get()
+    if type(resolver) is EvidenceResolver:
+        return resolver.canonical_declaring_entries(content, timestamp)
     return [
         (start, end)
         for block_id, start, end in daily_entries(content)
