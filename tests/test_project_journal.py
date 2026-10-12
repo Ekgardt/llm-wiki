@@ -1818,6 +1818,7 @@ def test_simultaneous_projectors_append_once_per_event(vault: Path, state_root: 
                     "demo",
                     checkpoint_event(f"evt-{index}", f"event-{index}"),
                     f"agent-{index}",
+                    writer_wait_seconds=max(0, deadline - time.monotonic()),
                 )
             except (ProjectLeaseBusy, ProjectFenceError, ProjectPendingPriorError):
                 # CI run 33039646439 (Windows py3.12-s2) lost this two-writer
@@ -1860,11 +1861,11 @@ def test_simultaneous_projectors_do_not_exhaust_a_counter_before_a_legal_retry(
     checkpoint = ProjectStore.checkpoint
     attempts = {}
 
-    def transient_loss(store, project, event, owner):
+    def transient_loss(store, project, event, owner, *, writer_wait_seconds=None):
         attempts[owner] = attempts.get(owner, 0) + 1
         if attempts[owner] <= 100:
             raise loss(*args)
-        return checkpoint(store, project, event, owner)
+        return checkpoint(store, project, event, owner, writer_wait_seconds=writer_wait_seconds)
 
     monkeypatch.setattr(ProjectStore, 'checkpoint', transient_loss)
     test_simultaneous_projectors_append_once_per_event(vault, state_root)

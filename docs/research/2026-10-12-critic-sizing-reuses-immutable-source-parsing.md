@@ -118,3 +118,41 @@ invalid leap days and noncanonical spellings.
 Installation, complete regression/CI, code-index refresh, cleanup and a real
 whole-cycle qualification remain required. The installed compiler file has not
 been changed while its observed full pass remains live.
+
+## Complete local run and qualification harness
+
+The complete local Python 3.10 run for `ffa3d717` returned two failures,
+12,573 passes and 236 skips in 2,498.74 seconds. Both failures inherited the
+operator's explicit `MEMORY_CODEX_MODEL` while testing implicit model selection.
+The two test files passed all 49 cases when that inherited setting was removed.
+The affected tests now explicitly clear it within their own monkeypatch scope;
+the operator's runtime configuration and model-identity refusal remain intact.
+
+CI run 38259514455 failed the concurrent project-journal test at ordinary writer
+admission. Its loop already gives a caller `LONG_TIMEOUT`, but `checkpoint`
+received no `writer_wait_seconds`, so publication used the product's ordinary
+five-second wait. The failing case took 10.21 seconds under CI load. A spy
+regression observes the real publication call and verifies that the caller's
+existing wait actually reaches it. The original helper failed this invariant;
+the amended helper and unchanged concurrent journal postconditions passed five
+prototype cases. All 152 project-journal and related Codex cases pass with the
+fixture corrections. A first probe that injected refusal into every publication
+entered repeated recovery and was terminated; it is not qualification evidence.
+
+The helper now passes the remaining duration of its existing caller deadline.
+The transient-contention wrapper forwards that duration. No timeout constant,
+production default, exception filter, retry count or append-once assertion was
+changed. Research on 2026-10-12 checked independent primary guidance from
+[Python futures](https://docs.python.org/3.10/library/concurrent.futures.html),
+[Go context](https://pkg.go.dev/context), and
+[Rust condition variables](https://doc.rust-lang.org/std/sync/struct.Condvar.html).
+Increasing global defaults, swallowing arbitrary timeouts, and subtracting
+matching base/candidate failures were rejected. Passing the caller's existing
+budget expresses the scenario the test already declares. This is a correction
+of the test caller, not a claim that production writer admission was changed.
+
+The full local run initially produced about 2.2 GiB of disposable pytest data.
+Normal pytest temporary-directory retention removed that completed run on the
+subsequent invocation; disk availability recovered from 1.8 to 3.9 GiB. No
+installed operational state or private knowledge was removed for this check.
+The revised CI must finish successfully before installation.

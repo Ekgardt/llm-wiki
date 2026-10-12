@@ -180,6 +180,7 @@ def _native_peer():
 
 
 def test_complete_resolver_pins_actual_response_only_once(monkeypatch, tmp_path):
+    monkeypatch.delenv('MEMORY_CODEX_MODEL', raising=False)
     selected = _basis(tmp_path).executable
     selected_calls = []
     stages = []

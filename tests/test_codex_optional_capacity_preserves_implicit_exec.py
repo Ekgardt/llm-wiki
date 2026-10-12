@@ -18,6 +18,7 @@ def _selected(monkeypatch, tmp_path):
 
 
 def test_unknown_version_keeps_implicit_exec_without_native_bootstrap(monkeypatch, tmp_path):
+    monkeypatch.delenv('MEMORY_CODEX_MODEL', raising=False)
     _selected(monkeypatch, tmp_path)
     spawned = []
     monkeypatch.setattr(lc, '_codex_basis_local_command', lambda *args: b'codex-cli 0.159.0\n')
