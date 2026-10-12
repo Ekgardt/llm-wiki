@@ -213,3 +213,37 @@ logical-clock control separates that contract from the retained real lock
 test. It deliberately does not measure unblocked wall-clock performance.
 No Go or additional Python dependency is introduced. A new complete CI run
 is still required before installation; the failed run is not subtracted.
+
+## Terminal cleanup fault belongs after startup
+
+Run 38284225219 passed the preceding archive-clock qualification, but Windows
+Python 3.11 shard 4 failed one LSP test after 3,659 passes and 57 skips. Its
+other 56 jobs succeeded and its aggregate failed. The test changed the normal
+ten-second startup budget to five seconds. Windows exhausted that artificial
+budget during genuine owner-only ACL preparation, before the injected lifecycle
+failure or its terminal lock existed. `_fail_startup` obtains a fresh cleanup
+deadline: waiting for the startup deadline did not target that separate clock.
+
+The corrected setup keeps the normal startup budget and all real ACL operations.
+It waits for the actual descendant PID using the remaining startup budget,
+acquires the real terminal lock in its other thread, and only then injects an
+expired cleanup deadline. No sleep is added; the unnecessary startup-deadline
+sleep is removed. Existing assertions still require retained retryable ownership,
+the pending-cleanup registration, private owner and lease records, the death of
+both server and descendant, successful explicit cleanup retry, valid failure
+evidence and removal of the lease. A new regression observes the real startup
+deadline resolver and rejects any test-induced reduction of its normal budget.
+That probe fails against the previous test; both direct cases pass after repair.
+The complete LSP module and regression pass: 214 passed, 44 platform skips.
+Five changed/nested functions have measured CCN at most five, at most two if
+statements and at most two control nesting levels. Production startup, cleanup
+budgets and ACL failure behavior are unchanged.
+
+Research on 2026-10-12: [pytest fixture setup and lifetime](https://docs.pytest.org/en/stable/how-to/fixtures.html),
+[Python 3.10 synchronization events](https://docs.python.org/3.10/library/threading.html),
+and [Microsoft's ACL command contract](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/icacls).
+Increasing an artificial startup cap would preserve the fault in the wrong
+phase; skipping ACL hardening would remove a security check. A real descendant
+barrier followed by cleanup-deadline injection targets the intended failure
+while preserving the platform startup contract. The previous CI remains failed
+evidence, and the new revision still requires a complete successful CI run.

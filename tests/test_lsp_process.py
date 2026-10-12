@@ -9505,6 +9505,8 @@ def test_startup_terminal_intent_timeout_returns_retryable_cleanup_error(
         deadline: float | None = None,
     ) -> None:
         coordinator = instance._coordinator
+        assert deadline is not None
+        _await_descendant_pid(pid_file, timeout=max(0.0, deadline - time.monotonic()))
 
         def hold_terminal_intent() -> None:
             coordinator.terminal_intent_lock.acquire()
@@ -9519,18 +9521,15 @@ def test_startup_terminal_intent_timeout_returns_retryable_cleanup_error(
         captured.append(instance)
         holder.start()
         assert held.wait(_BARRIER_SECONDS)
-        assert deadline is not None
-        remaining = deadline - time.monotonic()
-        if remaining > 0:
-            time.sleep(remaining + 0.01)
+        # The failure path owns a fresh cleanup deadline, independently of
+        # startup. Expire that deadline only after the real lock is held.
+        monkeypatch.setattr(lsp_process, "_fresh_cleanup_deadline", time.monotonic)
         raise RuntimeError("startup failed while terminal intent lock stayed held")
 
     monkeypatch.setattr(
         lsp_process, "_start_lifecycle_workers", fail_with_terminal_intent_lock
     )
-    # This test is about a cleanup lock held past the startup deadline, not
-    # about how long that deadline is, so it sets its own short one.
-    monkeypatch.setattr(lsp_process, "_STARTUP_WAIT_SECONDS", 5.0)
+    # Keep the normal, platform-qualified startup budget and ACL hardening.
     owner_root = tmp_path / OWNER_NONCE
     coordinator: lsp_process._LifecycleCoordinator | None = None
     cleanup_error: lsp_process.StartupCleanupError | None = None
