@@ -41,6 +41,7 @@ from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
+from datetime import date as calendar_date
 from datetime import datetime, timezone
 from itertools import groupby
 from pathlib import Path
@@ -2452,6 +2453,7 @@ class _CompileAttempt:
         self.critic_feedback: tuple[str, ...] = ()
         self.review_feedback: tuple[str, ...] = ()
         self.out_of_time = False
+        self.critique_sizing_measure = None
         self.source_descriptors = tuple(
             SourceDescriptor(item.logical_path, len(item.content), item.sha256)
             for item in inputs.sources
@@ -2664,8 +2666,14 @@ class _CompileAttempt:
         return [operation]
 
     def _batch_fits(self, descriptor: object, batch: list[object]) -> bool:
-        prompt = _critique_prompt(self.inputs, batch)
+        with _measure_choice_resolution(self._critic_sizing_measure()):
+            prompt = _critique_prompt(self.inputs, batch)
         return self._fits(prompt, CRITIQUE_SYSTEM, CRITIQUE_SCHEMA, descriptor)
+
+    def _critic_sizing_measure(self):
+        if self.critique_sizing_measure is None:
+            self.critique_sizing_measure = _ByteBatchMeasure(self.inputs)
+        return self.critique_sizing_measure
 
     def _normalized(
         self,
@@ -3271,6 +3279,57 @@ def _collect_source_line_choices(inputs):
     base = _draft_base_prompt(inputs)
     pairs = _protected_prompt_rows(base)
     ranges = _draft_source_ranges(inputs, base)
+    scope = _SOURCE_CHOICE_BINDINGS.get()
+    if scope is None:
+        return _render_source_line_choices(inputs, base, pairs, ranges)
+    return _measured_source_line_choices(inputs, base, pairs, ranges, scope)
+
+
+def _measured_source_line_choices(inputs, base, pairs, ranges, scope):
+    selected = _validated_choice_ranges(ranges, inputs)
+    rows = _projected_choice_rows(pairs, selected)
+    key = _source_choice_cache_key(inputs, base, selected, rows)
+    retained = scope.get('measured_choice_rows')
+    if retained is not None and retained[0] == key:
+        return _copy_source_choice_rows(retained[2])
+    choices = _render_source_line_choices(inputs, base, pairs, ranges)
+    owners = (inputs.dailies, tuple(source for source, _start, _end in selected))
+    scope['measured_choice_rows'] = (key, owners, choices)
+    return _copy_source_choice_rows(choices)
+
+
+def _validated_choice_ranges(ranges, inputs):
+    return tuple(filter(None, (_validated_choice_range(source, start, end, inputs)
+                              for source, start, end in ranges)))
+
+
+def _projected_choice_rows(pairs, selected):
+    bounds = tuple((start, end) for _source, start, end in selected)
+    return tuple(row for row in pairs if _row_inside_projection(row[0], row[1], bounds))
+
+
+def _source_choice_cache_key(inputs, base, selected, rows):
+    positions = _source_line_numbers(base)
+    return (_part_identities(inputs.dailies),
+            tuple((id(source), start, end) for source, start, end in selected), rows,
+            tuple((row[0], positions[row[0]]) for row in rows))
+
+
+def _validated_choice_range(source, start, end, inputs):
+    parts = _ordinary_choice_parts(source, inputs)
+    if source.prompt_content is None and not parts:
+        return None
+    _require_projection_source(source, inputs)
+    if parts:
+        _require_choice_part_bytes(parts)
+    return source, start, end
+
+
+def _copy_source_choice_rows(choices):
+    return tuple(dict(row, **_choice_native_fields(row)) for row in choices)
+
+
+def _render_source_line_choices(inputs, base, pairs, ranges):
     groups = {}
     for source, start, end in ranges:
         _collect_source_choices(source, start, end, pairs, inputs, groups)
@@ -4376,7 +4435,7 @@ def _bound_legacy_evidence(date, timestamp, quote, inputs):
         quote_start + len(quote_bytes),
     )
     _reference_parts(inputs, reference)
-    _resolve_legacy_choice_bytes(reference, physical.content, ROOT / source.logical_path)
+    _resolve_captured_choice_bytes(reference, physical.content, ROOT / source.logical_path)
     binding = {
         "source_path": source.logical_path,
         "source_digest": source.sha256,
@@ -4386,7 +4445,7 @@ def _bound_legacy_evidence(date, timestamp, quote, inputs):
     return binding, block
 
 
-def _resolve_legacy_choice_bytes(reference, content, source_path):
+def _resolve_captured_choice_bytes(reference, content, source_path):
     resolver = _SOURCE_CHOICE_RESOLVER.get()
     if resolver is None:
         return EvidenceResolver(ROOT).resolve_bytes(reference, content, source_path=source_path)
@@ -4401,14 +4460,15 @@ def _bound_native_evidence(item, inputs):
     if len(frames) != 1:
         raise ValueError("native evidence requires one complete verified container")
     frame = frames[0]
-    _require_native_frame_cache(frame, parts[0])
+    journal = _journal_index_for_part(parts[0], _choice_projection_parsing()[0])
+    _require_native_frame_cache(frame, parts[0], journal_index=journal)
     _require_native_line(frame, selector, timestamp, quote, inputs)
     reference = EvidenceRef(date, _physical_source(parts[0]).sha256, timestamp,
                             frame.byte_start, frame.byte_end)
     covered = _reference_parts(inputs, reference)
     physical = _physical_source(covered[0])
-    resolved = EvidenceResolver(ROOT).resolve_bytes(reference, physical.content,
-                                                    source_path=ROOT / frame.source_path)
+    resolved = _resolve_captured_choice_bytes(reference, physical.content,
+                                             ROOT / frame.source_path)
     block = _native_original_block(covered[0], frame)
     return {"source_path": frame.source_path, "source_digest": covered[0].sha256,
             "quote_sha256": resolved.sha256, "reference": str(reference)}, block
@@ -4920,7 +4980,8 @@ def _evidence_single_line(value: object, maximum: int) -> bool:
 
 def _require_calendar_date(date: str) -> None:
     try:
-        datetime.strptime(date, "%Y-%m-%d")
+        if calendar_date.fromisoformat(date).isoformat() != date:
+            raise ValueError("noncanonical date")
     except ValueError as exc:
         raise ValueError("compile evidence date is invalid") from exc
 
@@ -5129,10 +5190,10 @@ def _require_resolved_claim_evidence(
 ) -> None:
     reference = EvidenceRef.parse(claim_evidence["reference"])
     source = _reference_source(inputs, reference)
-    resolved = EvidenceResolver(ROOT).resolve_bytes(
+    resolved = _resolve_captured_choice_bytes(
         reference,
         source.content,
-        source_path=ROOT / source.logical_path,
+        ROOT / source.logical_path,
     )
     _require_literal_match(resolved, claim_evidence)
 
