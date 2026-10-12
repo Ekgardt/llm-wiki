@@ -156,3 +156,24 @@ Normal pytest temporary-directory retention removed that completed run on the
 subsequent invocation; disk availability recovered from 1.8 to 3.9 GiB. No
 installed operational state or private knowledge was removed for this check.
 The revised CI must finish successfully before installation.
+
+## Windows shard costs
+
+Run 38265297933 cancelled Windows Python 3.12 shard 3 at its existing
+60-minute job bound, after 3,094 passes and 61 skips. Its ten-minute diagnostic
+stack sampled SQLite commit during publication of genuine large-day receipts.
+The fixture subsequently completed: setup cost 791.93 seconds and the complete
+module cost 794.238 seconds. This is not evidence that one SQLite commit hung
+for ten minutes. Successful Windows Python 3.14 and 3.13 runs measured the same
+module at 301.464 and 410.771 seconds. Its recorded shard weight was 78.35 seconds.
+
+The candidate refreshes scheduling data from 34 completed current-run JUnit
+reports. From the interrupted report, only the fully completed large-day module
+is admitted; the interrupted final test file is excluded. Values increase to
+the measured maxima and none decrease. The existing longest-processing-time
+planner then balances its four groups at about 3,222.78 seconds each. This is
+a scheduling estimate, not a promise that a future runner finishes in that time.
+The job bound, tests, assertions, SQLite durability and complete source fixture
+are unchanged. The preparation still creates genuine transaction-authoritative
+receipts; replacing them with synthetic success was rejected. The new scheduling
+data requires a fresh complete CI run before installation.
