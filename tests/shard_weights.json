@@ -822,6 +822,7 @@
   "test_queue_v3_corruption.py": 438.53,
   "test_readme_i18n.py": 0.17,
   "test_recall_asks_the_graph_about_relations.py": 0.01,
+  "test_receipt_authority_does_not_read_unused_preconditions.py": 1.27,
   "test_receipt_authority_reads_keep_the_caller_deadline.py": 2.76,
   "test_receipt_versions_preserve_historical_archive_authority.py": 19.79,
   "test_recovery_does_not_revisit_a_finished_abort.py": 13.22,

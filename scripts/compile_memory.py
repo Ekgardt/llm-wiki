@@ -2313,7 +2313,7 @@ def _require_transaction_authority(
     *, deadline: float | None = None,
 ) -> None:
     """A receipt is evidence only when a committed transaction wrote those bytes."""
-    transaction = coordinator.committed_attempt(str(record["operation_id"]), deadline=deadline)
+    transaction = coordinator.committed_write_authority(str(record["operation_id"]), deadline=deadline)
     if transaction is None:
         raise ValueError("compile receipt has no committed transaction authority")
     operations = _transaction_operations(transaction)

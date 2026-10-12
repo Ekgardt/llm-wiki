@@ -1822,6 +1822,16 @@ class MarkdownOperation:
 
 
 @dataclass(frozen=True)
+class CommittedWriteAuthority:
+    """Recorded write evidence; does not claim to contain the complete transaction."""
+
+    id: str
+    operation_id: str
+    state: str
+    operations: tuple[MarkdownOperation, ...]
+
+
+@dataclass(frozen=True)
 class TransactionRecord:
     id: str
     operation_id: str
@@ -6029,15 +6039,61 @@ class MarkdownCoordinator:
 
     def _committed_attempt_by_ordinal(self, operation_id: str, *, deadline: float | None = None):
         with self._authority_read_connection(deadline) as database:
-            row = database.execute(
-                'SELECT id FROM "transaction" WHERE operation_id >= ? AND operation_id < ? '
-                "AND state = 'committed' ORDER BY created_at DESC, rowid DESC "
-                "LIMIT 1",
-                (operation_id + "#", operation_id + "$"),
-            ).fetchone()
+            row = self._committed_ordinal_row(database, operation_id)
         if row is None:
             return None
         return self._record(row["id"], deadline=deadline)
+
+    @staticmethod
+    def _committed_ordinal_row(database, operation_id):
+        return database.execute(
+            'SELECT id FROM "transaction" WHERE operation_id >= ? AND operation_id < ? '
+            "AND state = 'committed' ORDER BY created_at DESC, rowid DESC "
+            "LIMIT 1",
+            (operation_id + "#", operation_id + "$"),
+        ).fetchone()
+
+    def committed_write_authority(
+        self, operation_id: str, *, deadline: float | None = None
+    ) -> CommittedWriteAuthority | None:
+        """Read all write evidence without fetching unused recovery preconditions.
+
+        The normal transaction reader remains complete. This reader retains
+        the same exact identity, ordinal selection, connection contract and
+        deadline; each caller must still verify its own receipt bytes.
+        """
+        with self._authority_read_connection(deadline) as database:
+            row = self._committed_write_row(database, operation_id)
+            if row is None:
+                return None
+            return self._write_authority(database, row)
+
+    def _committed_write_row(self, database, operation_id):
+        row = database.execute(
+            'SELECT id,operation_id,state FROM "transaction" WHERE operation_id=?',
+            (operation_id,),
+        ).fetchone()
+        if row is not None and row["state"] == "committed":
+            return row
+        ordinal = self._committed_ordinal_row(database, operation_id)
+        if ordinal is None:
+            return None
+        return database.execute(
+            'SELECT id,operation_id,state FROM "transaction" WHERE id=? AND state=\'committed\'',
+            (ordinal["id"],),
+        ).fetchone()
+
+    @staticmethod
+    def _write_authority(database, row):
+        operations = database.execute(
+            'SELECT kind,path,before_hash,after_hash FROM "operation" '
+            "WHERE transaction_id=? ORDER BY position",
+            (row["id"],),
+        )
+        return CommittedWriteAuthority(
+            row["id"], row["operation_id"], row["state"],
+            tuple(MarkdownOperation(*operation) for operation in operations),
+        )
 
     def attempt_operation_id(
         self, operation_id: str, *, deadline: float | None = None,
