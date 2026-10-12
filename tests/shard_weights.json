@@ -849,6 +849,7 @@
   "test_reserved_names_are_asked_only_on_windows.py": 0.01,
   "test_retention_keeps_the_fallbacks_first_choice.py": 6.23,
   "test_retrieval.py": 0.23,
+  "test_retrieval_expiry_fixture_survives_preflight_scheduling.py": 0.05,
   "test_retrieval_partial_on_expiry.py": 0.28,
   "test_retrieval_review_blockers.py": 0.15,
   "test_retrieval_review_round2.py": 2.94,

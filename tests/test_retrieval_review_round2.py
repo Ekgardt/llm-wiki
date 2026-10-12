@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.retrieval_stage_deadline import expire_after_backend
 from tests.slow_machine import SHORT_TIMEOUT
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -864,17 +865,6 @@ def _noting_leg(calls: list[str], name: str, cid: str, path: str):
     return leg
 
 
-def _slow_lexical_leg(calls: list[str]):
-    """Finishes, and leaves no budget behind it."""
-    inner = _noting_leg(calls, "lexical", "a", "a.md")
-
-    def leg(**kwargs):
-        time.sleep(0.05)
-        return inner(**kwargs)
-
-    return leg
-
-
 def test_retrieve_respects_deadline(monkeypatch):
     """The deadline still binds -- and the finished leg is handed back, labelled.
 
@@ -888,14 +878,17 @@ def test_retrieve_respects_deadline(monkeypatch):
     import retrieval
 
     calls: list[str] = []
+    deadline, lexical = expire_after_backend(
+        monkeypatch, _noting_leg(calls, "lexical", "a", "a.md"), seconds=0.001
+    )
     result = retrieval.retrieve(
         "x",
         requested_profile="HYBRID",
-        lexical_backend=_slow_lexical_leg(calls),
+        lexical_backend=lexical,
         dense_backend=_noting_leg(calls, "dense", "b", "b.md"),
         rerank_enabled=False,
         corpus_generation="g",
-        deadline_monotonic=time.monotonic() + 0.001,
+        deadline_monotonic=deadline,
     )
 
     assert calls == ["lexical"]
@@ -1161,5 +1154,4 @@ def test_late_vector_seal_change_discards_generation_lexical(
     assert [row["candidate_id"] for row in rows] == ["legacy"]
     assert rows[0]["generation"] == "legacy"
     assert rows[0]["fallback_reason"] == "generation_seal_changed"
-
 

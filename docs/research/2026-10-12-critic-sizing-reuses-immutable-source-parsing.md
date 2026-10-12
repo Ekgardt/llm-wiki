@@ -247,3 +247,36 @@ phase; skipping ACL hardening would remove a security check. A real descendant
 barrier followed by cleanup-deadline injection targets the intended failure
 while preserving the platform startup contract. The previous CI remains failed
 evidence, and the new revision still requires a complete successful CI run.
+
+
+## Retrieval expiry must target the completed backend
+
+Run 38293527660 failed on Windows Python 3.12 shard 4: the one-millisecond
+partial-result fixture expired during preflight, before any lexical result
+existed. Production correctly refused an empty result. The same scheduling
+assumption existed in four related partial-result fixtures. A regression moves
+the existing 50-millisecond backend interval into preflight without sleeping;
+all five original scenarios fail, reproducing the common cause.
+
+One shared test helper controls time only while invoking the unchanged
+production deadline guard. It advances the logical clock to the original
+deadline after the stub backend returns. Backend exceptions still propagate,
+and pre-expired production requests still fail. Existing partial labels,
+source rows, refusal to start further stages and reranker assertions remain.
+The 400-hit salvage test retains its real wall-clock bound of 1.06 seconds;
+its processing clock is not frozen. Production code and deadlines are unchanged.
+This removes the old polling loop and its arbitrary iteration cap.
+
+The five scheduling regressions and related retrieval coverage pass: 109
+passed. Structure and test-weight qualification passes: 48 passed. Eleven
+changed or new functions have measured CCN at most three, at most two if
+statements and at most two control nesting levels. These local results do not
+replace a complete successful CI run; the failed run remains failed evidence.
+
+Research on 2026-10-12: [pytest scoped monkeypatching](https://docs.pytest.org/en/stable/how-to/monkeypatch.html),
+[Python 3.10 mock patch scope](https://docs.python.org/3.10/library/unittest.mock.html),
+and [Go's independent clock-testing model](https://pkg.go.dev/testing/synctest).
+Increasing the tiny deadline would preserve the scheduling assumption; catching
+the production refusal would hide the missing result. Controlling the intended
+fault phase retains the original guard and separately measured salvage cost.
+No runtime clock replacement or additional dependency is introduced.
