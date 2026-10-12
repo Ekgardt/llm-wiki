@@ -4,8 +4,12 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from unittest.mock import Mock
 
+import archive_daily
+import markdown_transaction
 import pytest
+import reliable_memory
 from archive_daily import DailyArchiver
 
 from tests.test_archive_daily_bagit import archive_vault as archive_vault
@@ -40,7 +44,23 @@ def test_expired_archive_authority_is_not_invalid_or_missing(archive_vault, meth
         getattr(archiver, method)(*args)
 
 
-def test_locked_archive_operation_read_obeys_clock_and_can_recover(archive_vault):
+def _assert_unlocked_recovery(archiver, source, path, monkeypatch):
+    # Recovery checks the caller clock, not an OS scheduling/IO guarantee.
+    # The real blocked phase below keeps its original wall-clock assertion.
+    now = time.monotonic()
+    clock = Mock(wraps=time)
+    clock.monotonic.return_value = now
+    with monkeypatch.context() as clocks:
+        for module in (archive_daily, markdown_transaction, reliable_memory):
+            clocks.setattr(module, "time", clock)
+        archiver.deadline = now + 2
+        assert archiver._receipt_operation_state(source['logical_path'], source['sha256'], path=path) == 'committed'
+        clock.monotonic.return_value = archiver.deadline
+        with pytest.raises(TimeoutError):
+            archiver._receipt_operation_state(source['logical_path'], source['sha256'], path=path)
+
+
+def test_locked_archive_operation_read_obeys_clock_and_can_recover(archive_vault, monkeypatch):
     root, state, _daily = archive_vault
     archiver = DailyArchiver(root, state)
     path, receipt = _receipt(root)
@@ -53,8 +73,7 @@ def test_locked_archive_operation_read_obeys_clock_and_can_recover(archive_vault
             archiver._receipt_operation_state(source['logical_path'], source['sha256'], path=path)
         assert time.monotonic() - started < 0.5
         blocker.rollback()
-    archiver.deadline = time.monotonic() + 2
-    assert archiver._receipt_operation_state(source['logical_path'], source['sha256'], path=path) == 'committed'
+    _assert_unlocked_recovery(archiver, source, path, monkeypatch)
 
 
 @pytest.mark.parametrize('method', ['_committed_receipt_transaction', '_committed_compile_transaction'])

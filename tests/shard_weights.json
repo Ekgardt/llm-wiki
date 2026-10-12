@@ -380,6 +380,7 @@
   "test_append_lost_capture_precondition.py": 16.84,
   "test_append_race_lineage.py": 102.04,
   "test_architecture_depth_argument.py": 0.02,
+  "test_archive_clock_recovery_ignores_external_scheduling.py": 0.3,
   "test_archive_daily_bagit.py": 249.33,
   "test_archive_receipt_authority_keeps_one_clock.py": 53.8,
   "test_archive_recency_signal.py": 36.9,

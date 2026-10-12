@@ -177,3 +177,39 @@ The job bound, tests, assertions, SQLite durability and complete source fixture
 are unchanged. The preparation still creates genuine transaction-authoritative
 receipts; replacing them with synthetic success was rejected. The new scheduling
 data requires a fresh complete CI run before installation.
+
+## Recovery clock qualification
+
+The measured scheduling candidate, run 38275485316, completed all 56 other
+jobs successfully. Windows Python 3.14 shard 4 failed one test after 3,569
+passes and 60 skips; its final aggregate therefore also failed. The archive
+recovery test set a new two-second caller deadline after releasing a real
+SQLite exclusive lock. That deadline expired before SQLite configuration.
+The trace does not identify which filesystem operation or scheduler pause
+consumed the budget. The production timeout is correct; a fresh deadline
+does not guarantee that a loaded host completes an unblocked read before it.
+
+The test keeps the genuine locked read, its 40 ms budget and its original
+500 ms wall-clock assertion. Only the subsequent recovery-clock check uses
+scoped module clock references and genuine SQLite/receipt authority. Its
+two-second logical budget is unchanged, and advancing that clock to its
+deadline must raise TimeoutError after the successful read. The standard
+library clock and unrelated modules are not replaced. Real lock waiting
+continues to use SQLite's finite busy timeout.
+
+A regression advances the outer clock three seconds after a real unblocked
+connection opens, without sleeping or manufacturing a committed response.
+The original test fails with the same deadline refusal; the corrected test
+passes and still rejects the expired recovery clock. Ten direct cases and
+119 related archive/authority cases pass locally. This does not establish a
+two-second Windows performance guarantee or change production deadlines.
+
+Research on 2026-10-12: [pytest scoped monkeypatching](https://docs.pytest.org/en/stable/how-to/monkeypatch.html),
+[Python 3.10 mock wrapping and patch locations](https://docs.python.org/3.10/library/unittest.mock.html),
+and [Go's independently documented clock-testing model](https://pkg.go.dev/testing/synctest).
+Increasing the recovery timeout would retain an unsupported host-performance
+assumption; disabling the deadline would lose the clock contract. Scoped
+logical-clock control separates that contract from the retained real lock
+test. It deliberately does not measure unblocked wall-clock performance.
+No Go or additional Python dependency is introduced. A new complete CI run
+is still required before installation; the failed run is not subtracted.
