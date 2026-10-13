@@ -10256,6 +10256,9 @@ def test_first_terminal_identity_survives_later_heartbeat_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    # This scenario requires cleanup to complete before checking identity.
+    # Separate timeout tests retain the actual short cleanup deadlines.
+    monkeypatch.setattr(lsp_process, "_GRACEFUL_CLEANUP_SECONDS", LONG_TIMEOUT)
     process = _start(tmp_path, "--lifecycle")
     coordinator = process._coordinator
     owner = coordinator.owner_directory
@@ -10276,14 +10279,14 @@ def test_first_terminal_identity_survives_later_heartbeat_failure(
         process,
         coordinator,
         "injected_failure",
-        time.monotonic() + 1,
+        time.monotonic() + LONG_TIMEOUT,
     )
     monkeypatch.setattr(lsp_process._OwnerDirectory, "write_lease", fail_heartbeat)
     coordinator.heartbeat_wake.set()
     assert attempted.wait(SHORT_TIMEOUT)
     heartbeat.join(SHORT_TIMEOUT)
     monkeypatch.setattr(lsp_process._OwnerDirectory, "write_lease", real_write_lease)
-    process.close(time.monotonic() + 5)
+    process.close(time.monotonic() + LONG_TIMEOUT)
 
     failure = json.loads((process.owner_root / "failure.json").read_bytes())
     assert coordinator.terminal_code == "injected_failure"
