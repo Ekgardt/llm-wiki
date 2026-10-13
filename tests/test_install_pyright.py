@@ -2408,14 +2408,17 @@ def test_state_validation_honors_end_to_end_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed_deadlines: list[float] = []
+    legacy_calls: list[Path] = []
+    now = [time.monotonic()]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
 
     def slow_legacy_validation(path: Path) -> None:
-        time.sleep(0.25)
+        legacy_calls.append(path)
+        now[0] += 0.25
 
     def bounded_lock_probe(path: Path, *, deadline: float):
         observed_deadlines.append(deadline)
-        while time.monotonic() < deadline:
-            time.sleep(0.001)
+        now[0] = deadline
         return None
 
     monkeypatch.setattr(
@@ -2439,11 +2442,10 @@ def test_state_validation_honors_end_to_end_deadline(
             deadline=requested_deadline,
         )
 
-    elapsed = time.monotonic() - started
-    assert len(observed_deadlines) <= 1
-    if observed_deadlines:
-        assert observed_deadlines[0] == pytest.approx(requested_deadline)
-    assert elapsed < 0.12
+    assert legacy_calls == []
+    assert observed_deadlines == [requested_deadline]
+    assert time.monotonic() == requested_deadline
+    assert not (tmp_path / "state/cache").exists()
 
 
 def test_nested_install_timeout_is_never_relabelled_as_io_failure(
