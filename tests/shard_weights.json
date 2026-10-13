@@ -850,6 +850,7 @@
   "test_repository_index.py": 13.72,
   "test_repository_index_coverage.py": 4.54,
   "test_repository_refresh.py": 38.12,
+  "test_repository_refresh_shares_the_callers_budget.py": 0.0,
   "test_repository_retention.py": 37.99,
   "test_repository_scope.py": 7.02,
   "test_repository_scope_identity_guard.py": 7.81,

@@ -38,6 +38,30 @@ work. No new setting, runtime path, database, or default duration is introduced.
 Continuously moving sources still fail at the deadline. Stable membership,
 complete source hashes, safe reads, and the writer gate remain unchanged.
 
+Full CI of the initial candidate exposed a compatibility error: exhaustion after
+observed source changes became an ordinary timeout rather than the named
+changed-checkout refusal. The final collector preserves `CorpusChanged` with
+the timeout chained as its cause when earlier attempts observed changes.
+Exhaustion without an observed change remains `TimeoutError`; cancellation is
+distinct and remains a `TimeoutError` subclass. No error text is used to decide
+between those cases.
+
+The shared repository pass also gave every checkout its entire remaining budget.
+Bounded retries therefore allowed one busy checkout to spend the following
+checkout's time. Each registered checkout now receives its equal share of the
+remaining time among the remaining rows. Time not spent by a quick checkout is
+available to the next ones. This is an explicit fairness tradeoff within the
+existing caller-selected budget, not a new fixed duration or attempt ceiling.
+Heavy checkouts can still be deferred; per-repository indexing remains available.
+Weighted allocation would require trustworthy measured costs and remains a
+possible later refinement.
+
+Additional independent guidance reviewed before this adjustment:
+[Google SRE overload handling](https://sre.google/sre-book/handling-overload/)
+on preventing one client from exhausting shared resources, the Python exception
+chaining documentation, and Amazon's bounded-retry guidance above. Equal shares
+are the project's scheduling choice, not a number prescribed by those sources.
+
 ## Qualification and limits
 
 The regression suite covers settling after four actual file changes, exhaustion
@@ -46,6 +70,6 @@ inputs. The Windows pathname race fixture still mutates after every read; a
 controlled monotonic clock proves deadline refusal without a timing-sensitive
 short real-time budget. It additionally asserts that reads occurred.
 
-Changed production functions have measured CCN at most four. This is a collector
+Changed production functions have measured CCN at most five. This is a collector
 correction; successful full maintenance, new-work compilation throughput, and
 the remaining point-seven obligations require their own evidence.

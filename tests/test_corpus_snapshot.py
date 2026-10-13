@@ -647,7 +647,7 @@ def test_collection_uses_writer_gate_and_rejects_external_edit_race(vault: Path,
         return content
 
     monkeypatch.setattr(corpus_snapshot, "read_stable_bytes", racing_read)
-    with pytest.raises(TimeoutError, match="deadline"):
+    with pytest.raises(CorpusChanged, match="deadline"):
         collect_corpus(vault, coordinator=coordinator, deadline_seconds=5)
     assert coordinator.entered is True
     assert reads > 0
@@ -803,7 +803,7 @@ def test_directory_replacement_during_scandir_is_rejected(
         return real_scandir(path)
 
     monkeypatch.setattr(corpus_snapshot.os, "scandir", swapping_scandir)
-    with pytest.raises(TimeoutError, match="deadline"):
+    with pytest.raises(CorpusChanged, match="deadline"):
         collect_corpus(vault, deadline_seconds=5)
     assert swaps >= 2
 
@@ -836,7 +836,7 @@ def test_source_parent_same_byte_replacement_after_read_is_rejected(
         return result
 
     monkeypatch.setattr(corpus_snapshot, "read_stable_bytes", swapping_read)
-    with pytest.raises(TimeoutError, match="deadline"):
+    with pytest.raises(CorpusChanged, match="deadline"):
         collect_corpus(vault, deadline_seconds=5)
     assert swaps >= 2
 
@@ -1121,7 +1121,7 @@ def test_daily_integrity_checks_remain_when_other_roots_are_pruned(vault, monkey
         return content
 
     monkeypatch.setattr(corpus_snapshot, "_candidate_bytes", racing_daily_read)
-    with pytest.raises(TimeoutError, match="deadline"):
+    with pytest.raises(CorpusChanged, match="deadline"):
         collect_corpus(
             vault, daily_paths=(relative,), deadline_seconds=5,
             pruned_directories=("knowledge/notes", "knowledge/projects", "knowledge/raw/sessions"),

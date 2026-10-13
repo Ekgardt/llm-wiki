@@ -1401,6 +1401,19 @@ def _pass_status(rows: list, adopted: Mapping) -> str:
     return "ok"
 
 
+def _fair_refresh_deadline(deadline: float, pending: int) -> float:
+    now = time.monotonic()
+    return min(deadline, now + max(0.0, deadline - now) / pending)
+
+
+def _refresh_rows_with_budget(rows, state_root, deadline):
+    outcomes = []
+    for position, row in enumerate(rows):
+        bound = _fair_refresh_deadline(deadline, len(rows) - position)
+        outcomes.append(_refresh_row(row, state_root, bound))
+    return outcomes
+
+
 def refresh_all_repositories(
     *,
     state_root: Path | None = None,
@@ -1421,7 +1434,7 @@ def refresh_all_repositories(
     deadline = time.monotonic() + budget_seconds
     adopted = _adopted_vault(state_root, deadline)
     rows = _registered_rows(state_root, deadline)
-    outcomes = [_refresh_row(row, state_root, deadline) for row in rows]
+    outcomes = _refresh_rows_with_budget(rows, state_root, deadline)
     followed = follow_worktrees(rows, state_root=state_root, deadline=deadline)
     return {
         "schema_version": SCHEMA_VERSION,

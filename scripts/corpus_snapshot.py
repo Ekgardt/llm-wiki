@@ -135,6 +135,10 @@ class CorpusChanged(RuntimeError):
     """Live corpus membership or content differs from a captured snapshot."""
 
 
+class CorpusCancelled(TimeoutError):
+    """The caller cancelled collection, independently of source changes."""
+
+
 class CorpusCapacityExceeded(ValueError):
     """A configured resource budget refused a complete live-corpus snapshot."""
 
@@ -665,7 +669,7 @@ def _check_processing_stop(
     deadline: float | None, cancelled: Callable[[], bool] | None
 ) -> None:
     if bool(cancelled and cancelled()):
-        raise TimeoutError("corpus collection cancelled")
+        raise CorpusCancelled("corpus collection cancelled")
     if deadline is not None:
         _check_deadline(deadline)
 
@@ -3052,12 +3056,23 @@ def _captured_after_retries(
     pruned: frozenset[str] = frozenset(),
 ) -> CorpusSnapshot:
     """One capture that describes a real instant, retried while the vault moves."""
+    last: CorpusChanged | None = None
     while True:
-        _check_processing_stop(deadline, cancelled)
         try:
-            return _capture(root, policy, deadline, cancelled, pruned)
-        except CorpusChanged:
             _check_processing_stop(deadline, cancelled)
+            return _capture(root, policy, deadline, cancelled, pruned)
+        except CorpusChanged as changed:
+            last = changed
+        except CorpusCancelled:
+            raise
+        except TimeoutError as stopped:
+            _raise_capture_retry_timeout(stopped, last)
+
+
+def _raise_capture_retry_timeout(stopped: TimeoutError, last: CorpusChanged | None) -> None:
+    if last is None:
+        raise stopped
+    raise CorpusChanged(f"corpus never held still before its deadline: {last}") from stopped
 
 
 def _or_setting(given: int | None, name: str, vault: Path) -> int:

@@ -42,9 +42,10 @@ def test_a_continuously_moving_source_stops_at_the_same_deadline(tmp_path, monke
 
     monkeypatch.setattr(corpus_snapshot.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(corpus_snapshot, "_capture", changing_capture)
-    with pytest.raises(TimeoutError, match="deadline"):
+    with pytest.raises(corpus_snapshot.CorpusChanged, match="deadline") as refusal:
         corpus_snapshot._captured_after_retries(tmp_path, None, 6.0, None)
     assert calls == [6.0] * 6
+    assert isinstance(refusal.value.__cause__, TimeoutError)
 
 
 def test_a_cancelled_retry_stops_before_another_capture(tmp_path, monkeypatch):
