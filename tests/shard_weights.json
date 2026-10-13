@@ -664,6 +664,7 @@
   "test_historical_work_captures_each_physical_layout_once.py": 2.38,
   "test_hook_error_redaction.py": 0.45,
   "test_hook_failures_reach_health.py": 0.12,
+  "test_host_capture_budget_starts_with_the_busy_writer_ready.py": 2.89,
   "test_impact_analysis.py": 17.75,
   "test_impact_is_exact_only_on_the_bytes_it_indexed.py": 0.78,
   "test_impact_reads_what_the_diff_really_holds.py": 4.41,

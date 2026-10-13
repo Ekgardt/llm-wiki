@@ -47,19 +47,18 @@ def test_capture_keeps_its_checkpoint_pending_without_waiting_past_host(tmp_path
     held, release = threading.Event(), threading.Event()
     writer = threading.Thread(target=_hold_writer, args=(coordinator, held, release))
 
-    def wake(_result, _intent_id):
-        writer.start()
-        assert held.wait(LONG_TIMEOUT)
-        return False
-
-    monkeypatch.setattr(adapter, "_wake_capture_worker", wake)
+    monkeypatch.setattr(adapter, "_wake_capture_worker", lambda _result, _intent_id: False)
     envelope = adapter.normalize_occurrence_event("claude", event, {
         "prompt": "continue", "tool_name": "Bash",
         "tool_input": {"command": "pwd"}, "cwd": str(project), "session_id": "prompt-gate",
         "event_id": "prompt-gate", "task_completed": True,
     })
-    started = time.monotonic()
+    writer.start()
     try:
+        # Establish the competing actor before the host's stopwatch. The real
+        # wake operation spawns a worker without waiting for its writer gate.
+        assert held.wait(LONG_TIMEOUT)
+        started = time.monotonic()
         result = adapter.ingest_event(envelope)
         elapsed = time.monotonic() - started
         assert result["capture_durable"] is True
