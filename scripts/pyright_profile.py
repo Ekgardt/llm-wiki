@@ -1499,7 +1499,10 @@ class _ProbeRun:
     def _wait_parent(self) -> None:
         try:
             self.parent_returncode = self.process.wait(
-                timeout=max(0.0, self.probe_deadline - time.monotonic())
+                timeout=min(
+                    NODE_PROBE_TIMEOUT_SECONDS,
+                    max(0.0, self.probe_deadline - time.monotonic()),
+                )
             )
         except subprocess.TimeoutExpired:
             if self.degradation_code is None:
