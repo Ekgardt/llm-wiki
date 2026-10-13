@@ -633,6 +633,8 @@ def test_collection_uses_writer_gate_and_rejects_external_edit_race(vault: Path,
     coordinator = Coordinator()
     real_read = corpus_snapshot.read_stable_bytes
     reads = 0
+    now = [0.0]
+    monkeypatch.setattr(corpus_snapshot.time, "monotonic", lambda: now[0])
 
     def racing_read(path: Path, limit: int, *, label: str):
         # An edit lands after every read, so no pass ever holds still: the
@@ -641,12 +643,14 @@ def test_collection_uses_writer_gate_and_rejects_external_edit_race(vault: Path,
         content = real_read(path, limit, label=label)
         reads += 1
         target.write_bytes(b"# Page\nAfter %d!\n" % reads)
+        now[0] += 1.0
         return content
 
     monkeypatch.setattr(corpus_snapshot, "read_stable_bytes", racing_read)
-    with pytest.raises(CorpusChanged, match="never held still"):
-        collect_corpus(vault, coordinator=coordinator)
+    with pytest.raises(TimeoutError, match="deadline"):
+        collect_corpus(vault, coordinator=coordinator, deadline_seconds=5)
     assert coordinator.entered is True
+    assert reads > 0
 
 
 def test_writer_gate_receives_remaining_deadline_and_releases_on_error(
@@ -785,6 +789,8 @@ def test_directory_replacement_during_scandir_is_rejected(
     write(target / "page.md", "# Before\n")
     real_scandir = corpus_snapshot.os.scandir
     swaps = 0
+    now = [0.0]
+    monkeypatch.setattr(corpus_snapshot.time, "monotonic", lambda: now[0])
 
     def swapping_scandir(path: object):
         # The directory is replaced under every pass, so none holds still.
@@ -793,11 +799,12 @@ def test_directory_replacement_during_scandir_is_rejected(
             swaps += 1
             target.rename(vault / f"knowledge/notes/safe-original-{swaps}")
             write(target / "page.md", f"# After {swaps}\n")
+            now[0] += 1.0
         return real_scandir(path)
 
     monkeypatch.setattr(corpus_snapshot.os, "scandir", swapping_scandir)
-    with pytest.raises(CorpusChanged, match="ancestor.*changed|directory.*changed"):
-        collect_corpus(vault)
+    with pytest.raises(TimeoutError, match="deadline"):
+        collect_corpus(vault, deadline_seconds=5)
     assert swaps >= 2
 
 
@@ -812,6 +819,8 @@ def test_source_parent_same_byte_replacement_after_read_is_rejected(
     target.write_bytes(content)
     real_read = corpus_snapshot.read_stable_bytes
     swaps = 0
+    now = [0.0]
+    monkeypatch.setattr(corpus_snapshot.time, "monotonic", lambda: now[0])
 
     def swapping_read(path: Path, limit: int, *, label: str):
         # The parent is replaced by a same-byte twin after every read of the
@@ -823,11 +832,12 @@ def test_source_parent_same_byte_replacement_after_read_is_rejected(
             parent.rename(vault / f"knowledge/notes/safe-original-{swaps}")
             parent.mkdir()
             (parent / "page.md").write_bytes(content)
+            now[0] += 1.0
         return result
 
     monkeypatch.setattr(corpus_snapshot, "read_stable_bytes", swapping_read)
-    with pytest.raises(CorpusChanged, match="ancestor.*changed"):
-        collect_corpus(vault)
+    with pytest.raises(TimeoutError, match="deadline"):
+        collect_corpus(vault, deadline_seconds=5)
     assert swaps >= 2
 
 
@@ -1100,16 +1110,19 @@ def test_daily_integrity_checks_remain_when_other_roots_are_pruned(vault, monkey
     relative = "knowledge/daily/2026-10-03.md"
     write(vault / relative, "# 2026-10-03\n\n## [10:00:00] session-end | s\n\n**user:** A fact.\n")
     original = corpus_snapshot._candidate_bytes
+    now = [0.0]
+    monkeypatch.setattr(corpus_snapshot.time, "monotonic", lambda: now[0])
 
     def racing_daily_read(candidate, max_bytes, label):
         content = original(candidate, max_bytes, label)
         target = vault / relative
         target.write_bytes(target.read_bytes() + b"Changed during collection.\n")
+        now[0] += 1.0
         return content
 
     monkeypatch.setattr(corpus_snapshot, "_candidate_bytes", racing_daily_read)
-    with pytest.raises(CorpusChanged):
+    with pytest.raises(TimeoutError, match="deadline"):
         collect_corpus(
-            vault, daily_paths=(relative,),
+            vault, daily_paths=(relative,), deadline_seconds=5,
             pruned_directories=("knowledge/notes", "knowledge/projects", "knowledge/raw/sessions"),
         )

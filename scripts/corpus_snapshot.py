@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
 import operator
 import os
 import re
@@ -630,13 +631,20 @@ def _positive_limit(value: object, name: str, *, allow_zero: bool = False) -> in
 def _require_monotonic(deadline: object) -> float:
     if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
         raise ValueError("deadline must be a monotonic timestamp")
-    return float(deadline)
+    return _finite_deadline_value(deadline)
+
+
+def _finite_deadline_value(value: int | float) -> float:
+    converted = float(value)
+    if not math.isfinite(converted):
+        raise ValueError("corpus collection requires a finite deadline")
+    return converted
 
 
 def _require_seconds(value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
         raise ValueError("deadline_seconds must be non-negative")
-    return float(value)
+    return _finite_deadline_value(value)
 
 
 def _deadline_value(deadline: float | None, deadline_seconds: float | None) -> float:
@@ -3033,12 +3041,9 @@ def _capture(
 # 2026-08-30, leaving no active generation and retrieval on its lexical leg
 # alone. Nothing about the fence changed; the vault outgrew it.
 #
-# Snapshot isolation, in every MVCC engine, means a consistent view from the
-# point a transaction started — not a world that holds still until it commits.
-# So: take another pass. Fail only if the vault never holds still for one.
-MAX_CAPTURE_PASSES = 4
-
-
+# Markdown files have no MVCC snapshot. Every retry must establish the same
+# complete membership and content proof again. The caller's finite monotonic
+# deadline and cancellation bound that work; an arbitrary pass count does not.
 def _captured_after_retries(
     root: Path,
     policy: SnapshotPolicy,
@@ -3047,14 +3052,12 @@ def _captured_after_retries(
     pruned: frozenset[str] = frozenset(),
 ) -> CorpusSnapshot:
     """One capture that describes a real instant, retried while the vault moves."""
-    last: CorpusChanged | None = None
-    for _ in range(MAX_CAPTURE_PASSES):
+    while True:
         _check_processing_stop(deadline, cancelled)
         try:
             return _capture(root, policy, deadline, cancelled, pruned)
-        except CorpusChanged as exc:
-            last = exc
-    raise CorpusChanged(f"corpus never held still for one pass: {last}")
+        except CorpusChanged:
+            _check_processing_stop(deadline, cancelled)
 
 
 def _or_setting(given: int | None, name: str, vault: Path) -> int:
@@ -3089,6 +3092,8 @@ def collect_corpus(
     membership they leave out is what the caller asked not to read.
     Unless explicitly supplied, the discovery entry budget uses the existing
     corpus.max_files setting, including entries that are not accepted sources.
+    A supplied deadline or duration must be finite so moving sources cannot
+    turn collection into unbounded retry work.
     """
     root = Path(vault).resolve(strict=True)
     if not stat.S_ISDIR(_safe_info(root).st_mode):

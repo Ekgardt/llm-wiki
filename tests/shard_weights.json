@@ -551,6 +551,7 @@
   "test_coordinator_v2_ownership_liveness.py": 20.9,
   "test_corpus_chunks_stream_from_immutable_sources.py": 6.79,
   "test_corpus_discovery_uses_configured_budget.py": 223.32,
+  "test_corpus_retry_uses_the_callers_deadline.py": 0.021000000000000005,
   "test_corpus_snapshot.py": 4.54,
   "test_coverage_reads_only_inside_the_repository.py": 0.32,
   "test_coverage_survives_the_budget.py": 0.01,
