@@ -42,7 +42,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -56,6 +55,9 @@ from integration_adapter import (  # noqa: E402
     MAX_CAPTURE_INTENT_BYTES,
     ROOT,
     STATE_ROOT,
+)
+from integration_adapter import (  # noqa: E402
+    _capture_publication_fence as _fresh_capture_authority,
 )
 
 # One pass adopts at most this many intents. The bound is required rather than
@@ -85,23 +87,6 @@ def _verified_intent_bytes(state_root: Path, record: dict[str, Any]) -> bytes:
     if len(payload) != int(record["byte_size"]):
         raise ValueError("intent_size_changed")
     return payload
-
-
-@contextmanager
-def _fresh_capture_authority(queue: object, coordinator: object, intent_id: str):
-    """Take this pass's own owner and fence — never the publisher's lost one."""
-    registry = queue.ownership_registry()
-    owner = registry.acquire("capture", scope=f"intent:{intent_id}")
-    try:
-        fence = coordinator.acquire_intent_fence(
-            intent_id, mode="capture", owner=owner
-        )
-        try:
-            yield owner, fence
-        finally:
-            coordinator.release_intent_fence(fence)
-    finally:
-        registry.release(owner)
 
 
 def _adoption_payload(record: dict[str, Any]) -> dict[str, str]:

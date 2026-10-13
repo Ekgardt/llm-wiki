@@ -79,7 +79,7 @@
   "test_a_fact_key_keeps_the_end_of_the_user_turn.py": 0.43,
   "test_a_fact_key_points_at_the_turn.py": 0.92,
   "test_a_failed_capture_does_not_block_other_ready_captures.py": 18.74,
-  "test_a_failed_capture_fence_release_retains_its_owner.py": 0.89,
+  "test_a_failed_capture_fence_release_retains_its_owner.py": 1.89,
   "test_a_failed_git_status_is_a_navigation_degradation.py": 0.03,
   "test_a_failed_release_does_not_keep_the_gate.py": 2.72,
   "test_a_failed_second_look_keeps_the_first_answer.py": 0.14,

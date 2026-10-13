@@ -43,3 +43,12 @@ Primary sources consulted for this change and the adjacent lock experiment:
 Regression protects the original lock exception, both retained authority
 rows, foreign-key integrity, and cleanup after failed fence acquisition.
 Related normal, refused, renewed, queue-link and ownership tests are required.
+
+Related-scenario qualification: capture adoption contained the same duplicated
+nested-finally implementation. The expanded regression failed specifically in
+that path (one failed, three passed). Adoption now imports the canonical
+publication ownership context under its existing local name. Its duplicate
+implementation is removed. It obtains the same fresh capture owner and intent
+fence, additionally using the existing lease keepalive while registration is
+in flight. No retry or lease value changes. Both normal capture and adoption
+are covered by the same failed-acquisition and failed-release regressions.
