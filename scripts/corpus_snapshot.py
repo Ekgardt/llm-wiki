@@ -16,6 +16,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from datetime import time as datetime_time
+from functools import partial
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -1540,6 +1541,7 @@ def _breadcrumb_corpus_read(discovery: _Discovery, relative: str, archived: bool
 
 def _follow_breadcrumb(discovery: _Discovery, head: _Candidate) -> None:
     from breadcrumb_evidence import restore_source
+    from breadcrumb_protocol import _RECORD_PARSING, _RecordParsing, _using_record_parsing
 
     logical = _breadcrumb_logical_path(head.relative)
     archived = logical != head.relative
@@ -1547,7 +1549,10 @@ def _follow_breadcrumb(discovery: _Discovery, head: _Candidate) -> None:
     def read(relative: str) -> bytes:
         return _breadcrumb_corpus_read(discovery, relative, archived)
 
-    restore_source(logical, read)
+    active = partial(_check_deadline, discovery.deadline)
+    parsing = _RECORD_PARSING.get() or _RecordParsing(active=active)
+    with _using_record_parsing(parsing):
+        restore_source(logical, read)
     _check_deadline(discovery.deadline)
 
 

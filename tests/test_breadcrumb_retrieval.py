@@ -65,6 +65,58 @@ def test_code_collection_does_not_import_private_breadcrumbs(tmp_path):
     assert [source.record.relative_path for source in snapshot.sources] == ['scripts/a.py']
 
 
+def test_corpus_follow_validates_each_immutable_record_once(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    import breadcrumb_protocol as protocol
+    import reliable_memory as reliability
+    from reliable_memory import canonical_json_bytes
+
+    _disk_source(tmp_path, b'complete source')
+    follow = corpus_snapshot._follow_breadcrumb
+    observations = []
+
+    def observe(discovery, head):
+        validation = Mock(wraps=reliability.validate_schema_object)
+        with monkeypatch.context() as local:
+            local.setattr(reliability, 'validate_schema_object', validation)
+            follow(discovery, head)
+        distinct = {(canonical_json_bytes(call.args[0]), canonical_json_bytes(call.args[1]))
+                    for call in validation.call_args_list}
+        observations.append((validation.call_count, len(distinct)))
+        assert protocol._RECORD_PARSING.get() is None
+
+    monkeypatch.setattr(corpus_snapshot, '_follow_breadcrumb', observe)
+    snapshot = corpus_snapshot.collect_corpus(tmp_path)
+
+    assert snapshot.sources
+    assert observations
+    assert all(actual == distinct and distinct > 0 for actual, distinct in observations), observations
+
+
+def test_corpus_follow_preserves_an_existing_record_owners_guard(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    import breadcrumb_protocol as protocol
+
+    _disk_source(tmp_path, b'complete source')
+    active = Mock(side_effect=RuntimeError('record owner lost'))
+    parent = protocol._RecordParsing(active=active)
+    follow = corpus_snapshot._follow_breadcrumb
+
+    def follow_with_owner(discovery, head):
+        with protocol._using_record_parsing(parent):
+            try:
+                follow(discovery, head)
+            finally:
+                assert protocol._RECORD_PARSING.get() is parent
+
+    monkeypatch.setattr(corpus_snapshot, '_follow_breadcrumb', follow_with_owner)
+    with pytest.raises(RuntimeError, match='record owner lost'):
+        corpus_snapshot.collect_corpus(tmp_path)
+    assert protocol._RECORD_PARSING.get() is None
+
+
 def _indexed_corpus(tmp_path, monkeypatch, embedder=None):
     import search_memory
     from generation_catalog import GenerationCatalog
