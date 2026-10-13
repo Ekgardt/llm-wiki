@@ -35,8 +35,12 @@ Primary sources checked on 2026-10-13:
 also confirms token-based restoration of an enclosing context. It is additional
 documentation from the first authority, not a fourth independent authority.
 
-The chosen change enters the existing `_source_choice_resolution` context for
-the repair's candidate cuts. The existing resolver retains immutable byte
+The first change (`ebcb8e98`) entered the existing `_source_choice_resolution`
+context for the repair's candidate cuts. The follow-up uses the shared
+`_source_layout_resolution` context, which also owns the existing pure journal
+and partition parsers; see
+[the emitted-layout qualification](2026-10-13-emitted-layouts-own-their-immutable-parsing.md).
+The existing resolver retains immutable byte
 objects and their validated hashes, entry positions, and line positions for
 that context. It still validates every referenced span and complete quote.
 Nested ownership and context restoration use the existing implementation.

@@ -597,6 +597,7 @@
   "test_durability_stand.py": 61.26,
   "test_durability_stand_recovery.py": 36.76,
   "test_embedder_unavailable_names_its_reason.py": 0.02,
+  "test_emitted_compile_layout_owns_immutable_parsing.py": 0.3,
   "test_empty_ready_shards_are_removed.py": 0.01,
   "test_enforcement_covers_bash.py": 0.01,
   "test_episode_consolidation.py": 0.59,

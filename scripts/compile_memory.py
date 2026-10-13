@@ -1014,7 +1014,7 @@ def _parse_native_journal(content):
 
 
 class _NativeJournalIndexes:
-    """Pure parsing for one measurement; strong refs prevent identity reuse."""
+    """Pure parsing for one owned layout; strong refs prevent identity reuse."""
 
     def __init__(self):
         self.sources: dict[int, tuple[bytes, dict]] = {}
@@ -1659,6 +1659,18 @@ def _source_choice_resolution(resolver=None):
         yield
     finally:
         _SOURCE_CHOICE_RESOLVER.reset(token)
+
+
+@contextmanager
+def _source_layout_resolution(inputs):
+    """Reuse immutable parsing, while every live authority check remains live."""
+    parsing = _SOURCE_CHOICE_PARSING.get() or _measurement_proofs(inputs)
+    token = _SOURCE_CHOICE_PARSING.set(parsing)
+    try:
+        with _source_choice_resolution():
+            yield
+    finally:
+        _SOURCE_CHOICE_PARSING.reset(token)
 
 
 @contextmanager
@@ -3110,7 +3122,7 @@ def _draft_prompt(inputs: CompileInputs) -> str:
 
 
 def _draft_layout(inputs, *, critic_feedback=()):
-    with _layout_protection_scope():
+    with _layout_protection_scope(), _source_layout_resolution(inputs):
         return _protected_draft_layout(inputs, critic_feedback=critic_feedback)
 
 
@@ -3809,6 +3821,11 @@ def _critic_operation(semantic, bindings, *, claim_records=None) -> dict[str, ob
 
 
 def _critique_prompt(inputs: CompileInputs, operations: list[object]) -> str:
+    with _source_layout_resolution(inputs):
+        return _bound_critique_prompt(inputs, operations)
+
+
+def _bound_critique_prompt(inputs: CompileInputs, operations: list[object]) -> str:
     cited: list[dict[str, object]] = []
     normalized: list[dict[str, object]] = []
     for operation in operations:
@@ -7864,7 +7881,7 @@ def _repartition_compile_repair(batch, feedback):
         return ()
     measure = _batch_measure(batch.inputs, batch.planning_model, None)
     _attach_required_context(measure, batch.inputs, batch.planning_candidates)
-    with _source_choice_resolution():
+    with _source_layout_resolution(batch.inputs):
         for cut in _balanced_repair_cuts(units):
             children = _repair_partition_at(batch, units, cut, feedback, measure)
             if children is not None:
