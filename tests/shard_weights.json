@@ -640,6 +640,7 @@
   "test_four_small_capture_corrections.py": 7.85,
   "test_fresh_positions.py": 0.09,
   "test_frontmatter_uses_optional_safe_yaml_acceleration.py": 0.02,
+  "test_full_doctor_scenarios_request_their_completion_budget.py": 0.36,
   "test_generation_catalog.py": 58.63,
   "test_generation_graph_rows_released_before_vectors.py": 1.22,
   "test_generation_integration.py": 11.29,

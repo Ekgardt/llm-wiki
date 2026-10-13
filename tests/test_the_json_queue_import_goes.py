@@ -23,6 +23,7 @@ import doctor  # noqa: E402
 import memory_queue  # noqa: E402
 from memory_queue import MemoryQueue, QueueOperationError  # noqa: E402
 
+from tests.slow_machine import LONG_TIMEOUT  # noqa: E402
 from tests.test_doctor import _build_root, _check  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
@@ -76,7 +77,10 @@ def test_doctor_repair_neither_imports_nor_marks_the_json_queue(tmp_path: Path, 
     root, state_root, home = _build_root(tmp_path)
     _json_queue(state_root, "legacy-1.json", "legacy-2.processing")
 
-    report = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
+    report = doctor.run_doctor(
+        root=root, state_root=state_root, home=home, repair=True,
+        time_budget_seconds=LONG_TIMEOUT,
+    )
 
     check = _check(report, "queue")
     assert [item["action"] for item in report["repaired"] if item["action"] in {"migrate_queue", "recover_stale_lease"}] == []
