@@ -570,6 +570,7 @@
   "test_dense_admission_weighs_a_span_once.py": 0.02,
   "test_dependency_contract.py": 0.0,
   "test_dependency_environments.py": 0.06,
+  "test_dependency_timeout_never_adds_unasked_time.py": 0.04,
   "test_dlp_finding_allowlist.py": 0.25,
   "test_doctor.py": 89.45,
   "test_doctor_admission_keeps_the_caller_deadline.py": 0.01,

@@ -128,9 +128,10 @@ def _run_uv_step(
     """The completed process, or the error result of a step that could not finish."""
     command = list(step.command)
     try:
-        if remaining() <= 0:
+        seconds = remaining()
+        if seconds <= 0:
             raise subprocess.TimeoutExpired(command, 0)
-        completed = run_uv(command, root=root, timeout=max(0.001, remaining()))
+        completed = run_uv(command, root=root, timeout=seconds)
     except subprocess.TimeoutExpired as exc:  # ProcessTreeTimeout carries cleanup_error
         return None, _uv_timeout_result(step, getattr(exc, "cleanup_error", None))
     except OSError as exc:
@@ -220,15 +221,15 @@ def _apply_dependency_sync(run_uv, root: Path, remaining) -> dict:
     )
 
 
-def _dependency_deadline(deadline: float | None, timeout: float) -> float:
+def _dependency_clock(deadline: float | None, timeout: float) -> Callable[[], float]:
     if deadline is not None:
-        return deadline
-    return time.monotonic() + timeout
+        return _remaining_clock(deadline)
+    return _remaining_clock(time.monotonic() + timeout, ceiling=timeout)
 
 
-def _remaining_clock(deadline: float) -> Callable[[], float]:
+def _remaining_clock(deadline: float, *, ceiling: float = math.inf) -> Callable[[], float]:
     def remaining() -> float:
-        return max(0.0, deadline - time.monotonic())
+        return min(max(0.0, deadline - time.monotonic()), max(0.0, ceiling))
 
     return remaining
 
@@ -241,7 +242,7 @@ def _dependency_action(
     timeout: float = DEPENDENCY_TIMEOUT_SECONDS,
     deadline: float | None = None,
 ) -> dict:
-    remaining = _remaining_clock(_dependency_deadline(deadline, timeout))
+    remaining = _dependency_clock(deadline, timeout)
     changes, error = _checked_dependency_plan(run_uv, root, remaining)
     if error is not None:
         return error
