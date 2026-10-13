@@ -3170,12 +3170,16 @@ def _capture_publication_fence(queue: object, coordinator: object, intent_id: st
     owner = registry.acquire("capture", scope=f"intent:{intent_id}")
     try:
         fence = coordinator.acquire_intent_fence(intent_id, mode="capture", owner=owner)
-        try:
-            with _CapturePublicationKeepAlive(registry, coordinator, owner, fence):
-                yield owner, fence
-        finally:
-            coordinator.release_intent_fence(fence)
+    except BaseException:
+        registry.release(owner)
+        raise
+    try:
+        with _CapturePublicationKeepAlive(registry, coordinator, owner, fence):
+            yield owner, fence
     finally:
+        # A retained fence still depends on its canonical owner. If releasing
+        # it fails, keep both for qualified recovery and preserve that error.
+        coordinator.release_intent_fence(fence)
         registry.release(owner)
 
 

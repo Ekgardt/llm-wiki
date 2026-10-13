@@ -1165,9 +1165,15 @@ def test_archive_winning_finalization_race_deletes_before_failure_records(
     monkeypatch.setattr(archiver.coordinator, "apply", pause_delete)
 
     def observe_failure_connection(queue: MemoryQueue, *, busy_ms=None, deadline=None):
-        connection = original_connect(queue, busy_ms=busy_ms, deadline=deadline)
-        if threading.current_thread().name == "archive-failure-writer":
-            failure_connected.set()
+        if threading.current_thread().name != "archive-failure-writer":
+            return original_connect(queue, busy_ms=busy_ms, deadline=deadline)
+        # This scenario requires the second writer to succeed after the first
+        # commits. Its lock wait uses the same established hang bound as joins;
+        # the production busy limit is separately tested as a genuine refusal.
+        connection = original_connect(
+            queue, busy_ms=int(LONG_TIMEOUT * 1_000), deadline=deadline
+        )
+        failure_connected.set()
         return connection
 
     monkeypatch.setattr(MemoryQueue, "_connect", observe_failure_connection)
@@ -1180,13 +1186,16 @@ def test_archive_winning_finalization_race_deletes_before_failure_records(
 
     def record_failure() -> None:
         failure_started.set()
-        MemoryQueue(state_root).record_source_failure(
-            f"knowledge/daily/{daily.name}",
-            digest,
-            error_code="archive_won_race",
-            producer="compile",
-        )
-        failure_done.set()
+        try:
+            MemoryQueue(state_root).record_source_failure(
+                f"knowledge/daily/{daily.name}",
+                digest,
+                error_code="archive_won_race",
+                producer="compile",
+            )
+            failure_done.set()
+        except BaseException as exc:
+            errors.append(exc)
 
     archive_thread = threading.Thread(target=archive)
     archive_thread.start()
@@ -1205,6 +1214,7 @@ def test_archive_winning_finalization_race_deletes_before_failure_records(
     assert not archive_thread.is_alive() and not failure_thread.is_alive()
     assert not failure_completed_while_delete_paused
     assert errors == []
+    assert failure_done.is_set()
     assert not daily.exists()
     assert MemoryQueue(state_root).source_failure(
         f"knowledge/daily/{daily.name}", digest
