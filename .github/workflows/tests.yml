@@ -110,11 +110,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The suite is split across four shards. A single Windows job took 57
-        # minutes, and a run that long starves its own concurrency tests; each
-        # shard is a separate runner with its own cores, so the split shortens
-        # the wall clock without adding contention on one machine. Setup is
-        # about half a minute, so the extra jobs cost almost nothing.
+        # 2026-10-13: measured module costs total 16433 s; four balanced shards
+        # would need 4108 s each, beyond Windows' unchanged 3600 s job budget.
+        # Five is the smallest count fitting that budget minus the measured
+        # 50 s setup/cleanup overhead. Each runner keeps its own cores; every
+        # test remains included. Requalify the weights and count on new costs.
         target:
           - linux-py3.10
           - linux-py3.14
@@ -125,7 +125,7 @@ jobs:
           - windows-py3.14
           - macos-py3.10
           - macos-py3.14
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5]
         include:
           - target: linux-py3.10
             os: ubuntu-24.04
@@ -212,7 +212,7 @@ jobs:
       # from tests/shard_weights.json (see tests/shard_plan.py).
       - run: >
           uv run --locked --no-sync python -m tests.shard_plan
-          --shard ${{ matrix.shard }} --of 4 --
+          --shard ${{ matrix.shard }} --of 5 --
           -q --durations=0 --junitxml="${{ runner.temp }}/pytest-timings/junit.xml"
         env:
           LLM_WIKI_TEST_PROGRESS_FILE: ${{ runner.temp }}/pytest-timings/progress.txt

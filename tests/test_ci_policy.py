@@ -102,7 +102,9 @@ def test_job_level_env_avoids_contexts_unavailable_before_runner_assignment() ->
     assert invalid == []
 
 
-SHARD_COUNT = 4
+# Minimal count from current measured costs and unchanged job budgets; see
+# docs/research/2026-10-13-five-shards-follow-the-measured-full-suite-cost.md.
+SHARD_COUNT = 5
 
 
 def test_full_suite_matrix_contains_every_supported_python_endpoint() -> None:
