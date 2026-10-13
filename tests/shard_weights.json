@@ -844,6 +844,7 @@
   "test_repair_backlinks.py": 1.64,
   "test_repair_capacity_repartitions_complete_source_work.py": 0.64,
   "test_repair_installed_memory.py": 8.7,
+  "test_repair_partition_reuses_immutable_evidence_layout.py": 0.05,
   "test_repository_index.py": 13.72,
   "test_repository_index_coverage.py": 4.54,
   "test_repository_refresh.py": 38.12,

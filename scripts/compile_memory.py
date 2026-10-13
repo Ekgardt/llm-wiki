@@ -7864,10 +7864,11 @@ def _repartition_compile_repair(batch, feedback):
         return ()
     measure = _batch_measure(batch.inputs, batch.planning_model, None)
     _attach_required_context(measure, batch.inputs, batch.planning_candidates)
-    for cut in _balanced_repair_cuts(units):
-        children = _repair_partition_at(batch, units, cut, feedback, measure)
-        if children is not None:
-            return children
+    with _source_choice_resolution():
+        for cut in _balanced_repair_cuts(units):
+            children = _repair_partition_at(batch, units, cut, feedback, measure)
+            if children is not None:
+                return children
     return ()
 
 
