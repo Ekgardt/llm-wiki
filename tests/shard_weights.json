@@ -661,6 +661,7 @@
   "test_historical_capture_reuses_only_canonical_record_parsing.py": 12.03,
   "test_historical_slices_share_their_boundaries.py": 0.51,
   "test_historical_test_protocols_keep_their_exact_utf8_bytes.py": 0.39,
+  "test_historical_work_captures_each_physical_layout_once.py": 2.38,
   "test_hook_error_redaction.py": 0.45,
   "test_hook_failures_reach_health.py": 0.12,
   "test_impact_analysis.py": 17.75,

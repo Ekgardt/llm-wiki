@@ -1886,6 +1886,7 @@ class _CurrentHistoricalSourceWork:
         self.reader = reader
         self.previous = previous
         self.captured = {}
+        self.layouts = {}
         self.units = []
         self.selector = reader._cached_selection()
 
@@ -1912,13 +1913,16 @@ class _CurrentHistoricalSourceWork:
         from compile_memory import _daily_parts, _native_daily_frames
 
         self.reader._require_active()
+        if logical in self.layouts:
+            return self.layouts[logical]
         raw = read_stable_bytes(self.reader.vault_root / logical, MAX_DAILY_BYTES, label="daily source")
         with self.reader._breadcrumb_record_parsing():
             frames = _native_daily_frames(logical, raw, self.reader.vault_root)
             parts = _daily_parts(logical, raw, native_frames=frames)
         self.reader._require_active()
         self.captured[logical] = raw
-        return parts
+        self.layouts[logical] = tuple(parts)
+        return self.layouts[logical]
 
     def _matching_unit(self, source):
         from compile_memory import _native_part_units
