@@ -196,6 +196,11 @@ def _resolve_link(target: str, search_roots: list[Path]) -> Path | None:
 def check_evidence_references(pages: list[Path]) -> list[str]:
     """Resolve every canonical logical evidence reference and fail closed."""
     resolver = EvidenceResolver(ROOT, state_root=STATE_ROOT)
+    with resolver.captured_sources() as captured:
+        return _captured_evidence_findings(pages, captured)
+
+
+def _captured_evidence_findings(pages, resolver):
     findings: list[str] = []
     for page in pages:
         try:
@@ -723,6 +728,11 @@ def _page_label(page: Path) -> str:
 def check_claim_schemas(pages: list[Path]) -> list[str]:
     """Validate canonical claim ledgers and quarantined inbox candidates."""
     resolver = EvidenceResolver(ROOT, state_root=STATE_ROOT)
+    with resolver.captured_sources() as captured:
+        return _captured_claim_findings(pages, captured)
+
+
+def _captured_claim_findings(pages, resolver):
     findings: list[str] = []
     for page in pages:
         try:

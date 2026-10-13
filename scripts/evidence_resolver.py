@@ -1,6 +1,7 @@
 """Resolve content-addressed daily evidence from flat files or sealed bags."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -1260,14 +1261,27 @@ class EvidenceResolver:
         self._immutable_entry_metadata = {}
 
     def resolve(self, reference: EvidenceRef | str) -> ResolvedEvidence:
-        ref = EvidenceRef.parse(reference) if isinstance(reference, str) else reference
-        if not isinstance(ref, EvidenceRef):
-            raise TypeError("reference must be EvidenceRef or canonical string")
+        ref = _captured_reference(reference)
         flat = self.daily_root / f"{ref.daily_id}.md"
         content = _flat_source(flat)
         if content is None:
             return self._resolve_archive(ref)
         return self._resolve_flat(ref, content, flat)
+
+    @contextlib.contextmanager
+    def captured_sources(self):
+        """Provisional read-only results; recheck every captured source before exit.
+
+        Callers must not publish or act on results inside this scope. Ordinary
+        resolve calls keep their independent current-file checks. Archives keep
+        their existing full per-reference verification.
+        """
+        captured = _CapturedEvidenceSources(self)
+        try:
+            yield captured
+            captured.validate_current_sources()
+        finally:
+            captured.close()
 
     def _resolve_flat(self, ref: EvidenceRef, content: bytes, flat: Path):
         current_digest = sha256_bytes(content)
@@ -1488,6 +1502,84 @@ def _resolved_byte_span(ref, content, source_path, location, selected, block, di
         byte_end=ref.byte_end, line_start=line_start, line_end=line_end,
         location=location, source_path=source_path,
     )
+
+
+class _CapturedEvidenceSources:
+    """One explicit read-only operation, with exact immutable byte ownership."""
+
+    def __init__(self, resolver: EvidenceResolver):
+        self.resolver = resolver
+        self.byte_resolver = EvidenceResolver(resolver.vault, state_root=resolver.state_root)
+        self.sources = {}
+        self.closed = False
+
+    def resolve(self, reference):
+        self._require_open()
+        ref = _captured_reference(reference)
+        flat = self.resolver.daily_root / f"{ref.daily_id}.md"
+        captured = self._capture(flat)
+        if captured is None:
+            return self.resolver._resolve_archive(ref)
+        selected, location = self._selected_source(flat, captured, ref)
+        return self.byte_resolver.resolve_bytes(
+            ref, selected, source_path=flat, location=location, reuse_immutable=True
+        )
+
+    def _capture(self, flat):
+        if flat in self.sources:
+            return self.sources[flat]
+        content = _flat_source(flat)
+        if content is None:
+            return None
+        captured = (content, sha256_bytes(content), {})
+        self.sources[flat] = captured
+        return captured
+
+    def _selected_source(self, flat, captured, ref):
+        content, digest, parts = captured
+        if digest == ref.source_sha256:
+            return content, "flat"
+        if ref.source_sha256 not in parts:
+            parts[ref.source_sha256] = self.resolver._historical_part(
+                flat, content, digest, ref.source_sha256
+            )
+        return _required_captured_part(parts[ref.source_sha256]), "flat-part"
+
+    def validate_current_sources(self):
+        self._require_open()
+        for flat, captured in self.sources.items():
+            current = _flat_source(flat)
+            _require_captured_source_current(current, captured[1])
+
+    def _require_open(self):
+        if self.closed:
+            raise RuntimeError("evidence source capture is closed")
+
+    def close(self):
+        self.closed = True
+        self.sources.clear()
+        self.byte_resolver._immutable_sources.clear()
+        self.byte_resolver._immutable_entry_metadata.clear()
+
+
+def _captured_reference(reference):
+    ref = EvidenceRef.parse(reference) if isinstance(reference, str) else reference
+    if not isinstance(ref, EvidenceRef):
+        raise TypeError("reference must be EvidenceRef or canonical string")
+    return ref
+
+
+def _required_captured_part(content):
+    if content is None:
+        raise EvidenceResolutionError("flat daily source hash mismatch")
+    return content
+
+
+def _require_captured_source_current(current, digest):
+    if current is None:
+        raise EvidenceResolutionError("captured daily source disappeared before validation completed")
+    if sha256_bytes(current) != digest:
+        raise EvidenceResolutionError("captured daily source changed before validation completed")
 
 
 def _flat_source(flat: Path) -> bytes | None:

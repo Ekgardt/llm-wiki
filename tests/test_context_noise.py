@@ -13,6 +13,7 @@ Useful signal must survive:
 """
 from __future__ import annotations
 
+import faulthandler
 import json
 import os
 import re
@@ -938,15 +939,19 @@ def test_session_start_health_latency_is_bounded_with_large_unsafe_queue(
     monkeypatch.setattr(session_start_context, "ROOT", root)
     monkeypatch.setattr(session_start_context, "STATE_ROOT", state_root)
 
-    started = time.perf_counter()
-    block = session_start_context.health_block()
-    elapsed = time.perf_counter() - started
+    faulthandler.dump_traceback_later(0.5)
+    try:
+        started = time.perf_counter()
+        block = session_start_context.health_block()
+        elapsed = time.perf_counter() - started
+    finally:
+        faulthandler.cancel_dump_traceback_later()
 
     assert (elapsed < 0.5, block.startswith("## Health"), "secret" in block) == (
         True,
         True,
         False,
-    )
+    ), f"health block elapsed {elapsed:.6f}s"
 
 
 def _fake_section(monkeypatch, module, *, log_entry: str) -> None:

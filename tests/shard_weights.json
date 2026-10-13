@@ -697,6 +697,7 @@
   "test_line_numbers_at_the_old_speed.py": 0.17,
   "test_lint_evidence.py": 0.07,
   "test_lint_orphan_pages.py": 0.09,
+  "test_lint_verifies_one_owned_daily_source.py": 0.29900000000000004,
   "test_litragbench_becomes_a_question_this_stand_can_read.py": 0.01,
   "test_live_evidence_reuses_only_a_content_verified_parse.py": 0.09,
   "test_llm_descriptors.py": 0.14,
