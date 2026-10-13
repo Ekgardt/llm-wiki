@@ -810,6 +810,7 @@
   "test_project_journal.py": 180.2,
   "test_project_journal_concurrent_caller_wait.py": 3.62,
   "test_project_store_adopted_coordinator.py": 26.77,
+  "test_projector_relative_wait_does_not_grow.py": 0.411,
   "test_provenance_join.py": 0.04,
   "test_provider_exit_is_not_an_empty_answer.py": 0.02,
   "test_provider_http_destination.py": 21.1,

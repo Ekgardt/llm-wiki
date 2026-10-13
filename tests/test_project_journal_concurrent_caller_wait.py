@@ -24,4 +24,4 @@ def test_projector_test_passes_its_existing_caller_wait(vault, state_root, monke
     monkeypatch.setattr(project_journal, '_apply_transaction', observed)
     run_projectors(vault, state_root)
     assert waits
-    assert all(value is not None and 0 < value <= LONG_TIMEOUT for value in waits)
+    assert all(value is not None and 0 < value <= LONG_TIMEOUT for value in waits), waits

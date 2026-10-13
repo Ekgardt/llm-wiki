@@ -1818,7 +1818,7 @@ def test_simultaneous_projectors_append_once_per_event(vault: Path, state_root: 
                     "demo",
                     checkpoint_event(f"evt-{index}", f"event-{index}"),
                     f"agent-{index}",
-                    writer_wait_seconds=max(0, deadline - time.monotonic()),
+                    writer_wait_seconds=min(LONG_TIMEOUT, max(0, deadline - time.monotonic())),
                 )
             except (ProjectLeaseBusy, ProjectFenceError, ProjectPendingPriorError):
                 # CI run 33039646439 (Windows py3.12-s2) lost this two-writer
