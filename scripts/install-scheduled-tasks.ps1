@@ -40,7 +40,7 @@ $tasks = @("LLMWiki-Nightly", "LLMWiki-Weekly")
 # scheduled_weekly.worst_case_seconds); tests hold both facts.
 # A function, not only a script variable: the status check calls it, so a caller
 # that loads the check alone still reads the same table.
-function Get-LLMWikiLimitHours { return @{ nightly = 4; weekly = 6 } }
+function Get-LLMWikiLimitHours { return @{ nightly = 5; weekly = 6 } }
 function Get-LLMWikiConfiguredLimitHours {
     $limits = Get-LLMWikiLimitHours
     if ($NightlyLimitHours -gt 0) { $limits.nightly = $NightlyLimitHours }

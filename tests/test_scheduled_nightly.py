@@ -194,11 +194,12 @@ def test_generation_refresh_never_treats_deferred_or_error_as_success(monkeypatc
     assert any(status in message for message in messages)
 
 
-def test_configured_compile_wait_is_the_child_timeout(monkeypatch):
+def test_configured_compile_wait_contributes_to_the_child_timeout(monkeypatch):
     import scheduled_nightly
 
     monkeypatch.setenv(scheduled_nightly.COMPILE_WAIT_ENV, "1200")
-    assert scheduled_nightly._compile_step().timeout == 1200
+    refresh = scheduled_nightly.setting_value("generation.post_compile_seconds", scheduled_nightly.ROOT)
+    assert scheduled_nightly._compile_step().timeout == 1200 + refresh + scheduled_nightly.STEP_START_MARGIN_SECONDS
     monkeypatch.setenv(scheduled_nightly.COMPILE_WAIT_ENV, "not a number")
     assert scheduled_nightly.compile_wait_seconds() == scheduled_nightly.COMPILE_WAIT_SECONDS
     monkeypatch.delenv(scheduled_nightly.COMPILE_WAIT_ENV)

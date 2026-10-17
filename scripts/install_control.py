@@ -685,7 +685,9 @@ def _scheduled_path(uv_path: Path) -> str:
 # systemd units once said 3 h and 5 h while the Windows tasks said 4 h and 6 h.
 # Research: docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md,
 # docs/research/2026-09-25-the-scheduler-says-what-the-night-could-not-do.md
-SCHEDULER_LIMIT_HOURS = {"nightly": 4, "weekly": 6}
+# The default nightly now includes the compiler's own generation refresh:
+# 15 092 seconds in auto mode exceeds four hours; configured budgets still win.
+SCHEDULER_LIMIT_HOURS = {"nightly": 5, "weekly": 6}
 
 # A oneshot service has no start timeout by default, so a hung pass would hold its
 # lease forever. See `docs/research/2026-09-14-ci-and-scheduler-gaps.md`.

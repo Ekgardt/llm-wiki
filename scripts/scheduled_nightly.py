@@ -377,10 +377,12 @@ def _episode_step() -> _Step:
     )
 
 
-def _compile_step() -> _Step:
-    """Observe this child's exit directly; receipts retain every committed batch."""
+def _compile_step(root: Path | None = None) -> _Step:
+    """The child compiles, then refreshes its generation before returning."""
+    refresh = setting_value("generation.post_compile_seconds", ROOT if root is None else root)
+    timeout = compile_wait_seconds() + refresh + STEP_START_MARGIN_SECONDS
     return _Step("compiling pending sources...", "compile",
-                 _script("compile_memory.py") + ["--trigger", "auto"], compile_wait_seconds())
+                 _script("compile_memory.py") + ["--trigger", "auto"], timeout)
 
 
 def _fact_keys_step() -> _Step:
@@ -619,7 +621,7 @@ def worst_case_seconds(root: Path | None = None) -> float:
     """
     from self_update import WORST_CASE_SECONDS as UPDATE_SECONDS
 
-    steps = [*_intake_steps(), _fact_keys_step(), _compile_step(), *_post_compile_steps()]
+    steps = [*_intake_steps(), _fact_keys_step(), _compile_step(root), *_post_compile_steps()]
     waits = COMPILE_IDLE_WAIT_SECONDS
     budgets = setting_value("generation.nightly_seconds", ROOT if root is None else root) + HEALTH_REPORT_BUDGET_SECONDS
     tail = MAINTENANCE_TAIL_BUDGET_SECONDS + UPDATE_SECONDS
