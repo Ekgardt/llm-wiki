@@ -5115,6 +5115,7 @@ def _generation_result(
         "unresolved_observations": None,
         "age_seconds": None,
         "age_source": None,
+        "capacity_usage": None,
         "repairable": status == "degraded",
     }
     baseline.update(details)
@@ -5142,6 +5143,7 @@ class _GenerationFacts(NamedTuple):
     scope_state: str
     corpus_extraction_state: str
     graph_extraction_state: str
+    capacity_usage: dict | None = None
 
 
 def _require_catalog_integrity(database: sqlite3.Connection, deadline: float) -> None:
@@ -5408,6 +5410,7 @@ def _generation_facts(
             manifest, COLLECTOR_VERSION, EXTRACTOR_VERSION
         ),
         graph_extraction_state=_graph_extraction_state(manifest),
+        capacity_usage=_generation_capacity_usage(snapshot, root),
     )
 
 
@@ -5499,7 +5502,7 @@ def _generation_health_result(
     # a parse error is named rather than buried.
     degraded = stale or vector_state == "stale"
     message = _generation_message(degraded, facts.extraction_faults)
-    return _generation_result(
+    result = _generation_result(
         "degraded" if degraded else "ok",
         message,
         catalog="valid",
@@ -5523,6 +5526,51 @@ def _generation_health_result(
         repairable=degraded,
         **_generation_search_fields(complete_v2),
     )
+    return _with_generation_capacity(result, facts.capacity_usage)
+
+
+def _capacity_use(used, ceiling, setting):
+    return {"used": used, "ceiling": ceiling, "setting": setting, "share": used / ceiling}
+
+
+def _generation_capacity_usage(snapshot, root):
+    if getattr(snapshot, "inspected_entries", None) is None:
+        return None
+    policy = snapshot.policy
+    extraction_ceiling = setting_value("extraction.max_sources", root)
+    return {
+        "entries": _capacity_use(snapshot.inspected_entries, policy.max_entries, "corpus.max_files"),
+        "sources": _capacity_use(snapshot.discovered_sources, policy.max_files, "corpus.max_files"),
+        "bytes": _capacity_use(snapshot.discovered_bytes, policy.max_total_bytes, "corpus.max_total_bytes"),
+        "knowledge_extraction_sources": _capacity_use(
+            len(_knowledge_extraction_sources(snapshot)),
+            extraction_ceiling, "extraction.max_sources",
+        ),
+        "project_extraction_sources_per_call": _capacity_use(
+            _project_extraction_batch_size(snapshot), extraction_ceiling, "extraction.max_sources",
+        ),
+    }
+
+
+def _project_extraction_batch_size(snapshot):
+    # _project_extraction passes a singleton, even when many projects exist.
+    return int(any(
+        _is_memory_source(snapshot, source)
+        and source.record.relative_path.startswith("knowledge/projects/")
+        for source in snapshot.sources
+    ))
+
+
+def _with_generation_capacity(result, usage):
+    result["details"]["capacity_usage"] = usage
+    if usage is None:
+        return result
+    near = [name for name, item in usage.items() if item["share"] >= CEILING_WARNING_SHARE]
+    result["details"]["capacity_near_ceiling"] = near
+    if near:
+        result["status"] = "degraded"
+        result["message"] += " Corpus capacity has reached a warning threshold; measure resource capacity before changing its limits."
+    return result
 
 
 def _validated_search_artifact(
@@ -5919,9 +5967,6 @@ _CEILING_SCOPES = {
     "claims.max_total_bytes": ("claims",),
     "compile.max_sources": ("compile",),
     "compile.max_total_source_bytes": ("compile",),
-    "corpus.max_files": ("notes", "projects", "daily"),
-    "corpus.max_total_bytes": ("notes", "projects", "daily"),
-    "extraction.max_sources": ("notes", "projects", "daily"),
 }
 
 
@@ -5932,7 +5977,7 @@ def _markdown_size(directory: Path) -> tuple[int, int]:
 
 
 def _vault_sizes(root: Path) -> dict[str, tuple[int, int]]:
-    sizes = {name: _markdown_size(root / "knowledge" / name) for name in ("notes", "projects", "daily")}
+    sizes = {"notes": _markdown_size(root / "knowledge/notes")}
     sizes["compile"] = _compile_sources_size(root)
     sizes["claims"] = _claim_sources_size(root)
     return sizes
@@ -5960,10 +6005,13 @@ def _ceiling_use(name: str, ceiling: int, sizes: dict[str, tuple[int, int]]) -> 
 
 
 def _settings_result(overridden: dict, near: dict) -> dict:
-    details = {"overridden": overridden, "near_ceiling": near}
+    details = {
+        "overridden": overridden, "near_ceiling": near,
+        "corpus_capacity": "not_measured; see full generation check",
+    }
     if near:
         names = ", ".join(sorted(near))
-        return _result("settings", "degraded", f"The vault is past 80% of a size ceiling: {names}; raise it in llm-wiki.toml before it stops the pipeline.", details)
+        return _result("settings", "degraded", f"The vault is past 80% of a size ceiling: {names}; measure resource capacity before changing it in llm-wiki.toml.", details)
     message = f"{len(overridden)} setting(s) differ from their defaults." if overridden else "Every setting has its default."
     return _result("settings", "ok", message, details)
 

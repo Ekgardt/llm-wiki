@@ -180,6 +180,37 @@ def test_doctor_reports_an_invalid_file_as_an_error(tmp_path: Path) -> None:
     assert "index.max_pages" in check["message"]
 
 
+def test_settings_does_not_count_unrelated_markdown_as_corpus(tmp_path, monkeypatch):
+    import corpus_snapshot
+
+    _vault(tmp_path, notes=1, toml="[corpus]\nmax_files = 2\nmax_total_bytes = 128\n")
+    journal = tmp_path / "knowledge/projects/demo/journal.md"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text("journal evidence\n" * 100)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("settings must not repeat the full generation collection")
+
+    monkeypatch.setattr(corpus_snapshot, "collect_corpus", forbidden)
+    check = doctor._settings_check(tmp_path)
+    assert "corpus.max_total_bytes" not in check["details"]["near_ceiling"]
+    assert check["details"]["corpus_capacity"] == "not_measured; see full generation check"
+
+
+def test_size_warning_requires_resource_review_before_raising_limit(tmp_path):
+    _vault(tmp_path, notes=4, toml="[index]\nmax_pages = 5\n")
+    check = doctor._settings_check(tmp_path)
+    assert "measure resource capacity" in check["message"]
+
+
+def test_limit_hint_names_controls_without_prescribing_an_unmeasured_increase():
+    hint = settings.raise_hint("corpus.max_files")
+    assert "measure resource capacity" in hint
+    assert "corpus.max_files" in hint
+    assert "llm-wiki.toml" in hint
+    assert "LLM_WIKI_CORPUS_MAX_FILES" in hint
+
+
 def _is_number(node: ast.AST) -> bool:
     value = getattr(node, "value", None)
     return isinstance(value, (int, float)) and not isinstance(value, bool)

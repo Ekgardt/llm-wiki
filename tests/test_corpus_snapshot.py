@@ -54,6 +54,43 @@ def write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8", newline="")
 
 
+def test_collection_reports_admission_counts_before_semantic_filtering(vault):
+    import doctor
+
+    note = "---\ntype: concept\n---\n# Current\n"
+    old = "---\ntype: concept\nstatus: superseded\n---\n# Old\n"
+    write(vault / "knowledge/notes/current.md", note)
+    write(vault / "knowledge/notes/old.md", old)
+    write(vault / "knowledge/notes/ignored.txt", "not a note")
+    write(vault / "knowledge/projects/demo/state.md", note)
+    write(vault / "knowledge/projects/demo/journal.md", "journal" * 100)
+    write(vault / "knowledge/daily/2026-10-17.md", "daily" * 100)
+    snapshot = collect_corpus(vault)
+    assert snapshot.discovered_sources == 3
+    assert snapshot.discovered_bytes == len((note * 2 + old).encode())
+    assert snapshot.inspected_entries == 6  # three notes entries, demo, two project files
+    assert len(snapshot.sources) == 2
+    usage = doctor._generation_capacity_usage(snapshot, vault)
+    assert usage["knowledge_extraction_sources"]["used"] == 1
+    assert usage["project_extraction_sources_per_call"]["used"] == 1
+
+
+def test_admission_counts_verified_session_parts_but_not_ordinary_dumps(vault):
+    from tests.test_breadcrumb_evidence import _source
+
+    _head, documents = _source(b"complete retained user event")
+    for relative, content in documents.items():
+        path = vault / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    write(vault / "knowledge/raw/sessions/2026-09-29/ordinary.md", "ordinary" * 100)
+    snapshot = collect_corpus(vault)
+    assert snapshot.discovered_sources == len(documents)
+    assert snapshot.discovered_bytes == sum(map(len, documents.values()))
+    assert {source.record.relative_path for source in snapshot.sources} == set(documents)
+    assert snapshot.inspected_entries > snapshot.discovered_sources
+
+
 def page(body: str, **metadata: object) -> str:
     fields = "\n".join(f"{key}: {value}" for key, value in metadata.items())
     return f"---\n{fields}\n---\n{body}"

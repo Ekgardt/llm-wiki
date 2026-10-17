@@ -159,9 +159,12 @@ def settings_path(root: Path | None = None) -> Path:
 
 
 def raise_hint(name: str) -> str:
-    """The words a refusal adds so the operator knows which setting lifts it."""
+    """Name the controls to review, without treating an increase as qualified."""
     setting = _BY_NAME[name]
-    return f"raise {setting.name} in {SETTINGS_FILE_NAME} or {setting.environment_name}"
+    return (
+        f"measure resource capacity before changing {setting.name} "
+        f"in {SETTINGS_FILE_NAME} or {setting.environment_name}"
+    )
 
 
 def clear_cache() -> None:

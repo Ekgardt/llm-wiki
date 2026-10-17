@@ -241,6 +241,11 @@ class CorpusSnapshot:
     # repository: a link, a file past the size bound, a name that is not UTF-8
     # (audit 2026-09-26 A-8). Named so a caller can say the graph is partial.
     skipped: tuple[str, ...] = ()
+    # Admission observations, not persisted authority or filtered source totals.
+    # Manually constructed/narrowed snapshots have no discovery measurement.
+    inspected_entries: int | None = None
+    discovered_sources: int | None = None
+    discovered_bytes: int | None = None
 
     @property
     def source_hashes(self) -> tuple[tuple[str, str], ...]:
@@ -1240,9 +1245,10 @@ class _Discovery:
     def _count_entry(self) -> None:
         self.entries += 1
         if self.entries > self.max_entries:
-            raise ValueError(
-                "corpus traversal entry limit exceeded; increase explicit max_entries "
-                "or " + raise_hint("corpus.max_files")
+            raise CorpusCapacityExceeded(
+                "corpus.max_files", self.max_entries, self.entries,
+                "corpus traversal entry limit exceeded; review explicit max_entries "
+                "and " + raise_hint("corpus.max_files")
             )
 
     def _directory_excluded(self, name: str, kind: str) -> bool:
@@ -3036,6 +3042,9 @@ def _capture(
         corpus_hash,
         policy,
         skipped=(*discovery.skipped, *capture.unreadable),
+        inspected_entries=discovery.entries,
+        discovered_sources=len(candidates),
+        discovered_bytes=capture.total,
     )
 
 
