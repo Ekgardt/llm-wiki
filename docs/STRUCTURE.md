@@ -211,6 +211,18 @@ unqualified after a kernel OOM. Installation and full-cycle qualification are
 separate checks, and the windows must be remeasured after resource changes.
 Decision: `knowledge/notes/generation-measured-time-budget-decision-20261008.md`.
 
+### Full nightly diagnosis window (approved 2026-10-17)
+
+`doctor.nightly_seconds` and `LLM_WIKI_DOCTOR_NIGHTLY_SECONDS` use the existing
+positive-integer settings registry. The default preserves the previous 60-second
+compatibility profile; its sufficiency requires qualification for each vault.
+Both full nightly diagnosis and the scheduler whole-pass bound read this value
+for the selected vault. Reinstall managed scheduler definitions after changing it.
+Incomplete checks remain deferred and read failures remain failures. Requalify
+the budget after history growth, load, or resource changes; a larger timeout does
+not fix inefficient work. No new dependency, database, or runtime path is added.
+Decision: `knowledge/notes/nightly-full-health-budget-decision-20261017.md`.
+
 ## Approved compile, queue, health and nightly refactoring
 
 Approved 2026-10-17; implementation and installed qualification are pending.

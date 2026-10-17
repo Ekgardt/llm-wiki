@@ -232,7 +232,7 @@ def test_the_night_writes_the_health_report_session_start_reads(tmp_path, monkey
 
     payload = json.loads((tmp_path / "logs" / "doctor-report.json").read_text(encoding="utf-8"))
     assert payload["schema_version"] == "health-report/v1"
-    assert payload["report"]["budget"] == scheduled_nightly.HEALTH_REPORT_BUDGET_SECONDS
+    assert payload["report"]["budget"] == scheduled_nightly.setting_value("doctor.nightly_seconds", scheduled_nightly.ROOT)
     assert payload["written_at"].endswith("+00:00")
     assert lines == ["  health: ok"]
 

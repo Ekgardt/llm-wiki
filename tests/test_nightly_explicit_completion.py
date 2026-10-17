@@ -20,8 +20,8 @@ def test_scheduler_budget_uses_the_requested_vaults_compile_refresh(tmp_path):
 
 def test_nightly_waits_for_its_compile_process_not_detached_trigger():
     step = nightly._compile_step()
-    assert any(argument.endswith('/compile_memory.py') for argument in step.command)
-    assert not any(argument.endswith('/maybe_compile.py') for argument in step.command)
+    assert str(nightly.ROOT / 'scripts' / 'compile_memory.py') in step.command
+    assert str(nightly.ROOT / 'scripts' / 'maybe_compile.py') not in step.command
     assert step.timeout > nightly.compile_wait_seconds()
 
 
@@ -85,3 +85,41 @@ def test_incomplete_full_diagnosis_defers_nightly_completion(monkeypatch):
     log = nightly.StepLog(lambda message: None)
     assert nightly._post_compile_pass(lambda *args: 0, log) == 0
     assert log.deferred == ["full_health_incomplete"]
+
+
+def test_full_health_and_scheduler_share_the_configured_budget(tmp_path, monkeypatch):
+    import doctor
+    import install_control
+    previous = nightly.worst_case_seconds(tmp_path)
+    (tmp_path / "llm-wiki.toml").write_text("[doctor]\nnightly_seconds = 3600\n")
+    monkeypatch.setattr(nightly, "ROOT", tmp_path)
+    monkeypatch.setattr(nightly, "REPORTS_DIR", tmp_path / "logs")
+    seen = []
+    def diagnose(**kwargs):
+        seen.append(kwargs)
+        return {"checks": [], "overall_status": "ok"}
+    monkeypatch.setattr(doctor, "run_doctor", diagnose)
+    assert nightly._write_health_report(lambda message: None) == "complete"
+    assert seen[0]["time_budget_seconds"] == 3600
+    assert seen[0]["scope"] == "full"
+    assert nightly.worst_case_seconds(tmp_path) - previous == 3600 - 60
+    assert install_control.scheduler_limit_hours(tmp_path)["nightly"] * 3600 > nightly.worst_case_seconds(tmp_path)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "1.5"])
+def test_invalid_health_budget_is_reported_without_running_doctor(tmp_path, monkeypatch, value):
+    import doctor
+    monkeypatch.setenv("LLM_WIKI_DOCTOR_NIGHTLY_SECONDS", value)
+    monkeypatch.setattr(nightly, "ROOT", tmp_path)
+    seen = []
+    monkeypatch.setattr(doctor, "run_doctor", lambda **kwargs: seen.append(kwargs))
+    lines = []
+    assert nightly._write_health_report(lines.append) == "failed"
+    assert seen == []
+    assert "LLM_WIKI_DOCTOR_NIGHTLY_SECONDS" in lines[0]
+
+
+def test_health_budget_environment_overrides_file(tmp_path, monkeypatch):
+    (tmp_path / "llm-wiki.toml").write_text("[doctor]\nnightly_seconds = 3600\n")
+    monkeypatch.setenv("LLM_WIKI_DOCTOR_NIGHTLY_SECONDS", "1800")
+    assert nightly.setting_value("doctor.nightly_seconds", tmp_path) == 1800

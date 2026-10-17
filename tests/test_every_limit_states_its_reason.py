@@ -38,6 +38,7 @@ REPLACED = {
     "retention.benchmark_run_days": 30,
     "retention.config_backup_days": 90,
     # Was COMPILE_PROVIDER_CEILING_S = 300; raised to 600 on the 2026-09-27 measurements.
+    "doctor.nightly_seconds": 60,
     "generation.nightly_seconds": 2131,
     "generation.post_compile_seconds": 2131,
     "provider.draft_ceiling_seconds": 600,
@@ -46,6 +47,7 @@ REPLACED = {
     "mcp.retrieval_seconds": 14,
 }
 RETIRED_NAMES = (
+    "HEALTH_REPORT_BUDGET_SECONDS",
     "MAX_PAGE_COUNT",
     "MAX_TOTAL_PAGE_BYTES",
     "MAX_SOURCE_COUNT",

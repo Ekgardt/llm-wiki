@@ -128,6 +128,7 @@ REGISTRY: tuple[Setting, ...] = (
     Setting("retention", "config_backup_days", 90, "days", "agent-config backups and displaced owned files undo an installer rewrite; the archive's 90 hot days"),
     Setting("generation", "nightly_seconds", 2131, "seconds", "107490-source measured full build exceeded 1812 s; plus 53 s validation scaled by corpus growth and 260 s collection variation; remeasure after growth (2026-10-08)"),
     Setting("generation", "post_compile_seconds", 2131, "seconds", "same complete generation builder and measured corpus as nightly; a 120 s window could not finish its 260 s collection (2026-10-08)"),
+    Setting("doctor", "nightly_seconds", 60, "seconds", "legacy bounded nightly inspection profile; insufficient for large retained history (507-1618 s measured 2026-10-17); configure and requalify against full checks, load and scheduler cost"),
     Setting("provider", "draft_ceiling_seconds", 600, "seconds", _DRAFT_CEILING_REASON),
     Setting("mcp", "retrieval_seconds", 14, "seconds", _RETRIEVAL_BUDGET_REASON, lower=5),
 )

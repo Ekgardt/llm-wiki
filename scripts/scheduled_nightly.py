@@ -596,7 +596,6 @@ def _post_compile_pass(run_step, log) -> int:
 # Issue #23.5: session start allows the doctor 0.1 s and said "not measured"
 # every morning. The night has the time; the morning reads what it wrote.
 HEALTH_REPORT_NAME = "doctor-report.json"
-HEALTH_REPORT_BUDGET_SECONDS = 60
 # `maintenance_helpers.wait_for_compile_idle`: three tries, ten seconds each.
 COMPILE_IDLE_WAIT_SECONDS = 30
 
@@ -623,7 +622,8 @@ def worst_case_seconds(root: Path | None = None) -> float:
 
     steps = [*_intake_steps(), _fact_keys_step(), _compile_step(root), *_post_compile_steps()]
     waits = COMPILE_IDLE_WAIT_SECONDS
-    budgets = setting_value("generation.nightly_seconds", ROOT if root is None else root) + HEALTH_REPORT_BUDGET_SECONDS
+    selected_root = ROOT if root is None else root
+    budgets = setting_value("generation.nightly_seconds", selected_root) + setting_value("doctor.nightly_seconds", selected_root)
     tail = MAINTENANCE_TAIL_BUDGET_SECONDS + UPDATE_SECONDS
     return float(sum(step.timeout for step in steps) + waits + budgets + tail)
 
@@ -634,7 +634,7 @@ def _write_health_report(log) -> str:
 
     try:
         report = run_doctor(
-            root=ROOT, state_root=STATE_ROOT, time_budget_seconds=HEALTH_REPORT_BUDGET_SECONDS, scope="full"
+            root=ROOT, state_root=STATE_ROOT, time_budget_seconds=setting_value("doctor.nightly_seconds", ROOT), scope="full"
         )
         payload = {
             "schema_version": "health-report/v1",
