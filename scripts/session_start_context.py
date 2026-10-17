@@ -113,15 +113,25 @@ def _claim_is_live(existing: dict, today: str, now: datetime) -> bool:
     return expires_at is not None and expires_at > now
 
 
+def _nightly_attempted_today(state: dict, today: str) -> bool:
+    """The daily cadence counts recorded attempts; success stays a separate fact."""
+    dates = (
+        str(state.get("last_nightly_date", ""))[:10],
+        _state_map(state, "last_nightly_result").get("date"),
+        _state_map(state, "last_nightly_failure").get("date"),
+    )
+    return today in dates
+
+
 def _claim_nightly_catchup(today: str | None = None, now: str | None = None) -> bool:
-    """Atomically reserve today's catchup when no nightly completed today."""
+    """Atomically reserve today's catchup when no nightly attempt was recorded."""
     today = _today_iso(today)
     claimed_at = _parse_iso_safe(now) or datetime.now(timezone.utc)
     claimed = False
 
     def _mutate(state: dict) -> None:
         nonlocal claimed
-        if str(state.get("last_nightly_date", ""))[:10] == today:
+        if _nightly_attempted_today(state, today):
             return
         if _claim_is_live(_state_map(state, "nightly_catchup_claim"), today, claimed_at):
             return

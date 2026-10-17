@@ -20,6 +20,19 @@ def test_deferred_night_does_not_advance_last_success(monkeypatch):
     assert 'nightly_catchup_claim' not in state
 
 
+@pytest.mark.parametrize('failures,deferred', [(0, ('compile_busy',)), (0, ('full_health_incomplete',)), (1, ())])
+def test_recorded_attempt_does_not_repeat_on_each_session(monkeypatch, failures, deferred):
+    import session_start_context as context
+
+    state = {'last_nightly_date': '2026-10-16'}
+    monkeypatch.setattr(nightly, 'update_state', lambda mutate: mutate(state))
+    monkeypatch.setattr(context, 'update_state', lambda mutate, **kwargs: mutate(state))
+    nightly._record_nightly_result('2026-10-17', failures, deferred=deferred)
+    assert context._claim_nightly_catchup('2026-10-17') is False
+    assert state['last_nightly_date'] == '2026-10-16'
+    assert context._claim_nightly_catchup('2026-10-18') is True
+
+
 @pytest.mark.parametrize("child_result", [0, 1, 2])
 @pytest.mark.parametrize("historical_status", ["ok", "error", "running"])
 def test_only_this_child_result_controls_dependent_steps(monkeypatch, child_result, historical_status):

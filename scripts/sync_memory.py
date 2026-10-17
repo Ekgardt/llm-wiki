@@ -151,7 +151,7 @@ def _missing_files(*paths: Path) -> list[str]:
 
 
 def _baseline_declared(project_text: str, lock_text: str) -> bool:
-    return "mcp>=1.29,<2" in project_text and 'name = "mcp"' in lock_text
+    return "mcp>=1.30,<2" in project_text and 'name = "mcp"' in lock_text
 
 
 def _dependency_inputs_error(root: Path) -> dict | None:

@@ -388,6 +388,10 @@ cron and sleep policy.
 When a night is missed entirely, the next session start asks for it: the maintenance
 pass a session start already spawns runs that day's nightly once, claimed in
 `run/state.json` so two sessions cannot both run it.
+A recorded failure or deferral also counts as that day's attempt: opening another
+session does not repeat the whole pass. The failure remains visible, and you can
+run `scripts/scheduled_nightly.py` explicitly after resolving its cause. An expired
+claim without a recorded outcome remains retryable after an interrupted launch.
 
 Two of the four backends can kill a pass that overruns: the systemd timer carries
 `TimeoutStartSec` and the Windows task an `ExecutionTimeLimit`, 4 hours nightly and 6 hours
