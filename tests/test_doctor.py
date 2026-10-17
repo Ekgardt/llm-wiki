@@ -469,7 +469,7 @@ def test_the_cli_accepts_a_larger_time_budget_and_refuses_an_impossible_one(
 
     def record(**kwargs):
         seen.update(kwargs)
-        return {"overall_status": "ok", "repaired": [], "checks": []}
+        return {"overall_status": "ok", "repaired": [], "checks": [], "scope": kwargs["scope"]}
 
     monkeypatch.setattr(doctor, "run_doctor", record)
 
@@ -480,6 +480,9 @@ def test_the_cli_accepts_a_larger_time_budget_and_refuses_an_impossible_one(
         (0, 45.0),
         (0, doctor.DEFAULT_TIME_BUDGET_SECONDS),
     )
+    assert seen["scope"] == "full"
+    assert doctor.main(["--scope", "operational"]) == 0
+    assert seen["scope"] == "operational"
     with pytest.raises(SystemExit):
         doctor.main(["--time-budget", "0"])
     assert "positive" in capsys.readouterr().err

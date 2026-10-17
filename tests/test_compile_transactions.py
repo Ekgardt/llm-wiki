@@ -2743,3 +2743,59 @@ def test_live_handoff_ledger_restore_does_not_hide_assessed_bytes(vault, monkeyp
     # Two assessments plus the established post-commit rebuild.
     assert len(calls) == 3
     assert state.read_bytes() == original_bytes
+
+
+def test_partial_commit_preserves_failure_for_identical_uncommitted_part(vault):
+    from dataclasses import replace
+
+    import compile_memory as cm
+    from memory_queue import MemoryQueue
+
+    root, state_root = vault
+    daily = _daily(root)
+    block = b'## [10:00:00] session-end | manual\n' + b'x' * 10000 + b'\n'
+    daily.write_bytes(block * 2)
+    inputs = cm.snapshot_compile_inputs([daily])
+    first, second = inputs.dailies
+    assert first.sha256 == second.sha256
+    queue = MemoryQueue(state_root)
+    queue.record_source_failure(first.logical_path, first.sha256, error_code='refused', producer='compile')
+    cm.apply_compile_plan(
+        replace(inputs, dailies=(first,)),
+        {'schema_version': 'compile-plan/v2', 'operations': []},
+        action_key='e' * 64, trigger='manual',
+        coordinator=MarkdownCoordinator(root, state_root), completed_at='2026-07-14T12:00:00Z',
+    )
+    assert queue.source_failure(first.logical_path, first.sha256) is not None
+
+
+def _publish_empty_contextual_batch(cm, inputs, coordinator, key):
+    batch = cm.pack_compile_batches(inputs, model=None)[0]
+    return cm.apply_compile_plan(
+        batch.inputs, {'schema_version': 'compile-plan/v2', 'operations': []},
+        action_key=key * 64, trigger='manual', coordinator=coordinator, batch=batch,
+        provider_budget={'provider': 'fake', 'model': 'test', 'max_output_tokens': 4000},
+    )
+
+
+def test_contextual_receipts_resolve_identical_occurrences_only_after_both_commits(vault):
+    import compile_memory as cm
+    from memory_queue import MemoryQueue
+
+    root, state_root = vault
+    daily = _daily(root)
+    block = b'## [10:00:00] session-end | manual\n' + b'x' * 10000 + b'\n'
+    daily.write_bytes(block * 2)
+    inputs = cm.snapshot_compile_inputs([daily])
+    first, second = inputs.dailies
+    queue = MemoryQueue(state_root)
+    queue.record_source_failure(first.logical_path, first.sha256, error_code='refused', producer='compile')
+    coordinator = MarkdownCoordinator(root, state_root)
+    _publish_empty_contextual_batch(cm, cm._inputs_with_parts(inputs, (first,)), coordinator, 'c')
+    assert queue.source_failure(first.logical_path, first.sha256) is not None
+    selection = cm._receipt_predicate(coordinator)
+    remaining = cm.snapshot_compile_inputs([daily], compiled=selection)
+    assert remaining.dailies == (second,)
+    _publish_empty_contextual_batch(cm, remaining, coordinator, 'd')
+    assert queue.source_failure(first.logical_path, first.sha256) is None
+    assert cm.daily_is_compiled(first.logical_path, daily.read_bytes(), cm._receipt_predicate(coordinator))

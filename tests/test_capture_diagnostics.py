@@ -281,10 +281,10 @@ def test_a_trail_writer_that_explodes_does_not_break_the_hook(
 def test_the_line_says_when_it_last_happened(diagnostics):
     """Nothing clears these counters, so an old loss must read as old."""
     module, state = diagnostics
-    module.record_capture_failure("compile_oversized_daily", "too big")
+    module.record_capture_failure("post_tool_append", "source write failed")
 
     line = module.capture_failure_line(state)
-    recorded = state["capture_failures"]["compile_oversized_daily"]["last_at"]
+    recorded = state["capture_failures"]["post_tool_append"]["last_at"]
 
     assert f"last at {recorded}" in line
     assert "--clear" in line

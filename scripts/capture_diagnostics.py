@@ -130,7 +130,8 @@ DURABLE_WORK_KINDS = frozenset({"adapter_capture_worker"})
 # kept the capture check red for tool errors (audit B-25,
 # docs/research/2026-09-25-a-tool-failure-is-not-a-lost-capture.md); they are
 # reported on their own.
-OPERATIONAL_KINDS = frozenset({"mcp_tool", "telemetry_event"})
+# Historical compile refusals retained their source; retain the diagnostic without calling it a lost capture.
+OPERATIONAL_KINDS = frozenset({"mcp_tool", "telemetry_event", "compile_oversized_daily"})
 
 
 class DurableWorkExhausted(RuntimeError):
@@ -532,7 +533,7 @@ def capture_failure_totals(state: dict) -> dict[str, int]:
 
 
 def operational_failure_totals(state: dict) -> dict[str, int]:
-    """Failed tool calls and telemetry writes per kind; not captures."""
+    """Failed operations per kind, including historical retained compile refusals."""
     return _lost_totals(_counter_entries(state, operational=True))
 
 
@@ -667,7 +668,7 @@ def _print_summary(state: dict) -> int:
     for kind, count in sorted(capture_deferred_totals(state).items()):
         print(f"{kind}: {count} deferred by a writer race (retried, not lost)")
     for kind, count in sorted(operational_failure_totals(state).items()):
-        print(f"{kind}: {count} failed (a tool or telemetry failure, not a capture)")
+        print(f"{kind}: {count} failed (an operation failure, not a lost capture)")
     if not totals:
         print("capture_diagnostics: no capture failures recorded")
         return 0

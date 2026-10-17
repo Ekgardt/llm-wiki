@@ -345,3 +345,39 @@ def test_complete_required_context_is_preserved_at_measured_platform_size(vault,
     assert source.content == original
     assert batch.packing.measured_input_tokens == count
     assert batch.packing.max_input_tokens == minimum
+
+
+def test_one_refused_part_keeps_independent_parts_of_its_day_packable(vault):
+    root, _state = vault
+    _part_version_inputs(root)
+    note = root / 'knowledge/notes/part-version.md'
+    note.write_bytes(note.read_bytes() + b'\n' + b'z' * 38000)
+    inputs = cm.snapshot_compile_inputs([root / 'knowledge/daily/2026-07-14.md'])
+
+    packable, refused = cm.partition_packable(inputs, model=None)
+
+    assert packable.dailies == inputs.dailies[:-1]
+    assert len(refused) == 1
+    assert refused[0].dailies == inputs.dailies[-1:]
+    assert note.read_bytes() in [source.content for source in refused[0].sources]
+    batches = cm.pack_compile_batches(packable, model=None)
+    assert tuple(part for batch in batches for part in batch.inputs.dailies) == packable.dailies
+    assert all(batch.packing.measured_input_tokens <= batch.packing.max_input_tokens
+               - batch.packing.reserved_output_tokens - batch.packing.safety_margin_tokens
+               for batch in batches)
+
+
+def test_refused_retained_source_is_compile_failure_not_capture_loss(vault, monkeypatch):
+    import capture_diagnostics
+    from memory_queue import MemoryQueue
+
+    root, state = vault
+    inputs = _large_required(root)
+    source = inputs.dailies[0]
+    captured = []
+    monkeypatch.setattr(capture_diagnostics, 'record_capture_failure', lambda *args, **kwargs: captured.append(args))
+    outcome = cm._refused_unit_outcome(inputs)
+    assert outcome.status == 1
+    assert MemoryQueue(state).source_failure(source.logical_path, source.sha256) is not None
+    assert (root / source.logical_path).read_bytes() == source.content
+    assert captured == []

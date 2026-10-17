@@ -211,6 +211,35 @@ unqualified after a kernel OOM. Installation and full-cycle qualification are
 separate checks, and the windows must be remeasured after resource changes.
 Decision: `knowledge/notes/generation-measured-time-budget-decision-20261008.md`.
 
+## Approved compile, queue, health and nightly refactoring
+
+Approved 2026-10-17; implementation and installed qualification are pending.
+The decision is `knowledge/notes/compile-queue-health-nightly-refactoring-decision-20261017.md`;
+the design and research are in
+`docs/research/2026-10-17-compile-queue-health-nightly-refactoring.md`.
+
+Compile planning preserves complete verified source units and required context.
+An independently refused unit does not prevent other units from completing;
+the day remains incomplete until every required disposition is confirmed.
+Provider capacity and a preferred working batch size are distinct. Unknown
+provider capacity is never represented as verified. Existing receipts, source
+hashes, transactional publication and at-least-once queue delivery remain.
+
+The approved health interface is `doctor --scope full|operational`, defaulting
+to `full`. Automatic session context and MCP explicitly request `operational`.
+Reports state their scope and coverage; operational health neither certifies
+historical integrity nor grants runtime deletion eligibility. Complete SQLite,
+foreign-key, semantic, artifact and source checks remain in the full scope.
+The existing `logs/doctor-report.json` continues to hold the full nightly
+report; an operational observation does not overwrite it. Consumers and the
+report schema change together.
+
+Nightly maintenance remains one dependency-ordered pass. Its overall result
+distinguishes completion, deferral and failure, and refers to the actual
+compile work rather than inferring success from unrelated global timestamps.
+No database, daemon, dependency or runtime root is added. A queue schema/index
+migration, if needed, requires its own approved migration design.
+
 ## External integration configuration preimages
 
 Claude and Codex configuration merges may create byte-exact sibling preimages

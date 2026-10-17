@@ -76,10 +76,13 @@ def test_the_unmeasured_block_carries_the_nightly_line(tmp_path, monkeypatch) ->
         {"last_nightly_status": "failed", "last_nightly_date": "2026-08-30"},
     )
 
-    block = session_start_context._unmeasured_health_block(9, 18)
+    block = session_start_context._operational_health_block({
+        "overall_status": "degraded",
+        "checks": [{"details": {"budget_exhausted": True}}] * 9 + [{"status": "ok"}] * 9,
+    })
 
     assert "nightly maintenance is failing" in block
-    assert "9 of 18 checks" in block
+    assert "9 of 18" in block
 
 
 def _stored_report(tmp_path, monkeypatch, written_at: str, status: str = "degraded") -> None:
@@ -95,13 +98,14 @@ def _stored_report(tmp_path, monkeypatch, written_at: str, status: str = "degrad
     )
 
 
-def test_session_start_reads_the_nightly_report_instead_of_measuring(tmp_path, monkeypatch) -> None:
+def test_session_start_labels_the_historical_nightly_report(tmp_path, monkeypatch) -> None:
     """Issue #23.5: 'not measured' every morning on a healthy vault."""
     from datetime import datetime, timedelta, timezone
 
     written = datetime.now(timezone.utc) - timedelta(hours=6)
     _stored_report(tmp_path, monkeypatch, written.isoformat(timespec="seconds"))
 
+    monkeypatch.setattr(session_start_context, "_measured_health_block", lambda: "")
     block = session_start_context.health_block()
 
     assert "index (degraded): stale" in block
@@ -114,6 +118,7 @@ def test_a_healthy_nightly_report_says_nothing(tmp_path, monkeypatch) -> None:
 
     _stored_report(tmp_path, monkeypatch, datetime.now(timezone.utc).isoformat(), status="ok")
 
+    monkeypatch.setattr(session_start_context, "_measured_health_block", lambda: "")
     assert session_start_context.health_block() == ""
 
 

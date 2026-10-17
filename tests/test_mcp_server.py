@@ -2422,6 +2422,9 @@ class TestHandleToolCall:
             captured.append(kwargs)
             return {
                 "overall_status": "ok",
+                "scope": "operational",
+                "coverage": {"retained_history": "not_checked"},
+                "generated_at": "2026-10-17T00:00:00+00:00",
                 "checks": [],
                 "counts": {"ok": 0, "degraded": 0, "error": 0},
                 "run_deletion": {"blockers": []},
@@ -2436,6 +2439,8 @@ class TestHandleToolCall:
         assert envelope["data"]["overall_status"] == "ok"
         assert captured[0]["deadline"] == 100.0 + mcp_server.MCP_OPERATION_SECONDS
         assert "time_budget_seconds" not in captured[0]
+        assert captured[0]["scope"] == "operational"
+        assert envelope["data"]["coverage"]["retained_history"] == "not_checked"
 
     def test_recall_exposes_validated_planner_trace_and_component_generation(self, monkeypatch):
         import mcp_server

@@ -1093,38 +1093,28 @@ def _report_stage_detail(stage: str, failure: str, detail: str) -> None:
     )
 
 
-def _record_oversized_daily(logical_path: str) -> None:
-    """Leave a durable trace of a daily log the compiler cannot take as one piece."""
-    try:
-        from capture_diagnostics import record_capture_failure
-
-        record_capture_failure(
-            "compile_oversized_daily",
-            f"{logical_path} exceeds the compile input budget and was not compiled",
-        )
-    except Exception:  # noqa: BLE001 - diagnostics never break a compile
-        pass
-
-
-def _without_days(inputs: CompileInputs, days: set[str]) -> CompileInputs:
-    """These inputs with the named days removed, as parts and as sources."""
-    if not days:
+def _inputs_with_parts(inputs: CompileInputs, parts: tuple) -> CompileInputs:
+    """Keep complete selected units and all their available contextual sources."""
+    if parts == inputs.dailies:
         return inputs
-    return _filtered_compile_days(inputs, days)
+    omitted = _part_logical_paths(inputs.dailies) - _part_logical_paths(parts)
+    return replace(inputs, dailies=parts,
+                   sources=tuple(source for source in inputs.sources if source.logical_path not in omitted))
 
 
-def _filtered_compile_days(inputs, days):
-    return replace(
-        inputs,
-        dailies=tuple(item for item in inputs.dailies if item.logical_path not in days),
-        sources=tuple(item for item in inputs.sources if item.logical_path not in days),
-    )
+def _part_logical_paths(parts):
+    return {part.logical_path for part in parts}
 
 
-def _only_day(inputs: CompileInputs, day: str) -> CompileInputs:
-    """One day's parts and source, for recording a failure against that day alone."""
-    others = {item.logical_path for item in inputs.dailies} - {day}
-    return _without_days(inputs, others)
+def _partition_compile_units(inputs, budget, measure):
+    accepted = []
+    refused = []
+    for unit in _native_part_units(inputs.dailies):
+        if _unit_is_refused(unit, budget, measure):
+            refused.append(_inputs_with_parts(inputs, tuple(unit)))
+            continue
+        accepted.extend(unit)
+    return _inputs_with_parts(inputs, tuple(accepted)), tuple(refused)
 
 
 def partition_packable(
@@ -1134,25 +1124,16 @@ def partition_packable(
     token_adapters: Mapping[str, TokenCounter] | None = None,
     planning_candidates: tuple | None = None,
 ) -> tuple[CompileInputs, tuple[CompileInputs, ...]]:
-    """The days the budget can take, and each day it cannot, apart.
-
-    A part that does not fit refused the whole pack, so one oversized day
-    stopped the compile of every other day in the run. The refused days now
-    fail alone and the rest pack as before. See
-    `docs/research/2026-09-28-a-long-entry-is-cut-inside-itself.md`.
-    """
+    """Admit independent atomic units; retain each refused unit for durable failure reporting."""
     budget = _compile_budget(model)
     measure = _batch_measure(inputs, model, token_adapters)
     _attach_required_context(measure, inputs, planning_candidates)
-    refused = sorted({unit[0].logical_path for unit in _native_part_units(inputs.dailies)
-                      if _unit_is_refused(unit, budget, measure)})
-    return _without_days(inputs, set(refused)), tuple(_only_day(inputs, day) for day in refused)
+    return _partition_compile_units(inputs, budget, measure)
 
 
-def _refused_day_outcome(day: CompileInputs, *, deadline: float = math.inf) -> BatchOutcome:
-    """A day no part budget can take fails alone, recorded like any failed batch."""
+def _refused_unit_outcome(day: CompileInputs, *, deadline: float = math.inf) -> BatchOutcome:
+    """A retained atomic unit fails alone, recorded like any failed batch."""
     path = day.dailies[0].logical_path
-    _record_oversized_daily(path)
     refusal = ValueError(f"daily source exceeds compile input budget: {path}")
     return BatchOutcome(_record_failed_batch(day, refusal, deadline=deadline))
 
@@ -1884,7 +1865,6 @@ def _qualified_same_day_join(parts, unit, partitions, source_bound):
 def _require_unit_fits(unit, budget, measure):
     if not _unit_is_refused(unit, budget, measure):
         return
-    _record_oversized_daily(unit[0].logical_path)
     raise ValueError("daily source exceeds compile input budget")
 
 
@@ -1902,23 +1882,6 @@ def _atomic_unit_budget(unit, target, measured, *, partitions=None):
     _require_native_unit(unit, partitions=partitions)
     minimum = measured + target.reserved_output_tokens + target.safety_margin_tokens
     return replace(target, max_input_tokens=max(target.max_input_tokens, minimum))
-
-
-def _require_daily_fits(
-    daily: DailySnapshot,
-    budget: ContextBudget,
-    measure: Callable[..., int],
-) -> None:
-    """Refuse a day the budget cannot take.
-
-    A day is already split by bytes before it gets here, so one part that still
-    will not fit means the budget cannot take this day at all. That is the
-    refusal the transactional tests pin, and it names the file.
-    """
-    if measure({daily.part_key}) <= budget.available_input_tokens:
-        return
-    _record_oversized_daily(daily.logical_path)
-    raise ValueError("daily source exceeds compile input budget")
 
 
 def _fitting_context(
@@ -6294,7 +6257,7 @@ class _ApplyPlan:
             return None
         operation_id, action_key = _receipt_authority(receipts)
         transaction, sequence = _transaction_authority(self.coordinator, operation_id, deadline=self.deadline)
-        _clear_compile_source_failures(self.inputs, self.coordinator.state_root, deadline=self.deadline)
+        _clear_compile_source_failures(self.inputs, self.coordinator, deadline=self.deadline)
         return CompileApplyResult(
             transaction.id,
             operation_id,
@@ -6728,7 +6691,7 @@ class _ApplyPlan:
             self.coordinator, self.operation_id, deadline=self.deadline
         )
         _rebuild_claim_index(self.claim_index)
-        _clear_compile_source_failures(self.inputs, self.coordinator.state_root, deadline=self.deadline)
+        _clear_compile_source_failures(self.inputs, self.coordinator, deadline=self.deadline)
         return CompileApplyResult(
             committed.id,
             self.operation_id,
@@ -7696,7 +7659,7 @@ def _run(
         failed = BatchOutcome(_record_failed_batch(inputs, exc, deadline=deadline))
         return _finish_run(args, [failed])
 
-    outcomes: list[BatchOutcome] = [_refused_day_outcome(day, deadline=deadline) for day in refused]
+    outcomes: list[BatchOutcome] = [_refused_unit_outcome(day, deadline=deadline) for day in refused]
     for batch in batches:
         # A failed batch is recorded against its sources and the run goes on:
         # batches are independent snapshots, and stopping here held every later
@@ -8189,12 +8152,42 @@ def _current_source_digests(
     return frozenset({sha256_bytes(content), *parts})
 
 
-def _clear_compile_source_failures(inputs: CompileInputs, state_root: Path, *, deadline: float = math.inf) -> None:
+def _clear_compile_source_failures(inputs: CompileInputs, coordinator: MarkdownCoordinator, *, deadline: float = math.inf) -> None:
+    """Clear only when this verified commit or prior receipts cover every occurrence."""
     _require_compile_active(deadline, None)
-    queue = active_or_legacy_memory_queue(ROOT, state_root, deadline=deadline)
+    queue = active_or_legacy_memory_queue(ROOT, coordinator.state_root, deadline=deadline)
+    compiled = _existing_receipt_selection(None, coordinator, deadline)
+    failures = set(queue.source_failure_keys(deadline=deadline))
     for source in inputs.dailies:
         _require_compile_active(deadline, None)
+        _clear_recorded_source_failure(queue, source, inputs, compiled, failures, deadline)
+
+
+def _clear_recorded_source_failure(queue, source, inputs, compiled, failures, deadline):
+    if (source.logical_path, source.sha256) not in failures:
+        return
+    if _failure_digest_resolved(source, inputs, compiled):
         queue.clear_source_failure(source.logical_path, source.sha256, deadline=deadline)
+
+
+def _failure_digest_resolved(source, inputs, compiled):
+    current = compiled._source_parts(source.logical_path)
+    matching = _parts_with_digest(current, source.sha256)
+    committed = _committed_part_descriptors(inputs, source.logical_path)
+    return bool(matching) and all(_part_resolved_by_commit(part, committed, compiled) for part in matching)
+
+
+def _parts_with_digest(parts, digest):
+    return [part for part in parts if part.sha256 == digest]
+
+
+def _committed_part_descriptors(inputs, logical_path):
+    return [_v4_source_descriptor(part) for part in inputs.dailies if part.logical_path == logical_path]
+
+
+def _part_resolved_by_commit(part, committed, compiled):
+    """The caller already verified this commit; prior commits still require their receipt."""
+    return any(compiled._context_matches(source, part) for source in committed) or compiled.matches(part)
 
 
 def merge_compile_diagnostics(

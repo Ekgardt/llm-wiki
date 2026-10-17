@@ -409,15 +409,23 @@ def _spawn_claimed(closed_days_only: bool = False) -> tuple[bool, bool, str]:
     return (True, False, f"spawned compile pid={pid}")
 
 
-def status() -> dict:
-    """Snapshot for the metacognitive block."""
+def process_status() -> dict:
+    """Inspect process ownership without reading sources or receipt history."""
     is_running, reason = _is_compile_running()
     return {
         "compile_running": is_running,
         "reason": reason,
-        "pending_work": _has_pending_work() if not is_running else False,
         "lock_file": str(LOCK_FILE),
     }
+
+
+def status() -> dict:
+    """Full snapshot for the metacognitive block, including pending work."""
+    snapshot = process_status()
+    snapshot["pending_work"] = False
+    if not snapshot["compile_running"]:
+        snapshot["pending_work"] = _has_pending_work()
+    return snapshot
 
 
 def main() -> int:

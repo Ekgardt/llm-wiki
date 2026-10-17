@@ -5818,7 +5818,7 @@ def _capture_loss_result(lost: int, live: bool, details: dict) -> dict:
 
 
 def _tool_failure_check(state_root: Path, deadline: float) -> dict:
-    """Report failed tool calls and telemetry writes, which are not lost captures.
+    """Report failed operations, including retained historical compile refusals.
 
     They share the capture trail and were counted as lost captures (audit B-25,
     docs/research/2026-09-25-a-tool-failure-is-not-a-lost-capture.md).
@@ -5840,13 +5840,13 @@ def _tool_failure_check(state_root: Path, deadline: float) -> dict:
         "state_error": state_error,
     }
     if state_error:
-        return _result("tools", "ok", "Tool failures could not be read; the capture check says why.", details)
+        return _result("tools", "degraded", "Operational failure diagnostics could not be read.", details)
     if not operational_failure_is_live(state):
-        return _result("tools", "ok", f"{failed} tool failure(s) recorded, none recently.", details)
+        return _result("tools", "ok", f"{failed} operation failure(s) recorded, none recently.", details)
     return _result(
         "tools",
         "degraded",
-        f"{failed} tool call(s) or telemetry write(s) have failed in total; the last at "
+        f"{failed} operation failure(s) recorded in total; the last at "
         f"{details['last_at']}, within the last seven days. See `logs/capture-failures.jsonl`.",
         details,
     )
@@ -5972,7 +5972,7 @@ def _near_ceilings(root: Path, values: dict) -> dict:
     return {name: use for name, use in uses.items() if use["share"] >= CEILING_WARNING_SHARE}
 
 
-def _capture_check(root: Path, state_root: Path, deadline: float) -> dict:
+def _capture_check(root: Path, state_root: Path, deadline: float, *, adoption=None) -> dict:
     """Report captures the hooks lost, so a silent loss is visible in health."""
     from capture_diagnostics import (
         capture_deferred_totals,
@@ -6002,7 +6002,7 @@ def _capture_check(root: Path, state_root: Path, deadline: float) -> dict:
             + state_size_hint(state_root),
             details,
         )
-    adoption, details["adoption_error"] = _adoption_state(root, state_root)
+    adoption, details["adoption_error"] = adoption or _adoption_state(root, state_root)
     details["adoption_state"] = adoption
     return _adoption_result(adoption, details) or _capture_loss_result(lost, live, details)
 
@@ -6761,11 +6761,23 @@ def _nightly_result(
 ) -> dict:
     status = state.get("last_nightly_status")
     last_date = str(state.get("last_nightly_date", ""))[:10]
-    if status == "failed":
-        return _result("scheduler", "error", "Last nightly maintenance failed.", details)
+    problem = _nightly_recorded_problem(status, details)
+    if problem is not None:
+        return problem
     if not status or not last_date:
         return _never_ran_result(installed, now, details)
     return _nightly_freshness_result(state, status, last_date, now, details)
+
+
+def _nightly_recorded_problem(status, details):
+    problems = {
+        "failed": ("error", "Last nightly maintenance failed."),
+        "deferred": ("degraded", "Nightly maintenance was deferred; completion is not verified."),
+    }
+    problem = problems.get(status)
+    if problem is None:
+        return None
+    return _result("scheduler", problem[0], problem[1], details)
 
 
 # The first nightly after an install is due within one schedule period (the pass
@@ -9767,6 +9779,140 @@ def _unfinished_when_late(check: dict, deadline: float) -> dict:
     return unfinished
 
 
+def _validate_health_scope(scope, repair, rebuild_generation):
+    if scope not in {"full", "operational"}:
+        raise ValueError("doctor scope must be full or operational")
+    if scope != "full" and (repair or rebuild_generation):
+        raise ValueError("doctor repairs require full scope")
+
+
+def _operational_adoption_check(root, state_root, deadline):
+    from installed_memory_repair import require_reliability_v3_admission
+    from markdown_transaction import _reliability_v3_records_present
+
+    if not _reliability_v3_records_present(state_root):
+        return _result("adoption", "degraded", "Reliability V3 admission is absent.", {"adopted": False})
+    require_reliability_v3_admission(root=root, state_root=state_root, deadline=deadline)
+    return _result("adoption", "ok", "Current writer admission verified; retained content not certified.",
+                   {"adopted": True, "retained_history": "not_checked"})
+
+
+_OPERATIONAL_STORES = {
+    "queue": ("queue", "SELECT state, COUNT(*) FROM tasks GROUP BY state", QUEUE_STATES),
+    "transactions": ("coordinator", 'SELECT state, COUNT(*) FROM "transaction" GROUP BY state', TRANSACTION_STATES),
+}
+_OPERATIONAL_EXCLUDED = ("archives", "claims", "backup", "checkpoints", "mcp", "integrations", "pyright", "generation")
+
+
+def _operational_store_details(state_root, name, deadline):
+    database_name, query, _states = _OPERATIONAL_STORES[name]
+    path = _operational_database_path(state_root, database_name)
+    with closing(_readonly_database(path, state_root, deadline=deadline)) as database:
+        database.execute("BEGIN")
+        details = {"states": dict(database.execute(query).fetchall()), "retained_history": "not_checked"}
+        if name == "queue":
+            details["source_failures"] = database.execute("SELECT COUNT(*) FROM source_failures").fetchone()[0]
+            details["dead_unresolved"] = database.execute(
+                "SELECT COUNT(*) FROM tasks AS dead WHERE dead.state='dead' AND NOT EXISTS "
+                "(SELECT 1 FROM tasks AS retry WHERE retry.redrive_of=dead.id AND retry.state!='cancelled')"
+            ).fetchone()[0]
+        return details
+
+
+def _operational_store_status(name, details):
+    states = details["states"]
+    if set(states) - set(_OPERATIONAL_STORES[name][2]):
+        return "error"
+    needs_attention = details.get("source_failures", 0) + details.get("dead_unresolved", 0)
+    needs_attention += sum(states.get(state, 0) for state in ("blocked", "quarantined", "conflicted"))
+    if needs_attention:
+        return "degraded"
+    return "ok"
+
+
+def _operational_store_check(state_root, name, deadline):
+    details = _operational_store_details(state_root, name, deadline)
+    status = _operational_store_status(name, details)
+    message = f"Current {name} counts read; retained artifacts and historical outcomes not verified."
+    if status != "ok":
+        message = f"{name.title()} records need attention; see current counts and run full diagnosis."
+    return _result(name, status, message, details)
+
+
+def _operational_capture_check(root, state_root, deadline, adoption):
+    state = "unknown"
+    error = adoption["message"]
+    if adoption.get("details", {}).get("adopted"):
+        state = "adopted"
+        error = None
+    return _capture_check(root, state_root, deadline, adoption=(state, error))
+
+
+def _operational_runs(root, state, home, now, deadline, adoption):
+    return (
+        ("environment", lambda: _environment_check(root, state)),
+        ("runtime", lambda: _runtime_check(state)),
+        ("capture", lambda: _operational_capture_check(root, state, deadline, adoption)),
+        ("tools", lambda: _tool_failure_check(state, deadline)),
+        ("scheduler", lambda: _scheduler_check(root, state, now, deadline, home)),
+        ("models", _models_check),
+        ("settings", lambda: _settings_check(root)),
+        ("hooks", lambda: _hook_error_check(state, now)),
+        ("lsp", lambda: _lsp_runtime_check(state, now, deadline=deadline)),
+        ("filesystem", lambda: _filesystem_check(state, deadline)),
+        ("queue", lambda: _operational_store_check(state, "queue", deadline)),
+        ("transactions", lambda: _operational_store_check(state, "transactions", deadline)),
+    )
+
+
+def _collect_operational_checks(root, state, home, now, deadline):
+    adoption = _operational_isolated("adoption", lambda: _operational_adoption_check(root, state, deadline), deadline)
+    checks = [adoption]
+    for name, run in _operational_runs(root, state, home, now, deadline, adoption):
+        checks.append(_operational_isolated(name, run, deadline))
+    return checks
+
+
+def _operational_isolated(name, run, deadline):
+    return _isolated(name, lambda: _operational_check_before_deadline(name, run, deadline))
+
+
+def _operational_deadline_error(error, deadline):
+    timed = isinstance(error, TimeoutError) or getattr(error, "sqlite_errorcode", None) == sqlite3.SQLITE_INTERRUPT
+    return timed and _deadline_reached(deadline)
+
+
+def _operational_check_before_deadline(name, run, deadline):
+    if _deadline_reached(deadline):
+        return _unfinished_result(name)
+    try:
+        return run()
+    except (TimeoutError, sqlite3.OperationalError) as error:
+        if _operational_deadline_error(error, deadline):
+            return _unfinished_result(name)
+        raise
+
+
+def _checks_for_scope(scope, context, home):
+    collect = {"full": _collect_checks, "operational": _collect_operational_checks}[scope]
+    return collect(context.root_path, context.state_path, home, context.generated_at, context.deadline)
+
+
+def _deletion_for_scope(scope, context, checks):
+    if scope == "operational":
+        return _deletion_snapshot(["not_checked_in_operational_scope"])
+    return _run_deletion_check(context.state_path, context.generated_at, root=context.root_path,
+                               deadline=context.deadline, collected={check["id"]: check for check in checks})
+
+
+def _health_coverage(scope, checks):
+    return {
+        "retained_history": {"full": "requested", "operational": "not_checked"}[scope],
+        "excluded_checks": list(_OPERATIONAL_EXCLUDED) if scope == "operational" else [],
+        "unfinished_checks": [check["id"] for check in checks if check.get("details", {}).get("budget_exhausted")],
+    }
+
+
 def _collect_checks(
     root_path: Path,
     state_path: Path,
@@ -9890,6 +10036,7 @@ def run_doctor(
     now: datetime | None = None,
     time_budget_seconds: float = DEFAULT_TIME_BUDGET_SECONDS,
     deadline: float | None = None,
+    scope: str = "full",
 ) -> dict:
     """Return a JSON-safe local health report; mutate only with ``repair=True``.
 
@@ -9899,6 +10046,8 @@ def run_doctor(
     2026-09-27 C-1, docs/research/2026-09-27-a-read-only-doctor-says-what-it-touches.md).
     Every other file, and the state it describes, is left as it was.
     """
+    started = time.monotonic()
+    _validate_health_scope(scope, repair, rebuild_generation)
     root_path, state_path, home_path = _resolved_doctor_paths(root, state_root, home)
     generated_at = _as_utc(now)
     context = _RepairContext(
@@ -9915,21 +10064,16 @@ def run_doctor(
     if repair:
         _run_repairs(context)
 
-    checks = _collect_checks(
-        root_path, state_path, home_path, generated_at, context.deadline
-    )
+    checks = _checks_for_scope(scope, context, home_path)
     _apply_repair_outcomes(checks, context)
-    run_deletion = _run_deletion_check(
-        state_path,
-        generated_at,
-        root=root_path,
-        deadline=context.deadline,
-        collected={check["id"]: check for check in checks},
-    )
+    run_deletion = _deletion_for_scope(scope, context, checks)
     checks.append(_run_deletion_result(run_deletion))
     counts = _status_counts(checks)
     return {
         "schema_version": SCHEMA_VERSION,
+        "scope": scope,
+        "coverage": _health_coverage(scope, checks),
+        "duration_seconds": time.monotonic() - started,
         "generated_at": generated_at.isoformat(),
         "overall_status": _overall_status(counts),
         "repaired": context.repaired,
@@ -9980,6 +10124,8 @@ def main(argv: list[str] | None = None) -> int:
             f"a budget exhaustion (default {DEFAULT_TIME_BUDGET_SECONDS:g})."
         ),
     )
+    parser.add_argument("--scope", choices=("full", "operational"), default="full",
+                        help="Operational observations or full retained-history diagnosis (default full).")
     args = parser.parse_args(argv)
     if not math.isfinite(args.time_budget) or args.time_budget <= 0:
         parser.error("--time-budget must be a positive number of seconds")
@@ -9987,6 +10133,7 @@ def main(argv: list[str] | None = None) -> int:
         repair=args.repair or args.rebuild_generation,
         rebuild_generation=args.rebuild_generation,
         time_budget_seconds=args.time_budget,
+        scope=args.scope,
     )
     _print_report(report, args.json)
     return {"ok": 0, "degraded": 1, "error": 2}[report["overall_status"]]
@@ -10005,7 +10152,7 @@ def _print_report(report: dict, as_json: bool) -> None:
     if as_json:
         print(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False))
         return
-    print(f"LLM-Wiki doctor: {report['overall_status']}")
+    print(f"LLM-Wiki doctor ({report['scope']}): {report['overall_status']}")
     _print_text_details(report)
 
 

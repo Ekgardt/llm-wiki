@@ -3849,8 +3849,9 @@ def _doctor_status(context: dict) -> dict:
         root=context["root"],
         state_root=context["state_root"],
         deadline=context["deadline"],
+        scope="operational",
     )
-    return _operator_result(
+    result = _operator_result(
         "status",
         ids=[str(check["id"]) for check in report["checks"]][: context["limit"]],
         states=[str(report["overall_status"])],
@@ -3858,6 +3859,11 @@ def _doctor_status(context: dict) -> dict:
         counts={key: int(value) for key, value in report["counts"].items()},
         overall_status=str(report["overall_status"]),
     )
+
+    result["scope"] = report["scope"]
+    result["coverage"] = report["coverage"]
+    result["generated_at"] = report["generated_at"]
+    return result
 
 
 def _queue_database_path(context: dict) -> Path:
@@ -4215,7 +4221,7 @@ def _build_tool_definitions() -> list:
         ),
         _make_tool(
             name="doctor",
-            description="Check local vault health. Read-only unless repair is explicitly true.",
+            description="Read current operational vault health with explicit coverage, or perform a named operator action. Full historical diagnosis is available through doctor.py --scope full.",
             inputSchema=TOOL_INPUT_SCHEMAS["doctor"],
         ),
     ]

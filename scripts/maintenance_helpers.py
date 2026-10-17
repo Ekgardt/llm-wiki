@@ -394,7 +394,7 @@ def wait_for_compile_idle(log_fn) -> None:
     a previous compile (triggered by a hook) is still running.
     """
     for attempt in range(3):
-        st = maybe_compile.status()
+        st = maybe_compile.process_status()
         if not st["compile_running"]:
             return
         log_fn(f"  compile running ({st['reason']}), waiting 10s (attempt {attempt + 1}/3)...")

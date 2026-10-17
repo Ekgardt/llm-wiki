@@ -343,3 +343,35 @@ def test_has_pending_work_true_when_daily_not_in_state(fake_env):
     state_file.write_text("{}", encoding="utf-8")
 
     assert fake_env._has_pending_work() is True
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_maintenance_polling_never_scans_compile_backlog(fake_env, monkeypatch, running):
+    """Lifecycle polling must work even when receipt inspection cannot complete."""
+    import maintenance_helpers
+    import scheduled_nightly
+
+    def unavailable_backlog(*args, **kwargs):
+        raise TimeoutError("historical receipt inspection exhausted its budget")
+
+    monkeypatch.setattr(fake_env, "_is_compile_running", lambda: (running, "owner verdict"))
+    monkeypatch.setattr(fake_env, "_has_pending_work", unavailable_backlog)
+    monkeypatch.setattr(maintenance_helpers, "maybe_compile", fake_env)
+    monkeypatch.setattr(scheduled_nightly, "maybe_compile", fake_env)
+    sleeps = []
+    monkeypatch.setattr(maintenance_helpers.time, "sleep", sleeps.append)
+    messages = []
+
+    assert scheduled_nightly._compile_running() is running
+    maintenance_helpers.wait_for_compile_idle(messages.append)
+    assert len(sleeps) == (3 if running else 0)
+    assert len(messages) == len(sleeps)
+
+
+def test_full_compile_status_preserves_backlog_failures(fake_env, monkeypatch):
+    def unavailable_backlog(*args, **kwargs):
+        raise TimeoutError("receipt inspection failed")
+
+    monkeypatch.setattr(fake_env, "_has_pending_work", unavailable_backlog)
+    with pytest.raises(TimeoutError, match="receipt inspection failed"):
+        fake_env.status()

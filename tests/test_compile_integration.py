@@ -216,22 +216,6 @@ class TestSignificanceBudget:
         from impact_analysis import apply_significance_budget
         assert apply_significance_budget([]) == []
 
-def test_a_daily_that_does_not_fit_leaves_a_trace(tmp_path, monkeypatch) -> None:
-    """Refusing the pass is the contract; refusing it silently was not."""
-    import compile_memory
-
-    recorded: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        compile_memory,
-        "_record_oversized_daily",
-        lambda path: recorded.append(("skipped", path)),
-    )
-
-    compile_memory._record_oversized_daily("knowledge/daily/2026-08-21.md")
-
-    assert recorded == [("skipped", "knowledge/daily/2026-08-21.md")]
-
-
 def test_compile_only_reads_canonical_daily_logs() -> None:
     """The directory ships a README, and it is not a day."""
     import memory_state

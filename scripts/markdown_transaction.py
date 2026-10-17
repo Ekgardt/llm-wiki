@@ -1692,10 +1692,16 @@ def _require_v3_invariants(database: sqlite3.Connection) -> None:
 def _require_v3_integrity(database: sqlite3.Connection) -> None:
     integrity = database.execute("PRAGMA integrity_check").fetchall()
     foreign_keys = database.execute("PRAGMA foreign_key_check").fetchall()
-    if len(integrity) != 1 or integrity[0][0] != "ok" or foreign_keys:
+    if len(integrity) != 1 or integrity[0][0] != "ok":
         raise _coordinator_migration_error(
             "coordinator_v3_validation_failed",
-            "coordinator v3 database invariant failed",
+            "coordinator v3 database invariant failed: SQLite integrity_check "
+            "did not return ok",
+        )
+    if foreign_keys:
+        raise _coordinator_migration_error(
+            "coordinator_v3_validation_failed",
+            f"coordinator v3 database invariant failed: foreign-key violations: {len(foreign_keys)}",
         )
 
 

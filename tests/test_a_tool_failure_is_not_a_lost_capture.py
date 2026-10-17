@@ -43,3 +43,18 @@ def test_doctor_names_recent_tool_failures_under_tools(recorded, tmp_path, monke
     check = doctor._tool_failure_check(tmp_path, time.monotonic() + 5)
 
     assert (check["status"], check["details"]["kinds"]) == ("degraded", {"mcp_tool": 1})
+
+
+def test_historical_compile_refusal_remains_visible_without_claiming_capture_loss(recorded):
+    import copy
+
+    capture_diagnostics.record_capture_failure('compile_oversized_daily', 'retained source exceeds budget')
+    original = copy.deepcopy(recorded)
+    assert capture_diagnostics.capture_failure_totals(recorded) == {}
+    assert capture_diagnostics.operational_failure_totals(recorded) == {'compile_oversized_daily': 1}
+    assert recorded == original
+
+
+def test_unreadable_operational_diagnostics_are_not_reported_healthy(tmp_path, monkeypatch):
+    monkeypatch.setattr(doctor, '_read_state', lambda *args: ({}, True))
+    assert doctor._tool_failure_check(tmp_path, time.monotonic() + 5)['status'] == 'degraded'
