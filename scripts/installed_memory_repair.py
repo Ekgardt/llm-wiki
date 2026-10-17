@@ -20,6 +20,7 @@ import memory_queue
 from bounded_io import read_stable_bytes
 from install_control import validate_install_state
 from reliable_memory import (
+    DEFAULTS,
     OPERATIONAL_SCAN_BATCH_ROWS,
     OperationalDatabaseContract,
     canonical_json_bytes,
@@ -30,6 +31,7 @@ from reliable_memory import (
     operational_deadline_active,
     publish_runtime_file,
     read_runtime_bytes,
+    refresh_operational_deadline,
     sha256_bytes,
     streamed_rows,
     sync_runtime_directory,
@@ -1332,6 +1334,9 @@ def _capture_intent_rows(database: sqlite3.Connection, deadline: float) -> Itera
     after = ""
     while True:
         _check_deadline(deadline)
+        # Full evidence scans can outlive the doctor's short initial read wait.
+        # Reuse the queue's lock budget, clamped to this caller's remaining time.
+        refresh_operational_deadline(database, DEFAULTS.queue_busy_ms, deadline)
         rows = database.execute(
             "SELECT * FROM capture_intents WHERE intent_id > ? ORDER BY intent_id LIMIT ?",
             (after, OPERATIONAL_SCAN_BATCH_ROWS),

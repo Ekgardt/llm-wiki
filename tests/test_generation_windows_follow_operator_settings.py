@@ -59,7 +59,8 @@ def test_an_invalid_window_is_not_silently_ignored(monkeypatch):
 
 @pytest.mark.parametrize(('options', 'expected'), [
     ('-NightlyLimitHours 17 -WeeklyLimitHours 7', [[17, True], [7, True]]),
-    ('', [[4, True], [6, True]]),
+    ('', [[install_control.SCHEDULER_LIMIT_HOURS['nightly'], True],
+          [install_control.SCHEDULER_LIMIT_HOURS['weekly'], True]]),
 ])
 def test_powershell_registers_the_supplied_windows_limits(tmp_path, options, expected):
     from tests.powershell_literal import ps_literal

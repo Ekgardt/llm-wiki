@@ -1,6 +1,8 @@
 """Doctor filesystem inspection must not lock the adopted owner registry."""
 import sqlite3
+import threading
 import time
+from contextlib import closing
 from datetime import datetime, timezone
 
 import doctor
@@ -9,6 +11,67 @@ from markdown_transaction import MarkdownChange, active_markdown_coordinator
 
 from tests.adopted_vault import adopt
 from tests.slow_machine import LONG_TIMEOUT
+
+
+def test_full_capture_scan_waits_for_a_commit_within_its_deadline(tmp_path):
+    from installed_memory_repair import _capture_intent_rows
+
+    state = tmp_path.resolve()
+    path = state / "queue.sqlite3"
+    ready, start, querying, done = (threading.Event() for _ in range(4))
+    rows, errors = [], []
+
+    def trace(query):
+        if query.startswith("SELECT"):
+            querying.set()
+
+    def read():
+        deadline = time.monotonic() + LONG_TIMEOUT
+        with closing(doctor._readonly_database(path, state, deadline=deadline)) as database:
+            database.set_trace_callback(trace)
+            ready.set()
+            assert start.wait(LONG_TIMEOUT)
+            try:
+                rows.extend(_capture_intent_rows(database, deadline))
+            except sqlite3.OperationalError as error:
+                errors.append(error)
+            finally:
+                done.set()
+
+    with closing(sqlite3.connect(path, isolation_level=None)) as writer:
+        writer.execute("CREATE TABLE capture_intents(intent_id TEXT PRIMARY KEY)")
+        writer.execute("INSERT INTO capture_intents VALUES ('retained')")
+        worker = threading.Thread(target=read)
+        worker.start()
+        try:
+            assert ready.wait(LONG_TIMEOUT)
+            writer.execute("BEGIN EXCLUSIVE")
+            start.set()
+            assert querying.wait(LONG_TIMEOUT)
+            done.wait(2 * doctor.READ_BUSY_MS / 1000)
+        finally:
+            writer.rollback()
+            start.set()
+            worker.join(LONG_TIMEOUT)
+    assert not worker.is_alive()
+    assert errors == []
+    assert [row["intent_id"] for row in rows] == ["retained"]
+
+
+def test_capture_batch_lock_wait_shrinks_with_remaining_deadline(tmp_path, monkeypatch):
+    import installed_memory_repair as repair
+
+    state = tmp_path.resolve()
+    path = state / "queue.sqlite3"
+    with closing(sqlite3.connect(path, isolation_level=None)) as writer:
+        writer.execute("CREATE TABLE capture_intents(intent_id TEXT PRIMARY KEY)")
+        writer.execute("INSERT INTO capture_intents VALUES ('retained')")
+    with closing(doctor._readonly_database(path, state)) as database:
+        with monkeypatch.context() as patch:
+            patch.setattr(repair.time, "monotonic", lambda: 100.0)
+            assert next(repair._capture_intent_rows(database, 100.125))["intent_id"] == "retained"
+            wait_ms = database.execute("PRAGMA busy_timeout").fetchone()[0]
+    assert wait_ms == 125
 
 
 def _environment(tmp_path):
