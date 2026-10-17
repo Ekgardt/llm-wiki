@@ -115,6 +115,7 @@ def _rendered(tmp_path: Path, uv_dir: str) -> dict[str, bytes]:
 def _edit_service(tmp_path: Path, replace_from: str, replace_to: str) -> None:
     service = _units(tmp_path) / _SERVICE
     text = service.read_text(encoding="utf-8")
+    assert replace_from in text, "the fixture must actually change the installed service"
     service.write_text(text.replace(replace_from, replace_to, 1), encoding="utf-8")
 
 
@@ -195,7 +196,10 @@ def test_a_line_that_replaced_one_of_ours_is_reported_not_moved(tmp_path: Path) 
     runner = _FakeSystemd()
     (tmp_path / "state").mkdir()
     _install(tmp_path, "4.0.0", _schedule(tmp_path, runner, "old"))
-    _edit_service(tmp_path, "TimeoutStartSec=4h", "TimeoutStartSec=9h")
+    hours = install_control.scheduler_limit_hours(tmp_path / "vault")["nightly"]
+    original = f"TimeoutStartSec={hours}h"
+    changed = f"TimeoutStartSec={hours + 1}h"
+    _edit_service(tmp_path, original, changed)
     new = _schedule(tmp_path, runner, "new")
 
     [takeover] = install_takeover.keep_changed_whole_files(tmp_path / "state", [new])
@@ -205,7 +209,7 @@ def test_a_line_that_replaced_one_of_ours_is_reported_not_moved(tmp_path: Path) 
         takeover.unmoved,
         takeover.undone,
         _drop_in(tmp_path).exists(),
-    ) == ([], [f"{_SERVICE}: TimeoutStartSec=9h"], [f"{_SERVICE}: TimeoutStartSec=4h"], False)
+    ) == ([], [f"{_SERVICE}: {changed}"], [f"{_SERVICE}: {original}"], False)
 
 
 def test_a_drop_in_already_there_is_left_as_it_is(tmp_path: Path) -> None:

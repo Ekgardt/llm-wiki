@@ -394,7 +394,7 @@ run `scripts/scheduled_nightly.py` explicitly after resolving its cause. An expi
 claim without a recorded outcome remains retryable after an interrupted launch.
 
 Two of the four backends can kill a pass that overruns: the systemd timer carries
-`TimeoutStartSec` and the Windows task an `ExecutionTimeLimit`, 4 hours nightly and 6 hours
+`TimeoutStartSec` and the Windows task an `ExecutionTimeLimit`, 5 hours nightly and 6 hours
 weekly. A macOS LaunchAgent and a cron line have no such limit — launchd's `ExitTimeOut`
 bounds only how long it waits after asking a job to stop — so there a hung pass is not stopped
 on a clock: it keeps the maintenance fence until it exits, and the passes that meet it are
