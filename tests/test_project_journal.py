@@ -1805,6 +1805,48 @@ def test_recover_replays_reservation_left_before_prepare(
     assert len(journal_records(ProjectStore(vault, state_root))) == 1
 
 
+def test_checkpoint_honors_writer_wait_during_prepare(vault, state_root, monkeypatch):
+    # Make a lost explicit budget observable without a wall-clock sleep.
+    monkeypatch.setattr(markdown_transaction, "_WRITER_WAIT_SECONDS", 0)
+    store = ProjectStore(vault, state_root)
+    rival = ProjectStore(vault, state_root)
+    held, release = threading.Event(), threading.Event()
+    commit = store._committed_checkpoint
+    claim = store.coordinator._try_claim_legacy_gate
+    collisions = []
+
+    def hold():
+        with rival.coordinator.writer_gate():
+            held.set()
+            assert release.wait(LONG_TIMEOUT)
+
+    def contend(owner, deadline):
+        outcome = claim(owner, deadline)
+        if outcome is None:
+            collisions.append(owner)
+            release.set()
+        return outcome
+
+    def commit_with_rival(*args, **kwargs):
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(hold)
+            try:
+                assert held.wait(LONG_TIMEOUT)
+                return commit(*args, **kwargs)
+            finally:
+                release.set()
+                future.result(timeout=LONG_TIMEOUT)
+
+    monkeypatch.setattr(store.coordinator, "_try_claim_legacy_gate", contend)
+    monkeypatch.setattr(store, "_committed_checkpoint", commit_with_rival)
+    receipt = store.checkpoint(
+        "demo", checkpoint_event(), "agent", writer_wait_seconds=LONG_TIMEOUT,
+    )
+    assert collisions
+    assert receipt.sequence == 1
+    assert len(journal_records(store)) == 1
+
+
 def test_simultaneous_projectors_append_once_per_event(vault: Path, state_root: Path):
     barrier = threading.Barrier(2)
 

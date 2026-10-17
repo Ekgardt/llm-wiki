@@ -6485,6 +6485,7 @@ class MarkdownCoordinator:
         _parent_transaction_id: str | None = None,
         deadline: float = float("inf"),
         cancelled: Callable[[], bool] | None = None,
+        writer_wait_seconds: float | None = None,
     ) -> TransactionRecord:
         self._require_operation_active(deadline, cancelled)
         _require_prepare_arguments(operation_id, changes, content_guard)
@@ -6494,7 +6495,10 @@ class MarkdownCoordinator:
             project_reservation, operation_id, persisted_preconditions
         )
         request_hash = self._request_hash(normalized, persisted_preconditions)
-        self.recover(deadline=deadline, cancelled=cancelled)
+        self.recover(
+            deadline=deadline, cancelled=cancelled,
+            writer_wait_seconds=writer_wait_seconds,
+        )
         self._require_operation_active(deadline, cancelled)
         existing = self._existing_bound_record(operation_id, request_hash)
         if existing is not None:

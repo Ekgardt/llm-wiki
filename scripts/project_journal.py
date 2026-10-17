@@ -2735,19 +2735,23 @@ class ProjectStore:
             writer_wait_seconds,
         )
 
-    def _checkpoint_writer_gate(self, lease: ProjectLease):
-        """The gate this store already owns, or none at all before adoption.
+    def _checkpoint_writer_gate(
+        self, lease: ProjectLease, writer_wait_seconds: float | None
+    ):
+        """Keep the caller's wait budget when lending the adopted owner's gate.
 
         The canonical registry allows one owner row per actor, and a v3 project
         lease is that row. Letting `prepare` claim a second `markdown-writer`
         row fails with `owner_identity_conflict`, so the adopted path lends the
         gate the owner it already holds, exactly as `mutate_owned_knowledge`
-        does for the capture worker. Before adoption there is no canonical
-        owner and `prepare` claims the legacy gate itself, as it always did.
+        does for the capture worker. Before adoption prepare and apply acquire
+        their own gate with the caller's budget, preserving their separate leases.
         """
         if lease._ownership is None:
             return contextlib.nullcontext()
-        return self.coordinator.writer_gate(owner=lease._ownership)
+        return self.coordinator.writer_gate(
+            owner=lease._ownership, wait_seconds=writer_wait_seconds
+        )
 
     def _committed_checkpoint(
         self,
@@ -2757,12 +2761,13 @@ class ProjectStore:
         preconditions: dict[str, object],
         writer_wait_seconds: float | None,
     ) -> CheckpointReceipt:
-        with self._checkpoint_writer_gate(lease):
+        with self._checkpoint_writer_gate(lease, writer_wait_seconds):
             transaction = self.coordinator.prepare(
                 changes,
                 operation_id=row.operation_id,
                 preconditions=preconditions,
                 project_reservation=row,
+                writer_wait_seconds=writer_wait_seconds,
             )
             return self._apply_checkpoint(
                 row, lease, transaction, writer_wait_seconds

@@ -135,6 +135,29 @@ def test_project_store_checkpoints_on_an_adopted_vault(
     assert receipt.transaction_id
 
 
+def test_adopted_checkpoint_preserves_owner_and_caller_wait(adopted_vault, monkeypatch):
+    from tests.slow_machine import LONG_TIMEOUT
+
+    root, state_root = adopted_vault
+    (root / "knowledge/projects/demo").mkdir(parents=True, exist_ok=True)
+    store = ProjectStore(root, state_root)
+    project = store.coordinator._project_nested_owner
+    observed = []
+
+    def observe(owner, wait_seconds):
+        observed.append(wait_seconds)
+        assert wait_seconds == LONG_TIMEOUT
+        return project(owner, wait_seconds)
+
+    monkeypatch.setattr(store.coordinator, "_project_nested_owner", observe)
+    receipt = store.checkpoint(
+        "demo", checkpoint_event(), "agent-a", writer_wait_seconds=LONG_TIMEOUT,
+    )
+    assert observed
+    assert receipt.sequence == 1
+    assert receipt.transaction_id
+
+
 def test_the_adopted_checkpoint_writes_the_journal_and_the_state(
     adopted_vault: tuple[Path, Path],
 ) -> None:
