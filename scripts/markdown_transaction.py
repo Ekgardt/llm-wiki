@@ -5387,10 +5387,11 @@ class MarkdownCoordinator:
         if re.fullmatch(r"[0-9a-f]{64}", intent_id) is None:
             raise ValueError("intent_id must be lowercase 64-hex")
         registry = self._ownership_registry()
-        now = datetime.now(timezone.utc)
-        expires_at = min(owner.expires_at, now + timedelta(seconds=INTENT_FENCE_SECONDS))
         token = uuid.uuid4().hex
         with self._connect() as database, begin_immediate(database):
+            # Judge authority after SQLite has admitted this write transaction.
+            now = datetime.now(timezone.utc)
+            expires_at = min(owner.expires_at, now + timedelta(seconds=INTENT_FENCE_SECONDS))
             registry.require(database, owner)
             self._reclaim_dead_intent_fence(database, registry, intent_id)
             epoch = int(
@@ -5524,9 +5525,10 @@ class MarkdownCoordinator:
         if not isinstance(fence, IntentFence):
             raise TypeError("fence must be an IntentFence")
         registry = self._ownership_registry()
-        now = datetime.now(timezone.utc)
-        expires_at = min(owner.expires_at, now + timedelta(seconds=INTENT_FENCE_SECONDS))
         with self._connect() as database, begin_immediate(database):
+            # Judge authority after SQLite has admitted this write transaction.
+            now = datetime.now(timezone.utc)
+            expires_at = min(owner.expires_at, now + timedelta(seconds=INTENT_FENCE_SECONDS))
             registry.require(database, owner)
             renewed = database.execute(
                 """UPDATE intent_fences SET heartbeat_at=?, expires_at=?
@@ -5558,8 +5560,9 @@ class MarkdownCoordinator:
         if not isinstance(binding, CaptureTaskBinding) or binding.seal_digest is None:
             raise ValueError("capture binding must be sealed")
         _require_matching_intent(binding, intent_fence)
-        now = datetime.now(timezone.utc)
         with self._connect() as database, begin_immediate(database):
+            # Judge authority after SQLite has admitted this write transaction.
+            now = datetime.now(timezone.utc)
             _require_live_intent_fence(database, intent_fence, now)
             _project_binding_row(database, binding, intent_fence, now)
 

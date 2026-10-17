@@ -8400,10 +8400,11 @@ class _QueueV3CandidateReader:
         registry = self.ownership_registry()
         with closing(registry._connect()) as coordinator_database:
             registry.require(coordinator_database, owner)
-        now = _utc_now()
-        expires_at = min(owner.expires_at, now + timedelta(seconds=TASK_FENCE_SECONDS))
         token = uuid.uuid4().hex
         with closing(self._connect()) as database, begin_immediate(database):
+            # Judge authority after SQLite has admitted this write transaction.
+            now = _utc_now()
+            expires_at = min(owner.expires_at, now + timedelta(seconds=TASK_FENCE_SECONDS))
             self._require_owner_projection(database, owner, now)
             self._require_fenceable_task(database, task_id)
             epoch = self._next_task_fence_epoch(database, task_id)
@@ -8463,9 +8464,10 @@ class _QueueV3CandidateReader:
         """
         if not isinstance(fence, TaskFence):
             raise TypeError("fence must be a TaskFence")
-        now = _utc_now()
-        expires_at = min(owner.expires_at, now + timedelta(seconds=TASK_FENCE_SECONDS))
         with closing(self._connect()) as database, begin_immediate(database):
+            # Judge authority after SQLite has admitted this write transaction.
+            now = _utc_now()
+            expires_at = min(owner.expires_at, now + timedelta(seconds=TASK_FENCE_SECONDS))
             self._require_owner_projection(database, owner, now)
             renewed = database.execute(
                 """UPDATE task_fences SET heartbeat_at=?, expires_at=?

@@ -385,3 +385,46 @@ CRLF bytes (34), while the new capacity test expected the pre-write LF string
 (30). Explicit LF/CRLF byte fixtures reproduced the CRLF failure on Linux; the
 assertion now measures the supplied bytes, retaining both variants on every OS.
 This changes no production counting rule and excludes no platform.
+
+## Fence time is sampled after write admission (2026-10-17)
+
+Investigation of the new live `owner_fence_lost` and Windows CI failures found a
+separate reproducible authority bug. Intent and task fences sampled the current
+time before opening SQLite and entering `BEGIN IMMEDIATE`. Waiting could move
+the real clock beyond expiry while the subsequent SQL predicate still used the
+old time. This could renew an expired intent, admit an expired queue owner,
+project a binding under an expired intent, or create an intent whose useful
+lifetime had already been spent waiting.
+
+Five regressions reproduce those cases by advancing a controlled clock when a
+real SQLite write transaction is admitted. They failed against the old code;
+fixture setup failures (an unsealed binding and a wrong queue path attribute)
+were corrected before counting the five defect reproductions. Cleanup now
+releases the test's intent before its owner, preserving foreign-key checks.
+The change moves time sampling into the existing transaction in five methods:
+intent acquisition/renewal/binding projection and task acquisition/renewal.
+No TTL, retry count, timeout, schema, dependency or public interface changes.
+The two owner-projection callers and all live-intent guard callers were checked.
+Canonical owner heartbeat already samples its clock inside the write transaction.
+
+Sources checked 2026-10-17:
+- [SQLite transactions](https://www.sqlite.org/lang_transaction.html), updated
+  2026-02-18: write admission is serialized; BEGIN IMMEDIATE can encounter a
+  competing writer. A timestamp preceding admission cannot certify its end.
+- [Kubernetes Lease API](https://kubernetes.io/docs/reference/kubernetes-api/coordination/lease-v1/):
+  renewal and duration determine a lease's validity. This is an independent
+  lease contract reference, not a new Kubernetes dependency.
+- [Kleppmann on fencing](https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html):
+  a paused client can resume after expiry; storage must fence stale authority.
+  This is foundational 2016 analysis, not a claim of a newly published design.
+
+Alternatives rejected: extending TTL cannot repair a stale-time check; treating
+an expired fence as valid weakens authority; another lock or renewal abstraction
+adds complexity without closing the ordering error. Existing rollback-journal,
+synchronous=FULL SQLite and Python 3.10-compatible APIs are retained. Sampling
+at admission does not promise that an arbitrarily stalled commit will finish
+before expiry, nor solve cross-database coordination beyond existing contracts.
+
+This is not proven to explain the 19:58:48 live capture loss. Nor does it explain
+the Windows trim failure or b0e769ad CI's Windows processor cleanup failure.
+Those remain open; no failed test is disabled or reclassified as successful.
