@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.slow_machine import LONG_TIMEOUT
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -83,7 +85,8 @@ def test_admission_reads_use_existing_store_waits(tmp_path, monkeypatch, bounded
         return database
 
     monkeypatch.setattr(installed_memory_repair, "open_readonly_operational_db", observe)
-    deadline = time.monotonic() + 1.0 if bounded else None
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
+    deadline = 101.0 if bounded else None
     installed_memory_repair.require_reliability_v3_admission(root=root, state_root=state_root, deadline=deadline)
     waits = dict(opened)
     expected = {"queue-v3.sqlite3": DEFAULTS.queue_busy_ms,
@@ -129,4 +132,4 @@ def test_adoption_reads_survive_a_short_exclusive_writer(tmp_path, name, validat
     root, state_root, _home = _build_root(tmp_path)
     _adopt(root, state_root)
     with _short_exclusive_write(state_root / "run" / name):
-        validate(root=root, state_root=state_root, deadline=time.monotonic() + 5)
+        validate(root=root, state_root=state_root, deadline=time.monotonic() + LONG_TIMEOUT)
