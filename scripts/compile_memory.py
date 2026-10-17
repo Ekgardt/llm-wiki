@@ -7516,14 +7516,15 @@ def main() -> int:
         print(f"discarded {len(discarded)} unusable receipt(s)")
         return 0
     code = _compile_under_lock(args)
-    if code == 0 and not args.dry_run:
+    if not args.dry_run:
         _refresh_generation_after_compile()
     return code
 
 
 # A compiled page is searchable once the memory generation holds it. Refreshing
-# right after the compile is a no-op (`status: current`) when nothing changed and
-# defers when the nightly holds the fence. See
+# after a completed attempt includes committed pages even when another batch
+# failed. It is a no-op (`status: current`) when nothing changed and
+# defers when another generation refresh holds the maintenance fence. See
 # `docs/research/2026-09-24-an-answer-says-how-old-its-index-is.md`.
 def _refresh_generation_after_compile() -> None:
     """Make what the compile wrote searchable now, not after the next nightly."""
@@ -7535,7 +7536,7 @@ def _refresh_generation_after_compile() -> None:
         outcome = run_generation_maintenance(
             ROOT, STATE_ROOT, time_budget_seconds=seconds
         )
-    except Exception as error:  # noqa: BLE001 - the compile already succeeded
+    except Exception as error:  # noqa: BLE001 - retain the separate compile outcome
         print(f"compile_memory: generation refresh failed: {describe_error(error)}", file=sys.stderr)
         return
     print(f"compile_memory: generation {outcome.get('status')} ({outcome.get('reason') or 'none'})")

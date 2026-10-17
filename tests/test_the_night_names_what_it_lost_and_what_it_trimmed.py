@@ -1,4 +1,4 @@
-"""A deferred compile is counted, the scheduler logs are bounded, and the
+"""Incomplete nights stay visible, scheduler logs are bounded, and the
 daily archiver actually runs.
 
 Three promises the scheduled passes did not keep: a compile owned by the
@@ -41,30 +41,32 @@ def _state(**fields) -> None:
     memory_state.update_state(lambda state: state.update(fields))
 
 
-def test_a_deferred_compile_that_never_finished_is_reported_once(state_dir) -> None:
-    lines: list[str] = []
-    _state(last_compile_started_at="2026-09-18T03:10:00", last_compile_status="running")
-
-    scheduled_nightly._remember_deferred_compile(lines.append)
-    first = scheduled_nightly._report_deferred_loss(lines.append)
-    second = scheduled_nightly._report_deferred_loss(lines.append)
-
-    assert (first, second) == (1, 0)
-    assert "never finished" in lines[0]
-
-
-def test_a_deferred_compile_that_did_finish_is_not_a_failure(state_dir) -> None:
-    lines: list[str] = []
-    _state(last_compile_started_at="2026-09-18T03:10:00", last_compile_status="running")
-    scheduled_nightly._remember_deferred_compile(lines.append)
-    _state(last_compile_status="ok")
-
-    assert scheduled_nightly._report_deferred_loss(lines.append) == 0
-    assert lines == []
+@pytest.mark.parametrize('failures,deferred', [(1, ()), (0, ('compile_busy',))])
+def test_incomplete_night_retains_legacy_deferral_evidence(state_dir, failures, deferred) -> None:
+    stamp = '2026-09-18T03:10:00'
+    _state(nightly_deferred_compile=stamp, last_nightly_date='2026-09-17')
+    scheduled_nightly._record_nightly_result('2026-09-18', failures, deferred=deferred)
+    state = memory_state.load_state()
+    assert state['nightly_deferred_compile'] == stamp
+    assert state['last_nightly_date'] == '2026-09-17'
+    assert state['last_nightly_status'] != 'success'
 
 
-def test_nothing_is_reported_when_no_compile_was_deferred(state_dir) -> None:
-    assert scheduled_nightly._report_deferred_loss(print) == 0
+def test_complete_night_retires_legacy_deferral_evidence(state_dir) -> None:
+    _state(nightly_deferred_compile='2026-09-18T03:10:00')
+    scheduled_nightly._record_nightly_result('2026-09-18', 0)
+    state = memory_state.load_state()
+    assert state['last_nightly_status'] == 'success'
+    assert 'nightly_deferred_compile' not in state
+
+
+def test_foreign_compile_timestamp_does_not_certify_this_night(state_dir) -> None:
+    _state(last_compile_status='ok', last_compile_finished_at='2026-09-18T03:10:00')
+    scheduled_nightly._record_nightly_result('2026-09-18', 0, deferred=('compile_busy',))
+    state = memory_state.load_state()
+    assert state['last_nightly_status'] == 'deferred'
+    assert state['last_nightly_result']['deferred'] == ['compile_busy']
+    assert 'last_nightly_date' not in state
 
 
 def test_a_scheduler_log_keeps_its_tail_and_the_file_it_is_written_to(
