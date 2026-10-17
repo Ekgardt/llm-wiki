@@ -2277,6 +2277,39 @@ def _write_lsp_failure(
     (owner / "failure.json").write_text(json.dumps(record), encoding="utf-8")
 
 
+def test_doctor_lsp_explains_missing_identity_without_allowing_cleanup(tmp_path) -> None:
+    import doctor
+
+    now = datetime.now(timezone.utc)
+    owner = _write_lsp_owner(
+        tmp_path, owner_nonce="a" * 32, generation_nonce="b" * 32,
+        started_at=now - timedelta(days=32), owner_pid=os.getpid(),
+    )
+    _write_lsp_failure(
+        owner, owner_nonce="a" * 32, generation_nonce="b" * 32,
+        timestamp=now - timedelta(days=31),
+    )
+    before = (owner / "owner.json").read_bytes()
+    check = doctor._lsp_runtime_check(tmp_path, now)
+    assert "process-start identity" in check["message"]
+    assert check["details"]["owners"][0]["missing_start_identity_pids"] == [os.getpid()]
+    assert check["details"]["owners"][0]["processes_dead"] is False
+    assert check["details"]["read_error"] is True
+    assert check["details"]["deletion_codes"] == ["lsp_state_unreadable"]
+    assert (owner / "owner.json").read_bytes() == before
+
+
+def test_doctor_lsp_other_unknown_cause_does_not_claim_missing_identity() -> None:
+    import doctor
+
+    check = doctor._lsp_result(
+        [{"missing_start_identity_pids": []}], [], unreadable=True,
+    )
+    assert "process-start identity" not in check["message"]
+    assert check["details"]["read_error"] is True
+    assert check["details"]["deletion_codes"] == ["lsp_state_unreadable"]
+
+
 def test_doctor_lsp_record_read_checks_absolute_deadline_around_handle_io(
     monkeypatch,
 ) -> None:

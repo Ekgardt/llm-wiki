@@ -4880,6 +4880,12 @@ def _lsp_recorded_processes(owner: dict, lease: dict | None) -> tuple:
     )
 
 
+def _lsp_missing_start_identity_pids(owner: object, lease: dict | None) -> list[int]:
+    if not isinstance(owner, dict):
+        return []
+    return [pid for pid, identity in _lsp_recorded_processes(owner, lease) if not identity]
+
+
 def _failure_time_invalid(owner: dict, failure: dict, now: datetime) -> bool:
     owner_started_at = _parse_lsp_timestamp(owner.get("started_at"))
     failed_at = _parse_lsp_timestamp(failure.get("timestamp"))
@@ -4989,6 +4995,7 @@ def _read_lsp_owner(snapshot: tuple, now: datetime, deadline: float) -> _LspOwne
     owner, lease, unreadable = _validated_lsp_records(
         entry_name, child_names, owner, lease, now
     )
+    record["missing_start_identity_pids"] = _lsp_missing_start_identity_pids(owner, lease)
     liveness = _lsp_liveness(owner, lease, entry_name, now, deadline)
     record["live"] = liveness.live
     # Only positive death may imply a crash; explicit failure evidence is
@@ -5034,10 +5041,19 @@ def _scan_lsp_owners(
     return owners, codes, unreadable
 
 
+def _lsp_retained_message(owners: list[dict], unreadable: bool) -> str:
+    if unreadable and any(owner.get("missing_start_identity_pids") for owner in owners):
+        return (
+            "Retained LSP records lack process-start identity; "
+            "process death cannot be verified. Cleanup remains blocked."
+        )
+    return "LSP runtime owners are live or retained."
+
+
 def _lsp_result(owners: list[dict], codes: list[str], *, unreadable: bool) -> dict:
     if unreadable and "lsp_state_unreadable" not in codes:
         codes.append("lsp_state_unreadable")
-    message = "LSP runtime owners are live or retained."
+    message = _lsp_retained_message(owners, unreadable)
     status = "degraded"
     if not codes:
         message, status = "LSP runtime owners are bounded.", "ok"
