@@ -314,3 +314,39 @@ def test_detect_communities_answers_without_pulling_the_graph(repository, monkey
         for group in communities
         for member in group["members"]
     } <= {"app.hub", "app.warm", "app.gate", "app.loop"}
+
+
+@pytest.mark.parametrize("count", [33, 1025])
+def test_every_excluded_prefix_is_used_beyond_the_old_boundary(graph, count):
+    prefixes = tuple(f"unused_{number}_" for number in range(count - 1)) + ("lonely",)
+    rows, truncated = graph.nodes_without_edges(exclude_name_prefixes=prefixes)
+    assert "lonely" not in {row["metadata"]["name"] for row in rows}
+    assert "stale" in {row["metadata"]["name"] for row in rows}
+    assert truncated is False
+
+
+@pytest.mark.parametrize("prefix", ["test_", "test%", "x' OR 1=1 --", "back\\slash"])
+def test_prefix_sql_preserves_literal_matching_and_null_names(prefix):
+    import json
+    import sqlite3
+    from contextlib import closing
+
+    import evidence_graph
+
+    with closing(sqlite3.connect(":memory:")) as database:
+        database.execute("CREATE TABLE node(metadata_json TEXT)")
+        names = [prefix + "suffix", "testXsuffix", "ordinary", None]
+        database.executemany("INSERT INTO node VALUES (?)", [(json.dumps({"name": name}),) for name in names])
+        parameters = []
+        clause = evidence_graph._name_prefix_exclusions((prefix,), parameters)
+        rows = database.execute("SELECT json_extract(metadata_json, '$.name') FROM node WHERE 1" + clause, parameters)
+        assert [row[0] for row in rows] == ["testXsuffix", "ordinary"]
+        assert database.execute("SELECT COUNT(*) FROM node").fetchone()[0] == 4
+
+
+def test_empty_prefix_filter_keeps_the_statement_unfiltered():
+    import evidence_graph
+
+    parameters = []
+    assert evidence_graph._name_prefix_exclusions((), parameters) == ""
+    assert parameters == []

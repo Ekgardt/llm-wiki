@@ -24,7 +24,7 @@ def test_production_baseline_owns_mcp_v1_and_python310_tomli(
     project: dict[str, object],
 ) -> None:
     dependencies = project["project"]["dependencies"]
-    assert "mcp>=1.29,<2" in dependencies
+    assert "mcp>=1.30,<2" in dependencies
     assert "tomli>=2.4.1,<3; python_version < '3.11'" in dependencies
     assert project["project"]["optional-dependencies"]["mcp-server"] == []
 

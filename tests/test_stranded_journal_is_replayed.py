@@ -80,8 +80,8 @@ def test_a_healthy_database_is_never_opened_read_write(tmp_path: Path) -> None:
     calls: list[Path] = []
 
     original = reliable_memory._replayed_hot_journal
-    reliable_memory._replayed_hot_journal = lambda target: (
-        calls.append(target) or original(target)
+    reliable_memory._replayed_hot_journal = lambda target, *, deadline=None: (
+        calls.append(target) or original(target, deadline=deadline)
     )
     try:
         connection = reliable_memory.open_readonly_operational_db(
@@ -116,7 +116,7 @@ def test_a_journal_that_will_not_clear_keeps_the_original_refusal(
     """A live writer holds a hot journal legitimately; refusing is right there."""
     path = _database(tmp_path)
     _strand_a_journal(path)
-    monkeypatch.setattr(reliable_memory, "_replayed_hot_journal", lambda target: False)
+    monkeypatch.setattr(reliable_memory, "_replayed_hot_journal", lambda target, *, deadline=None: False)
     error = sqlite3.OperationalError("attempt to write a readonly database")
 
     with pytest.raises(sqlite3.OperationalError, match="readonly database"):
@@ -129,7 +129,7 @@ def test_the_recovery_is_attempted_at_most_once(tmp_path: Path, monkeypatch) -> 
     _strand_a_journal(path)
     attempts: list[int] = []
 
-    def never_clears(target: Path) -> bool:
+    def never_clears(target: Path, *, deadline=None) -> bool:
         attempts.append(1)
         return True
 

@@ -25,6 +25,7 @@ def test_a_refused_compile_records_its_refusal_not_the_holders_status(monkeypatc
             "discard_unusable_receipts": False,
             "lock_token": None,
             "all": False,
+            "dry_run": False,
         },
     )
     monkeypatch.setattr(compile_memory, "parse_args", arguments)
@@ -36,6 +37,7 @@ def test_a_refused_compile_records_its_refusal_not_the_holders_status(monkeypatc
     monkeypatch.setattr(compile_memory, "_mark_started", lambda trigger: marks.append("started"))
     monkeypatch.setattr(compile_memory, "_mark_finished", lambda *a, **k: marks.append("finished"))
     monkeypatch.setattr(compile_memory, "_mark_refused", lambda trigger, reason: marks.append("refused"))
+    monkeypatch.setattr(compile_memory, "_refresh_generation_after_compile", lambda: None)
 
     assert (compile_memory.main(), marks) == (1, ["refused"])
 

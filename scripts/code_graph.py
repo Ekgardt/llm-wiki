@@ -102,27 +102,46 @@ def _have_tree_sitter() -> bool:
         return False
 
 
-def _get_parser(lang: str):
-    """Get or create a tree-sitter parser for a language. Returns None if unavailable."""
+# A fallback reason is one exception line. 200 characters is the bound retrieval
+# gives the same kind of reason (`search_memory.EMBEDDER_REASON_MAX_CHARS`), so the
+# two read alike; `describe_error` redacts it first.
+FALLBACK_REASON_MAX_CHARS = 200
+
+
+def _fallback_reason(error: Exception) -> str:
+    """Why a parse stage fell back, as `Class: redacted message`."""
+    from secret_redact import describe_error
+
+    return describe_error(error)[:FALLBACK_REASON_MAX_CHARS]
+
+
+def _parser_attempt(lang: str) -> tuple:
+    """(parser, None); (None, why) when loading failed; (None, None) for no grammar.
+
+    The regex fallback used to be taken with the cause thrown away, so a missing
+    grammar package and a broken one looked the same. See
+    `docs/research/2026-09-28-a-check-names-its-cause.md`.
+    """
     if lang in _ts:
-        return _ts[lang]
-
+        return _ts[lang], None
     try:
-        import tree_sitter as ts
+        return _new_parser(lang), None
+    except Exception as exc:  # noqa: BLE001 - ImportError included: the fallback names it
+        return None, _fallback_reason(exc)
 
-        loader = GRAMMAR_LOADERS.get(lang)
-        if loader is None:
-            return None
-        module_name, factory_name = loader
-        grammar = importlib.import_module(module_name)
-        language = ts.Language(getattr(grammar, factory_name)())
-        parser = ts.Parser(language)
-        _ts[lang] = parser
-        return parser
-    except ImportError:
+
+def _new_parser(lang: str):
+    """A cached parser for the language, or None when no grammar is configured."""
+    loader = GRAMMAR_LOADERS.get(lang)
+    if loader is None:
         return None
-    except Exception:
-        return None
+    import tree_sitter as ts
+
+    module_name, factory_name = loader
+    grammar = importlib.import_module(module_name)
+    parser = ts.Parser(ts.Language(getattr(grammar, factory_name)()))
+    _ts[lang] = parser
+    return parser
 
 
 def detect_language(file_path: Path) -> str | None:
@@ -130,14 +149,20 @@ def detect_language(file_path: Path) -> str | None:
     return language_for_path(file_path)
 
 
-def _jedi_script(file_path: Path, workspace_root: Path):
-    """The Jedi script for this file, or None when Jedi cannot be used at all."""
+def _jedi_script(file_path: Path, workspace_root: Path) -> tuple:
+    """(script, None); (None, why) when Jedi failed; (None, None) when it is absent.
+
+    Jedi is an optional extra, so its absence is the documented state, not a failure.
+    """
     try:
         jedi = importlib.import_module("jedi")
+    except ImportError:
+        return None, None
+    try:
         project = jedi.Project(path=str(workspace_root.resolve()))
-        return jedi.Script(path=str(file_path.resolve()), project=project)
-    except Exception:
-        return None
+        return jedi.Script(path=str(file_path.resolve()), project=project), None
+    except Exception as exc:  # noqa: BLE001 - the calls stay unresolved and say why
+        return None, _fallback_reason(exc)
 
 
 def _workspace_definition(definition, workspace: Path) -> tuple | None:
@@ -151,14 +176,14 @@ def _workspace_definition(definition, workspace: Path) -> tuple | None:
     return (full_name, resolved_path)
 
 
-def _inferred_targets(script, call: dict, workspace: Path) -> set:
-    """The distinct workspace targets Jedi infers for one call site."""
+def _inferred_targets(script, call: dict, workspace: Path) -> tuple:
+    """(the distinct workspace targets Jedi infers for one call site, None), or (set(), why)."""
     try:
         definitions = script.infer(line=call["line"], column=call.get("column", 0))
         pairs = (_workspace_definition(item, workspace) for item in definitions)
-        return {pair for pair in pairs if pair is not None}
-    except Exception:
-        return set()
+        return {pair for pair in pairs if pair is not None}, None
+    except Exception as exc:  # noqa: BLE001 - this call stays unresolved and says why
+        return set(), _fallback_reason(exc)
 
 
 def _semantically_resolvable(call: dict) -> bool:
@@ -169,7 +194,14 @@ def _enriched_call(script, call: dict, workspace: Path) -> dict:
     """A call resolved to its one workspace target, or the call unchanged."""
     if not _semantically_resolvable(call):
         return call
-    unique = _inferred_targets(script, call, workspace)
+    unique, reason = _inferred_targets(script, call, workspace)
+    if reason is not None:
+        return {**call, "semantic_error": reason}
+    return _resolved_call(call, unique)
+
+
+def _resolved_call(call: dict, unique: set) -> dict:
+    """The call bound to its one inferred target, or unchanged when there is not one."""
     if len(unique) != 1:
         return call
     full_name, _ = unique.pop()
@@ -178,9 +210,18 @@ def _enriched_call(script, call: dict, workspace: Path) -> dict:
     return updated
 
 
+def _unresolved_call(call: dict, reason: str) -> dict:
+    """A call Jedi would have tried carries why it could not."""
+    if not _semantically_resolvable(call):
+        return call
+    return {**call, "semantic_error": reason}
+
+
 def enrich_python_semantics(file_path: Path, calls: list[dict], workspace_root: Path) -> list[dict]:
     """Resolve unknown Python calls with Jedi when it yields one workspace target."""
-    script = _jedi_script(file_path, workspace_root)
+    script, reason = _jedi_script(file_path, workspace_root)
+    if reason is not None:
+        return [_unresolved_call(call, reason) for call in calls]
     if script is None:
         return calls
     workspace = workspace_root.resolve()
@@ -225,26 +266,35 @@ def _language_symbols(file_path, lang, registry, workspace_root, extracted):
     return functions, classes, calls, imports
 
 
-def _tree_sitter_symbols(file_path: Path, lang: str, registry, workspace_root):
-    """Extracted symbols, or None when the caller must fall back to regex."""
-    parser = _get_parser(lang)
+def _tree_sitter_symbols(file_path: Path, lang: str, registry, workspace_root) -> tuple:
+    """(symbols, None), or (None, why or None) when the caller must fall back to regex."""
+    parser, reason = _parser_attempt(lang)
     if parser is None:
-        return None
+        return None, reason
     source = file_path.read_bytes()
-    extracted = _extract_symbols(parser.parse(source), parser.language, lang, source)
+    extracted, reason = _extract_symbols(parser.parse(source), parser.language, lang, source)
     if extracted is None:
-        return None
-    return _language_symbols(file_path, lang, registry, workspace_root, extracted)
+        return None, reason
+    return _language_symbols(file_path, lang, registry, workspace_root, extracted), None
+
+
+def _regex_fallback(
+    file_path: Path, lang: str, registry, workspace_root: Path, reason: str | None
+) -> dict:
+    """Regex-based extraction (less accurate, no deps), naming why tree-sitter was not used."""
+    result = _regex_parse(file_path, lang, registry, workspace_root)
+    if reason is not None:
+        result["parser_fallback_reason"] = reason
+    return result
 
 
 def _parse_file(file_path: Path, registry: SymbolRegistry, workspace_root: Path) -> dict:
     lang = detect_language(file_path)
     if not lang:
         return _empty_parse_result(file_path)
-    symbols = _tree_sitter_symbols(file_path, lang, registry, workspace_root)
+    symbols, reason = _tree_sitter_symbols(file_path, lang, registry, workspace_root)
     if symbols is None:
-        # Fallback: regex-based extraction (less accurate but no deps).
-        return _regex_parse(file_path, lang, registry, workspace_root)
+        return _regex_fallback(file_path, lang, registry, workspace_root, reason)
     functions, classes, calls, imports = symbols
     return {
         "file": str(file_path),
@@ -256,15 +306,15 @@ def _parse_file(file_path: Path, registry: SymbolRegistry, workspace_root: Path)
     }
 
 
-def _query_matches(tree, language, lang: str):
-    """The query matches for this language, or None when it cannot run."""
+def _query_matches(tree, language, lang: str) -> tuple:
+    """(the query matches for this language, None), or (None, why it cannot run)."""
     try:
         import tree_sitter as ts
 
         query_source = (QUERY_DIR / f"{lang}.scm").read_text(encoding="utf-8")
-        return ts.QueryCursor(ts.Query(language, query_source)).matches(tree.root_node)
-    except (OSError, UnicodeError, Exception):
-        return None
+        return ts.QueryCursor(ts.Query(language, query_source)).matches(tree.root_node), None
+    except Exception as exc:  # noqa: BLE001 - the regex fallback runs and names this
+        return None, _fallback_reason(exc)
 
 
 def _as_node_list(value) -> list:
@@ -340,13 +390,13 @@ def _collect_all_symbol_kinds(matches, source: bytes) -> dict:
     return groups
 
 
-def _extract_symbols(tree, language, lang: str, source: bytes) -> tuple | None:
-    """Execute the language query and return functions, classes, calls, imports."""
-    matches = _query_matches(tree, language, lang)
+def _extract_symbols(tree, language, lang: str, source: bytes) -> tuple:
+    """((functions, classes, calls, imports), None), or (None, why the query failed)."""
+    matches, reason = _query_matches(tree, language, lang)
     if matches is None:
-        return None
+        return None, reason
     groups = _collect_all_symbol_kinds(matches, source)
-    return tuple(groups[name] for name in _SYMBOL_KINDS)
+    return tuple(groups[name] for name in _SYMBOL_KINDS), None
 
 
 _SCRIPT_CALL_KEYWORDS = {"if", "for", "while", "switch", "catch"}

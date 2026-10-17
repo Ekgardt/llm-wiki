@@ -143,7 +143,8 @@ class _Entry:
         }
         if self.kind == "file":
             value.update(size=self.size, sha256=self.sha256)
-        elif self.kind == "symlink":
+            return value
+        if self.kind == "symlink":
             assert self.link_target is not None
             value["target_sha256"] = sha256_bytes(
                 self.link_target.encode("utf-8", errors="surrogatepass")

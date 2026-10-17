@@ -418,7 +418,8 @@ def test_public_navigation_paths_require_canonical_nfc_posix_relative_text(
             NavigationRequest(
                 scope, Capability.DEFINITIONS, invalid_path, 1, 0
             )
-        elif record_kind == "location":
+            return
+        if record_kind == "location":
             NavigationLocation(
                 invalid_path,
                 PositionRange(0, 1),
@@ -429,16 +430,16 @@ def test_public_navigation_paths_require_canonical_nfc_posix_relative_text(
                 ResolutionLabel.LSP_CONFIRMED,
                 provenance,
             )
-        else:
-            NavigationDiagnostic(
-                invalid_path,
-                PositionRange(0, 1),
-                DiagnosticSeverity.ERROR,
-                None,
-                "message",
-                (),
-                provenance,
-            )
+            return
+        NavigationDiagnostic(
+            invalid_path,
+            PositionRange(0, 1),
+            DiagnosticSeverity.ERROR,
+            None,
+            "message",
+            (),
+            provenance,
+        )
 
 
 def test_public_navigation_paths_accept_canonical_nfc_posix_relative_text(
@@ -2971,12 +2972,13 @@ def test_setup_failure_fallback_retries_freshness_before_publication(
             assert result.status is NavigationStatus.STALE
             assert result.locations == ()
             assert result.provenance == ()
-        elif useful_graph:
+            return
+        if useful_graph:
             assert result.status is NavigationStatus.PARTIAL
             assert len(result.locations) == 1
-        else:
-            assert result.status is NavigationStatus.NOT_READY
-            assert result.locations == ()
+            return
+        assert result.status is NavigationStatus.NOT_READY
+        assert result.locations == ()
     finally:
         session.close(deadline=time.monotonic() + SHORT_TIMEOUT)
 

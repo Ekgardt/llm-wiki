@@ -53,7 +53,6 @@ def test_the_worker_names_an_intent_it_could_not_adopt(tmp_path: Path, monkeypat
     monkeypatch.setattr(memory_state, "STATE_FILE", run / "state.json")
     monkeypatch.setattr(memory_state, "LOCK_FILE", run / "state.json.lock")
     monkeypatch.setattr(capture_diagnostics, "FAILURE_LOG", run / "capture-failures.jsonl")
-    monkeypatch.setattr(flush_memory, "STATE_ROOT", tmp_path)
     queue = _queue(tmp_path)
     coordinator = _coordinator(tmp_path)
     lost = _publish_ready_intent(tmp_path, queue, coordinator, b"lost-record")

@@ -246,6 +246,7 @@ def get_link_graph(
 ) -> dict[str, list[str]]:
     """Prefer the active immutable graph and honestly source-scan if absent."""
     global _link_graph_cache
+    _require_before(deadline, "graph neighbor deadline reached")
     active = _read_active_link_graph(catalog, deadline=deadline)
     if active is not None:
         _link_graph_cache = None

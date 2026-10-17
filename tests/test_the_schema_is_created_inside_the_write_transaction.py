@@ -63,3 +63,28 @@ def test_the_trace_store_creates_its_schema_after_begin_immediate(tmp_path, monk
 
     assert _first_index(statements, "BEGIN IMMEDIATE") < _first_index(statements, "CREATE")
     assert open_transaction is False
+
+
+def test_coordinator_schema_and_migrations_share_the_write_transaction(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    import markdown_transaction
+
+    statements = []
+    configured = markdown_transaction.MarkdownCoordinator._connect
+
+    @contextmanager
+    def traced(self, **kwargs):
+        with configured(self, **kwargs) as database:
+            database.set_trace_callback(statements.append)
+            yield database
+
+    monkeypatch.setattr(markdown_transaction.MarkdownCoordinator, "_connect", traced)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    markdown_transaction.MarkdownCoordinator(vault, tmp_path / "state")
+    begin = _first_index(statements, "BEGIN IMMEDIATE")
+    create = _first_index(statements, "CREATE")
+    alter = _first_index(statements, "ALTER")
+    assert begin < create < alter
+    assert not any(statement.lstrip().startswith("COMMIT") for statement in statements[begin:alter])

@@ -50,11 +50,16 @@ def _coordinator(tmp_path: Path):
     )
 
 
+def _session_intent(seed: bytes) -> tuple[str, bytes]:
+    from tests.adopted_capture_vault import session_intent_payload
+
+    return session_intent_payload(seed)
+
+
 def _publish_ready_intent(tmp_path: Path, queue, coordinator, seed: bytes) -> dict:
     """Every publication step for real, up to but not including the enqueue."""
-    payload = canonical_json_bytes({"seed": seed.decode()})
+    intent_id, payload = _session_intent(seed)
     digest = sha256_bytes(payload)
-    intent_id = sha256_bytes(seed)
     shard = intent_id[:2]
     pending = f"run/capture-intents/pending/{shard}/{intent_id}.json"
     ready = f"run/capture-intents/ready/{shard}/{intent_id}.json"
@@ -342,7 +347,6 @@ def test_the_capture_worker_adopts_before_it_claims(
     queue = _queue(tmp_path)
     coordinator = _coordinator(tmp_path)
     orphan = _publish_ready_intent(tmp_path, queue, coordinator, b"worker-adopts")
-    monkeypatch.setattr(flush_memory, "STATE_ROOT", tmp_path)
 
     flush_memory.run_capture_worker_once(
         queue, coordinator, process_missing=lambda *args: None
@@ -358,7 +362,6 @@ def test_a_failing_sweeper_never_stops_the_worker(
 
     queue = _queue(tmp_path)
     coordinator = _coordinator(tmp_path)
-    monkeypatch.setattr(flush_memory, "STATE_ROOT", tmp_path)
 
     def _explode(*args, **kwargs):
         raise RuntimeError("sweeper down")

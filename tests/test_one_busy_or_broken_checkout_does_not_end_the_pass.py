@@ -10,6 +10,7 @@ import shutil
 import sys
 from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -102,12 +103,28 @@ def test_a_checkout_being_written_is_refused_by_name_and_the_others_are_refreshe
     (busy / "pkg" / "new_work.py").write_text("def new_work():\n    return 1\n", encoding="utf-8")
 
     _write_while_read(monkeypatch, busy)
+    _advance_capture_clock_during_reads(monkeypatch)
     answer = repository_index.refresh_all_repositories(state_root=state, budget_seconds=120)
 
     assert _rows_by_name(answer) == {
         "busy": ("refused", "repository_changed_during_capture"),
         "quiet": ("refreshed", None),
     }
+
+
+def _advance_capture_clock_during_reads(monkeypatch):
+    """Consume capture time only; do not age operational ownership leases."""
+    import corpus_snapshot
+
+    original = corpus_snapshot._capture
+    now = [corpus_snapshot.time.monotonic()]
+    monkeypatch.setattr(corpus_snapshot, "time", SimpleNamespace(monotonic=lambda: now[0]))
+
+    def capture(*args, **kwargs):
+        now[0] += 1.0
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(corpus_snapshot, "_capture", capture)
 
 
 def test_a_registration_whose_tree_is_gone_is_refused_by_name(adopted_vault, tmp_path):  # noqa: F811

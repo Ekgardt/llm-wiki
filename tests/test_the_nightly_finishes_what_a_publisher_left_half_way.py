@@ -35,8 +35,13 @@ def test_the_nightly_command_finishes_a_half_published_intent(tmp_path, monkeypa
 
     results = capture_adoption.adopt_in_active_vault()
 
-    finished = [entry["intent_id"] for entry in results["complete_pending_capture_intents"]["completed"]]
+    finished = results["recover_unindexed_capture_intents"]["recovered"]
     assert (finished, _pending_ids(queue)) == ([half["intent_id"]], [])
+    assert results["complete_pending_capture_intents"]["completed"] == []
+    lease = queue.claim_capture("nightly-proof", handler_versions=(1,))
+    assert lease is not None
+    assert lease.payload["intent_id"] == half["intent_id"]
+    assert queue.claim_capture("nightly-proof", handler_versions=(1,)) is None
 
 
 def test_the_nightly_command_writes_down_an_intent_it_could_not_recover(tmp_path, monkeypatch) -> None:

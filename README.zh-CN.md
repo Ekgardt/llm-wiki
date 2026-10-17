@@ -99,11 +99,11 @@ uv run python scripts/search_memory.py "auth"
 
 ### 依赖配置
 
-MCP 属于 production 基线；`mcp-server` 保留为 compatibility alias。安装程序会替你完成；
-手动执行：
+MCP 属于 production 基线；`mcp-server` 保留为 compatibility alias。安装程序会安装全部组件（`full` 扩展：向量检索、reranker、代码索引）以及用于 Python 的
+Pyright；在 Linux 上 torch 取自 PyTorch 的 CPU 构建。手动执行：
 
 ```bash
-uv sync --locked --no-default-groups
+uv sync --locked --no-default-groups --inexact --extra full
 uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120
 uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json
 ```
@@ -113,11 +113,14 @@ uv run --locked --no-sync python scripts/repair_installed_memory.py --check --js
 当前的数据库格式；若知识库中已有工作，会先请你确认没有代理在运行。它从不删除知识
 或 `run/`。
 
-可选扩展会叠加到已安装的内容上，并保留你已选择的部分：
+安装程序会询问记忆流水线调用哪个模型，只列出你的提供方能应答的模型（Claude 的
+`sonnet`、`opus`、`haiku`、`fable` 各试调一次）；按回车保留上次的选择。没有终端时，
+用 `--model <名称>`（Windows 上为 `-Model`）指定，否则保留上次的选择或提供方的默认模型。
+
+其他语言的代码导航按需安装，每种语言一条命令：
 
 ```bash
-uv sync --locked --no-default-groups --inexact --extra hybrid      # 向量 + reranker
-uv sync --locked --no-default-groups --inexact --extra code-graph  # 代码索引
+uv run --locked --no-sync python scripts/install_language_server.py --profile typescript     # 或 gopls、rust-analyzer
 ```
 
 贡献者安装开发依赖组并运行完整回归套件：

@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from defusedxml.common import DefusedXmlException
+from defusedxml.ElementTree import parse as parse_xml
 from reliable_memory import validate_schema
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -183,8 +185,10 @@ def _junit_root(artifact_root: Path, artifact_name: str) -> ET.Element:
     if len(xml_files) != 1:
         raise ValueError(f"full job requires exactly one JUnit artifact XML: {artifact_name}")
     try:
-        return ET.parse(xml_files[0]).getroot()
-    except (OSError, ET.ParseError) as exc:
+        return parse_xml(
+            xml_files[0], forbid_dtd=True, forbid_entities=True, forbid_external=True,
+        ).getroot()
+    except (OSError, ET.ParseError, DefusedXmlException) as exc:
         raise ValueError(f"invalid JUnit artifact: {artifact_name}") from exc
 
 

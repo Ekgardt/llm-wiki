@@ -46,7 +46,7 @@ def test_the_adopted_queue_waits_out_a_busy_database(tmp_path: Path, monkeypatch
     root, state_root, _home = _build_root(tmp_path)
     _adopt(root, state_root)
     monkeypatch.setattr(markdown_transaction, "_ADOPTION_VALIDATION_CACHE", set())
-    real = installed_memory_repair.require_reliability_v3_adopted
+    real = installed_memory_repair.require_reliability_v3_admission
     calls: list[int] = []
 
     def busy_once(*, root, state_root):
@@ -57,7 +57,7 @@ def test_the_adopted_queue_waits_out_a_busy_database(tmp_path: Path, monkeypatch
             ) from sqlite3.OperationalError("database is locked")
         return real(root=root, state_root=state_root)
 
-    monkeypatch.setattr(installed_memory_repair, "require_reliability_v3_adopted", busy_once)
+    monkeypatch.setattr(installed_memory_repair, "require_reliability_v3_admission", busy_once)
 
     queue = memory_queue.active_memory_queue(root, state_root)
 

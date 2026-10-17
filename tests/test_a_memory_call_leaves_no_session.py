@@ -49,4 +49,4 @@ def test_the_backfill_skips_sessions_of_memory_calls_and_keeps_conversations(tmp
     _saved(tmp_path, "2026/09/14/rollout-two.jsonl", started_in_provider + "\n" + TURN)
     kept = _saved(tmp_path, "-repo-project/three.jsonl", json.dumps({"cwd": "/repo/project"}) + "\n" + TURN)
 
-    assert backfill_sessions._transcripts((tmp_path,)) == [kept]
+    assert backfill_sessions._found_transcripts((tmp_path,)) == [kept]

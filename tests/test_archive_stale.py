@@ -299,3 +299,54 @@ def test_restoring_a_page_that_was_never_archived_says_so(tmp_path, monkeypatch)
     archive_stale, _vault = _archive_vault(tmp_path, monkeypatch)
 
     assert archive_stale.restore_page("never-seen", apply=True) == "NOT ARCHIVED: never-seen"
+
+
+def _large_archive_vault(tmp_path, monkeypatch):
+    import archive_stale
+
+    notes = tmp_path / "knowledge" / "notes"
+    notes.mkdir(parents=True)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setattr(archive_stale, "ROOT", tmp_path)
+    monkeypatch.setattr(archive_stale, "KNOWLEDGE", notes)
+    monkeypatch.setattr(archive_stale, "ARCHIVE_ROOT", notes / "archive")
+    return archive_stale, notes
+
+
+def test_archive_and_restore_a_page_admitted_by_the_transaction(tmp_path, monkeypatch):
+    archive, notes = _large_archive_vault(tmp_path, monkeypatch)
+    source = notes / "large.md"
+    content = b"---\ntype: debugging\n---\n# Large\n" + b"x" * (17 * 1024 * 1024)
+    source.write_bytes(content)
+    result = archive._archive_page(source, apply=True)
+    assert result.startswith("ARCHIVED:"), result
+    assert not source.exists()
+    result = archive.restore_page("large", apply=True)
+    assert result.startswith("RESTORED:"), result
+    assert source.read_bytes() == content
+
+
+def test_restore_a_large_existing_archive_without_a_private_read_limit(tmp_path, monkeypatch):
+    archive, notes = _large_archive_vault(tmp_path, monkeypatch)
+    source = archive.ARCHIVE_ROOT / "2025" / "large.md"
+    source.parent.mkdir(parents=True)
+    content = b"---\ntype: debugging\nstatus: archived\n---\n# Large\n" + b"x" * (17 * 1024 * 1024)
+    source.write_bytes(content)
+    result = archive.restore_page("large", apply=True)
+    assert result.startswith("RESTORED:"), result
+    assert not source.exists()
+    assert (notes / "large.md").read_bytes() == content.replace(b"status: archived\n", b"")
+
+
+def test_archive_still_refuses_above_the_transaction_target_budget(tmp_path, monkeypatch):
+    from markdown_transaction import MAX_KNOWLEDGE_TARGET_BYTES
+
+    archive, notes = _large_archive_vault(tmp_path, monkeypatch)
+    source = notes / "too-large.md"
+    with source.open("wb") as stream:
+        stream.truncate(MAX_KNOWLEDGE_TARGET_BYTES + 1)
+    result = archive._archive_page(source, apply=True)
+    assert result.startswith("READ_ERROR:"), result
+    assert source.stat().st_size == MAX_KNOWLEDGE_TARGET_BYTES + 1
+    assert not archive.ARCHIVE_ROOT.exists()

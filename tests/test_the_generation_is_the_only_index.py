@@ -7,6 +7,7 @@ The legacy FTS5 index and vector cache were retired on 2026-09-23. See
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -87,6 +88,8 @@ def test_a_search_without_a_generation_reports_the_markdown_read(tmp_path: Path,
 
 def test_doctor_names_a_missing_generation_and_the_explicit_rebuild_builds_it(tmp_path: Path, monkeypatch) -> None:
     root, state_root, home = _build_root(tmp_path)
+    # This test rebuilds a repository index and must own its Git identity.
+    subprocess.run(['git', 'init', '--quiet', str(root)], check=True, capture_output=True)
     (root / "knowledge" / "notes" / "page.md").write_text("# Page\nOne page.\n", encoding="utf-8")
     monkeypatch.setattr(doctor, "_pyright_check", lambda *args, **kwargs: doctor._result("pyright", "ok", "ok", {}))
 

@@ -68,6 +68,11 @@ DEFAULTS = ReliableMemoryDefaults()
 MAX_CAPTURE_DECISION_BYTES = 1024 * 1024
 
 
+def quote_sqlite_identifier(name: str) -> str:
+    """Encode one exact SQLite identifier, including its embedded quotes."""
+    return '"' + name.replace('"', '""') + '"'
+
+
 def _require_positive_int(name: str, value: object) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
@@ -378,17 +383,89 @@ def _run_lock_probe(
     return _second_writer_is_blocked(second)
 
 
+def _require_probe_component(path: Path) -> None:
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or _windows_reparse_point(path):
+        raise PermissionError("locking probe path must contain only real directories")
+
+
+def _require_probe_root_chain(root: Path) -> None:
+    from bounded_io import _acceptable_ancestor
+
+    _require_probe_component(root)
+    for parent in root.parents:
+        if not _acceptable_ancestor(parent):
+            raise PermissionError("locking probe ancestor is not trusted")
+
+
+def _probe_directory(root: Path) -> Path:
+    root = root.absolute()
+    _require_probe_root_chain(root)
+    directory = root / "run"
+    _require_probe_component(directory)
+    if directory.lstat().st_dev != root.lstat().st_dev:
+        raise PermissionError("locking probe must use the runtime root filesystem")
+    return directory
+
+
+def _initialize_probe_directory(root: Path) -> None:
+    _require_probe_root_chain(root.absolute())
+    (root / "run").mkdir(exist_ok=True)
+    _set_owner_only(_probe_directory(root), 0o700)
+
+
+def _probe_directory_identity(directory: Path) -> tuple[int, int, int]:
+    info = directory.lstat()
+    return info.st_dev, info.st_ino, info.st_mode
+
+
+def _require_same_probe_directory(directory: Path, identity: tuple[int, int, int]) -> None:
+    _require_probe_root_chain(directory)
+    if _probe_directory_identity(directory) != identity:
+        raise PermissionError("locking probe directory changed")
+
+
+def _contained_lock_probe(root, probe, identity, deadline, connections) -> bool | None:
+    _require_same_probe_directory(root, identity)
+    result = _run_lock_probe(probe, deadline, connections)
+    _require_same_probe_directory(root, identity)
+    return result
+
+
+def _cleanup_lock_probe(probe, connections, root, identity) -> None:
+    _close_probe_connections(connections)
+    if probe is None:
+        return
+    try:
+        _require_same_probe_directory(root, identity)
+    except OSError:
+        return  # The original directory is no longer owned at this path.
+    _remove_probe_files(probe)
+
+
 def _sqlite_lock_probe(root: Path, *, deadline: float = float("inf")) -> bool | None:
-    """Return lock support, or ``None`` when a bounded probe cannot complete."""
-    probe = root / f".llm-wiki-lock-probe-{secrets.token_hex(16)}.sqlite3"
+    """Probe existing run/ without changing the sealed vault root."""
+    try:
+        directory = _probe_directory(root)
+    except OSError:
+        return None
+    return _sqlite_directory_lock_probe(directory, deadline=deadline)
+
+
+def _sqlite_directory_lock_probe(directory: Path, *, deadline: float = float("inf")) -> bool | None:
+    """Probe the database's actual directory without creating another runtime root."""
+    probe = None
+    identity = None
     connections: list[sqlite3.Connection] = []
     try:
-        return _run_lock_probe(probe, deadline, connections)
+        _require_probe_root_chain(directory.absolute())
+        identity = _probe_directory_identity(directory)
+        probe = directory / f".llm-wiki-lock-probe-{secrets.token_hex(16)}.sqlite3"
+        return _contained_lock_probe(directory, probe, identity, deadline, connections)
     except (OSError, sqlite3.Error):
         return None
     finally:
-        _close_probe_connections(connections)
-        _remove_probe_files(probe)
+        _cleanup_lock_probe(probe, connections, directory, identity)
 
 
 _CLOUD_DIRECTORY_NAMES = frozenset(
@@ -414,15 +491,29 @@ def _warn_if_cloud_synchronized(path: Path) -> None:
     )
 
 
-def validate_state_root(path: Path) -> None:
-    """Fail closed when a runtime root lacks known-safe local lock semantics."""
+def _prepare_local_database_directory(path: Path) -> Path:
     path = Path(path)
     _require_local_non_reparse_root(path)
     _warn_if_cloud_synchronized(path)
     path.mkdir(parents=True, exist_ok=True)
+    _require_probe_root_chain(path.absolute())
     _set_owner_only(path, 0o700)
+    return path
+
+
+def validate_state_root(path: Path) -> None:
+    """Fail closed when a runtime root lacks known-safe local lock semantics."""
+    path = _prepare_local_database_directory(path)
+    _initialize_probe_directory(path)
     if _sqlite_lock_probe(path) is not True:
         raise UnsafeStateRoot(f"state root failed the SQLite two-connection locking probe: {path}")
+
+
+def validate_database_directory(path: Path) -> None:
+    """Validate a database parent; only a state-root initializer creates run/."""
+    path = _prepare_local_database_directory(path)
+    if _sqlite_directory_lock_probe(path) is not True:
+        raise UnsafeStateRoot(f"database directory failed the SQLite two-connection locking probe: {path}")
 
 
 def _owner_permissions_supported(path: Path) -> bool:
@@ -431,6 +522,8 @@ def _owner_permissions_supported(path: Path) -> bool:
 
 def _chmod_or_warn(path: Path, mode: int) -> bool:
     """Apply `mode`; False (with the warning) when the filesystem has no permission bits."""
+    if stat.S_IMODE(path.stat().st_mode) == mode:
+        return True
     try:
         path.chmod(mode)
     except OSError as exc:
@@ -470,17 +563,62 @@ def _harden_runtime_owner_only(path: Path, mode: int) -> None:
     _set_owner_only(Path(path), mode)
 
 
+def operational_deadline_active(deadline: float | None) -> None:
+    """Refuse an expired caller budget without creating runtime state."""
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("operational database deadline expired")
+
+
+def operational_busy_ms(busy_ms: int, deadline: float | None) -> int:
+    operational_deadline_active(deadline)
+    if deadline is None or math.isinf(deadline):
+        return busy_ms
+    return min(busy_ms, max(0, int((deadline - time.monotonic()) * 1_000)))
+
+
+# Cooperative SQL checks every 1 000 VM instructions. Measured 2026-10-03:
+# a 100 000-row recursive aggregate took 0.384 s at interval 1 versus 0.0194 s
+# here, with a 20 ms interruption overshoot below 16 microseconds. A retained
+# authority fallback read was 0.153 s at 1 versus 0.0387 s here (same result).
+# At 10 000, cost barely improved while overshoot grew; this is instrumentation
+# granularity, never a row/data/work ceiling. Requalify on SQLite/workload changes;
+# UDFs and filesystem/OS scheduling remain cooperative, not hard real-time.
+_OPERATIONAL_PROGRESS_VM_STEPS = 1_000
+
+
+def configure_operational_deadline(database: sqlite3.Connection, deadline: float | None) -> None:
+    operational_deadline_active(deadline)
+    if deadline is None or math.isinf(deadline):
+        return
+
+    def interrupted() -> int:
+        return int(time.monotonic() >= deadline)
+
+    database.set_progress_handler(interrupted, _OPERATIONAL_PROGRESS_VM_STEPS)
+
+
+def refresh_operational_deadline(database: sqlite3.Connection, busy_ms: int, deadline: float | None) -> None:
+    """Recompute lock waiting before the next transaction or commit."""
+    operational_deadline_active(deadline)
+    if deadline is None or math.isinf(deadline):
+        return
+    remaining_ms = operational_busy_ms(busy_ms, deadline)
+    database.execute(f"PRAGMA busy_timeout={remaining_ms:d}")
+
+
 def open_operational_db(
     path: Path,
     *,
     busy_ms: int,
     contract: OperationalDatabaseContract | None = None,
     initialize_contract: bool = False,
+    deadline: float | None = None,
 ) -> sqlite3.Connection:
     """Open an owner-restricted rollback-journal operational database."""
     _require_operational_open_arguments(busy_ms, contract, initialize_contract)
+    busy_ms = operational_busy_ms(busy_ms, deadline)
     path = Path(path)
-    validate_state_root(path.parent)
+    validate_database_directory(path.parent)
     expected = _operational_db_identity(path)
     connection = sqlite3.connect(
         path,
@@ -488,17 +626,20 @@ def open_operational_db(
         isolation_level=None,
     )
     try:
+        configure_operational_deadline(connection, deadline)
         _configure_operational_connection(
             connection,
             path,
             expected,
-            busy_ms=busy_ms,
+            busy_ms=operational_busy_ms(busy_ms, deadline),
             contract=contract,
             initialize_contract=initialize_contract,
         )
+        operational_deadline_active(deadline)
         return connection
     except Exception:
         connection.close()
+        operational_deadline_active(deadline)
         raise
 
 
@@ -683,22 +824,46 @@ def run_resumable_migration(
 def _contained_runtime_metadata(path: Path, state_root: Path) -> os.stat_result:
     root = Path(state_root).resolve(strict=True)
     try:
-        path.parent.resolve(strict=True).relative_to(root)
-        return path.lstat()
+        parent = path.parent.resolve(strict=True)
+        _require_runtime_parent_containment(parent, root)
     except (OSError, ValueError) as exc:
         raise PermissionError("runtime file is outside the configured state root") from exc
+    return path.lstat()
+
+
+def _require_runtime_parent_containment(parent: Path, root: Path) -> None:
+    normalized_root = os.path.normcase(root)
+    normalized_parent = os.path.normcase(parent)
+    if os.path.commonpath((normalized_parent, normalized_root)) != normalized_root:
+        raise ValueError("runtime parent is outside the configured state root")
 
 
 def _require_bounded_regular_file(
-    path: Path, metadata: os.stat_result, max_bytes: int
+    path: Path, metadata: os.stat_result, max_bytes: int | None
 ) -> None:
     if (
         stat.S_ISLNK(metadata.st_mode)
         or _windows_reparse_point(path)
         or not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_size > max_bytes
     ):
         raise PermissionError("runtime file must be a bounded regular file")
+    _require_file_size_budget(metadata.st_size, max_bytes)
+
+
+
+def _require_file_size_budget(size: int, max_bytes: int | None) -> None:
+    """SQLite metadata opens need no whole-file byte budget."""
+    if max_bytes is None:
+        return
+    if size > max_bytes:
+        raise PermissionError("runtime file must be a bounded regular file")
+
+
+def _require_nonnegative_file_budget(max_bytes: int | None) -> None:
+    if max_bytes is None:
+        return
+    if max_bytes < 0:
+        raise ValueError("max_bytes must be non-negative")
 
 
 def _require_windows_owner_only(path: Path) -> None:
@@ -721,12 +886,11 @@ def _validated_runtime_metadata(
     path: Path,
     state_root: Path,
     *,
-    max_bytes: int,
+    max_bytes: int | None,
     owner_only: bool,
 ) -> os.stat_result:
     """Validate a bounded regular runtime file from metadata alone."""
-    if max_bytes < 0:
-        raise ValueError("max_bytes must be non-negative")
+    _require_nonnegative_file_budget(max_bytes)
     metadata = _contained_runtime_metadata(path, state_root)
     _require_bounded_regular_file(path, metadata, max_bytes)
     if owner_only:
@@ -772,7 +936,7 @@ def validate_operational_db_file(
     path: Path,
     state_root: Path,
     *,
-    max_bytes: int,
+    max_bytes: int | None,
     owner_only: bool = False,
 ) -> os.stat_result:
     """Validate an operational database without opening a second descriptor.
@@ -816,28 +980,34 @@ def _readonly_write_refusal(error: BaseException) -> bool:
     return "readonly database" in str(error)
 
 
-def _replayed_hot_journal(path: Path) -> bool:
+def _replayed_hot_journal(path: Path, *, deadline: float | None = None) -> bool:
     """Let SQLite replay a stranded journal; True when it is gone afterwards."""
+    busy_ms = operational_busy_ms(_JOURNAL_REPLAY_BUSY_MS, deadline)
     try:
         database = sqlite3.connect(
-            str(Path(path)), timeout=_JOURNAL_REPLAY_BUSY_MS / 1_000
+            str(Path(path)), timeout=busy_ms / 1_000
         )
     except sqlite3.Error:
+        operational_deadline_active(deadline)
         return False
     try:
+        configure_operational_deadline(database, deadline)
         database.execute("PRAGMA journal_mode")
+        operational_deadline_active(deadline)
     except sqlite3.Error:
+        operational_deadline_active(deadline)
         return False
     finally:
         database.close()
     return not _hot_journal(path).exists()
 
 
-def _require_replayed_journal(path: Path, error: sqlite3.OperationalError) -> None:
+def _require_replayed_journal(path: Path, error: sqlite3.OperationalError, *, deadline: float | None = None) -> None:
     """Re-raise the original refusal unless a stranded journal explains it."""
+    operational_deadline_active(deadline)
     if not _readonly_write_refusal(error) or not _hot_journal(path).exists():
         raise error
-    if not _replayed_hot_journal(path):
+    if not _replayed_hot_journal(path, deadline=deadline):
         raise error
 
 
@@ -874,10 +1044,11 @@ def open_readonly_operational_db(
     path: Path,
     state_root: Path,
     *,
-    max_bytes: int,
+    max_bytes: int | None,
     owner_only: bool = False,
     busy_ms: int = 0,
     contract: OperationalDatabaseContract | None = None,
+    deadline: float | None = None,
 ) -> sqlite3.Connection:
     """Open a validated runtime SQLite database read-only and fail on path races.
 
@@ -886,7 +1057,9 @@ def open_readonly_operational_db(
     """
     if busy_ms < 0:
         raise ValueError("busy_ms must be non-negative")
+    operational_deadline_active(deadline)
     arguments = {
+        "deadline": deadline,
         "max_bytes": max_bytes,
         "owner_only": owner_only,
         "busy_ms": busy_ms,
@@ -895,7 +1068,7 @@ def open_readonly_operational_db(
     try:
         return _opened_readonly_operational_db(path, state_root, **arguments)
     except sqlite3.OperationalError as error:
-        _require_replayed_journal(Path(path), error)
+        _require_replayed_journal(Path(path), error, deadline=deadline)
     return _opened_readonly_operational_db(path, state_root, **arguments)
 
 
@@ -903,12 +1076,14 @@ def _opened_readonly_operational_db(
     path: Path,
     state_root: Path,
     *,
-    max_bytes: int,
+    max_bytes: int | None,
     owner_only: bool,
     busy_ms: int,
     contract: OperationalDatabaseContract | None,
+    deadline: float | None = None,
 ) -> sqlite3.Connection:
     """Validate the file and open it read-only, once, with no recovery."""
+    busy_ms = operational_busy_ms(busy_ms, deadline)
     expected = validate_operational_db_file(
         path, state_root, max_bytes=max_bytes, owner_only=owner_only
     )
@@ -919,17 +1094,20 @@ def _opened_readonly_operational_db(
         isolation_level=None,
     )
     try:
+        configure_operational_deadline(database, deadline)
         current = Path(path).stat(follow_symlinks=False)
         if not os.path.samestat(expected, current):
             raise PermissionError("runtime database identity changed while opening")
-        _apply_readonly_operational_pragmas(database, busy_ms)
+        _apply_readonly_operational_pragmas(database, operational_busy_ms(busy_ms, deadline))
         if contract is not None:
             _validate_or_initialize_operational_contract(
                 database, contract, initialize=False
             )
+        operational_deadline_active(deadline)
         return database
     except Exception:
         database.close()
+        operational_deadline_active(deadline)
         raise
 
 
@@ -1011,6 +1189,22 @@ def capture_runtime_file_identity(
     target = Path(path)
     root = Path(state_root).resolve(strict=True)
     metadata = validate_runtime_file(target, root, max_bytes=1 << 50)
+    return _runtime_identity_from_metadata(target, metadata)
+
+
+def capture_operational_database_identity(
+    path: Path, *, state_root: Path
+) -> RuntimeFileIdentity:
+    """Identify a live database without closing a non-SQLite descriptor."""
+    target = Path(path)
+    root = Path(state_root).resolve(strict=True)
+    metadata = validate_operational_db_file(target, root, max_bytes=None)
+    return _runtime_identity_from_metadata(target, metadata)
+
+
+def _runtime_identity_from_metadata(
+    target: Path, metadata: os.stat_result
+) -> RuntimeFileIdentity:
     on_windows = os.name == "nt"
     names = _windows_runtime_identity_names(target) if on_windows else None
     current = target.stat(follow_symlinks=False)
@@ -1049,8 +1243,15 @@ def begin_immediate(
 
 
 def fsync_file(path: Path) -> None:
-    with Path(path).open("rb+") as handle:
+    with Path(path).open(_file_sync_mode()) as handle:
         os.fsync(handle.fileno())
+
+
+def _file_sync_mode() -> str:
+    # Windows FlushFileBuffers requires write access; POSIX fsync does not.
+    if os.name == "nt":
+        return "rb+"
+    return "rb"
 
 
 def _fsync_directory_windows(path: Path) -> None:
@@ -1286,11 +1487,21 @@ def publish_runtime_file(
     _write_staged_bytes(staged, data, mode)
     _harden_runtime_owner_only(staged, mode)
     _publish_staged(staged, destination, parent, data, create_only, expected)
-    _harden_runtime_owner_only(destination, mode)
+    _verify_published_runtime_permissions(destination, mode)
     published = capture_runtime_file_identity(destination, state_root=root)
     if published.size != len(data):
         raise RuntimeError("published runtime file size changed during read-back")
     return published
+
+
+def _verify_published_runtime_permissions(path: Path, mode: int) -> None:
+    """Same-parent publication preserves permissions; any drift must remain a refusal."""
+    if os.name == "nt":
+        from markdown_transaction import _verify_windows_owner_acl
+
+        _verify_windows_owner_acl(path)
+        return
+    _require_applied_mode(path, mode)
 
 
 def _require_runtime_mode(mode: object) -> None:

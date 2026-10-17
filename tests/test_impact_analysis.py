@@ -541,24 +541,26 @@ def test_public_analyze_impact_propagates_all_deadline_timeouts(
     root = _repository(tmp_path)
     (root / "alpha.py").write_text("def alpha():\n    return 2\n", encoding="utf-8")
 
-    if stage == "git":
-        monkeypatch.setattr(
-            impact_analysis,
-            "collect_git_changes",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                TimeoutError("git deadline")
-            ),
-        )
-    elif stage == "graph":
-        graph = _Graph()
-        monkeypatch.setattr(
-            graph,
-            "evidence",
-            lambda **_kwargs: (_ for _ in ()).throw(
-                TimeoutError("evidence deadline")
-            ),
-        )
-    else:
+    def install_timeout():
+        if stage == "git":
+            monkeypatch.setattr(
+                impact_analysis,
+                "collect_git_changes",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    TimeoutError("git deadline")
+                ),
+            )
+            return None
+        if stage == "graph":
+            graph = _Graph()
+            monkeypatch.setattr(
+                graph,
+                "evidence",
+                lambda **_kwargs: (_ for _ in ()).throw(
+                    TimeoutError("evidence deadline")
+                ),
+            )
+            return graph
         graph = None
 
         def text_timeout(_symbols, *, deadline=None, **_kwargs):
@@ -566,9 +568,12 @@ def test_public_analyze_impact_propagates_all_deadline_timeouts(
             raise TimeoutError("text deadline")
 
         monkeypatch.setattr(impact_analysis, "find_stale_wiki_pages", text_timeout)
+        return None
+
+    graph = install_timeout()
 
     with pytest.raises(TimeoutError, match="deadline"):
-        analyze_impact(root=root, graph=locals().get("graph"))
+        analyze_impact(root=root, graph=graph)
 
 
 def test_changed_ranges_rejects_expired_deadline():

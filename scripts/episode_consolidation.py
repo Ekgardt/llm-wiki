@@ -113,7 +113,13 @@ def session_records(vault: Path, day: str) -> list[Path]:
     directory = session_day_directory(vault, day)
     if not directory.is_dir():
         return []
-    return sorted(path for path in directory.glob("*.md") if path.is_file())
+    return sorted(path for path in directory.glob("*.md") if _is_session_record(path))
+
+
+def _is_session_record(path: Path) -> bool:
+    from breadcrumb_evidence import is_breadcrumb_document
+
+    return path.is_file() and not is_breadcrumb_document(path)
 
 
 def record_set_digest(vault: Path, day: str) -> str:

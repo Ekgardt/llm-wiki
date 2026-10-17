@@ -41,7 +41,7 @@ from pathlib import Path
 from repository_refusal import SCHEMA_VERSION, RepositoryIndexRefused  # noqa: E402
 
 # A listing names repositories, not files. 128 is far above the number of
-# repositories one operator keeps on one machine and far below MAX_GENERATIONS.
+# repositories one operator keeps on one machine; listing truncation is explicit.
 MAX_LISTED_REPOSITORIES = 128
 # Bounded path evidence in a change report. The counts are always exact; the
 # named paths are the first of each kind in sorted order.
@@ -1401,6 +1401,19 @@ def _pass_status(rows: list, adopted: Mapping) -> str:
     return "ok"
 
 
+def _fair_refresh_deadline(deadline: float, pending: int) -> float:
+    now = time.monotonic()
+    return min(deadline, now + max(0.0, deadline - now) / pending)
+
+
+def _refresh_rows_with_budget(rows, state_root, deadline):
+    outcomes = []
+    for position, row in enumerate(rows):
+        bound = _fair_refresh_deadline(deadline, len(rows) - position)
+        outcomes.append(_refresh_row(row, state_root, bound))
+    return outcomes
+
+
 def refresh_all_repositories(
     *,
     state_root: Path | None = None,
@@ -1421,7 +1434,7 @@ def refresh_all_repositories(
     deadline = time.monotonic() + budget_seconds
     adopted = _adopted_vault(state_root, deadline)
     rows = _registered_rows(state_root, deadline)
-    outcomes = [_refresh_row(row, state_root, deadline) for row in rows]
+    outcomes = _refresh_rows_with_budget(rows, state_root, deadline)
     followed = follow_worktrees(rows, state_root=state_root, deadline=deadline)
     return {
         "schema_version": SCHEMA_VERSION,

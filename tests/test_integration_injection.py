@@ -30,6 +30,8 @@ import pytest
 
 from tests.powershell_literal import ps_literal
 from tests.slow_machine import SHORT_TIMEOUT
+from tests.test_breadcrumb_storage import _bundle
+from tests.test_breadcrumb_worker import ingress as ingress
 
 ROOT = Path(__file__).resolve().parent.parent
 # Session start must answer from the projection instead of recomputing the
@@ -293,22 +295,8 @@ def test_installed_plugin_captures_without_an_inherited_environment(tmp_path: Pa
     assert f"{root}/scripts" in " ".join(calls[0]["args"])
 
 
-def test_user_prompt_ingestion_runs_prompt_capture_once(monkeypatch):
-    _ensure_scripts_on_path()
-    import integration_adapter
-
-    calls = []
-    monkeypatch.setattr(integration_adapter, "_observe_checkpoint_fail_open", lambda event: None)
-    monkeypatch.setattr(
-        integration_adapter,
-        "_project_context",
-        lambda event: ("demo", Path("D:/project")),
-    )
-    monkeypatch.setattr(
-        integration_adapter,
-        "_run_delegate",
-        lambda name, payload, **kwargs: calls.append((name, payload, kwargs)),
-    )
+def test_user_prompt_ingestion_runs_prompt_capture_once(ingress):
+    integration_adapter, queue, _coordinator = ingress
     envelope = integration_adapter.normalize_event(
         "opencode",
         "user_prompt",
@@ -320,12 +308,11 @@ def test_user_prompt_ingestion_runs_prompt_capture_once(monkeypatch):
         },
     )
 
-    integration_adapter.ingest_event(envelope)
-
-    # Feedback candidates were retired on 2026-09-25; the prompt reaches compile
-    # through the daily log.
-    assert [name for name, _, _ in calls] == ["user_prompt_capture.py"]
-    assert calls[0][1]["prompt"] == "Preserve this request"
+    result = integration_adapter.ingest_event(envelope)
+    content = json.loads(_bundle(queue.state_root, result["capture_intent_ids"][0]).content)
+    assert content["payload"]["prompt"] == "Preserve this request"
+    assert queue.claim_capture("once", handler_versions=(2,)) is not None
+    assert queue.claim_capture("twice", handler_versions=(2,)) is None
 
 
 def test_normalization_preserves_only_available_checkpoint_signals():
@@ -452,6 +439,14 @@ def test_host_tool_call_id_separates_repeated_mutations():
     assert first.event_id != second.event_id
 
 
+def _without_writer_wait(callback):
+    def observe(envelope, *, writer_wait_seconds):
+        assert writer_wait_seconds == 0.0
+        return callback(envelope)
+
+    return observe
+
+
 def test_adapter_observes_same_envelope_once_before_durable_capture(monkeypatch, tmp_path):
     import io
     import sys
@@ -463,7 +458,7 @@ def test_adapter_observes_same_envelope_once_before_durable_capture(monkeypatch,
     monkeypatch.setattr(
         integration_adapter,
         "_observe_project_checkpoint",
-        lambda envelope: calls.append(("observe", envelope)),
+        _without_writer_wait(lambda envelope: calls.append(("observe", envelope))),
     )
     monkeypatch.setattr(
         integration_adapter,
@@ -604,7 +599,7 @@ def test_durable_capture_runs_when_checkpoint_observation_fails(monkeypatch, cap
     monkeypatch.setattr(
         integration_adapter,
         "_observe_project_checkpoint",
-        lambda envelope: (_ for _ in ()).throw(RuntimeError("x" * 2000)),
+        _without_writer_wait(lambda envelope: (_ for _ in ()).throw(RuntimeError("x" * 2000))),
     )
 
     def publish(*_args):
@@ -677,7 +672,7 @@ def test_adapter_observes_before_direct_ingestion(monkeypatch):
     monkeypatch.setattr(
         integration_adapter,
         "_observe_project_checkpoint",
-        lambda observed: calls.append(("observe", observed.event_id)),
+        _without_writer_wait(lambda observed: calls.append(("observe", observed.event_id))),
     )
     monkeypatch.setattr(
         integration_adapter,
@@ -702,7 +697,7 @@ def test_direct_ingestion_continues_when_checkpoint_observation_fails(monkeypatc
     monkeypatch.setattr(
         integration_adapter,
         "_observe_project_checkpoint",
-        lambda observed: (_ for _ in ()).throw(RuntimeError("checkpoint failed")),
+        _without_writer_wait(lambda observed: (_ for _ in ()).throw(RuntimeError("checkpoint failed"))),
     )
     monkeypatch.setattr(
         integration_adapter,
@@ -731,7 +726,7 @@ def test_claude_stop_is_dirty_checkpoint_only_and_never_dispatches_session_end(m
     monkeypatch.setattr(
         integration_adapter,
         "_observe_project_checkpoint",
-        lambda envelope: calls.append(("observe", envelope.event_type)),
+        _without_writer_wait(lambda envelope: calls.append(("observe", envelope.event_type))),
     )
     monkeypatch.setattr(
         integration_adapter,
@@ -1934,7 +1929,7 @@ def test_claude_outer_session_start_preserves_hook_output_contract(monkeypatch, 
     monkeypatch.setattr(
         integration_adapter,
         "ingest_event",
-        lambda _envelope: {"context": "combined context\n"},
+        lambda _envelope, **_options: {"context": "combined context\n"},
     )
     monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
 
@@ -1991,7 +1986,7 @@ def test_claude_session_end_uses_one_adapter_occurrence_for_both_side_effects(
     monkeypatch.setattr(
         integration_adapter,
         "_observe_project_checkpoint",
-        observe,
+        _without_writer_wait(observe),
     )
     monkeypatch.setattr(integration_adapter, "_run_delegate", delegate)
     monkeypatch.setattr(
@@ -2091,8 +2086,14 @@ def _group_keeps_contract(key: tuple[str, int], group: dict) -> bool:
         group.get("matcher") == matcher
         and command["type"] == "command"
         and _command_texts_end_with(command, script, ending)
-        and 0 < command["timeout"] <= 15
+        and _codex_timeout_keeps_contract(key, command)
     )
+
+
+def _codex_timeout_keeps_contract(key: tuple[str, int], command: dict) -> bool:
+    if key in {("UserPromptSubmit", 0), ("PostToolUse", 1)}:
+        return "timeout" not in command
+    return 0 < command["timeout"] <= 15
 
 
 def test_codex_hook_merge_preserves_user_hooks_and_is_idempotent(tmp_path):
@@ -2182,7 +2183,7 @@ def test_codex_hook_merge_prunes_owned_backups_but_keeps_newest_and_unrelated(tm
 
     backups = list(tmp_path.glob("hooks.json.bak-llm-wiki-*"))
     assert not old.exists()
-    assert len(backups) <= 10
+    assert sum(path.stat().st_size for path in backups) <= 100 * 1024 * 1024
     assert original in [path.read_bytes() for path in backups]
     assert unrelated.read_bytes() == b"keep"
 
@@ -2213,10 +2214,11 @@ def _codex_inline_group_toml(event_name: str, group: dict) -> list[str]:
                 'type = "command"',
                 f"command = {json.dumps(handler['command'])}",
                 f"command_windows = {json.dumps(handler['commandWindows'])}",
-                f"timeout = {handler['timeout']}",
                 "",
             ]
         )
+        if "timeout" in handler:
+            lines.append(f"timeout = {handler['timeout']}")
     return lines
 
 
@@ -2379,10 +2381,11 @@ def test_codex_mcp_config_state_accepts_exact_enabled_table(tmp_path, quoted):
 
     config = tmp_path / "config.toml"
     table = '[mcp_servers."llm-wiki"]' if quoted else "[mcp_servers.llm-wiki]"
+    from integration_hook_config import codex_launch_args
+
+    args = codex_launch_args(ROOT, "mcp_server.py", (), relative_target=True)
     config.write_text(
-        f'{table}\ncommand = "uv"\n'
-        f'args = ["run", "--locked", "--no-sync", "--directory", {json.dumps(str(ROOT))}, '
-        '"python", "scripts/mcp_server.py"]\nenabled = true\n',
+        f'{table}\ncommand = "uv"\nargs = {json.dumps(args)}\nenabled = true\n',
         encoding="utf-8",
     )
 
@@ -2401,7 +2404,12 @@ def test_codex_mcp_config_state_accepts_exact_enabled_table(tmp_path, quoted):
             '[mcp_servers.llm-wiki]\ncommand = "uv"\n'
             'args = ["run", "--locked", "--no-sync", "--directory", "wrong", "python", '
             '"scripts/mcp_server.py"]\nenabled = false\n',
-            "conflict",
+            "disabled",
+        ),
+        (
+            '[mcp_servers.llm-wiki]\ncommand = "uv"\n'
+            'args = ["run", "--directory", "elsewhere", "python", "scripts/mcp_server.py"]\n',
+            "stale",
         ),
     ],
 )
@@ -2677,6 +2685,8 @@ def test_unix_installer_trusts_smoke_exit_status(
             set -euo pipefail
             RED='' GREEN='' YELLOW='' BLUE='' NC=''
             PATH="$(dirname "$0")/bin:$PATH"
+            # Defined before the smoke step in the real installer; the report goes under it.
+            STATE_ROOT="$(dirname "$0")/state"
             export PATH
             info() {{ echo "[INFO] $1"; }}
             ok() {{ echo "[OK] $1"; }}
@@ -2724,6 +2734,8 @@ def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
             # again while the trap sat behind two writes.
             export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS={_SMOKE_TIMEOUT_SECONDS}
             PATH="$(dirname "$0")/bin:$PATH"
+            # Defined before the smoke step in the real installer; the report goes under it.
+            STATE_ROOT="$(dirname "$0")/state"
             export PATH
             info() {{ :; }}
             ok() {{ : > passed.marker; }}
@@ -2797,6 +2809,8 @@ def test_unix_installer_signal_traps_cleanup_and_exit(tmp_path, signal_name, exp
             set -euo pipefail
             export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=30
             PATH="$(dirname "$0")/bin:$PATH"
+            # Defined before the smoke step in the real installer; the report goes under it.
+            STATE_ROOT="$(dirname "$0")/state"
             export PATH
             info() {{ :; }}
             ok() {{ :; }}
@@ -2887,6 +2901,8 @@ def test_unix_installer_signal_kills_complete_stubborn_test_tree(tmp_path):
             set -euo pipefail
             export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=30
             PATH="$(dirname "$0")/bin:$PATH"
+            # Defined before the smoke step in the real installer; the report goes under it.
+            STATE_ROOT="$(dirname "$0")/state"
             export PATH
             info() {{ :; }}
             ok() {{ :; }}
@@ -2964,6 +2980,8 @@ def test_unix_installer_initial_monitor_mode_cleans_stopped_test_tree(tmp_path):
             set -m
             export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=3
             PATH="$(dirname "$0")/bin:$PATH"
+            # Defined before the smoke step in the real installer; the report goes under it.
+            STATE_ROOT="$(dirname "$0")/state"
             export PATH
             info() {{ :; }}
             ok() {{ : > passed.marker; }}
@@ -3060,6 +3078,8 @@ def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(tmp_path, s
             set +m
             export LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS=3
             PATH="$(dirname "$0")/bin:$PATH"
+            # Defined before the smoke step in the real installer; the report goes under it.
+            STATE_ROOT="$(dirname "$0")/state"
             export PATH
             info() {{ :; }}
             ok() {{ : > passed.marker; }}
@@ -3178,6 +3198,7 @@ def test_unix_installer_sigttin_wait_status_enters_bounded_group_cleanup(tmp_pat
         "stop_test_group",
         "stop_test_process",
         "test_tree_alive",
+        "stop_live_test_tree",
         "stop_test_child",
         "stop_test_timer",
         "wait_test_child",
@@ -3269,6 +3290,7 @@ def test_unix_installer_signal_trap_restores_initial_monitor_mode(tmp_path):
         "stop_test_group",
         "stop_test_process",
         "test_tree_alive",
+        "stop_live_test_tree",
         "stop_test_child",
         "stop_test_timer",
         "handle_test_signal",
@@ -3326,7 +3348,7 @@ def test_unix_installer_cleanup_targets_group_with_term_then_kill(tmp_path):
     bash = _require_bash()
     source = (ROOT / "install.sh").read_text(encoding="utf-8")
     functions = _shell_functions(
-        source, "send_signal", "test_group_is_own", "stop_test_group", "stop_test_process", "test_tree_alive", "stop_test_child"
+        source, "send_signal", "test_group_is_own", "stop_test_group", "stop_test_process", "test_tree_alive", "stop_live_test_tree", "stop_test_child"
     )
     runner = tmp_path / "exercise-cleanup.sh"
     runner.write_text(
@@ -3420,6 +3442,8 @@ def test_windows_installer_trusts_smoke_exit_status(
         function Ok($msg) {{ Write-Output "[OK] $msg" }}
         function Warn($msg) {{ Write-Output "[WARN] $msg" }}
         function Fail($msg) {{ Write-Output "[FAIL] $msg"; exit 1 }}
+        # Defined before the smoke step in the real installer; the report goes under it.
+        $STATE_ROOT = {ps_literal(str(tmp_path / "state"))}
         {section}
         """
     )
@@ -3527,6 +3551,8 @@ def test_windows_installer_error_stops_native_child_and_later_steps(
         function Info($msg) {{ Write-Output "[INFO] $msg" }}
         function Ok($msg) {{ Write-Output "[OK] $msg" }}
         function Warn($msg) {{ Write-Output "[WARN] $msg" }}
+        # Defined before the smoke step in the real installer; the report goes under it.
+        $STATE_ROOT = {ps_literal(str(tmp_path / "state"))}
         {section}
         New-Item -ItemType File -Path {ps_literal(str(later))} | Out-Null
         """
@@ -3576,19 +3602,12 @@ def _mcp_config_kept(config: Path, scenario: str, original: str, before: bytes) 
 
 def _codex_mcp_toml(vault: Path, *, quoted: bool, conflicting: bool = False) -> str:
     table = '[mcp_servers."llm-wiki"]' if quoted else "[mcp_servers.llm-wiki]"
-    args = (
-        ["python", "other.py"]
-        if conflicting
-        else [
-            "run",
-            "--locked",
-            "--no-sync",
-            "--directory",
-            str(vault),
-            "python",
-            "scripts/mcp_server.py",
-        ]
-    )
+    _ensure_scripts_on_path()
+    from integration_hook_config import codex_launch_args
+
+    args = codex_launch_args(vault, "mcp_server.py", (), relative_target=True)
+    if conflicting:
+        args = ["python", "other.py"]
     return f'{table}\ncommand = "uv"\nargs = {json.dumps(args)}\n'
 
 
@@ -3602,7 +3621,14 @@ def test_unix_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario
     if not bash.exists():
         pytest.skip("Git Bash unavailable")
     source = (ROOT / "install.sh").read_text(encoding="utf-8")
-    function = _shell_functions(source, "write_codex_mcp_block", "add_codex_mcp_block", "codex_mcp_state_status", "configure_codex_mcp")
+    function = _shell_functions(
+        source,
+        "write_codex_mcp_block",
+        "add_codex_mcp_block",
+        "codex_mcp_state_status",
+        "replace_codex_mcp",
+        "configure_codex_mcp",
+    )
     home = tmp_path / "home"
     config = home / ".codex" / "config.toml"
     config.parent.mkdir(parents=True)
@@ -3617,13 +3643,17 @@ def test_unix_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scenario
     runner.write_text(
         function
         + "\nuv() {\n"
-        + "  while [[ $# -gt 0 && $1 != config-state ]]; do shift; done\n"
+        + "  while [[ $# -gt 0 && $1 != config-state && $1 != config-replace && $1 != config-block ]]; do shift; done\n"
         + '  command "$TEST_PYTHON" "$TEST_VAULT/scripts/codex_memory.py" "$@"\n'
         + "}\nset +e\n"
         + 'configure_codex_mcp "$TEST_VAULT" "$HOME/.codex/config.toml"\n'
         + "exit $?\n",
         encoding="utf-8",
     )
+    from tests.test_shell_functions_stay_simple import _shape_violations, _violations
+
+    assert _violations(runner.read_bytes()) == {}
+    assert _shape_violations(runner.read_bytes()) == []
     env = os.environ.copy()
     env.update(HOME=str(home), TEST_VAULT=str(ROOT), TEST_PYTHON=sys.executable)
 
@@ -3667,22 +3697,37 @@ def test_windows_installer_mcp_function_uses_parser_in_temp_home(tmp_path, scena
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
             {ps_literal(str(source))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
-        $fn = $ast.Find({{ param($node)
-            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -eq 'Install-CodexMcp'
-        }}, $true)
-        if ($null -eq $fn) {{ throw 'Install-CodexMcp missing' }}
-        Invoke-Expression $fn.Extent.Text
+        foreach ($name in @('Install-CodexMcp', 'Complete-CodexMcpInstall',
+            'Get-CodexMcpInstallState', 'Update-CodexMcpEntry',
+            'Get-CodexMcpSeparator', 'Add-CodexMcpEntry')) {{
+            $fn = $ast.Find({{ param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq $name
+            }}, $true)
+            if ($null -eq $fn) {{ throw "$name missing" }}
+            Invoke-Expression $fn.Extent.Text
+        }}
         function uv {{
             $all = @($args)
-            $index = [Array]::IndexOf($all, 'config-state')
-            if ($index -lt 0) {{ throw 'config-state missing' }}
+            $index = -1
+            foreach ($command in @('config-state', 'config-replace', 'config-block')) {{
+                $index = [Array]::IndexOf($all, $command)
+                if ($index -ge 0) {{ break }}
+            }}
+            if ($index -lt 0) {{ throw 'config command missing' }}
             & {ps_literal(sys.executable)} {ps_literal(str(ROOT / "scripts/codex_memory.py"))} $all[$index..($all.Count - 1)]
         }}
         $code = Install-CodexMcp -VaultRoot {ps_literal(str(ROOT))} -Config {ps_literal(str(config))}
         exit $code
         """
     )
+
+    from tests.test_powershell_functions_stay_simple import _measure, _problems
+
+    emitted = tmp_path / "installer-mcp-contract.ps1"
+    emitted.write_text(command, encoding="utf-8")
+    assert [problem for record in _measure([emitted], tmp_path)
+            for problem in _problems(record)] == []
 
     result = subprocess.run(
         [require_tool("pwsh"), "-NoProfile", "-NonInteractive", "-Command", command],
@@ -4316,10 +4361,11 @@ def test_install_scripts_generate_context(tmp_path):
                 ("session_start_context", install_sh, True),
                 ("sync-args", install_sh, True),
                 ("sync-args", install_ps1, True),
+                # The sync plan itself (--locked --no-default-groups --extra full) is
+                # pinned in tests/test_dependency_environments.py; the installers take it
+                # from `installer_config.py sync-args`.
                 ("--locked", install_sh, True),
-                ("--no-default-groups", install_sh, True),
                 ("--locked", install_ps1, True),
-                ("--no-default-groups", install_ps1, True),
             )
         )
         == []
@@ -4378,18 +4424,15 @@ def test_install_scripts_generate_context(tmp_path):
         }
     }
     sh_codex_mcp = _shell_functions(install_sh, "write_codex_mcp_block", "add_codex_mcp_block", "codex_mcp_state_status", "configure_codex_mcp")
+    ps_codex_mcp = install_ps1.split("function Add-CodexMcpEntry {", 1)[1].split("\nfunction ", 1)[0]
     assert (
         _unmet_substrings(
             (
                 ('CODEX_CONFIG="$HOME/.codex/config.toml"', sh_codex, True),
                 ("config-state", sh_codex_mcp, True),
-                ("[mcp_servers.llm-wiki]", sh_codex_mcp, True),
-                ('command = "uv"', sh_codex_mcp, True),
-                (
-                    'args = [\\"run\\", \\"--locked\\", \\"--no-sync\\", \\"--directory\\"',
-                    sh_codex_mcp,
-                    True,
-                ),
+                ('uv run --locked --no-sync --directory "$vault_root" python scripts/codex_memory.py', sh_codex_mcp, True),
+                ('config-block --vault-root "$vault_root"', sh_codex_mcp, True),
+                ('write_codex_mcp_block "$block" "$config"', sh_codex_mcp, True),
                 ("config.bak", sh_codex_mcp, True),
                 ("grep", sh_codex_mcp, False),
                 ("$CODEX_HOOKS_STATE", sh_codex, True),
@@ -4420,9 +4463,9 @@ def test_install_scripts_generate_context(tmp_path):
                 ('$codexConfig = Join-Path $env:USERPROFILE ".codex\\config.toml"', ps_codex, True),
                 ("function Install-CodexMcp", install_ps1, True),
                 ("config-state", install_ps1, True),
-                ("[mcp_servers.llm-wiki]", install_ps1, True),
-                ('command = "uv"', install_ps1, True),
-                ('args = ["run", "--locked", "--no-sync", "--directory"', install_ps1, True),
+                ('uv run --locked --no-sync --directory $VaultRoot python scripts/codex_memory.py', ps_codex_mcp, True),
+                ('config-block --vault-root $VaultRoot', ps_codex_mcp, True),
+                ('$block = $blockLines -join "`n"', ps_codex_mcp, True),
                 ("Copy-Item -LiteralPath $Config", install_ps1, True),
                 ("Config.bak", install_ps1, True),
                 ("codex-memory-wrapper", ps_codex, True),
@@ -4574,14 +4617,17 @@ def test_windows_scheduler_status_accepts_only_the_registered_contract(tmp_path)
 
     command = textwrap.dedent(
         f"""
+        $ErrorActionPreference = 'Stop'
         $tokens = $null
         $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
             {ps_literal(str(script))}, [ref]$tokens, [ref]$errors)
         if ($errors.Count) {{ throw ($errors | Out-String) }}
         foreach ($name in @(
-            'Get-LLMWikiLimitHours', 'New-LLMWikiScheduledAction', 'Test-LLMWikiTaskSpec',
-            'Test-LLMWikiScheduledTasks'
+            'Get-LLMWikiLimitHours', 'Get-LLMWikiConfiguredLimitHours',
+            'New-LLMWikiScheduledAction', 'Test-LLMWikiTaskSpec',
+            'Test-LLMWikiScheduledTasks', 'Test-LLMWikiTaskAction', 'Test-LLMWikiTaskSchedule',
+            'Test-LLMWikiTaskIdentity', 'Write-LLMWikiTaskStatus', 'Test-LLMWikiTaskRegistration'
         )) {{
             $fn = $ast.Find({{ param($node)
                 $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and

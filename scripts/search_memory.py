@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import heapq
 import json
 import math
 import os
@@ -30,6 +31,7 @@ import re
 import sqlite3
 import stat
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -45,6 +47,7 @@ from corpus_snapshot import (  # noqa: E402
     MAX_CORPUS_FILE_BYTES,
     CorpusSnapshot,
     canonical_retrieval_chunks,
+    iter_snapshot_chunks,
     validate_canonical_source_manifest,
     validate_live_snapshot,
 )
@@ -70,10 +73,6 @@ MAX_SEARCH_DIRECTORIES = 2_000
 # Directory depth of the Markdown fallback walk; the live knowledge tree is 5 deep (2026-09-27),
 # so 32 only refuses a runaway tree.
 MAX_SEARCH_DEPTH = 32
-# The largest result count a caller may ask for; a larger one is refused with its range. Bounds
-# one answer's work. Basis unknown: value predates measurement; review when a caller needs more
-# rows.
-MAX_SEARCH_LIMIT = 1_000
 MAX_PAGE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
 SEARCH_INDEX_COLUMNS = (
     "path", "title", "summary", "body", "project", "timestamp", "slug",
@@ -126,10 +125,8 @@ GENERATION_METADATA_KEYS = frozenset(
         "chunk_count",
     }
 )
-# Chunk rows one generation's FTS index holds, the same count the corpus may produce
-# (`corpus_snapshot.MAX_CORPUS_CHUNKS`). A vault-size bound. Basis unknown: value predates
-# measurement; review when doctor warns on corpus size.
-MAX_GENERATION_FTS_CHUNKS = 100_000
+# SQLite invokes the deadline and cancellation guard at this instruction interval.
+# This controls interruption responsiveness, not the number of corpus chunks.
 GENERATION_FTS_PROGRESS_OPCODES = 1_000
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
@@ -282,9 +279,9 @@ def _validate_search_limit(value: object) -> int:
     if (
         isinstance(value, bool)
         or not isinstance(value, int)
-        or not 1 <= value <= MAX_SEARCH_LIMIT
+        or value < 1
     ):
-        raise ValueError(f"limit must be an integer from 1 to {MAX_SEARCH_LIMIT}")
+        raise ValueError("limit must be a positive integer")
     return value
 
 
@@ -449,7 +446,8 @@ def _write_generation_fts(
     )
 
     def rows():
-        for order, chunk in enumerate(snapshot.chunks):
+        chunks = iter_snapshot_chunks(snapshot, deadline=deadline, cancelled=cancelled)
+        for order, chunk in enumerate(chunks):
             _check_generation_stop(deadline, cancelled)
             yield (*_generation_chunk_row(chunk, order), _keys_of(chunk, keys))
 
@@ -489,8 +487,6 @@ def _require_buildable_snapshot(
     if not isinstance(snapshot, CorpusSnapshot):
         raise TypeError("snapshot must be a CorpusSnapshot")
     _check_generation_stop(deadline, cancelled)
-    if len(snapshot.chunks) > MAX_GENERATION_FTS_CHUNKS:
-        raise ValueError("generation FTS chunk row ceiling exceeded")
 
 
 def _discard_unfinished_fts(destination: Path, temporary: Path, *, complete: bool) -> None:
@@ -653,48 +649,83 @@ def _embedded_rows(texts: list[str], embedder: object, dimensions: int, check_st
     return np.ascontiguousarray(np.vstack(blocks), dtype=np.float32)
 
 
-def _reused_matrix(
-    snapshot: CorpusSnapshot,
-    embedder: object,
-    dimensions: int,
-    cache: Mapping[str, object],
-    check_stop=None,
-) -> tuple[object, int]:
-    """One row per chunk, taken from the cache where the chunk digest matches.
+def _vector_chunk_batches(snapshot, check_stop):
+    batch = []
+    for chunk in iter_snapshot_chunks(snapshot, cancelled=check_stop):
+        batch.append(chunk)
+        if len(batch) == EMBED_STOP_BATCH:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
 
-    A chunk ID is `sha256({extractor, parent, path, range, sha256})` where the
-    last field is the digest of the chunk's own bytes and `chunk.text` is those
-    bytes decoded — so an equal ID means equal text, and the model has already
-    been checked to be the same model at the same revision. The reused row is
-    therefore the row that model produced for that exact text.
 
-    What this does *not* claim: that the row equals what a fresh full build
-    would emit here. It does not, and neither does another full build — measured
-    on 400 real chunks, re-batching the same texts moves float32 results by up
-    to 8.6e-08, because the encoder pads and sorts by length. See
-    `docs/research/2026-08-28-what-a-rebuild-may-reuse.md`.
-    """
+def _new_vector_matrix(path, rows, dimensions):
     import numpy as np
 
-    fresh_positions = [
-        index for index, chunk in enumerate(snapshot.chunks) if chunk.id not in cache
-    ]
-    fresh = _embedded_rows(
-        [snapshot.chunks[index].text for index in fresh_positions], embedder, dimensions, check_stop
-    )
-    matrix = np.zeros((len(snapshot.chunks), dimensions), dtype=np.float32)
-    for row, index in enumerate(fresh_positions):
-        matrix[index] = fresh[row]
-    _fill_cached_rows(matrix, snapshot, cache)
-    return matrix, len(snapshot.chunks) - len(fresh_positions)
+    if rows == 0:
+        return np.zeros((0, dimensions), dtype=np.float32)
+    return np.lib.format.open_memmap(path, mode="w+", dtype=np.float32,
+                                    shape=(rows, dimensions))
 
 
-def _fill_cached_rows(matrix, snapshot: CorpusSnapshot, cache: Mapping[str, object]) -> None:
-    for index, chunk in enumerate(snapshot.chunks):
-        cached = cache.get(chunk.id)
+def _vector_cached_row(chunk, snapshot, cache):
+    previous = _parent_cache_extractor(getattr(cache, "metadata", {}), snapshot.extractor_version)
+    return _cached_chunk_row(chunk, snapshot.extractor_version, previous, cache)
+
+
+def _write_vector_batch(matrix, offset, batch, snapshot, cache, embedder, dimensions, check_stop):
+    positions, texts = [], []
+    for index, chunk in enumerate(batch):
+        cached = _vector_cached_row(chunk, snapshot, cache)
         if cached is None:
+            positions.append(offset + index)
+            texts.append(chunk.text)
             continue
-        matrix[index] = cached
+        matrix[offset + index] = cached
+    fresh = _embedded_rows(texts, embedder, dimensions, check_stop)
+    for index, position in enumerate(positions):
+        matrix[position] = fresh[index]
+    return len(batch) - len(positions)
+
+
+def _reused_matrix(snapshot, embedder, dimensions, cache, check_stop=None, *, output_path):
+    """One disk-backed row per exact chunk; only the current work batch is held."""
+    matrix = _new_vector_matrix(output_path, len(snapshot.chunks), dimensions)
+    reused, offset = 0, 0
+    try:
+        for batch in _vector_chunk_batches(snapshot, check_stop):
+            reused += _write_vector_batch(matrix, offset, batch, snapshot, cache,
+                                          embedder, dimensions, check_stop)
+            offset += len(batch)
+        _require_vector_row_count(offset, len(snapshot.chunks))
+        return matrix, reused
+    except BaseException:
+        _close_vector_matrix(matrix)
+        raise
+
+
+def _require_vector_row_count(observed, expected):
+    if observed != expected:
+        raise ValueError("vector source chunk count changed")
+
+
+class _ChunkVectorField(Sequence):
+    def __init__(self, snapshot, name):
+        self.snapshot, self.name = snapshot, name
+
+    def __len__(self):
+        return len(self.snapshot.chunks)
+
+    def __iter__(self):
+        return (getattr(chunk, self.name) for chunk in self.snapshot.chunks)
+
+    def __getitem__(self, position):
+        return getattr(self.snapshot.chunks[position], self.name)
+
+    def iter_checked(self, check_stop):
+        return (getattr(chunk, self.name) for chunk in
+                iter_snapshot_chunks(self.snapshot, cancelled=check_stop))
 
 
 def _vector_metadata(
@@ -708,10 +739,10 @@ def _vector_metadata(
         "model_id": model_id,
         "model_revision": model_revision,
         "dimensions": dimensions,
-        "chunk_ids": [chunk.id for chunk in snapshot.chunks],
-        "source_ids": [chunk.source_id for chunk in snapshot.chunks],
-        "source_paths": [chunk.source_path for chunk in snapshot.chunks],
-        "source_sha256": [chunk.source_sha256 for chunk in snapshot.chunks],
+        "chunk_ids": _ChunkVectorField(snapshot, "id"),
+        "source_ids": _ChunkVectorField(snapshot, "source_id"),
+        "source_paths": _ChunkVectorField(snapshot, "source_path"),
+        "source_sha256": _ChunkVectorField(snapshot, "source_sha256"),
     }
 
 
@@ -723,29 +754,89 @@ def _remove_quietly(paths: Iterable[Path]) -> None:
             pass
 
 
-def _publish_vector_artifacts(
-    directory: Path,
-    destinations: list[Path],
-    metadata: Mapping[str, object],
-    matrix: object,
-) -> None:
-    """Write both artifacts to temporaries and publish them, or leave neither."""
+VECTOR_ARRAY_FIELDS = ("chunk_ids", "source_ids", "source_paths", "source_sha256")
+VECTOR_SCALAR_FIELDS = ("schema_version", "corpus_sha256", "collector_version",
+                        "extractor_version", "model_id", "model_revision", "dimensions")
+
+
+def _vector_array_values(values, check_stop):
+    checked = getattr(values, "iter_checked", None)
+    if checked is not None:
+        return checked(check_stop)
+    return iter(values)
+
+
+def _write_json_vector_array(output, values, check_stop):
+    output.write("[")
+    separator = ""
+    for value in _vector_array_values(values, check_stop):
+        _run_vector_stop(check_stop)
+        output.write(separator + json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+        separator = ","
+    output.write("]")
+
+
+def _run_vector_stop(check_stop):
+    if check_stop is not None:
+        check_stop()
+
+
+def _write_vector_metadata(path, metadata, check_stop):
+    with path.open("w", encoding="utf-8", newline="") as output:
+        output.write("{")
+        separator = ""
+        for key in sorted(metadata):
+            _run_vector_stop(check_stop)
+            output.write(separator + json.dumps(key) + ":")
+            _write_vector_metadata_value(output, key, metadata[key], check_stop)
+            separator = ","
+        output.write("}")
+
+
+def _write_vector_metadata_value(output, key, value, check_stop):
+    if key in VECTOR_ARRAY_FIELDS:
+        _write_json_vector_array(output, value, check_stop)
+        return
+    output.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+
+
+def _copy_vector_matrix(path, matrix, check_stop):
     import numpy as np
 
+    if not isinstance(matrix, np.memmap):
+        with path.open("wb") as output:
+            np.save(output, matrix, allow_pickle=False)
+        return
+    matrix.flush()
+    with Path(matrix.filename).open("rb") as source, path.open("wb") as output:
+        _copy_vector_blocks(source, output, check_stop)
+
+
+def _copy_vector_blocks(source, output, check_stop):
+    while block := source.read(64 * 1024):
+        _run_vector_stop(check_stop)
+        output.write(block)
+
+
+def _close_vector_matrix(matrix):
+    mapped = getattr(matrix, "_mmap", None)
+    if mapped is not None:
+        mapped.close()
+    temporary = getattr(matrix, "_vector_temporary", None)
+    if temporary is not None:
+        temporary.cleanup()
+
+
+def _publish_vector_artifacts(directory, destinations, metadata, matrix, check_stop=None):
+    """Publish the existing pair without full JSON or matrix heap copies."""
     temporary_json = directory / f".vectors.json.{uuid.uuid4().hex}.tmp"
     temporary_npy = directory / f".vectors.npy.{uuid.uuid4().hex}.tmp"
-    created: list[Path] = []
+    created = []
     try:
-        temporary_json.write_text(
-            json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-            encoding="utf-8",
-            newline="",
-        )
-        with temporary_npy.open("wb") as output:
-            np.save(output, matrix, allow_pickle=False)
-        for temporary, destination in zip(
-            (temporary_json, temporary_npy), destinations, strict=True
-        ):
+        _write_vector_metadata(temporary_json, metadata, check_stop)
+        _copy_vector_matrix(temporary_npy, matrix, check_stop)
+        for temporary, destination in zip((temporary_json, temporary_npy), destinations, strict=True):
+            _run_vector_stop(check_stop)
             _publish_new_file(temporary, destination)
             created.append(destination)
     except BaseException:
@@ -753,6 +844,235 @@ def _publish_vector_artifacts(
         raise
     finally:
         _remove_quietly((temporary_json, temporary_npy))
+
+
+class _VectorJSONReader:
+    """Read the closed, flat vector format one scalar at a time."""
+    def __init__(self, source, check_stop):
+        self.source, self.check_stop = source, check_stop
+        self.buffer, self.ended = "", False
+        self.position = 0
+        self.decoder = json.JSONDecoder()
+
+    def _read_more(self):
+        _run_vector_stop(self.check_stop)
+        block = self.source.read(64 * 1024)
+        self.ended = not block
+        self.buffer = self.buffer[self.position:] + block
+        self.position = 0
+
+    def _skip_space(self):
+        while self.position < len(self.buffer) and self.buffer[self.position] in " \t\r\n":
+            self.position += 1
+
+    def peek(self):
+        self._skip_space()
+        while self.position == len(self.buffer) and not self.ended:
+            self._read_more()
+            self._skip_space()
+        return self.buffer[self.position:self.position + 1]
+
+    def take(self, token):
+        if self.peek() != token:
+            raise ValueError("invalid vector metadata JSON framing")
+        self.position += 1
+
+    def scalar(self):
+        _require_vector_scalar_start(self.peek())
+        while True:
+            result = self._decoded_scalar()
+            if result is not None:
+                value, end = result
+                self.position = end
+                return value
+            if self.ended:
+                raise ValueError("invalid vector metadata JSON scalar")
+            self._read_more()
+
+    def _decoded_scalar(self):
+        try:
+            value, end = self.decoder.raw_decode(self.buffer, self.position)
+        except json.JSONDecodeError:
+            return None
+        if end == len(self.buffer) and not self.ended:
+            return None
+        _require_vector_scalar(value)
+        return value, end
+
+
+def _require_vector_scalar_start(token):
+    if token in ("[", "{"):
+        raise ValueError("vector metadata requires flat scalar values")
+
+
+def _require_vector_scalar(value):
+    if isinstance(value, (dict, list)):
+        raise ValueError("vector metadata requires flat scalar values")
+
+
+class _VectorColumn(Sequence):
+    def __init__(self, metadata, name):
+        self.metadata, self.name = metadata, name
+
+    def __len__(self):
+        return self.metadata.counts[self.name]
+
+    def __getitem__(self, position):
+        index = range(len(self))[position]
+        with closing(self.metadata.database.execute(
+            "SELECT value FROM vector_values WHERE field=? AND position=?", (self.name, index)
+        )) as rows:
+            return rows.fetchone()[0]
+
+    def __iter__(self):
+        with closing(self.metadata.database.execute(
+            "SELECT value FROM vector_values WHERE field=? ORDER BY position", (self.name,)
+        )) as rows:
+            for row in rows:
+                _run_vector_stop(self.metadata.check_stop)
+                yield row[0]
+
+
+class _VectorMetadata(Mapping):
+    """Owned ephemeral lookup, never a knowledge or generation database."""
+    def __init__(self, check_stop):
+        self.temporary = tempfile.TemporaryDirectory(prefix="llm-wiki-vector-metadata-")
+        try:
+            self.database = _new_vector_metadata_database(Path(self.temporary.name) / "metadata.sqlite3")
+        except BaseException:
+            self.temporary.cleanup()
+            raise
+        self.scalars, self.counts = {}, {}
+        self.check_stop = check_stop
+
+    def __len__(self):
+        return len(self.scalars) + len(self.counts)
+
+    def __iter__(self):
+        return iter((*self.scalars, *self.counts))
+
+    def __getitem__(self, key):
+        if key in self.counts:
+            return _VectorColumn(self, key)
+        return self.scalars[key]
+
+    def store(self, key, values):
+        rows = (_vector_metadata_row(self, key, value) for value in values)
+        _insert_vector_values(self.database, rows)
+
+    def close(self):
+        self.database.close()
+        self.temporary.cleanup()
+
+
+def _new_vector_metadata_database(path):
+    database = sqlite3.connect(path)
+    try:
+        with closing(database.execute("CREATE TABLE vector_values (field TEXT NOT NULL, position INTEGER NOT NULL, value TEXT NOT NULL, PRIMARY KEY(field,position)) WITHOUT ROWID")):
+            pass
+        with closing(database.execute("CREATE UNIQUE INDEX vector_ids ON vector_values(value) WHERE field='chunk_ids'")):
+            pass
+        return database
+    except BaseException:
+        database.close()
+        raise
+
+
+def _vector_metadata_row(metadata, key, value):
+    if not isinstance(value, str):
+        raise ValueError("vector metadata array member must be a string")
+    position = metadata.counts[key]
+    metadata.counts[key] += 1
+    return key, position, value
+
+
+def _insert_vector_values(database, rows):
+    try:
+        with closing(database.executemany("INSERT INTO vector_values VALUES (?,?,?)", rows)):
+            pass
+    except sqlite3.IntegrityError as error:
+        raise ValueError("vector metadata chunk IDs are repeated") from error
+
+
+def _read_vector_array(reader, metadata, key):
+    reader.take("[")
+    metadata.counts[key] = 0
+    if reader.peek() != "]":
+        metadata.store(key, _read_vector_array_members(reader))
+    reader.take("]")
+
+
+def _read_vector_array_members(reader):
+    while True:
+        yield reader.scalar()
+        if reader.peek() == "]":
+            return
+        reader.take(",")
+
+
+def _read_vector_field(reader, metadata):
+    key = reader.scalar()
+    _require_new_vector_key(key, metadata)
+    reader.take(":")
+    if key in VECTOR_ARRAY_FIELDS:
+        _read_vector_array(reader, metadata, key)
+        return
+    metadata.scalars[key] = _vector_metadata_scalar(key, reader.scalar())
+
+
+def _vector_metadata_scalar(key, value):
+    if key == "dimensions":
+        _require_positive_int(value, "vector metadata dimensions must be a positive integer")
+        return value
+    if not isinstance(value, str) or not value:
+        raise ValueError("vector metadata header must be a nonempty string")
+    return value
+
+
+def _require_new_vector_key(key, metadata):
+    if not isinstance(key, str) or key in metadata:
+        raise ValueError("vector metadata key is invalid or repeated")
+    if key not in (*VECTOR_ARRAY_FIELDS, *VECTOR_SCALAR_FIELDS):
+        raise ValueError("unknown vector metadata field")
+
+
+def _read_vector_fields(reader, metadata):
+    while True:
+        _read_vector_field(reader, metadata)
+        if reader.peek() == "}":
+            return
+        reader.take(",")
+
+
+def _parse_vector_metadata(path, check_stop):
+    _run_vector_stop(check_stop)
+    metadata = _VectorMetadata(check_stop)
+    try:
+        with path.open("r", encoding="utf-8") as source:
+            reader = _VectorJSONReader(source, check_stop)
+            reader.take("{")
+            _read_vector_fields(reader, metadata)
+            reader.take("}")
+            _require_vector_json_end(reader)
+        _require_vector_json_fields(metadata)
+        metadata.database.commit()
+        return metadata
+    except BaseException:
+        metadata.close()
+        raise
+
+
+def _require_vector_json_fields(metadata):
+    required = {"schema_version", "model_id", "model_revision", "dimensions", "chunk_ids"}
+    if not required.issubset(metadata):
+        raise ValueError("vector metadata cache identity fields are incomplete")
+    if len(set(metadata.counts.values())) != 1:
+        raise ValueError("vector metadata parallel arrays differ in length")
+
+
+def _require_vector_json_end(reader):
+    if reader.peek():
+        raise ValueError("vector metadata has trailing JSON")
 
 
 #: The identity a cached vector is namespaced by. A row is reusable only when
@@ -763,14 +1083,50 @@ VECTOR_CACHE_IDENTITY_KEYS = ("schema_version", "model_id", "model_revision", "d
 MAX_PARENT_VECTOR_METADATA_BYTES = 256 * 1024 * 1024
 
 
-def _parent_vector_metadata(reuse_from: Path) -> Mapping[str, object] | None:
-    metadata_path = reuse_from / "vectors.json"
-    matrix_path = reuse_from / "vectors.npy"
-    if not metadata_path.is_file() or not matrix_path.is_file():
+def _parent_vector_metadata(reuse_from, check_stop=None):
+    path = reuse_from / "vectors.json"
+    if not path.is_file() or not (reuse_from / "vectors.npy").is_file():
         return None
-    if metadata_path.stat().st_size > MAX_PARENT_VECTOR_METADATA_BYTES:
+    if path.stat().st_size > MAX_PARENT_VECTOR_METADATA_BYTES:
         return None
-    return _json_mapping(_sealed_parent_bytes(reuse_from, "vectors.json"))
+    try:
+        with tempfile.TemporaryDirectory(prefix="llm-wiki-vector-parent-json-") as temporary:
+            captured = Path(temporary) / "vectors.json"
+            _copy_sealed_parent_artifact(reuse_from, "vectors.json", captured, check_stop)
+            return _parse_vector_metadata(captured, check_stop)
+    except (OSError, ValueError, UnicodeError):
+        return None
+
+
+def _copy_sealed_parent_artifact(directory, name, destination, check_stop):
+    expected = _parent_artifact_digest(directory, name)
+    if expected is None:
+        raise ValueError("parent vector artifact lacks a seal")
+    path = directory / name
+    before = _require_regular_file(path)
+    with path.open("rb") as source, destination.open("wb") as output:
+        opened = os.fstat(source.fileno())
+        _require_parent_open_identity(before, opened)
+        checksum = _copied_vector_digest(source, output, check_stop)
+        after_open = os.fstat(source.fileno())
+    _require_stable_identity(opened, after_open, path.lstat())
+    if checksum != expected:
+        raise ValueError("copied parent vector bytes do not match their manifest")
+
+
+def _require_parent_open_identity(before, opened):
+    if not os.path.samestat(before, opened):
+        raise ValueError("parent vector artifact changed while opening")
+
+
+def _copied_vector_digest(source, output, check_stop):
+    digest = hashlib.sha256()
+    while block := source.read(64 * 1024):
+        _run_vector_stop(check_stop)
+        digest.update(block)
+        output.write(block)
+    _run_vector_stop(check_stop)
+    return digest.hexdigest()
 
 
 def _parent_artifact_digest(reuse_from: Path, name: str) -> str | None:
@@ -778,33 +1134,6 @@ def _parent_artifact_digest(reuse_from: Path, name: str) -> str | None:
     descriptors = _artifact_descriptors(_loaded_json_mapping(reuse_from / "manifest.json") or {})
     sealed = (descriptors or {}).get(name, {}).get("sha256")
     return sealed if isinstance(sealed, str) else None
-
-
-def _sealed_parent_bytes(reuse_from: Path, name: str) -> bytes | None:
-    """The artifact's bytes, only when they hash to the parent manifest's seal.
-
-    The builder used to trust whatever sat in the parent directory; a damaged matrix of
-    the right shape was copied and sealed again. See
-    `docs/research/2026-09-14-reused-vectors-match-their-seal.md`.
-    """
-    expected = _parent_artifact_digest(reuse_from, name)
-    if expected is None:
-        return None
-    try:
-        data = (reuse_from / name).read_bytes()
-    except OSError:
-        return None
-    return data if hashlib.sha256(data).hexdigest() == expected else None
-
-
-def _json_mapping(data: bytes | None) -> Mapping[str, object] | None:
-    if data is None:
-        return None
-    try:
-        value = json.loads(data)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    return value if isinstance(value, Mapping) else None
 
 
 def _loaded_json_mapping(path: Path) -> Mapping[str, object] | None:
@@ -829,67 +1158,140 @@ def _vector_identity_matches(
     return all(metadata.get(key) == expected[key] for key in VECTOR_CACHE_IDENTITY_KEYS)
 
 
-def _loaded_parent_matrix(reuse_from: Path, rows: int, dimensions: int):
-    import io
+def _loaded_parent_matrix(reuse_from, rows, dimensions, check_stop=None):
+    temporary = tempfile.TemporaryDirectory(prefix="llm-wiki-vector-parent-matrix-")
+    try:
+        path = Path(temporary.name) / "vectors.npy"
+        _copy_sealed_parent_artifact(reuse_from, "vectors.npy", path, check_stop)
+        return _mapped_parent_copy(path, temporary, rows, dimensions)
+    except (OSError, ValueError):
+        temporary.cleanup()
+        return None
+    except BaseException:
+        temporary.cleanup()
+        raise
 
+
+def _mapped_parent_copy(path, temporary, rows, dimensions):
     import numpy as np
 
-    data = _sealed_parent_bytes(reuse_from, "vectors.npy")
-    if data is None:
-        return None
+    matrix = np.load(path, mmap_mode="r", allow_pickle=False)
     try:
-        matrix = np.load(io.BytesIO(data), allow_pickle=False)
-    except (OSError, ValueError):
-        return None
+        _require_parent_vector_matrix(matrix, rows, dimensions)
+        matrix._vector_temporary = temporary
+        return matrix
+    except BaseException:
+        _close_vector_matrix(matrix)
+        raise
+
+
+def _require_parent_vector_matrix(matrix, rows, dimensions):
+    import numpy as np
+
     if matrix.shape != (rows, dimensions) or matrix.dtype != np.float32:
-        return None
-    return matrix
+        raise ValueError("parent vector matrix shape or dtype differs")
 
 
-def _reusable_vector_rows(
-    reuse_from: Path | None, model_id: str, model_revision: str, dimensions: int
-) -> dict[str, object]:
-    """The parent generation's vectors, keyed by chunk digest.
+class _ReusableVectors(Mapping):
+    def __init__(self, metadata, matrix):
+        self.metadata, self.matrix = metadata, matrix
+        self.extractor_version = str(metadata.get("extractor_version", ""))
 
-    The parent generation *is* the cache — it is already immutable, already
-    carries one digest per chunk beside its matrix, and is already pruned by the
-    catalog's own retention. Nothing new is stored, so nothing new can grow
-    without bound.
+    def __len__(self):
+        return len(self.matrix)
 
-    Every refusal here is silent and total: an unusable parent means this build
-    embeds everything, which is exactly what every build did before.
-    """
+    def __iter__(self):
+        return iter(self.metadata["chunk_ids"])
+
+    def __getitem__(self, chunk_id):
+        _run_vector_stop(self.metadata.check_stop)
+        with closing(self.metadata.database.execute(
+            "SELECT position FROM vector_values WHERE field='chunk_ids' AND value=?", (chunk_id,)
+        )) as rows:
+            row = rows.fetchone()
+        if row is None:
+            raise KeyError(chunk_id)
+        return self.matrix[row[0]]
+
+    def close(self):
+        _close_vector_matrix(self.matrix)
+        self.metadata.close()
+
+
+def _reusable_vector_rows(reuse_from, model_id, model_revision, dimensions,
+                          *, snapshot=None, check_stop=None):
     if reuse_from is None:
         return {}
-    metadata = _parent_vector_metadata(reuse_from)
-    if metadata is None or not _vector_identity_matches(
-        metadata, model_id, model_revision, dimensions
-    ):
+    metadata = _parent_vector_metadata(reuse_from, check_stop)
+    if metadata is None:
         return {}
-    return _rows_by_chunk_id(reuse_from, metadata, dimensions)
+    return _qualified_parent_vector_rows(reuse_from, metadata, model_id,
+                                         model_revision, dimensions, check_stop)
 
 
-def _rows_by_chunk_id(
-    reuse_from: Path, metadata: Mapping[str, object], dimensions: int
-) -> dict[str, object]:
-    chunk_ids = metadata.get("chunk_ids")
-    if not _usable_chunk_ids(chunk_ids):
+def _qualified_parent_vector_rows(directory, metadata, model_id, revision, dimensions, check_stop):
+    if not _vector_identity_matches(metadata, model_id, revision, dimensions):
+        metadata.close()
         return {}
-    matrix = _loaded_parent_matrix(reuse_from, len(chunk_ids), dimensions)
+    try:
+        matrix = _loaded_parent_matrix(directory, len(metadata["chunk_ids"]), dimensions, check_stop)
+        return _parent_rows_or_empty(metadata, matrix, check_stop)
+    except BaseException:
+        metadata.close()
+        raise
+
+
+def _parent_rows_or_empty(metadata, matrix, check_stop):
     if matrix is None:
+        metadata.close()
         return {}
-    return {
-        chunk_id: matrix[index]
-        for index, chunk_id in enumerate(chunk_ids)
-        if isinstance(chunk_id, str)
-    }
+    try:
+        if not _matrix_is_finite(matrix, None, check_stop):
+            _close_vector_matrix(matrix)
+            metadata.close()
+            return {}
+        return _ReusableVectors(metadata, matrix)
+    except BaseException:
+        _close_vector_matrix(matrix)
+        raise
 
 
-def _usable_chunk_ids(chunk_ids: object) -> bool:
-    """Duplicate IDs would make a row ambiguous, so the whole cache is refused."""
-    if not isinstance(chunk_ids, list):
+def _chunk_id_at_extractor(chunk, extractor_version: str) -> str:
+    from corpus_snapshot import canonical_chunk_id
+
+    return canonical_chunk_id(
+        source_id=chunk.source_id, source_path=chunk.source_path,
+        byte_start=chunk.byte_start, byte_end=chunk.byte_end,
+        span_sha256=chunk.span_sha256, extractor_version=extractor_version,
+    )
+
+
+def _chunk_reuse_identity_holds(chunk, extractor_version: str) -> bool:
+    try:
+        text_digest = hashlib.sha256(chunk.text.encode("utf-8", errors="strict")).hexdigest()
+    except UnicodeError:
         return False
-    return len(set(chunk_ids)) == len(chunk_ids)
+    return chunk.span_sha256 == text_digest and chunk.id == _chunk_id_at_extractor(chunk, extractor_version)
+
+
+def _parent_cache_extractor(metadata: Mapping[str, object], current: str) -> str:
+    """Unknown parent extraction identity permits only existing exact-ID reuse."""
+    value = metadata.get("extractor_version")
+    if not isinstance(value, str) or not value:
+        return current
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeError:
+        return current
+    return value
+
+
+def _cached_chunk_row(chunk, current: str, previous: str, rows: Mapping[str, object]):
+    if not _chunk_reuse_identity_holds(chunk, current):
+        return None
+    if chunk.id in rows:
+        return rows[chunk.id]
+    return rows.get(_chunk_id_at_extractor(chunk, previous))
 
 
 def build_generation_numpy_vectors(
@@ -914,39 +1316,41 @@ def build_generation_numpy_vectors(
     )[0]
 
 
-def _built_generation_vectors(
-    snapshot: CorpusSnapshot,
-    generation_directory: Path,
-    *,
-    embedder: object,
-    model_id: str,
-    model_revision: str,
-    dimensions: int,
-    reuse_from: Path | None = None,
-    check_stop=None,
-) -> tuple[list[dict[str, object]], int]:
-    """The same build, plus how many rows came from the parent rather than the model."""
+def _built_generation_vectors(snapshot, generation_directory, *, embedder, model_id,
+                              model_revision, dimensions, reuse_from=None, check_stop=None):
+    """Build the same artifacts with owned, bounded transient working data."""
     _require_vector_build_inputs(snapshot, model_id, model_revision, dimensions)
     directory = _generation_directory(generation_directory)
     destinations = [directory / name for name in GENERATION_VECTOR_ARTIFACTS]
     _require_absent_artifacts(destinations)
-    cache = _reusable_vector_rows(reuse_from, model_id, model_revision, dimensions)
-    matrix, reused = _reused_matrix(snapshot, embedder, dimensions, cache, check_stop)
-    _publish_vector_artifacts(
-        directory,
-        destinations,
-        _vector_metadata(
-            snapshot,
-            model_id=model_id,
-            model_revision=model_revision,
-            dimensions=dimensions,
-        ),
-        matrix,
-    )
-    return [
-        _artifact_descriptor(directory / name, name)
-        for name in GENERATION_VECTOR_ARTIFACTS
-    ], reused
+    cache = _reusable_vector_rows(reuse_from, model_id, model_revision, dimensions,
+                                 snapshot=snapshot, check_stop=check_stop)
+    try:
+        with tempfile.TemporaryDirectory(prefix=".vectors.", dir=directory) as temporary:
+            return _write_generation_vectors(snapshot, directory, destinations, Path(temporary),
+                                             cache, embedder, model_id, model_revision, dimensions, check_stop)
+    finally:
+        _close_vector_cache(cache)
+
+
+def _close_vector_cache(cache):
+    close = getattr(cache, "close", None)
+    if close is not None:
+        close()
+
+
+def _write_generation_vectors(snapshot, directory, destinations, temporary, cache,
+                              embedder, model_id, revision, dimensions, check_stop):
+    matrix, reused = _reused_matrix(snapshot, embedder, dimensions, cache, check_stop,
+                                    output_path=temporary / "vectors.npy")
+    try:
+        metadata = _vector_metadata(snapshot, model_id=model_id, model_revision=revision,
+                                    dimensions=dimensions)
+        _publish_vector_artifacts(directory, destinations, metadata, matrix, check_stop)
+    finally:
+        _close_vector_matrix(matrix)
+    return [_artifact_descriptor(directory / name, name, cancelled=check_stop)
+            for name in GENERATION_VECTOR_ARTIFACTS], reused
 
 
 def _generation_embedder(embedder, *, is_query: bool):
@@ -2148,6 +2552,21 @@ def _fts_contents_hold(
     manifest: dict[str, object],
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    *,
+    verified_rows: bool = False,
+) -> bool:
+    if verified_rows:
+        return _valid_generation_fts(
+            connection, manifest, check_rows=False, deadline=deadline, cancelled=cancelled
+        )
+    return _strict_fts_contents_hold(connection, manifest, deadline, cancelled)
+
+
+def _strict_fts_contents_hold(
+    connection: sqlite3.Connection,
+    manifest: dict[str, object],
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
 ) -> bool:
     key = _fts_verdict_key(manifest)
     if _fts_already_valid(key):
@@ -2165,6 +2584,8 @@ def _validated_generation_connection(
     manifest: dict[str, object],
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    *,
+    verified_rows: bool = False,
 ) -> sqlite3.Connection | None:
     """Open the artifact read-only and hand it back only once it validates."""
     _check_generation_stop(deadline, cancelled)
@@ -2174,7 +2595,9 @@ def _validated_generation_connection(
     )
     try:
         _check_generation_stop(deadline, cancelled)
-        if not _fts_contents_hold(connection, manifest, deadline, cancelled):
+        if not _fts_contents_hold(
+            connection, manifest, deadline, cancelled, verified_rows=verified_rows
+        ):
             connection.close()
             return None
         return connection
@@ -2183,12 +2606,85 @@ def _validated_generation_connection(
         raise
 
 
+def _named_fts_seal(entries: object) -> object | None:
+    if not isinstance(entries, tuple):
+        return None
+    matches = [item[1] for item in entries if _is_fts_seal_entry(item)]
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def _is_fts_seal_entry(item: object) -> bool:
+    return isinstance(item, tuple) and len(item) == 2 and item[0] == GENERATION_FTS_ARTIFACT
+
+
+def _fts_query_seal(manifest: Mapping[str, object], seal: object) -> object | None:
+    if not isinstance(seal, tuple) or len(seal) != 3:
+        return None
+    digest = hashlib.sha256(_canonical_manifest_bytes(manifest)).hexdigest()
+    if seal[0] != digest:
+        return None
+    return _named_fts_seal(seal[2])
+
+
+def _require_current_fts_seal(artifact, manifest, expected, deadline, cancelled) -> None:
+    descriptors = _artifact_descriptors(manifest) or {}
+    current = _sealed_file(
+        artifact, descriptors.get(GENERATION_FTS_ARTIFACT),
+        deadline=deadline, cancelled=cancelled,
+    )
+    if current != expected:
+        raise ValueError("generation FTS artifact changed after its query seal")
+
+
+def _persisted_query_rows(catalog, artifact, manifest, seal, deadline, cancelled) -> bool:
+    expected = _fts_query_seal(manifest, seal)
+    if expected is None:
+        return False
+    _require_current_fts_seal(artifact, manifest, expected, deadline, cancelled)
+    state_root = getattr(catalog, "state_root", None)
+    if state_root is None:
+        return False
+    from verified_artifacts import VerifiedArtifacts
+
+    cache = VerifiedArtifacts(Path(state_root))
+    return cache.verdict(_FTS_ROWS_VERDICT, _fts_rows_digest(manifest)) == "ok"
+
+
+def _rechecked_query_connection(connection, artifact, manifest, seal, deadline, cancelled):
+    if connection is None:
+        return None
+    try:
+        expected = _fts_query_seal(manifest, seal)
+        _require_current_fts_seal(artifact, manifest, expected, deadline, cancelled)
+        return connection
+    except BaseException:
+        _close_quietly(connection)
+        raise
+
+
+def _sealed_query_connection(catalog, artifact, manifest, seal, deadline, cancelled):
+    verified_rows = _persisted_query_rows(
+        catalog, artifact, manifest, seal, deadline, cancelled
+    )
+    connection = _validated_generation_connection(
+        artifact, manifest, deadline, cancelled, verified_rows=verified_rows
+    )
+    if not verified_rows:
+        return connection
+    return _rechecked_query_connection(
+        connection, artifact, manifest, seal, deadline, cancelled
+    )
+
+
 def _generation_connection(
     catalog: object,
     manifest: dict[str, object],
     *,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    seal: object = None,
 ) -> sqlite3.Connection | None:
     _check_generation_stop(deadline, cancelled)
     generations_path = getattr(catalog, "generations_path", None)
@@ -2197,8 +2693,8 @@ def _generation_connection(
         return None
     artifact = Path(generations_path) / generation_id / GENERATION_FTS_ARTIFACT
     try:
-        return _validated_generation_connection(
-            artifact, manifest, deadline, cancelled
+        return _sealed_query_connection(
+            catalog, artifact, manifest, seal, deadline, cancelled
         )
     except TimeoutError:
         raise
@@ -2423,6 +2919,18 @@ def _require_membership_matches(
         raise ValueError("generation evidence source membership does not match source manifest")
 
 
+class _AuthoritativeSources(dict):
+    """Verified captured bytes with their already sealed collection context."""
+
+    def __init__(self, sources, *, code_roots):
+        super().__init__(sources)
+        self._code_roots = tuple(code_roots)
+
+    @property
+    def code_roots(self):
+        return self._code_roots
+
+
 def _generation_authoritative_sources(
     generation_path: Path,
     manifest: dict[str, object],
@@ -2452,8 +2960,159 @@ def _generation_authoritative_sources(
                 database, metadata, deadline=deadline, cancelled=cancelled
             )
     _require_membership_matches(sources, source_manifest)
+    return _AuthoritativeSources(
+        sources, code_roots=source_manifest["policy"]["code_roots"]
+    )
+
+
+
+_ANSWER_CORPUS_ARTIFACTS = ("evidence.sqlite3", "search.sqlite3", "source-manifest.json")
+
+
+def published_corpus(vault: Path, *, deadline: float) -> CorpusSnapshot | None:
+    """The verified published read model; selected live sources still need rechecking."""
+    from repository_scope import resolve_repository_scope
+
+    catalog_path = STATE_ROOT / "cache/evidence-graph/catalog.sqlite3"
+    if not catalog_path.exists():
+        return None
+    catalog = GenerationCatalog(STATE_ROOT, catalog_path=catalog_path)
+    scope = resolve_repository_scope(vault, deadline=deadline)
+    manifest = catalog.get_active_for_repository(scope, deadline=deadline)
+    if manifest is None:
+        return None
+    return _published_corpus(catalog, manifest, vault, deadline)
+
+
+def _published_corpus(catalog, manifest, vault, deadline):
+    seal = _generation_consumption_seal(
+        catalog, manifest, _ANSWER_CORPUS_ARTIFACTS, deadline=deadline
+    )
+    if seal is None:
+        raise ValueError("published corpus could not be sealed")
+    directory = catalog.generations_path / manifest["generation_id"]
+    snapshot = _read_published_corpus(catalog, directory, manifest, vault, deadline)
+    if not _generation_consumption_unchanged(
+        catalog, manifest, _ANSWER_CORPUS_ARTIFACTS, seal, deadline=deadline
+    ):
+        from corpus_snapshot import CorpusChanged
+
+        raise CorpusChanged("published corpus changed during read")
+    return snapshot
+
+
+def _read_published_corpus(catalog, directory, manifest, vault, deadline):
+    header = _validated_source_manifest(
+        directory, manifest, state_root=STATE_ROOT, deadline=deadline, cancelled=None
+    )
+    verified = _generation_authoritative_sources(
+        directory, manifest, state_root=STATE_ROOT, deadline=deadline, cancelled=None
+    )
+    sources = _published_sources(directory, verified, deadline)
+    chunks = _published_chunks(catalog, manifest, sources, deadline)
+    return CorpusSnapshot(
+        tuple(sources.values()), chunks, manifest["source_manifest_sha256"],
+        _published_policy(header["policy"], vault), header["collector"], header["extractor"],
+    )
+
+
+def _published_policy(fields, vault):
+    import corpus_snapshot as corpus
+
+    return corpus._policy(
+        **fields, approved_code_roots=tuple(fields["code_roots"]),
+        max_files=setting_value("corpus.max_files", vault),
+        max_file_bytes=corpus.MAX_CORPUS_FILE_BYTES,
+        max_total_bytes=setting_value("corpus.max_total_bytes", vault),
+        max_entries=corpus.MAX_CORPUS_INSPECTED_ENTRIES,
+        max_directories=corpus.MAX_CORPUS_DIRECTORIES, max_depth=corpus.MAX_CORPUS_DEPTH,
+    )
+
+
+def _published_sources(directory, verified, deadline):
+    """Retain recorded source fields; derive claim authority from verified Markdown."""
+    from dataclasses import replace
+
+    from corpus_snapshot import SourceRecord, canonical_captured_source
+
+    evidence = directory / "evidence.sqlite3"
+    validate_runtime_file(evidence, STATE_ROOT, max_bytes=16 * 1024 * 1024 * 1024)
+    uri = f"{evidence.resolve(strict=True).as_uri()}?mode=ro&immutable=1"
+    sources = {}
+    with closing(sqlite3.connect(uri, uri=True, timeout=0)) as database:
+        with _generation_sqlite_guard(database, deadline, None):
+            rows = database.execute(
+                "SELECT source_id,relative_path,sha256,size,media_type,language,git_oid "
+                "FROM source ORDER BY relative_path,source_id"
+            )
+            for row in rows:
+                _check_generation_stop(deadline, None)
+                record = SourceRecord(*row)
+                captured = canonical_captured_source(
+                    source_id=record.logical_id, source_path=record.relative_path,
+                    source_sha256=record.sha256, content=verified[record.logical_id]["content"],
+                    deadline=deadline, code_roots=getattr(verified, "code_roots", ()),
+                )
+                sources[record.logical_id] = replace(captured, record=record)
+    if set(sources) != set(verified):
+        raise ValueError("published source membership changed during read")
     return sources
 
+
+def _published_chunks(catalog, manifest, sources, deadline):
+    from corpus_snapshot import _newline_offsets
+
+    connection = _generation_connection(catalog, manifest, deadline=deadline)
+    if connection is None:
+        raise ValueError("published corpus chunks could not be verified")
+    chunks = []
+    line_indexes = {}
+    with closing(connection), _generation_sqlite_guard(connection, deadline, None):
+        for row in connection.execute(_FTS_CHUNK_SELECT):
+            _check_generation_stop(deadline, None)
+            source = sources[row[2]]
+            if row[2] not in line_indexes:
+                line_indexes[row[2]] = _newline_offsets(source.content)
+            chunks.append(_published_chunk(row, source, manifest, line_indexes[row[2]]))
+    return tuple(chunks)
+
+
+def _require_published_span(row, source, manifest, offsets):
+    from corpus_snapshot import _line_at, canonical_chunk_id
+
+    start, end = row[7:9]
+    if not 0 <= start <= end <= len(source.content):
+        raise ValueError("published chunk span is outside its source")
+    span = source.content[start:end]
+    expected_id = canonical_chunk_id(
+        source_id=source.record.logical_id, source_path=source.record.relative_path,
+        byte_start=start, byte_end=end, span_sha256=hashlib.sha256(span).hexdigest(),
+        extractor_version=manifest["extractor_version"],
+    )
+    expected = (
+        expected_id, source.record.relative_path, source.record.sha256,
+        source.record.relative_path, _line_at(offsets, start), _line_at(offsets, end),
+        hashlib.sha256(span).hexdigest(), span.decode("utf-8"),
+    )
+    if (row[0], row[3], row[4], row[5], row[9], row[10], row[11], row[21]) != expected:
+        raise ValueError("published chunk differs from its verified source bytes")
+
+
+def _published_chunk(row, source, manifest, offsets=None):
+    from corpus_snapshot import RetrievalChunk, _newline_offsets
+
+    if offsets is None:
+        offsets = _newline_offsets(source.content)
+    _require_published_span(row, source, manifest, offsets)
+    metadata = source.metadata
+    return RetrievalChunk(
+        id=row[0], source_id=row[2], source_path=row[3], source_sha256=row[4],
+        parent_page=row[5], heading_ancestry=tuple(json.loads(row[6])),
+        byte_start=row[7], byte_end=row[8], line_start=row[9], line_end=row[10],
+        span_sha256=row[11], text=row[21], type=metadata.type, project=metadata.project,
+        authority=metadata.authority, confidence=metadata.confidence, status=metadata.status,
+        valid_from=metadata.valid_from, valid_to=metadata.valid_to, language=row[19],
+    )
 
 def _reproducible_by_this_extractor(manifest: Mapping[str, object]) -> bool:
     """Only this extractor's own chunks can be re-derived and compared."""
@@ -2687,6 +3346,7 @@ def _expected_source_chunks(
     manifest: Mapping[str, object],
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    code_roots: tuple[str, ...] = (),
 ) -> Iterator[object]:
     content = source["content"]
     if not isinstance(content, bytes):
@@ -2696,69 +3356,49 @@ def _expected_source_chunks(
         source_path=str(source["relative_path"]),
         source_sha256=str(source["sha256"]),
         content=content,
+        code_roots=code_roots,
         extractor_version=str(manifest.get("extractor_version")),
         deadline=deadline,
         cancelled=cancelled,
     )
 
 
-def _appended_chunk_rows(rows: list[tuple[object, ...]], chunks) -> bool:
-    """False once the stored-chunk ceiling is crossed."""
-    for chunk in chunks:
-        rows.append(_generation_chunk_row(chunk, len(rows)))
-        if len(rows) > MAX_GENERATION_FTS_CHUNKS:
-            return False
-    return True
 
 
-def _expected_chunk_rows(
-    authoritative_sources: Mapping[str, Mapping[str, object]],
-    *,
-    manifest: Mapping[str, object],
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> list[tuple[object, ...]] | None:
-    """Every chunk the authoritative sources must produce, in stored order."""
+def _expected_chunk_rows(authoritative_sources, *, manifest, deadline, cancelled):
+    """Validate source availability, then derive only the consumed source."""
+    if any(
+        not isinstance(source.get("content"), bytes) for source in authoritative_sources.values()
+    ):
+        return None
     ordered = sorted(
-        authoritative_sources.items(),
-        key=lambda item: (str(item[1]["relative_path"]), item[0]),
+        authoritative_sources.items(), key=lambda item: (str(item[1]["relative_path"]), item[0])
     )
-    rows: list[tuple[object, ...]] = []
+    return _iter_expected_chunk_rows(
+        ordered, manifest, deadline, cancelled,
+        code_roots=getattr(authoritative_sources, "code_roots", ()),
+    )
+
+
+def _iter_expected_chunk_rows(ordered, manifest, deadline, cancelled, *, code_roots=()):
+    order = 0
     for source_id, source in ordered:
         _check_generation_stop(deadline, cancelled)
-        try:
-            chunks = _expected_source_chunks(
-                source_id,
-                source,
-                manifest=manifest,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
-        except _UnusableAuthoritativeSource:
-            return None
-        if not _appended_chunk_rows(rows, chunks):
-            return None
-    return rows
+        chunks = _expected_source_chunks(
+            source_id, source, manifest=manifest, deadline=deadline, cancelled=cancelled,
+            code_roots=code_roots,
+        )
+        for chunk in chunks:
+            yield _generation_chunk_row(chunk, order)
+            order += 1
 
 
 def _stored_chunk_count(connection: sqlite3.Connection) -> int:
-    return len(
-        list(
-            connection.execute(
-                "SELECT 1 FROM chunks LIMIT ?", (MAX_GENERATION_FTS_CHUNKS + 1,)
-            )
-        )
-    )
+    return int(connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
 
 
-def _chunk_count_agrees(
-    count: int, metadata: Mapping[str, str], expected_chunks: list[tuple[object, ...]] | None
-) -> bool:
-    if count > MAX_GENERATION_FTS_CHUNKS:
-        return False
-    if metadata.get("chunk_count") != str(count):
-        return False
-    return expected_chunks is None or count == len(expected_chunks)
+def _chunk_count_agrees(count: int, metadata: Mapping[str, str]) -> bool:
+    return metadata.get("chunk_count") == str(count)
 
 
 def _is_sha256(value: object) -> bool:
@@ -2769,10 +3409,8 @@ def _is_filled_str(value: object) -> bool:
     return isinstance(value, str) and bool(value)
 
 
-def _fresh_chunk_id(
-    chunk_id: object, order: int, chunk_order: object, seen: set[str]
-) -> bool:
-    return _is_sha256(chunk_id) and chunk_id not in seen and chunk_order == order
+def _fresh_chunk_id(chunk_id: object, order: int, chunk_order: object) -> bool:
+    return _is_sha256(chunk_id) and chunk_order == order
 
 
 def _valid_source_reference(
@@ -2783,9 +3421,9 @@ def _valid_source_reference(
     return source_id == f"source:{source_path}" and parent_page == source_path
 
 
-def _valid_chunk_identity(row: tuple[object, ...], order: int, seen: set[str]) -> bool:
+def _valid_chunk_identity(row: tuple[object, ...], order: int) -> bool:
     chunk_id, chunk_order, source_id, source_path, source_sha256, parent_page = row[:6]
-    if not _fresh_chunk_id(chunk_id, order, chunk_order, seen):
+    if not _fresh_chunk_id(chunk_id, order, chunk_order):
         return False
     if not _valid_source_reference(source_id, source_path, parent_page):
         return False
@@ -2831,31 +3469,46 @@ def _valid_chunk_text(row: tuple[object, ...]) -> bool:
     return isinstance(content, str) and bool(content.strip())
 
 
-def _valid_stored_chunk(row: tuple[object, ...], order: int, seen: set[str]) -> bool:
+def _valid_stored_chunk(row: tuple[object, ...], order: int) -> bool:
     try:
         ancestry = json.loads(row[6])
     except (TypeError, json.JSONDecodeError):
         return False
-    if not _valid_chunk_identity(row, order, seen):
+    if not _valid_chunk_identity(row, order):
         return False
     if not _valid_chunk_span(row, ancestry):
         return False
     return _valid_chunk_text(row)
 
 
-def _chunk_row_mismatch(
-    row: tuple[object, ...],
-    order: int,
-    expected_chunks: list[tuple[object, ...]] | None,
-) -> bool:
-    if expected_chunks is None or order >= len(expected_chunks):
+_NO_EXPECTED_ROW = object()
+
+
+def _chunk_row_mismatch(row, expected_chunks) -> bool:
+    if expected_chunks is None:
         return False
-    return row != expected_chunks[order]
+    return row != next(expected_chunks, _NO_EXPECTED_ROW)
+
+
+def _expected_rows_end(expected_chunks) -> bool:
+    if expected_chunks is None:
+        return True
+    return next(expected_chunks, _NO_EXPECTED_ROW) is _NO_EXPECTED_ROW
+
+
+def _expected_count_agrees(expected_chunks, count, deadline, cancelled):
+    if expected_chunks is None:
+        return True
+    actual = 0
+    for _row in expected_chunks:
+        _check_generation_stop(deadline, cancelled)
+        actual += 1
+    return actual == count
 
 
 def _stored_chunks_match(
     connection: sqlite3.Connection,
-    expected_chunks: list[tuple[object, ...]] | None,
+    expected_chunks: Iterator[tuple[object, ...]] | None,
     *,
     count: int,
     check_rows: bool = True,
@@ -2874,7 +3527,7 @@ def _stored_chunks_match(
     `docs/research/2026-09-12-the-rows-are-checked-once-per-distinct-bytes.md`.
     """
     if not check_rows:
-        return True
+        return _expected_count_agrees(expected_chunks, count, deadline, cancelled)
     return _rows_hold_invariants(
         connection, expected_chunks, count=count, deadline=deadline, cancelled=cancelled
     )
@@ -2882,21 +3535,43 @@ def _stored_chunks_match(
 
 def _rows_hold_invariants(
     connection: sqlite3.Connection,
-    expected_chunks: list[tuple[object, ...]] | None,
+    expected_chunks: Iterator[tuple[object, ...]] | None,
     *,
     count: int,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> bool:
-    seen: set[str] = set()
+    _check_generation_stop(deadline, cancelled)
+    unique = _unique_stored_chunk_ids(connection)
+    _check_generation_stop(deadline, cancelled)
+    if not unique:
+        return False
+    return _stored_rows_agree(connection, expected_chunks, count, deadline, cancelled)
+
+
+def _unique_stored_chunk_ids(connection: sqlite3.Connection) -> bool:
+    """SQLite checks uniqueness with its file-backed transient index.
+
+    These private artifact connections hold no TEMP tables. FILE avoids a
+    Python ID set and permits pager spill on the qualified SQLite runtime.
+    """
+    connection.execute("PRAGMA temp_store=FILE")
+    row = connection.execute(
+        "SELECT COUNT(*) = COUNT(DISTINCT chunk_id) FROM chunks"
+    ).fetchone()
+    return bool(row[0])
+
+
+def _stored_rows_agree(connection, expected_chunks, count, deadline, cancelled) -> bool:
+    observed = 0
     for order, row in enumerate(connection.execute(_FTS_CHUNK_SELECT)):
         _check_generation_stop(deadline, cancelled)
-        if not _valid_stored_chunk(row, order, seen):
+        if not _valid_stored_chunk(row, order):
             return False
-        if _chunk_row_mismatch(row, order, expected_chunks):
+        if _chunk_row_mismatch(row, expected_chunks):
             return False
-        seen.add(str(row[0]))
-    return len(seen) == count
+        observed += 1
+    return observed == count and _expected_rows_end(expected_chunks)
 
 
 _UNUSABLE_CHUNKS = object()
@@ -2973,7 +3648,7 @@ def _fts_counts_and_chunks_match(
 ) -> bool:
     """The stored chunk count, and then the stored chunks themselves."""
     count = _stored_chunk_count(connection)
-    if not _chunk_count_agrees(count, metadata, expected_chunks):
+    if not _chunk_count_agrees(count, metadata):
         return False
     return _stored_chunks_match(
         connection,
@@ -3220,10 +3895,14 @@ def _chunk_weight(authority: object, page_type: object, content: object, relativ
     return trust_weight(authority, page_type, relative_path) * substance_weight(content)
 
 
-def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object]:
+def _generation_result(
+    row: sqlite3.Row, generation_id: str, *, apply_weight: bool = True
+) -> dict[str, object]:
     authority = _row_text(row, "authority")
     content = _row_text(row, "content")
-    score = -float(row["rank"]) * _chunk_weight(authority, _row_text(row, "type"), content, row["source_path"])
+    score = -float(row["rank"])
+    if apply_weight:
+        score *= _chunk_weight(authority, _row_text(row, "type"), content, row["source_path"])
     return {
         "path": row["source_path"],
         "title": _page_title(row),
@@ -3232,6 +3911,7 @@ def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object
         # docs/research/2026-09-27-a-row-that-carries-its-text-carries-no-cut-of-it.md).
         "content": content,
         "score": score,
+        "_signal_score": -float(row["rank"]),
         "project": _row_text(row, "project"),
         "timestamp": _row_text(row, "valid_from")[:10],
         "chunk_id": row["chunk_id"],
@@ -3293,6 +3973,25 @@ def _exact_filename_rows(
     ).fetchall()
 
 
+_SESSION_SOURCE_PREFIX = "knowledge/raw/sessions/"
+
+
+def _fts_cohort_row_limit(limit: int) -> int:
+    # SQLite INTEGER parameters are signed 64-bit. A larger requested pool
+    # means all representable rows, never an overflowing Python binding.
+    return min(limit * 5, (1 << 63) - 1)
+
+
+def _generation_cohort_rows(connection, query, filters, values, limit, *, sessions):
+    operator = "LIKE" if sessions else "NOT LIKE"
+    return connection.execute(
+        f"SELECT {_GENERATION_CHUNK_COLUMNS}, bm25(chunks) AS rank FROM chunks "
+        f"WHERE chunks MATCH ?{filters} AND source_path {operator} ? "
+        "ORDER BY rank, chunk_order LIMIT ?",
+        [_fts_query(query), *values, _SESSION_SOURCE_PREFIX + "%", _fts_cohort_row_limit(limit)],
+    ).fetchall()
+
+
 def _generation_matched_rows(
     connection: sqlite3.Connection,
     query: str,
@@ -3300,18 +3999,35 @@ def _generation_matched_rows(
     values: Sequence[object],
     limit: int,
 ) -> list[sqlite3.Row]:
-    """One BM25 over a chunk's title, text and — in a v2 artifact — its fact keys.
+    """Keep session evidence from evicting claim candidates before trust applies.
 
-    Key expansion, the shape LongMemEval measured as the good one: a turn is found under
-    the facts it states as well as under its text, and what the reader gets is still the
-    turn. The keys are a column of this table, so they are ranked on the same scale as the
-    text. Research: `docs/research/2026-09-17-one-table-one-scale-for-the-keys.md`.
+    Both tiers use the existing caller-derived overfetch; no fixed source quota
+    is introduced. They still share this generation's one FTS table and BM25
+    statistics, so paired quality measurements remain necessary.
     """
-    return connection.execute(
-        f"SELECT {_GENERATION_CHUNK_COLUMNS}, bm25(chunks) AS rank FROM chunks "
-        f"WHERE chunks MATCH ?{filters} ORDER BY rank, chunk_order LIMIT ?",
-        [_fts_query(query), *values, limit * 5],
-    ).fetchall()
+    rows = []
+    for sessions in (False, True):
+        rows.extend(_generation_cohort_rows(connection, query, filters, values, limit, sessions=sessions))
+    return rows
+
+
+def _session_evidence_hit(row: Mapping[str, object]) -> bool:
+    return str(row.get("path", "")).startswith(_SESSION_SOURCE_PREFIX)
+
+
+def _source_tier(rows: list[dict], sessions: bool) -> list[dict]:
+    return [row for row in rows if _session_evidence_hit(row) == sessions]
+
+
+def _admit_source_tiers(rows: list[dict], limit: int) -> list[dict]:
+    """Keep each caller-bounded pool, then preserve the engine's scored order.
+
+    Pool protection must not silently rank a weak claim above stronger evidence.
+    Final answer and explicit total candidate caps remain retrieval's contract.
+    """
+    selected = {id(row) for sessions in (False, True)
+                for row in _source_tier(rows, sessions)[:limit]}
+    return [row for row in rows if id(row) in selected]
 
 
 def _deduplicated_results(
@@ -3357,7 +4073,38 @@ def _boost_generation_results(
     query_words = set(query.casefold().split())
     for result in results:
         _check_generation_stop(deadline, cancelled)
-        result["score"] = _boosted_generation_score(result, query_words, project)
+        _boost_admission_and_signal(result, query_words, project)
+
+
+def _boost_admission_and_signal(result, query_words, project):
+    result["score"] = _boosted_generation_score(result, query_words, project)
+    if "_signal_score" in result:
+        raw = {**result, "score": result["_signal_score"]}
+        result["_signal_score"] = _boosted_generation_score(raw, query_words, project)
+
+
+def _signal_pool_order(row):
+    return -float(row["_signal_score"]), str(row["candidate_id"])
+
+
+def _union_signal_rows(rows):
+    return list({str(row["candidate_id"]): row for row in rows}.values())
+
+
+def _literal_signal_pool(rows, limit, include_unweighted):
+    curated = rows[:limit]
+    if not include_unweighted:
+        return curated
+    relevance = sorted(rows, key=_signal_pool_order)[:limit]
+    return _union_signal_rows([*curated, *relevance])
+
+
+def _generation_signal_pool(rows, limit, include_unweighted):
+    curated = _admit_source_tiers(rows, limit)
+    if not include_unweighted:
+        return curated
+    relevance = _admit_source_tiers(sorted(rows, key=_signal_pool_order), limit)
+    return _union_signal_rows([*curated, *relevance])
 
 
 def _generation_fts_search(
@@ -3372,6 +4119,7 @@ def _generation_fts_search(
     as_of: str | None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    include_unweighted: bool = False,
 ) -> list[dict[str, object]]:
     """BM25 over one generation, with an exact filename match kept in front."""
     with _generation_sqlite_guard(connection, deadline, cancelled):
@@ -3407,7 +4155,7 @@ def _generation_fts_search(
     filtered = apply_hard_filters(
         results, project=project, since=since, as_of=as_of, scope=scope
     )
-    return filtered[:limit]
+    return _generation_signal_pool(filtered, limit, include_unweighted)
 
 
 def _vectors_match_manifest(
@@ -3425,16 +4173,30 @@ def _vectors_match_manifest(
     )
 
 
-def _read_vector_metadata(
-    directory: Path, deadline: float | None, cancelled: Callable[[], bool] | None
-) -> dict:
-    metadata_bytes = bytearray()
-    with (directory / "vectors.json").open("rb") as source:
-        while chunk := source.read(64 * 1024):
-            _check_generation_stop(deadline, cancelled)
-            metadata_bytes.extend(chunk)
-    _check_generation_stop(deadline, cancelled)
-    return json.loads(metadata_bytes.decode("utf-8"))
+def _read_vector_metadata(directory, deadline, cancelled, *, expected=None):
+    def check_stop():
+        _check_generation_stop(deadline, cancelled)
+
+    check_stop()
+    with tempfile.TemporaryDirectory(prefix="llm-wiki-vector-reader-json-") as temporary:
+        captured = Path(temporary) / "vectors.json"
+        _copy_current_vector_metadata(directory / "vectors.json", captured, expected, check_stop)
+        return _parse_vector_metadata(captured, check_stop)
+
+
+def _copy_current_vector_metadata(path, destination, expected, check_stop):
+    before = _require_regular_file(path)
+    with path.open("rb") as source, destination.open("wb") as output:
+        opened = os.fstat(source.fileno())
+        _require_parent_open_identity(before, opened)
+        checksum = _copied_vector_digest(source, output, check_stop)
+        after_open = os.fstat(source.fileno())
+    _require_stable_identity(opened, after_open, path.lstat())
+    _require_expected_seal(expected, destination.stat().st_size, checksum)
+
+
+def _expected_vector_metadata(manifest):
+    return (_artifact_descriptors(manifest) or {}).get("vectors.json")
 
 
 def _matrix_is_finite(
@@ -3449,34 +4211,33 @@ def _matrix_is_finite(
     return True
 
 
-def _column(ordered: list[sqlite3.Row], index: int) -> list[object]:
-    return [row[index] for row in ordered]
-
-
-def _vector_metadata_matches(
-    metadata: Mapping[str, object],
-    manifest: Mapping[str, object],
-    ordered: list[sqlite3.Row],
-    *,
-    model_id: str,
-    model_revision: str,
-    dimensions: object,
-) -> bool:
-    """Every claim vectors.json makes about its corpus must hold."""
+def _vector_metadata_matches(metadata, manifest, ordered, *, model_id, model_revision, dimensions):
     expected = {
         "schema_version": "corpus-vectors/v1",
         "corpus_sha256": manifest.get("source_manifest_sha256"),
         "collector_version": manifest.get("collector_version"),
         "extractor_version": manifest.get("extractor_version"),
-        "model_id": model_id,
-        "model_revision": model_revision,
-        "dimensions": dimensions,
-        "chunk_ids": _column(ordered, 0),
-        "source_ids": _column(ordered, 1),
-        "source_paths": _column(ordered, 2),
-        "source_sha256": _column(ordered, 3),
+        "model_id": model_id, "model_revision": model_revision, "dimensions": dimensions,
     }
-    return all(metadata.get(key) == value for key, value in expected.items())
+    if not all(metadata.get(key) == value for key, value in expected.items()):
+        return False
+    return _vector_identity_arrays_match(metadata, ordered)
+
+
+def _matching_vector_columns(metadata, ordered):
+    columns = [metadata.get(field) for field in VECTOR_ARRAY_FIELDS]
+    if not all(isinstance(values, Sequence) and len(values) == len(ordered) for values in columns):
+        return None
+    return columns
+
+
+def _vector_identity_arrays_match(metadata, ordered):
+    columns = _matching_vector_columns(metadata, ordered)
+    if columns is None:
+        return False
+    identities = zip(*columns)
+    return all(tuple(values) == tuple(row[index] for index in range(len(VECTOR_ARRAY_FIELDS)))
+               for values, row in zip(identities, ordered))
 
 
 def _usable_vector_matrix(
@@ -3501,87 +4262,160 @@ def _usable_query_vector(query_matrix: object, dimensions: object) -> bool:
     return bool(np.isfinite(query_matrix).all())
 
 
-def _cosine_similarities(
-    matrix: object, query_vector: object, *, deadline, cancelled
-) -> object:
-    import numpy as np
+class _CosineScores(Sequence):
+    """Only one existing 4096-row numerical work block is retained per query."""
+    def __init__(self, matrix, query_vector, deadline, cancelled):
+        import numpy as np
 
-    query_norm = np.linalg.norm(query_vector) + 1e-10
-    similarities = np.empty(len(matrix), dtype=np.float32)
-    for start in range(0, len(matrix), 4096):
-        _check_generation_stop(deadline, cancelled)
-        block = matrix[start : start + 4096]
-        similarities[start : start + len(block)] = (block @ query_vector) / (
-            (np.linalg.norm(block, axis=1) + 1e-10) * query_norm
-        )
-    return similarities
+        self.matrix, self.query = matrix, query_vector
+        self.deadline, self.cancelled = deadline, cancelled
+        self.query_norm = np.linalg.norm(query_vector) + 1e-10
+        self.start, self.block = -1, ()
+
+    def __len__(self):
+        return len(self.matrix)
+
+    def __getitem__(self, position):
+        index = range(len(self))[position]
+        start = index // 4096 * 4096
+        if start != self.start:
+            self._load_block(start)
+        return self.block[index - start]
+
+    def _load_block(self, start):
+        import numpy as np
+
+        _check_generation_stop(self.deadline, self.cancelled)
+        block = self.matrix[start:start + 4096]
+        self.block = (block @ self.query) / ((np.linalg.norm(block, axis=1) + 1e-10) * self.query_norm)
+        self.start = start
+        _check_generation_stop(self.deadline, self.cancelled)
 
 
-def _ordered_chunk_identity(
-    connection: sqlite3.Connection, deadline, cancelled
-) -> list[sqlite3.Row]:
+def _cosine_similarities(matrix, query_vector, *, deadline, cancelled):
+    return _CosineScores(matrix, query_vector, deadline, cancelled)
+
+
+class _OrderedVectorIdentity(Sequence):
+    def __init__(self, connection, deadline, cancelled):
+        self.connection, self.deadline, self.cancelled = connection, deadline, cancelled
+        with _generation_sqlite_guard(connection, deadline, cancelled):
+            self.count = connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+
+    def __len__(self):
+        return self.count
+
+    def __iter__(self):
+        with _generation_sqlite_guard(self.connection, self.deadline, self.cancelled):
+            with closing(self.connection.execute(
+                "SELECT chunk_id,source_id,source_path,source_sha256 FROM chunks ORDER BY chunk_order"
+            )) as rows:
+                yield from rows
+
+    def __getitem__(self, position):
+        index = range(len(self))[position]
+        with _generation_sqlite_guard(self.connection, self.deadline, self.cancelled):
+            return self.connection.execute(
+                "SELECT chunk_id,source_id,source_path,source_sha256 FROM chunks ORDER BY chunk_order LIMIT 1 OFFSET ?", (index,)
+            ).fetchone()
+
+
+def _ordered_chunk_identity(connection, deadline, cancelled):
+    connection.row_factory = sqlite3.Row
+    return _OrderedVectorIdentity(connection, deadline, cancelled)
+
+
+def _dense_order_key(row):
+    return -float(row["score"]), str(row["chunk_id"])
+
+
+def _vector_scored_result(row, score, generation_id, project):
+    result = _generation_result(row, generation_id, apply_weight=False)
+    if project and str(result["project"]).casefold() == project.casefold():
+        score *= 1.5
+    result["_signal_score"] = score
+    score *= _chunk_weight(result.get("authority"), result.get("type"), result.get("content"), result.get("path"))
+    result["score"] = round(score, 4)
+    result["requested_mode"], result["effective_mode"] = "hybrid", "hybrid"
+    return result
+
+
+def _vector_score_rows(connection, similarities, generation_id, filters, values,
+                       project, deadline, cancelled):
     with _generation_sqlite_guard(connection, deadline, cancelled):
-        connection.row_factory = sqlite3.Row
-        return connection.execute(
-            "SELECT chunk_id, source_id, source_path, source_sha256 "
-            "FROM chunks ORDER BY chunk_order"
-        ).fetchall()
+        rows = connection.execute(f"SELECT {_GENERATION_CHUNK_COLUMNS}, 0.0 AS rank FROM chunks "
+                                  f"WHERE 1=1{filters} ORDER BY chunk_order", values)
+        try:
+            for row in rows:
+                _check_generation_stop(deadline, cancelled)
+                yield _vector_scored_result(row, float(similarities[row["chunk_order"]]),
+                                            generation_id, project)
+        finally:
+            _close_vector_cache(rows)
 
 
-def _vector_scored_rows(
-    connection: sqlite3.Connection,
-    similarities: object,
-    generation_id: str,
-    *,
-    scope: str,
-    since: str | None,
-    as_of: str | None,
-    project: str | None,
-    deadline,
-    cancelled,
-) -> list[dict[str, object]]:
-    """Cosine rows, ordered by the same trust-weighted score the lexical leg uses.
+def _vector_tier_filter(filters, values, sessions):
+    operator = "LIKE"
+    if not sessions:
+        operator = "NOT LIKE"
+    return filters + f" AND source_path {operator} ?", (*values, _SESSION_SOURCE_PREFIX + "%")
 
-    `_generation_result` already multiplies the lexical rank by `trust_weight`,
-    so the lexical leg decides *admission* by who said it and what the page is.
-    The dense leg used to overwrite that score with raw cosine, which left the
-    vault's own rule -- answer from the compiled pages, read the commentary
-    after -- governing only the order of candidates that were already in the
-    pool, never which candidates got into it.
 
-    That gap stayed harmless while the commentary was small. Measured on this
-    vault on 2026-08-29, `docs/` carried 1,409 chunks against `knowledge/notes`'
-    620, and 49 of the 87 research notes had been written in the preceding two
-    days. Because the questions are Russian and the decision pages are English,
-    same-language commentary took every high cosine: the gold page for eight of
-    ten stand questions ranked 117-310 by raw cosine and never entered the
-    120-row over-fetch, so no downstream weight could reach it. Weighting here
-    puts those same pages at 1-14.
-    """
+class _WorstSignalFirst:
+    """Invert the existing deterministic key so a bounded heap exposes its worst row."""
+
+    __slots__ = ("key",)
+
+    def __init__(self, key):
+        self.key = key
+
+    def __lt__(self, other):
+        return other.key < self.key
+
+    def __eq__(self, other):
+        return self.key == other.key
+
+
+def _offer_vector_candidate(heap, order, row, serial, limit):
+    key = order(row)
+    entry = (_WorstSignalFirst(key), serial, row)
+    if len(heap) < limit:
+        heapq.heappush(heap, entry)
+        return
+    if key < heap[0][0].key:
+        heapq.heapreplace(heap, entry)
+
+
+def _heap_signal_rows(heaps):
+    return _union_signal_rows([entry[2] for _order, heap in heaps for entry in heap])
+
+
+def _vector_admission(rows, limit, include_unweighted):
+    if limit <= 0:
+        return []
+    if not include_unweighted:
+        return heapq.nsmallest(limit, rows, key=_dense_order_key)
+    heaps = [(_dense_order_key, []), (_signal_pool_order, [])]
+    for serial, row in enumerate(rows):
+        for order, heap in heaps:
+            _offer_vector_candidate(heap, order, row, serial, limit)
+    return _heap_signal_rows(heaps)
+
+
+def _vector_scored_rows(connection, similarities, generation_id, *, scope, since, as_of,
+                        project, deadline, cancelled, limit=None, include_unweighted=False):
+    """Preserve exact trust-weighted tier admission without retaining all prose."""
     filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
-    with _generation_sqlite_guard(connection, deadline, cancelled):
-        rows = connection.execute(
-            f"SELECT {_GENERATION_CHUNK_COLUMNS}, 0.0 AS rank FROM chunks "
-            f"WHERE 1=1{filters} ORDER BY chunk_order",
-            values,
-        ).fetchall()
+    if limit is None:
+        return sorted(_vector_score_rows(connection, similarities, generation_id, filters,
+                      values, project, deadline, cancelled), key=_dense_order_key)
     results = []
-    for row in rows:
-        _check_generation_stop(deadline, cancelled)
-        result = _generation_result(row, generation_id)
-        score = float(similarities[row["chunk_order"]])
-        # The vector path boosts a project match by 1.5, not by the lexical 2.0.
-        if project and str(result["project"]).casefold() == project.casefold():
-            score *= 1.5
-        # A page that states no provenance weighs as `inferred`, any other source
-        # as neutral (`provenance.page_authority`); a row is never refused for it.
-        score *= _chunk_weight(result.get("authority"), result.get("type"), result.get("content"), result.get("path"))
-        result["score"] = round(score, 4)
-        result["requested_mode"] = "hybrid"
-        result["effective_mode"] = "hybrid"
-        results.append(result)
-    results.sort(key=lambda item: (-float(item["score"]), str(item["chunk_id"])))
-    return results
+    for sessions in (False, True):
+        tier_filters, tier_values = _vector_tier_filter(filters, values, sessions)
+        rows = _vector_score_rows(connection, similarities, generation_id, tier_filters,
+                                  tier_values, project, deadline, cancelled)
+        results.extend(_vector_admission(rows, limit, include_unweighted))
+    return sorted(results, key=_dense_order_key)
 
 
 def _stored_vectors_are_trustworthy(
@@ -3609,65 +4443,66 @@ def _stored_vectors_are_trustworthy(
     )
 
 
-def _generation_vector_rows(
-    query: str,
-    connection: sqlite3.Connection,
-    manifest: dict[str, object],
-    directory: Path,
-    generation_id: str,
-    *,
-    embedder: object,
-    model_id: str,
-    model_revision: str,
-    scope: str,
-    limit: int,
-    project: str | None,
-    since: str | None,
-    as_of: str | None,
-    deadline: float | None,
-    cancelled: Callable[[], bool] | None,
-) -> list[dict[str, object]] | None:
-    """The scored rows, or None when the stored vectors cannot be trusted."""
+def _generation_vector_rows(query, connection, manifest, directory, generation_id, *,
+                            embedder, model_id, model_revision, scope, limit, project,
+                            since, as_of, deadline, cancelled, include_unweighted=False):
+    with closing(_read_vector_metadata(directory, deadline, cancelled,
+                                        expected=_expected_vector_metadata(manifest))) as metadata:
+        matrix = _loaded_generation_vector_matrix(directory, manifest, len(metadata["chunk_ids"]),
+                                                   deadline, cancelled)
+        try:
+            return _query_generation_vector_matrix(query, connection, manifest, generation_id,
+                                                   metadata, matrix, embedder, model_id, model_revision,
+                                                   scope, limit, project, since, as_of, deadline, cancelled, include_unweighted)
+        finally:
+            _close_vector_matrix(matrix)
+
+
+def _loaded_generation_vector_matrix(directory, manifest, rows, deadline, cancelled):
+    def check_stop():
+        _check_generation_stop(deadline, cancelled)
+
+    check_stop()
+    temporary = tempfile.TemporaryDirectory(prefix="llm-wiki-vector-reader-matrix-")
+    try:
+        path = Path(temporary.name) / "vectors.npy"
+        expected = (_artifact_descriptors(manifest) or {}).get("vectors.npy")
+        _copy_current_vector_metadata(directory / "vectors.npy", path, expected, check_stop)
+        return _mapped_parent_copy(path, temporary, rows, manifest.get("vector_dimensions"))
+    except BaseException:
+        temporary.cleanup()
+        raise
+
+
+def _query_generation_vector_matrix(query, connection, manifest, generation_id, metadata, matrix,
+                                    embedder, model_id, model_revision, scope, limit, project,
+                                    since, as_of, deadline, cancelled, include_unweighted=False):
     import numpy as np
 
-    metadata = _read_vector_metadata(directory, deadline, cancelled)
-    matrix = np.load(directory / "vectors.npy", mmap_mode="r", allow_pickle=False)
     _check_generation_stop(deadline, cancelled)
     ordered = _ordered_chunk_identity(connection, deadline, cancelled)
     dimensions = manifest.get("vector_dimensions")
-    if not _stored_vectors_are_trustworthy(
-        metadata,
-        manifest,
-        ordered,
-        matrix,
-        model_id=model_id,
-        model_revision=model_revision,
-        dimensions=dimensions,
-        deadline=deadline,
-        cancelled=cancelled,
-    ):
+    if not _stored_vectors_are_trustworthy(metadata, manifest, ordered, matrix,
+            model_id=model_id, model_revision=model_revision, dimensions=dimensions,
+            deadline=deadline, cancelled=cancelled):
         return None
-    _check_generation_stop(deadline, cancelled)
     query_matrix = np.asarray(_call_generation_embedder(embedder, [query]))
     _check_generation_stop(deadline, cancelled)
     if not _usable_query_vector(query_matrix, dimensions):
         return None
-    similarities = _cosine_similarities(
-        matrix, query_matrix[0], deadline=deadline, cancelled=cancelled
-    )
-    results = _vector_scored_rows(
-        connection,
-        similarities,
-        generation_id,
-        scope=scope,
-        since=since,
-        as_of=as_of,
-        project=project,
-        deadline=deadline,
-        cancelled=cancelled,
-    )
+    return _admitted_generation_vector_rows(connection, matrix, query_matrix[0], generation_id,
+                                             scope, limit, project, since, as_of, deadline, cancelled, include_unweighted)
+
+
+def _admitted_generation_vector_rows(connection, matrix, query_vector, generation_id,
+                                     scope, limit, project, since, as_of, deadline, cancelled, include_unweighted=False):
+    similarities = _cosine_similarities(matrix, query_vector, deadline=deadline, cancelled=cancelled)
+    results = _vector_scored_rows(connection, similarities, generation_id, scope=scope,
+                                  since=since, as_of=as_of, project=project,
+                                  deadline=deadline, cancelled=cancelled, limit=limit * 3,
+                                  include_unweighted=include_unweighted)
     _check_generation_stop(deadline, cancelled)
-    return results[: limit * 3]
+    return _generation_signal_pool(results, limit * 3, include_unweighted)
 
 
 def _generation_vectors_search(
@@ -3686,6 +4521,7 @@ def _generation_vectors_search(
     as_of: str | None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    include_unweighted: bool = False,
 ) -> list[dict[str, object]] | None:
     """Cosine search over one generation's vectors, or None when unusable."""
     _check_generation_stop(deadline, cancelled)
@@ -3710,6 +4546,7 @@ def _generation_vectors_search(
             as_of=as_of,
             deadline=deadline,
             cancelled=cancelled,
+            include_unweighted=include_unweighted,
         )
     except TimeoutError:
         raise
@@ -3750,37 +4587,39 @@ def search(
     limit = _validate_search_limit(limit)
     if _blank_query(query):
         return []
-    from retrieval import retrieve_via_search_memory
+    from retrieval import foreground_retrieval, retrieve_via_search_memory
 
-    generation_embedder, generation_model_id, generation_model_revision = (
-        _resolved_generation_embedder(
-            semantic, generation_embedder, generation_model_id, generation_model_revision
+    with foreground_retrieval(source_tool):
+
+        generation_embedder, generation_model_id, generation_model_revision = (
+            _resolved_generation_embedder(
+                semantic, generation_embedder, generation_model_id, generation_model_revision
+            )
         )
-    )
 
-    return retrieve_via_search_memory(
-        query,
-        scope=scope,
-        limit=limit,
-        project=project,
-        since=since,
-        as_of=as_of,
-        semantic=semantic,
-        page_paths=page_paths,
-        graph=graph,
-        rerank=rerank,
-        source_tool=source_tool,
-        emit_telemetry=emit_telemetry,
-        profile=profile,
-        catalog=catalog,
-        generation_embedder=generation_embedder,
-        generation_model_id=generation_model_id,
-        generation_model_revision=generation_model_revision,
-        deadline_monotonic=deadline_monotonic,
-        max_candidates=max_candidates,
-        cancelled=cancelled,
-        trace_sink=trace_sink,
-    )
+        return retrieve_via_search_memory(
+            query,
+            scope=scope,
+            limit=limit,
+            project=project,
+            since=since,
+            as_of=as_of,
+            semantic=semantic,
+            page_paths=page_paths,
+            graph=graph,
+            rerank=rerank,
+            source_tool=source_tool,
+            emit_telemetry=emit_telemetry,
+            profile=profile,
+            catalog=catalog,
+            generation_embedder=generation_embedder,
+            generation_model_id=generation_model_id,
+            generation_model_revision=generation_model_revision,
+            deadline_monotonic=deadline_monotonic,
+            max_candidates=max_candidates,
+            cancelled=cancelled,
+            trace_sink=trace_sink,
+        )
 
 
 # The one directory whose file names are identities: pages live flat there, as
@@ -3857,13 +4696,15 @@ def _page_read_eligible(
     )
 
 
-def _page_hit(read: _PageRead, *, score: float, bm25_score: float) -> dict:
-    return {
+def _page_hit(read: _PageRead, *, score: float, bm25_score: float,
+              signal_score: float | None = None) -> dict:
+    result = {
         "path": read.relative_path,
         "title": read.title,
         "summary": read.summary[:120],
         "score": score,
         "bm25_score": bm25_score,
+        "type": read.page_type,
         "project": read.project,
         "timestamp": read.timestamp,
         "candidate_id": legacy_candidate_id(read.relative_path),
@@ -3873,6 +4714,9 @@ def _page_hit(read: _PageRead, *, score: float, bm25_score: float) -> dict:
         "generation": "legacy",
         "authority": read.authority,
     }
+    if signal_score is not None:
+        result["_signal_score"] = signal_score
+    return result
 
 
 def _exact_page_hit(
@@ -3893,7 +4737,7 @@ def _exact_page_hit(
     if not _page_read_eligible(read, project=project, since=since, as_of=as_of):
         return None
     score = round(10.0 * trust_weight(read.authority, read.page_type, read.relative_path), 2)
-    return _page_hit(read, score=score, bm25_score=0.0)
+    return _page_hit(read, score=score, bm25_score=0.0, signal_score=10.0)
 
 
 def _project_matches(page_project: str, project: str | None) -> bool:
@@ -4025,7 +4869,7 @@ def _document_terms(page: Path, title: str, summary: str, body: str) -> set[str]
     return set(re.findall(r"\w+", haystack))
 
 
-def _direct_match_score(
+def _literal_relevance_score(
     page: Path, read: _PageRead, query_terms: set[str], shared: set[str]
 ) -> float:
     """Literal matching has no BM25, so the count of shared terms carries the base score.
@@ -4040,6 +4884,11 @@ def _direct_match_score(
         score *= 3.0
     if query_terms.issubset(set(re.findall(r"\w+", page.stem.casefold()))):
         score *= 4.0
+    return score
+
+
+def _direct_match_score(page, read, query_terms, shared):
+    score = _literal_relevance_score(page, read, query_terms, shared)
     return score * trust_weight(read.authority, read.page_type, read.relative_path)
 
 
@@ -4069,7 +4918,8 @@ def _direct_page_hit(
         return None
     score = round(_direct_match_score(page, read, query_terms, shared), 2)
     return {
-        **_page_hit(read, score=score, bm25_score=score),
+        **_page_hit(read, score=score, bm25_score=score,
+                    signal_score=_literal_relevance_score(page, read, query_terms, shared)),
         "fallback_reason": "no_active_generation",
         "partial": True,
     }
@@ -4085,6 +4935,7 @@ def _direct_markdown_hits(
     as_of: str | None,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    include_unweighted: bool = False,
 ) -> list[dict]:
     """Return bounded literal matches from authoritative Markdown only.
 
@@ -4109,7 +4960,7 @@ def _direct_markdown_hits(
         if hit is not None:
             results.append(hit)
     results.sort(key=lambda item: (-float(item["score"]), str(item["path"])))
-    return results[: max(limit * 3, limit)]
+    return _literal_signal_pool(results, max(limit * 3, limit), include_unweighted)
 
 
 def markdown_hits(
@@ -4123,6 +4974,7 @@ def markdown_hits(
     page_paths: list[Path] | None = None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    include_unweighted: bool = False,
 ) -> list[dict]:
     """The lexical signal when no generation is active: Markdown, read directly.
 
@@ -4145,10 +4997,64 @@ def markdown_hits(
         as_of=as_of,
         deadline=deadline,
         cancelled=cancelled,
+        include_unweighted=include_unweighted,
     )
+    hits.extend(_direct_breadcrumb_hits(
+        query, scope=scope, limit=limit, project=project, since=since,
+        as_of=as_of, deadline=deadline, cancelled=cancelled, include_unweighted=include_unweighted,
+    ))
+    hits.sort(key=lambda item: (-float(item["score"]), str(item["path"])))
     normalized_stem = _normalized_filename_stem(query)
     hits = _with_exact_page(hits, pages, normalized_stem, project=project, since=since, as_of=as_of)
     return _promoted_filename_first(hits, normalized_stem)
+
+
+def _breadcrumb_literal_row(chunk, terms: set[str]) -> dict | None:
+    """One physical, bounded chunk, never a whole multipart event in the answer."""
+    shared = terms & set(re.findall(r"\w+", chunk.text.casefold()))
+    if not shared:
+        return None
+    score = len(shared) * _chunk_weight(chunk.authority, chunk.type, chunk.text, chunk.source_path)
+    return {
+        "path": chunk.source_path, "candidate_id": chunk.id, "chunk_id": chunk.id,
+        "source_id": chunk.source_id, "source_sha256": chunk.source_sha256,
+        "span_sha256": chunk.span_sha256, "content": chunk.text,
+        "heading_ancestry": list(chunk.heading_ancestry),
+        "title": next(iter(chunk.heading_ancestry), Path(chunk.source_path).stem),
+        "score": score, "bm25_score": score, "_signal_score": float(len(shared)), "project": chunk.project,
+        "type": chunk.type, "authority": chunk.authority, "confidence": chunk.confidence,
+        "status": chunk.status, "valid_from": chunk.valid_from, "valid_to": chunk.valid_to,
+        "timestamp": (chunk.valid_from or "")[:10], "language": chunk.language,
+        "fallback_reason": "no_active_generation", "partial": True,
+    }
+
+
+def _breadcrumb_literal_rows(snapshot, terms, deadline, cancelled) -> list[dict]:
+    rows = []
+    for chunk in snapshot.chunks:
+        _check_legacy_stop(deadline, cancelled)
+        row = _breadcrumb_literal_row(chunk, terms)
+        if row is not None:
+            rows.append(row)
+    return rows
+
+
+def _direct_breadcrumb_hits(
+    query, *, scope, limit, project, since, as_of, deadline, cancelled, include_unweighted=False,
+) -> list[dict]:
+    """Reuse complete-source verification and chunking under the caller's deadline."""
+    from corpus_snapshot import collect_corpus
+
+    if scope in _NOTES_SCOPES:
+        return []
+    snapshot = collect_corpus(
+        ROOT, deadline=deadline, cancelled=cancelled,
+        pruned_directories=("knowledge/notes", "knowledge/projects"),
+    )
+    rows = _breadcrumb_literal_rows(snapshot, _evidence_terms(query), deadline, cancelled)
+    rows = apply_hard_filters(rows, project=project, since=since, as_of=as_of, scope=scope)
+    rows.sort(key=lambda row: (-float(row["score"]), row["path"], row["candidate_id"]))
+    return _literal_signal_pool(rows, max(limit * 3, limit), include_unweighted)
 
 
 def _resolved_pages(

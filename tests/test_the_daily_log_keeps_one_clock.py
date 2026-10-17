@@ -17,12 +17,11 @@ from tests.test_claims import raw_claim, source_bytes
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
-# Every function that stamps a daily heading, or picks the daily file's day.
+# Clock-reading writers. Breadcrumbs use the verified occurrence instant instead;
+# test_breadcrumb_decision and test_breadcrumb_worker cover delayed delivery.
 DAILY_CLOCK_READERS = (
-    ("post_tool_capture.py", "_append_tool_tag"),
-    ("user_prompt_capture.py", "_append_prompt_tag"),
     ("mcp_server.py", "_log_decision"),
-    ("session_end_project_tag.py", "_tag_session"),
+    ("session_end_project_tag.py", "_tag_project_payload"),
     ("memory_queue.py", "_manual_flush"),
     ("flush_memory.py", "_capture_now"),
     ("daily_log_append.py", "append_daily"),

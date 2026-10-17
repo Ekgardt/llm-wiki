@@ -158,7 +158,8 @@ def _claim_pages_under(root: Path, project_only: bool) -> list[Path]:
     return [path for path in root.rglob("*.md") if _is_claim_page(path, project_only)]
 
 
-def _paths(vault: Path) -> list[Path]:
+def claim_scope_paths(vault: Path) -> list[Path]:
+    """Discover claim pages without applying the reader's admission ceilings."""
     pages = []
     for relative, project_only in (
         ("knowledge/notes", False),
@@ -169,9 +170,14 @@ def _paths(vault: Path) -> list[Path]:
             continue
         _require_regular_directory(root, "claim tree root must be a regular directory")
         pages.extend(_claim_pages_under(root, project_only))
+    return sorted(pages, key=lambda item: item.relative_to(vault).as_posix())
+
+
+def _paths(vault: Path) -> list[Path]:
+    pages = claim_scope_paths(vault)
     if len(pages) > setting_value("claims.max_pages", vault):
         raise ValueError(f"claim tree exceeds the page limit; {raise_hint('claims.max_pages')}")
-    return sorted(pages, key=lambda item: item.relative_to(vault).as_posix())
+    return pages
 
 
 def _snapshot_claim_tree(

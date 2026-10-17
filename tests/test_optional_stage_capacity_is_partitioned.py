@@ -102,6 +102,8 @@ def boundary(monkeypatch):
     """
     import retrieval
 
+    monkeypatch.setattr(retrieval, "_OPTIONAL_STAGE_OBSERVED", {})
+    monkeypatch.setattr(retrieval, "_OPTIONAL_STAGE_OBSERVED_AT", {})
     kinds = getattr(retrieval, "OPTIONAL_STAGE_KINDS", ("dense", "rerank"))
     monkeypatch.setattr(
         retrieval,

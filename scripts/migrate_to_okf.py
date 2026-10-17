@@ -37,18 +37,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
-from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
+from markdown_transaction import (  # noqa: E402
+    MAX_KNOWLEDGE_TARGET_BYTES,
+    mutate_knowledge,
+    stable_operation_id,
+)
 from memory_state import ROOT  # noqa: E402
 from reliable_memory import sha256_bytes  # noqa: E402
 from vault_editorial import EDITORIAL_NAMES  # noqa: E402
 
 # Reserved OKF filenames — no frontmatter allowed at bundle level.
 RESERVED_NAMES = frozenset({"index.md", "log.md"})
-# One page read whole for frontmatter migration; above MAX_KNOWLEDGE_PAGE_BYTES (8 MiB), which
-# every other reader uses. Basis unknown: value predates measurement; review when it is aligned
-# with that ceiling.
-MAX_MIGRATION_PAGE_BYTES = 16 * 1024 * 1024
-
 # Editorial / contract files at the vault root — left alone.
 #
 # `EDITORIAL_NAMES` (imported above) covers the ones that are editorial wherever
@@ -218,14 +217,6 @@ def _skip_status(path: Path) -> str | None:
     return _root_contract_status(path)
 
 
-def _read_page(path: Path) -> tuple[str, str | None]:
-    """(status, text) — the status is empty when the read succeeded."""
-    try:
-        return "", path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as e:
-        return (f"error_read:{type(e).__name__}", None)
-
-
 def _added_field(body: str, field: str, value: str) -> str:
     """The quoted field to append, or nothing when it is empty or already set."""
     if not value:
@@ -295,13 +286,8 @@ def migrate_file(path: Path) -> tuple[str, str | None]:
         ("skip_no_type_rule", None)  — path doesn't match any TYPE_INFERENCE entry
         ("migrate", new_content)     — frontmatter to prepend
     """
-    skipped = _skip_status(path)
-    if skipped is not None:
-        return (skipped, None)
-    status, content = _read_page(path)
-    if content is None:
-        return (status, None)
-    return _content_migration(path, content)
+    status, content, _digest = _planned_page(path)
+    return status, content
 
 
 def _content_migration(path: Path, content: str) -> tuple[str, str | None]:
@@ -330,13 +316,22 @@ def _rel(path: Path) -> str:
     return path.relative_to(ROOT).as_posix()
 
 
-def _source_hash(path: Path) -> tuple[str, str | None]:
-    """(status, digest) — the status is empty when the hash was taken."""
+def _planned_page(path: Path) -> tuple[str, str | None, str | None]:
+    skipped = _skip_status(path)
+    if skipped is not None:
+        return skipped, None, None
+    return _read_planned_page(path)
+
+
+def _read_planned_page(path: Path) -> tuple[str, str | None, str | None]:
+    """Bind the migration and its CAS precondition to one stable byte read."""
     try:
-        data = read_stable_bytes(path, MAX_MIGRATION_PAGE_BYTES, label="migration page")
-    except (OSError, ValueError) as exc:
-        return (f"error_read:{type(exc).__name__}", None)
-    return "", sha256_bytes(data)
+        data = read_stable_bytes(path, MAX_KNOWLEDGE_TARGET_BYTES, label="migration page")
+        source = data.decode("utf-8")
+    except (OSError, ValueError) as error:
+        return f"error_read:{type(error).__name__}", None, None
+    status, content = _content_migration(path, source)
+    return status, content, sha256_bytes(data)
 
 
 class MigrationPlan:
@@ -369,12 +364,9 @@ class MigrationPlan:
 def _plan_migration(files: list[Path]) -> MigrationPlan:
     plan = MigrationPlan()
     for path in files:
-        status, digest = _source_hash(path)
-        if digest is None:
-            plan.record(status, path, None)
-            continue
-        plan.source_hashes[path] = digest
-        status, content = migrate_file(path)
+        status, content, digest = _planned_page(path)
+        if digest is not None:
+            plan.source_hashes[path] = digest
         plan.record(status, path, content)
     return plan
 

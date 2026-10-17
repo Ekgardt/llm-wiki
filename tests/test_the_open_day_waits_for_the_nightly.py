@@ -23,10 +23,11 @@ CLOSED, OPEN = "2026-09-26.md", "2026-09-27.md"
 @pytest.fixture
 def vault(tmp_path, monkeypatch):
     """Two days, neither compiled: yesterday's is closed, today's is still growing."""
-    root, state_root = tmp_path / "vault", tmp_path / "state"
+    from tests.adopted_vault import adopt
+
+    root, state_root = adopt(tmp_path)
     daily = root / "knowledge" / "daily"
-    daily.mkdir(parents=True)
-    (state_root / "run").mkdir(parents=True)
+    daily.mkdir(parents=True, exist_ok=True)
     for name in (CLOSED, OPEN):
         (daily / name).write_text("## [10:00:00] s\n", encoding="utf-8")
     (daily / "README.md").write_text("# Daily logs\n", encoding="utf-8")
@@ -45,12 +46,49 @@ def test_closed_days_are_every_day_but_the_newest(vault):
 
 def test_only_the_open_day_changed_is_no_work_for_the_session_start(vault):
     import maybe_compile
-    from memory_state import file_hash, update_state
 
-    daily = vault / "knowledge/daily"
-    update_state(lambda state: state.update(compiled_daily_hashes={CLOSED: file_hash(daily / CLOSED)}))
+    _publish_closed_receipt(vault)
+    _matching_closed_mirror(vault)
 
     assert (maybe_compile._has_pending_work(closed_days_only=True), maybe_compile._has_pending_work()) == (False, True)
+
+
+def _matching_closed_mirror(root):
+    from memory_state import file_hash, update_state
+
+    def record(state):
+        state.update(compiled_daily_hashes={CLOSED: file_hash(root / "knowledge/daily" / CLOSED)})
+
+    update_state(record)
+
+
+def _publish_closed_receipt(root):
+    import compile_memory as compiler
+    from markdown_transaction import active_markdown_coordinator
+    from memory_state import STATE_ROOT
+
+    (root / "knowledge/notes").mkdir(parents=True, exist_ok=True)
+    for relative in ("AGENTS.md", "knowledge/index.md", "knowledge/log.local.md"):
+        (root / relative).write_text("# Isolated compile fixture\n", encoding="utf-8")
+    coordinator = active_markdown_coordinator(root, STATE_ROOT)
+    inputs = compiler.snapshot_compile_inputs([root / "knowledge/daily" / CLOSED])
+    batch = compiler.pack_compile_batches(inputs, model=None)[0]
+    result = compiler.apply_compile_plan(
+        batch.inputs, {"schema_version": "compile-plan/v2", "operations": []},
+        action_key="e" * 64, trigger="manual", coordinator=coordinator, batch=batch,
+        provider_budget={"provider": "fake", "model": "test", "max_output_tokens": 4000},
+    )
+    receipt = compiler._read_snapshot_receipt(batch.inputs.dailies[0], coordinator)
+    assert receipt is not None and receipt["operation_id"] == result.operation_id
+    assert receipt["schema_version"] == "compile-receipt/v4"
+
+
+def test_a_matching_mirror_without_a_committed_receipt_keeps_the_closed_day_pending(vault):
+    import maybe_compile
+
+    (vault / "knowledge/daily/receipts").mkdir()
+    _matching_closed_mirror(vault)
+    assert maybe_compile._has_pending_work(closed_days_only=True)
 
 
 def test_the_session_start_compile_leaves_out_the_open_day(vault):

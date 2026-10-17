@@ -179,10 +179,16 @@ class FakeLspServer:
     def _run_handler(self, handler: Callable[[FakeLspPeer], None], peer: FakeLspPeer) -> None:
         try:
             handler(peer)
-        except (BrokenPipeError, ConnectionError, OSError):
+        except ConnectionError:
+            # Scripted peers can be disconnected by a protocol under test.
+            # Other OS errors must reach teardown with their original cause.
             pass
         except BaseException as exc:  # pragma: no cover - surfaced by close
             self.failures.append(exc)
+            try:
+                peer.close()
+            except BaseException as cleanup_error:
+                self.failures.append(cleanup_error)
 
     @staticmethod
     def _close_protocol(protocol: object) -> None:

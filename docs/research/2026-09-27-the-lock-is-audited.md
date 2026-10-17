@@ -2,6 +2,12 @@
 
 Date: 2026-09-26 (audit of 2026-09-27, item B-19).
 
+Update 2026-09-29: the PyPI pass skips the vendor's local `+cpu` build. CI now
+retains that pass and adds a strict OSV pass over the same export. See
+`docs/research/2026-09-29-a-local-build-is-not-an-audit-skip.md` for the reproduced
+gap, exact-version audit and known-vulnerable positive control. The original
+choice below remains the historical record.
+
 ## What was true
 
 `uv.lock` pinned anyio 4.14.1 and cryptography 49.0.0. OSV (queried

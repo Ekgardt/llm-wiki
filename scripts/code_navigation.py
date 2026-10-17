@@ -1697,7 +1697,7 @@ class CodeNavigation:
 
     def _resolver_values(
         self, run: _StructuralRun
-    ) -> tuple[tuple[NavigationLocation, ...], bool, NavigationStatus | None]:
+    ) -> tuple[tuple[NavigationLocation, ...], bool, _CallbackFailure | None]:
         """Bounded resolver output; a failure keeps whatever was already bounded."""
         if self._symbol_resolver is None:
             return (), False, None
@@ -1713,11 +1713,12 @@ class CodeNavigation:
             )
             _check_deadline(run.deadline)
         except TimeoutError:
-            return raw_candidates, input_truncated, NavigationStatus.TIMEOUT
+            return raw_candidates, input_truncated, _RESOLVER_TIMED_OUT
         except NavigationInterruption:
             raise
-        except Exception:
-            return raw_candidates, input_truncated, NavigationStatus.ERROR
+        except Exception as exc:
+            failure = _callback_error("symbol resolver failed", exc)
+            return raw_candidates, input_truncated, failure
         return raw_candidates, input_truncated, None
 
     def verify_edge(
@@ -1767,25 +1768,25 @@ class CodeNavigation:
         source: SourceAnchor,
         target: SourceAnchor,
         anchors_valid: bool,
-    ) -> tuple[bool | None, NavigationStatus | None]:
+    ) -> tuple[bool | None, _CallbackFailure | None]:
         if not anchors_valid or self._edge_verifier is None:
             return None, None
         return self._call_edge_verifier(run, source, target)
 
     def _call_edge_verifier(
         self, run: _StructuralRun, source: SourceAnchor, target: SourceAnchor
-    ) -> tuple[bool | None, NavigationStatus | None]:
+    ) -> tuple[bool | None, _CallbackFailure | None]:
         try:
             _check_deadline(run.deadline)
             value = self._edge_verifier(source, target, run.repository, run.deadline)
             _check_deadline(run.deadline)
             _require_instance(value, bool, "edge verifier result must be boolean")
         except TimeoutError:
-            return None, NavigationStatus.TIMEOUT
+            return None, _VERIFIER_TIMED_OUT
         except NavigationInterruption:
             raise
-        except Exception:
-            return None, NavigationStatus.ERROR
+        except Exception as exc:
+            return None, _callback_error("edge verifier failed", exc)
         return value, None
 
     def _confirmed_edge(
@@ -1870,12 +1871,33 @@ _COVERAGE_STATUS: Mapping[str, NavigationStatus] = MappingProxyType(
         "not_ready": NavigationStatus.NOT_READY,
     }
 )
-_VERIFIER_WARNINGS: Mapping[NavigationStatus, str] = MappingProxyType(
-    {
-        NavigationStatus.TIMEOUT: "edge verifier timed out",
-        NavigationStatus.ERROR: "edge verifier failed",
-    }
-)
+
+
+@dataclass(frozen=True, slots=True)
+class _CallbackFailure:
+    """A structural callback that did not answer: its status and the warning saying why."""
+
+    status: NavigationStatus
+    warning: str
+
+
+_RESOLVER_TIMED_OUT = _CallbackFailure(NavigationStatus.TIMEOUT, "symbol resolver timed out")
+_VERIFIER_TIMED_OUT = _CallbackFailure(NavigationStatus.TIMEOUT, "edge verifier timed out")
+
+
+def _callback_error(prefix: str, error: Exception) -> _CallbackFailure:
+    """An error answer whose warning names the class of the callback's exception.
+
+    `symbol resolver failed` alone dropped the exception. Its message stays out:
+    a callback's exception text may quote any path or value, and no callback text
+    crosses this boundary (`test_callback_exceptions_are_redacted_at_every_boundary`).
+    See `docs/research/2026-09-28-a-check-names-its-cause.md`.
+    """
+    return _CallbackFailure(NavigationStatus.ERROR, _failure_text(prefix, error))
+
+
+def _failure_text(prefix: str, error: BaseException) -> str:
+    return f"{prefix}: {type(error).__name__}"
 _SYMBOL_MESSAGES: Mapping[str, str] = MappingProxyType(
     {
         "revision_timeout": "symbol revision computation timed out",
@@ -2256,7 +2278,8 @@ class _QueryAttempt:
         self.validation_warning: str | None = None
         self.anchor: SourceAnchor | None = None
         self.raw_graph_locations: tuple[NavigationLocation, ...] = ()
-        self.structural_failed = False
+        # Empty while the structural fallback has not failed; then its warning.
+        self.structural_failure = ""
         self.structural_input_truncated = False
 
     def finish(self, status: NavigationStatus, warning: str, revision_after: str) -> NoReturn:
@@ -2417,8 +2440,8 @@ class _QueryAttempt:
             raise
         except NavigationInterruption:
             raise
-        except Exception:
-            self.structural_failed = True
+        except Exception as exc:
+            self.structural_failure = _failure_text("structural fallback failed", exc)
 
     def _provider_facts(
         self, outcome: _ProviderOutcome, encoding: object, lsp_provenance: tuple[Provenance, ...]
@@ -2491,7 +2514,7 @@ class _QueryAttempt:
                 (partial_locations, "provider locations partially filtered"),
                 (partial_diagnostics, "provider diagnostics partially filtered"),
                 (partial_hover, "provider hover range was filtered"),
-                (self.structural_failed, "structural fallback failed"),
+                (self.structural_failure, self.structural_failure),
                 (self.structural_input_truncated, "structural callback input bound reached"),
                 (partial_graph, "structural candidates partially filtered"),
             )),
@@ -2794,7 +2817,7 @@ def _labeled_candidates(
 
 
 def _symbol_warnings(
-    resolver_failure: NavigationStatus | None,
+    resolver_failure: _CallbackFailure | None,
     filtered: bool,
     input_truncated: bool,
     truncated: bool,
@@ -2802,8 +2825,7 @@ def _symbol_warnings(
 ) -> tuple[str, ...]:
     none_found = not candidates and resolver_failure is None
     return _flagged((
-        (resolver_failure is NavigationStatus.TIMEOUT, "symbol resolver timed out"),
-        (resolver_failure is NavigationStatus.ERROR, "symbol resolver failed"),
+        (resolver_failure is not None, _failure_warning(resolver_failure)),
         (filtered, "symbol candidates partially filtered"),
         (input_truncated, "symbol callback input bound reached"),
         (truncated, "symbol candidate limit reached"),
@@ -2812,13 +2834,19 @@ def _symbol_warnings(
     ))
 
 
+def _failure_warning(failure: _CallbackFailure | None) -> str:
+    if failure is None:
+        return ""
+    return failure.warning
+
+
 def _symbol_status(
-    resolver_failure: NavigationStatus | None,
+    resolver_failure: _CallbackFailure | None,
     candidates: tuple[NavigationLocation, ...],
     warnings: tuple[str, ...],
 ) -> NavigationStatus:
     if resolver_failure is not None and not candidates:
-        return resolver_failure
+        return resolver_failure.status
     if len(candidates) == 1 and not warnings:
         return NavigationStatus.OK
     return NavigationStatus.PARTIAL
@@ -2850,7 +2878,7 @@ def _edge_anchors_valid(
 
 
 def _require_edge_proof(
-    run: _StructuralRun, anchors_valid: bool, verifier_failure: NavigationStatus | None
+    run: _StructuralRun, anchors_valid: bool, verifier_failure: _CallbackFailure | None
 ) -> None:
     if not anchors_valid:
         run.finish(
@@ -2861,8 +2889,8 @@ def _require_edge_proof(
         )
     if verifier_failure is not None:
         run.finish(
-            verifier_failure,
-            _VERIFIER_WARNINGS[verifier_failure],
+            verifier_failure.status,
+            verifier_failure.warning,
             run.revision_before,
             run.revision_after,
         )

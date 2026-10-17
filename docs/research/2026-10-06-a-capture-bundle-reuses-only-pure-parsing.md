@@ -1,0 +1,15 @@
+# One capture bundle reuses only pure parsing
+
+Research checked 2026-10-06. Python 3.10 remains supported. This change adds no setting, schema, source authority, runtime path or persisted cache.
+
+The current diagnostic profile reached its shared deadline inside capture validation. It observed 13,725 intent checks and 13,578 complete bundle loads; 67,888 uncached record validations took 16.89 cumulative seconds, including 12.036 seconds in schema validation. The outer error was caused by TimeoutError. This is a partial, instrumented observation, not corruption evidence or a complete runtime benchmark. Fresh runtime reads independently took 14.922 cumulative seconds. Removing pure repetition cannot by itself establish that every health check fits the normal budget.
+
+The common `_require_capture_document` now owns one existing `_RecordParsing` context around the normal `verified_capture_handler`. The parsing context retains exact immutable physical record bytes and the schema bytes actually read. It rejects schema drift, returns freshly decoded records and checks the original caller deadline during parsing. Existing SQL size/hash binding, manifest identity, fresh anchor/part reads, chain/digest/completeness checks and exception classification remain. The context resets in `finally`, including nested callers and failures. Its retained data is one naturally complete bundle plus its schemas, never a whole queue or a successful filesystem verdict.
+
+[Python 3.10 Context Variables](https://docs.python.org/3.10/library/contextvars.html) documents token reset to the prior context. [RFC 8259](https://www.rfc-editor.org/rfc/rfc8259) defines the JSON interchange syntax; a parsed document still needs the product's canonical/schema and identity validation. [SQLite isolation](https://www.sqlite.org/isolation.html) explains database isolation; this pure JSON scope does not replace the operational snapshot or filesystem authority.
+
+Alternatives rejected: retaining the whole queue would unnecessarily enlarge lifetime and memory; caching successful file checks would weaken fresh authority; skipping schema or terminal records would lose required checks. Reusing the already implemented reader-local parsing mechanism is the smaller change.
+
+The original production-call regression observed five canonical validations for three unique physical records. The candidate performs three and preserves both fresh external bundle reads. Controls cover v1 identity and v2 identity, manifest canonicality, changed parts, schema drift, deadline, independent bundle lifetime and nested/exception reset. Existing tests are unchanged. The initial test fixture omitted the publication parent directory; that failed run is retained separately from the corrected genuine original RED.
+
+Small real sealed-copy samples establish the mechanism only. Their sub-millisecond timings and one-part sizes do not establish queue-scale latency or full-health improvement. Current source work, legacy planning limits, all other health failures and the separate claims-index rebuild cost remain outside this change.

@@ -1833,6 +1833,35 @@ class BehavioralNavigationRuntime:
         return 0
 
 
+def _terminal_probe(scenario, sent, terminal, events, deadline, cancellation):
+    """The probe is interrupted before dispatch, or after it."""
+    if _interruption_pending(deadline, cancellation):
+        terminal.set()
+        raise _interruption(scenario, "rejected before dispatch")
+    sent.set()
+    events.append("sent")
+    if scenario == "cancellation":
+        _await_cancellation(cancellation, deadline)
+        terminal.set()
+        events.append("terminal")
+        raise benchmark_runner.RequestCancelled("cancelled after dispatch")
+    _await_deadline(deadline)
+    terminal.set()
+    events.append("terminal")
+    raise TimeoutError("timed out after dispatch")
+
+
+
+class _ProbeDeliveryProtocolShape:
+    generation_nonce = "benchmark-fixture-generation"
+
+    def _queue_request_message(self, message, *, deadline, key):
+        raise AssertionError("this terminal fixture does not queue wire messages")
+
+    def _handle_response(self, message, nonce):
+        raise AssertionError("this terminal fixture does not receive wire replies")
+
+
 @pytest.mark.parametrize("scenario", ["timeout", "cancellation"])
 def test_ownership_interruption_rejects_terminal_without_sent_proof(
     monkeypatch: pytest.MonkeyPatch,
@@ -1840,7 +1869,7 @@ def test_ownership_interruption_rejects_terminal_without_sent_proof(
 ) -> None:
     terminal = threading.Event()
 
-    class Protocol:
+    class Protocol(_ProbeDeliveryProtocolShape):
         @staticmethod
         def _sent_request_evidence() -> tuple[int, str | None]:
             return 0, None
@@ -1912,23 +1941,9 @@ def test_ownership_interruption_dispatches_before_terminal_and_then_cleans_up(
     events: list[str] = []
 
     def probe(deadline: float, cancellation):
-        """The probe is interrupted before dispatch, or after it."""
-        if _interruption_pending(deadline, cancellation):
-            terminal.set()
-            raise _interruption(scenario, "rejected before dispatch")
-        sent.set()
-        events.append("sent")
-        if scenario == "cancellation":
-            _await_cancellation(cancellation, deadline)
-            terminal.set()
-            events.append("terminal")
-            raise benchmark_runner.RequestCancelled("cancelled after dispatch")
-        _await_deadline(deadline)
-        terminal.set()
-        events.append("terminal")
-        raise TimeoutError("timed out after dispatch")
+        return _terminal_probe(scenario, sent, terminal, events, deadline, cancellation)
 
-    class Protocol:
+    class Protocol(_ProbeDeliveryProtocolShape):
         @staticmethod
         def _sent_request_evidence() -> tuple[int, str | None]:
             return (1, "workspace/symbol") if sent.is_set() else (0, None)
@@ -1978,7 +1993,7 @@ def test_ownership_waits_for_post_write_evidence_after_fast_completion() -> None
     events: list[str] = []
     timers: list[threading.Timer] = []
 
-    class Protocol:
+    class Protocol(_ProbeDeliveryProtocolShape):
         @staticmethod
         def _sent_request_evidence() -> tuple[int, str | None]:
             return (
@@ -2041,7 +2056,7 @@ def test_real_runtime_measures_four_active_ownership_scenarios() -> None:
         def wait(self, *, timeout: float) -> int:
             raise AssertionError("the lifecycle owner must reap the process")
 
-    class ActiveProtocol:
+    class ActiveProtocol(_ProbeDeliveryProtocolShape):
         def __init__(self, runtime: ActiveOwnershipRuntime) -> None:
             self.runtime = runtime
 

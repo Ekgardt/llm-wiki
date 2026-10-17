@@ -28,6 +28,7 @@ from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
 from lint_memory import (  # noqa: E402
     NOTES,
     VAULT,
+    backlink_target_is_mutable,
     missing_backlink_pairs,
 )
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
@@ -110,6 +111,8 @@ def with_backlink(text: str, slug: str) -> str:
 def _repair_pair(source: Path, target: Path) -> str:
     relative = target.relative_to(ROOT).as_posix()
     current = read_stable_bytes(target, MAX_PAGE_BYTES, label="backlink target")
+    if not backlink_target_is_mutable(current):
+        raise ValueError("backlink target is immutable or has invalid metadata")
     updated = with_backlink(current.decode("utf-8"), page_slug(source)).encode("utf-8")
     if updated == current:
         return f"UNCHANGED: {relative}"

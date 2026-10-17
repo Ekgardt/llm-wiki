@@ -244,22 +244,26 @@ def test_generation_check_degrades_noncurrent_scope_or_extraction_identity(tmp_p
     import doctor
 
     root, state = _vault(tmp_path)
-    if finding == "unscoped":
-        _empty_generation(
-            state,
-            "gen-1",
-            extractor_version=doctor._maintenance_extractor_identity(),
-        )
-    elif finding == "mismatched_scope":
-        other_root, _other_state = _vault(tmp_path / "other")
-        _empty_generation(state, "gen-1", root=other_root)
-    else:
+    def publish_stale_generation():
+        if finding == "unscoped":
+            _empty_generation(
+                state,
+                "gen-1",
+                extractor_version=doctor._maintenance_extractor_identity(),
+            )
+            return
+        if finding == "mismatched_scope":
+            other_root, _other_state = _vault(tmp_path / "other")
+            _empty_generation(state, "gen-1", root=other_root)
+            return
         _empty_generation(
             state,
             "gen-1",
             root=root,
             extractor_version="maintenance-extractors/stale",
         )
+
+    publish_stale_generation()
 
     result = doctor._generation_check(
         root,

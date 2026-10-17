@@ -40,7 +40,7 @@ class _CapturedSource(Protocol):
     record: _SourceRecord
     content: bytes
 
-EXTRACTOR_VERSION = "code-extractor/v17"  # v17: star, branch and rebinding re-exports (audit 2026-09-27 C-7)
+EXTRACTOR_VERSION = "code-extractor/v19"  # v18: finite re-export walks and complete literal route matching
 # Syntax nodes walked between two deadline checks: the check is cheap, 256 keeps it
 # off the hot path while a stop is still heard within a fraction of a millisecond.
 _SYNTAX_STOP_INTERVAL = 256
@@ -429,15 +429,6 @@ def _sqlite_aliases(tree: ast.Module) -> set[str]:
     }
 
 
-# The `argument->parameter` text stored on one call edge: at most 8 pairs and 256
-# bytes, and a cut list ends in "+N more", so the reader sees what was left out. A
-# display bound on a stored label; basis unknown — value predates measurement.
-MAX_BINDINGS = 8
-MAX_BINDING_BYTES = 256
-# A string literal longer than this is not read as an HTTP route path, so it makes no
-# route edge. Basis unknown: value predates measurement; review if real route
-# templates are longer.
-MAX_ROUTE_PATH_BYTES = 512
 _HTTP_CLIENT_MODULES = frozenset({"requests", "httpx"})
 _HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete"})
 
@@ -516,24 +507,12 @@ def _keyword_bindings(node: ast.Call, parameters: list[str]) -> list[str]:
 
 
 def _argument_bindings(node: ast.Call, target: Mapping[str, object]) -> str:
-    """`argument->parameter` pairs of one call, bounded in count and bytes."""
+    """Every proven `argument->parameter` pair in one source-bounded call."""
     parameters = _bound_parameters(target)
     pairs = _positional_bindings(node, parameters) + _keyword_bindings(node, parameters)
     if not pairs:
         return ""
-    return _bounded_bindings(pairs)
-
-
-def _bounded_bindings(pairs: list[str]) -> str:
-    kept = pairs[:MAX_BINDINGS]
-    text = ",".join(kept)
-    while len(text.encode("utf-8")) > MAX_BINDING_BYTES and kept:
-        kept.pop()
-        text = ",".join(kept)
-    remaining = len(pairs) - len(kept)
-    if not remaining:
-        return text
-    return f"{text}+{remaining} more".lstrip(",")
+    return ",".join(pairs)
 
 
 def _client_module(func: ast.expr, aliases: Mapping[str, tuple[str, str]]) -> str | None:
@@ -548,7 +527,7 @@ def _client_module(func: ast.expr, aliases: Mapping[str, tuple[str, str]]) -> st
 
 def _request_path(node: ast.Call) -> str | None:
     target = _string_constant(next(iter(node.args), None))
-    if target is None or len(target.encode("utf-8")) > MAX_ROUTE_PATH_BYTES:
+    if target is None:
         return None
     return _url_path(target)
 
@@ -800,10 +779,6 @@ def _route_methods(decorator: ast.Call, function: ast.Attribute) -> tuple[str, .
 # deep parses fine and then aborted the whole extraction from inside
 # `_call_edges`. Depth is measured iteratively before anything recurses.
 MAX_EXPRESSION_DEPTH = 64
-# A re-export chain is followed this many modules deep, then left unresolved (the
-# name keeps no target rather than a wrong one); it also stops a re-export cycle.
-# Basis unknown: value predates measurement.
-MAX_REEXPORT_HOPS = 8
 _TOO_DEEP_TEXT = f"<expression nested deeper than {MAX_EXPRESSION_DEPTH}>"
 
 
@@ -2332,7 +2307,8 @@ class _Collector:
         seen: set[tuple[str, str]] = set()
         pending = deque(self._reexports_of(module, symbol))
         found: list[str] = []
-        while pending and len(seen) < MAX_REEXPORT_HOPS:
+        while pending:
+            self.check_stop()
             hop = pending.popleft()
             if hop not in seen:
                 seen.add(hop)

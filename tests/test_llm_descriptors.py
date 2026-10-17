@@ -451,7 +451,7 @@ def test_http_backend_uses_captured_endpoint_after_env_drift(provider, monkeypat
         requests.append(request)
         return Response()
 
-    monkeypatch.setattr(llm_client.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(llm_client, "open_provider_request", urlopen)
 
     result = llm_client.call_candidate(descriptor, "prompt", "system")
 
@@ -478,7 +478,7 @@ def test_ollama_probe_uses_captured_remote_endpoint_after_env_drift(monkeypatch)
         requests.append((request, timeout))
         return Response()
 
-    monkeypatch.setattr(llm_client.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(llm_client, "open_provider_request", urlopen)
 
     assert llm_client.probe_candidate(descriptor) is True
     assert requests[0][0].full_url == "http://remote.example:22123/api/tags"
@@ -532,7 +532,7 @@ def test_forced_ollama_local_only_accepts_only_local_model_metadata(monkeypatch)
                 }
             ).encode("utf-8")
 
-    monkeypatch.setattr(llm_client.urllib.request, "urlopen", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(llm_client, "open_provider_request", lambda *args, **kwargs: Response())
 
     assert descriptor.capabilities["local_only_status"] == "external_runtime_unverified"
     assert llm_client.probe_candidate(descriptor) is True
@@ -571,7 +571,7 @@ def test_call_candidate_cannot_bypass_local_only_remote_model_check(monkeypatch)
                 }
             ).encode("utf-8")
 
-    monkeypatch.setattr(llm_client.urllib.request, "urlopen", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(llm_client, "open_provider_request", lambda *args, **kwargs: Response())
     monkeypatch.setitem(
         llm_client._BACKENDS,
         "ollama",
@@ -805,7 +805,7 @@ def _http_call(monkeypatch, provider, response_data):
         requests.append(request)
         return Response()
 
-    monkeypatch.setattr(llm_client.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(llm_client, "open_provider_request", urlopen)
     result = llm_client.call_candidate(
         descriptor, "prompt", "system", available=True, max_tokens=37
     )
@@ -924,7 +924,7 @@ def test_opencode_aggregate_usage_wins_over_part_usage(monkeypatch):
             return Response({})
         return Response(responses.pop(0))
 
-    monkeypatch.setattr(llm_client.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(llm_client, "open_provider_request", urlopen)
     result = llm_client.call_candidate(descriptor, "prompt", "", available=True)
 
     assert result.text == "answer"
@@ -1063,7 +1063,7 @@ def test_opencode_only_invalid_text_returns_empty_with_reported_usage(monkeypatc
             return Response({})
         return Response(responses.pop(0))
 
-    monkeypatch.setattr(llm_client.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(llm_client, "open_provider_request", urlopen)
     result = llm_client.call_candidate(descriptor, "prompt", "", available=True)
 
     assert result.failure_class == "empty_response"

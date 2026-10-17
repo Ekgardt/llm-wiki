@@ -14,27 +14,18 @@ import json
 import sys
 from pathlib import Path
 
-import pytest
+from tests.test_breadcrumb_storage import _bundle
+from tests.test_breadcrumb_worker import ingress as ingress
 
 ROOT = Path(__file__).resolve().parents[1]
 PATCH = "*** Begin Patch\n*** Update File: src/app.py\n@@\n-old\n+new\n*** End Patch\n"
 
 
-@pytest.fixture
-def adapter(monkeypatch):
-    import integration_adapter
-
-    calls: list[tuple[str, dict]] = []
-    monkeypatch.setattr(integration_adapter, "_observe_checkpoint_fail_open", lambda envelope: None)
-    monkeypatch.setattr(
-        integration_adapter, "_project_context", lambda envelope: ("demo", Path("/work/demo"))
-    )
-    monkeypatch.setattr(
-        integration_adapter,
-        "_run_delegate",
-        lambda name, payload, **kwargs: calls.append((name, payload)),
-    )
-    return integration_adapter, calls
+def _saved_payload(queue):
+    manifests = list((queue.state_root / "run/capture-intents/ready").rglob("*.json"))
+    assert len(manifests) == 1
+    manifest = json.loads(manifests[0].read_bytes())
+    return json.loads(_bundle(queue.state_root, manifest["intent_id"]).content)["payload"]
 
 
 def _run(adapter_module, monkeypatch, event: str, payload: dict) -> None:
@@ -44,9 +35,9 @@ def _run(adapter_module, monkeypatch, event: str, payload: dict) -> None:
 
 
 def test_a_codex_prompt_runs_prompt_capture_and_prints_nothing(
-    adapter, monkeypatch, capsys
+    ingress, monkeypatch, capsys
 ):
-    adapter_module, calls = adapter
+    adapter_module, queue, _coordinator = ingress
     _run(adapter_module, monkeypatch, "user_prompt", {
         "hook_event_name": "UserPromptSubmit",
         "session_id": "019a-codex-session",
@@ -55,15 +46,13 @@ def test_a_codex_prompt_runs_prompt_capture_and_prints_nothing(
         "prompt": "Keep this request",
     })
 
-    assert ([name for name, _ in calls], calls[0][1]["prompt"], capsys.readouterr().out) == (
-        ["user_prompt_capture.py"],
-        "Keep this request",
-        "",
-    )
+    assert _saved_payload(queue)["prompt"] == "Keep this request"
+    assert capsys.readouterr().out == ""
 
 
-def test_a_codex_patch_is_an_edit_of_the_file_it_touches(adapter, monkeypatch, capsys):
-    adapter_module, calls = adapter
+
+def test_a_codex_patch_is_an_edit_of_the_file_it_touches(ingress, monkeypatch, capsys):
+    adapter_module, queue, _coordinator = ingress
     _run(adapter_module, monkeypatch, "post_tool_use", {
         "hook_event_name": "PostToolUse",
         "session_id": "019a-codex-session",
@@ -74,11 +63,9 @@ def test_a_codex_patch_is_an_edit_of_the_file_it_touches(adapter, monkeypatch, c
         "tool_response": {"success": True},
     })
 
-    name, payload = calls[0]
-    assert (name, payload["tool_name"], payload["tool_input"]["filePath"]) == (
-        "post_tool_capture.py",
-        "Edit",
-        "src/app.py",
+    payload = _saved_payload(queue)
+    assert (payload["tool_name"], payload["target"]) == (
+        "Edit", "src/app.py",
     )
     assert capsys.readouterr().out == ""
 

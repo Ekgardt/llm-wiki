@@ -156,15 +156,9 @@ def current_process_identity() -> ProcessIdentity:
 
 def process_identity_state(identity: ProcessIdentity) -> ProcessState:
     _validate_process(identity)
-    try:
-        observed = process_start_identity(identity.pid)
-    except OperationalOwnershipError:
-        raise
-    except (OSError, PermissionError):
-        return "unknown"
-    if observed is None or observed != identity.start_identity:
-        return "dead"
-    return "alive"
+    return cast(ProcessState, process_liveness.recorded_process_state(
+        identity.pid, identity.start_identity, probe=process_start_identity
+    ))
 
 
 @dataclass(frozen=True)
@@ -317,7 +311,7 @@ def _validate_process(identity: ProcessIdentity) -> None:
         raise TypeError("process must be a ProcessIdentity")
     if isinstance(identity.pid, bool) or not isinstance(identity.pid, int) or identity.pid <= 0:
         raise ValueError("process pid must be a positive integer")
-    _bounded_text(identity.start_identity, "process start identity", 512)
+    _bounded_text(identity.start_identity, "process start identity", process_liveness.MAX_START_IDENTITY_CHARS)
 
 
 def _utf8_size(value: str, label: str) -> int:
@@ -1243,13 +1237,10 @@ def _marker_owner_alive(pid: int, identity: str) -> bool:
     (audit 2026-09-26 C-12). Research:
     docs/research/2026-09-26-a-marker-is-judged-by-the-process-it-names.md
     """
-    try:
-        observed = process_start_identity(pid)
-    except (OSError, PermissionError) as exc:
-        raise OperationalOwnershipError("owner_liveness_unknown") from exc
-    if observed is None:
-        return False
-    return not identity or observed == identity
+    state = process_liveness.recorded_process_state(pid, identity, probe=process_start_identity)
+    if state == "unknown":
+        raise OperationalOwnershipError("owner_liveness_unknown")
+    return state == "alive"
 
 
 def _remove_marker_file(path: Path) -> None:

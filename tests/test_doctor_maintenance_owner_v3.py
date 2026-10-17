@@ -28,6 +28,8 @@ import doctor  # noqa: E402
 from installed_memory_repair import repair_installed_vault  # noqa: E402
 from operational_ownership import OwnershipRegistry  # noqa: E402
 
+from tests.test_repository_index import _git  # noqa: E402
+
 _V3_DATABASE = "run/markdown-transactions-v3.sqlite3"
 
 
@@ -35,6 +37,7 @@ def _adopted_vault(tmp_path: Path) -> tuple[Path, Path]:
     root = tmp_path / "vault"
     state_root = tmp_path / "state"
     (root / "scripts").mkdir(parents=True)
+    _git(root, "init", "-q")
     (root / "scripts/integration_adapter.py").write_bytes(
         (SCRIPTS_DIR / "integration_adapter.py").read_bytes()
     )

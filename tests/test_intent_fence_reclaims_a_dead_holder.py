@@ -40,7 +40,6 @@ import markdown_transaction  # noqa: E402
 import memory_queue  # noqa: E402
 import operational_ownership as ownership  # noqa: E402
 from reliable_memory import (  # noqa: E402
-    canonical_json_bytes,
     publish_runtime_file,
     sha256_bytes,
 )
@@ -72,8 +71,9 @@ def _build(state_root: Path):
 def _publish_ready_intent(state_root: Path, queue, coordinator) -> str:
     """Every publication step for real, up to but not including the enqueue."""
     seed = b"intent-fence-reclaim"
-    payload = canonical_json_bytes({"seed": seed.decode()})
-    intent_id = sha256_bytes(seed)
+    from tests.adopted_capture_vault import session_intent_payload
+
+    intent_id, payload = session_intent_payload(seed)
     shard = intent_id[:2]
     pending = f"run/capture-intents/pending/{shard}/{intent_id}.json"
     ready = f"run/capture-intents/ready/{shard}/{intent_id}.json"
@@ -112,8 +112,10 @@ def _publish_ready_intent(state_root: Path, queue, coordinator) -> str:
 
 
 def _dead_identity() -> ownership.ProcessIdentity:
+    from tests.process_identity_fixture import reused_current_process_identity
+
     return ownership.ProcessIdentity(
-        pid=os.getpid(), start_identity="llm-wiki-test:killed-process"
+        pid=os.getpid(), start_identity=reused_current_process_identity()
     )
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import multiprocessing
 import os
 import sqlite3
 import time
@@ -29,6 +30,7 @@ def _child_writer_budget() -> None:
     Waiting long enough for the gate keeps these processes from needing that
     path at all.
     """
+    assert multiprocessing.get_start_method() != "fork", "test workers must not inherit parent thread state"
     markdown_transaction._WRITER_WAIT_SECONDS = 120.0
 
 
@@ -186,13 +188,13 @@ def _compete_for_blackboard_resource(
     vault: str,
     state_root: str,
     agent: str,
-    start_at: float,
+    ready,
 ) -> tuple[str, str]:
     os.environ["LLM_WIKI_ROOT"] = vault
     os.environ["LLM_WIKI_STATE_ROOT"] = state_root
     blackboard.PROJECTS_DIR = Path(vault) / "knowledge/projects"
     _child_writer_budget()
-    time.sleep(max(0.0, start_at - time.monotonic()))
+    ready.wait()
     try:
         claim = blackboard.claim_task(
             "demo",
@@ -298,7 +300,9 @@ STATUS_RACE_READS = 12
 
 def _status_race_batches(vault: Path, state_root: Path, writers: int, per_writer: int):
     """Writers and two readers over one blackboard; the batches they wrote."""
-    with concurrent.futures.ProcessPoolExecutor(max_workers=writers + 2) as executor:
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=writers + 2, mp_context=multiprocessing.get_context("spawn"),
+    ) as executor:
         readers = [
             executor.submit(_read_blackboard_status, str(vault), str(state_root), STATUS_RACE_READS)
             for _ in range(2)
@@ -352,24 +356,30 @@ def _released_leftovers(status: dict) -> list[tuple[str, list[str]]]:
     return [item for item in held if item[1]]
 
 
-def test_multiprocess_same_resource_claim_has_one_fenced_winner(
-    blackboard_vault: tuple[Path, Path],
-) -> None:
-    vault, state_root = blackboard_vault
-    start_at = time.monotonic() + 2.0
-
-    with concurrent.futures.ProcessPoolExecutor(max_workers=2) as executor:
+def _competing_claim_results(vault: Path, state_root: Path, ready):
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=2, mp_context=multiprocessing.get_context("spawn"),
+    ) as executor:
         futures = [
             executor.submit(
                 _compete_for_blackboard_resource,
                 str(vault),
                 str(state_root),
                 agent,
-                start_at,
+                ready,
             )
             for agent in ("opencode", "codex")
         ]
-        results = [future.result(timeout=LONG_TIMEOUT) for future in futures]
+        return [future.result(timeout=LONG_TIMEOUT) for future in futures]
+
+
+def test_multiprocess_same_resource_claim_has_one_fenced_winner(
+    blackboard_vault: tuple[Path, Path],
+) -> None:
+    vault, state_root = blackboard_vault
+    with multiprocessing.get_context("spawn").Manager() as manager:
+        ready = manager.Barrier(2, timeout=LONG_TIMEOUT)
+        results = _competing_claim_results(vault, state_root, ready)
 
     assert sorted(status for status, _identity in results) == ["claimed", "conflict"]
     with sqlite3.connect(

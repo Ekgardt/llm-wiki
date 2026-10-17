@@ -102,6 +102,20 @@ def _entries(revision: WorkspaceRevision) -> dict[str, RevisionEntry]:
     return {entry.path: entry for entry in revision.entries}
 
 
+def test_fixture_copy_excludes_generated_bytecode(tmp_path, monkeypatch):
+    from tests import code_kernel_helpers
+
+    fixture = tmp_path / "fixture"
+    generated = fixture / "pkg/__pycache__"
+    generated.mkdir(parents=True)
+    (generated / "module.cpython-312.pyc").write_bytes(b"generated")
+    (fixture / "module.pyc").write_bytes(b"generated")
+    (fixture / "module.py").write_text("value = 1\n")
+    monkeypatch.setattr(code_kernel_helpers, "FIXTURE_ROOT", fixture)
+    copied = code_kernel_helpers.copy_python_fixture(tmp_path / "copy")
+    assert {p.relative_to(copied).as_posix() for p in copied.rglob("*")} == {"pkg", "module.py"}
+
+
 def _symlink_or_skip(link: Path, target: Path, *, directory: bool = False) -> None:
     try:
         os.symlink(target, link, target_is_directory=directory)
@@ -3170,12 +3184,16 @@ def test_non_git_manifest_rejects_relevant_symlinks(tmp_path: Path, kind: str) -
     outside_directory = tmp_path / "outside"
     outside_directory.mkdir()
     (outside_directory / "nested.py").write_text("secret = 2\n", encoding="utf-8")
-    if kind == "file":
-        _symlink_or_skip(root / "linked.py", outside_file)
-    elif kind == "config":
-        _symlink_or_skip(root / "pyrightconfig.json", outside_file)
-    else:
+    def link_relevant_source():
+        if kind == "file":
+            _symlink_or_skip(root / "linked.py", outside_file)
+            return
+        if kind == "config":
+            _symlink_or_skip(root / "pyrightconfig.json", outside_file)
+            return
         _symlink_or_skip(root / "linked-directory", outside_directory, directory=True)
+
+    link_relevant_source()
 
     with pytest.raises(PermissionError, match="symlink|reparse|directory"):
         compute_workspace_revision(resolve_repository_scope(root))

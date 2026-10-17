@@ -239,6 +239,7 @@ def test_opencode_tool_names_are_mapped_to_shared_capture_names():
     assert envelope.payload == {
         "tool_name": "Edit",
         "target": "src/auth.py",
+        "capture_time_origin": "host",
         "changed": True,
         "dirty": True,
         "significant": True,
@@ -297,18 +298,23 @@ def _assert_delegate_saw_only_redacted(observed, secret):
 def test_delegate_receives_only_normalized_redacted_payload(monkeypatch, capsys, tmp_path):
     import integration_adapter
 
+    from tests.adopted_vault import adopt
+
     # This one runs the adapter for real, so it writes a project journal. Without
     # its own root that lands in the live vault under the redacted slug.
-    vault = tmp_path / "vault"
-    vault.mkdir()
+    vault, state = adopt(tmp_path)
     monkeypatch.setattr(integration_adapter, "ROOT", vault)
-    monkeypatch.setattr(integration_adapter, "STATE_ROOT", tmp_path / "state")
+    monkeypatch.setattr(integration_adapter, "STATE_ROOT", state)
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
-    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
     secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
     observed = {}
 
-    def fake_run(*args, **kwargs):
+    real_run = integration_adapter.subprocess.run
+
+    def fake_run(command, *args, **kwargs):
+        if command[:2] != [sys.executable, str(SCRIPTS_DIR / "session_end_project_tag.py")]:
+            return real_run(command, *args, **kwargs)
         observed.update(kwargs)
         return SimpleNamespace(returncode=0, stdout="context", stderr=secret)
 
@@ -358,7 +364,7 @@ def test_lifecycle_cli_delegate_uses_shared_ingest_boundary(
     monkeypatch.setattr(
         integration_adapter,
         "ingest_event",
-        lambda event: calls.append(event) or {"capture_intent_ids": ["1" * 64]},
+        lambda event, **_options: calls.append(event) or {"capture_intent_ids": ["1" * 64]},
     )
     monkeypatch.setattr(
         integration_adapter,
@@ -367,7 +373,7 @@ def test_lifecycle_cli_delegate_uses_shared_ingest_boundary(
             AssertionError("lifecycle delegate bypassed shared ingestion")
         ),
     )
-    args = SimpleNamespace(source="claude", event=event_type, delegate=delegate)
+    args = SimpleNamespace(source="claude", event=event_type, delegate=delegate, background=False)
 
     assert integration_adapter._dispatch_cli_event(args, envelope) is None
     assert calls == [envelope]
@@ -512,7 +518,7 @@ def _delegate_output(command, delegate: str, outputs: list[str]) -> str:
     return outputs.pop(0)
 
 
-@pytest.mark.parametrize("delegate", ["user_prompt_capture.py", "session_start_context.py"])
+@pytest.mark.parametrize("delegate", ["session_start_context.py"])
 def test_delegate_forwards_only_valid_hook_json(monkeypatch, capsys, delegate):
     import integration_adapter
 
@@ -520,8 +526,8 @@ def test_delegate_forwards_only_valid_hook_json(monkeypatch, capsys, delegate):
         '{"hookSpecificOutput":{}}',
         '{"hookSpecificOutput":{"additionalContext":"safe"}}',
     ]
-    # A Claude prompt also reaches feedback capture (audit B-7), whose output is
-    # never forwarded; only the named delegate's output is under test here.
+    # Session-start still delegates context rendering. Prompt advisory output
+    # is checked through the durable ingress in test_breadcrumb_worker.py.
     monkeypatch.setattr(
         integration_adapter.subprocess,
         "run",
@@ -1425,7 +1431,7 @@ def test_windows_transient_permissions_use_bounded_icacls(monkeypatch, tmp_path)
 def _assert_hook_contract(settings: dict, hook_name: str, timeouts: list, event_name: str) -> None:
     hooks = settings["hooks"][hook_name][0]["hooks"]
     commands = [hook["command"] for hook in hooks]
-    assert [hook["timeout"] for hook in hooks] == timeouts
+    assert [hook.get("timeout") for hook in hooks] == timeouts
     assert all("scripts/integration_adapter.py" in command for command in commands)
     assert all(f"--event {event_name}" in command for command in commands)
 
@@ -1441,7 +1447,7 @@ def test_claude_hooks_route_through_shared_adapter_and_preserve_contract():
         "SessionStart": ([15], "session_start"),
         "PreCompact": ([15], "pre_compact"),
         "SessionEnd": ([15], "session_end"),
-        "UserPromptSubmit": ([5], "user_prompt"),
+        "UserPromptSubmit": ([None], "user_prompt"),
         "PostToolUse": ([5], "post_tool_use"),
     }
     for hook_name, (timeouts, event_name) in expected.items():

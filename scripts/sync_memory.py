@@ -8,6 +8,7 @@ import math
 import os
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -127,9 +128,10 @@ def _run_uv_step(
     """The completed process, or the error result of a step that could not finish."""
     command = list(step.command)
     try:
-        if remaining() <= 0:
+        seconds = remaining()
+        if seconds <= 0:
             raise subprocess.TimeoutExpired(command, 0)
-        completed = run_uv(command, root=root, timeout=max(0.001, remaining()))
+        completed = run_uv(command, root=root, timeout=seconds)
     except subprocess.TimeoutExpired as exc:  # ProcessTreeTimeout carries cleanup_error
         return None, _uv_timeout_result(step, getattr(exc, "cleanup_error", None))
     except OSError as exc:
@@ -149,7 +151,7 @@ def _missing_files(*paths: Path) -> list[str]:
 
 
 def _baseline_declared(project_text: str, lock_text: str) -> bool:
-    return "mcp>=1.29,<2" in project_text and 'name = "mcp"' in lock_text
+    return "mcp>=1.30,<2" in project_text and 'name = "mcp"' in lock_text
 
 
 def _dependency_inputs_error(root: Path) -> dict | None:
@@ -219,15 +221,15 @@ def _apply_dependency_sync(run_uv, root: Path, remaining) -> dict:
     )
 
 
-def _dependency_deadline(deadline: float | None, timeout: float) -> float:
+def _dependency_clock(deadline: float | None, timeout: float) -> Callable[[], float]:
     if deadline is not None:
-        return deadline
-    return time.monotonic() + timeout
+        return _remaining_clock(deadline)
+    return _remaining_clock(time.monotonic() + timeout, ceiling=timeout)
 
 
-def _remaining_clock(deadline: float) -> Callable[[], float]:
+def _remaining_clock(deadline: float, *, ceiling: float = math.inf) -> Callable[[], float]:
     def remaining() -> float:
-        return max(0.0, deadline - time.monotonic())
+        return min(max(0.0, deadline - time.monotonic()), max(0.0, ceiling))
 
     return remaining
 
@@ -240,7 +242,7 @@ def _dependency_action(
     timeout: float = DEPENDENCY_TIMEOUT_SECONDS,
     deadline: float | None = None,
 ) -> dict:
-    remaining = _remaining_clock(_dependency_deadline(deadline, timeout))
+    remaining = _dependency_clock(deadline, timeout)
     changes, error = _checked_dependency_plan(run_uv, root, remaining)
     if error is not None:
         return error
@@ -386,7 +388,20 @@ def _run_process_tree(
     except subprocess.TimeoutExpired as exc:
         cleanup_error = _finish_timed_out_process(process, _kill_process_tree(process))
         raise ProcessTreeTimeout(command, exc.timeout, cleanup_error=cleanup_error) from exc
+    except BaseException as error:
+        _end_interrupted_process(process, error)
+        raise
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def _end_interrupted_process(
+    process: subprocess.Popen[str], error: BaseException
+) -> None:
+    """Finish the owned child tree before propagating the original interruption."""
+    cleanup_error = _finish_timed_out_process(process, _kill_process_tree(process))
+    setattr(error, "cleanup_error", cleanup_error)
+    if cleanup_error:
+        print(f"Process cleanup unverified after interruption: {cleanup_error}", file=sys.stderr)
 
 
 _INDEXES = "indexes"
@@ -498,6 +513,10 @@ def _attention(report: dict) -> dict[str, str]:
     }
 
 
+def _error_ids(report: dict) -> set[str]:
+    return {str(check.get("id")) for check in report.get("checks", []) if check.get("status") == "error"}
+
+
 def _final_doctor_message(status: str, attention: dict[str, str]) -> str:
     """The verdict, and when it is not ok, which checks made it so.
 
@@ -518,8 +537,37 @@ def _skipped_by_limit(action_id: str) -> dict:
 
 def _failed_action(action_id: str, exc: Exception) -> dict:
     return _result(
-        action_id, "error", f"{action_id.title()} action failed.", {"error": type(exc).__name__}
+        action_id,
+        "error",
+        f"{action_id.title()} action failed.",
+        {"error": type(exc).__name__, "failed": True},
     )
+
+
+# Actions that report the vault's state as doctor sees it; the others do the sync's work.
+_FINDING_ACTIONS = frozenset({"transactions", "queue", "doctor"})
+
+
+def _is_sync_failure(action: dict) -> bool:
+    """An error the sync or the install owns; a finding about the vault is not one.
+
+    The live update of 2026-09-28 finished every step and then failed on 183
+    refused writes from the three days before it, which no install can settle.
+    """
+    if action["status"] != "error":
+        return False
+    if action["id"] not in _FINDING_ACTIONS or action["details"].get("failed"):
+        return True
+    from install_smoke import INSTALL_OWNED_CHECKS
+
+    return bool(INSTALL_OWNED_CHECKS.intersection(action["details"].get("errors", ())))
+
+
+def _exit_code(report: dict) -> int:
+    """2 when the sync failed, 1 when it finished with findings, 0 when clean."""
+    if any(_is_sync_failure(action) for action in report["actions"]):
+        return 2
+    return {"ok": 0, "changed": 0}.get(report["overall_status"], 1)
 
 
 _SUBSET_CHECKS = {
@@ -620,7 +668,11 @@ class _SyncRun:
             "doctor",
             status,
             _final_doctor_message(status, attention),
-            {"overall_status": report.get("overall_status", "error"), "attention": attention},
+            {
+                "overall_status": report.get("overall_status", "error"),
+                "attention": attention,
+                "errors": sorted(_error_ids(report)),
+            },
         )
 
     def action(self, action_id: str) -> dict:
@@ -750,7 +802,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"LLM-Wiki sync ({report['mode']}): {report['overall_status']}")
         for action in report["actions"]:
             print(f"{action['id']}: {action['status']} - {action['message']}")
-    return {"ok": 0, "changed": 0, "degraded": 1, "error": 2}.get(report["overall_status"], 2)
+    return _exit_code(report)
 
 
 if __name__ == "__main__":

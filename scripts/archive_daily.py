@@ -12,7 +12,6 @@ import sys
 import time
 import uuid
 from collections.abc import Callable
-from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -25,7 +24,6 @@ from evidence_resolver import (  # noqa: E402
     EvidenceRef,
     EvidenceResolutionError,
     EvidenceResolver,
-    _daily_part_bounds,
     _line_span,
     _regular_directory,
     bounded_directory_entries,
@@ -55,6 +53,7 @@ from reliable_memory import (  # noqa: E402
     canonical_json_bytes,
     fsync_directory,
     fsync_file,
+    operational_deadline_active,
     sha256_bytes,
 )
 
@@ -187,21 +186,25 @@ class DailyArchiver:
         queue: MemoryQueue | None = None,
         source_heartbeat_seconds: int = DEFAULTS.queue_heartbeat_seconds,
         source_lease_seconds: int = DEFAULTS.queue_lease_seconds,
+        deadline: float = float("inf"),
     ) -> None:
+        self.deadline = deadline
+        operational_deadline_active(deadline)
         self.vault = Path(vault).resolve(strict=True)
         self.state_root = Path(state_root)
         self.daily_root = self.vault / "knowledge" / "daily"
         self.archive_root = self.daily_root / "archive"
         self.coordinator = active_or_legacy_coordinator(
-            self.vault, self.state_root
+            self.vault, self.state_root, deadline=deadline
         )
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.killpoint = killpoint or (lambda _point: None)
         self.queue = queue or active_or_legacy_memory_queue(
-            self.vault, self.state_root
+            self.vault, self.state_root, deadline=deadline
         )
         self.source_heartbeat_seconds = source_heartbeat_seconds
         self.source_lease_seconds = source_lease_seconds
+        self.receipt_selection = None
 
     def eligible(
         self,
@@ -241,10 +244,13 @@ class DailyArchiver:
         return reasons
 
     def _read_compile_receipt(self, logical_path: str, digest: str) -> dict[str, object] | None:
+        operational_deadline_active(self.deadline)
         try:
             from compile_memory import read_compile_receipt_v3
 
-            return read_compile_receipt_v3(logical_path, digest, self.coordinator)
+            return read_compile_receipt_v3(logical_path, digest, self.coordinator, deadline=self.deadline)
+        except TimeoutError:
+            raise
         except (OSError, RuntimeError, ValueError):
             return None
 
@@ -411,37 +417,52 @@ class DailyArchiver:
         self, logical_path: str, content: bytes
     ) -> tuple[tuple[CompiledPart, ...], list[str]]:
         """Every compile part of the day with its receipt, and what any part lacks."""
+        from compile_memory import _daily_parts
+
+        selection = self._context_receipt_selection()
         parts: list[CompiledPart] = []
         reasons: list[str] = []
-        for start, end in _daily_part_bounds(content):
-            digest = sha256_bytes(content[start:end])
-            receipt, part_reasons = self._receipt_reasons(logical_path, digest)
-            parts.append(CompiledPart(start, end, digest, receipt))
+        for part in _daily_parts(logical_path, content):
+            receipt, part_reasons = self._context_part_receipt(selection, part)
+            parts.append(CompiledPart(part.byte_start, part.byte_end, part.sha256, receipt))
             reasons.extend(part_reasons)
         return tuple(parts), reasons
 
+    def _context_receipt_selection(self):
+        from compile_memory import _receipt_predicate
+
+        if self.receipt_selection is None:
+            self.receipt_selection = _receipt_predicate(self.coordinator, deadline=self.deadline)
+        return self.receipt_selection
+
+    def _context_part_receipt(self, selection, part):
+        try:
+            receipt = selection.receipt(part)
+        except TimeoutError:
+            raise
+        except (OSError, RuntimeError, ValueError):
+            return None, ["compile_receipt_context_invalid"]
+        if receipt is not None:
+            return receipt, []
+        legacy, reasons = self._receipt_reasons(part.logical_path, part.sha256)
+        if legacy is not None:
+            return None, ["compile_receipt_context_unverified", *reasons]
+        return None, reasons
+
     def _receipt_operation_state(
-        self, logical_path: str, digest: str
+        self, logical_path: str, digest: str, *, path: Path | None = None
     ) -> str | None:
         from compile_memory import compile_receipt_path, compile_source_identity
 
-        path = compile_receipt_path(compile_source_identity(logical_path, digest))
+        operational_deadline_active(self.deadline)
+        path = compile_receipt_path(compile_source_identity(logical_path, digest)) if path is None else path
         if not path.exists():
             return None
         try:
-            text = read_stable_bytes(
-                path, MAX_POLICY_BYTES, label="compile receipt"
-            ).decode("utf-8", errors="strict")
-            record = json.loads(text.split("```json\n", 1)[1].split("\n```", 1)[0])
-            operation_id = record["operation_id"]
-            if not isinstance(operation_id, str):
-                return "invalid"
-            with closing(sqlite3.connect(self.coordinator.database_path)) as connection:
-                row = connection.execute(
-                    'SELECT state FROM "transaction" WHERE operation_id=?',
-                    (operation_id,),
-                ).fetchone()
-            return "missing" if row is None else str(row[0])
+            operation_id = self._receipt_operation_id(path)
+            return self._receipt_operation_record_state(operation_id)
+        except TimeoutError:
+            raise
         except (
             IndexError,
             KeyError,
@@ -450,9 +471,25 @@ class DailyArchiver:
             UnicodeDecodeError,
             ValueError,
             json.JSONDecodeError,
-            sqlite3.Error,
         ):
+            operational_deadline_active(self.deadline)
             return "invalid"
+
+    def _receipt_operation_record_state(self, operation_id: str) -> str:
+        with self.coordinator._authority_read_connection(self.deadline) as connection:
+            row = connection.execute(
+                'SELECT state FROM "transaction" WHERE operation_id=?', (operation_id,)
+            ).fetchone()
+        return "missing" if row is None else str(row[0])
+
+    def _receipt_operation_id(self, path: Path) -> str:
+        text = read_stable_bytes(path, MAX_POLICY_BYTES, label="compile receipt").decode("utf-8", errors="strict")
+        operational_deadline_active(self.deadline)
+        record = json.loads(text.split("```json\n", 1)[1].split("\n```", 1)[0])
+        operation_id = record["operation_id"]
+        if not isinstance(operation_id, str):
+            raise ValueError("compile receipt operation identity is invalid")
+        return operation_id
 
     @staticmethod
     def _receipt_expected_paths(receipt: dict[str, object]) -> set[str]:
@@ -463,7 +500,8 @@ class DailyArchiver:
             for item in receipt.get("operations", [])
             if isinstance(item, dict)
         }
-        paths.add(str(identity and f"knowledge/daily/receipts/v3-{identity}.md"))
+        version = str(receipt.get("schema_version", "")).rsplit("/", 1)[-1]
+        paths.add(str(identity and f"knowledge/daily/receipts/{version}-{identity}.md"))
         return paths
 
     def _transaction_within_retention(
@@ -482,10 +520,11 @@ class DailyArchiver:
 
     def _committed_receipt_transaction(self, receipt: dict[str, object]) -> object | None:
         """The committed transaction this receipt names, or None when unusable."""
+        operational_deadline_active(self.deadline)
         operation_id = receipt.get("operation_id")
         if not isinstance(operation_id, str):
             return None
-        transaction = self.coordinator._record_for_operation_id(operation_id)
+        transaction = self.coordinator._record_for_operation_id(operation_id, deadline=self.deadline)
         if transaction is None or transaction.state != "committed":
             return None
         return transaction
@@ -897,14 +936,14 @@ class DailyArchiver:
 
     def _committed_compile_transaction(self, receipt: dict[str, object]) -> object:
         transaction = self.coordinator._record_for_operation_id(
-            str(receipt["operation_id"])
+            str(receipt["operation_id"]), deadline=self.deadline
         )
         if transaction is None or transaction.state != "committed":
             raise RuntimeError("compile transaction authority is not committed")
         return transaction
 
     def _commit_sequence(self, transaction: object) -> int:
-        with self.coordinator._connect() as database:
+        with self.coordinator._authority_read_connection(self.deadline) as database:
             row = database.execute(
                 'SELECT rowid AS commit_sequence FROM "transaction" WHERE id=?',
                 (transaction.id,),
@@ -923,23 +962,21 @@ class DailyArchiver:
         """Re-prove one compile receipt and its committed transaction at build time."""
         assert receipt is not None
         logical_path = f"knowledge/daily/{daily_id}.md"
-        from compile_memory import (
-            compile_receipt_path,
-            compile_source_identity,
-            read_compile_receipt_v3,
-        )
+        from compile_memory import read_compile_receipt_version
 
-        source_identity = compile_source_identity(logical_path, digest)
-        receipt_path = compile_receipt_path(source_identity)
+        source_identity = str(receipt["source_identity"])
+        version = str(receipt["schema_version"]).rsplit("/", 1)[-1]
+        receipt_path = self.daily_root / "receipts" / f"{version}-{source_identity}.md"
         receipt_bytes = read_stable_bytes(
             receipt_path, MAX_POLICY_BYTES, label="compile receipt"
         )
-        authoritative_receipt = read_compile_receipt_v3(
+        authoritative_receipt = read_compile_receipt_version(
             logical_path,
             digest,
             self.coordinator,
             path=receipt_path,
             vault=self.vault,
+            deadline=self.deadline,
         )
         if authoritative_receipt != receipt:
             raise RuntimeError("compile receipt authority changed during archive")
@@ -1635,7 +1672,7 @@ class DailyArchiver:
         """Transaction states touching this daily, or None when unreadable."""
         relative = f"knowledge/daily/{source_name}"
         try:
-            with closing(sqlite3.connect(self.coordinator.database_path)) as connection:
+            with self.coordinator._authority_read_connection(self.deadline) as connection:
                 return connection.execute(
                     'SELECT t.state, t.updated_at FROM "transaction" t '
                     'JOIN "operation" o ON o.transaction_id=t.id WHERE o.path=?',
@@ -1669,7 +1706,7 @@ class DailyArchiver:
 
     def _writer_active(self) -> bool:
         try:
-            with self.coordinator._connect() as connection:
+            with self.coordinator._authority_read_connection(self.deadline) as connection:
                 row = connection.execute(
                     "SELECT * FROM writer_owners WHERE gate_name='global'"
                 ).fetchone()

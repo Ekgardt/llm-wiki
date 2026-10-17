@@ -5,6 +5,7 @@ Research: `docs/research/2026-09-17-a-document-is-opened-in-its-own-language.md`
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -65,6 +66,7 @@ def _document(scope, repository: Path, relative: str) -> OpenDocument:
 
 @pytest.mark.parametrize(("profile", "relative", "expected"), CASES)
 def test_did_open_names_the_language_of_the_file(tmp_path, profile, relative, expected):
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
     scope = resolve_repository_scope(tmp_path)
     session = LanguageServerSession(
         scope, _never_started_identity(), state_root=tmp_path, profile=profile

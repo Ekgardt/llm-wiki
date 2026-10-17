@@ -1098,7 +1098,8 @@ def _note_symbol(
     existing = symbols.get(node["node_id"])
     if existing is None:
         symbols[node["node_id"]] = _symbol_record(node, occurrence, side, old_range, classification)
-    elif side not in existing["sides"]:
+        return
+    if side not in existing["sides"]:
         existing["sides"].append(side)
 
 

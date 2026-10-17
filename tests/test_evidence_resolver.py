@@ -20,6 +20,29 @@ def _reference(daily_id: str, source: bytes, block: str, start: int, end: int) -
     )
 
 
+def _archive_source_receipt(root: Path, logical_path: str, source: bytes) -> Path:
+    import compile_memory
+
+    identity = compile_memory.compile_source_identity(logical_path, _sha(source))
+    legacy = root / f"knowledge/daily/receipts/v3-{identity}.md"
+    parts = compile_memory._daily_parts(logical_path, source)
+    if len(parts) != 1:
+        return legacy
+    descriptor = compile_memory._v4_source_descriptor(parts[0])
+    current = root / "knowledge/daily/receipts" / compile_memory._context_receipt_path(descriptor).name
+    if current.exists():
+        return current
+    return legacy
+
+
+def _archive_receipt_authority(path: Path, fallback_identity: str) -> tuple[str, str, str]:
+    if not path.exists():
+        return "a" * 64, fallback_identity, "compile:test"
+    raw = path.read_bytes()
+    record = json.loads(raw.split(b"```json\n", 1)[1].split(b"\n```", 1)[0])
+    return _sha(raw), record["source_identity"], record["operation_id"]
+
+
 def _write_bag(root: Path, daily_id: str, source: bytes, *, suffix: str = "one") -> Path:
     bag = root / "knowledge" / "daily" / "archive" / daily_id[:7] / f"bag-test-{suffix}"
     payload_name = f"data/{daily_id}.md"
@@ -53,15 +76,8 @@ def _write_bag(root: Path, daily_id: str, source: bytes, *, suffix: str = "one")
     source_identity = compile_memory.compile_source_identity(
         logical_path, _sha(source)
     )
-    receipt_path = root / f"knowledge/daily/receipts/v3-{source_identity}.md"
-    receipt_hash = _sha(receipt_path.read_bytes()) if receipt_path.exists() else "a" * 64
-    operation_id = "compile:test"
-    if receipt_path.exists():
-        operation_id = json.loads(
-            receipt_path.read_text(encoding="utf-8")
-            .split("```json\n", 1)[1]
-            .split("\n```", 1)[0]
-        )["operation_id"]
+    receipt_path = _archive_source_receipt(root, logical_path, source)
+    receipt_hash, source_identity, operation_id = _archive_receipt_authority(receipt_path, source_identity)
     manifest = {
         "schema_version": "archive-manifest/v1",
         "logical_daily_id": daily_id,
@@ -70,7 +86,7 @@ def _write_bag(root: Path, daily_id: str, source: bytes, *, suffix: str = "one")
         "payload_hash": _sha(source),
         "compile_receipt_ref": {
             "schema": "compile-receipt-ref/v1",
-            "path": f"knowledge/daily/receipts/v3-{source_identity}.md",
+            "path": receipt_path.relative_to(root).as_posix(),
             "logical_path": logical_path,
             "source_digest": _sha(source),
             "source_identity": source_identity,
@@ -330,6 +346,49 @@ def _long_day(entries: int, *, filler: int = 400) -> bytes:
             f"quote-{index} " + "x" * filler + "\n"
         )
     return "".join(parts).encode()
+
+
+def test_repeated_historical_evidence_reuses_search_but_checks_current_bytes(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import Mock
+
+    import evidence_resolver as module
+
+    original = b"## [evt-1] event\nretained evidence\n"
+    grown = original + b"\n## [evt-2] later\nmore evidence\n"
+    path = vault / "knowledge/daily/2026-01-02.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(grown)
+    start = original.index(b"retained")
+    reference = _reference("2026-01-02", original, "evt-1", start, len(original) - 1)
+    search = Mock(wraps=module.compile_part_slice)
+    monkeypatch.setattr(module, "compile_part_slice", search)
+    resolver = module.EvidenceResolver(vault)
+
+    assert resolver.resolve(reference).bytes == b"retained evidence"
+    assert resolver.resolve(reference).bytes == b"retained evidence"
+    assert search.call_count == 1
+    identity = path.stat()
+    path.write_bytes(grown.replace(b"retained", b"tampered", 1))
+    os.utime(path, ns=(identity.st_atime_ns, identity.st_mtime_ns))
+    with pytest.raises(module.EvidenceResolutionError, match="hash mismatch"):
+        resolver.resolve(reference)
+    assert search.call_count == 2
+
+
+def test_cached_part_still_checks_each_evidence_block(vault: Path) -> None:
+    from evidence_resolver import EvidenceResolutionError, EvidenceResolver
+
+    original = b"## [evt-1] event\nretained evidence\n"
+    path = vault / "knowledge/daily/2026-01-02.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(original + b"\n## [evt-2] later\nmore evidence\n")
+    start = original.index(b"retained")
+    resolver = EvidenceResolver(vault)
+    resolver.resolve(_reference("2026-01-02", original, "evt-1", start, len(original) - 1))
+    with pytest.raises(EvidenceResolutionError):
+        resolver.resolve(_reference("2026-01-02", original, "evt-2", start, len(original) - 1))
 
 
 def test_evidence_from_one_compile_part_resolves_after_the_day_grows(vault: Path) -> None:

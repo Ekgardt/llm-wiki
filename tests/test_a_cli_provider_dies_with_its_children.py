@@ -66,15 +66,23 @@ def test_a_claude_call_that_runs_out_of_time_ends_the_whole_tree(slow_cli) -> No
     assert ("tree", _Spawned.pid) in slow_cli
 
 
+@pytest.mark.parametrize('phase', ['discovery', 'execution'])
 def test_a_codex_call_that_runs_out_of_time_ends_the_whole_tree(
-    slow_cli, tmp_path: Path
+    slow_cli, tmp_path: Path, monkeypatch, phase
 ) -> None:
+    from tests.test_codex_counts_the_prepared_invocation import _empty_mcp_discovery
+
     prompt = tmp_path / "prompt.txt"
     prompt.write_bytes(b"hello")
+    binary = tmp_path / 'owned-codex'
+    binary.write_bytes(b'owned CLI fixture')
+    executable = llm_client._bind_codex_executable(str(binary))
+    if phase == 'execution':
+        monkeypatch.setattr(llm_client, '_codex_basis_local_command', _empty_mcp_discovery)
 
     with pytest.raises(llm_client.ProviderTimeout):
         llm_client._codex_last_message(
-            ["codex"], str(prompt), str(tmp_path / "out.txt")
+            [str(binary)], str(prompt), str(tmp_path / "out.txt"), executable=executable
         )
 
     assert ("tree", _Spawned.pid) in slow_cli

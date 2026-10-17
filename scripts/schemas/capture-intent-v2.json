@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "intent_id", "anchor_sha256", "input_sha256", "input_bytes", "part_count", "last_part_sha256"],
+  "properties": {
+    "schema_version": {"const": "capture-intent/v2"},
+    "intent_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "anchor_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "input_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "input_bytes": {"type": "integer", "minimum": 1},
+    "part_count": {"type": "integer", "minimum": 1},
+    "last_part_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

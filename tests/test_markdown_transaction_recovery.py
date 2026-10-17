@@ -275,7 +275,7 @@ def test_coordinator_v2_rows_survive_candidate_migration_exactly(
         ),
         (
             "writer_owners",
-            "INSERT INTO writer_owners VALUES "
+            "INSERT INTO writer_owners (gate_name, owner_token, process_id, thread_id, acquired_at, heartbeat_at, expires_at, fencing_epoch) VALUES "
             "('global', 'token', 1, 2, '2026-08-12Z', '2026-08-12Z', "
             "'2099-01-01Z', 1)",
         ),

@@ -11,12 +11,9 @@ from dataclasses import dataclass
 
 from corpus_snapshot import CapturedSource, read_frontmatter
 from graph_storable import storable_identity_key, storable_metadata
-from reliable_memory import canonical_json_bytes
 from settings import raise_hint, setting_value
 
 EXTRACTOR_VERSION = "knowledge-extractor/v1"
-# Records one extraction may produce; `episode_consolidation.MAX_RECORDS` is a day's session records.
-MAX_RECORDS = 100_000
 
 # A wikilink lives on one line. Without the line breaks in the classes, `[[` in a
 # quoted pandas `df[["Latitude", ...` and a `]]` several turns later were read as
@@ -194,7 +191,7 @@ class _Extraction:
         ordered: Sequence[CapturedSource],
         symbols: Mapping[str, str],
         *,
-        record_limit: int,
+        record_limit: int | None,
         deadline: float | None,
         monotonic: Callable[[], float],
         cancelled: Callable[[], bool] | None,
@@ -243,11 +240,11 @@ class _Extraction:
 
     def check_work(self) -> None:
         _check_stop(self.deadline, self.monotonic, self.cancelled)
-        if self._count() >= self.record_limit:
+        if _record_budget_at_capacity(self._count, self.record_limit):
             raise ValueError("knowledge extraction record ceiling exceeded")
 
     def _require_room(self) -> None:
-        if self._count() > self.record_limit:
+        if _record_budget_exceeded(self._count, self.record_limit):
             raise ValueError("knowledge extraction record ceiling exceeded")
 
     def add_relation(
@@ -514,7 +511,9 @@ class _Extraction:
         search_start: int,
         authority: str,
     ) -> int:
-        encoded = canonical_json_bytes(record)
+        from claims import claim_json_bytes
+
+        encoded = claim_json_bytes(record)
         start = source.content.find(encoded, search_start)
         if start < 0:
             raise ValueError("canonical claim record is not present in source bytes")
@@ -559,6 +558,21 @@ def _require_positive_bound(value: object, name: str) -> None:
         raise ValueError(f"{name} must be positive")
 
 
+
+def _require_optional_record_budget(value: object) -> None:
+    if value is None:
+        return
+    _require_positive_bound(value, "max_records")
+
+
+def _record_budget_at_capacity(count: Callable[[], int], limit: int | None) -> bool:
+    return limit is not None and count() >= limit
+
+
+def _record_budget_exceeded(count: Callable[[], int], limit: int | None) -> bool:
+    return limit is not None and count() > limit
+
+
 def _require_source_sequence(sources: object) -> None:
     if isinstance(sources, (bytes, str)) or not isinstance(sources, Sequence):
         raise TypeError("sources must be a sequence of CapturedSource values")
@@ -574,7 +588,7 @@ def _require_extraction_arguments(
 ) -> None:
     _require_source_sequence(sources)
     _require_positive_bound(max_sources, "max_sources")
-    _require_positive_bound(max_records, "max_records")
+    _require_optional_record_budget(max_records)
     _require_callable_cancel(cancelled)
     assert isinstance(max_sources, int) and isinstance(sources, Sequence)
     if len(sources) > max_sources:
@@ -612,7 +626,7 @@ def extract_knowledge(
     *,
     symbol_index: Mapping[str, str] | None = None,
     max_sources: int | None = None,
-    max_records: int = MAX_RECORDS,
+    max_records: int | None = None,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     cancelled: Callable[[], bool] | None = None,
@@ -628,7 +642,7 @@ def extract_knowledge(
     extraction = _Extraction(
         ordered,
         symbol_index or {},
-        record_limit=min(max_records, MAX_RECORDS),
+        record_limit=max_records,
         deadline=deadline,
         monotonic=monotonic,
         cancelled=cancelled,

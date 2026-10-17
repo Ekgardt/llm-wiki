@@ -73,3 +73,33 @@ def test_an_unreadable_reply_keys_nothing_and_leaves_the_turn_to_ask_again(vault
     retried = fact_keys.key_turns(store, snapshot.chunks, _ask)
 
     assert (retried, store.count()[0]) == (2, 2)
+
+
+@pytest.mark.parametrize("large_daily", [False, True])
+def test_main_collects_only_the_daily_sources_and_shares_its_deadline(
+    vault, tmp_path, monkeypatch, large_daily
+):
+    import corpus_snapshot
+    import memory_state
+
+    if large_daily:
+        daily = vault / DAILY
+        daily.write_bytes(daily.read_bytes() + b"\n" + b" " * (corpus_snapshot.MAX_KNOWLEDGE_PAGE_BYTES + 1))
+    (vault / "knowledge/notes/unused.md").write_text("---\ntype: concept\n---\n# Unused\n")
+    state_root = tmp_path / "state"
+    seen = []
+    original = corpus_snapshot.collect_corpus
+
+    def observed_collection(*args, **kwargs):
+        snapshot = original(*args, **kwargs)
+        seen.append((kwargs, [s.record.relative_path for s in snapshot.sources]))
+        return snapshot
+
+    monkeypatch.setattr(memory_state, "ROOT", vault)
+    monkeypatch.setattr(memory_state, "STATE_ROOT", state_root)
+    monkeypatch.setattr(corpus_snapshot, "collect_corpus", observed_collection)
+    monkeypatch.setattr(fact_keys, "_provider_ask", _ask)
+    monkeypatch.setattr(fact_keys, "_extend_recurring_pages", lambda store: 0)
+    assert fact_keys.main(["--budget-seconds", "10"]) == 0
+    assert seen[0][1] == [DAILY]
+    assert seen[0][0].get("deadline") is not None

@@ -7,7 +7,6 @@ from __future__ import annotations
 import json
 import os
 import stat
-import subprocess
 import sys
 from pathlib import Path
 
@@ -22,6 +21,13 @@ EVIDENCE_ROOTS = 300
 DEAD_ROOTS = 50
 
 
+@pytest.fixture()
+def dead_process():
+    from tests.test_a_dead_owner_root_is_swept_when_the_next_server_starts import finished_process
+
+    return finished_process()
+
+
 def _canonical(record: dict) -> bytes:
     return json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
@@ -34,23 +40,17 @@ def _plant(parent: Path, index: int, pid: int, **extra) -> Path:
     return root
 
 
-@pytest.fixture()
-def dead_pid() -> int:
-    child = subprocess.Popen([sys.executable, "-c", ""])
-    child.wait()
-    return child.pid
-
-
 def _sweep(parent: Path) -> None:
     _sweep_dead_owner_roots(parent / ("f" * 32))
 
 
-def test_roots_that_kept_evidence_do_not_hide_the_dead_ones(tmp_path, dead_pid):
+def test_roots_that_kept_evidence_do_not_hide_the_dead_ones(tmp_path, dead_process):
     parent = tmp_path / "lsp"
+    pid, identity = dead_process
     for index in range(EVIDENCE_ROOTS):
-        root = _plant(parent, index, dead_pid)
+        root = _plant(parent, index, pid, owner_start_identity=identity)
         (root / "failure.json").write_bytes(_canonical({"code": "process_exited"}))
-    dead = [_plant(parent, EVIDENCE_ROOTS + index, dead_pid) for index in range(DEAD_ROOTS)]
+    dead = [_plant(parent, EVIDENCE_ROOTS + index, pid, owner_start_identity=identity) for index in range(DEAD_ROOTS)]
 
     _sweep(parent)
 
@@ -61,7 +61,8 @@ def test_roots_that_kept_evidence_do_not_hide_the_dead_ones(tmp_path, dead_pid):
 def test_a_pid_now_naming_a_later_process_is_dead(tmp_path):
     parent = tmp_path / "lsp"
     mine = os.getpid()
-    reused = _plant(parent, 1, mine, owner_start_identity="0:1")
+    prefix, ticks = process_start_identity(mine).rsplit(":", 1)
+    reused = _plant(parent, 1, mine, owner_start_identity=f"{prefix}:{int(ticks) + 1}")
     live = _plant(parent, 2, mine, owner_start_identity=process_start_identity(mine))
     legacy = _plant(parent, 3, mine)
 
@@ -71,11 +72,12 @@ def test_a_pid_now_naming_a_later_process_is_dead(tmp_path):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="symbolic links need privileges on Windows")
-def test_the_unseal_never_follows_a_link_out_of_the_root(tmp_path, dead_pid):
+def test_the_unseal_never_follows_a_link_out_of_the_root(tmp_path, dead_process):
     outside = tmp_path / "outside.txt"
     outside.write_bytes(b"kept\n")
     os.chmod(outside, 0o400)
-    root = _plant(tmp_path / "lsp", 1, dead_pid)
+    pid, identity = dead_process
+    root = _plant(tmp_path / "lsp", 1, pid, owner_start_identity=identity)
     (root / "link").symlink_to(outside)
 
     _sweep(tmp_path / "lsp")

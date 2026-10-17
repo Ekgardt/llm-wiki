@@ -17,7 +17,6 @@ work when no provider answered was retired on 2026-09-25
 """
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import json
 import sys
@@ -32,7 +31,6 @@ from iso_time import local_now  # noqa: E402
 from memory_state import (  # noqa: E402
     MAX_CAPTURE_INTENT_BYTES,
     ROOT,
-    STATE_ROOT,
 )
 from secret_redact import redact_secrets  # noqa: E402
 
@@ -490,7 +488,7 @@ CAPTURE_KEEPALIVE_SECONDS = 10.0
 
 
 class _CaptureKeepAlive:
-    """Renew every claim a capture holds while its classifier runs.
+    """Renew every claim through terminal verification and all processing I/O.
 
     Owner and its queue projection, the queue lease, the task fence and the
     intent fence: nothing renewed them, and no capture over 30 seconds ever
@@ -517,7 +515,9 @@ class _CaptureKeepAlive:
 
     def __exit__(self, *_exc: object) -> None:
         self._stop.set()
-        self._thread.join(timeout=CAPTURE_KEEPALIVE_SECONDS * 2)
+        # Releasing the enclosing fences requires the renewer to have stopped,
+        # including a database call already in flight when stop was requested.
+        self._thread.join()
 
     def _run(self) -> None:
         from lease_renewal import renew_until_stopped
@@ -1266,15 +1266,39 @@ def process_new_capture(
     llm_call: Callable[[str, str, int], object] | None = None,
     now: Callable[[], datetime] = _capture_now,
 ) -> object:
+    if lease.handler_version == 2:
+        from breadcrumb_worker import process_breadcrumb
+
+        return process_breadcrumb(queue, coordinator, lease, active, task_fence, intent_fence, owner)
+    if lease.handler_version != 1:
+        raise ValueError("unsupported capture handler version")
+    return _process_session_capture(
+        queue, coordinator, lease, active, task_fence, intent_fence, owner,
+        llm_call=llm_call, now=now,
+    )
+
+
+def _process_session_capture(
+    queue: object,
+    coordinator: object,
+    lease: object,
+    active: object,
+    task_fence: object,
+    intent_fence: object,
+    owner: object,
+    *,
+    llm_call: Callable[[str, str, int], object] | None = None,
+    now: Callable[[], datetime] = _capture_now,
+) -> object:
     record = _read_capture_intent(queue, lease, active)
+    _project_session_marker(record, coordinator, owner)
     _keep_session_record(record, now, coordinator, owner)
     _ensure_capture_results_directory(queue)
     resolved = _existing_capture_decision(
         queue, coordinator, lease, active, task_fence, intent_fence, owner, record
     )
     if resolved is None:
-        with _CaptureKeepAlive(queue, coordinator, lease, task_fence, intent_fence, owner):
-            result, tier, body = _call_capture_classifier(record, llm_call)
+        result, tier, body = _call_capture_classifier(record, llm_call)
         chosen_at = None
         if tier != "ok":
             chosen_at = _session_time(record, now)
@@ -1306,6 +1330,40 @@ def process_new_capture(
     )
 
 
+def _project_session_marker(record, coordinator, owner) -> None:
+    from daily_log_append import contained_block
+    from session_end_project_tag import session_marker_plan
+
+    plan = session_marker_plan(record, coordinator.vault)
+    if plan is None:
+        return
+    path, entry, operation_id = plan
+    _ensure_session_marker_header(coordinator, owner, path)
+    _append_session_marker_block(
+        coordinator, owner, operation_id, path,
+        contained_block(redact_secrets(entry)).encode("utf-8"),
+    )
+
+
+def _ensure_session_marker_header(coordinator, owner, path) -> None:
+    from markdown_transaction import stable_operation_id
+
+    if path.exists():
+        return
+    header = f"# Daily Session Memory — {path.stem}\n".encode()
+    _append_session_marker_block(
+        coordinator, owner, stable_operation_id("daily-header", path.name, header), path, header
+    )
+
+
+def _append_session_marker_block(coordinator, owner, operation_id, path, block) -> None:
+    from markdown_transaction import append_owned_knowledge
+
+    transaction = append_owned_knowledge(coordinator, owner, operation_id, path, block)
+    if transaction.state != "committed":
+        raise RuntimeError("session marker transaction did not commit")
+
+
 def process_capture_lease(
     queue: object,
     coordinator: object,
@@ -1328,17 +1386,18 @@ def process_capture_lease(
     ) as (task_fence, intent_fence):
         if intent_fence is None:
             raise RuntimeError("capture intent fence is unavailable")
-        terminal = queue.complete_existing_capture_terminal(
-            lease,
-            intent_id=intent_id,
-            active_link_digest=binding.active_digest,
-            task_fence=task_fence,
-            intent_fence=intent_fence,
-            owner=owner,
-        )
-        if terminal is not None:
-            return terminal
-        return process_missing(lease, binding, task_fence, intent_fence, owner)
+        with _CaptureKeepAlive(queue, coordinator, lease, task_fence, intent_fence, owner):
+            return _complete_or_process_capture(queue, lease, binding, task_fence, intent_fence, owner, process_missing)
+
+
+def _complete_or_process_capture(queue, lease, binding, task_fence, intent_fence, owner, process_missing):
+    terminal = queue.complete_existing_capture_terminal(
+        lease, intent_id=binding.intent_id, active_link_digest=binding.active_digest,
+        task_fence=task_fence, intent_fence=intent_fence, owner=owner,
+    )
+    if terminal is not None:
+        return terminal
+    return process_missing(lease, binding, task_fence, intent_fence, owner)
 
 
 def _adopt_orphaned_intents(queue: object, coordinator: object) -> None:
@@ -1359,13 +1418,13 @@ def _adopt_orphaned_intents(queue: object, coordinator: object) -> None:
 def _swept_intents(sweep, queue: object, coordinator: object) -> None:
     """One recovery pass, best effort: a sweeper that fails never stops the drain.
 
-    Two passes run here. One finishes a publication that stopped half way — a
-    `pending` row whose publisher died before it marked the intent ready — and the
-    other gives a task to an intent that was published and never dispatched. See
+    The passes discover unindexed durable manifests, finish a publication that
+    stopped at a `pending` row, and give a task to a ready intent that was never
+    dispatched. See
     `docs/research/2026-09-17-a-publication-that-stopped-half-way-is-finished.md`.
     """
     try:
-        result = sweep(queue, coordinator, state_root=Path(STATE_ROOT))
+        result = sweep(queue, coordinator, state_root=Path(queue.state_root))
     except Exception as error:  # noqa: BLE001 - recovery must not break the worker
         _count_dropped_capture("capture_adoption", error, None)
         return
@@ -1379,6 +1438,8 @@ def run_capture_worker_once(
     coordinator: object,
     *,
     process_missing: Callable[[object, object, object, object, object], object],
+    handler_versions: tuple[int, ...] = (1,),
+    settled_failure: Callable[[BaseException], None] | None = None,
 ) -> object | None:
     # An intent with no task is invisible to `recover_expired_leases`, which
     # recovers a task whose lease expired and so presupposes a task. See
@@ -1395,11 +1456,11 @@ def run_capture_worker_once(
             # died stays leased forever and the session is lost in silence, which
             # is what stranded two of them here on 2026-08-26.
             queue.recover_expired_leases()
-            lease = queue.claim_capture("capture-worker")
+            lease = queue.claim_capture("capture-worker", handler_versions=handler_versions)
             if lease is None:
                 return None
             return _process_or_fail(
-                queue, coordinator, lease, owner, process_missing
+                queue, coordinator, lease, owner, process_missing, settled_failure
             )
     finally:
         registry.release(owner)
@@ -1411,6 +1472,7 @@ def _process_or_fail(
     lease: object,
     owner: object,
     process_missing: Callable[..., object],
+    settled_failure: Callable[[BaseException], None] | None,
 ) -> object:
     """Settle the claim either way: a failure is a named retry, not a stuck lease.
 
@@ -1427,10 +1489,30 @@ def _process_or_fail(
             process_missing=process_missing,
         )
     except Exception as error:
-        with contextlib.suppress(Exception):
-            queue.fail(lease, _capture_queue_failure(error))
+        queue.fail(lease, _capture_queue_failure(error))
+        return _settled_capture_failure(lease, error, settled_failure)
+
+
+def _settled_capture_failure(
+    lease: object,
+    error: BaseException,
+    observer: Callable[[BaseException], None] | None,
+) -> BaseException:
+    """Observe a committed retry or dead task; never turn it into success.
+
+    Called only after queue.fail returns. Settlement and owner-release failures
+    still escape. Callers without an observer retain the raised exception.
+    """
+    from capture_diagnostics import DurableWorkExhausted
+
+    try:
         _raise_if_attempts_spent(lease, error)
-        raise
+    except DurableWorkExhausted as exhausted:
+        error = exhausted
+    if observer is None:
+        raise error
+    observer(error)
+    return error
 
 
 def _capture_queue_failure(error: BaseException) -> object:
@@ -1461,5 +1543,3 @@ def _count_dropped_capture(kind: str, error: BaseException, session_id: str | No
     from secret_redact import describe_error
 
     record_capture_failure(kind, describe_error(error), error=error, session_id=session_id)
-
-

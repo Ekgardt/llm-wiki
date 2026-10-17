@@ -42,13 +42,11 @@ def test_an_orphan_behind_a_full_window_of_bad_records_is_adopted(tmp_path):
     )
 
 
-def test_the_pass_stops_looking_after_its_bound_of_skips(tmp_path, monkeypatch):
-    import capture_adoption
-
-    monkeypatch.setattr(capture_adoption, "MAX_SKIPPED_INTENTS_PER_PASS", 2)
+def test_one_successful_dispatch_can_look_past_multiple_failures(tmp_path):
     queue, coordinator = _queue(tmp_path), _coordinator(tmp_path)
-    bad, _good = _bad_head_and_one_good(tmp_path, queue, coordinator)
+    bad, good = _bad_head_and_one_good(tmp_path, queue, coordinator)
 
     result = _adopt(queue, coordinator, tmp_path, limit=1)
 
-    assert (_adopted_ids(result), len(_skipped_ids(result))) == ([], 2)
+    assert (_adopted_ids(result), sorted(_skipped_ids(result))) == ([good], sorted(bad))
+    assert result["examined"] == 3

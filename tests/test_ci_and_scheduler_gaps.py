@@ -56,7 +56,7 @@ def test_each_systemd_pass_is_stopped_only_above_its_worst_case(tmp_path, monkey
 
     definitions = install_control.render_systemd_definitions(tmp_path / "vault", tmp_path / "state", tmp_path / "uv")
     worst = {"nightly": scheduled_nightly.worst_case_seconds(), "weekly": scheduled_weekly.worst_case_seconds()}
-    limits = {kind: install_control.SYSTEMD_START_LIMITS[kind] for kind in worst}
+    limits = {kind: f"{install_control.scheduler_limit_hours(tmp_path / 'vault')[kind]}h" for kind in worst}
     rendered = all(f"TimeoutStartSec={limits[kind]}" in definitions[f"llm-wiki-{kind}.service"].decode() for kind in worst)
 
     assert (rendered, [kind for kind in worst if _limit_seconds(limits[kind]) <= worst[kind]]) == (True, [])

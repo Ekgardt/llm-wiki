@@ -4,11 +4,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-_PAGE = "---\ntype: decision\n---\n# Target\n\nBody.\n"
+_PAGE = "---\ntype: concept\n---\n# Target\n\nBody.\n"
 
 
 def _source_page(root: Path, name: str) -> Path:
@@ -51,7 +53,7 @@ def test_a_link_that_is_already_there_is_not_added_twice():
     assert twice == once
 
 
-def test_the_owed_backlink_is_written_through_a_transaction(tmp_path, monkeypatch):
+def _isolated_vault(tmp_path, monkeypatch):
     import lint_memory
     import repair_backlinks
 
@@ -66,6 +68,13 @@ def test_the_owed_backlink_is_written_through_a_transaction(tmp_path, monkeypatc
         monkeypatch.setattr(module, "NOTES", notes, raising=False)
     monkeypatch.setattr(repair_backlinks, "VAULT", vault / "knowledge")
     monkeypatch.setattr(repair_backlinks, "NOTES", notes)
+    return vault
+
+
+def test_the_owed_backlink_is_written_through_a_transaction(tmp_path, monkeypatch):
+    import repair_backlinks
+
+    vault = _isolated_vault(tmp_path, monkeypatch)
     source = _source_page(vault, "source.md")
     target = _source_page(vault, "target.md")
     source.write_text(
@@ -81,6 +90,41 @@ def test_the_owed_backlink_is_written_through_a_transaction(tmp_path, monkeypatc
     assert applied == ["LINKED: knowledge/notes/target.md → source"]
     assert "[[knowledge/notes/source]]" in target.read_text(encoding="utf-8")
     assert repair_backlinks.repair(apply=False) == []
+
+
+@pytest.mark.parametrize("declared_type", ["decision", '"decision"', "decision # accepted history"])
+def test_an_active_decision_is_not_rewritten_for_a_backlink(tmp_path, monkeypatch, declared_type):
+    import repair_backlinks
+
+    vault = _isolated_vault(tmp_path, monkeypatch)
+    source = _source_page(vault, "source.md")
+    target = _source_page(vault, "target.md")
+    source.write_text("---\ntype: concept\n---\nSee [[knowledge/notes/target]].\n", encoding="utf-8")
+    before = f"---\ntype: {declared_type}\nstatus: accepted\n---\n# Decision\n".encode()
+    target.write_bytes(before)
+
+    assert repair_backlinks.repair(apply=False) == []
+    assert repair_backlinks.repair(apply=True) == []
+    assert target.read_bytes() == before
+    assert "[[knowledge/notes/target]]" in source.read_text(encoding="utf-8")
+
+
+def test_a_target_that_became_a_decision_is_refused_at_the_write_boundary(tmp_path, monkeypatch):
+    import repair_backlinks
+
+    vault = _isolated_vault(tmp_path, monkeypatch)
+    source = _source_page(vault, "source.md")
+    target = _source_page(vault, "target.md")
+    source.write_text("---\ntype: concept\n---\nSee [[knowledge/notes/target]].\n", encoding="utf-8")
+    target.write_text(_PAGE, encoding="utf-8")
+    assert len(repair_backlinks.repair(apply=False)) == 1
+    before = b"---\ntype: decision\nstatus: accepted\n---\n# Decision\n"
+    target.write_bytes(before)
+
+    with pytest.raises(ValueError, match="immutable"):
+        repair_backlinks._repair_pair(source, target)
+
+    assert target.read_bytes() == before
 
 
 def test_a_superseded_page_is_not_asked_to_link_forward(tmp_path, monkeypatch):

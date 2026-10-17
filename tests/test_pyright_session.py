@@ -5010,7 +5010,7 @@ def test_symlinked_lsp_owner_parent_fails_closed_without_mutating_target(
     outside = state_root.parent / "outside-lsp"
     outside.mkdir()
     lsp_parent = state_root / "run/lsp"
-    lsp_parent.parent.mkdir()
+    lsp_parent.parent.mkdir(exist_ok=True)
     try:
         lsp_parent.symlink_to(outside, target_is_directory=True)
     except OSError:
@@ -5720,12 +5720,16 @@ def test_synchronize_notification_failure_replays_prior_snapshot_without_commit(
         before_documents = dict(session._documents)
         before_document_bytes = session._document_bytes
 
-        if failed_method == "textDocument/didChange":
-            (repository / "pkg/service.py").write_bytes(b"changed = True\n")
-        elif failed_method == "textDocument/didClose":
-            (repository / "pkg/service.py").unlink()
-        else:
+        def change_documents():
+            if failed_method == "textDocument/didChange":
+                (repository / "pkg/service.py").write_bytes(b"changed = True\n")
+                return
+            if failed_method == "textDocument/didClose":
+                (repository / "pkg/service.py").unlink()
+                return
             (repository / "pkg/watched.py").write_bytes(b"watched = True\n")
+
+        change_documents()
         revision = compute_workspace_revision(scope, deadline=time.monotonic() + SHORT_TIMEOUT)
 
         notify_generation = LspProcess.notify_generation

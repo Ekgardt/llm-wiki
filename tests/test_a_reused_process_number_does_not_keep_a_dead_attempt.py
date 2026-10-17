@@ -12,10 +12,13 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 import time
 from pathlib import Path
 
 import markdown_transaction
+import process_liveness
+import pytest
 from markdown_transaction import MarkdownCoordinator
 
 from tests.slow_machine import LONG_TIMEOUT
@@ -87,12 +90,25 @@ def test_a_number_now_held_by_another_process_lets_the_attempt_go(
     tmp_path: Path,
 ) -> None:
     coordinator = _stale_attempt(tmp_path)
-    another_start = json.dumps({"pid": os.getpid(), "start_identity": "another-start"})
+    identity = process_liveness.process_start_identity(os.getpid())
+    prefix, ticks = identity.rsplit(":", 1)
+    another_start = json.dumps({"pid": os.getpid(), "start_identity": f"{prefix}:{int(ticks) + 1}"})
     _owner_record(coordinator).write_bytes(another_start.encode("ascii"))
 
     outcome = _append(coordinator)
 
     assert (outcome, "preparing" in _states(coordinator)) == ("committed", False)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux stored identities require namespace scope")
+@pytest.mark.parametrize("identity", ["another-start", "linux:boot:1"])
+def test_an_unqualified_identity_cannot_release_the_attempt(tmp_path: Path, identity: str) -> None:
+    coordinator = _stale_attempt(tmp_path)
+    owner = _owner_record(coordinator)
+    owner.write_text(json.dumps({"pid": os.getpid(), "start_identity": identity}), encoding="ascii")
+
+    assert markdown_transaction._preparer_alive(owner.parent, os.getpid())
+    assert _states(coordinator) == ["preparing"]
 
 
 def test_the_living_writer_keeps_its_attempt(tmp_path: Path) -> None:

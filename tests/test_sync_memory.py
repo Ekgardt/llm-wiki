@@ -178,13 +178,13 @@ def _build_vault(tmp_path: Path) -> tuple[Path, Path, Path]:
     )
     (root / "pyproject.toml").write_text(
         '[project]\nrequires-python = ">=3.10"\n'
-        'dependencies = ["mcp>=1.29,<2"]\n'
+        'dependencies = ["mcp>=1.30,<2"]\n'
         '[project.optional-dependencies]\nmcp-server = []\n',
         encoding="utf-8",
     )
     (root / "uv.lock").write_text(
         'version = 1\nrequires-python = ">=3.10"\n'
-        '[[package]]\nname = "mcp"\nversion = "1.29.0"\n'
+        '[[package]]\nname = "mcp"\nversion = "1.30.0"\n'
         '[[package]]\nname = "llm-wiki"\nprovides-extras = ["mcp-server"]\n',
         encoding="utf-8",
     )
@@ -223,12 +223,12 @@ def test_check_is_default_dry_run_and_actions_are_ordered(tmp_path, monkeypatch)
 def test_dependency_action_checks_lock_and_baseline_environment(tmp_path):
     sync_memory = _load_sync_memory()
     (tmp_path / "pyproject.toml").write_text(
-        '[project]\ndependencies = ["mcp>=1.29,<2"]\n'
+        '[project]\ndependencies = ["mcp>=1.30,<2"]\n'
         '[project.optional-dependencies]\nmcp-server = []\n',
         encoding="utf-8",
     )
     (tmp_path / "uv.lock").write_text(
-        'version = 1\n[[package]]\nname = "mcp"\nversion = "1.29.0"\n',
+        'version = 1\n[[package]]\nname = "mcp"\nversion = "1.30.0"\n',
         encoding="utf-8",
     )
     commands = []
@@ -257,7 +257,7 @@ def test_importable_wrong_mcp_version_is_planned_and_repaired(tmp_path, monkeypa
 
     sync_memory = _load_sync_memory()
     (tmp_path / "pyproject.toml").write_text(
-        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+        'dependencies = ["mcp>=1.30,<2"]\nmcp-server = []\n', encoding="utf-8"
     )
     (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
     commands = []
@@ -289,7 +289,7 @@ def test_importable_wrong_mcp_version_is_planned_and_repaired(tmp_path, monkeypa
 def test_current_locked_environment_is_noop_even_without_import_probe(tmp_path):
     sync_memory = _load_sync_memory()
     (tmp_path / "pyproject.toml").write_text(
-        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+        'dependencies = ["mcp>=1.30,<2"]\nmcp-server = []\n', encoding="utf-8"
     )
     (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
     commands = []
@@ -309,7 +309,7 @@ def test_current_locked_environment_is_noop_even_without_import_probe(tmp_path):
 def test_check_reports_planned_dependency_changes_without_applying(tmp_path):
     sync_memory = _load_sync_memory()
     (tmp_path / "pyproject.toml").write_text(
-        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+        'dependencies = ["mcp>=1.30,<2"]\nmcp-server = []\n', encoding="utf-8"
     )
     (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
     commands = []
@@ -351,7 +351,7 @@ def test_dependency_action_rejects_missing_lock_inputs(tmp_path, missing):
 def test_apply_syncs_only_locked_production_baseline_without_models(tmp_path):
     sync_memory = _load_sync_memory()
     (tmp_path / "pyproject.toml").write_text(
-        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+        'dependencies = ["mcp>=1.30,<2"]\nmcp-server = []\n', encoding="utf-8"
     )
     (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
     commands = []
@@ -398,7 +398,7 @@ def test_apply_syncs_only_locked_production_baseline_without_models(tmp_path):
 def test_dependency_commands_share_one_deadline(tmp_path):
     sync_memory = _load_sync_memory()
     (tmp_path / "pyproject.toml").write_text(
-        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+        'dependencies = ["mcp>=1.30,<2"]\nmcp-server = []\n', encoding="utf-8"
     )
     (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
     timeouts = []
@@ -455,7 +455,7 @@ def test_uv_commands_use_process_tree_runner(tmp_path, monkeypatch):
 def test_apply_rejects_stale_lock_even_when_mcp_is_installed(tmp_path):
     sync_memory = _load_sync_memory()
     (tmp_path / "pyproject.toml").write_text(
-        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+        'dependencies = ["mcp>=1.30,<2"]\nmcp-server = []\n', encoding="utf-8"
     )
     (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
     commands = []
@@ -770,7 +770,7 @@ def test_retained_descendant_pipes_are_closed_without_unbounded_communicate(monk
 def test_dependency_timeout_exposes_cleanup_failure(tmp_path):
     sync_memory = _load_sync_memory()
     (tmp_path / "pyproject.toml").write_text(
-        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+        'dependencies = ["mcp>=1.30,<2"]\nmcp-server = []\n', encoding="utf-8"
     )
     (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
     def timed_out(*args, **kwargs):
@@ -785,7 +785,7 @@ def test_dependency_timeout_exposes_cleanup_failure(tmp_path):
 def test_dependency_action_reports_expired_deadline_without_starting_uv(tmp_path):
     sync_memory = _load_sync_memory()
     (tmp_path / "pyproject.toml").write_text(
-        'dependencies = ["mcp>=1.29,<2"]\nmcp-server = []\n', encoding="utf-8"
+        'dependencies = ["mcp>=1.30,<2"]\nmcp-server = []\n', encoding="utf-8"
     )
     (tmp_path / "uv.lock").write_text('name = "mcp"\nmcp-server\n', encoding="utf-8")
 

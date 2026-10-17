@@ -33,9 +33,15 @@ CALLER_CWD="$(pwd -P)"
 INSTALLER_CREATED_CLONE="${LLM_WIKI_INSTALLER_CREATED_CLONE:-0}"
 PROTECT_PUSH=0
 AGENTS_STOPPED=0
+REPLACE_CODEX_MCP=0
+CODEX_MCP_STATE=unverified
 SCHEDULER_MODE=native
 EXPECT_SCHEDULER_VALUE=0
 EXPECT_ADOPT_VALUE=0
+EXPECT_MODEL_VALUE=0
+# `--model <name>`: the memory model, checked with one short call; without it the
+# installer asks on a terminal (docs/research/2026-09-29-the-installer-asks-which-model.md).
+MODEL_ARGS=()
 # `--adopt <resource-id>`: the operator takes over a file changed outside the installer as it
 # is now; see docs/research/2026-09-28-a-rollback-undoes-only-what-it-did.md.
 ADOPT_ARGS=()
@@ -61,18 +67,27 @@ for argument in "$@"; do
     EXPECT_ADOPT_VALUE=0
     continue
   fi
+  if [[ "$EXPECT_MODEL_VALUE" -eq 1 ]]; then
+    MODEL_ARGS=(--model "$argument")
+    EXPECT_MODEL_VALUE=0
+    continue
+  fi
   case "$argument" in
     --protect-push) PROTECT_PUSH=1 ;;
     --confirm-all-agents-stopped) AGENTS_STOPPED=1 ;;
+    --replace-codex-mcp) REPLACE_CODEX_MCP=1 ;;
     --scheduler) EXPECT_SCHEDULER_VALUE=1 ;;
     --scheduler=*) SCHEDULER_MODE="${argument#--scheduler=}" ;;
     --adopt) EXPECT_ADOPT_VALUE=1 ;;
     --adopt=*) ADOPT_ARGS+=(--adopt "${argument#--adopt=}") ;;
+    --model) EXPECT_MODEL_VALUE=1 ;;
+    --model=*) MODEL_ARGS=(--model "${argument#--model=}") ;;
     *) fail "Unknown installer argument: $argument" ;;
   esac
 done
 [[ "$EXPECT_SCHEDULER_VALUE" -eq 0 ]] || fail "--scheduler requires native or cron"
 [[ "$EXPECT_ADOPT_VALUE" -eq 0 ]] || fail "--adopt requires a resource id"
+[[ "$EXPECT_MODEL_VALUE" -eq 0 ]] || fail "--model requires a model name"
 case "$SCHEDULER_MODE" in
   native|cron) ;;
   *) fail "--scheduler requires native or cron" ;;
@@ -141,22 +156,29 @@ write_codex_mcp_block() {
 
 add_codex_mcp_block() {
   local vault_root="$1" config="$2"
-  local vault_json block
+  local block
   mkdir -p "$(dirname "$config")" || return 1
-  vault_json="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$vault_root")" || return 1
-  block="$(printf '%s\n' \
-    '[mcp_servers.llm-wiki]' \
-    'command = "uv"' \
-    "args = [\"run\", \"--locked\", \"--no-sync\", \"--directory\", $vault_json, \"python\", \"scripts/mcp_server.py\"]")"
+  block="$(uv run --locked --no-sync --directory "$vault_root" python scripts/codex_memory.py \
+    config-block --vault-root "$vault_root")" || return 1
   write_codex_mcp_block "$block" "$config"
 }
 
 codex_mcp_state_status() {
   case "$1" in
-    equivalent) return 0 ;;
-    conflict|invalid) return 2 ;;
-    *) return 1 ;;
+    equivalent|replaced) return 0 ;;
+    *) return 2 ;;
   esac
+}
+
+# This product's own earlier entry (`stale`) is rewritten to this vault's; an entry the
+# operator wrote is replaced only with --replace-codex-mcp. Either way the previous file
+# is kept as a verified preimage beside config.toml.
+# See docs/research/2026-09-28-a-check-names-its-cause.md.
+replace_codex_mcp() {
+  local vault_root="$1" config="$2" foreign=()
+  [ "${REPLACE_CODEX_MCP:-0}" -eq 1 ] && foreign=(--foreign)
+  uv run --locked --no-sync --directory "$vault_root" python "$vault_root/scripts/codex_memory.py" \
+    config-replace --config "$config" --vault-root "$vault_root" ${foreign[@]+"${foreign[@]}"}
 }
 
 configure_codex_mcp() {
@@ -169,6 +191,10 @@ configure_codex_mcp() {
     add_codex_mcp_block "$vault_root" "$config"
     return
   fi
+  case "$state" in
+    stale|conflict) state="$(replace_codex_mcp "$vault_root" "$config")" || return 1 ;;
+  esac
+  CODEX_MCP_STATE="$state"
   codex_mcp_state_status "$state"
 }
 
@@ -409,13 +435,15 @@ stop_test_process() {
   send_signal TERM "$testPid"
   send_signal CONT "$testPid"
 }
+stop_live_test_tree() {
+  if ! test_tree_alive; then return; fi
+  if test_group_is_own; then stop_test_group; else stop_test_process; fi
+}
 stop_test_child() {
   if [ -z "$testPid" ]; then
     return
   fi
-  if test_tree_alive; then
-    if test_group_is_own; then stop_test_group; else stop_test_process; fi
-  fi
+  stop_live_test_tree
   if wait "$testPid" 2>/dev/null; then :; fi
   testPid=""
   testPgid=""
@@ -453,7 +481,8 @@ start_test_child() {
     *m*) testMonitorMode=on ;;
     *) testMonitorMode=off; set -m ;;
   esac
-  uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds "$smokeDeadlineSeconds" &
+  uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds "$smokeDeadlineSeconds" \
+    --report "$STATE_ROOT/logs/install-smoke.json" &
   testPid=$! testPgid=$!
   (
     trap 'exit 0' HUP INT TERM
@@ -563,6 +592,21 @@ if [ "$CODEX_HOOKS_OWNED" -eq 1 ]; then
   IDE_HOOK_ARGS+=(--codex-hooks)
 fi
 
+# ─── 5a. Choose the memory model ───────────────────────────────────
+
+# The provider's own list (Claude: each alias asked once); the answer is exported so
+# the install transaction persists it into the hooks' env and the scheduler units.
+info "Choosing the model the memory pipeline calls..."
+MODEL_CHOICE="$(uv run --locked --no-sync --directory "$VAULT_ROOT" python \
+  "$VAULT_ROOT/scripts/choose_model.py" --home "$HOME" \
+  ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"})" || fail "Model choice failed"
+MODEL_VARIABLE="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["variable"])' "$MODEL_CHOICE")"
+MODEL_VALUE="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["model"])' "$MODEL_CHOICE")"
+if [ -n "$MODEL_VARIABLE" ] && [ -n "$MODEL_VALUE" ]; then
+  export "$MODEL_VARIABLE=$MODEL_VALUE"
+  ok "Memory model: $MODEL_VALUE"
+fi
+
 # ─── 6. Set up scheduled maintenance ────────────────────────────────
 
 info "Setting up scheduled maintenance..."
@@ -628,11 +672,10 @@ if command -v codex &>/dev/null; then
     ok "Codex MCP config verified: $CODEX_CONFIG"
   else
     mcp_exit=$?
-    if [ "$mcp_exit" -eq 2 ]; then
-      warn "Existing Codex MCP entry conflicts with LLM-Wiki; config.toml was not changed. Merge manually."
-    else
-      warn "Codex MCP config could not be verified; config.toml was not changed."
-    fi
+    # The helper's own line for the state the entry was left in; none asks for a manual merge.
+    [ "$mcp_exit" -eq 2 ] || CODEX_MCP_STATE=unverified
+    warn "$(uv run --locked --no-sync --directory "$VAULT_ROOT" python "$VAULT_ROOT/scripts/codex_memory.py" \
+      config-advice --state "$CODEX_MCP_STATE")"
   fi
   CODEX_HOOKS="$HOME/.codex/hooks.json"
   case "$CODEX_HOOKS_STATE" in
@@ -782,8 +825,10 @@ case "$(adoption_plan "$ADOPTION_STATE" "$AGENTS_STOPPED")" in
     ;;
   *)
     SYNC_WARNING=1
-    warn "Reliability V3 state is '${ADOPTION_STATE}'; session capture is disabled until adoption runs:"
-    warn "  uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json"
+    # The check's own line says what the state means; the installer claims no more.
+    # See docs/research/2026-09-28-a-check-names-its-cause.md.
+    warn "$(uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --check --summary 2>>"$ADOPTION_ERR" || true)"
+    warn "  details: uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json"
     adoption_tail
     ;;
 esac
@@ -805,6 +850,19 @@ case "$MODELS_EXIT" in
   *) warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" ;;
 esac
 
+# A managed Pyright the operator installed earlier is validated, and repaired when
+# its receipt is from before the tree digest (`install_pyright.py` retires such an
+# install and reinstalls the pinned release). Nothing is installed where the operator
+# never installed it: that stays an explicit action.
+# See docs/research/2026-09-28-a-check-names-its-cause.md.
+if [ -d "$STATE_ROOT/cache/code-tools/pyright" ]; then
+  if PYRIGHT_REPORT="$(uv run --locked --no-sync python "$VAULT_ROOT/scripts/install_pyright.py" --state-root "$STATE_ROOT" 2>&1 >/dev/null)"; then
+    ok "Managed Pyright verified"
+  else
+    warn "Managed Pyright could not be verified or repaired: ${PYRIGHT_REPORT}"
+  fi
+fi
+
 # ─── 8b. Bounded runtime sync ──────────────────────────────────────
 
 info "Synchronizing runtime state and derived indexes..."
@@ -819,21 +877,15 @@ case "$SYNC_EXIT" in
   *) fail "Runtime synchronization failed" ;;
 esac
 
-# ─── 9. Optional: semantic + hybrid search ─────────────────────────
-
-info "Optional: install hybrid search (BM25 + vector + reranker)?"
-info "  uv sync --locked --no-default-groups --inexact --extra hybrid"
-info "  uv sync --locked --no-default-groups --inexact --extra code-graph"
-info "  uv sync --locked --no-default-groups --inexact --extra reranker"
-
-# ─── 10. Print summary ─────────────────────────────────────────────
+# ─── 9. Print summary ─────────────────────────────────────────────
 
 echo ""
 echo "=============================================="
 if [ "$SYNC_WARNING" -eq 1 ]; then
   echo -e "${YELLOW}  LLM-Wiki installed with warnings${NC}"
-  echo "  The runtime synchronization ran after every other step and named the checks that need"
-  echo "  attention (the doctor line above). For the state now: uv run --locked --no-sync python scripts/doctor.py"
+  echo "  The install completed; this is not a failure (a failure stops with [FAIL] and exit 1)."
+  echo "  The [WARN] lines above and the doctor line name what needs attention now."
+  echo "  For the state now: uv run --locked --no-sync python scripts/doctor.py"
 else
   echo -e "${GREEN}  LLM-Wiki installed successfully!${NC}"
 fi
@@ -862,9 +914,7 @@ echo "  uv run --locked --no-sync python scripts/build_advisory.py              
 echo "  uv run --locked --no-sync python scripts/build_guardrails.py             # learned rules"
 echo "  uv run --locked --no-sync python benchmark/run_benchmark.py              # run benchmark"
 echo ""
-echo "MCP baseline: 12 local task-shaped tools (installed)"
-echo "Optional enhancements:"
-echo "  uv sync --locked --no-default-groups --inexact --extra hybrid"
-echo "  uv sync --locked --no-default-groups --inexact --extra code-graph"
-echo "  uv sync --locked --no-default-groups --inexact --extra reranker"
+echo "MCP: 12 local task-shaped tools; every component is installed, with Pyright for Python"
+echo "Code navigation in another language (one command each, when you need it):"
+echo "  uv run --locked --no-sync python scripts/install_language_server.py --profile <typescript|gopls|rust-analyzer>"
 echo ""

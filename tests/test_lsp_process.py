@@ -2935,10 +2935,11 @@ def test_protocol_callback_lifecycle_operations_fail_fast_without_mutation(
             deadline = time.monotonic() + 1
             if operation == "close":
                 instance.close(deadline)
-            elif operation == "restart":
+                return
+            if operation == "restart":
                 instance.restart(deadline)
-            else:
-                instance._terminal_failure("handler_failure", deadline)
+                return
+            instance._terminal_failure("handler_failure", deadline)
         except BaseException as error:
             handler_errors.append(error)
         finally:
@@ -9504,6 +9505,8 @@ def test_startup_terminal_intent_timeout_returns_retryable_cleanup_error(
         deadline: float | None = None,
     ) -> None:
         coordinator = instance._coordinator
+        assert deadline is not None
+        _await_descendant_pid(pid_file, timeout=max(0.0, deadline - time.monotonic()))
 
         def hold_terminal_intent() -> None:
             coordinator.terminal_intent_lock.acquire()
@@ -9518,18 +9521,15 @@ def test_startup_terminal_intent_timeout_returns_retryable_cleanup_error(
         captured.append(instance)
         holder.start()
         assert held.wait(_BARRIER_SECONDS)
-        assert deadline is not None
-        remaining = deadline - time.monotonic()
-        if remaining > 0:
-            time.sleep(remaining + 0.01)
+        # The failure path owns a fresh cleanup deadline, independently of
+        # startup. Expire that deadline only after the real lock is held.
+        monkeypatch.setattr(lsp_process, "_fresh_cleanup_deadline", time.monotonic)
         raise RuntimeError("startup failed while terminal intent lock stayed held")
 
     monkeypatch.setattr(
         lsp_process, "_start_lifecycle_workers", fail_with_terminal_intent_lock
     )
-    # This test is about a cleanup lock held past the startup deadline, not
-    # about how long that deadline is, so it sets its own short one.
-    monkeypatch.setattr(lsp_process, "_STARTUP_WAIT_SECONDS", 5.0)
+    # Keep the normal, platform-qualified startup budget and ACL hardening.
     owner_root = tmp_path / OWNER_NONCE
     coordinator: lsp_process._LifecycleCoordinator | None = None
     cleanup_error: lsp_process.StartupCleanupError | None = None
@@ -10256,6 +10256,9 @@ def test_first_terminal_identity_survives_later_heartbeat_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    # This scenario requires cleanup to complete before checking identity.
+    # Separate timeout tests retain the actual short cleanup deadlines.
+    monkeypatch.setattr(lsp_process, "_GRACEFUL_CLEANUP_SECONDS", LONG_TIMEOUT)
     process = _start(tmp_path, "--lifecycle")
     coordinator = process._coordinator
     owner = coordinator.owner_directory
@@ -10276,14 +10279,14 @@ def test_first_terminal_identity_survives_later_heartbeat_failure(
         process,
         coordinator,
         "injected_failure",
-        time.monotonic() + 1,
+        time.monotonic() + LONG_TIMEOUT,
     )
     monkeypatch.setattr(lsp_process._OwnerDirectory, "write_lease", fail_heartbeat)
     coordinator.heartbeat_wake.set()
     assert attempted.wait(SHORT_TIMEOUT)
     heartbeat.join(SHORT_TIMEOUT)
     monkeypatch.setattr(lsp_process._OwnerDirectory, "write_lease", real_write_lease)
-    process.close(time.monotonic() + 5)
+    process.close(time.monotonic() + LONG_TIMEOUT)
 
     failure = json.loads((process.owner_root / "failure.json").read_bytes())
     assert coordinator.terminal_code == "injected_failure"

@@ -140,18 +140,52 @@ def test_a_successful_compile_refreshes_the_generation(monkeypatch):
         lambda _root, _state, *, time_budget_seconds: calls.append(time_budget_seconds) or {"status": "current"},
     )
 
-    assert (compile_memory.main(), calls) == (0, [compile_memory.POST_COMPILE_GENERATION_SECONDS])
+    assert (compile_memory.main(), calls) == (0, [compile_memory.setting_value("generation.post_compile_seconds", compile_memory.ROOT)])
 
 
-def test_a_failed_or_dry_compile_does_not_refresh(monkeypatch):
+def test_a_dry_compile_does_not_refresh(monkeypatch):
     calls: list[int] = []
-    monkeypatch.setattr(compile_memory, "_compile_under_lock", lambda _args: 1)
+    monkeypatch.setattr(compile_memory, "_compile_under_lock", lambda _args: 0)
     monkeypatch.setattr(compile_memory, "_refresh_generation_after_compile", lambda: calls.append(1))
 
-    monkeypatch.setattr(sys, "argv", ["compile_memory.py"])
-    failed = compile_memory.main()
-    monkeypatch.setattr(compile_memory, "_compile_under_lock", lambda _args: 0)
     monkeypatch.setattr(sys, "argv", ["compile_memory.py", "--dry-run"])
     dry = compile_memory.main()
 
-    assert (failed, dry, calls) == (1, 0, [])
+    assert (dry, calls) == (0, [])
+
+
+def _indexed_matches(state: Path, query: str) -> list[dict]:
+    import sqlite3
+
+    from generation_catalog import GenerationCatalog
+
+    manifest = GenerationCatalog(state).get_active()
+    database = state / 'cache/evidence-graph/generations' / manifest['generation_id'] / 'search.sqlite3'
+    with sqlite3.connect(database) as connection:
+        return search_memory._generation_fts_search(
+            query, manifest, connection, scope='all', limit=10,
+            project=None, since=None, as_of=None,
+        )
+
+
+def test_partial_compile_keeps_its_error_but_published_page_is_searchable(tmp_path, monkeypatch):
+    from tests.test_generation_maintenance import _vault as empty_vault
+
+    root, state = empty_vault(tmp_path)
+    assert doctor.run_generation_maintenance(root, state)['status'] == 'built'
+    monkeypatch.setenv('LLM_WIKI_ROOT', str(root))
+    monkeypatch.setenv('LLM_WIKI_STATE_ROOT', str(state))
+    monkeypatch.setattr(compile_memory, 'ROOT', root)
+    monkeypatch.setattr(compile_memory, 'STATE_ROOT', state)
+    monkeypatch.setattr(sys, 'argv', ['compile_memory.py'])
+
+    def partially_committed(_args):
+        (root / 'knowledge/notes/zirconium.md').write_text(
+            '---\ntype: concept\n---\n# Zirconium\n\nZirconium is the retained fact.\n', encoding='utf-8'
+        )
+        return 1
+
+    monkeypatch.setattr(compile_memory, '_compile_under_lock', partially_committed)
+    assert _indexed_matches(state, 'zirconium') == []
+    assert compile_memory.main() == 1
+    assert _indexed_matches(state, 'zirconium')

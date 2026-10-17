@@ -388,7 +388,8 @@ def _pwsh_push_helper(repository: Path, *, created: bool, explicit: bool):
         pytest.skip("PowerShell unavailable")
     command = _powershell_functions(
         ROOT / "install.ps1",
-        ("Invoke-NativeCommand", "Protect-PushUrls", "Protect-PushUrlsIfAuthorized"),
+        ("Invoke-NativeCommand", "Invoke-NativeProcess", "Write-NativeResult",
+         "Protect-PushUrls", "Protect-PushUrlsIfAuthorized"),
     ) + textwrap.dedent(
         f"""
         Protect-PushUrlsIfAuthorized `

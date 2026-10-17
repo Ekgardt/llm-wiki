@@ -65,7 +65,7 @@ def test_the_windows_installer_plans_the_same() -> None:
         f"$plans += Get-AdoptionPlan -State {ps_literal(state)} -Confirmed ${bool(confirmed)}"
         for state, confirmed, _expected in PLAN
     )
-    command = _powershell_functions(ROOT / "install.ps1", ("Get-AdoptionPlan",)) + (
+    command = _powershell_functions(ROOT / "install.ps1", ("Get-AdoptionPlan", "Get-ExistingAdoptionPlan")) + (
         f"$plans = @()\n{calls}\nConvertTo-Json -Compress $plans\n"
     )
 

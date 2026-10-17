@@ -14,6 +14,7 @@ OWASP LLM Top 10 (2025) coverage:
 from __future__ import annotations
 
 import ast
+import io
 import re
 from pathlib import Path
 from unittest.mock import patch
@@ -60,21 +61,39 @@ def _names_daily_archive(line: str) -> bool:
     return "daily" in line and "archive" in line
 
 
-def _assignment_sources(source: str, tree: ast.AST) -> list[str]:
+def _source_lines(source: str) -> list[bytes]:
+    """Prepare physical UTF-8 lines once, preserving CR/LF and form feeds."""
+    return [line.encode("utf-8") for line in io.StringIO(source, newline="").readlines()]
+
+
+def _source_segment(lines: list[bytes], node: ast.AST) -> str | None:
+    positions = tuple(getattr(node, name, None) for name in
+                      ("lineno", "end_lineno", "col_offset", "end_col_offset"))
+    if None in positions:
+        return None
+    first, last, start, end = positions
+    first, last = first - 1, last - 1
+    if first == last:
+        return lines[first][start:end].decode("utf-8")
+    segment = lines[first][start:] + b"".join(lines[first + 1:last]) + lines[last][:end]
+    return segment.decode("utf-8")
+
+
+def _assignment_sources(lines: list[bytes], tree: ast.AST) -> list[str]:
     return [
-        ast.get_source_segment(source, node) or ""
+        _source_segment(lines, node) or ""
         for node in ast.walk(tree)
         if isinstance(node, (ast.Assign, ast.AnnAssign))
     ]
 
 
-def _archive_assignment(source: str, tree: ast.AST) -> bool:
-    return any(_mentions_daily_archive(text) for text in _assignment_sources(source, tree))
+def _archive_assignment(lines: list[bytes], tree: ast.AST) -> bool:
+    return any(_mentions_daily_archive(text) for text in _assignment_sources(lines, tree))
 
 
-def _archive_rename(source: str, renames: list[ast.Call]) -> bool:
+def _archive_rename(lines: list[bytes], renames: list[ast.Call]) -> bool:
     return any(
-        _mentions_daily_archive(ast.get_source_segment(source, call) or "")
+        _mentions_daily_archive(_source_segment(lines, call) or "")
         for call in renames
     )
 
@@ -86,7 +105,59 @@ def _publishes_daily_archive(path: Path) -> bool:
     renames = _rename_calls(tree)
     if not renames:
         return False
-    return _archive_assignment(source, tree) or _archive_rename(source, renames)
+    lines = _source_lines(source)
+    return _archive_assignment(lines, tree) or _archive_rename(lines, renames)
+
+
+def test_archive_guard_does_not_split_the_whole_source_for_every_assignment(tmp_path, monkeypatch):
+    """Whole-module preparation must not grow with its assignment count."""
+    module = tmp_path / "publisher.py"
+    source = "value = 1\n" * 20 + "archive = daily_root / 'archive'\nos.rename(before, archive)\n"
+    module.write_text(source, encoding="utf-8")
+    original = ast._splitlines_no_ff
+    preparations = []
+
+    def split_lines(text):
+        preparations.append(text)
+        return original(text)
+
+    monkeypatch.setattr(ast, "_splitlines_no_ff", split_lines)
+    assert _publishes_daily_archive(module)
+    assert len(preparations) <= 1, "the full source was split again for each assignment"
+
+
+@pytest.mark.parametrize("ending", ["\n", "\r\n", "\r"])
+@pytest.mark.parametrize("source", [
+    "é = 'pré'; target = daily_root / 'archive'\nos.rename(before, target)\n",
+    "target = (\n    daily_root / 'archive'\n)\nos.replace(before, target)\n",
+    "target: str = 'daily\\farchive'\nos.rename(before, target)\n",
+    "target = '''daily\farchive\nсохранённая строка'''\nos.rename(before, target)\n",
+    "target = 'daily\\narchive'\nos.rename(before, target)\n",
+])
+def test_archive_source_spans_match_python_with_unicode_and_physical_endings(source, ending):
+    source = source.replace("\n", ending)
+    lines = _source_lines(source)
+    nodes = (node for node in ast.walk(ast.parse(source))
+             if isinstance(node, (ast.Assign, ast.AnnAssign, ast.Call)))
+    for node in nodes:
+        assert _source_segment(lines, node) == ast.get_source_segment(source, node)
+
+
+def test_an_unlocated_node_keeps_the_original_missing_segment_result():
+    node = ast.Assign(targets=[ast.Name(id="target")], value=ast.Constant(value=1))
+    assert _source_segment(_source_lines("target = 1\n"), node) is None
+
+
+@pytest.mark.parametrize("source,expected", [
+    ("target = daily_root / 'archive'\nos.rename(before, target)\n", True),
+    ("target = ordinary_root / 'archive'\nos.rename(before, target)\n", False),
+    ("target = 'knowledge/daily'\nother = 'knowledge/log-archive'\nos.rename(before, target)\n", False),
+    ("os.replace(before, daily_root / 'archive')\n", True),
+])
+def test_archive_guard_preserves_publication_and_unrelated_path_verdicts(tmp_path, source, expected):
+    module = tmp_path / "publisher.py"
+    module.write_text(source, encoding="utf-8")
+    assert _publishes_daily_archive(module) is expected
 
 
 def _parsed_module(py: Path) -> ast.AST | None:
@@ -526,12 +597,31 @@ class TestCompileEvidenceEnforcement:
         item = compile_memory.RAW_PLAN_SCHEMA["properties"]["operations"][
             "items"
         ]["properties"]["evidence"]["items"]
-        assert set(item["required"]) == {
+        legacy, native = item["oneOf"]
+        expected = {
             "daily_date",
             "timestamp",
             "quoted_text",
             "claim",
         }
+        assert set(legacy["required"]) == expected
+        assert set(native["required"]) == expected | {"native_event"}
+        assert legacy["additionalProperties"] is False
+        assert native["additionalProperties"] is False
+
+    @pytest.mark.parametrize("field", ("daily_date", "timestamp", "quoted_text", "claim"))
+    @pytest.mark.parametrize("native", (False, True))
+    def test_neither_evidence_form_admits_a_missing_required_field(self, field, native):
+        import compile_memory
+
+        item = compile_memory.RAW_PLAN_SCHEMA["properties"]["operations"]["items"]["properties"]["evidence"]["items"]
+        record = {"daily_date": "2026-07-14", "timestamp": "10:00:00", "quoted_text": "An exact observation.", "claim": "A grounded claim."}
+        if native:
+            record["native_event"] = {"source_path": "knowledge/raw/sessions/2026-07-14/example.md", "byte_start": 0, "line_index": 0}
+        compile_memory._validate_rule(record, item, "$evidence")
+        del record[field]
+        with pytest.raises(ValueError):
+            compile_memory._validate_rule(record, item, "$evidence")
 
 
 # ---------------------------------------------------------------------------

@@ -96,7 +96,7 @@ PYTHON = (
 
 def _without_grammars(monkeypatch) -> None:
     """The documented fallback: a machine with no tree-sitter grammar."""
-    monkeypatch.setattr(code_graph, "_get_parser", lambda language: None)
+    monkeypatch.setattr(code_graph, "_parser_attempt", lambda language: (None, None))
 
 
 def test_a_function_found_by_the_regex_fallback_has_an_end(tmp_path, monkeypatch):

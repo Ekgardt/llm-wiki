@@ -1499,7 +1499,10 @@ class _ProbeRun:
     def _wait_parent(self) -> None:
         try:
             self.parent_returncode = self.process.wait(
-                timeout=max(0.0, self.probe_deadline - time.monotonic())
+                timeout=min(
+                    NODE_PROBE_TIMEOUT_SECONDS,
+                    max(0.0, self.probe_deadline - time.monotonic()),
+                )
             )
         except subprocess.TimeoutExpired:
             if self.degradation_code is None:
@@ -1723,13 +1726,13 @@ def _lock_mentions_pyright(
         return False
     lockfile_version = value.get("lockfileVersion")
     if lockfile_version == 1:
-        entries = value.get("dependencies")
-        key = "pyright"
-    elif lockfile_version in {2, 3}:
-        entries = value.get("packages")
-        key = "node_modules/pyright"
-    else:
-        return False
+        return _contains_lock_entry(value.get("dependencies"), "pyright")
+    if lockfile_version in {2, 3}:
+        return _contains_lock_entry(value.get("packages"), "node_modules/pyright")
+    return False
+
+
+def _contains_lock_entry(entries: object, key: str) -> bool:
     return isinstance(entries, dict) and key in entries
 
 

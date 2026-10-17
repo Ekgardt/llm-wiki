@@ -193,13 +193,17 @@ def _assert_refused(registry, state_root: Path, code: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("observed", "expected"),
-    [("linux:boot:10", "alive"), ("linux:boot:11", "dead")],
+    ("reused", "expected"),
+    [(False, "alive"), (True, "dead")],
 )
 def test_pid_reuse_is_dead_only_when_start_identity_differs(
-    monkeypatch: pytest.MonkeyPatch, observed: str, expected: str
+    monkeypatch: pytest.MonkeyPatch, reused: bool, expected: str
 ) -> None:
-    identity = ownership.ProcessIdentity(pid=99, start_identity="linux:boot:10")
+    recorded = process_liveness.process_start_identity(os.getpid())
+    observed = recorded
+    if reused:
+        observed = recorded.rsplit(":", 1)[0] + ":1234567890123456789"
+    identity = ownership.ProcessIdentity(pid=99, start_identity=recorded)
     monkeypatch.setattr(ownership, "process_start_identity", lambda _pid: observed)
 
     assert ownership.process_identity_state(identity) == expected
@@ -399,16 +403,18 @@ def test_marker_identity_change_blocks_release_and_preserves_owner(
 def test_process_identity_dispatch_liveness_and_actor_contracts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    recorded = process_liveness.process_start_identity(os.getpid())
     monkeypatch.setattr(ownership, "_platform_system", lambda: "Linux")
     monkeypatch.setattr(
-        ownership, "process_start_identity", lambda pid: f"linux:boot:{pid}"
+        ownership, "process_start_identity", lambda pid: recorded
     )
     monkeypatch.setattr(ownership.os, "getpid", lambda: 77)
+    monkeypatch.setattr(process_liveness, "_linux_procfs_pids", lambda: [b"77"])
     monkeypatch.setattr(ownership.os, "getuid", lambda: 501, raising=False)
 
     identity = ownership.current_process_identity()
 
-    assert identity == ownership.ProcessIdentity(pid=77, start_identity="linux:boot:77")
+    assert identity == ownership.ProcessIdentity(pid=77, start_identity=recorded)
     assert ownership.process_identity_state(identity) == "alive"
     assert ownership.current_actor_identity() == "posix-uid:501"
 

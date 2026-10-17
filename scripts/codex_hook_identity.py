@@ -22,5 +22,17 @@ OUR_CODEX_SCRIPTS = tuple(dict.fromkeys(script for script, _ending in OUR_CODEX_
 def is_our_codex_command(command: object) -> bool:
     if not isinstance(command, str):
         return False
+    if "exec(__import__" in command:
+        return _owned_bootstrap_command(command)
     tail = command.rstrip()
     return any(script in tail and tail.endswith(ending) for script, ending in OUR_CODEX_COMMANDS)
+
+
+def _owned_bootstrap_command(command: str) -> bool:
+    from integration_hook_config import codex_command_launch
+
+    try:
+        codex_command_launch(command)
+        return True
+    except (ValueError, TypeError, UnicodeError):
+        return False

@@ -193,7 +193,7 @@ class TestARewriteIsCheckedBeforeItIsWritten:
         reflected = (
             GOOD_REWRITE.replace("# Growing Page", "---\ntype: pattern\n---\n\n# Growing Page")
             + "\n## Update (2026-05-01)\nNew.\n\n## Update (2026-06-01)\nNewer.\n"
-            + "\n\n## History (pre-reflection 2026-03-01)\n<details>\n\n## Update (2026-01-15)\nOld.\n\n</details>\n"
+            + "\n\n## History (pre-reflection 2026-03-01)\n<details>\n<summary>Original page before reflection</summary>\n\n## Update (2026-01-15)\nOld.\n\n</details>\n"
         )
         reflection, _page, _written = _vault_page(tmp_path, monkeypatch, reflected, GOOD_REWRITE)
 

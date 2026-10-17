@@ -14,9 +14,11 @@ Usage examples:
 from __future__ import annotations
 
 import argparse
+import copy
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -138,9 +140,24 @@ def parse_args() -> argparse.Namespace:
     hooks_state.add_argument("--source", required=True)
     hooks_state.add_argument("--config", required=True)
 
+    config_block = sub.add_parser("config-block")
+    config_block.add_argument("--vault-root", required=True)
+
     config_state = sub.add_parser("config-state")
     config_state.add_argument("--config", required=True)
     config_state.add_argument("--vault-root", required=True)
+
+    config_advice = sub.add_parser("config-advice")
+    config_advice.add_argument("--state", required=True)
+
+    config_replace = sub.add_parser("config-replace")
+    config_replace.add_argument("--config", required=True)
+    config_replace.add_argument("--vault-root", required=True)
+    config_replace.add_argument(
+        "--foreign",
+        action="store_true",
+        help="also replace an entry this product did not write (the installer's --replace-codex-mcp)",
+    )
 
     daily = sub.add_parser("daily-log", parents=[common])
     daily.add_argument(
@@ -656,27 +673,139 @@ def _llm_wiki_table(table: object) -> dict[str, Any] | str:
     return table
 
 
-def _mcp_expected_args(vault_root: Path) -> list[str]:
-    return [
-        "run",
-        "--locked",
-        "--no-sync",
-        "--directory",
-        str(vault_root),
-        "python",
-        "scripts/mcp_server.py",
-    ]
+def _mcp_expected_args(vault_root: Path, provider_bundle: dict[str, str] | None = None) -> list[str]:
+    from integration_hook_config import codex_launch_args
+
+    return codex_launch_args(vault_root, "mcp_server.py", (), provider_bundle, relative_target=True)
 
 
-def _mcp_entry_state(table: dict[str, Any], vault_root: Path) -> str:
-    equivalent = (
-        table.get("command") == "uv"
-        and table.get("args") == _mcp_expected_args(vault_root)
-        and table.get("enabled", True) is True
-    )
-    if equivalent:
+# The keys this product has ever written into its Codex entry, and the tail every
+# form of its arguments ended with: `uv run [--locked --no-sync] --directory <vault>
+# python scripts/mcp_server.py` (the pre-bootstrap form retained for migration).
+# An entry of that shape
+# with other arguments is this product's own earlier entry, `stale`, and the installer
+# rewrites it; anything else is the operator's (`conflict`), and an entry switched
+# off with `enabled = false` is the operator's choice (`disabled`).
+# See docs/research/2026-09-28-a-check-names-its-cause.md.
+_OUR_ENTRY_KEYS = frozenset({"command", "args", "enabled"})
+_OUR_ENTRY_TAIL = ["python", "scripts/mcp_server.py"]
+
+
+def _mcp_entry_state(table: dict[str, Any], vault_root: Path,
+                     provider_bundle: dict[str, str] | None = None) -> str:
+    """The first state whose test the entry meets, in the order they are listed."""
+    if _switched_off(table, vault_root):
+        return "disabled"
+    if table.get("command") == "uv" and table.get("args") == _mcp_expected_args(vault_root, provider_bundle):
         return "equivalent"
-    return "conflict"
+    return "stale" if _written_by_this_product(table, vault_root) else "conflict"
+
+
+def _switched_off(table: dict[str, Any], _vault_root: Path) -> bool:
+    return table.get("enabled", True) is False
+
+
+
+def _written_by_this_product(table: dict[str, Any], _vault_root: Path) -> bool:
+    args = table.get("args")
+    if table.get("command") != "uv" or not isinstance(args, list):
+        return False
+    return set(table) <= _OUR_ENTRY_KEYS and (_our_argument_shape(args) or _owned_bootstrap_mcp(args, _vault_root))
+
+
+def _owned_bootstrap_mcp(args: list[object], vault_root: Path) -> bool:
+    from integration_hook_config import codex_launch_bundle
+
+    try:
+        codex_launch_bundle(args, vault_root)
+        return args[9:] == ["scripts/mcp_server.py"]
+    except (ValueError, TypeError, UnicodeError):
+        return False
+
+
+def _our_argument_shape(args: list[object]) -> bool:
+    return args[:1] == ["run"] and args[-2:] == _OUR_ENTRY_TAIL and "--directory" in args
+
+
+# `[mcp_servers.llm-wiki]` or `[mcp_servers."llm-wiki"]` on its own line: the only form
+# the entry is rewritten in. Inline or dotted-key forms are left alone.
+_MCP_TABLE_HEADER = re.compile(r'^\[\s*mcp_servers\s*\.\s*(?:llm-wiki|"llm-wiki")\s*\]\s*(?:#.*)?$')
+_TABLE_START = re.compile(r"^\s*\[")
+
+
+def _mcp_block(vault_root: Path) -> str:
+    """The entry this product writes, as `install.sh` and `install.ps1` append it."""
+    args = ", ".join(json.dumps(item) for item in _mcp_expected_args(vault_root))
+    return f'[mcp_servers.llm-wiki]\ncommand = "uv"\nargs = [{args}]\n'
+
+
+def _entry_span(lines: list[str]) -> tuple[int, int] | None:
+    """(first line, end) of the one standalone entry table, or None."""
+    headers = [index for index, line in enumerate(lines) if _MCP_TABLE_HEADER.match(line.strip())]
+    if len(headers) != 1:
+        return None
+    start = headers[0]
+    return start, _before_leading_comments(lines, start, _next_table(lines, start))
+
+
+def _next_table(lines: list[str], start: int) -> int:
+    following = (index for index in range(start + 1, len(lines)) if _TABLE_START.match(lines[index]))
+    return next(following, len(lines))
+
+
+def _before_leading_comments(lines: list[str], start: int, end: int) -> int:
+    """Blank and comment lines just above the next table belong to that table."""
+    while end > start + 1 and lines[end - 1].strip()[:1] in {"", "#"}:
+        end -= 1
+    return end
+
+
+def _rewritten_text(text: str, vault_root: Path) -> str | None:
+    lines = text.splitlines(keepends=True)
+    span = _entry_span(lines)
+    if span is None:
+        return None
+    start, end = span
+    separator = "\n" if end < len(lines) else ""
+    return "".join(lines[:start]) + _mcp_block(vault_root) + separator + "".join(lines[end:])
+
+
+def _only_the_entry_changed(document: dict[str, Any], rewritten: str, vault_root: Path) -> bool:
+    """The rewritten file parses to the old document with only the entry replaced."""
+    expected = copy.deepcopy(document)
+    expected["mcp_servers"]["llm-wiki"] = {"command": "uv", "args": _mcp_expected_args(vault_root)}
+    try:
+        return tomllib.loads(rewritten) == expected
+    except tomllib.TOMLDecodeError:
+        return False
+
+
+_REPLACEABLE = {"stale": False, "conflict": True}
+
+
+def replace_codex_mcp_entry(config: Path, vault_root: Path, *, foreign: bool) -> str:
+    """Rewrite the entry to this vault's, keeping a verified preimage beside the file.
+
+    `stale` is always rewritten; `conflict` only when the operator asked (`foreign`).
+    Returns `replaced`, `refused-foreign`, `not-rewritable`, or the unchanged state.
+    """
+    state = codex_mcp_config_state(config, vault_root)
+    if state not in _REPLACEABLE:
+        return state
+    if _REPLACEABLE[state] and not foreign:
+        return "refused-foreign"
+    return _publish_rewritten_entry(config, vault_root)
+
+
+def _publish_rewritten_entry(config: Path, vault_root: Path) -> str:
+    original = config.read_bytes()
+    rewritten = _rewritten_text(original.decode("utf-8"), vault_root)
+    if rewritten is None:
+        return "not-rewritable"
+    if not _only_the_entry_changed(_read_codex_toml(config), rewritten, vault_root):
+        return "not-rewritable"
+    publish_configuration(config, rewritten.encode("utf-8"), expected_original=original)
+    return "replaced"
 
 
 def _read_codex_document(config: Path) -> dict[str, Any] | str:
@@ -686,20 +815,22 @@ def _read_codex_document(config: Path) -> dict[str, Any] | str:
         return "invalid"
 
 
-def codex_mcp_config_state(config: Path, vault_root: Path) -> str:
+def codex_mcp_config_state(config: Path, vault_root: Path,
+                           provider_bundle: dict[str, str] | None = None) -> str:
     """Classify the existing Codex MCP entry without modifying TOML."""
     if not config.exists():
         return "absent"
-    return _document_mcp_state(_read_codex_document(config), vault_root)
+    return _document_mcp_state(_read_codex_document(config), vault_root, provider_bundle)
 
 
-def _document_mcp_state(document: dict[str, Any] | str, vault_root: Path) -> str:
+def _document_mcp_state(document: dict[str, Any] | str, vault_root: Path,
+                        provider_bundle: dict[str, str] | None = None) -> str:
     if isinstance(document, str):
         return document
     entry = _mcp_entry(document)
     if isinstance(entry, str):
         return entry
-    return _mcp_entry_state(entry, vault_root)
+    return _mcp_entry_state(entry, vault_root, provider_bundle)
 
 
 def _read_hooks_document(path: Path, *, missing_ok: bool) -> dict[str, Any]:
@@ -959,8 +1090,11 @@ def _print_heartbeat(result: dict[str, Any], reason: str) -> None:
     print(f"Reason: {reason}")
 
 
-def _print_daily_tag(result: dict[str, Any], reason: str, session_id: str) -> None:
-    print(f"Daily log tagged for slug: {result.get('slug')}")
+def _print_daily_capture(result: dict[str, Any], reason: str, session_id: str) -> None:
+    if result["daily_log_written"]:
+        print(f"Daily log tagged for slug: {result.get('slug')}")
+    else:
+        print(f"Daily log not written for slug: {result.get('slug')}")
     print(f"Reason: {reason}")
     print(f"Session id: {session_id}")
     if result["flush_spawned"]:
@@ -971,7 +1105,7 @@ def _print_daily_result(result: dict[str, Any], reason: str, session_id: str) ->
     if result["heartbeat_recorded"]:
         _print_heartbeat(result, reason)
         return
-    _print_daily_tag(result, reason, session_id)
+    _print_daily_capture(result, reason, session_id)
 
 
 def _daily_outcome(
@@ -1020,8 +1154,48 @@ def command_hooks_state(args: argparse.Namespace) -> int:
     return 0
 
 
+# One plain line per state the entry can be left in; none asks for a manual merge.
+# Both installers print it, so they say the same thing.
+# See docs/research/2026-09-28-a-check-names-its-cause.md.
+_REPLACE_HINT = "rerun the installer with --replace-codex-mcp (install.ps1: -ReplaceCodexMcp)"
+CODEX_MCP_ADVICE = {
+    "conflict": (
+        "Codex already has an 'llm-wiki' MCP entry that LLM-Wiki did not write; it was left "
+        f"as it is. To use this vault instead, {_REPLACE_HINT}; the current file is kept beside it."
+    ),
+    "disabled": "The Codex 'llm-wiki' MCP entry is switched off (enabled = false); left as you set it.",
+    "not-rewritable": (
+        "The Codex 'llm-wiki' MCP entry is written in a form the installer does not rewrite "
+        "(inline or split tables); config.toml was not changed."
+    ),
+    "invalid": "Codex config.toml is not valid TOML; it was not changed.",
+}
+CODEX_MCP_ADVICE["refused-foreign"] = CODEX_MCP_ADVICE["conflict"]
+
+
+def command_config_advice(args: argparse.Namespace) -> int:
+    default = "Codex MCP config could not be verified; config.toml was not changed."
+    print(CODEX_MCP_ADVICE.get(args.state, default))
+    return 0
+
+
+def _write_config_status(status: str) -> None:
+    """Machine-readable installer states use LF on every host, including Windows."""
+    sys.stdout.buffer.write((status + "\n").encode("utf-8"))
+
+
+def command_config_block(args: argparse.Namespace) -> int:
+    sys.stdout.buffer.write(_mcp_block(Path(args.vault_root)).encode("utf-8"))
+    return 0
+
+
+def command_config_replace(args: argparse.Namespace) -> int:
+    _write_config_status(replace_codex_mcp_entry(Path(args.config), Path(args.vault_root), foreign=args.foreign))
+    return 0
+
+
 def command_config_state(args: argparse.Namespace) -> int:
-    print(codex_mcp_config_state(Path(args.config), Path(args.vault_root)))
+    _write_config_status(codex_mcp_config_state(Path(args.config), Path(args.vault_root)))
     return 0
 
 
@@ -1034,6 +1208,9 @@ _COMMANDS = {
     "merge-hooks": command_merge_hooks,
     "hooks-state": command_hooks_state,
     "config-state": command_config_state,
+    "config-replace": command_config_replace,
+    "config-block": command_config_block,
+    "config-advice": command_config_advice,
 }
 
 

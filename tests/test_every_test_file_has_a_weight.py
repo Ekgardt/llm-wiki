@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from tests import shard_plan
 
 REPORT = """<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite>
@@ -42,3 +44,22 @@ def test_the_slowest_job_sets_the_weight(tmp_path: Path) -> None:
 
 def test_an_unweighted_file_costs_the_table_mean() -> None:
     assert shard_plan._cost("test_new.py", {"a.py": 1.0, "b.py": 9.0}) == 5.0
+
+
+@pytest.mark.parametrize("exit_code", [1, 7])
+def test_a_failed_measurement_returns_pytest_failure_and_keeps_weights(tmp_path, monkeypatch, exit_code):
+    table = tmp_path / "weights.json"
+    before = '{"test_one.py": 42.0}\n'
+    table.write_text(before, encoding="utf-8")
+    monkeypatch.setattr(shard_plan, "WEIGHTS_PATH", table)
+    monkeypatch.setattr(shard_plan, "test_files", lambda: ["test_one.py"])
+
+    def failed_pytest(command, **_kwargs):
+        report_argument = next(value for value in command if value.startswith("--junitxml="))
+        Path(report_argument.split("=", 1)[1]).write_text(REPORT, encoding="utf-8")
+        return exit_code
+
+    monkeypatch.setattr(shard_plan.subprocess, "call", failed_pytest)
+    result = shard_plan.main(["--weigh", "tests/test_one.py"])
+    assert result == exit_code
+    assert table.read_text(encoding="utf-8") == before

@@ -225,9 +225,12 @@ EDGE_FAULTS = {
     "anchor-timeout": ("timeout", "edge anchor validation timed out"),
     "anchor-moves": ("stale", "edge target changed during verification"),
     "verifier-timeout": ("timeout", "edge verifier timed out"),
-    "verifier-error": ("error", "edge verifier failed"),
+    "verifier-error": ("error", "edge verifier failed: RuntimeError"),
     "verifier-false": ("partial", "no structural edge proof"),
-    "verifier-not-boolean": ("error", "edge verifier failed"),
+    "verifier-not-boolean": (
+        "error",
+        "edge verifier failed: TypeError",
+    ),
 }
 
 
@@ -272,7 +275,10 @@ def _resolver_failing_midway(symbol, repository, deadline):
 
 
 SYMBOL_RESOLVERS = {
-    "fails-midway": (_resolver_failing_midway, ("error", ("symbol resolver failed",))),
+    "fails-midway": (
+        _resolver_failing_midway,
+        ("error", ("symbol resolver failed: RuntimeError",)),
+    ),
     "times-out": (_raise(TimeoutError("resolver")), ("timeout", ("symbol resolver timed out",))),
     "finds-nothing": (lambda *args: (), ("partial", ("no structural candidates",))),
 }
@@ -407,3 +413,28 @@ def _revision_entries(scope: RepositoryScope) -> dict[str, object]:
 
 def _cached_names(facade: CodeNavigation) -> list[str]:
     return [key[0].rsplit("/", 1)[-1] for key in facade._source_document_cache]
+
+
+def test_a_failed_structural_fallback_names_its_class_and_not_its_text(
+    navigation, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The warning said only `structural fallback failed`; the exception was dropped.
+
+    Its class is named; its text, which may quote any path, is not.
+    """
+    facade, session, scope = navigation
+    _pin_attempt(monkeypatch, session, scope)
+    root = scope.checkout_root
+    monkeypatch.setattr(
+        facade, "_structural_candidates", _raise(RuntimeError(f"no graph under {root}"))
+    )
+    monkeypatch.setattr(session, "type_definition", TYPE_CALLS["reports"])
+    monkeypatch.setattr(session, "hover", HOVER_CALLS["ranged"])
+
+    result = facade.query(
+        NavigationRequest(scope, Capability.TYPES, "pkg/service.py", 10, 20),
+        deadline=time.monotonic() + SHORT_TIMEOUT,
+    )
+
+    assert "structural fallback failed: RuntimeError" in result.warnings
+    assert "no graph" not in "".join(result.warnings)

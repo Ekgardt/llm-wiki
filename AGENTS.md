@@ -11,6 +11,9 @@ it loads.
 
 ## 0. Process rules (mandatory)
 
+### Обязательные законы разработки
+Перед началом работы обязательно прочитай [Обязательные законы разработки](rules/development-laws.md) полностью и соблюдай все девять законов при исследовании, проектировании, разработке, тестировании, установке изменений и сопровождении системы. Файл содержит текст законов пользователя с прямо согласованными им изменениями; сведения о редакции указаны в самом файле. Изменять, ослаблять или обходить эти законы без прямого указания пользователя запрещено. Если требование невозможно выполнить, прямо сообщи об этом; не выдавай невыполненное за выполненное.
+
 ### How to talk to the user
 - Write in **plain human language**. Short sentences.
 - Avoid jargon stacks, audit IDs, severity tables unless the user explicitly
@@ -266,10 +269,13 @@ report kept whole up to 8 000 characters. Retention never depends on
 a judgement made before the question exists; the classifier decides only whether
 a session also deserves a compiled page. That directory is private by default
 (`knowledge/raw/**` is denied in `.gitignore`), the record is bounded, and a
-failed write never breaks capture. Session evidence is not yet a member of the
-corpus generation, so it is on disk and greppable but not yet part of hybrid
-retrieval — adding it requires the corpus collector to carry a `session` source
-kind. See `knowledge/notes/session-evidence-retention-decision.md`.
+failed write never breaks capture. Ordinary session dumps remain outside the
+corpus generation. The durable breadcrumb repair admits only verified linked
+breadcrumb heads and complete parts through the existing `session` source kind;
+physical source hashes and citation spans are retained. Prompt/tool producers use
+the common durable ingress, installed on 2026-09-30 after regression, retrieval,
+answer-cost and fenced-ownership qualification. See the durable breadcrumb repair contract
+in `docs/STRUCTURE.md`. See `knowledge/notes/session-evidence-retention-decision.md`.
 
 **Forbidden at vault root:** `wiki/`, `memory/`, `outputs/`, `state/`,
 `LLM-wiki-state/` (legacy sibling layout — removed). Runtime lives **inside**
@@ -487,7 +493,7 @@ uv run python scripts/compile_memory.py            # compile daily logs → note
 uv run python scripts/lookup_mode.py               # show retrieval tier
 uv run python scripts/mcp_server.py                # MCP server (12 tools, stdio; base install)
 uv run python scripts/doctor.py                    # local health; --repair is explicit
-# v4.0 optional features (require --extra flags):
+# v4.0 features (every install brings them; other language servers: install_language_server.py):
 uv run python scripts/repository_index.py index .  # index a repository's code (a generation)
 uv run python scripts/code_graph.py .              # read-only live parse summary
 uv run python scripts/impact_analysis.py           # git diff → stale wiki pages

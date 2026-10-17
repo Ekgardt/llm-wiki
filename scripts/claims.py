@@ -11,6 +11,7 @@ import time
 import unicodedata
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -31,13 +32,19 @@ from reliable_memory import (
     open_operational_db,
     sha256_bytes,
     validate_schema,
-    validate_state_root,
+    validate_schema_object,
 )
 from settings import raise_hint, setting_value
 
 SCHEMA_DIR = Path(__file__).with_name("schemas")
 LEDGER_SCHEMA = SCHEMA_DIR / "claim-ledger-v1.json"
 CANDIDATE_SCHEMA = SCHEMA_DIR / "claim-candidate-v1.json"
+LEDGER_V2_SCHEMA = SCHEMA_DIR / "claim-ledger-v2.json"
+_LEDGER_SCHEMAS = {"claim-ledger/v1": LEDGER_SCHEMA, "claim-ledger/v2": LEDGER_V2_SCHEMA}
+_RECORD_SCHEMA_RULES = {
+    "claim/v1": json.loads(LEDGER_SCHEMA.read_text(encoding="utf-8"))["properties"]["claims"]["items"],
+    "claim/v2": json.loads(LEDGER_V2_SCHEMA.read_text(encoding="utf-8"))["properties"]["claims"]["items"]["oneOf"][1],
+}
 # The claim tree's ceiling, which is the journal's: a project journal is one of
 # the pages this index reads, and a page the journal accepts must never be one
 # the index refuses. Measured 2026-09-10: a 4.2 MB journal refused every compile
@@ -599,16 +606,16 @@ class ClaimPipeline:
         raw = claim.record
         semantic = _semantic_payload(raw)
         record = {
-            "schema_version": "claim/v1",
+            "schema_version": raw.get("schema_version", "claim/v1"),
             "id": _trim(raw["id"], label="id"),
             "fingerprint": sha256_bytes(canonical_json_bytes(semantic)),
-            "text": _nfc(raw["text"]),
+            "text": _normalized_literal(raw),
             **semantic,
             "observed_at": claim.claim.block.observed_at,
             "lifecycle": raw["lifecycle"],
             "confidence": raw["confidence"],
             "authority": raw["authority"],
-            "evidence": json.loads(canonical_json_bytes(raw["evidence"])),
+            "evidence": _normalized_evidence(raw),
             "links": sorted({_trim(item, label="claim link") for item in raw["links"]}),
             "extractor_version": _trim(raw["extractor_version"], label="extractor version"),
         }
@@ -684,8 +691,116 @@ def _evidence_literal(span: bytes) -> str:
         raise EvidenceMismatch("evidence span is not UTF-8") from exc
 
 
+def _normalized_evidence(record: Mapping[str, object]) -> dict:
+    if record.get("schema_version") == "claim/v2":
+        return deepcopy(record["evidence"])
+    return json.loads(canonical_json_bytes(record["evidence"]))
+
+
+def _requires_literal_encoding(value: object) -> bool:
+    if isinstance(value, (list, tuple)):
+        return any(_requires_literal_encoding(item) for item in value)
+    if not isinstance(value, Mapping):
+        return False
+    return value.get("schema_version") in ("claim/v2", "claim-ledger/v2") or _embedded_literal_encoding(value)
+
+
+def _embedded_literal_encoding(value: Mapping[str, object]) -> bool:
+    return any(_requires_literal_encoding(item) for item in value.get("claims", [])) or _requires_literal_encoding(value.get("claim")) or _has_native_evidence(value)
+
+
+def _has_native_evidence(value: Mapping[str, object]) -> bool:
+    return "native_event" in value or any(isinstance(item, Mapping) and "native_event" in item for item in value.get("evidence", []))
+
+
+def claim_json_bytes(value: object) -> bytes:
+    """Historical v1 canonical encoding, or exact v2 physical literal strings.
+
+    Accepts a validated claim, ledger or existing candidate wrapper. Semantic
+    fingerprints still use canonical_json_bytes; this encoder never grants proof.
+    """
+    if _requires_literal_encoding(value):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8", errors="strict")
+    return canonical_json_bytes(value)
+
+
+def _normalized_literal(record: Mapping[str, object]) -> str:
+    if record.get("schema_version") == "claim/v2":
+        return record["text"]
+    return _nfc(record["text"])
+
+
+def _require_claim_byte_budget(content: bytes) -> None:
+    if len(content) > MAX_CLAIM_PAGE_BYTES:
+        raise ValueError("claim content exceeds the existing page byte budget")
+
+
+def _ledger_schema_path(ledger: object) -> Path:
+    if not isinstance(ledger, Mapping):
+        raise ValueError("claim ledger must be an object")
+    path = _LEDGER_SCHEMAS.get(_document_version(ledger))
+    if path is None:
+        raise ValueError("unsupported claim ledger version")
+    return path
+
+
+def claim_record_schema(record: object) -> dict:
+    if not isinstance(record, Mapping):
+        raise ValueError("claim record must be an object")
+    version = _document_version(record)
+    if version not in _RECORD_SCHEMA_RULES:
+        raise ValueError("unsupported claim record version")
+    return deepcopy(_RECORD_SCHEMA_RULES[version])
+
+
+def _document_version(document: Mapping[str, object]) -> str:
+    version = document.get("schema_version")
+    if not isinstance(version, str):
+        raise ValueError("claim document version must be a string")
+    return version
+
+
+def _candidate_schema(record: object) -> dict:
+    rule = claim_record_schema(record)
+    schema = json.loads(CANDIDATE_SCHEMA.read_text(encoding="utf-8"))
+    if record["schema_version"] == "claim/v1":
+        return schema
+    rule["properties"]["lifecycle"] = deepcopy(schema["properties"]["claim"]["properties"]["lifecycle"])
+    schema["properties"]["claim"] = rule
+    return schema
+
+
+def validate_claim_candidate(candidate: object) -> None:
+    if not isinstance(candidate, Mapping):
+        raise ValueError("claim candidate must be an object")
+    record = candidate.get("claim")
+    schema = _candidate_schema(record)
+    _require_claim_byte_budget(claim_json_bytes(candidate))
+    validate_schema_object(candidate, schema)
+    validate_claim_record(record)
+
+
+def claim_ledger_document(records: Sequence[Mapping[str, object]], *, previous_version: str | None = None) -> dict:
+    for record in records:
+        validate_claim_record(record)
+    version = _ledger_output_version(records, previous_version)
+    ledger = {"schema_version": version, "claims": list(records)}
+    validate_schema(ledger, _ledger_schema_path(ledger))
+    _require_claim_byte_budget(claim_json_bytes(ledger))
+    return ledger
+
+
+def _ledger_output_version(records: Sequence[Mapping[str, object]], previous_version: str | None) -> str:
+    if previous_version not in {None, "claim-ledger/v1", "claim-ledger/v2"}:
+        raise ValueError("unsupported previous claim ledger version")
+    if previous_version == "claim-ledger/v2" or any(record["schema_version"] == "claim/v2" for record in records):
+        return "claim-ledger/v2"
+    return "claim-ledger/v1"
+
+
 def validate_claim_record(record: object) -> None:
-    validate_schema({"schema_version": "claim-ledger/v1", "claims": [record]}, LEDGER_SCHEMA)
+    _require_claim_byte_budget(claim_json_bytes(record))
+    validate_schema_object(record, claim_record_schema(record))
     assert isinstance(record, Mapping)
     _require_canonical_semantics(record)
     evidence = record["evidence"]
@@ -730,12 +845,22 @@ def _require_observation(record: Mapping[str, object], ref: EvidenceRef) -> None
         raise ValueError("claim observation does not match its evidence block")
 
 
+def claim_ledger_fingerprint(ledger: dict[str, object] | None) -> str:
+    """Bind the validated ledger consumed by assessment, including its absence."""
+    return sha256_bytes(canonical_json_bytes(ledger))
+
+
+def _record_ledger_snapshot(snapshot, relative, ledger) -> None:
+    if snapshot is not None:
+        snapshot[relative] = claim_ledger_fingerprint(ledger)
+
+
 def parse_claim_ledger(content: bytes) -> dict[str, object] | None:
-    text = _decoded_claim_page(content)
-    if not _has_claims_heading(text):
+    match = claim_ledger_match(content)
+    if match is None:
         return None
-    ledger = _parsed_ledger(text)
-    validate_schema(ledger, LEDGER_SCHEMA)
+    ledger = _parsed_ledger(match)
+    validate_schema(ledger, _ledger_schema_path(ledger))
     _require_unique_ledger_ids(ledger["claims"])
     for record in ledger["claims"]:
         validate_claim_record(record)
@@ -749,25 +874,185 @@ def _decoded_claim_page(content: bytes) -> str:
         raise ValueError("claim page is not UTF-8") from exc
 
 
-def _has_claims_heading(text: str) -> bool:
-    headings = list(re.finditer(r"(?m)^## Claims[ \t]*\r?$", text))
-    if not headings:
+_REFLECTION_HEADER = re.compile(rb"## History \(pre-reflection (\d{4}-\d{2}-\d{2})\)[ \t]*")
+_REFLECTION_SUMMARY = b"<summary>Original page before reflection</summary>"
+_CLAIMS_HEADING = re.compile(rb"## Claims[ \t]*")
+_DETAILS_OPEN = re.compile(rb"<details>(?:[ \t]*<summary>.*</summary>)?")
+
+
+class _ClaimPageScan:
+    """Only the producer-owned historical container is excluded from authority."""
+
+    def __init__(self):
+        self.fence = None
+        self.depth = 0
+        self.pending = None
+        self.start = None
+        self.summary_pending = False
+        self.headings = []
+        self.histories = []
+        self.history_markers = []
+
+    def line(self, body, start, end):
+        if self.pending is not None or self.summary_pending:
+            self._container_header(body)
+            return
+        if self._fenced(body):
+            return
+        self._body_line(body, start, end)
+
+    def _container_header(self, body):
+        if self.pending is not None:
+            self._begin_history(body)
+            return
+        self._summary(body)
+
+    def _body_line(self, body, start, end):
+        if self.depth:
+            self._history_line(body, end)
+            return
+        self._active_line(body, start)
+
+    def _fenced(self, body):
+        from corpus_snapshot import _closing_fence, _opening_fence
+
+        if self.fence is not None:
+            character, length = self.fence
+            if _closing_fence(body, character, length):
+                self.fence = None
+            return True
+        opening = _opening_fence(body)
+        return self._opened_fence(opening)
+
+    def _opened_fence(self, opening):
+        if opening is None:
+            return False
+        self.fence = (opening[1][:1], len(opening[1]))
+        return True
+
+    def _active_line(self, body, start):
+        _require_no_orphan_history_close(body, self.histories)
+        self._note_history_marker(body, start)
+        if _reflection_header(body):
+            self.pending = start
+            return
+        if _CLAIMS_HEADING.fullmatch(body):
+            self.headings.append(start)
+
+    def _note_history_marker(self, body, start):
+        if body.startswith(b"## History (pre-reflection"):
+            self.history_markers.append(start)
+
+    def _begin_history(self, body):
+        if not body.strip():
+            return
+        _require_reflection_open(body)
+        self.start, self.pending, self.depth = self.pending, None, 1
+        self.summary_pending = body == b"<details>"
+
+    def _history_line(self, body, end):
+        self.depth += _details_delta(body)
+        if self.depth == 0:
+            self.histories.append((self.start, end))
+            self.start = None
+
+    def _summary(self, body):
+        if not body.strip():
+            return
+        if body != _REFLECTION_SUMMARY:
+            raise ValueError("reflection history has no canonical summary")
+        self.summary_pending = False
+
+    def finish(self):
+        if self.pending is not None or self.depth:
+            raise ValueError("reflection history is malformed or unclosed")
+
+
+def _reflection_header(body):
+    matched = _REFLECTION_HEADER.fullmatch(body)
+    if matched is None:
         return False
-    if len(headings) != 1:
-        raise ValueError("claim page must contain exactly one Claims ledger")
+    date.fromisoformat(matched[1].decode("ascii"))
     return True
 
 
-def _parsed_ledger(text: str) -> dict[str, object]:
-    match = CLAIM_LEDGER_RE.search(text.encode("utf-8"))
-    if match is None:
+def _require_reflection_open(body):
+    allowed = (b"<details>", b"<details>" + _REFLECTION_SUMMARY)
+    if body not in allowed:
+        raise ValueError("reflection history has no canonical details container")
+
+
+def _require_no_orphan_history_close(body, histories):
+    if histories and body == b"</details>":
+        raise ValueError("reflection history has an unmatched closing container")
+
+
+def _details_delta(body):
+    if body == b"</details>":
+        return -1
+    return int(_DETAILS_OPEN.fullmatch(body) is not None)
+
+
+def _claim_page_scan(content):
+    scan, offset = _ClaimPageScan(), 0
+    for line in content.splitlines(keepends=True):
+        end = offset + len(line)
+        scan.line(line.rstrip(b"\r\n"), offset, end)
+        offset = end
+    scan.finish()
+    return scan
+
+
+def _active_claim_match(content, scan):
+    if not scan.headings:
+        return None
+    if len(scan.headings) != 1:
+        raise ValueError("claim page must contain exactly one Claims ledger")
+    masked = bytearray(content)
+    for start, end in scan.histories:
+        masked[start:end] = re.sub(rb"[^\r\n]", b" ", content[start:end])
+    matched = CLAIM_LEDGER_RE.match(bytes(masked), scan.headings[0])
+    return _require_claim_match(matched)
+
+
+def _require_claim_match(matched):
+    if matched is None:
         raise ValueError("Claims ledger must be one fenced canonical JSON object")
+    return matched
+
+
+def claim_ledger_match(content: bytes):
+    """The active canonical ledger with original byte offsets, never history."""
+    _require_claim_byte_budget(content)
+    _decoded_claim_page(content)
+    return _active_claim_match(content, _claim_page_scan(content))
+
+
+def reflection_history_spans(content: bytes) -> tuple[tuple[int, int], ...]:
+    """Exact byte ranges of balanced producer-owned historical containers."""
+    _require_claim_byte_budget(content)
+    _decoded_claim_page(content)
+    return tuple(_claim_page_scan(content).histories)
+
+
+def reflection_history_boundary(content: bytes) -> int | None:
+    """The legacy or current history heading outside Markdown fences."""
+    scan = _claim_page_scan(content)
+    if not scan.history_markers:
+        return None
+    start = scan.history_markers[0]
+    if start and content[start - 1:start] == b"\n":
+        return start - 1
+    return start
+
+
+def _parsed_ledger(match) -> dict[str, object]:
     raw = match[2]
     try:
         ledger = json.loads(raw.decode("utf-8"))
     except json.JSONDecodeError as exc:
         raise ValueError("Claims ledger is malformed JSON") from exc
-    if canonical_json_bytes(ledger) != raw:
+    if claim_json_bytes(ledger) != raw:
         raise ValueError("Claims ledger is not restricted canonical JSON")
     return ledger
 
@@ -1022,14 +1307,18 @@ class ClaimIndex:
         *,
         deadline: float = float("inf"),
         cancelled: Callable[[], bool] | None = None,
+        ledger_snapshot: dict[str, str] | None = None,
     ) -> None:
         if time.monotonic() >= deadline or bool(cancelled and cancelled()):
             raise TimeoutError("claim rebuild cancelled or deadline reached")
-        validate_state_root(self.path.parent)
-        _restrict_owner_only(self.path.parent, 0o700)
+        # The established database-open boundary validates the actual parent.
+        # It also remains importable by processes holding the previous module.
+        with closing(self._connect()):
+            pass
         with _exclusive_file_lock(self.lock_path):
             pages = self._rebuild_pages(sources)
-            self._rebuild_locked(pages, deadline=deadline, cancelled=cancelled)
+            self._rebuild_locked(pages, deadline=deadline, cancelled=cancelled,
+                                 ledger_snapshot=ledger_snapshot)
 
     def _rebuild_pages(
         self,
@@ -1074,13 +1363,14 @@ class ClaimIndex:
         *,
         deadline: float = float("inf"),
         cancelled: Callable[[], bool] | None = None,
+        ledger_snapshot: dict[str, str] | None = None,
     ) -> None:
         rows: list[tuple[object, ...]] = []
         diagnostics: list[tuple[str, str, str]] = []
         seen_pages: set[str] = set()
         for page in pages:
             _require_rebuild_active(deadline, cancelled)
-            self._collect_page(Path(page), seen_pages, rows, diagnostics)
+            self._collect_page(Path(page), seen_pages, rows, diagnostics, ledger_snapshot)
         _require_rebuild_active(deadline, cancelled)
         self._write_index(rows, diagnostics)
 
@@ -1090,12 +1380,14 @@ class ClaimIndex:
         seen_pages: set[str],
         rows: list[tuple[object, ...]],
         diagnostics: list[tuple[str, str, str]],
+        ledger_snapshot: dict[str, str] | None = None,
     ) -> None:
         relative, content = self._page_bytes(page)
         if relative in seen_pages:
             raise ValueError("claim index page list contains duplicates")
         seen_pages.add(relative)
         ledger = parse_claim_ledger(content)
+        _record_ledger_snapshot(ledger_snapshot, relative, ledger)
         if ledger is None:
             return
         for record in ledger["claims"]:
@@ -1120,7 +1412,7 @@ class ClaimIndex:
                 record["relation"],
                 record["lifecycle"],
                 relative,
-                canonical_json_bytes(record),
+                claim_json_bytes(record),
             )
         )
 

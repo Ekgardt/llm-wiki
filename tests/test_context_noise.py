@@ -13,6 +13,7 @@ Useful signal must survive:
 """
 from __future__ import annotations
 
+import faulthandler
 import json
 import os
 import re
@@ -258,7 +259,7 @@ def test_session_start_injects_bounded_health_only_when_degraded(monkeypatch):
     monkeypatch.setattr(session_start_context, "advisory_block", lambda slug=None: "")
     monkeypatch.setattr(session_start_context, "_impact_block", lambda: "")
 
-    assert session_start_context.health_block() == "## Health\n\nindex: stale\n\n"
+    assert session_start_context.health_block() == "## Health\n\nOperational scope; retained history not checked.\nindex: stale\n\n"
     context = session_start_context.build_context()
     assert "## Health" in context
     assert len(context.encode("utf-8")) <= (
@@ -806,7 +807,9 @@ def test_session_start_health_fails_open(monkeypatch):
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("doctor unavailable")),
     )
 
-    assert session_start_context.health_block() == ""
+    block = session_start_context.health_block()
+    assert "Operational health could not be measured" in block
+    assert "doctor unavailable" in block
 
 
 def test_session_start_health_uses_strict_doctor_budget(monkeypatch):
@@ -938,15 +941,19 @@ def test_session_start_health_latency_is_bounded_with_large_unsafe_queue(
     monkeypatch.setattr(session_start_context, "ROOT", root)
     monkeypatch.setattr(session_start_context, "STATE_ROOT", state_root)
 
-    started = time.perf_counter()
-    block = session_start_context.health_block()
-    elapsed = time.perf_counter() - started
+    faulthandler.dump_traceback_later(0.5)
+    try:
+        started = time.perf_counter()
+        block = session_start_context.health_block()
+        elapsed = time.perf_counter() - started
+    finally:
+        faulthandler.cancel_dump_traceback_later()
 
     assert (elapsed < 0.5, block.startswith("## Health"), "secret" in block) == (
         True,
         True,
         False,
-    )
+    ), f"health block elapsed {elapsed:.6f}s"
 
 
 def _fake_section(monkeypatch, module, *, log_entry: str) -> None:
@@ -1044,10 +1051,10 @@ def test_a_truncated_run_reports_only_that_it_was_truncated(monkeypatch):
 
     block = session_start_context.health_block()
 
-    assert "Health was not measured" in block
-    assert "1 of 2 checks" in block
-    assert "queue" not in block
-    assert "unreadable" not in block
+    assert "Operational checks incomplete" in block
+    assert "1 of 2" in block
+    assert "queue" in block
+    assert "unreadable" in block
 
 
 def test_a_complete_run_reports_its_findings(monkeypatch):
@@ -1061,7 +1068,7 @@ def test_a_complete_run_reports_its_findings(monkeypatch):
     monkeypatch.setattr(doctor, "run_doctor", lambda **kwargs: report)
     monkeypatch.setattr(doctor, "degraded_summary", lambda passed: "index: stale")
 
-    assert session_start_context.health_block() == "## Health\n\nindex: stale\n\n"
+    assert session_start_context.health_block() == "## Health\n\nOperational scope; retained history not checked.\nindex: stale\n\n"
 
 
 def _knowledge_state(monkeypatch, state: dict) -> str:

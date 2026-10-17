@@ -1,6 +1,6 @@
 """The class-d cuts in the core modules lose nothing silently (law 9, phase 2a).
 
-A claim past the per-page cap is reported like any other dropped claim, and the
+Malformed claims are reported; valid claims share the response budget. The
 navigation answer's CALLS read is anchored on the symbol, so a repository with more
 call edges than the fact bound still finds the symbol's calls. See
 `docs/research/2026-09-27-a-cut-says-what-it-left-out.md` and
@@ -26,14 +26,13 @@ def _candidate(index: int) -> dict[str, object]:
     }
 
 
-def test_a_claim_past_the_page_cap_is_reported_as_dropped() -> None:
-    cap = compile_memory.MAX_CLAIMS_PER_OPERATION
+def test_admission_preserves_valid_claims_and_reports_only_malformed() -> None:
+    candidates = [_candidate(index) for index in range(10)]
     before = len(compile_memory.DROPPED_CLAIMS)
-
-    kept = compile_memory._admitted_candidates([_candidate(index) for index in range(cap + 2)], "cut-page")
-
+    kept = compile_memory._admitted_candidates(candidates + [{"subject": None}], "cut-page")
     dropped = compile_memory.DROPPED_CLAIMS[before:]
-    assert (len(kept), [item["slug"] for item in dropped]) == (cap, ["cut-page", "cut-page"])
+    assert kept == candidates
+    assert [item["slug"] for item in dropped] == ["cut-page"]
 
 
 class _AnchoredGraph:

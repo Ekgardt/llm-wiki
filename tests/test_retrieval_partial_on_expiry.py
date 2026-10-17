@@ -28,6 +28,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.retrieval_stage_deadline import expire_after_backend
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
@@ -52,32 +54,15 @@ def _hit(cid: str, path: str, score: float) -> dict:
     }
 
 
-def _expire_after_lexical(hits):
-    """A lexical backend that finishes and leaves no budget behind it.
-
-    It waits on the clock rather than on `sleep`. `time.sleep(0.06)` against a
-    50 ms deadline assumes the sleep never returns early, and on Windows under
-    Python 3.10 the timer granularity is coarse enough that it does: measured
-    2026-08-31, `py3.10-s3` was the last failing shard, with the dense leg
-    running because the budget had not actually expired. Every other version
-    and platform passed the same test.
-    """
-    deadline = time.monotonic() + 0.05
-
-    def lexical(**_kwargs):
-        for _ in range(10_000):
-            if time.monotonic() > deadline:
-                break
-            time.sleep(0.001)
-        return hits
-
-    return deadline, lexical
+def _expire_after_lexical(monkeypatch, hits):
+    """Expire the original guard precisely after the stub returns its rows."""
+    return expire_after_backend(monkeypatch, lambda **_kwargs: hits, seconds=0.05)
 
 
-def test_the_finished_lexical_leg_survives_the_deadline():
+def test_the_finished_lexical_leg_survives_the_deadline(monkeypatch):
     import retrieval
 
-    deadline, lexical = _expire_after_lexical([_hit("a", "a.md", 1.0)])
+    deadline, lexical = _expire_after_lexical(monkeypatch, [_hit("a", "a.md", 1.0)])
     dense_calls = []
 
     result = retrieval.retrieve(
@@ -93,10 +78,10 @@ def test_the_finished_lexical_leg_survives_the_deadline():
     assert [item.relative_path for item in result.candidates] == ["a.md"]
 
 
-def test_a_salvaged_answer_says_it_is_partial_and_why():
+def test_a_salvaged_answer_says_it_is_partial_and_why(monkeypatch):
     import retrieval
 
-    deadline, lexical = _expire_after_lexical([_hit("a", "a.md", 1.0)])
+    deadline, lexical = _expire_after_lexical(monkeypatch, [_hit("a", "a.md", 1.0)])
 
     result = retrieval.retrieve(
         "needle",
@@ -195,7 +180,7 @@ def test_a_backend_timeout_after_a_finished_leg_is_still_raised():
 def test_salvage_starts_no_new_work_and_runs_no_reranker(monkeypatch):
     import retrieval
 
-    deadline, lexical = _expire_after_lexical([_hit("a", "a.md", 1.0)])
+    deadline, lexical = _expire_after_lexical(monkeypatch, [_hit("a", "a.md", 1.0)])
     reranked = []
 
     monkeypatch.setattr(
@@ -216,11 +201,12 @@ def test_salvage_starts_no_new_work_and_runs_no_reranker(monkeypatch):
     assert answer.trace.partial is True
 
 
-def test_salvage_is_bounded_in_memory_work():
+def test_salvage_is_bounded_in_memory_work(monkeypatch):
     """The unwinding must not cost anything like a leg. Measured, not assumed."""
     import retrieval
 
     deadline, lexical = _expire_after_lexical(
+        monkeypatch,
         [_hit(f"c{index}", f"p{index % 20}.md", 1.0 / (index + 1)) for index in range(400)]
     )
 
@@ -237,6 +223,6 @@ def test_salvage_is_bounded_in_memory_work():
 
     assert result.trace.partial is True
     assert len(result.candidates) == 5
-    # 0.06 s of that is the backend's own sleep. The salvage itself is the rest,
-    # and a whole second of headroom is far above anything measured for it.
+    # No artificial wait is included. This remains a real wall-clock measure
+    # of processing all 400 hits and salvaging the answer; its bound is unchanged.
     assert spent < 1.06

@@ -40,14 +40,18 @@ import contextlib
 import contextvars
 import functools
 import hashlib
+import io
 import json
 import math
 import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -57,7 +61,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import NamedTuple
 
-from context_budget import TokenCount, TokenCounter, TokenUsage, count_tokens
+from context_budget import ContextBudget, TokenCount, TokenCounter, TokenUsage, count_tokens
 from model_dlp import (
     DLPContentBlocked,
     DLPPolicyError,
@@ -67,7 +71,7 @@ from model_dlp import (
     require_safe_model_output,
 )
 from reliable_memory import canonical_json_bytes
-from secret_redact import redact_secrets
+from secret_redact import describe_error, redact_secrets
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -86,6 +90,7 @@ class ProviderDescriptor:
     fallback_from: tuple[str, ...]
     _endpoint: str | None = field(default=None, repr=False, compare=False)
     _resolution_failure: str | None = field(default=None, repr=False, compare=False)
+    _codex_basis: CodexPlanningBasis | None = field(default=None, repr=False, compare=False)
 
     @property
     def identity(self) -> str:
@@ -119,6 +124,9 @@ class LLMResult:
     structured_output: str
     usage: TokenUsage = field(default_factory=TokenUsage)
     input_token_count: TokenCount | None = None
+    # The redacted cause behind `failure_class` when an exception produced it:
+    # the class names what failed, this says why.
+    failure_detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -295,12 +303,25 @@ class _Transport(NamedTuple):
     prompt: str
     schema: object
     policy: object
+    codex: _PreparedCodex | None = None
+
+
+class _Blocked(NamedTuple):
+    """A DLP failure class and the redacted cause that produced it."""
+
+    code: str
+    detail: str | None = None
+
+
+def _scanner_failure(exc: Exception) -> str:
+    """The failed scanner's exception class only: its message may quote the text it scanned."""
+    return type(exc).__name__
 
 
 def _protected_transport(
     system_prompt: str, prompt: str, schema: Mapping[str, object] | None
-) -> _Transport | str:
-    """Redacted inputs, or the failure class that blocks transport."""
+) -> _Transport | _Blocked:
+    """Redacted inputs, or the failure that blocks transport."""
     try:
         policy = load_policy()
         return _Transport(
@@ -309,10 +330,81 @@ def _protected_transport(
             redact_transport_value(schema, policy),
             policy,
         )
-    except DLPPolicyError:
-        return "dlp_policy_error"
-    except Exception:  # noqa: BLE001 - scanner failure must block transport
-        return "dlp_scan_error"
+    except DLPPolicyError as exc:
+        return _Blocked("dlp_policy_error", describe_error(exc))
+    except Exception as exc:  # noqa: BLE001 - scanner failure must block transport
+        return _Blocked("dlp_scan_error", _scanner_failure(exc))
+
+
+def _local_count_text(descriptor, transport, mode):
+    """Codex's local stdin, or the existing estimated content for other backends."""
+    if descriptor is not None and descriptor.provider == "codex":
+        return _codex_prompt(transport.system_prompt, transport.prompt)
+    native_schema = _native_schema_json(transport.schema, mode)
+    if _schema_unshown(transport.schema, mode, native_schema):
+        return None
+    return _count_text_parts(transport.system_prompt, native_schema, transport.prompt)
+
+
+def _planning_candidate_text(descriptor, prompt, system_prompt, schema, protected):
+    mode = _structured_mode(descriptor, schema) if descriptor is not None else "prompt"
+    system = _prompted_system(system_prompt, schema, mode)
+    transport = _Transport(system, prompt, schema, None)
+    if protected:
+        transport = _protected_transport(system, prompt, schema)
+    if isinstance(transport, _Blocked):
+        return None
+    return _local_count_text(descriptor, transport, mode)
+
+
+def _count_text_parts(system, schema, prompt):
+    return "\n\n".join(part for part in (system, schema, prompt) if part)
+
+
+def _planning_candidates(descriptor):
+    if descriptor is not None:
+        return (descriptor,)
+    return _resolved_planning_candidates() or (None,)
+
+
+def _resolved_planning_candidates():
+    return tuple(item for item in provider_candidates(forced_provider())
+                 if item.resolution_failure is None)
+
+
+def planning_input_texts(prompt, system_prompt, schema, *, descriptor=None, protected=False):
+    """Candidate-local layouts without probing or preparing an executable.
+
+    Codex is local stdin, not CLI bootstrap. Other backends retain their existing
+    estimated system/schema/user content; this does not claim full HTTP wire size.
+    """
+    return tuple(_planning_candidate_text(item, prompt, system_prompt, schema, protected)
+                 for item in _planning_candidates(descriptor))
+
+
+def planning_input_text(prompt, system_prompt, schema, *, descriptor=None, protected=False):
+    texts = planning_input_texts(prompt, system_prompt, schema, descriptor=descriptor, protected=protected)
+    known = [text for text in texts if text is not None]
+    return max(known, key=lambda text: len(text.encode("utf-8")), default=None)
+
+
+def _maximum_layout_count(counts):
+    unknown = next((count for count in counts if count.tokens is None), None)
+    if unknown is not None:
+        return unknown
+    return max(counts, key=lambda count: count.tokens, default=TokenCount())
+
+
+def count_planning_input(prompt, system_prompt, schema, *, model=None, adapters=None, descriptor=None, protected=False):
+    texts = planning_input_texts(prompt, system_prompt, schema, descriptor=descriptor, protected=protected)
+    counts = tuple(_planning_text_count(text, model, adapters) for text in texts)
+    return _maximum_layout_count(counts)
+
+
+def _planning_text_count(text, model, adapters):
+    if text is None:
+        return TokenCount()
+    return count_tokens(text, model=model, adapters=adapters)
 
 
 def _counted_tokens(
@@ -324,16 +416,12 @@ def _counted_tokens(
     token_adapters: Mapping[str, TokenCounter] | None,
 ) -> TokenCount:
     """What we will send, counted — unless the native schema could not be shown."""
+    if transport.codex is not None:
+        return count_tokens(transport.codex.payload, model=descriptor.model, adapters=token_adapters)
     if _schema_unshown(schema, mode, native_schema_json):
         return TokenCount()
-    parts = [
-        part
-        for part in (transport.system_prompt, native_schema_json, transport.prompt)
-        if part
-    ]
-    return count_tokens(
-        "\n\n".join(parts), model=descriptor.model, adapters=token_adapters
-    )
+    text = _count_text_parts(transport.system_prompt, native_schema_json, transport.prompt)
+    return count_tokens(text, model=descriptor.model, adapters=token_adapters)
 
 
 def _schema_unshown(
@@ -345,6 +433,8 @@ def _schema_unshown(
 def _invoked_backend(
     caller, descriptor: ProviderDescriptor, transport: _Transport, mode: str
 ):
+    if transport.codex is not None:
+        return _call_prepared_codex(descriptor, transport.codex)
     if mode == "native":
         return caller(
             descriptor, transport.prompt, transport.system_prompt, transport.schema
@@ -364,13 +454,13 @@ def _input_count(usage: TokenUsage, pre_call_count: TokenCount) -> TokenCount:
     return pre_call_count
 
 
-def _unsafe_output_failure(text: str, policy: object) -> str | None:
+def _unsafe_output_failure(text: str, policy: object) -> _Blocked | None:
     try:
         require_safe_model_output(text, policy)
     except DLPContentBlocked:
-        return "dlp_output_blocked"
-    except Exception:  # noqa: BLE001 - scanner failure must block publication
-        return "dlp_scan_error"
+        return _Blocked("dlp_output_blocked")
+    except Exception as exc:  # noqa: BLE001 - scanner failure must block publication
+        return _Blocked("dlp_scan_error", _scanner_failure(exc))
     return None
 
 
@@ -517,7 +607,9 @@ def _outcome_of(
         return LLMResult(descriptor, None, True, "empty_response", mode, usage, count)
     failure = _unsafe_output_failure(text, transport.policy)
     if failure is not None:
-        return LLMResult(descriptor, None, True, failure, mode, usage, count)
+        return LLMResult(
+            descriptor, None, True, failure.code, mode, usage, count, failure.detail
+        )
     return LLMResult(descriptor, text.strip(), True, None, mode, usage, count)
 
 
@@ -550,6 +642,7 @@ def _dispatched_call(
     schema: Mapping[str, object] | None,
     available: bool | None,
     token_adapters: Mapping[str, TokenCounter] | None,
+    input_budget: ContextBudget | None = None,
 ) -> LLMResult:
     mode = _structured_mode(descriptor, schema)
     caller = _BACKENDS.get(descriptor.provider)
@@ -559,18 +652,44 @@ def _dispatched_call(
     transport = _protected_transport(
         _prompted_system(system_prompt, schema, mode), prompt, schema
     )
-    if isinstance(transport, str):
-        return LLMResult(descriptor, None, False, transport, mode)
+    if isinstance(transport, _Blocked):
+        return LLMResult(
+            descriptor, None, False, transport.code, mode, failure_detail=transport.detail
+        )
+    return _prepared_candidate_call(descriptor, caller, transport, mode, schema, token_adapters, input_budget)
+
+
+def _prepared_candidate_call(descriptor, caller, transport, mode, schema, token_adapters, input_budget=None):
+    try:
+        transport = _prepare_backend_transport(caller, descriptor, transport)
+    except Exception as exc:  # noqa: BLE001 - executable preparation is a provider boundary
+        return _failed_result(descriptor, exc, mode, TokenCount())
     native_schema_json = _native_schema_json(schema, mode)
-    return _completed_call(
-        descriptor,
-        caller,
-        transport,
-        mode,
-        _counted_tokens(
-            descriptor, transport, native_schema_json, schema, mode, token_adapters
-        ),
-    )
+    count = _counted_tokens(descriptor, transport, native_schema_json, schema, mode, token_adapters)
+    refused = _prepared_input_refusal(descriptor, transport, mode, count, input_budget)
+    if refused is not None:
+        return refused
+    return _completed_call(descriptor, caller, transport, mode, count)
+
+
+def _local_budget_exceeded(count, budget):
+    return count.tokens is not None and count.tokens > budget.available_input_tokens
+
+
+def _prepared_input_refusal(descriptor, transport, mode, count, budget):
+    if budget is None or transport.codex is None:
+        return None
+    if _local_budget_exceeded(count, budget):
+        return LLMResult(descriptor, None, True, "context_overflow", mode,
+                         input_token_count=count)
+    return None
+
+
+def _prepare_backend_transport(caller, descriptor, transport):
+    if caller is not _call_codex:
+        return transport
+    prepared = _prepare_codex(descriptor, transport.prompt, transport.system_prompt)
+    return transport._replace(codex=prepared)
 
 
 def call_candidate(
@@ -582,6 +701,7 @@ def call_candidate(
     schema: Mapping[str, object] | None = None,
     available: bool | None = None,
     token_adapters: Mapping[str, TokenCounter] | None = None,
+    input_budget: ContextBudget | None = None,
 ) -> LLMResult:
     """Probe and call one resolved candidate, returning a stable outcome."""
     if descriptor.resolution_failure is not None:
@@ -590,7 +710,7 @@ def call_candidate(
         )
     _require_token_contract(descriptor, max_tokens)
     return _dispatched_call(
-        descriptor, prompt, system_prompt, schema, available, token_adapters
+        descriptor, prompt, system_prompt, schema, available, token_adapters, input_budget
     )
 
 
@@ -851,6 +971,27 @@ def _is_literal_loopback_endpoint(endpoint: str) -> bool:
     return hostname in {"127.0.0.1", "::1"}
 
 
+class _RejectProviderRedirects(urllib.request.HTTPRedirectHandler):
+    """A provider response cannot authorize a different destination or method."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        fp.close()
+        raise urllib.error.HTTPError(req.full_url, code, "provider_redirect_refused", None, None)
+
+
+def open_provider_request(request: urllib.request.Request, *, timeout: float):
+    """Keep the approved request's destination; literal loopback never uses a proxy.
+
+    Remote endpoints retain configured proxies and standard TLS verification.
+    This opener is local to the request, not a process-wide urllib replacement.
+    See docs/research/2026-09-29-provider-transport-keeps-the-approved-destination.md.
+    """
+    handlers: list[urllib.request.BaseHandler] = [_RejectProviderRedirects()]
+    if _is_literal_loopback_endpoint(request.full_url):
+        handlers.append(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(*handlers).open(request, timeout=timeout)
+
+
 # ---------------------------------------------------------------------------
 # Liveness probes (cheap, before attempting real call)
 # ---------------------------------------------------------------------------
@@ -878,7 +1019,7 @@ def _opencode_request(url: str, *, method: str = "GET", body: bytes | None = Non
 
 
 def _opencode_healthy() -> bool:
-    with urllib.request.urlopen(_opencode_request(f"{_opencode_base()}/global/health"), timeout=1.0) as resp:
+    with open_provider_request(_opencode_request(f"{_opencode_base()}/global/health"), timeout=1.0) as resp:
         payload = json.loads(resp.read().decode("utf-8") or "{}")
     return isinstance(payload, dict) and payload.get("healthy") is True
 
@@ -927,7 +1068,7 @@ def _probe_ollama(descriptor: ProviderDescriptor) -> bool:
         return False
     try:
         request = urllib.request.Request(_ollama_api_url(descriptor._endpoint, "tags"))
-        with urllib.request.urlopen(request, timeout=1.0) as response:
+        with open_provider_request(request, timeout=1.0) as response:
             return _ollama_tags_answer(descriptor, response)
     except (
         json.JSONDecodeError,
@@ -1253,7 +1394,7 @@ def _framed_system_text(system_prompt: str) -> str:
 
 def _opencode_post(url: str, payload: Mapping[str, object]) -> object:
     request = _opencode_request(url, method="POST", body=json.dumps(payload).encode("utf-8"))
-    with urllib.request.urlopen(request, timeout=_timeout_s()) as response:
+    with open_provider_request(request, timeout=_timeout_s()) as response:
         raw = response.read().decode("utf-8")
     if not raw:
         return None
@@ -1306,9 +1447,10 @@ def _is_text_part(part: object) -> bool:
 def _opencode_delete(base: str, session_id: str) -> None:
     try:
         request = _opencode_request(f"{base}/session/{session_id}", method="DELETE")
-        urllib.request.urlopen(request, timeout=5.0)
-    except (urllib.error.URLError, OSError):
-        pass
+        with open_provider_request(request, timeout=5.0):
+            return
+    except (urllib.error.URLError, OSError) as error:
+        print(f"llm_client: OpenCode session cleanup failed: {describe_error(error)}", file=sys.stderr)
 
 
 def _opencode_answer(base: str, session_id: str, prompt: str, system_prompt: str):
@@ -1347,6 +1489,615 @@ def _call_opencode(
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _CodexExecutable:
+    path: str
+    resolved_path: str
+    identity: tuple[int, ...]
+    sha256: str
+
+
+@dataclass(frozen=True)
+class _PreparedCodex:
+    """One protected local payload and selected executable, not a wire-token proof."""
+
+    executable: _CodexExecutable | None
+    payload: str
+    model: str | None
+    reasoning: str
+    basis: CodexPlanningBasis | None = field(default=None, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class CodexPlanningBasis:
+    """Attempt-owned native model/catalog evidence; advertised planning, not wire capacity."""
+
+    original_descriptor: ProviderDescriptor
+    executable: _CodexExecutable
+    model: str
+    model_provider: str
+    planning_window: int | None
+    catalog_sha256: str
+    config_files: tuple[tuple[str, str | None], ...]
+    environment_sha256: str
+    cli_version: str
+    mcp_server_names: tuple[str, ...] = ()
+
+    @property
+    def descriptor(self) -> ProviderDescriptor:
+        return replace(self.original_descriptor, model=self.model, _codex_basis=self)
+
+
+def _codex_basis_digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+
+
+def _codex_basis_remaining(deadline):
+    if _finite_number(deadline) is None:
+        raise ValueError("Codex model-resolution deadline must be finite")
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("Codex model-resolution deadline expired")
+    return remaining
+
+
+_CODEX_INTERNAL_DISABLED_FEATURES = (
+    "hooks", "apps", "plugins", "shell_tool", "view_image", "browser_use",
+    "computer_use", "multi_agent", "multi_agent_v2", "image_generation",
+    "skill_search", "sleep_tool", "code_mode", "code_mode_host", "code_mode_only",
+)
+
+
+def _codex_configuration_args(reasoning):
+    closed = [part for name in _CODEX_INTERNAL_DISABLED_FEATURES
+              for part in ("-c", f"features.{name}=false")]
+    return ["-c", f"model_reasoning_effort={reasoning}",
+            "-c", 'web_search="disabled"', *closed]
+
+
+def _codex_mcp_names(config):
+    effective = config.get("config", {})
+    if not isinstance(effective, dict):
+        raise ValueError("Codex effective configuration is not an object")
+    return _codex_validated_mcp_names(effective.get("mcp_servers", {}))
+
+
+def _codex_validated_mcp_names(servers):
+    if not isinstance(servers, dict):
+        raise ValueError("Codex MCP configuration is not an object")
+    if not all(_codex_mcp_entry_valid(name, value) for name, value in servers.items()):
+        raise ValueError("Codex MCP configuration contains an invalid server")
+    return tuple(sorted(servers))
+
+
+def _codex_mcp_entry_valid(name, value):
+    return isinstance(name, str) and bool(name) and isinstance(value, dict)
+
+
+def _codex_closed_mcp(names):
+    return {name: {"enabled": False} for name in names}
+
+
+def _codex_basis_command(executable, descriptor, suffix):
+    reasoning = str(descriptor.inference_settings.get("reasoning", "low"))
+    command = [executable.path, *_codex_configuration_args(reasoning),
+               "-c", 'sandbox_mode="read-only"']
+    if descriptor.model is not None:
+        command.extend(["-c", f"model={json.dumps(descriptor.model)}"])
+    return command + list(suffix)
+
+
+def _codex_basis_file_digest(path):
+    candidate = Path(path)
+    if not candidate.exists():
+        return None
+    resolved = candidate.resolve(strict=True)
+    with candidate.open("rb") as handle:
+        before = _codex_file_identity(os.fstat(handle.fileno()))
+        digest = _codex_stream_digest(handle)
+        _require_codex_file_identity(_codex_file_identity(os.fstat(handle.fileno())), before)
+        _require_codex_path_binding(candidate, resolved, handle, before, digest, posix_path=candidate)
+    return digest
+
+
+def _codex_layer_file(layer):
+    name = layer["name"]
+    if isinstance(name.get("file"), str):
+        return name["file"]
+    if isinstance(name.get("dotCodexFolder"), str):
+        return str(Path(name["dotCodexFolder"]) / "config.toml")
+    return None
+
+
+def _codex_config_files(config):
+    paths = {_codex_layer_file(layer) for layer in config.get("layers", ())}
+    paths.discard(None)
+    return tuple((path, _codex_basis_file_digest(path)) for path in sorted(paths))
+
+
+def _require_codex_planning_basis(basis, descriptor):
+    if replace(descriptor, model=basis.original_descriptor.model,
+               fallback_from=basis.original_descriptor.fallback_from, _codex_basis=None) != basis.original_descriptor:
+        raise RuntimeError("Codex planning descriptor changed after model resolution")
+    _require_codex_basis_model(basis, descriptor)
+    if _codex_basis_digest(provider_environment()) != basis.environment_sha256:
+        raise RuntimeError("Codex invocation environment changed after planning")
+    _require_codex_basis_files(basis.config_files)
+    _require_codex_executable(basis.executable)
+
+
+def _require_codex_basis_model(basis, descriptor):
+    if descriptor.model != basis.model:
+        raise RuntimeError("Codex planning model disagrees with descriptor")
+
+
+def _require_codex_basis_files(files):
+    for path, expected in files:
+        if _codex_basis_file_digest(path) != expected:
+            raise RuntimeError("Codex configuration changed after planning")
+
+
+class _CodexBasisRpc:
+    def __init__(self, tree, deadline):
+        self.tree = tree
+        self.deadline = deadline
+        self.replies = queue.Queue()
+        self.config = None
+        self.config_files = ()
+        self.readers = (
+            threading.Thread(target=self._read_stdout),
+            threading.Thread(target=self._read_stderr),
+        )
+        try:
+            for reader in self.readers:
+                reader.start()
+        except RuntimeError:
+            _settle_codex_basis_tree(self)
+            raise
+
+    def _read_stdout(self):
+        try:
+            for line in iter(self.tree.process.stdout.readline, b""):
+                self.replies.put((json.loads(line), None))
+        except (OSError, ValueError, UnicodeError) as error:
+            self.replies.put((None, error))
+        finally:
+            self.replies.put((None, EOFError("Codex model bootstrap closed")))
+
+    def _read_stderr(self):
+        try:
+            for _block in iter(functools.partial(self.tree.process.stderr.read1, io.DEFAULT_BUFFER_SIZE), b""):
+                pass
+        except OSError as error:
+            self.replies.put((None, error))
+
+    def send(self, method, params, identifier=None):
+        _codex_basis_remaining(self.deadline)
+        request = {"method": method, "params": params}
+        if identifier is not None:
+            request["id"] = identifier
+        self.tree.process.stdin.write(json.dumps(request).encode() + b"\n")
+        self.tree.process.stdin.flush()
+
+    def request(self, identifier, method, params):
+        self.send(method, params, identifier)
+        while True:
+            reply = self._next_reply()
+            if _codex_basis_reply_matches(reply, identifier):
+                return _codex_basis_reply_result(reply)
+
+    def _next_reply(self):
+        try:
+            reply, error = self.replies.get(timeout=_codex_basis_remaining(self.deadline))
+        except queue.Empty as error:
+            raise TimeoutError("Codex model-resolution deadline expired") from error
+        if error is not None:
+            raise error
+        if not isinstance(reply, dict):
+            raise ValueError("Codex model bootstrap response is not an object")
+        return reply
+
+    def close(self):
+        try:
+            self.tree.process.stdin.close()
+            self.tree.process.wait(timeout=_codex_basis_remaining(self.deadline))
+        finally:
+            _settle_codex_basis_tree(self)
+
+
+def _settle_codex_basis_tree(rpc):
+    from sync_memory import PROCESS_CLEANUP_TIMEOUT_SECONDS
+
+    cleanup = time.monotonic() + PROCESS_CLEANUP_TIMEOUT_SECONDS
+    rpc.tree.terminate(deadline=cleanup)
+    for reader in rpc.readers:
+        _join_started_codex_basis_reader(reader, cleanup)
+    _require_codex_basis_readers_settled(rpc.readers)
+    rpc.tree.close()
+    rpc.tree.process.stdout.close()
+    rpc.tree.process.stderr.close()
+
+
+def _join_started_codex_basis_reader(reader, deadline):
+    if reader.ident is not None:
+        reader.join(timeout=max(0.0, deadline - time.monotonic()))
+
+
+def _require_codex_basis_readers_settled(readers):
+    if any(reader.is_alive() for reader in readers):
+        raise RuntimeError("Codex model-bootstrap reader cleanup is unverified")
+
+
+class _CodexCapabilityUnavailable(RuntimeError):
+    """A structurally valid optional native method is explicitly unavailable."""
+
+
+def _codex_basis_reply_matches(reply, identifier):
+    received = reply.get("id")
+    if received is None:
+        return False
+    if type(received) is not type(identifier):
+        raise ValueError("Codex model bootstrap response has an invalid request identifier")
+    return received == identifier
+
+
+def _codex_basis_reply_result(reply):
+    if "error" in reply:
+        return _codex_basis_native_error(reply)
+    if not isinstance(reply.get("result"), dict):
+        raise ValueError("Codex model bootstrap lacks a result object")
+    return reply["result"]
+
+
+def _codex_basis_native_error(reply):
+    error = reply["error"]
+    if "result" in reply or not isinstance(error, dict):
+        raise ValueError("Codex model bootstrap has an invalid error response")
+    _require_codex_native_error_fields(error)
+    if error["code"] == -32601:
+        raise _CodexCapabilityUnavailable("Codex optional native method is unavailable")
+    raise RuntimeError("Codex model bootstrap returned a native error")
+
+
+def _require_codex_native_error_fields(error):
+    if type(error.get("code")) is not int:
+        raise ValueError("Codex native error lacks an integer code")
+    if not isinstance(error.get("message"), str) or not error["message"]:
+        raise ValueError("Codex native error lacks a message")
+
+
+def _spawn_codex_basis_rpc(command, neutral, environment, deadline):
+    from lsp_process_tree import ProcessTree
+
+    _codex_basis_remaining(deadline)
+    tree = ProcessTree.spawn_with_deadline(command, cwd=Path(neutral), env=environment, deadline=deadline)
+    return _CodexBasisRpc(tree, deadline)
+
+
+def _codex_native_basis(rpc, neutral, descriptor):
+    rpc.request(1, "initialize", {"clientInfo": {"name": "llm-wiki-memory", "version": "1.0"}})
+    rpc.send("initialized", {})
+    config = rpc.request(2, "config/read", {"includeLayers": True})
+    rpc.config = config
+    rpc.config_files = _codex_config_files(config)
+    _codex_config_layers_verified(config)
+    _require_codex_basis_files(rpc.config_files)
+    params = {"cwd": neutral, "ephemeral": True, "sandbox": "read-only", "approvalPolicy": "never",
+              "config": {"mcp_servers": _codex_closed_mcp(_codex_mcp_names(config))}}
+    if descriptor.model is not None:
+        params["model"] = descriptor.model
+    result = rpc.request(3, "thread/start", params)
+    _require_codex_native_model(result, descriptor)
+    rpc.request(4, "thread/unsubscribe", {"threadId": result["thread"]["id"]})
+    return result, config
+
+
+def _require_codex_native_model(result, descriptor):
+    if not result["thread"].get("ephemeral"):
+        raise ValueError("Codex model bootstrap was not ephemeral")
+    if descriptor.model is not None and descriptor.model != result.get("model"):
+        raise RuntimeError("Codex selected model disagrees with explicit configuration")
+    _require_codex_model_strings(result)
+
+
+def _require_codex_model_strings(result):
+    if any(not isinstance(result.get(key), str) or not result[key] for key in ("model", "modelProvider")):
+        raise ValueError("Codex model bootstrap lacks resolved model/provider")
+
+
+def _codex_basis_local_command(executable, command, neutral, environment, deadline):
+    result = _codex_basis_command_result(executable, command, neutral, environment, deadline)
+    if _codex_catalog_command_unsupported(command, result):
+        raise _CodexCapabilityUnavailable("Codex optional model catalog is unavailable")
+    _require_codex_exited_cleanly(result)
+    return result.stdout
+
+
+def _codex_basis_command_result(executable, command, neutral, environment, deadline):
+    from sync_memory import _run_process_tree
+
+    _require_codex_executable(executable)
+    result = _run_process_tree(command, timeout=_codex_basis_remaining(deadline),
+                               cwd=neutral, env=environment, capture_output=True)
+    _require_codex_executable(executable)
+    _codex_basis_remaining(deadline)
+    return result
+
+
+def _codex_catalog_command_unsupported(command, result):
+    if tuple(command[-2:]) != ("debug", "models") or result.returncode != 2:
+        return False
+    first_line = result.stderr.splitlines()[:1]
+    return first_line in ([b"error: unrecognized subcommand 'models'"],
+                          [b"error: unrecognized subcommand 'debug'"])
+
+
+def _codex_advertised_window(catalog, model, provider, cli_version):
+    if provider != "openai" or cli_version != "codex-cli 0.160.0":
+        return None
+    row = _codex_catalog_model(catalog, model)
+    if row is None:
+        return None
+    return _codex_catalog_window(row)
+
+
+def _codex_catalog_model(catalog, model):
+    rows = catalog.get("models", ()) if isinstance(catalog, dict) else catalog
+    if not isinstance(rows, (list, tuple)):
+        return None
+    return next((row for row in rows if _codex_catalog_named(row, model)), None)
+
+
+def _codex_catalog_named(row, model):
+    return isinstance(row, dict) and row.get("slug") == model
+
+
+def _codex_catalog_window(row):
+    window = row.get("context_window")
+    percent = row.get("effective_context_window_percent")
+    if not _codex_positive_int(window) or not _codex_positive_int(percent):
+        return None
+    if percent > 100:
+        return None
+    return window * percent // 100
+
+
+def _codex_positive_int(value):
+    return type(value) is int and value > 0
+
+
+def _codex_configured_window(window, config):
+    override = config.get("config", {}).get("model_context_window")
+    if override is None or window is None:
+        return window
+    # Configured windows need their own qualified effective-window semantics.
+    return None
+
+
+def _resolved_codex_basis(descriptor, executable, result, config, neutral, environment, deadline,
+                          version=None):
+    version = version or _codex_basis_version(executable, neutral, environment, deadline)
+    files = _codex_config_files(config)
+    verified = _codex_config_layers_verified(config)
+    resolved = replace(descriptor, model=result["model"])
+    command = _codex_basis_command(executable, resolved, ("debug", "models"))
+    raw = _codex_optional_catalog(executable, command, neutral, environment, deadline)
+    window = _codex_verified_catalog_window(raw, result, version, verified)
+    _codex_config_layers_verified(config)
+    _require_codex_basis_files(files)
+    return CodexPlanningBasis(descriptor, executable, result["model"], result["modelProvider"],
+                              _codex_configured_window(window, config), hashlib.sha256(raw or b'').hexdigest(),
+                              files, _codex_basis_digest(environment), version, _codex_mcp_names(config))
+
+
+def _codex_basis_version(executable, neutral, environment, deadline):
+    raw = _codex_basis_local_command(executable, [executable.path, "--version"], neutral, environment, deadline)
+    return raw.decode().strip()
+
+
+def _codex_optional_catalog(executable, command, neutral, environment, deadline):
+    try:
+        return _codex_basis_local_command(executable, command, neutral, environment, deadline)
+    except _CodexCapabilityUnavailable:
+        _require_codex_executable(executable)
+        _codex_basis_remaining(deadline)
+        return None
+
+
+def _codex_verified_catalog_window(raw, result, version, verified):
+    if raw is None:
+        return None
+    catalog = json.loads(raw)
+    if not verified:
+        return None
+    return _codex_advertised_window(catalog, result["model"], result["modelProvider"], version)
+
+
+def _codex_config_layers_verified(config):
+    layers = config.get("layers")
+    if not isinstance(layers, list):
+        return False
+    # Unknown layers prevent a capacity claim, but cannot hide a later file drift.
+    verified = tuple(_codex_config_layer_verified(layer) for layer in layers)
+    return all(verified)
+
+
+def _codex_config_layer_verified(layer):
+    name = layer["name"]
+    if name.get("type") == "sessionFlags":
+        return True
+    if name.get("profile") is not None:
+        return False
+    return _codex_file_layer_verified(layer)
+
+
+def _codex_file_layer_verified(layer):
+    from settings import tomllib
+
+    path = _codex_layer_file(layer)
+    if path is None:
+        return False
+    candidate = Path(path)
+    document = tomllib.loads(candidate.read_text(encoding="utf-8")) if candidate.exists() else {}
+    return _require_codex_layer_version(layer, document)
+
+
+def _require_codex_layer_version(layer, document):
+    # Rust/Python serializers disagree for some floats; compare parsed values.
+    try:
+        json.dumps(document, allow_nan=False)
+    except (TypeError, ValueError):
+        return False
+    if layer.get("config") != document:
+        raise RuntimeError("Codex configuration changed during model resolution")
+    return _codex_layer_version_known(layer.get("version"))
+
+
+def _codex_layer_version_known(version):
+    if not isinstance(version, str) or not version.startswith("sha256:"):
+        return False
+    return _has_digest(version.removeprefix("sha256:"))
+
+
+def resolve_codex_planning_basis(descriptor: ProviderDescriptor, *, deadline: float) -> CodexPlanningBasis | None:
+    """Resolve once before planning; no turn, user data, persistent model selection or wire claim."""
+    if descriptor.provider != "codex":
+        return None
+    _codex_basis_remaining(deadline)
+    executable = _selected_codex_executable()
+    if executable is None:
+        return None
+    return _resolve_selected_codex_basis(descriptor, executable, deadline)
+
+
+def _resolve_selected_codex_basis(descriptor, executable, deadline):
+    environment = provider_environment()
+    with provider_cwd() as neutral:
+        version = _codex_basis_version(executable, neutral, environment, deadline)
+        if version != "codex-cli 0.160.0":
+            _require_codex_resolution_identity(executable, environment, deadline)
+            return None
+        basis = _codex_qualified_basis(descriptor, executable, neutral, environment, deadline, version)
+    if basis is None:
+        return None
+    _require_codex_planning_basis(basis, basis.descriptor)
+    _codex_basis_remaining(deadline)
+    return basis
+
+
+def _require_codex_resolution_identity(executable, environment, deadline):
+    _require_codex_executable(executable)
+    if _codex_basis_digest(provider_environment()) != _codex_basis_digest(environment):
+        raise RuntimeError("Codex invocation environment changed during resolution")
+    _codex_basis_remaining(deadline)
+
+
+def _codex_qualified_basis(descriptor, executable, neutral, environment, deadline, version):
+    command = _codex_basis_command(executable, descriptor, ("app-server", "--stdio"))
+    _require_codex_executable(executable)
+    rpc = _spawn_codex_basis_rpc(command, neutral, environment, deadline)
+    native = _codex_optional_native_basis(rpc, neutral, descriptor)
+    _require_codex_exited_cleanly(subprocess.CompletedProcess(command, rpc.tree.process.returncode, b'', b''))
+    _require_codex_resolution_identity(executable, environment, deadline)
+    _require_codex_basis_files(rpc.config_files)
+    if rpc.config is not None:
+        _codex_config_layers_verified(rpc.config)
+    if native is None:
+        return None
+    result, config = native
+    return _resolved_codex_basis(descriptor, executable, result, config, neutral, environment, deadline, version)
+
+
+def _codex_optional_native_basis(rpc, neutral, descriptor):
+    try:
+        try:
+            return _codex_native_basis(rpc, neutral, descriptor)
+        except _CodexCapabilityUnavailable:
+            return None
+    finally:
+        rpc.close()
+
+def _codex_file_identity(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode)
+
+
+def _codex_stream_digest(handle):
+    digest = hashlib.sha256()
+    for block in iter(functools.partial(handle.read, io.DEFAULT_BUFFER_SIZE), b""):
+        digest.update(block)
+    return digest.hexdigest()
+
+
+def _require_codex_file_identity(actual, expected):
+    if actual != expected:
+        raise RuntimeError("selected Codex executable changed before dispatch")
+
+
+
+def _require_codex_path_binding(path, resolved, handle, identity, digest, *, posix_path=None):
+    if sys.platform != "win32":
+        _require_codex_file_identity(_codex_file_identity((posix_path or resolved).stat()), identity)
+        return
+    _require_codex_windows_binding(path, resolved, handle, identity, digest)
+
+
+def _require_codex_windows_binding(path, resolved, handle, identity, digest):
+    _require_codex_file_identity(path.resolve(strict=True), resolved)
+    with path.open("rb") as reopened:
+        _require_codex_handle_identity(reopened, identity)
+        _require_codex_file_identity(_codex_stream_digest(reopened), digest)
+        _require_codex_handle_identity(reopened, identity)
+        _require_codex_handle_identity(handle, identity)
+        _require_codex_file_identity(path.resolve(strict=True), resolved)
+        _require_codex_handle_identity(reopened, identity)
+        _require_codex_handle_identity(handle, identity)
+
+
+def _require_codex_handle_identity(handle, identity):
+    _require_codex_file_identity(_codex_file_identity(os.fstat(handle.fileno())), identity)
+
+def _bind_codex_executable(path):
+    path = str(Path(path).absolute())
+    resolved = Path(path).resolve(strict=True)
+    with resolved.open("rb") as handle:
+        identity = _codex_file_identity(os.fstat(handle.fileno()))
+        digest = _codex_stream_digest(handle)
+        _require_codex_file_identity(_codex_file_identity(os.fstat(handle.fileno())), identity)
+        _require_codex_path_binding(Path(path), resolved, handle, identity, digest)
+    return _CodexExecutable(path, str(resolved), identity, digest)
+
+
+def _selected_codex_executable():
+    path = _find_codex_binary()
+    if path is None:
+        return None
+    return _bind_codex_executable(path)
+
+
+def _prepare_codex(descriptor, prompt, system_prompt):
+    return _PreparedCodex(
+        _codex_attempt_executable(descriptor), _codex_prompt(system_prompt, prompt),
+        descriptor.model, str(descriptor.inference_settings.get("reasoning", "low")), descriptor._codex_basis,
+    )
+
+
+def _codex_attempt_executable(descriptor):
+    basis = descriptor._codex_basis
+    if basis is None:
+        return _selected_codex_executable()
+    _require_codex_planning_basis(basis, descriptor)
+    return basis.executable
+
+
+def _require_codex_executable(executable):
+    _require_codex_file_identity(_bind_codex_executable(executable.path), executable)
+
+
+def _require_codex_model(descriptor, prepared):
+    if descriptor.model != prepared.model:
+        raise RuntimeError("prepared Codex model disagrees with provider descriptor")
+
+
 def _windows_codex_candidate() -> str | None:
     """`codex.ps1` is not among the spellings: CreateProcess cannot start a script.
 
@@ -1377,13 +2128,12 @@ def _codex_command(codex_bin: str, model: str | None, reasoning: str, out_path: 
     command = [
         codex_bin,
         "exec",
+        "--json",
+        "--ephemeral",
         "--skip-git-repo-check",
         "--sandbox",
         "read-only",
-        "-c",
-        f"model_reasoning_effort={reasoning}",
-        "-c",
-        "features.hooks=false",
+        *_codex_configuration_args(reasoning),
         "--output-last-message",
         out_path,
     ]
@@ -1394,7 +2144,7 @@ def _codex_command(codex_bin: str, model: str | None, reasoning: str, out_path: 
 
 def _temp_text_file(content: str = "") -> str:
     with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False, encoding="utf-8"
+        mode="w", suffix=".txt", delete=False, encoding="utf-8", newline="\n"
     ) as handle:
         handle.write(content)
         return handle.name
@@ -1449,7 +2199,7 @@ def _run_cli(
     from sync_memory import _run_process_tree
 
     return _run_process_tree(
-        command, timeout=_timeout_s(), input=stdin_text, **options
+        command, timeout=options.pop("timeout", _timeout_s()), input=stdin_text, **options
     )
 
 
@@ -1492,25 +2242,107 @@ def provider_environment() -> dict[str, str]:
     return environment
 
 
-def _codex_last_message(command: list[str], prompt_path: str, out_path: str) -> str:
+def _codex_last_message(command: list[str], prompt_path: str, out_path: str, *, executable=None, basis=None) -> BackendResponse:
     with open(prompt_path, "rb") as stdin_handle, provider_cwd() as neutral:
         try:
+            deadline = time.monotonic() + _timeout_s()
+            _require_codex_dispatch_identity(executable, basis)
+            environment = provider_environment()
+            names = _codex_dispatch_mcp_names(command, executable, basis, neutral, environment, deadline)
+            command = command + _codex_exec_mcp_args(names)
             result = _run_cli(
                 command,
                 stdin=stdin_handle,
                 capture_output=True,
                 cwd=neutral,
-                env=provider_environment(),
+                env=environment,
+                timeout=_codex_basis_remaining(deadline),
             )
-        except subprocess.TimeoutExpired as exc:
+        except (subprocess.TimeoutExpired, TimeoutError) as exc:
             raise ProviderTimeout(
                 f"codex did not answer within {_timeout_s()}s{_cleanup_note(exc)}"
             ) from exc
     _require_codex_exited_cleanly(result)
+    usage = _codex_usage(result.stdout)
     try:
-        return Path(out_path).read_text(encoding="utf-8", errors="ignore")
+        text = Path(out_path).read_text(encoding="utf-8", errors="ignore")
     except OSError:
-        return ""
+        text = ""
+    return BackendResponse(text, usage)
+
+
+def _codex_dispatch_mcp_names(command, executable, basis, neutral, environment, deadline):
+    if basis is not None:
+        return basis.mcp_server_names
+    executable = executable or _bind_codex_executable(command[0])
+    discovery = [executable.path, *_codex_configuration_args("low"), "mcp", "list", "--json"]
+    raw = _codex_basis_local_command(executable, discovery, neutral, environment, deadline)
+    return _codex_mcp_list_names(raw)
+
+
+def _codex_mcp_list_names(raw):
+    servers = json.loads(raw)
+    if not isinstance(servers, list):
+        raise ValueError("Codex MCP list is not an array")
+    names = tuple(_codex_mcp_list_name(server) for server in servers)
+    if len(set(names)) != len(names):
+        raise ValueError("Codex MCP list has duplicate server names")
+    return tuple(sorted(names))
+
+
+def _codex_mcp_list_name(server):
+    if not isinstance(server, dict):
+        raise ValueError("Codex MCP list contains a non-object server")
+    name = server.get("name")
+    if not isinstance(name, str) or not name:
+        raise ValueError("Codex MCP list contains an invalid server name")
+    return name
+
+
+def _codex_exec_mcp_args(names):
+    entries = ",".join(json.dumps(name, ensure_ascii=False) + "={enabled=false}" for name in names)
+    return ["-c", "mcp_servers={" + entries + "}"]
+
+
+def _codex_usage(output: str | bytes) -> TokenUsage:
+    reports = []
+    for line in output.splitlines():
+        report = _codex_usage_line(line)
+        if report is not None:
+            reports.append(report)
+    names = ("input_tokens", "output_tokens", "cache_read_tokens")
+    return TokenUsage(**{name: _complete_usage_count(reports, name) for name in names})
+
+
+def _complete_usage_count(reports: list[TokenUsage], name: str) -> int | None:
+    values = [getattr(report, name) for report in reports]
+    if not values or None in values:
+        return None
+    return sum(values)
+
+
+def _codex_usage_line(line: str | bytes) -> TokenUsage | None:
+    if not line.strip():
+        return None
+    return _codex_usage_event(json.loads(line))
+
+
+def _codex_usage_event(event: object) -> TokenUsage | None:
+    if not isinstance(event, Mapping):
+        raise ValueError("Codex JSONL event must be an object")
+    if event.get("type") != "turn.completed":
+        return None
+    return _codex_usage_counts(event.get("usage"))
+
+
+def _codex_usage_counts(value: object) -> TokenUsage:
+    if not isinstance(value, Mapping):
+        return TokenUsage()
+    return _usage_from_counts(
+        input_tokens=value.get("input_tokens"),
+        output_tokens=value.get("output_tokens"),
+        cache_read_tokens=value.get("cached_input_tokens"),
+    )
 
 
 def _codex_prompt(system_prompt: str, prompt: str) -> str:
@@ -1526,23 +2358,42 @@ def _call_codex(
     prompt: str,
     system_prompt: str,
     schema: Mapping[str, object] | None = None,
-) -> str:
-    """Call `codex exec` and return the model's final message."""
-    codex_bin = _find_codex_binary()
-    if not codex_bin:
-        return ""
-    prompt_path = _temp_text_file(_codex_prompt(system_prompt, prompt))
+) -> BackendResponse:
+    """Return the final message and reported completed-turn usage."""
+    return _call_prepared_codex(descriptor, _prepare_codex(descriptor, prompt, system_prompt))
+
+
+def _call_prepared_codex(descriptor, prepared):
+    _require_codex_model(descriptor, prepared)
+    if prepared.executable is None:
+        return BackendResponse("")
+    prompt_path = _temp_text_file(prepared.payload)
     out_path = _temp_text_file()
     command = _codex_command(
-        codex_bin,
-        descriptor.model,
-        str(descriptor.inference_settings.get("reasoning", "low")),
+        prepared.executable.path,
+        prepared.model,
+        prepared.reasoning,
         out_path,
     )
     try:
-        return _codex_last_message(command, prompt_path, out_path)
+        return _send_prepared_codex(command, prompt_path, out_path, prepared)
     finally:
         _remove_quietly((prompt_path, out_path))
+
+
+def _require_codex_dispatch_identity(executable, basis):
+    if basis is not None:
+        _require_codex_planning_basis(basis, basis.descriptor)
+        return
+    if executable is not None:
+        _require_codex_executable(executable)
+
+
+def _send_prepared_codex(command, prompt_path, out_path, prepared):
+    if prepared.basis is None:
+        return _codex_last_message(command, prompt_path, out_path, executable=prepared.executable)
+    return _codex_last_message(command, prompt_path, out_path,
+                               executable=prepared.executable, basis=prepared.basis)
 
 
 # ---------------------------------------------------------------------------
@@ -1762,7 +2613,7 @@ def _call_openai(
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=_timeout_s()) as response:
+    with open_provider_request(request, timeout=_timeout_s()) as response:
         data = json.loads(response.read().decode("utf-8"))
     return BackendResponse(
         data["choices"][0]["message"]["content"], _parse_http_usage(data)
@@ -1863,7 +2714,7 @@ def _ollama_model_context(descriptor: ProviderDescriptor) -> int | None:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=OLLAMA_SHOW_TIMEOUT_S) as response:
+        with open_provider_request(request, timeout=OLLAMA_SHOW_TIMEOUT_S) as response:
             data = json.loads(response.read(1024 * 1024).decode("utf-8"))
     except (OSError, ValueError, urllib.error.URLError):
         return None
@@ -1938,7 +2789,7 @@ def _call_ollama(
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=_timeout_s()) as resp:
+    with open_provider_request(req, timeout=_timeout_s()) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     _require_unfilled_window(data, num_ctx, int(descriptor.inference_settings["max_tokens"]))
     return BackendResponse(data["message"]["content"], _parse_ollama_usage(data))

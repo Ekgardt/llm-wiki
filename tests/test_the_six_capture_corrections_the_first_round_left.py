@@ -93,14 +93,14 @@ def test_a_backfilled_record_is_named_and_dated_as_live_capture_would(tmp_path):
     assert (fields["session"], fields["captured_at"][:10]) == ("0199c0de-1234", day)
 
 
-def test_the_scan_says_how_many_transcripts_its_cap_left_out():
-    outcome = backfill_sessions.Outcome(scanned=3, unscanned=7)
+def test_the_scan_reports_recorded_and_new_sessions_without_a_prefix_quota():
+    outcome = backfill_sessions.Outcome(scanned=10_001, present=10_000, written=1)
 
     lines = outcome.as_lines(applied=False)
 
-    assert lines[-1].startswith(
-        f"left unscanned by the {backfill_sessions.MAX_TRANSCRIPTS}-transcript cap: 7"
-    )
+    assert lines[0] == "transcripts scanned: 10001"
+    assert lines[1].startswith("records to write: 1 ")
+    assert lines[2] == "already present: 10000"
 
 
 def test_the_advisory_is_built_for_the_session_that_is_starting(monkeypatch):

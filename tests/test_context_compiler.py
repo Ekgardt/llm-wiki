@@ -9,8 +9,8 @@ The compiler must:
 - keep LLM-generated contextual text disabled by default,
 - prefix chunks deterministically with page title, heading ancestry, project,
   type, status, aliases, and validity metadata,
-- expand small parent pages in full; expand large pages to the matched heading
-  subtree plus bounded adjacent context,
+- preserve selected spans by default and support explicit parent/heading
+  expansion within caller bounds,
 - return a retrieval trace and a materialization trace with every package.
 """
 from __future__ import annotations
@@ -321,6 +321,34 @@ def _snapshot(
     return CorpusSnapshot(sources, chunks, digest, policy)
 
 
+class _UnrequestedChunks:
+    def __iter__(self):
+        raise AssertionError("L0 metadata must not materialize unrequested chunks")
+
+
+def test_metadata_context_does_not_materialize_unrequested_chunks():
+    source = _source("knowledge/notes/example.md", b"# Example\nUseful context\n")
+    snapshot = _snapshot((source,))
+    object.__setattr__(snapshot, "chunks", _UnrequestedChunks())
+    compilation = context_compiler._Compilation(snapshot, set(), ())
+    assert len(compilation.parents) == 1
+    assert compilation.chunks_by_id == {}
+
+
+def _stop_requested():
+    return True
+
+
+@pytest.mark.parametrize("stop", ["deadline", "cancelled"])
+def test_context_stops_before_materializing_requested_source(stop):
+    source = _source("knowledge/notes/example.md", b"# Example\nUseful context\n")
+    snapshot = _snapshot((source,))
+    object.__setattr__(snapshot, "chunks", _UnrequestedChunks())
+    options = {"deadline": time.monotonic() - 1} if stop == "deadline" else {"cancelled": _stop_requested}
+    with pytest.raises(TimeoutError):
+        compile_context(snapshot, evidence_chunk_ids=("requested",), **options)
+
+
 def _page(
     relative_path: str,
     title: str,
@@ -412,6 +440,7 @@ def test_l2_source_span_materialized_for_final_evidence():
         snapshot,
         shortlist=(page.record.logical_id,),
         evidence_chunk_ids=(chunk.id,),
+        small_parent_chars=len(page.content),  # explicit whole-page expansion
     )
 
     l2_items = [i for i in compiled.items if i.representation == "l2"]
@@ -857,7 +886,7 @@ def _representation_bytes(result, *representations: str) -> list[int]:
 def test_compiler_enforces_default_budget_even_when_budget_omitted(monkeypatch):
     import context_compiler
 
-    monkeypatch.setattr(context_compiler, "DEFAULT_BUDGET", ContextBudget(None, 10, 0, 0))
+    monkeypatch.setattr(context_compiler, "DEFAULT_CONTEXT_BUDGET", ContextBudget(None, 10, 0, 0))
     page = _page("large.md", "Large", "summary", "body " * 100)
 
     compiled = context_compiler.compile_context(_snapshot((page,)))

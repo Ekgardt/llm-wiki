@@ -7,7 +7,9 @@ from __future__ import annotations
 import ast
 import re
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -77,3 +79,70 @@ def test_one_module_writes_the_fixed_width_instant() -> None:
     copies = {path.name: _hand_rolled_lines(path) for path in scripts if path.name != "iso_time.py"}
 
     assert {name: lines for name, lines in copies.items() if lines} == {}
+
+
+def _adapter_event(at):
+    from event_envelope import build_event_envelope
+
+    return build_event_envelope(event_type="session_end", payload={"reason": "clear", "transcript_path": None},
+                                occurred_at=at, captured_at=at, agent="codex", session="clock-test")
+
+
+def _later_clock(at):
+    return at + timedelta(hours=1)
+
+
+@pytest.mark.parametrize("at", [WHOLE, WHOLE + timedelta(microseconds=500001)])
+def test_adapter_pending_clock_keeps_width_and_actual_reducer_roundtrip(at):
+    import integration_adapter as adapter
+
+    envelope = _adapter_event(at)
+    pending = adapter._pending_checkpoint(envelope, "demo", "demo:clock-test")
+    assert pending["occurred_at"] == at.isoformat(timespec="microseconds")
+    decision = adapter._observe_pending_item(pending, {}, {})
+    assert decision is not None and decision.checkpoint_at == at
+
+
+@pytest.mark.parametrize("at", [WHOLE, WHOLE + timedelta(microseconds=500001)])
+def test_adapter_inflight_clock_keeps_width_and_recovery_roundtrip(at):
+    import integration_adapter as adapter
+    from project_journal import CheckpointDecision
+
+    pending = adapter._pending_checkpoint(_adapter_event(at), "demo", "demo:clock-test")
+    pending["claim_owner"] = "clock-owner"
+    state = {"project_checkpoint_pending": {"demo": [pending]}}
+    adapter._record_inflight_state(state, "demo", "clock-owner", [pending],
+                                   CheckpointDecision("session_end", checkpoint_at=at))
+    inflight = state[adapter.INFLIGHT_STATE_KEY]["demo"]
+    assert inflight["checkpoint_at"] == at.isoformat(timespec="microseconds")
+    replayed = adapter._inflight_plan([pending], {}, inflight)
+    assert replayed is not None and replayed[-1].checkpoint_at == at
+
+
+@pytest.mark.parametrize("at", [WHOLE, WHOLE + timedelta(microseconds=500001)])
+def test_adapter_capture_clock_keeps_width_and_session_filing_roundtrip(at):
+    import flush_memory
+    import integration_adapter as adapter
+
+    record = adapter._capture_source_record(_adapter_event(at), "demo", "clear", "source")
+    assert record["occurred_at"] == at.isoformat(timespec="microseconds")
+    assert flush_memory._session_time(record, partial(_later_clock, at)) == at
+
+
+def test_adapter_clock_readers_keep_historical_width_and_absent_clock():
+    import flush_memory
+    import integration_adapter as adapter
+
+    assert adapter._inflight_time({"checkpoint_at": WHOLE.isoformat()}) == WHOLE
+    assert flush_memory._intent_time({"occurred_at": WHOLE.isoformat()}) == WHOLE
+    assert adapter._inflight_time({"checkpoint_at": None}) is None
+    assert adapter._capture_occurred_at(SimpleNamespace(occurred_at=None)) is None
+
+
+def test_adapter_capture_clock_preserves_an_existing_offset():
+    import integration_adapter as adapter
+
+    at = WHOLE.astimezone(timezone(timedelta(hours=5, minutes=30)))
+    encoded = adapter._capture_occurred_at(SimpleNamespace(occurred_at=at))
+    assert encoded == at.isoformat(timespec="microseconds")
+    assert datetime.fromisoformat(encoded) == WHOLE

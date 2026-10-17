@@ -14,6 +14,7 @@ from tests.test_capture_intent_adoption import (
     _coordinator,
     _linked_ids,
     _queue,
+    _session_intent,
     _skipped_ids,
 )
 
@@ -22,8 +23,7 @@ LATER = datetime.now(timezone.utc) + timedelta(hours=1)
 
 def _publish_pending_intent(tmp_path: Path, queue, coordinator, seed: bytes) -> dict:
     """The publication, stopped where a host timeout stops it: the pending row and file."""
-    payload = canonical_json_bytes({"seed": seed.decode()})
-    intent_id = sha256_bytes(seed)
+    intent_id, payload = _session_intent(seed)
     shard = intent_id[:2]
     pending = f"run/capture-intents/pending/{shard}/{intent_id}.json"
     ready = f"run/capture-intents/ready/{shard}/{intent_id}.json"

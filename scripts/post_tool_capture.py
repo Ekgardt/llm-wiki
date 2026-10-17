@@ -1,34 +1,13 @@
-"""PostToolUse hook — lightweight tool-usage tagger.
+"""PostToolUse compatibility entrypoint for complete, durable, non-LLM capture.
 
-Appends a single non-LLM breadcrumb line per tool call (Edit, Write,
-MultiEdit, Bash with significant impact) to today's daily log, so
-the episodic record shows WHAT the agent did, not just what the user
-asked. Pairs with UserPromptSubmit capture to give compile_memory a
-full mid-session activity picture.
-
-Design constraints (Phase 1):
-- NON-LLM. No SDK calls. ms-fast.
-- Filtered: only logs Edit / Write / MultiEdit / NotebookEdit / Bash
-  (significant tools). Skips Read / Glob / Grep / LS (too noisy, low
-  signal for memory).
-- Per-tool rate limit: at most 1 line per (slug, tool, target-path)
-  per 60s — coalesces bursts like 20 micro-Edits to one block.
-- Path preview: shows the file path (or first 80 chars of Bash cmd)
-  so a future compile can correlate "decision made" with "file X edited".
-- Never fails the hook.
-
-Input (Claude Code PostToolUse hook JSON on stdin):
-    {"session_id": "...", "tool_name": "Edit", "tool_input": {...},
-     "tool_response": {...}, "cwd": "..."}
-
-Output: empty (PostToolUse has no continue/cancel semantics for our use).
+The common adapter persists the redacted occurrence before asynchronous journal
+delivery. No direct append, text truncation, tool filter or time suppression lives
+here. Historical --background invocations keep using this same ingress.
 """
 from __future__ import annotations
 
 import io
-import os
 import sys
-from datetime import datetime
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -38,48 +17,7 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-# No stand-ins: a module that cannot import fails the hook, which the host shows
-# as a non-blocking hook error and the adapter records as a lost capture
-# (docs/research/2026-09-25-a-tool-call-in-the-vault-is-captured.md).
-from memory_state import ROOT as _MS_ROOT  # noqa: E402
-from memory_state import STATE_ROOT as _MS_STATE  # noqa: E402
-from memory_state import update_state  # noqa: E402
-
-ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(_MS_ROOT))).resolve()
-STATE_ROOT = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(_MS_STATE))).resolve()
-
 from capture_diagnostics import hook_object, record_capture_failure  # noqa: E402
-from capture_operation import claim_operation, complete_operation  # noqa: E402
-from event_envelope import build_event_envelope, canonical_agent  # noqa: E402
-from iso_time import local_now  # noqa: E402
-from secret_redact import redact_secrets  # noqa: E402
-from session_start_project_state import _compute_slug  # noqa: E402
-
-DAILY_DIR = ROOT / "knowledge" / "daily"
-
-# Tools we care about for memory purposes. Read/Glob/Grep/LS are too
-# noisy (every agent loop reads dozens of files) and add no durable
-# signal — the file WRITE is the durable fact, not the file read.
-SIGNIFICANT_TOOLS = frozenset(
-    {
-        "Edit",
-        "Write",
-        "MultiEdit",
-        "NotebookEdit",
-        "Bash",
-    }
-)
-
-# Per-(slug, tool, target) dedupe window.
-# The same (slug, tool, target) captured again within this window is skipped as a duplicate. A
-# noise trade-off, not measured; review when distinct edits are lost.
-RATE_LIMIT_SECONDS = 60
-
-# Bash commands shorter than this are noise (cd, pwd, ls, etc.).
-MIN_BASH_CMD_CHARS = 8
-
-# Path previews longer than this get truncated.
-MAX_TARGET_PREVIEW = 100
 
 
 def _read_hook_input() -> dict:
@@ -91,241 +29,20 @@ def _read_hook_input() -> dict:
     return hook_object(raw, "tool_input")
 
 
-def _compute_slug_from_cwd(cwd: str) -> str:
-    """The slug `state.md` uses; only a path the system cannot resolve falls back."""
-    try:
-        return _compute_slug(Path(cwd).resolve(), ROOT / "knowledge" / "projects")
-    except (OSError, ValueError):
-        return Path(cwd).name.lower().replace(" ", "-") or "unknown"
-
-
-def _file_target(tool_input: dict) -> str:
-    return str(tool_input.get("filePath") or tool_input.get("file_path") or "")
-
-
-def _bash_target(tool_input: dict) -> str:
-    command = str(tool_input.get("command") or "").strip()
-    if not command:
-        return ""
-    return command.splitlines()[0]
-
-
-def _extract_target(tool_name: str, tool_input: dict) -> str:
-    """Pull out the meaningful target identifier for the tool call.
-
-    For file tools → relative file path. For Bash → first line of the
-    command (truncated). For unknown → tool name alone.
-    """
-    readers = {
-        "Edit": _file_target,
-        "Write": _file_target,
-        "MultiEdit": _file_target,
-        "NotebookEdit": _file_target,
-        "Bash": _bash_target,
-    }
-    return readers.get(tool_name, lambda _value: "")(tool_input)
-
-
-def _tool_operation_key(slug: str, tool: str, target: str) -> str:
-    return f"{slug}::{tool}::{target[:80]}"
-
-
-def _claim_tool_operation(
-    slug: str,
-    tool: str,
-    target: str,
-    *,
-    source_event_id: str | None = None,
-) -> str | None:
-    return claim_operation(
-        update_state,
-        namespace="tool_capture_dedupe",
-        key=_tool_operation_key(slug, tool, target),
-        prefix="post-tool",
-        source_event_id=source_event_id,
-        rate_limit_seconds=RATE_LIMIT_SECONDS,
-        max_entries=200,
-        now=datetime.now(),
-    )
-
-
-def _complete_tool_operation(
-    slug: str, tool: str, target: str, operation_id: str
-) -> None:
-    complete_operation(
-        update_state,
-        namespace="tool_capture_dedupe",
-        key=_tool_operation_key(slug, tool, target),
-        operation_id=operation_id,
-        now=datetime.now(),
-    )
-
-
-# The parent kills this delegate at `integration_adapter.DELEGATE_TIMEOUT_SECONDS`.
-# Without a deadline of its own the append retried its compare-and-swap until
-# that kill arrived, so the breadcrumb was lost and a refused attempt was left
-# behind with nothing saying why — 250 losses on this vault, every one of them
-# while a benchmark had all four cores. Giving up a little earlier means the
-# child records its own reason instead of vanishing. The host's own timeout for
-# this hook is shorter still, so the budget is the writer's
-# (`daily_log_append.BREADCRUMB_APPEND_BUDGET_SECONDS`), shared by every hook. See
-# `docs/research/2026-09-17-every-hook-writer-gives-up-before-its-host-does.md`.
-
-
-def _append_tool_tag(
-    slug: str,
-    session_id: str,
-    tool: str,
-    target: str,
-    operation_id: str | None = None,
-    *,
-    agent: str = "unknown",
-) -> bool:
-    try:
-        from daily_log_append import (
-            BREADCRUMB_APPEND_BUDGET_SECONDS,
-            append_daily,
-            append_deadline,
-        )
-
-        ts = local_now().strftime("%H:%M:%S")
-        # One line, as the prompt breadcrumb: a line break in a path is not a line of the log.
-        preview = " ".join(redact_secrets(target).split())[:MAX_TARGET_PREVIEW]
-        source = canonical_agent(agent)
-        block = (
-            f"- `[{ts}] tool | {source} | {session_id[:8]} | "
-            f"{slug} | {tool}` {preview}"
-        )
-        append_daily(
-            slug,
-            session_id,
-            block,
-            operation_id=operation_id,
-            deadline=append_deadline(BREADCRUMB_APPEND_BUDGET_SECONDS),
-        )
-        return True
-    except Exception as error:  # noqa: BLE001
-        record_capture_failure(
-            "post_tool_append",
-            f"{type(error).__name__}: {error}",
-            error=error,
-            slug=slug,
-            session_id=session_id,
-        )
-        return False
-
-
-def _optional_string(value: object) -> str | None:
-    if not isinstance(value, str):
-        return None
-    return value
-
-
-def _text_or_empty(value: object) -> str:
-    if not isinstance(value, str):
-        return ""
-    return value
-
-
-def _dict_or_empty(value: object) -> dict:
-    if not isinstance(value, dict):
-        return {}
-    return value
-
-
-def _useful_target(tool_name: str, target: str) -> bool:
-    if tool_name != "Bash":
-        return True
-    return len(target) >= MIN_BASH_CMD_CHARS
-
-
-def _validated_tool_target(hook: dict) -> tuple[str, str] | None:
-    tool_name = _text_or_empty(hook.get("tool_name"))
-    if tool_name not in SIGNIFICANT_TOOLS:
-        return None
-    target = _extract_target(tool_name, _dict_or_empty(hook.get("tool_input")))
-    if not _useful_target(tool_name, target):
-        return None
-    return tool_name, target
-
-
-def _cwd(value: object) -> str:
-    if value:
-        return str(value)
-    return os.getcwd()
-
-
-def _tool_context(hook: dict) -> tuple[str, str, object, object, str] | None:
-    tool = _validated_tool_target(hook)
-    if tool is None:
-        return None
-    tool_name, target = tool
-    source_session = hook.get("session_id")
-    source_cwd = hook.get("cwd")
-    # A call made inside the vault is captured like any other; the memory's own
-    # processes are filtered by the adapter's reentry marker (audit B-1).
-    return tool_name, target, source_session, source_cwd, _cwd(source_cwd)
-
-
-def _tool_envelope(
-    hook: dict,
-    tool_name: str,
-    target: str,
-    source_session: object,
-    source_cwd: object,
-    slug: str,
-):
-    return build_event_envelope(
-        event_type="post_tool_use",
-        payload={"tool_name": tool_name, "target": redact_secrets(target)},
-        agent=_optional_string(hook.get("agent")),
-        session=_optional_string(source_session),
-        project=slug if source_cwd else None,
-        worktree=_optional_string(source_cwd),
-        severity=_optional_string(hook.get("severity")),
-        parent_event_id=_optional_string(hook.get("parent_event_id")),
-        source_event_id=_optional_string(hook.get("event_id")),
-    )
-
-
-def _finish_tool_operation(
-    appended: bool, slug: str, tool_name: str, target: str, operation_id: str
-) -> None:
-    if appended:
-        _complete_tool_operation(slug, tool_name, target, operation_id)
-
-
 def _capture_tool(hook: dict) -> None:
-    context = _tool_context(hook)
-    if context is None:
+    """Direct hook invocations use the common durable ingress."""
+    if not hook:
         return
-    tool_name, target, source_session, source_cwd, cwd = context
-    slug = _compute_slug_from_cwd(cwd)
-    envelope = _tool_envelope(
-        hook, tool_name, target, source_session, source_cwd, slug
+    from integration_adapter import ingest_event, normalize_occurrence_event
+
+    envelope = normalize_occurrence_event(
+        str(hook.get("agent") or "claude"), "post_tool_use", hook,
     )
-    operation_id = _claim_tool_operation(
-        slug,
-        tool_name,
-        envelope.payload["target"],
-        source_event_id=envelope.source_event_id,
-    )
-    if operation_id is None:
-        return
-    appended = _append_tool_tag(
-        slug,
-        str(source_session or "unknown"),
-        tool_name,
-        envelope.payload["target"],
-        operation_id=operation_id,
-        agent=envelope.agent or "unknown",
-    )
-    _finish_tool_operation(
-        appended, slug, tool_name, envelope.payload["target"], operation_id
-    )
+    ingest_event(envelope)
 
 
-def main() -> int:
+def main(arguments: list[str] | None = None) -> int:
+    # Older installed hooks may still pass --background; durable ingress is the same.
     try:
         _capture_tool(_read_hook_input())
     except Exception as error:  # noqa: BLE001

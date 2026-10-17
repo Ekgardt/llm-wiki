@@ -1,25 +1,24 @@
-"""Task 15: Adaptive Context Compiler.
+"""Adaptive Context Compiler.
 
 Materializes L0/L1/L2 representations for each captured source and packs
-them into one shared token budget. Designed to be called by the retrieval
-planner (Task 11, future), the SessionStart context builder, and the
-grounded QA pipeline (Tasks 16–17, not yet integrated).
+them into one shared token budget. Query memory and get_context compile
+captured evidence here; other context producers share the final packing
+boundary through compile_context_items.
 
 Design contract (from docs/superpowers/plans/2026-07-16-unified-evidence-retrieval.md):
 
 - L0 is broad ranking metadata (every parent contributes one item).
 - L1 is shortlisted orientation (only parents in ``shortlist``).
 - L2/source spans are final evidence (only chunks in ``evidence_chunk_ids``).
-- Caches key by logical path + source SHA-256 + generator version + model
-  descriptor. Item IDs embed the source hash so different versions cannot
-  conflate.
+- Item IDs include the logical source identity and source SHA-256, so
+  different source versions cannot conflate.
 - Duplicate stems (e.g. ``foo.md`` and ``sub/foo.md``) are reported, not
   conflated.
 - LLM-generated contextual text is OFF by default.
 - Chunks carry a deterministic prefix with page title, project, type, status,
   aliases, and validity metadata.
-- Small parents expand in full; large parents expand to the matched heading
-  subtree plus a bounded adjacent context.
+- Selected evidence keeps its verified byte span by default. Callers may
+  request whole-parent or heading expansion with explicit bounds.
 - Every compiled package carries a compilation trace with materializations.
 """
 from __future__ import annotations
@@ -43,27 +42,17 @@ from corpus_snapshot import (
     RetrievalChunk,
     _frontmatter,
     _markdown_headings,
+    iter_snapshot_chunks,
 )
 
-DEFAULT_BUDGET = ContextBudget(
-    model=None,
-    max_input_tokens=8192,
-    reserved_output_tokens=0,
-    safety_margin_tokens=512,
-)
-# How much surrounding page the compiler adds around a retrieved chunk: a parent
-# section up to 1 500 characters is taken whole, a larger one only as a 2 000-character
-# subtree, and a following section of up to 200 characters rides along when it still
-# fits. These shape context, not correctness: nothing is refused or lost past them.
-# Basis unknown: values predate measurement (2026-07-18, the L0/L1/L2 compiler); review
-# when answer quality is measured against context size.
-DEFAULT_SMALL_PARENT_CHARS = 1500
-DEFAULT_LARGE_PARENT_SUBTREE_CHARS = 2000
-ADJACENT_CONTEXT_CHARS = 200
+# Selected evidence stays in its verified chunk span by default, as in
+# query_memory. Widening is an explicit caller choice; the shared context
+# budget controls the complete output. Repeating a small page per selected
+# chunk can otherwise make get_context discard all evidence.
+# See docs/research/2026-10-03-selected-context-keeps-its-own-span.md.
 DEFAULT_RELEVANCE_L0 = 0.4
 DEFAULT_RELEVANCE_L1 = 0.7
 DEFAULT_RELEVANCE_L2 = 0.95
-COMPILER_VERSION = "context-compiler/v1"
 LLM_GENERATED_CONTEXT_DEFAULT = False
 
 Representation = Literal["l0", "l1", "l2"]
@@ -172,7 +161,6 @@ class CompiledContext:
 @dataclass(frozen=True)
 class _Parent:
     source: CapturedSource
-    chunks: tuple[RetrievalChunk, ...]
     title: str
     summary: str
     aliases: tuple[str, ...]
@@ -208,10 +196,6 @@ def _extract_summary(content: str) -> str:
 
 
 def _build_parents(snapshot: CorpusSnapshot) -> tuple[_Parent, ...]:
-    chunks_by_parent: dict[str, list[RetrievalChunk]] = {}
-    for chunk in snapshot.chunks:
-        chunks_by_parent.setdefault(chunk.parent_page, []).append(chunk)
-
     parents: list[_Parent] = []
     for source in snapshot.sources:
         relative_path = source.record.relative_path
@@ -223,7 +207,6 @@ def _build_parents(snapshot: CorpusSnapshot) -> tuple[_Parent, ...]:
         parents.append(
             _Parent(
                 source=source,
-                chunks=tuple(chunks_by_parent.get(relative_path, ())),
                 title=title,
                 summary=summary,
                 aliases=aliases,
@@ -370,7 +353,7 @@ def _with_adjacent(headings: list, section_start: int, section_end: int, budget:
         content_length,
     )
     adjacent_size = adjacent_end - section_end
-    if 0 < adjacent_size <= ADJACENT_CONTEXT_CHARS and adjacent_end - section_start <= budget:
+    if 0 < adjacent_size and adjacent_end - section_start <= budget:
         return adjacent_end
     return section_end
 
@@ -547,8 +530,8 @@ def compile_context(
     shortlist: Iterable[str] = (),
     evidence_chunk_ids: Iterable[str] = (),
     budget: ContextBudget | None = None,
-    small_parent_chars: int = DEFAULT_SMALL_PARENT_CHARS,
-    large_parent_subtree_chars: int = DEFAULT_LARGE_PARENT_SUBTREE_CHARS,
+    small_parent_chars: int = 0,
+    large_parent_subtree_chars: int = 0,
     generated_context: bool = LLM_GENERATED_CONTEXT_DEFAULT,
     graph_expansions: Iterable[Mapping[str, object]] = (),
     deadline: float | None = None,
@@ -566,6 +549,8 @@ def compile_context(
         snapshot,
         {str(s) for s in shortlist},
         tuple(sorted({str(c) for c in evidence_chunk_ids})),
+        deadline=deadline,
+        cancelled=cancelled,
     )
     compilation.materialize(
         _L2Limits(small_parent_chars, large_parent_subtree_chars, deadline, cancelled)
@@ -599,7 +584,7 @@ def _require_nonnegative_limits(small_parent_chars: int, large_parent_subtree_ch
 
 def _budget_or_default(budget: ContextBudget | None) -> ContextBudget:
     if budget is None:
-        return DEFAULT_BUDGET
+        return DEFAULT_CONTEXT_BUDGET
     return budget
 
 
@@ -703,14 +688,29 @@ def _packing_trace(packed, packed_items: list[CompiledItem]) -> PackingTrace:
     )
 
 
+def _requested_evidence_chunks(
+    snapshot: CorpusSnapshot, requested: tuple[str, ...], *, deadline=None, cancelled=None
+) -> dict:
+    if not requested:
+        return {}
+    selected = set(requested)
+    chunks = iter_snapshot_chunks(snapshot, deadline=deadline, cancelled=cancelled)
+    return {chunk.id: chunk for chunk in chunks if chunk.id in selected}
+
+
 class _Compilation:
     """The items one compile materializes, each with its trace and its owner."""
 
-    def __init__(self, snapshot: CorpusSnapshot, shortlist: set[str], evidence_ids: tuple[str, ...]) -> None:
+    def __init__(
+        self, snapshot: CorpusSnapshot, shortlist: set[str], evidence_ids: tuple[str, ...],
+        *, deadline=None, cancelled=None,
+    ) -> None:
         self.parents = _build_parents(snapshot)
         self.shortlist = shortlist
         self.requested_evidence_ids = evidence_ids
-        self.chunks_by_id = {chunk.id: chunk for chunk in snapshot.chunks}
+        self.chunks_by_id = _requested_evidence_chunks(
+            snapshot, evidence_ids, deadline=deadline, cancelled=cancelled
+        )
         self.items: list[CompiledItem] = []
         self.materializations: list[MaterializationTrace] = []
         self.l1_parent_by_item_id: dict[str, str] = {}

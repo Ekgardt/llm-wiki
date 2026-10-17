@@ -34,3 +34,34 @@ and operator probe, then the run and the gates.
 
 Files: `benchmark/run_code_navigation.py`, `CHANGELOG.md`,
 `docs/AUDIT-2026-09-10-memory-and-retrieval.md`.
+
+## 2026-10-06: authored citation validation before compilation publication
+
+Installed HEAD 974ab62a binds each evidence entry, but the renderer also copies
+model-authored titles, summaries, body text, claims and related links. A complete
+reference in the evidence section did not prevent a shortened reference elsewhere
+in the page. The isolated regression reproduced five incorrect acceptances while
+keeping two positive controls. Existing strict `extract_evidence_references`
+checks the newly authored strings before normalized-plan acceptance. Every parsed
+reference must additionally belong to this operation's already verified bindings.
+Old target text is neither edited nor granted new authority. This prevents fresh
+malformed pages; it does not repair the three already stored pages, including an
+immutable decision. The normalization cache identity changes; no source format,
+path, provider contract, resource limit or persistent authority is added.
+
+Research verified 2026-10-06:
+- W3C PROV-DM: https://www.w3.org/TR/prov-dm/ — provenance links identify actual entities and derivations.
+- OWASP Input Validation: https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html — both syntactic and semantic validation are required.
+- OpenAI Structured Outputs: https://developers.openai.com/api/docs/guides/structured-outputs — a schema does not establish semantic correctness; this is not a claim that Codex CLI implements API grammar guarantees.
+
+Prompt-only correction would not enforce the invariant. Renderer-only syntax
+checking would accept a complete unrelated reference. Automatic shortening or
+replacement would invent provenance. Reusing the existing parser plus exact
+operation-owned bindings is the smallest verified change. A new prose citation
+requires its corresponding evidence entry; existing target prose is preserved.
+
+Qualification: five genuine failures and two positive controls before the fix;
+seven new tests and the complete transaction suite pass (90 total). Actual Lizard
+and AST analysis of all nine changed/new callables measured CCN at most four,
+no more than two if statements and at most two control-flow nesting levels.
+The broader regression and installed validation remain separate requirements.

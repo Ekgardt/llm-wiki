@@ -7,9 +7,12 @@ is NOT a full DLP scanner. For CI secret scanning, rely on gitleaks.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 # A credential-named key followed by a value. The name alone decides nothing:
 # `lease_token: str` is a type annotation, `token = next(iterator)` is an
@@ -41,65 +44,70 @@ _QUOTE = r"\\?[\"']"
 # A quoted value whole (spaces included) or a bare one that stops before a
 # backslash, so an escaped closing quote of a JSON string is never swallowed.
 _VALUE = r"(\\?\"[^\"\r\n\\]*\\?\"|'[^'\r\n]*'|[^\s\\]+)"
+# Candidate starts are a superset; the original pattern still decides every match.
+_CREDENTIAL_VALUE_PATTERN = re.compile(
+    rf"(?i)({_CREDENTIAL_NAME}(?:{_QUOTE})?{_SAME_LINE}[=:]{_SAME_LINE}){_VALUE}"
+)
+_ASSIGNMENT_HEAD = re.compile(rf"(?<![\w.-])[\w.-]+(?:{_QUOTE})?{_SAME_LINE}[=:]")
 _NAMED_VALUE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         rf"(?i)(authorization(?:{_QUOTE})?{_SAME_LINE}:{_SAME_LINE}(?:{_QUOTE})?"
         rf"(?:bearer|basic|token)[^\S\r\n])([^\s\\\"']+)"
     ),
-    re.compile(rf"(?i)({_CREDENTIAL_NAME}(?:{_QUOTE})?{_SAME_LINE}[=:]{_SAME_LINE}){_VALUE}"),
+    _CREDENTIAL_VALUE_PATTERN,
 )
 
-_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+_PATTERN_RULES: list[tuple[re.Pattern[str], str, tuple[str, ...]]] = [
     # A provider key starts a token. Without this guard `sk-` matched inside
     # `dead-task-retirement-and-restore-decision`, the fail-closed DLP boundary
     # quarantined the write, and this vault could publish no knowledge at all.
     # Punctuation is still a boundary, so `KEY=sk-…`, `"sk-…"` and `(sk-…)` are
     # caught as before. See docs/research/2026-08-22-secret-prefix-boundaries.md.
-    (re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9][A-Za-z0-9_-]{18,}"), "[REDACTED_API_KEY]"),
+    (re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9][A-Za-z0-9_-]{18,}"), "[REDACTED_API_KEY]", ('sk-',)),
     # GitHub ships six prefixes, not one, and the fine-grained tokens carry a
     # seventh shape. See docs/research/2026-08-25-which-secret-shapes-are-worth-a-pattern.md.
     (
         re.compile(r"(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{20,}"),
         "[REDACTED_GITHUB_TOKEN]",
-    ),
+     ('gh',)),
     (
         re.compile(r"(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{20,}"),
         "[REDACTED_GITHUB_TOKEN]",
-    ),
+     ('github_pat_',)),
     # Underscore keys (Stripe and everyone who copied the shape). The existing
     # `sk-` rule never saw these, and the prefix does not name the vendor, so
     # the replacement does not claim one.
     (
         re.compile(r"(?<![A-Za-z0-9])[sr]k_(live|test)_[A-Za-z0-9]{16,}"),
         "[REDACTED_API_KEY]",
-    ),
-    (re.compile(r"(?<![A-Za-z0-9])npm_[A-Za-z0-9]{30,}"), "[REDACTED_API_KEY]"),
-    (re.compile(r"(?<![A-Za-z0-9])hf_[A-Za-z0-9]{30,}"), "[REDACTED_API_KEY]"),
-    (re.compile(r"(?<![A-Za-z0-9])pypi-[A-Za-z0-9_-]{30,}"), "[REDACTED_API_KEY]"),
-    (re.compile(r"(?<![A-Za-z0-9])GOCSPX-[A-Za-z0-9_-]{20,}"), "[REDACTED_API_KEY]"),
-    (re.compile(r"(?<![A-Za-z0-9])xapp-[0-9]-[A-Za-z0-9-]{10,}"), "[REDACTED_SLACK_TOKEN]"),
-    (re.compile(r"(?<![A-Za-z0-9])xox[baprs]-[A-Za-z0-9-]{10,}"), "[REDACTED_SLACK_TOKEN]"),
-    (re.compile(r"(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}"), "[REDACTED_AWS_KEY]"),
-    (re.compile(r"(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{35}"), "[REDACTED_GOOGLE_KEY]"),
+     ('k_',)),
+    (re.compile(r"(?<![A-Za-z0-9])npm_[A-Za-z0-9]{30,}"), "[REDACTED_API_KEY]", ('npm_',)),
+    (re.compile(r"(?<![A-Za-z0-9])hf_[A-Za-z0-9]{30,}"), "[REDACTED_API_KEY]", ('hf_',)),
+    (re.compile(r"(?<![A-Za-z0-9])pypi-[A-Za-z0-9_-]{30,}"), "[REDACTED_API_KEY]", ('pypi-',)),
+    (re.compile(r"(?<![A-Za-z0-9])GOCSPX-[A-Za-z0-9_-]{20,}"), "[REDACTED_API_KEY]", ('GOCSPX-',)),
+    (re.compile(r"(?<![A-Za-z0-9])xapp-[0-9]-[A-Za-z0-9-]{10,}"), "[REDACTED_SLACK_TOKEN]", ('xapp-',)),
+    (re.compile(r"(?<![A-Za-z0-9])xox[baprs]-[A-Za-z0-9-]{10,}"), "[REDACTED_SLACK_TOKEN]", ('xox',)),
+    (re.compile(r"(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}"), "[REDACTED_AWS_KEY]", ('AKIA',)),
+    (re.compile(r"(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{35}"), "[REDACTED_GOOGLE_KEY]", ('AIza',)),
     (
         re.compile(
             r"(?<![A-Za-z0-9])eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
         ),
         "[REDACTED_JWT]",
-    ),
+     ('eyJ',)),
     # A key with no END line (`head id_rsa`) is redacted to the end of the text: what
     # follows its BEGIN line is the key until something proves otherwise.
     (
         re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)"),
         "[REDACTED_PEM_KEY]",
-    ),
+     ('PRIVATE KEY-----',)),
     # Google OAuth access tokens, Telegram bot tokens, Slack incoming webhooks
     # (audit 2026-09-27 B-4, docs/research/2026-09-27-the-redactor-knows-the-missing-shapes.md).
-    (re.compile(r"(?<![A-Za-z0-9])ya29\.[A-Za-z0-9_-]{20,}"), "[REDACTED_GOOGLE_TOKEN]"),
+    (re.compile(r"(?<![A-Za-z0-9])ya29\.[A-Za-z0-9_-]{20,}"), "[REDACTED_GOOGLE_TOKEN]", ('ya29.',)),
     # A bot id, a colon and the secret: the Bot API documents `123456:ABC-DEF1234ghIkl-…`
     # (a 34-character secret); issued secrets run 35. From 30 on it is a token, not a clock.
-    (re.compile(r"(?<![\w:])\d{6,10}:[A-Za-z0-9_-]{30,}(?![\w-])"), "[REDACTED_TELEGRAM_TOKEN]"),
-    (re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9/_-]+"), "[REDACTED_SLACK_WEBHOOK]"),
+    (re.compile(r"(?<![\w:])\d{6,10}:[A-Za-z0-9_-]{30,}(?![\w-])"), "[REDACTED_TELEGRAM_TOKEN]", ()),
+    (re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9/_-]+"), "[REDACTED_SLACK_WEBHOOK]", ('https://hooks.slack.com/services/',)),
     # A credential in a URL query (`?api_key=…`, `&access_token=…`, a signed URL's `sig=`).
     (
         re.compile(
@@ -107,22 +115,36 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
             r"password|passwd|pwd|auth|sig|signature|key)=)[^&\s#\"'<>]+"
         ),
         r"\1[REDACTED]",
-    ),
-    (re.compile(r"(?<![A-Za-z0-9])glpat-[\w-]{20,}"), "[REDACTED_GITLAB_TOKEN]"),
+     ('?', '&')),
+    (re.compile(r"(?<![A-Za-z0-9])glpat-[\w-]{20,}"), "[REDACTED_GITLAB_TOKEN]", ('glpat-',)),
     # The password in `scheme://user:password@host` (RFC 3986 3.2.1 deprecates it
     # for exactly this reason); the user and the host stay readable.
     # Up to the LAST `@` of the authority (`user:p@ss@host`), never a port alone.
     # A scheme starts where no scheme character precedes it: `\b` let the scheme run
     # start at every dot of `a.a.a…` and rescan it, 6.7 s on 40 KB (audit 2026-09-27 B-6).
-    (re.compile(r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://[^\s/:@]+:)(?!\d+@)[^\s/]+(@)"), r"\1[REDACTED]\2"),
-    # `curl -u user:password`: the part after the first colon.
-    (re.compile(r"(?<![\w-])((?:-u|--user)(?:\s+|=)[^\s:]+:)(?!\$)[^\s]+"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://[^\s/:@]+:)(?!\d+@)[^\s/]+(@)"), r"\1[REDACTED]\2", ('://',)),
     # `--password=X`, `--password X` (docker login, podman, many CLIs).
-    (re.compile(r"(?<![\w-])(--password(?:=|[^\S\r\n]+))(?![$-])[^\s]+"), r"\1[REDACTED]"),
+    (re.compile(r"(?<![\w-])(--password(?:=|[^\S\r\n]+))(?![$-])[^\s]+"), r"\1[REDACTED]", ('--password',)),
     # MySQL's `-pPASSWORD`, `sshpass -p` and `docker login -p` are redacted by
     # `_redact_command_passwords`, one pass per line (a lazy scan per command name was
     # quadratic: 2.5 s on 40 KB of `mysql `, audit 2026-09-27 B-6).
 ]
+
+# A prerequisite is certified by the unchanged rule's exact source and flags.
+# Unknown or changed rules run their full regex. Case-insensitive rules use
+# punctuation only, preserving Python's Unicode case matching.
+_PATTERNS = [(pattern, replacement) for pattern, replacement, _ in _PATTERN_RULES]
+_LF_NAMED_RULES = _NAMED_VALUE_PATTERNS
+_LF_TOKEN_RULES = tuple(_PATTERNS)
+# Exact reviewed regex source/flags/order; new rules keep the full-text path.
+_LINE_LOCAL_RULESET_SHA256 = "4d5f9e2ef116dfbb7343eb47bfd4bdff48836d20b5dbf81989c4cbf3b352df49"
+_LINE_REDACTION_CACHE = ContextVar("line_redaction_cache", default=None)
+
+_PATTERN_PREREQUISITES = {
+    (pattern.pattern, pattern.flags): literals
+    for pattern, _replacement, literals in _PATTERN_RULES if literals
+}
+
 
 # A command whose `-p` takes a password: MySQL clients only attached (`-pX`; `-p db`
 # prompts and names a database), sshpass and docker login attached or separated.
@@ -134,6 +156,30 @@ _FLAG_VALUE = r"(?:'[^'\r\n]*'|\"[^\"\r\n]*\"|\S+)"
 _ATTACHED_PASSWORD = re.compile(r"(?<!\S)(-p)(?![\s$])" + _FLAG_VALUE)
 _ANY_PASSWORD = re.compile(r"(?<!\S)(-p(?:[^\S\r\n]+)?)(?![\s$-])" + _FLAG_VALUE)
 
+# Options belong to their command: `date -u +%H:%M:%S` is not credentials.
+# Quoted shell operators remain in the command; unquoted ones end its region.
+# See docs/research/2026-09-29-a-user-flag-belongs-to-its-command.md.
+_CURL_COMMAND = re.compile(
+    r"(?<![\w.-])(?i:curl(?:\.exe)?)[\"']?(?=\s)"
+    r"(?:\\\r?\n|`\r?\n|'[^'\r\n]*(?:'|$)|\"[^\"\r\n]*(?:\"|$)|[^'\";&|\r\n])*"
+)
+_CURL_USER = re.compile(r"(?<![\w-])(?:-u|--user)(?:[^\S\r\n]+|=)" + _FLAG_VALUE)
+
+
+def _curl_credentials(match: re.Match[str]) -> str:
+    value = match.group()
+    prefix, colon, password = value.partition(":")
+    if not colon or password.startswith("$"):
+        return value
+    closing = ""
+    if password.endswith(("'", '"')):
+        closing = password[-1]
+    return prefix + ":[REDACTED]" + closing
+
+
+def _curl_command(match: re.Match[str]) -> str:
+    return _CURL_USER.sub(_curl_credentials, match.group())
+
 
 def _command_line(line: str) -> str:
     command = _PASSWORD_COMMAND.search(line)
@@ -144,7 +190,32 @@ def _command_line(line: str) -> str:
 
 
 def _redact_command_passwords(text: str) -> str:
-    return "".join(_command_line(line) for line in text.splitlines(keepends=True))
+    # This stage already sees one complete splitlines row at a time. Reuse only
+    # its reviewed pure rules within the existing measurement-owned scope;
+    # the curl, entropy, policy and transport passes still see their full text.
+    scope = _LINE_REDACTION_CACHE.get()
+    if scope is None or not _command_rules_are_original():
+        return "".join(_command_line(line) for line in text.splitlines(keepends=True))
+    cache = scope.setdefault("command_lines", {})
+    return "".join(_cached_command_line(line, cache) for line in text.splitlines(keepends=True))
+
+
+_COMMAND_LINE_CALLBACK = _command_line
+_COMMAND_LINE_CODE = _command_line.__code__
+_COMMAND_LINE_PATTERNS = (_PASSWORD_COMMAND, _ATTACHED_PASSWORD, _ANY_PASSWORD)
+
+
+def _command_rules_are_original():
+    patterns = (_PASSWORD_COMMAND, _ATTACHED_PASSWORD, _ANY_PASSWORD)
+    return (_command_line is _COMMAND_LINE_CALLBACK
+            and _command_line.__code__ is _COMMAND_LINE_CODE
+            and all(current is original for current, original in zip(patterns, _COMMAND_LINE_PATTERNS)))
+
+
+def _cached_command_line(line, cache):
+    if line not in cache:
+        cache[line] = _command_line(line)
+    return cache[line]
 
 _HIGH_ENTROPY_RE = re.compile(
     r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9+/=])"
@@ -189,10 +260,26 @@ def _shannon_entropy(data: str) -> float:
     return -sum((f / n) * math.log2(f / n) for f in freq.values())
 
 
+def _pattern_may_match(pattern: re.Pattern[str], text: str) -> bool:
+    if not isinstance(pattern, re.Pattern):
+        return True
+    key = (getattr(pattern, "pattern", None), getattr(pattern, "flags", None))
+    literals = _PATTERN_PREREQUISITES.get(key)
+    if literals is None:
+        return True
+    return any(literal in text for literal in literals)
+
+
+def _apply_pattern(pattern: re.Pattern[str], replacement: str, text: str) -> str:
+    if not _pattern_may_match(pattern, text):
+        return text
+    return pattern.sub(replacement, text)
+
+
 def _redact_patterns(text: str) -> str:
     out = text
     for pattern, replacement in _PATTERNS:
-        out = pattern.sub(replacement, out)
+        out = _apply_pattern(pattern, replacement, out)
     return out
 
 
@@ -279,8 +366,38 @@ def _replace_named_value(match: re.Match[str]) -> str:
 def _redact_named_values(text: str) -> str:
     out = text
     for pattern in _NAMED_VALUE_PATTERNS:
-        out = pattern.sub(_replace_named_value, out)
+        out = _named_pattern_sub(pattern, out)
     return out
+
+
+def _named_pattern_sub(pattern, text: str) -> str:
+    if pattern is _CREDENTIAL_VALUE_PATTERN:
+        return _indexed_named_values(text)
+    return pattern.sub(_replace_named_value, text)
+
+
+def _indexed_named_values(text: str) -> str:
+    matches = (_CREDENTIAL_VALUE_PATTERN.match(text, head.start())
+               for head in _ASSIGNMENT_HEAD.finditer(text))
+    return _rewrite_named_matches(text, matches)
+
+
+def _rewrite_named_matches(text: str, matches) -> str:
+    pieces = []
+    cursor = 0
+    for match in matches:
+        cursor = _append_named_match(text, match, cursor, pieces)
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+def _append_named_match(text: str, match, cursor: int, pieces) -> int:
+    if match is None:
+        return cursor
+    if match.start() < cursor:
+        return cursor
+    pieces.extend((text[cursor:match.start()], _replace_named_value(match)))
+    return match.end()
 
 
 def _looks_like_path(token: str) -> bool:
@@ -392,6 +509,81 @@ def describe_error_chain(error: BaseException) -> str:
     return " <- ".join(parts)
 
 
+_LF_PIPELINE_CALLBACKS = {name: globals()[name] for name in (
+    "_redact_named_values", "_redact_patterns", "_replace_named_value", "_value_is_credential",
+    "_value_is_code", "_bare_value_is_credential", "_is_symbol_reference", "_matches_known_secret_shape",
+    "_split_value", "_indexed_named_values", "_named_pattern_sub", "_rewrite_named_matches",
+    "_append_named_match", "_apply_pattern", "_pattern_may_match",
+)}
+
+
+@contextmanager
+def line_redaction_scope(cache):
+    """Reuse pure LF-local passes only during an explicitly owned measurement."""
+    token = _LINE_REDACTION_CACHE.set(cache)
+    try:
+        yield
+    finally:
+        _LINE_REDACTION_CACHE.reset(token)
+
+
+def _line_rules_are_original(text):
+    return ("PRIVATE KEY-----" not in text
+            and _NAMED_VALUE_PATTERNS == _LF_NAMED_RULES
+            and tuple(_PATTERNS) == _LF_TOKEN_RULES
+            and _line_rule_fingerprint() == _LINE_LOCAL_RULESET_SHA256
+            and _line_callbacks_are_original())
+
+
+def _line_rule_fingerprint():
+    try:
+        rules = ([(pattern.pattern, pattern.flags) for pattern in _NAMED_VALUE_PATTERNS],
+                 [(pattern.pattern, pattern.flags, replacement) for pattern, replacement in _PATTERNS])
+        encoded = json.dumps(rules, separators=(",", ":")).encode()
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _line_callbacks_are_original():
+    return all(globals()[name] is original for name, original in _LF_PIPELINE_CALLBACKS.items())
+
+
+def _line_redaction_configuration():
+    return (_NAMED_VALUE_PATTERNS, tuple(_PATTERNS),
+            tuple(_PATTERN_PREREQUISITES.items()), _redact_named_values, _redact_patterns,
+            _replace_named_value, _value_is_credential, _value_is_code,
+            _bare_value_is_credential, _is_symbol_reference, _matches_known_secret_shape,
+            _split_value, _MIN_CREDENTIAL_VALUE_CHARS, _MIN_ALPHA_SECRET_CHARS,
+            _VALUE_END_RE, _INTERPOLATION_MARKS, frozenset(_CODE_CHARACTERS),
+            _ASSIGNMENT_HEAD, _CREDENTIAL_VALUE_PATTERN, _indexed_named_values,
+            _named_pattern_sub, _rewrite_named_matches, _append_named_match,
+            _apply_pattern, _pattern_may_match,
+            _IDENTIFIER_RE, _QUOTED_VALUE_RE, _LOCATION_RE)
+
+
+def _configured_line_cache(scope):
+    configuration = _line_redaction_configuration()
+    if scope.get("configuration") != configuration:
+        scope.clear()
+        scope.update(configuration=configuration, lines={})
+    return scope["lines"]
+
+
+def _cached_pattern_line(line, cache):
+    if line not in cache:
+        cache[line] = _redact_patterns(_redact_named_values(line))
+    return cache[line]
+
+
+def _pattern_redaction(text):
+    scope = _LINE_REDACTION_CACHE.get()
+    if scope is None or not _line_rules_are_original(text):
+        return _redact_patterns(_redact_named_values(text))
+    cache = _configured_line_cache(scope)
+    return "\n".join(_cached_pattern_line(line, cache) for line in text.split("\n"))
+
+
 def redact_secrets(text: str) -> str:
     """Return text with common secret patterns replaced."""
     if not text or not isinstance(text, str):
@@ -400,7 +592,9 @@ def redact_secrets(text: str) -> str:
     # `_PATTERNS`, so `token=sk-…` collapsed to `token=[REDACTED]` and never to
     # `token=[REDACTED_API_KEY]`. Splitting them into their own pass must not
     # renumber that — the marker is asserted, hashed and stored downstream.
-    return _redact_high_entropy(_redact_command_passwords(_redact_patterns(_redact_named_values(text))))
+    return _redact_high_entropy(_redact_command_passwords(_CURL_COMMAND.sub(
+        _curl_command, _pattern_redaction(text)
+    )))
 
 
 # --- structured values ------------------------------------------------------

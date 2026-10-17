@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "intent_id", "index", "previous_sha256", "text"],
+  "properties": {
+    "schema_version": {"const": "breadcrumb-part/v1"},
+    "intent_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "index": {"type": "integer", "minimum": 0},
+    "previous_sha256": {"oneOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9a-f]{64}$"}]},
+    "text": {"type": "string", "minLength": 1}
+  },
+  "additionalProperties": false
+}

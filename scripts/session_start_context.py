@@ -34,6 +34,7 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from capture_diagnostics import record_hook_error  # noqa: E402
 from context_budget import (  # noqa: E402
     DEFAULT_CONTEXT_BUDGET,
     BudgetExceededError,
@@ -49,6 +50,7 @@ from memory_state import (  # noqa: E402
     update_state,
 )
 from reliable_memory import validate_runtime_file  # noqa: E402
+from secret_redact import describe_error  # noqa: E402
 from vault_log import LOG_RELATIVE  # noqa: E402
 
 MEMORY_INDEX = ROOT / "knowledge" / "index.md"
@@ -111,15 +113,25 @@ def _claim_is_live(existing: dict, today: str, now: datetime) -> bool:
     return expires_at is not None and expires_at > now
 
 
+def _nightly_attempted_today(state: dict, today: str) -> bool:
+    """The daily cadence counts recorded attempts; success stays a separate fact."""
+    dates = (
+        str(state.get("last_nightly_date", ""))[:10],
+        _state_map(state, "last_nightly_result").get("date"),
+        _state_map(state, "last_nightly_failure").get("date"),
+    )
+    return today in dates
+
+
 def _claim_nightly_catchup(today: str | None = None, now: str | None = None) -> bool:
-    """Atomically reserve today's catchup when no nightly completed today."""
+    """Atomically reserve today's catchup when no nightly attempt was recorded."""
     today = _today_iso(today)
     claimed_at = _parse_iso_safe(now) or datetime.now(timezone.utc)
     claimed = False
 
     def _mutate(state: dict) -> None:
         nonlocal claimed
-        if str(state.get("last_nightly_date", ""))[:10] == today:
+        if _nightly_attempted_today(state, today):
             return
         if _claim_is_live(_state_map(state, "nightly_catchup_claim"), today, claimed_at):
             return
@@ -134,7 +146,8 @@ def _claim_nightly_catchup(today: str | None = None, now: str | None = None) -> 
 
     try:
         update_state(_mutate, lock_timeout=HOOK_STATE_LOCK_TIMEOUT)
-    except Exception:  # noqa: BLE001
+    except Exception as error:  # noqa: BLE001
+        record_hook_error(STATE_ROOT, "nightly catch-up claim", describe_error(error))
         return False
     return claimed
 
@@ -147,8 +160,8 @@ def _release_nightly_claim(today: str) -> None:
 
     try:
         update_state(_release, lock_timeout=HOOK_STATE_LOCK_TIMEOUT)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as error:  # noqa: BLE001
+        record_hook_error(STATE_ROOT, "nightly catch-up release", describe_error(error))
 
 
 def maybe_spawn_nightly_catchup(today: str | None = None) -> None:
@@ -811,22 +824,13 @@ def _impact_block() -> str:
         return ""
 
 
-# The suite pins this budget deliberately: session start must not wait on the
-# doctor. Measured against the vault this was written on, the sixteen checks
-# want 1.77 seconds, so at this budget the run is always truncated — see
-# `_deferred_count` for what that means for its findings.
+# Session start retains its existing latency budget. Operational checks may
+# exceed it; completed findings and the count of unmeasured checks are both shown.
 HEALTH_BUDGET_SECONDS = 0.1
 
 
 def _deferred_count(report: dict) -> int:
-    """How many checks never ran because the doctor's budget ran out.
-
-    A truncated run is not a partial answer, it is no answer. Checks that are
-    cut short mid-read report failure without marking themselves: on this vault
-    the queue and the LSP both report their state unreadable at this budget and
-    are fine at a real one. So the count is used to discard the run, not to
-    filter it.
-    """
+    """Count explicitly unmeasured checks; completed findings remain evidence."""
     return sum(
         1
         for check in report.get("checks", [])
@@ -834,9 +838,8 @@ def _deferred_count(report: dict) -> int:
     )
 
 
-# How old the nightly's report may be before session start measures for itself
-# (#23.5): one night plus a late start, so a machine that slept through the
-# night falls back rather than trusting yesterday's morning.
+# Maximum age of supplementary full-diagnosis evidence: one night plus a late
+# start. Current operational health is measured independently on every session.
 HEALTH_REPORT_MAX_AGE_SECONDS = 36 * 3600
 HEALTH_REPORT_NAME = "doctor-report.json"
 
@@ -853,6 +856,8 @@ def _stored_health_report() -> tuple[dict, str] | None:
         return None
     report = payload.get("report")
     if age > HEALTH_REPORT_MAX_AGE_SECONDS or not isinstance(report, dict):
+        return None
+    if report.get("scope", "full") != "full":
         return None
     return report, written.strftime("%Y-%m-%d %H:%M")
 
@@ -872,36 +877,37 @@ def _stored_health_block(report: dict, when: str) -> str:
 
 
 def health_block() -> str:
-    """Return doctor output only when local health is degraded.
-
-    The nightly's report is read first (#23.5); a budgeted run happens only
-    when there is none young enough. A run that ran out of budget reports
-    nothing but the fact that it did: the findings of a truncated run are
-    artefacts of the clock, and naming them teaches the reader to ignore
-    this block.
-    """
+    """Current operational findings, followed by dated full-diagnosis evidence."""
+    current = _measured_health_block()
     stored = _stored_health_report()
     if stored is not None:
-        return _stored_health_block(*stored)
-    return _measured_health_block()
+        return current + _stored_health_block(*stored)
+    return current
 
 
 def _measured_health_block() -> str:
     try:
-        from doctor import degraded_summary, run_doctor
+        from doctor import run_doctor
 
-        report = run_doctor(
-            root=ROOT,
-            state_root=STATE_ROOT,
-            time_budget_seconds=HEALTH_BUDGET_SECONDS,
-        )
-        deferred = _deferred_count(report)
-        summary = degraded_summary(report)
-    except Exception:  # noqa: BLE001
-        return ""
+        report = run_doctor(root=ROOT, state_root=STATE_ROOT,
+                            time_budget_seconds=HEALTH_BUDGET_SECONDS, scope="operational")
+    except Exception as error:  # noqa: BLE001 - the context names the failure without blocking startup
+        return f"## Health\n\nOperational health could not be measured: {describe_error(error)}\n\n"
+    return _operational_health_block(report)
+
+
+def _operational_health_block(report: dict) -> str:
+    from doctor import degraded_summary
+
+    completed = [check for check in report.get("checks", [])
+                 if not check.get("details", {}).get("budget_exhausted")]
+    summary = degraded_summary({**report, "checks": completed})
+    deferred = _deferred_count(report)
     if deferred:
-        return _unmeasured_health_block(deferred, len(report.get("checks", [])))
-    return f"## Health\n\n{summary}\n\n" if summary else ""
+        summary += f"\nOperational checks incomplete: {deferred} of {len(report.get('checks', []))} were not measured."
+    if not summary:
+        return ""
+    return f"## Health\n\n{_nightly_line()}Operational scope; retained history not checked.\n{summary.strip()}\n\n"
 
 
 def _nightly_state() -> dict:
@@ -918,10 +924,8 @@ def _nightly_state() -> dict:
 def _nightly_line() -> str:
     """One line about the nightly pass, read rather than measured.
 
-    The health checks want 1.77 seconds and this block allows 0.1, so every
-    session start reports only that nothing was measured. That is deliberate —
-    session start must not wait on the doctor — but it left the one place a
-    degraded vault could surface saying nothing at all.
+    This durable outcome remains available even when the operational health
+    budget expires before the scheduler check can run.
 
     Measured 2026-09-05: the nightly had failed every night since 2026-08-30, no
     evidence generation was ever activated, and every answer for five days came
@@ -931,6 +935,8 @@ def _nightly_line() -> str:
     """
     state = _nightly_state()
     status = state.get("last_nightly_status")
+    if status == "deferred":
+        return "**Nightly maintenance is deferred; completion is not verified.**\n"
     if status != "failed":
         return ""
     date = state.get("last_nightly_date") or "never"
@@ -940,20 +946,8 @@ def _nightly_line() -> str:
     )
 
 
-def _unmeasured_health_block(deferred: int, total: int) -> str:
-    return (
-        "## Health\n\n"
-        + _nightly_line()
-        + f"Health was not measured: {deferred} of {total} checks did not run "
-        f"inside the {HEALTH_BUDGET_SECONDS}s budget. Run "
-        "`uv run python scripts/doctor.py` for the real state.\n\n"
-    )
-
-
-def _recover_transactions() -> None:
-    """Best-effort bounded recovery before any session context is read."""
-    deadline = time.monotonic() + RECOVERY_LIMIT_SECONDS
-    database = STATE_ROOT / "run" / "markdown-transactions.sqlite3"
+def _recovery_database_available(database: Path) -> bool:
+    """Distinguish a normal first start from a refused recovery database."""
     try:
         validate_runtime_file(
             database,
@@ -961,7 +955,19 @@ def _recover_transactions() -> None:
             max_bytes=MAX_TRANSACTION_DATABASE_BYTES,
             owner_only=True,
         )
-    except (OSError, PermissionError, ValueError):
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError) as error:
+        record_hook_error(STATE_ROOT, "session-start recovery database", describe_error(error))
+        return False
+    return True
+
+
+def _recover_transactions() -> None:
+    """Best-effort bounded recovery before any session context is read."""
+    deadline = time.monotonic() + RECOVERY_LIMIT_SECONDS
+    database = STATE_ROOT / "run" / "markdown-transactions.sqlite3"
+    if not _recovery_database_available(database):
         return
     if time.monotonic() >= deadline:
         return
@@ -973,8 +979,8 @@ def _recover_transactions() -> None:
             max_transactions=RECOVERY_MAX_TRANSACTIONS,
             deadline=deadline,
         )
-    except Exception:  # noqa: BLE001 - SessionStart must remain available
-        pass
+    except Exception as error:  # noqa: BLE001 - SessionStart must remain available
+        record_hook_error(STATE_ROOT, "session-start transaction recovery", describe_error(error))
 
 
 def _section_item(name: str, text: str) -> ContextItem | None:

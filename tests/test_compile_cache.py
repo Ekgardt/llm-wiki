@@ -497,6 +497,9 @@ def test_fd_read_rejects_same_inode_change_between_lstat_and_open(tmp_path, monk
     original = path.read_bytes()
     changed = original.replace(b'"schema_version":1', b'"schema_version":2')
     assert len(changed) == len(original)
+    assert changed != original
+    checked = path.stat()
+    assert checked.st_mtime_ns > 0
     real_open = compile_cache.os.open
     modified = False
 
@@ -505,12 +508,33 @@ def test_fd_read_rejects_same_inode_change_between_lstat_and_open(tmp_path, monk
         if Path(target) == path and not modified:
             modified = True
             path.write_bytes(changed)
+            # Equal-sized writes can share a clock tick, especially on tmpfs.
+            os.utime(path, ns=(checked.st_atime_ns, 0))
+            assert path.stat().st_mtime_ns != checked.st_mtime_ns
         return real_open(target, flags, *args, **kwargs)
 
     monkeypatch.setattr(compile_cache.os, "open", racing_open)
 
     with pytest.raises(PermissionError, match="changed before open"):
         compile_cache._read_cache_entry(path)
+    assert modified is True
+
+
+def test_get_rejects_changed_schema_with_matching_stat_identity(tmp_path):
+    cache = CompileCache(tmp_path)
+    action = _action()
+    path = cache.put(action, _plan())
+    original = path.read_bytes()
+    before = path.stat()
+    changed = original.replace(b'"schema_version":1', b'"schema_version":2')
+    assert changed != original
+    assert len(changed) == len(original)
+    path.write_bytes(changed)
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert compile_cache._file_identity(path.stat()) == compile_cache._file_identity(before)
+    validator_calls = []
+    assert cache.get(action, lambda plan: validator_calls.append(plan) or True) is None
+    assert validator_calls == []
 
 
 def test_get_rejects_symlinked_entry_without_running_validator(tmp_path):

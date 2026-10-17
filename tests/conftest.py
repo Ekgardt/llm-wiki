@@ -196,6 +196,7 @@ SHIPPED_APPEND_BUDGETS = "shipped_append_budgets"
 _APPEND_BUDGETS = (
     "daily_log_append.BREADCRUMB_APPEND_BUDGET_SECONDS",
     "daily_log_append.LIFECYCLE_APPEND_BUDGET_SECONDS",
+    "daily_log_append.BACKGROUND_APPEND_BUDGET_SECONDS",
 )
 
 

@@ -22,6 +22,8 @@ from install_control import ManagedResource  # noqa: E402
 
 PLUGIN_SOURCE = "const _EMBEDDED_ROOT = null; // llm-wiki:embedded-root\n"
 BACKEND_OF = {"native": "systemd_user", "cron": "cron"}
+# cron's kind: a cron table entry cannot be read back, so a change to it is taken back first.
+SCHEDULER_KIND = {"cron": "cron_scheduler"}
 RELEASE = {
     "commit_oid": "a" * 40,
     "project_version": "0.0.0",
@@ -43,7 +45,7 @@ def _file_scheduler(directory: Path, backend: str) -> ManagedResource:
 
     return ManagedResource(
         resource_id=f"{backend}-scheduler",
-        kind="test_scheduler",
+        kind=SCHEDULER_KIND.get(backend, "test_scheduler"),
         locator=str(target),
         desired=backend.encode(),
         read_owned=lambda: target.read_bytes() if target.exists() else None,
@@ -127,7 +129,12 @@ def test_the_same_request_is_not_a_replacement(machine: Path) -> None:
 
 
 def test_a_failed_replacement_puts_the_previous_install_back(machine: Path, monkeypatch) -> None:
-    """Research: docs/research/2026-09-25-a-failed-reinstall-puts-the-old-one-back.md."""
+    """Research: docs/research/2026-09-25-a-failed-reinstall-puts-the-old-one-back.md.
+
+    A change that involves a cron entry is still taken back before its replacement is
+    written: a cron entry cannot be read back as it is. Any other set change is one
+    update and needs no restore (`tests/test_an_update_replaces_what_it_owns.py`).
+    """
     _install(machine, scheduler="native", profile=".bashrc", plugin=True)
     real_install = install_control.install_resources
     calls: list[int] = []
@@ -141,6 +148,11 @@ def test_a_failed_replacement_puts_the_previous_install_back(machine: Path, monk
     monkeypatch.setattr(install_control, "install_resources", fail_first)
 
     with pytest.raises(install_control.InstallControlError, match="injected_install_failure"):
-        _install(machine, scheduler="native", profile=".bashrc", plugin=False)
+        _install(machine, scheduler="cron", profile=".bashrc", plugin=True)
 
-    assert (_plugin(machine).exists(), (machine / "sched" / "systemd_user.txt").exists(), len(calls)) == (True, True, 2)
+    assert (
+        _plugin(machine).exists(),
+        (machine / "sched" / "systemd_user.txt").exists(),
+        (machine / "sched" / "cron.txt").exists(),
+        len(calls),
+    ) == (True, True, False, 2)

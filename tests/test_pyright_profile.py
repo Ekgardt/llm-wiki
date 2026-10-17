@@ -5,6 +5,7 @@ from __future__ import annotations
 import builtins
 import dataclasses
 import io
+import math
 import os
 import shutil
 import signal
@@ -2919,6 +2920,23 @@ def test_node_persistent_timeout_is_retained_for_bounded_retry(
     assert process.stdin.closed
     assert process.stdout.closed
     assert process.stderr.closed
+
+
+@pytest.mark.parametrize("remaining", [0.0, 0.5, 2.0])
+def test_node_probe_relative_wait_keeps_its_declared_budget(monkeypatch, remaining):
+    budget = pyright_profile.NODE_PROBE_TIMEOUT_SECONDS
+    boundary = math.ldexp(1.0, math.frexp(budget)[1] + 1)
+    clock = boundary - budget / 2
+    clock += 3 * math.ulp(clock)
+    assert (clock + budget) - clock > budget
+    monkeypatch.setattr(pyright_profile, "time", SimpleNamespace(monotonic=lambda: clock))
+    process = _FakeNodeProcess(b"v22.23.1\n")
+    run = pyright_profile._ProbeRun(_FakeNodeTree(process), clock + remaining, clock + budget)
+
+    run._wait_parent()
+
+    assert process.wait_timeouts == [min(budget, remaining)]
+    assert run.parent_exited
     assert pyright_profile._pending_node_probe_cleanup_snapshot() == ()
 
 

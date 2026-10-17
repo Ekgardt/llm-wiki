@@ -25,7 +25,14 @@ import maybe_compile  # noqa: E402
 import memory_state  # noqa: E402
 import process_liveness  # noqa: E402
 
-FOREIGN = "test-process:a-number-handed-to-somebody-else"
+
+def _reused_identity() -> str:
+    identity = process_liveness.process_start_identity(os.getpid())
+    prefix, ticks = identity.rsplit(":", 1)
+    return f"{prefix}:{int(ticks) + 1}"
+
+
+FOREIGN = _reused_identity()
 
 
 @pytest.fixture

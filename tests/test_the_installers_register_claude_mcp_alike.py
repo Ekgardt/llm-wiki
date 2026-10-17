@@ -39,7 +39,7 @@ def test_both_installers_try_the_claude_cli_before_asking_the_operator() -> None
 @needs_pwsh
 def test_each_entry_state_reads_the_same_in_both_installers() -> None:
     sh_lines = [_call("claude_status_line", state).stdout.strip() for state in STATES]
-    script = _powershell_functions(ROOT / "install.ps1", ("Get-ClaudeStatusLine",)) + (
+    script = _powershell_functions(ROOT / "install.ps1", ("Get-ClaudeStatusLine", "Get-ClaudeMcpRegistrationLine")) + (
         "ConvertTo-Json -Compress @("
         + ", ".join(f'(Get-ClaudeStatusLine -Automatic $true -McpState "{state}")' for state in STATES)
         + ")\n"

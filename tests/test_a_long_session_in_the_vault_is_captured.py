@@ -19,10 +19,8 @@ import user_prompt_capture
 FIELDS = {"session": "abc-session", "captured_at": "2026-09-24T10:00:00+00:00"}
 
 
-def test_a_prompt_is_skipped_for_its_length_only() -> None:
-    long_prompt = "x" * (user_prompt_capture.MIN_PROMPT_CHARS + 1)
-
-    assert (user_prompt_capture._should_skip("x"), user_prompt_capture._should_skip(long_prompt)) == (True, False)
+def test_only_an_empty_prompt_is_skipped() -> None:
+    assert (user_prompt_capture._should_skip("да"), user_prompt_capture._should_skip("  ")) == (False, True)
 
 
 def test_a_second_window_of_a_session_is_kept_beside_the_first(tmp_path: Path) -> None:

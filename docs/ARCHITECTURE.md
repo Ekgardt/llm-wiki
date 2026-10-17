@@ -187,12 +187,12 @@ Three local tiers share the same Markdown corpus:
 
 No embedding model, vector cache, or optional package is required in this tier.
 
-### Optional semantic tier (`uv sync --locked --inexact --extra semantic`)
+### Semantic tier (the `semantic` extra; every install brings it through `full`)
 1. **BM25 (weight=2.0)**: SQLite FTS5 over the generation.
 2. **Vector (weight=1.0)**: numpy brute-force cosine similarity using intfloat/multilingual-e5-small over the generation's `vectors.npy` (with `vectors.json` beside it).
 3. **Graph-neighbor (weight=0.5)**: wikilink adjacency boost.
 
-### Hybrid tier (`uv sync --locked --inexact --extra hybrid`)
+### Hybrid tier (the `hybrid` extra; every install brings it through `full`)
 1. **BM25 (weight=2.0)**: SQLite FTS5 (same as base — 25 years battle-tested).
 2. **Vector (weight=1.0)**: numpy cosine over the generation's vectors, the same
    `intfloat/multilingual-e5-small` embedding as the semantic tier, run through ONNX
@@ -324,10 +324,10 @@ retry base/cap; and worker limits of 20 tasks, 600 seconds, and 2 idle seconds.
 Explicit CLI flags override runtime retention and worker/queue policy; Stage 2 adds
 no environment variables.
 
-## What v4.0 adds (optional, all behind `--extra` flags)
+## What v4.0 adds (every install brings all of it, the `full` extra, since 2026-09-29)
 
 - **Hybrid vectors** (`--extra hybrid`): in-process numpy vector search, embedded, zero-daemon.
-- **Cross-encoder reranker** (`--extra reranker`): `BAAI/bge-reranker-v2-m3` on `torch`, re-ranks the head of the list.
+- **Cross-encoder reranker** (`--extra reranker`): `BAAI/bge-reranker-v2-m3` on `torch` (PyTorch's CPU build on Linux), re-ranks the head of the list.
 - **Code graph** (`--extra code-graph`): lazy tree-sitter parsing of Python,
   JavaScript, TypeScript, Go, Rust, Java, C, C++, Ruby, PHP, C#, and Bash;
   materialized `.scm` queries, call graph, and impact analysis.

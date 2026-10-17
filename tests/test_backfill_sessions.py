@@ -98,3 +98,24 @@ def test_a_refused_write_is_counted_and_named(tmp_path, monkeypatch):
 
     assert outcome.refused == 1
     assert outcome.refused_sessions == ["secretish"]
+
+
+def test_recorded_sessions_cannot_starve_an_unprocessed_tail(tmp_path, monkeypatch):
+    vault = _vault(tmp_path, monkeypatch)
+    pending = _transcript(tmp_path, "pending-tail", TRANSCRIPT)
+    # Exactly the removed prefix boundary, not a new product quota.
+    recorded = [tmp_path / f"recorded-{index}.jsonl" for index in range(10_000)]
+    found = [*recorded, pending]
+    monkeypatch.setattr(backfill_sessions, "_found_transcripts", lambda roots: found)
+    monkeypatch.setattr(backfill_sessions, "_session_day", lambda path: "2026-08-01")
+    monkeypatch.setattr(backfill_sessions, "_record_session_id", lambda path: path.stem)
+    original_exists = backfill_sessions._record_exists
+    monkeypatch.setattr(
+        backfill_sessions, "_record_exists",
+        lambda root, day, session: session.startswith("recorded-") or original_exists(root, day, session),
+    )
+
+    outcome = backfill_sessions.backfill(vault, (tmp_path / "projects",), apply=True)
+
+    assert (outcome.scanned, outcome.present, outcome.written) == (len(found), len(recorded), 1)
+    assert (vault / "knowledge/raw/sessions/2026-08-01/pending-tail.md").is_file()

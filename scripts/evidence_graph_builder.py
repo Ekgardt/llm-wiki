@@ -825,6 +825,7 @@ def build_full_generation(
         database_path = generation_path / "evidence.sqlite3"
         _write_generation_database(
             database_path,
+            page_size=_generation_page_size(policy),
             graph_schema=graph_schema,
             sources_list=sources_list,
             source_bytes_snapshot=source_bytes_snapshot,
@@ -832,6 +833,9 @@ def build_full_generation(
             deadline=deadline,
             cancelled=cancelled,
         )
+        # SQLite now owns the complete persisted rows. Do not overlap these
+        # disposable Python containers with search/vector encoding and validation.
+        del records, nodes, occurrences, assertions, evidence, observations, dependencies
         _check_stop(deadline, cancelled)
         fsync_file(database_path)
         fsync_directory(generation_path)
@@ -937,6 +941,7 @@ def _write_generation_database(
     records: Mapping[str, list[Mapping[str, object]]],
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
+    page_size: int = 4096,
 ) -> None:
     evidence_graph.create_generation_database(
         database_path,
@@ -951,7 +956,18 @@ def _write_generation_database(
         dependencies=records["dependencies"],
         deadline=deadline,
         cancelled=cancelled,
+        page_size=page_size,
     )
+
+
+def _generation_page_size(policy: Mapping[str, object] | None) -> int:
+    # Complete 2026-10-08 memory/code pairs: 8 KiB removes small-source
+    # overflow waste in memory, but increases code storage. Keep code at 4 KiB.
+    # This changes physical pages only, never the v2 schema or source bytes.
+    # See docs/research/2026-10-08-compile-configuration-refresh-and-disk-amplification.md.
+    if _policy_code_roots(policy):
+        return 4096
+    return 8192
 
 
 def _generation_search_artifact(
@@ -1840,17 +1856,20 @@ def build_incremental_generation(
         dependency_rows,
         dependency_total,
     )
+    # These intermediates are no longer used; the persisted manifest retains
+    # the source ownership evidence needed by the next generation.
+    del runner, ownership, records_by_owner, entry_by_id, parent_entries, parent_manifest
     _check_stop(deadline, cancelled)
     built = build_full_generation(
         catalog,
         sources=sources_list,
         source_bytes=source_snapshot,
-        nodes=merged["nodes"].values(),
-        occurrences=merged["occurrences"].values(),
-        assertions=merged["assertions"].values(),
-        evidence=merged["evidence"].values(),
-        observations=merged["observations"].values(),
-        dependencies=merged["dependencies"].values(),
+        nodes=_owned_record_iterator(merged, "nodes"),
+        occurrences=_owned_record_iterator(merged, "occurrences"),
+        assertions=_owned_record_iterator(merged, "assertions"),
+        evidence=_owned_record_iterator(merged, "evidence"),
+        observations=_owned_record_iterator(merged, "observations"),
+        dependencies=_owned_record_iterator(merged, "dependencies"),
         generation_id=generation_id,
         parent_generation_id=parent_generation_id,
         policy=policy,
@@ -1880,6 +1899,11 @@ def build_incremental_generation(
         reused_sources=tuple(sorted(reused)),
         rebuilt_sources=tuple(sorted(rebuild)),
     )
+
+
+def _owned_record_iterator(merged, collection):
+    """Transfer one locally owned family; exhaustion releases its dictionary."""
+    return iter(merged.pop(collection).values())
 
 
 def _validated_incremental_inputs(

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,6 +22,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import doctor  # noqa: E402
+
+from tests.slow_machine import LONG_TIMEOUT  # noqa: E402
 
 # The row cap the transaction scans used to have; a vault past it is ordinary.
 OLD_SCAN_CAP = 10_000
@@ -330,13 +333,26 @@ def test_a_quarantined_transaction_with_a_plan_still_owns_operations(
 
 
 def test_an_undo_listing_past_its_bound_refuses_deletion_without_accusing(
-    tmp_path: Path, now: datetime
+    tmp_path: Path, now: datetime, monkeypatch
 ) -> None:
-    """Directories the listing never reached are unknown, not missing."""
+    """Directories beyond the inspection deadline are unknown, not missing."""
     _build_vault(tmp_path, now, transactions=doctor.MAX_RUNTIME_ENTRIES + 50, operations_each=1)
+    clock = [time.monotonic()]
+    deadline = clock[0] + LONG_TIMEOUT
+    inspected = []
+    original_kind = doctor._artifact_kind
 
-    details = _check(tmp_path, now)["details"]
+    def expire_after_entry(path, root):
+        kind = original_kind(path, root)
+        inspected.append(path)
+        clock[0] = deadline + 1
+        return kind
 
+    monkeypatch.setattr(doctor.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(doctor, "_artifact_kind", expire_after_entry)
+    details = doctor._transaction_check(tmp_path, now, deadline=deadline)["details"]
+
+    assert len(inspected) == 1
     assert (
         "transaction_artifact_state_unknown" in details["deletion_codes"],
         "transaction_metadata_corrupt" in details["codes"],

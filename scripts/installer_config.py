@@ -9,6 +9,8 @@ import json
 import os
 import shlex
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -303,6 +305,22 @@ def _ignored_environment(root: Path, override: str | None) -> str | None:
     return str(chosen)
 
 
+# The extras every install brings: all of them (`full` names semantic, hybrid,
+# code-graph, mcp-server and reranker), by the owner's requirement of 2026-09-29.
+# The models step fetches every pinned model whose runtime is present, so both the
+# e5 encoder and the reranker arrive; Linux takes torch's CPU build (pyproject.toml).
+# Language servers other than Pyright stay one explicit command per language.
+# `tests/test_the_installer_brings_the_runtime_of_every_model_it_fetches.py`
+# holds this to `install_models.pinned_models`; the nightly update keeps it
+# through `self_update.chosen_extras`.
+# See docs/research/2026-09-29-every-install-brings-every-component.md.
+DEFAULT_EXTRAS = ("full",)
+
+
+def _extra_arguments(extras: Sequence[str]) -> list[str]:
+    return [argument for extra in extras for argument in ("--extra", extra)]
+
+
 def uv_sync_arguments(root: Path, override: str | None) -> tuple[Path, list[str]]:
     root = Path(root).resolve()
     environment = resolve_uv_project_environment(root, override)
@@ -310,17 +328,55 @@ def uv_sync_arguments(root: Path, override: str | None) -> tuple[Path, list[str]
         raise ValueError(
             f"Selected uv project environment is not a virtual environment: {environment}"
         )
-    arguments = [
-        "--directory",
-        str(root),
-        "sync",
-        "--locked",
-        "--no-default-groups",
-        "--quiet",
-    ]
-    if (environment / "pyvenv.cfg").is_file():
-        arguments.append("--inexact")
-    return environment, arguments
+    arguments = ["--directory", str(root), "sync", "--locked", "--no-default-groups", "--quiet"]
+    return environment, [*arguments, *_selection_arguments(root, environment)]
+
+
+def _selection_arguments(root: Path, environment: Path) -> list[str]:
+    """A new environment gets the defaults; an existing one its whole selection, exactly.
+
+    An exact sync removes what the lock no longer names (2.7 GB of CUDA wheels on
+    the owner's vault), so it must name every extra and group the environment has;
+    only that environment's interpreter can see them. When it cannot answer, the
+    sync stays inexact and removes nothing it cannot account for.
+    See docs/research/2026-09-29-a-sync-removes-what-the-lock-no-longer-names.md.
+    """
+    if not (environment / "pyvenv.cfg").is_file():
+        return _extra_arguments(DEFAULT_EXTRAS)
+    named = _environment_selection(root, environment)
+    if named is None:
+        return [*_extra_arguments(DEFAULT_EXTRAS), "--inexact"]
+    return named
+
+
+# One interpreter start and one read of the installed distributions; measured under
+# a second on this machine (2026-09-29), so a minute only bounds a hung interpreter.
+SELECTION_TIMEOUT_SECONDS = 60
+
+
+def _environment_interpreter(environment: Path) -> Path:
+    windows = environment / "Scripts" / "python.exe"
+    return windows if windows.is_file() else environment / "bin" / "python"
+
+
+def _environment_selection(root: Path, environment: Path) -> list[str] | None:
+    """Inspect the selected environment; parse project choices in the caller."""
+    inventory_script = (
+        "import sys,json;sys.path.insert(0,sys.argv[1]);"
+        "from self_update import _installed_distributions;"
+        "print(json.dumps(_installed_distributions(),default=sorted))"
+    )
+    command = [str(_environment_interpreter(environment)), "-c", inventory_script, str(root / "scripts")]
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=SELECTION_TIMEOUT_SECONDS, check=True)
+        from self_update import sync_selection
+
+        installed = {name: set(requires) for name, requires in json.loads(completed.stdout).items()}
+        return sync_selection(root, installed)["arguments"]
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, ImportError) as error:
+        print(f"installer_config: the environment could not name its extras ({type(error).__name__}); "
+              "the sync keeps what is installed", file=sys.stderr)
+        return None
 
 
 def selected_global_file(config_dir: Path) -> Path:
