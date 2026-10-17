@@ -52,3 +52,84 @@ def test_pending_native_parts_keep_already_committed_companions(tmp_path, monkey
     batch, _plan = _pending_batch(root, coordinator, first)
     units = compiler._native_part_units(batch.inputs.dailies)
     assert units == [list(batch.inputs.dailies)]
+
+
+def test_one_compile_reuses_discovery_parsing_but_rereads_receipt_bytes(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    root, coordinator, *_ = _committed_companion(tmp_path, monkeypatch)
+    original = compiler.parse_compile_receipt_v4
+    parsed = []
+    reads = []
+    read = compiler.read_stable_bytes
+    def read_current(*args, **kwargs):
+        reads.append(args[0])
+        return read(*args, **kwargs)
+    monkeypatch.setattr(compiler, 'read_stable_bytes', read_current)
+    def parse(raw, **kwargs):
+        parsed.append(raw)
+        return original(raw, **kwargs)
+    monkeypatch.setattr(compiler, 'parse_compile_receipt_v4', parse)
+    scope = getattr(compiler, '_receipt_discovery_scope', nullcontext)
+    with scope():
+        compiler._receipt_predicate(coordinator)._load()
+        first = len(parsed)
+        assert first > 0
+        compiler._receipt_predicate(coordinator)._load()
+        assert len(parsed) == first
+        assert len(reads) == first * 2
+    compiler._receipt_predicate(coordinator)._load()
+    assert len(parsed) == first * 2
+
+
+def test_discovery_rejects_changed_receipt_even_with_preserved_mtime(tmp_path, monkeypatch):
+    import os
+
+    import pytest
+    root, coordinator, *_ = _committed_companion(tmp_path, monkeypatch)
+    path = next((root / 'knowledge/daily/receipts').glob('v4-*.md'))
+    before = path.stat()
+    with compiler._receipt_discovery_scope():
+        compiler._receipt_predicate(coordinator)._load()
+        path.write_bytes(path.read_bytes().replace(b'completed', b'corrupted'))
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        with pytest.raises(ValueError):
+            compiler._receipt_predicate(coordinator)._load()
+
+
+def test_discovery_descriptor_mutation_cannot_change_later_selection(tmp_path, monkeypatch):
+    root, coordinator, first, *_ = _committed_companion(tmp_path, monkeypatch)
+    key = (first.logical_path, first.sha256)
+    with compiler._receipt_discovery_scope():
+        selection = compiler._receipt_predicate(coordinator)
+        selection._load()
+        selection.catalog[key][0][1]['sha256'] = 'f' * 64
+        current = compiler._receipt_predicate(coordinator)
+        current._load()
+        assert current.catalog[key][0][1]['sha256'] == first.sha256
+        assert current.receipt(first) is not None
+
+
+def test_discovery_refuses_schema_change_and_resets_after_exception(tmp_path, monkeypatch):
+    import pytest
+    root, coordinator, *_ = _committed_companion(tmp_path, monkeypatch)
+    schema = tmp_path / 'schema.json'
+    schema.write_bytes(compiler.COMPILE_RECEIPT_V4_SCHEMA.read_bytes())
+    monkeypatch.setattr(compiler, 'COMPILE_RECEIPT_V4_SCHEMA', schema)
+    with pytest.raises(ValueError, match='schema changed'):
+        with compiler._receipt_discovery_scope():
+            compiler._receipt_predicate(coordinator)._load()
+            schema.write_bytes(schema.read_bytes() + b'\n')
+            compiler._receipt_predicate(coordinator)._load()
+    assert compiler._RECEIPT_DISCOVERY_PARSING.get() is None
+
+
+def test_discovery_reuse_does_not_reuse_transaction_authority(tmp_path, monkeypatch):
+    import pytest
+    root, coordinator, first, *_ = _committed_companion(tmp_path, monkeypatch)
+    def refused(*args, **kwargs):
+        raise ValueError('authority changed')
+    with compiler._receipt_discovery_scope():
+        assert compiler._receipt_predicate(coordinator).receipt(first) is not None
+        monkeypatch.setattr(compiler, '_require_transaction_authority', refused)
+        with pytest.raises(ValueError, match='authority changed'):
+            compiler._receipt_predicate(coordinator).receipt(first)

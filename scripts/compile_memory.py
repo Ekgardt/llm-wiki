@@ -6901,6 +6901,53 @@ def _canonical_dailies() -> list[Path]:
     return daily_logs(DAILY_DIR)
 
 
+_RECEIPT_DISCOVERY_PARSING = ContextVar("receipt_discovery_parsing", default=None)
+
+
+@contextmanager
+def _receipt_discovery_scope():
+    """One compile owns pure discovery parsing; live authority is never cached."""
+    token = _RECEIPT_DISCOVERY_PARSING.set(_ReceiptDiscoveryParsing())
+    try:
+        yield
+    finally:
+        _RECEIPT_DISCOVERY_PARSING.reset(token)
+
+
+class _ReceiptDiscoveryParsing:
+    """Keep only the latest content digest and encoded descriptor per receipt path."""
+
+    def __init__(self):
+        self.schema = COMPILE_RECEIPT_V4_SCHEMA.read_bytes()
+        self.entries = {}
+
+    def _require_schema(self):
+        if COMPILE_RECEIPT_V4_SCHEMA.read_bytes() != self.schema:
+            raise ValueError("compile receipt schema changed during discovery")
+
+    def source(self, path, raw, fields):
+        self._require_schema()
+        digest = sha256_bytes(raw)
+        previous = self.entries.get(path)
+        if previous is None or previous[0] != digest:
+            source = _validated_discovery_source(raw, fields)
+            self._require_schema()
+            self.entries[path] = (digest, canonical_json_bytes(source))
+        return json.loads(self.entries[path][1])
+
+
+def _validated_discovery_source(raw, fields):
+    record = parse_compile_receipt_v4(raw, logical_path=fields[0], source_sha256=fields[1])
+    return record["source"]
+
+
+def _discovered_receipt_source(path, raw, fields):
+    parsing = _RECEIPT_DISCOVERY_PARSING.get()
+    if parsing is None:
+        return _validated_discovery_source(raw, fields)
+    return parsing.source(path, raw, fields)
+
+
 class _ContextReceiptSelector:
     """One deadline-aware discovery pass; every positive result verifies authority."""
 
@@ -6933,10 +6980,10 @@ class _ContextReceiptSelector:
         fields = _receipt_source_fields(raw)
         if fields is None:
             raise ValueError("compile receipt source identity is absent")
-        record = parse_compile_receipt_v4(raw, logical_path=fields[0], source_sha256=fields[1])
-        if path.name != f"v4-{record['source_identity']}.md":
+        source = _discovered_receipt_source(path, raw, fields)
+        if path.name != f"v4-{compile_context_source_identity(source)}.md":
             raise ValueError("compile receipt filename disagrees")
-        catalog.setdefault(fields, []).append((path, record["source"]))
+        catalog.setdefault(fields, []).append((path, source))
         self._active()
 
     def __call__(self, logical_path: str, digest: str) -> bool:
@@ -7564,7 +7611,7 @@ def _compile_under_lock(
         return 1
     _mark_started_unless_dry(args)
     try:
-        with call_ceiling(setting_value("provider.draft_ceiling_seconds")):
+        with _receipt_discovery_scope(), call_ceiling(setting_value("provider.draft_ceiling_seconds")):
             return _run(args, deadline=deadline, cancelled=cancelled, owner=owner)
     except BaseException as e:  # noqa: BLE001
         _mark_error_unless_dry(args, e)
