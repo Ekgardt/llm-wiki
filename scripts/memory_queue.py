@@ -14080,16 +14080,44 @@ def _process_entry_type():
     return ProcessEntry32
 
 
-def _walk_process_snapshot(kernel32, snapshot) -> list[tuple[int, int]]:
+def _process_snapshot_api():
+    """Bind pointer-sized handles before calling the Windows snapshot API."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return kernel32
+
+
+def _configure_process_walk(kernel32, entry_type) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    for name in ("Process32First", "Process32Next"):
+        function = getattr(kernel32, name)
+        function.argtypes = (wintypes.HANDLE, ctypes.POINTER(entry_type))
+        function.restype = wintypes.BOOL
+
+
+def _walk_process_snapshot(kernel32, snapshot) -> list[tuple[int, int]] | None:
     import ctypes
 
     entry = _process_entry_type()()
+    _configure_process_walk(kernel32, type(entry))
     entry.dwSize = ctypes.sizeof(entry)
     pairs: list[tuple[int, int]] = []
     ok = kernel32.Process32First(snapshot, ctypes.byref(entry))
     while ok:
         pairs.append((int(entry.th32ProcessID), int(entry.th32ParentProcessID)))
         ok = kernel32.Process32Next(snapshot, ctypes.byref(entry))
+    # Win32 ERROR_NO_MORE_FILES (18) is the documented successful end.
+    # Any other failure leaves an unknown tree, even after some valid rows.
+    if ctypes.get_last_error() != 18:
+        return None
     return pairs
 
 
@@ -14103,7 +14131,7 @@ def _windows_process_pairs() -> list[tuple[int, int]] | None:
     try:
         import ctypes
 
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = _process_snapshot_api()
         snapshot = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
         if snapshot in (None, -1, ctypes.c_void_p(-1).value):
             return None
@@ -14396,7 +14424,11 @@ def _terminate_processor_child(
         process, descendants, platform_name, cleanup_timeout
     )
     if _cleanup_failed(cleanup_verified, platform_name, tree_verified):
-        raise QueueOperationError("process_cleanup_failed")
+        raise QueueOperationError(
+            "process_cleanup_failed",
+            f"snapshot_known={descendants is not None}; tree_verified={tree_verified}; "
+            f"termination_verified={cleanup_verified}",
+        )
     return descendants
 
 

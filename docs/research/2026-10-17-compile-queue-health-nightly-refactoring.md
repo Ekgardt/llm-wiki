@@ -428,3 +428,58 @@ before expiry, nor solve cross-database coordination beyond existing contracts.
 This is not proven to explain the 19:58:48 live capture loss. Nor does it explain
 the Windows trim failure or b0e769ad CI's Windows processor cleanup failure.
 Those remain open; no failed test is disabled or reclassified as successful.
+
+## Windows process snapshots preserve unknown state and handle width (2026-10-17)
+
+The queue's Toolhelp enumeration treated every false return from Process32First
+or Process32Next as successful exhaustion. An API failure before the first row
+became an empty tree; a failure later became a supposedly complete partial tree.
+This contradicted the caller's existing rule that an unknown descendant snapshot
+cannot prove process cleanup. CreateToolhelp32Snapshot and the handle consumers
+also lacked ctypes prototypes, leaving the default signed C-int return type.
+A real ctypes callback returning a pointer-width value reproduced truncation.
+Six enumeration-error cases and the width case failed before the change.
+
+Bind HANDLE/BOOL/DWORD and the exact PROCESSENTRY32 pointer types explicitly.
+Accept enumeration completion only with the documented ERROR_NO_MORE_FILES (18);
+otherwise return the existing unknown value, None. The snapshot handle is closed
+through the existing finally path even on enumeration failure. No new retry,
+timeout, limit, dependency, runtime path or public interface is introduced.
+The existing cleanup refusal remains; its message now records snapshot_known,
+tree_verified and termination_verified. Two diagnostic assertions failed before
+this message change. Processor-error assertions retain their expected codes and
+include the exception detail when they fail, so a future Windows failure can be
+investigated rather than guessed at.
+
+Sources inspected 2026-10-17:
+- Microsoft [Process32First](https://learn.microsoft.com/en-us/windows/win32/api/tlhelp32/nf-tlhelp32-process32first)
+  and [Process32Next](https://learn.microsoft.com/en-us/windows/win32/api/tlhelp32/nf-tlhelp32-process32next)
+  specify HANDLE, the entry pointer, and the normal end code.
+- [Python ctypes](https://docs.python.org/3.13/library/ctypes.html) documents the
+  default C-int return and explicit restype/argtypes. These APIs also exist in
+  the supported Python 3.10 baseline; local runtime is Python 3.12.3.
+- [Go's Windows syscall implementation](https://go.dev/src/syscall/syscall_windows.go)
+  uses a pointer-width Handle, sets the entry size, propagates enumeration errors
+  and closes the acquired snapshot. It is an independent implementation reference,
+  not a proposal to add Go or its syscall package.
+
+Alternatives: treating all failures as exhaustion silently weakens safety;
+repeating a failed enumeration without a defined retry contract adds policy;
+replacing Toolhelp with a subprocess or new library adds dependencies without
+fixing the current API boundary. Explicit types and terminal-code validation are
+smaller. The LSP thread-snapshot code already binds handle types; it enumerates
+threads for a different ownership contract and is not replaced here.
+
+The Linux-hosted API simulations and ctypes callback do not qualify native
+Windows behavior. A new native-only check requires that a real complete snapshot
+contains the current process, alongside the existing spawned-grandchild tests.
+The earlier process_cleanup_failed CI incident is not declared explained by
+these findings. Windows native CI, the trim incident, the live capture loss,
+full retained-history reconciliation and the complete nightly cycle remain open.
+
+Local validation: 77 related queue/process tests passed in 96.04 seconds; the
+native Windows check was skipped on Linux. Initial diagnostic assertions confused
+str(exception), which includes the stable code, with its detail field; the final
+tests check code and detail separately. Lizard/AST checked 245 changed functions
+without violations; Ruff and Python 3.10 grammar passed. All 97 installed packages
+are compatible; the lockfile and dependency set are unchanged.

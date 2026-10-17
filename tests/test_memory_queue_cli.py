@@ -392,7 +392,7 @@ def test_worker_cleans_grandchild_before_reporting_malformed_result(
                 60,
             )
         pid = read_pid(pid_path, SHORT_TIMEOUT)
-        assert raised.value.code == "processor_result_malformed"
+        assert raised.value.code == "processor_result_malformed", str(raised.value)
         assert not memory_queue._pid_is_alive(pid)
     finally:
         if pid_path.exists():
@@ -412,7 +412,7 @@ def test_worker_cleans_grandchild_before_reporting_processor_crash(
                 60,
             )
         pid = read_pid(pid_path, SHORT_TIMEOUT)
-        assert raised.value.code == "processor_exception"
+        assert raised.value.code == "processor_exception", str(raised.value)
         assert not memory_queue._pid_is_alive(pid)
     finally:
         if pid_path.exists():
@@ -552,7 +552,7 @@ def test_worker_child_rejects_malformed_ipc_frame(frame: bytes) -> None:
     with pytest.raises(memory_queue.QueueOperationError) as raised:
         memory_queue._decode_processor_frame(frame)
 
-    assert raised.value.code == "processor_result_malformed"
+    assert raised.value.code == "processor_result_malformed", str(raised.value)
 
 
 def test_idle_sleep_is_capped_by_worker_remaining_budget(
@@ -918,6 +918,7 @@ def test_windows_tree_cleanup_failure_falls_back_and_reports_unverified_descenda
         memory_queue._terminate_processor_child(process, platform_name="nt")
 
     assert raised.value.code == "process_cleanup_failed"
+    assert raised.value.detail == "snapshot_known=False; tree_verified=False; termination_verified=False"
     assert process.terminated == 1
     assert not process.is_alive()
 
@@ -1020,6 +1021,7 @@ def test_cleanup_fails_when_tracked_descendant_remains_alive(
         )
 
     assert raised.value.code == "process_cleanup_failed"
+    assert raised.value.detail == "snapshot_known=True; tree_verified=True; termination_verified=False"
 
 
 def test_cleanup_waits_until_tracked_descendant_is_confirmed_dead(
