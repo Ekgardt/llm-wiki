@@ -96,12 +96,14 @@ def test_ignored_entries_report_capacity_not_corrupt_sources(tmp_path):
     assert result["details"]["repairable"] is False
 
 
-def test_generation_reports_its_actual_scope_without_an_extra_collection(tmp_path, monkeypatch):
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_generation_reports_its_actual_scope_without_an_extra_collection(tmp_path, monkeypatch, newline):
     import doctor
 
     root, state = _vault(tmp_path)
     note = "---\ntype: concept\n---\n# First\n"
-    (root / "knowledge/notes/first.md").write_text(note)
+    payload = note.replace("\n", newline).encode()
+    (root / "knowledge/notes/first.md").write_bytes(payload)
     doctor.run_generation_maintenance(
         root=root, state_root=state, time_budget_seconds=LONG_TIMEOUT, max_sources=10,
     )
@@ -126,7 +128,7 @@ def test_generation_reports_its_actual_scope_without_an_extra_collection(tmp_pat
     assert len(calls) == 1
     assert usage["entries"]["used"] == 2
     assert usage["sources"]["used"] == 1
-    assert usage["bytes"]["used"] == len(note.encode())
+    assert usage["bytes"]["used"] == len(payload)
     assert usage["knowledge_extraction_sources"]["used"] == 1
     assert result["details"]["capacity_near_ceiling"] == ["entries"]
     assert result["details"]["freshness"] == "fresh"

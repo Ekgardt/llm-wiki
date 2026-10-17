@@ -339,3 +339,49 @@ breadcrumb parts, исключение обычных dumps и журналов,
 На живом дереве settings занял0,317s; generation check подтвердил минимум204011
 entries при204010, сохранив freshness=unknown и repairable=false. Измерение
 29,580s включает оба вызова и не доказывает скорость полной компиляции.
+
+## Adoption reads wait for the existing store lock budget (2026-10-17)
+
+The active-database snapshot shared by writer admission and full adoption
+certification omitted `busy_ms`; the common read-only opener defaults to zero.
+Operational doctor calls admission directly, and full capture inspection also
+reaches this opener. An ordinary exclusive writer could therefore produce
+`reliability_v3_record_invalid: OperationalError: database is locked` immediately.
+Six regression cases failed before the fix: both stores, admission and full
+certification under a real separate-process exclusive writer, and observation of
+the connection wait with and without a caller deadline. This establishes a defect
+matching the live symptom; it does not prove every historical lock failure had
+this cause.
+
+Use the existing queue (5,000 ms) and coordinator (10,000 ms) lock budgets at this
+shared opener. The existing opener clamps them to the caller's remaining time;
+identity, schema, metadata, physical integrity and foreign-key checks remain.
+No new number, retry loop, dependency, persistent setting, or schema is added.
+These inherited store budgets are not newly qualified resource limits: revisit
+under measured contention and latency, especially if writes outlast the store
+budget. A lock held longer still fails; corruption still fails. There is no
+claim that complete retained-history reconciliation can now succeed while a
+compiler continues changing the filesystem.
+
+Sources checked on 2026-10-17:
+- [SQLite busy timeout](https://sqlite.org/c3ref/busy_timeout.html): the native
+  handler waits for contention within its budget, then returns busy.
+- [Python sqlite3](https://docs.python.org/3.13/library/sqlite3.html): connection
+  timeout is the lock wait before OperationalError; this code uses the existing
+  Python 3.10-compatible API, installed Python 3.12.3.
+- [PostgreSQL explicit locking](https://www.postgresql.org/docs/18/explicit-locking.html):
+  conflicting transactions require coordination and consistent lock order.
+  This is an independent concurrency reference, not a PostgreSQL runtime proposal.
+
+Alternatives: suppressing lock errors would invent successful validation;
+repeated whole-record validation would repeat work and add a second retry policy;
+holding a global writer gate through health would stall capture. Native waiting
+at the existing connection boundary is smaller and keeps the read transaction's
+lock order. The separate-process fixture holds a controlled 0.2-second write;
+that duration is test stimulus, not a product delay or capacity limit.
+
+The 7f142b56 CI exposed a separate fixture error on Windows: write_text produced
+CRLF bytes (34), while the new capacity test expected the pre-write LF string
+(30). Explicit LF/CRLF byte fixtures reproduced the CRLF failure on Linux; the
+assertion now measures the supplied bytes, retaining both variants on every OS.
+This changes no production counting rule and excludes no platform.

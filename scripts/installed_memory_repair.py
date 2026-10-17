@@ -360,6 +360,8 @@ def _active_database_snapshot(record: dict[str, object], *, database_name: str, 
                 max_bytes=None,
                 owner_only=True,
                 contract=_database_contract(database_name),
+                busy_ms={"queue": DEFAULTS.queue_busy_ms,
+                         "coordinator": DEFAULTS.markdown_busy_ms}[database_name],
                 deadline=deadline,
             )
         ) as database:
