@@ -483,3 +483,57 @@ str(exception), which includes the stable code, with its detail field; the final
 tests check code and detail separately. Lizard/AST checked 245 changed functions
 without violations; Ruff and Python 3.10 grammar passed. All 97 installed packages
 are compatible; the lockfile and dependency set are unchanged.
+
+## Capture diagnostics check actual write progress (2026-10-17)
+
+The trail writer called os.write and discarded the returned byte count on both
+platform paths. A short write therefore returned True with a truncated JSON line;
+a zero-byte write returned True with no new record. Four regressions reproduced
+this before the fix, with and without the Windows byte-lock adapter. The short
+writer performs actual one-byte filesystem writes, including splitting UTF-8,
+and asserts that the sidecar owner is held throughout.
+
+Reuse reliable_memory._write_all, already loaded through memory_state: it advances
+only by the actual byte count and rejects no progress. The complete append stays
+inside the existing sidecar lock and, on Windows, the existing byte lock. No new
+retry budget, sleep, size cap, package, runtime path or configuration is introduced.
+The normal full write still uses one syscall. Tests check exact existing/new JSON
+records, false on no progress, and lock release. This is an internal reuse of the
+existing durability primitive, not a new public API. Python 3.10 remains supported.
+
+Primary sources checked on 2026-10-17:
+- [Python os.write](https://docs.python.org/3.12/library/os.html#os.write) returns
+  the actual count; interrupted calls are already retried by Python when the signal
+  handler does not raise. No extra EINTR retry loop is added.
+- [Linux write(2)](https://man7.org/linux/man-pages/man2/write.2.html) documents
+  short writes and completing the remaining bytes. O_APPEND does not make a whole
+  multi-call record atomic; the existing cooperating-writer sidecar provides that
+  exclusion here.
+- [Microsoft CRT _write](https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/write?view=msvc-170)
+  documents byte-count results, errors, append behavior and text translation. The
+  existing binary open flag and Windows byte lock are retained. Linux fault
+  injection on the adapter does not establish native Windows qualification.
+The Open Group write page could not be fetched and is not counted as a source.
+
+Alternatives: checking the count and abandoning a recoverable short write loses
+available progress; a local duplicate loop is unnecessary; buffered file objects
+would change descriptor/locking behavior without a benefit. Related integration
+adapter and LSP writers already account for actual progress. Their differing
+text/evidence contracts are unchanged. The reused helper has no dependency on
+capture_diagnostics, so this adds no circular import.
+
+Limits: a permanent OS error after a partial write may still leave an incomplete
+line; this change does not promise atomic rollback or power-loss durability for
+the best-effort log. The existing caller reports failure and retains its separate
+counter path. This is not evidence explaining the Windows trim CI failure, nor
+the live owner_fence_lost capture event. The existing trail-lock wait policy and
+other historical limits have not been qualified by this change.
+
+Validation: 106 related diagnostic, lock, append and reliable-memory tests passed
+in 11.15 seconds; three platform-specific tests were skipped. Actual Lizard/AST
+analysis passed for 250 changed functions; Ruff and Python 3.10 grammar passed.
+All 97 installed packages remain compatible. CI for the preceding 7fc79008 commit
+again failed the Windows 3.13 trim/append test (run 39071113802, job 117509064677).
+That failure is retained, not disabled or attributed to short writes without
+proof. The live compiler was still running after nearly eight hours; it was not
+stopped for this change.

@@ -35,6 +35,7 @@ from memory_state import (  # noqa: E402
     load_state,
     update_state,
 )
+from reliable_memory import _write_all  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
 FAILURE_LOG = REPORTS_DIR / "capture-failures.jsonl"
@@ -244,19 +245,19 @@ def _unlock_trail(descriptor: int, locking) -> None:
 
 
 def _write_trail_line(descriptor: int, data: bytes, locking, pause=time.sleep) -> bool:
-    """One append-mode write, serialized where the system does not do it itself.
+    """Complete one append-mode record while the caller holds the sidecar lock.
 
     The descriptor is in append mode, so the write lands at the end wherever the
     lock left the file pointer. False means the lock was never free: nothing was
     written, and nothing of anyone else's was overwritten.
     """
     if locking is None:
-        os.write(descriptor, data)
+        _write_all(descriptor, data)
         return True
     if not _lock_trail(descriptor, locking, pause):
         return False
     try:
-        os.write(descriptor, data)
+        _write_all(descriptor, data)
     finally:
         _unlock_trail(descriptor, locking)
     return True
@@ -378,7 +379,7 @@ def _write_failure_line(line: str) -> bool:
 
 
 def _append_failure_line(record: dict[str, str]) -> bool:
-    """Add one line with a single append-mode write; True when it was written.
+    """Add one complete line under the trail lock; True when it was written.
 
     Reading the trail, adding a line and writing the whole file back lost a line
     whenever two hooks failed together, which is when hooks fail. See
