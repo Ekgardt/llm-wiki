@@ -148,7 +148,8 @@ def test_normal_batch_never_publishes_or_receipts_a_critique_drop(vault, monkeyp
                            coordinator=MarkdownCoordinator(root, state), deadline=math.inf,
                            cancelled=None, owner=None)
     assert result.status != 0
-    assert len(prompts) == 2 * (cm.setting_value('compile.validation_retries') + 1)
+    assert len(prompts) == 3 * (cm.setting_value('compile.validation_retries') + 1)
+    assert all('COMPLETE SELECTED SOURCES' in prompt for prompt in prompts[2::3])
     apply.assert_not_called()
     assert not list((root / 'knowledge/daily/receipts').iterdir())
     assert not list((root / 'knowledge/notes').iterdir())

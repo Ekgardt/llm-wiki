@@ -1335,3 +1335,64 @@ The complete public Cedar cycle published through normal transactions in three
 calls / 16.81 seconds / 32083 input and 254 output tokens. The preceding version's
 observed cycle required seven calls / 44.25 seconds. This small stochastic example
 is not an aggregate performance guarantee or a production-day success.
+
+### 2026-10-18: complete feedback before correction, repair the failed role
+
+The 415fbff5 pending-source run left two failed batches after 22 calls /390.76s,
+with one batch published. Inspection found that `_review` raised on an operation
+refusal before `_review_source_completeness` could run. A correction therefore
+received citation/scope problems first and missing-fact problems only after the
+next complete generation, exhausting the same correction allowance piecemeal.
+Malformed reviewer output also went straight back to drafting with no review-format
+diagnostic. A further operation-verdict retry lived outside the configurable
+correction budget. New regressions reproduced these paths before implementation.
+
+Primary research checked 2026-10-18: [Pydantic AI output validation](https://pydantic.dev/docs/ai/core-concepts/output/)
+returns validation diagnostics to the generating role and charges the output retry
+budget; [LangChain structured-output error handling](https://docs.langchain.com/oss/python/langchain/structured-output)
+distinguishes recoverable format errors and supplies specific correction feedback;
+[Anthropic evaluation design](https://platform.claude.com/docs/en/test-and-evaluate/develop-tests)
+uses explicit task-specific criteria and edge cases. Chosen implementation uses
+those principles in the existing pipeline, without importing these frameworks.
+
+Validated operation refusals now collect source-completeness findings in the same
+pass. Neither check can override the other: a refused operation still prevents
+publication even when completeness passes. A malformed or incomplete review is
+kept as untrusted correction data for the exact review request. The next existing
+correction pass resumes that review with its unchanged source/proposals, system
+role and schema; it does not redraft pages. Invalid review data never enters the
+semantic draft-feedback channel. Full correction requests are sized before calls,
+and a new provider starts without the previous provider's pending format repair.
+The hidden one-off missing-verdict retry is removed; all such corrections spend
+`compile.validation_retries`. No nested retry allowance, arbitrary upper cap,
+provider switch, external dependency, path or environment contract is introduced.
+
+Draft v22 explicitly asks for coverage of all selected sources on the first pass;
+review v11 explicitly counts facts already preserved in context, compares meaning
+rather than identical wording, and must identify what is absent from both context
+and proposals. This addresses the observed refusal that acknowledged the existing
+internet-policy decision yet demanded another operation for it. The claim that a
+particular reason is genuinely new still requires semantic judgement; prompts
+cannot guarantee perfect model agreement. Both program identities invalidate prior
+cached plans. Alternatives rejected: raising the retry limit leaves staged blind
+feedback intact; passing a malformed review weakens safety; a second repair loop
+multiplies spending; redrafting an unchanged valid proposal wastes work.
+
+CI39135555067 failures were independently identified: an older fake-provider fixture
+returned draft JSON for source review, one address test asserted obsolete draft v20,
+and four newly added test files lacked measured shard weights. The fixture now
+explicitly supplies both expected response shapes while retaining its audit-tail
+parsing check; the cache-version assertion remains; actual test timings populate
+the weight table. No failing check is skipped or relaxed.
+
+Final local validation: 892 related Python3.12 tests passed, including structure,
+limits, provider, failed-CI cases and measured shard registration; 39 focused
+Python3.10 tests passed. Ruff and measured complexity passed (442 changed functions
+since the refactor baseline). Both dependency checks passed (97 installed and66
+isolated packages); uv.lock is unchanged. A real model repaired an injected review
+missing `reason` with two review-role calls, no new draft, and preserved the fact.
+A complete public fixture committed in three calls/17.90s. A longer first-draft
+instruction initially displaced optional context in two packing regressions; the
+instruction was shortened in place and both original full-context assertions passed
+without changing their fixtures or product budgets. Real pending-day validation
+and the new full platform CI still have to qualify installation.

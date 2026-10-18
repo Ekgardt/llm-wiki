@@ -196,8 +196,10 @@ refusal at one names the setting that raises it. Decision and sources:
 
 The approved 2026-10-18 compile correction setting is `compile.validation_retries`
 (`LLM_WIKI_COMPILE_VALIDATION_RETRIES` for one run), default 2, minimum 0, no
-additional upper ceiling. It counts full correcting passes after the initial
-attempt for each provider; 0 disables correction retries. The default is an
+additional upper ceiling. It counts correcting passes after the initial
+attempt for each provider; a malformed or incomplete review resumes in the review
+role without redrafting, within that same budget. There is no separate hidden
+missing-verdict retry. Zero disables correction retries. The default is an
 explicit cost/quality compromise: allow a format correction and a semantic
 correction while preventing unlimited model passes. It is not a measured optimum.
 Review it using complete-cycle retained facts, failures, tokens and latency after

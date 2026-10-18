@@ -156,7 +156,8 @@ def test_e2e_compile_with_fake_provider(tmp_path, monkeypatch):
             }
         )
         + "\nCOMPILE_AUDIT: verified 0 evidence citations; 0 dedup checks performed; "
-        "0 stubs skipped; 0 contradictions handled; 0 pages rejected as below-threshold",
+        "0 stubs skipped; 0 contradictions handled; 0 pages rejected as below-threshold\n"
+        + json.dumps({"source_review": {"complete": True, "reason": "Explicit fake fixture: no durable content."}}),
     )
 
     # Re-bind module paths that were cached at import time.
