@@ -759,3 +759,68 @@ skips. The original burst and trim tests retain their assertions. Lizard/AST
 checks pass for 285 changed functions across the refactor; Ruff and Python 3.10
 parsing pass. All 97 installed packages are compatible. Evidence lives in
 `logs/refactor-20261018-diagnostic-pipeline-{red,green,consumers}.txt`.
+
+## 2026-10-18: qualify the installed Codex dependency for compile planning
+
+The 03:05–05:32 nightly compile emitted 459 failed-batch messages, 134 zero-page
+publications and eight one-page publications before its launcher timed out at
+8839 seconds. Failures include rejected critic plans followed by draft input
+budget refusals. Those counts do not prove that all failures have one cause.
+
+The installed dependency is Codex CLI 0.162.1. Both discovery and advertised-window
+interpretation accepted only 0.160.0, so `_planned_candidate` returned a descriptor
+with no planning basis. The compiler's previously implemented repair window
+therefore could not use the model's native advertised capacity. A direct read-only
+native probe on 0.162.1 successfully resolved the configured gpt-6-luna model and
+OpenAI provider, verified two configuration files, and cleaned up its ephemeral
+bootstrap; the old version check still suppressed the window. No inference turn
+or user source was sent by that probe.
+
+Two regressions reproduce the excluded installed version: complete resolver
+binding and matching catalog capacity. The qualification policy is now shared by
+discovery and catalog interpretation in one immutable set, covering tested 0.160.0
+and 0.162.1. Existing unknown-version fallback and all identity, configuration,
+cleanup, model/provider matching and malformed-reply refusals remain unchanged.
+The installed 0.162.1 resolver now returns an advertised planning window of
+258400 (catalog context_window 272000 × effective_context_window_percent 95 / 100).
+This is native planning evidence, not an exact tokenizer count, account entitlement,
+wire admission guarantee or proof that the full nightly cycle now succeeds.
+
+No model, reasoning setting, provider choice, source context, review requirement,
+retry count, timeout, output reserve or safety margin changes. No runtime path,
+environment contract or package is added. The two duplicated single-version
+conditions are replaced by the shared qualification set. 0.160.0 remains supported
+for existing installations; it is a compatibility entry, not a parallel engine.
+Unknown versions require requalification rather than an assumed capacity increase.
+This restriction is tied to experimentally checked bootstrap/catalog semantics;
+revisit it whenever the selected CLI changes. Complete protocol-based compatibility
+without release qualification would require separate evidence about semantic drift.
+
+Primary sources checked on 2026-10-18:
+
+- [Official Codex App Server](https://learn.chatgpt.com/docs/app-server) describes
+  initialization and version-specific generated schemas, and ephemeral thread use.
+- [Official CLI reference](https://learn.chatgpt.com/docs/cli/reference) describes
+  `debug models` and the optional bundled catalog. The qualification uses the native
+  selected executable and the existing verified invocation configuration.
+- [JSON-RPC specification](https://www.jsonrpc.org/specification) distinguishes
+  method-not-found from invalid parameters and malformed responses; optional
+  capability absence must not hide genuine protocol failure.
+- [Python subprocess documentation](https://docs.python.org/3/library/subprocess.html)
+  documents process completion and cleanup; the existing owned process-tree and
+  joined-reader tests remain part of this dependency qualification.
+
+Alternatives: copying the advertised number into TOML would lose model/config
+binding; accepting every version would claim untested semantics; reverting the
+user's CLI would affect other consumers. Qualifying the actual installed dependency
+preserves the existing contract with the smallest change. Native evidence:
+`logs/refactor-20261018-codex-162-native-probe.json` and
+`logs/refactor-20261018-codex-162-native-qualified.json`. Regression evidence:
+`logs/refactor-20261018-codex-162-red.txt` (two failures before the change) and
+`logs/refactor-20261018-codex-162-green.txt` (81 related checks pass).
+
+Extended validation: 310 related consumer tests pass, with 20 platform/optional
+skips (25.09 s); this includes the earlier 81 checks rather than adding to them.
+Ruff, Python 3.10 parsing and complexity checks pass for all 291 changed functions
+in this refactoring series. All 97 installed packages have compatible dependencies.
+Full nightly completion and Windows CI remain separate, unresolved qualifications.

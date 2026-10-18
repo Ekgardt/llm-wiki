@@ -1832,8 +1832,14 @@ def _codex_catalog_command_unsupported(command, result):
                           [b"error: unrecognized subcommand 'debug'"])
 
 
+# Native bootstrap and catalog semantics verified on these exact CLI releases.
+# Unknown versions keep implicit execution without claiming planning capacity.
+# Requalify on CLI upgrades; see the 2026-10-18 compile refactoring research.
+_CODEX_PLANNING_VERSIONS = frozenset({"codex-cli 0.160.0", "codex-cli 0.162.1"})
+
+
 def _codex_advertised_window(catalog, model, provider, cli_version):
-    if provider != "openai" or cli_version != "codex-cli 0.160.0":
+    if provider != "openai" or cli_version not in _CODEX_PLANNING_VERSIONS:
         return None
     row = _codex_catalog_model(catalog, model)
     if row is None:
@@ -1974,7 +1980,7 @@ def _resolve_selected_codex_basis(descriptor, executable, deadline):
     environment = provider_environment()
     with provider_cwd() as neutral:
         version = _codex_basis_version(executable, neutral, environment, deadline)
-        if version != "codex-cli 0.160.0":
+        if version not in _CODEX_PLANNING_VERSIONS:
             _require_codex_resolution_identity(executable, environment, deadline)
             return None
         basis = _codex_qualified_basis(descriptor, executable, neutral, environment, deadline, version)

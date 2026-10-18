@@ -115,12 +115,13 @@ def test_unverified_managed_layer_does_not_invent_capacity(name):
     assert not lc._codex_config_layers_verified({'layers': [{'name': name}]})
 
 
-def test_catalog_capacity_is_only_matching_native_advertisement():
+@pytest.mark.parametrize('version', ['codex-cli 0.160.0', 'codex-cli 0.162.1'])
+def test_catalog_capacity_is_only_matching_native_advertisement(version):
     row = {'slug': 'resolved-model', 'context_window': 272000,
            'effective_context_window_percent': 95}
-    assert lc._codex_advertised_window([row], 'resolved-model', 'openai', 'codex-cli 0.160.0') == 258400
-    assert lc._codex_advertised_window([row], 'other-model', 'openai', 'codex-cli 0.160.0') is None
-    assert lc._codex_advertised_window([row], 'resolved-model', 'custom', 'codex-cli 0.160.0') is None
+    assert lc._codex_advertised_window([row], 'resolved-model', 'openai', version) == 258400
+    assert lc._codex_advertised_window([row], 'other-model', 'openai', version) is None
+    assert lc._codex_advertised_window([row], 'resolved-model', 'custom', version) is None
     assert lc._codex_advertised_window([row], 'resolved-model', 'openai', 'codex-cli unknown') is None
 
 
@@ -179,7 +180,8 @@ def _native_peer():
     return "import json,sys\nfor line in sys.stdin:\n r=json.loads(line)\n m=r['method']\n results={'initialize':{},'config/read':{'layers':[{'name':{'type':'sessionFlags'}}],'config':{}},'thread/start':{'model':'resolved-model','modelProvider':'openai','thread':{'id':'ephemeral','ephemeral':True}},'thread/unsubscribe':{}}\n if 'id' in r: print(json.dumps({'id':r['id'],'result':results[m]}),flush=True)\n"
 
 
-def test_complete_resolver_pins_actual_response_only_once(monkeypatch, tmp_path):
+@pytest.mark.parametrize('version', ['codex-cli 0.160.0', 'codex-cli 0.162.1'])
+def test_complete_resolver_pins_actual_response_only_once(monkeypatch, tmp_path, version):
     monkeypatch.delenv('MEMORY_CODEX_MODEL', raising=False)
     selected = _basis(tmp_path).executable
     selected_calls = []
@@ -197,7 +199,7 @@ def test_complete_resolver_pins_actual_response_only_once(monkeypatch, tmp_path)
     def local_command(executable, command, neutral, environment, deadline):
         stages.append(tuple(command))
         lc._codex_basis_remaining(deadline)
-        return _local_catalog_reply(command)
+        return _local_catalog_reply(command, version)
 
     monkeypatch.setattr(lc, '_selected_codex_executable', select)
     monkeypatch.setattr(lc, '_spawn_codex_basis_rpc', owned_peer)
@@ -215,9 +217,9 @@ def test_complete_resolver_pins_actual_response_only_once(monkeypatch, tmp_path)
     assert basis.descriptor.inference_settings['max_tokens'] == 'backend_default'
 
 
-def _local_catalog_reply(command):
+def _local_catalog_reply(command, version):
     if command[-1] == '--version':
-        return b'codex-cli 0.160.0\n'
+        return (version + '\n').encode()
     return json.dumps({'models': [{'slug': 'resolved-model', 'context_window': 272000,
                                  'effective_context_window_percent': 95}]}).encode()
 
