@@ -3650,11 +3650,9 @@ def _is_transient_writer_contention(error: BaseException) -> bool:
 def _sqlite_contention(error: sqlite3.OperationalError) -> bool:
     """The driver's code decides when it has one; otherwise the message does."""
     code = getattr(error, "sqlite_errorcode", None)
-    if isinstance(code, int) and code & 0xFF in {
-        sqlite3.SQLITE_BUSY,
-        sqlite3.SQLITE_LOCKED,
-    }:
-        return True
+    if isinstance(code, int):
+        # SQLite primary BUSY/LOCKED codes; Python 3.10 lacks the named constants.
+        return code & 0xFF in {5, 6}
     message = str(error).casefold()
     return "busy" in message or "locked" in message
 

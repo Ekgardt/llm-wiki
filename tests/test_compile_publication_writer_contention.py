@@ -148,7 +148,7 @@ def test_sqlite_busy_expiry_keeps_the_original_cause():
     from capture_diagnostics import is_contention
 
     error = sqlite3.OperationalError('busy')
-    error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    error.sqlite_errorcode = 5  # SQLite SQLITE_BUSY; named constant is absent on Python 3.10.
     with pytest.raises(TimeoutError) as caught:
         markdown_transaction._retry_gate_or_fail(error, 0, time.monotonic() - 1)
     assert caught.value.__cause__ is error
@@ -159,3 +159,16 @@ def test_unrelated_timeout_is_not_classified_as_contention():
     from capture_diagnostics import is_contention
 
     assert not is_contention(TimeoutError('timed out waiting for the global Markdown writer gate'))
+
+
+@pytest.mark.parametrize(('code', 'message', 'expected'), [
+    (5, 'busy', True), (6, 'locked', True),
+    (261, 'extended busy', True), (262, 'extended locked', True),
+    (13, 'locked database is full', False), (11, 'busy but corrupt', False),
+])
+def test_sqlite_code_is_authoritative_over_message(code, message, expected):
+    import sqlite3
+
+    error = sqlite3.OperationalError(message)
+    error.sqlite_errorcode = code
+    assert markdown_transaction._sqlite_contention(error) is expected

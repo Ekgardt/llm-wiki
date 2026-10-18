@@ -934,3 +934,49 @@ The preceding provider-upgrade CI exposed a missing measured shard weight for
 adds that file; its three tests and six weight-integrity tests pass. Existing weights
 are preserved. This CI preparation error is acknowledged, not evidence that the
 previous full CI passed. Logs: `writer-admission-{red,green,consumers,shard-weight}.txt`.
+
+## 2026-10-18: SQLite contention across supported Python versions
+
+CI 39117071266 exposed use of `sqlite3.SQLITE_BUSY` in the new cause-chain test,
+which is absent in Python 3.10. Reproduction on real CPython 3.10.20 also exposed
+that the production `_sqlite_contention` had the same dependency when given a
+numeric error code. Ordinary 3.10 exceptions without that attribute use the
+existing message fallback; the numeric-code branch must still be portable.
+
+The shared writer classifier now uses SQLite's documented primary codes 5 and 6,
+masking extended codes with 0xff. These are external protocol constants, not new
+limits. If a numeric code exists, it is authoritative: a FULL or CORRUPT error
+cannot be reclassified by the words `busy` or `locked` in its message. Text fallback
+remains only for drivers without a numeric code, preserving Python 3.10 support.
+No wait, retry count, database format, dependency, runtime path or safety check is
+relaxed. The test supplies the stable SQLite code rather than a newer Python name.
+
+Sources checked 2026-10-18: [Python 3.10 sqlite3](https://docs.python.org/3.10/library/sqlite3.html),
+[SQLite result codes](https://www.sqlite.org/rescode.html),
+[DB-API exception contract](https://peps.python.org/pep-0249/), and
+[Microsoft system error codes](https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--0-499-).
+Python and PEP describe one ecosystem, not two independent maintainers. SQLite
+and Microsoft independently distinguish contention from storage failures. Windows
+sharing classification was inspected and is unchanged. Alternatives rejected:
+skipping the regression on 3.10, upgrading the project's minimum Python version,
+or interpreting arbitrary error text despite an explicit non-contention code.
+
+Runtime recovery observations: the supported adoption sweep reported zero skipped,
+zero orphaned and zero half-published records. A fresh quarantine inspection found
+one unresolved breadcrumb publication, versus 17 in the earlier snapshot. Its
+source reconstructs to 560 bytes and its head matches the staged digest; its linked
+queue task succeeded. No committed create witness exists in current transaction
+history, so the quarantine remains retained, not manually marked resolved. These
+observations do not prove full queue completion or explain the missing witness.
+The macOS Pyright fixture CI independently failed with QualifiedIdentityError;
+its 1203 tests passed and 101 skipped before that fixture failure. It is not fixed
+by this SQLite change.
+
+Validation: CPython 3.10.20 reproduced the missing-constant failure (1 failed,
+9 passed), then seven failures with the numeric-code regression matrix. After the
+fix, 436 related checks pass on that interpreter (141.11 s); 24 targeted checks
+pass on installed CPython 3.12.3. Ruff and measured complexity pass for 318 changed
+functions in the series. Dependency checks pass for the isolated 66-package 3.10
+environment and installed 97-package 3.12 environment; the lock file is unchanged.
+Evidence: `logs/step7-python310-{red,consumers}.txt`,
+`logs/step7-sqlite-classification-red.txt`, `logs/step7-python312-sqlite.txt`.
