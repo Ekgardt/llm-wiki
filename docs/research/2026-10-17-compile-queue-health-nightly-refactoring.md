@@ -980,3 +980,48 @@ functions in the series. Dependency checks pass for the isolated 66-package 3.10
 environment and installed 97-package 3.12 environment; the lock file is unchanged.
 Evidence: `logs/step7-python310-{red,consumers}.txt`,
 `logs/step7-sqlite-classification-red.txt`, `logs/step7-python312-sqlite.txt`.
+
+## 2026-10-18: qualification failures retain the failed predicates
+
+The macOS correctness fixture in CI 39117071266 emitted only
+`QualifiedIdentityError`, hiding which of seven required identity checks failed.
+The next run, 39118878569, passed both the Linux and macOS Pyright jobs without a
+Pyright change. This is not evidence that the original intermittent failure was
+fixed. Its precise cause remains unknown from the old log.
+
+The confirmed diagnostic defect is reproduced by seven individual identity
+mismatches and one CLI rendering check. Qualification now names the same seven
+predicates in one mapping and attaches only the failed names to its existing
+exception. The CLI preserves these names in its error JSON. Status, exit code,
+package/version pins, Node check, degradation refusal and all gate requirements
+are unchanged. There is no new retry, timeout or accepted identity. Arbitrary
+identity values, paths and exception text are not printed; the finite set of
+check names is output structure, not a new operating limit. The previous unnamed
+boolean tuple is removed, not kept as a parallel decision path.
+
+The active graph did not cover the benchmark directory, and live graph extraction
+returned operation_timeout. Dependencies, consumers, CLI rendering and fixture
+checks were therefore inspected directly in benchmark/run_code_navigation.py,
+tests/test_code_navigation_benchmark.py, pyright_profile.py and the workflow.
+The updated code index will include benchmark with scripts and tests.
+
+Sources checked 2026-10-18 (three independent projects):
+- [Python exceptions](https://docs.python.org/3/library/exceptions.html): carry
+  diagnostic information through the existing exception boundary.
+- [OpenTelemetry exception logs](https://opentelemetry.io/docs/specs/semconv/exceptions/exceptions-logs/):
+  distinguish exception classification from descriptive diagnostic information.
+- [OWASP Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html):
+  log useful failure context while excluding sensitive values.
+
+Alternatives rejected: weakening exact identity checks, adding blind retries,
+changing timeouts without a measured cause, or dumping the entire identity and
+its filesystem paths. This change repairs observability only; the intermittent
+macOS cause remains open pending evidence from a recurrence.
+
+Validation: eight diagnostic regressions fail before the change. Afterwards the
+benchmark suite passes 150 tests with four platform/native skips (34.77 s).
+Eleven targeted identity/CLI checks pass on real Python 3.10.20 (2.44 s); those
+checks overlap the full suite and are not additional unique coverage. Ruff,
+Python 3.10 syntax and complexity pass for 326 changed functions in the series.
+All 97 installed dependencies are compatible. Evidence:
+`logs/step7-pyright-diagnostics-{red,green,python310}.txt`.

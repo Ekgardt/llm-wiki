@@ -4672,3 +4672,37 @@ def test_a_failing_ownership_probe_is_not_retried() -> None:
     outcome = runtime._ownership_outcome("cancellation", time.monotonic() + 60)
     assert outcome == {"available": False, "orphan_count": None}
     assert attempts == ["cancellation"]
+
+
+@pytest.mark.parametrize(('field', 'value', 'failure'), [
+    ('status', 'missing', 'status'), ('qualified', False, 'qualified'),
+    ('version', 'wrong', 'pyright_version'),
+    ('package_sha256', 'wrong', 'package_sha256'),
+    ('node_major', 99, 'node_major'), ('node_version', '', 'node_version'),
+    ('degradation_codes', ('private-value',), 'degradation_codes'),
+])
+def test_qualification_failure_names_the_failed_check(field, value, failure):
+    manifest = benchmark_runner.load_manifest()
+    identity = SimpleNamespace(status='qualified', qualified=True,
+        version=manifest['pyright_version'], package_sha256=manifest['pyright_package_sha256'],
+        node_major=manifest['node_major'], node_version='v22.23.1', degradation_codes=())
+    setattr(identity, field, value)
+    with pytest.raises(QualifiedIdentityError) as caught:
+        benchmark_runner._require_qualified_identity(identity, manifest)
+    assert caught.value.failed_checks == (failure,)
+
+
+def test_cli_keeps_qualification_checks_without_identity_values(monkeypatch, capsys):
+    def fail(*args):
+        identity = SimpleNamespace(status='private-status', qualified=False)
+        benchmark_runner._require_qualified_identity(identity, benchmark_runner.load_manifest())
+
+    monkeypatch.setattr(benchmark_runner, '_run_and_evaluate', fail)
+    assert benchmark_runner.main(['--fixture', '--correctness-only']) == 2
+    captured = capsys.readouterr()
+    report = json.loads(captured.err)
+    assert report['failed_checks'] == ['status', 'qualified', 'pyright_version',
+                                      'package_sha256', 'node_major', 'node_version']
+    assert report['code'] == 'QualifiedIdentityError'
+    assert report['market_superiority_claimed'] is False
+    assert 'private-status' not in captured.err

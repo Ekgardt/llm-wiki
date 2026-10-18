@@ -164,6 +164,10 @@ class FixtureIdentityError(RuntimeError):
 class QualifiedIdentityError(RuntimeError):
     """Raised when no exact, already-installed Pyright identity is available."""
 
+    def __init__(self, message: str, failed_checks: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        self.failed_checks = failed_checks
+
 
 class BenchmarkTimeoutError(TimeoutError):
     """Raised when the one absolute benchmark run budget is exhausted."""
@@ -958,20 +962,25 @@ def verify_repository_identity(
     _require_gold_hash(repository, manifest)
 
 
-def _require_qualified_identity(identity: object, manifest: Mapping[str, object]) -> None:
-    checks = (
-        getattr(identity, "status", None) == "qualified",
-        getattr(identity, "qualified", None) is True,
-        getattr(identity, "version", None) == manifest["pyright_version"],
-        getattr(identity, "package_sha256", None) == manifest["pyright_package_sha256"],
-        getattr(identity, "node_major", None) == manifest["node_major"],
-        isinstance(getattr(identity, "node_version", None), str)
+def _qualified_identity_checks(identity: object, manifest: Mapping[str, object]) -> dict[str, bool]:
+    """Fixed public check names; never serialize paths or arbitrary identity values."""
+    return {
+        "status": getattr(identity, "status", None) == "qualified",
+        "qualified": getattr(identity, "qualified", None) is True,
+        "pyright_version": getattr(identity, "version", None) == manifest["pyright_version"],
+        "package_sha256": getattr(identity, "package_sha256", None) == manifest["pyright_package_sha256"],
+        "node_major": getattr(identity, "node_major", None) == manifest["node_major"],
+        "node_version": isinstance(getattr(identity, "node_version", None), str)
         and bool(getattr(identity, "node_version", None)),
-        not tuple(getattr(identity, "degradation_codes", ())),
-    )
-    if not all(checks):
+        "degradation_codes": not tuple(getattr(identity, "degradation_codes", ())),
+    }
+
+
+def _require_qualified_identity(identity: object, manifest: Mapping[str, object]) -> None:
+    failed = tuple(name for name, passed in _qualified_identity_checks(identity, manifest).items() if not passed)
+    if failed:
         raise QualifiedIdentityError(
-            "an exact qualified Pyright package and Node identity is required"
+            "an exact qualified Pyright package and Node identity is required", failed
         )
 
 
@@ -3425,11 +3434,11 @@ def _validate_path_arguments(parser: argparse.ArgumentParser, args: argparse.Nam
         parser.error("--state-root must be absolute")
 
 
-def _error_exit(code_name: str, exit_code: int) -> int:
-    print(
-        _canonical_json({"status": "error", "code": code_name, "market_superiority_claimed": False}),
-        file=sys.stderr,
-    )
+def _error_exit(code_name: str, exit_code: int, *, failed_checks: tuple[str, ...] = ()) -> int:
+    report = {"status": "error", "code": code_name, "market_superiority_claimed": False}
+    if failed_checks:
+        report["failed_checks"] = list(failed_checks)
+    print(_canonical_json(report), file=sys.stderr)
     return exit_code
 
 
@@ -3458,7 +3467,7 @@ def main(argv: list[str] | None = None) -> int:
     except BenchmarkTimeoutError:
         return _error_exit("BenchmarkTimeout", 4)
     except (FixtureIdentityError, QualifiedIdentityError) as exc:
-        return _error_exit(type(exc).__name__, 2)
+        return _error_exit(type(exc).__name__, 2, failed_checks=getattr(exc, "failed_checks", ()))
     except Exception as exc:
         return _error_exit(type(exc).__name__, 3)
 
