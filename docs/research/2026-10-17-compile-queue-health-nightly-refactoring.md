@@ -1138,3 +1138,69 @@ Evidence: `logs/step7-critic-address-{red,tests,python310}-20261018.txt`,
 `logs/step7-response-evidence-cycle-20261018.log`,
 `logs/step7-windows312-failure-20261018.log`,
 `logs/step7-current-corpus-capacity-20261018.json`.
+
+### 2026-10-18: structural refusals participate in correction
+
+The installed e4aaff4e run of the October 15 source ended after 2596.40 seconds
+and 88 completed provider calls: 31 published batches, five failed batches, and
+memory-generation publication deferred by `corpus_entry_limit`. Local evidence is
+`logs/step7-critic-address-full-cycle-20261018.{json,log}`. Its failures include
+malformed JSON, non-string related entries and an unsupported category, besides
+semantic refusals. `_planned` and `_normalized` recorded structural refusals but
+sent neither the refused answer nor the validation diagnostic to the next draft.
+This made retries blind. A subsequent empty answer could even complete the source
+because only semantic criticism had populated the unresolved-work feedback.
+
+Research checked on 2026-10-18, independent primary sources:
+
+- [Pydantic AI output validators](https://pydantic.dev/docs/ai/core-concepts/output/)
+  return validation errors to the model through ModelRetry.
+- [LangChain structured-output error handling](https://docs.langchain.com/oss/python/langchain/structured-output)
+  supplies the specific schema failure to the next attempt.
+- [Anthropic structured outputs](https://platform.claude.com/docs/en/build-with-claude/structured-outputs)
+  distinguish native schema constraints from original-schema local validation;
+  supported schema subsets differ. Native output does not replace our evidence
+  and source-completion requirements.
+
+Chosen implementation reuses the existing complete-source correction path for
+both structural validation stages. One helper carries the exact rejected answer,
+stage and validation diagnostic as untrusted correction data. Existing semantic
+review records survive; prior invalid addresses are explicitly not authority.
+The existing model-capacity check measures the whole correction before calling.
+The existing empty-rewrite refusal and cache bypass now also cover structural
+refusals. Successful corrections undergo the same schema, citation, critic and
+normalization checks. Draft program v20 invalidates v19 cached answers. No second
+repair loop, dependency, persistent format, path or environment contract is added.
+
+Alternatives rejected for this change: repeating the same request conveys no
+new diagnostic; coercing malformed fields would silently invent meaning; enabling
+native output without qualifying the provider's schema subset is incompatible
+with the current contract. Native constraints remain a separate improvement.
+No retry count or timeout is raised. The inherited two-retry policy is still not
+qualified as an optimal cost/quality tradeoff and remains open under law 9.
+
+Five initial regression cases failed on the installed implementation and passed
+with the correction path. Additional tests cover normalization diagnostics,
+whole-response sizing before calls, preservation of prior review feedback,
+refusal of empty completion, cache bypass and cache-version invalidation.
+A public-source paired Codex probe seeded the same non-string related entry:
+base accepted an empty result in one call (11415 input / 8 output tokens, 4.83 s);
+candidate produced one exactly evidenced, critic-approved fact in two calls
+(21641 input / 169 output tokens, 10.96 s). This is a correctness improvement in
+that observed fixture, not evidence of aggregate token savings or a successful
+production-day compilation. Reports: local `logs/step7-validation-feedback-*-probe-20261018.json`.
+
+Remaining compiler work is explicit: source-wide verification of no-content and
+completeness, optional claim/body review semantics, malformed review handling,
+qualification of retries and native output, and a successful full production
+cycle. None is claimed solved by repairing structural feedback.
+
+Validation for this change: 656 related Python 3.12 tests passed; the final nine
+new regressions passed after two extra cache assertions were added; 38 focused
+Python 3.10.20 tests passed. Ruff and measured complexity passed (353 changed
+functions since the refactor baseline, each within the user limits). Installed
+97-package and isolated 66-package dependency checks passed; uv.lock unchanged.
+An initial `pip install -e .[dev]` attempt failed because this uv project is not
+an editable setuptools package; the supported `uv sync --locked` succeeded.
+The preceding e4aaff4e GitHub matrix completed successfully; it does not validate
+this new commit and does not establish the cause of the earlier Windows failure.
