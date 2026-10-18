@@ -1283,3 +1283,55 @@ its cost. Report: `logs/step7-source-completeness-cycle-20261018.json`. A prior
 harness attempt omitted the required paired batch descriptor and failed before
 publication; the corrected harness used the ordinary batch contract. An additional
 41 structure tests passed. Production-day validation remains outstanding.
+
+### 2026-10-18: one durability rubric for all compile roles
+
+The installed 87453316 production run of the October 15 pending sources ended
+with three failed batches after 21 calls / 350.02 seconds; nothing was published,
+and generation refresh deferred on `corpus_entry_limit`. Source completeness
+exposed omissions, but also exposed inconsistent role criteria: response 10
+required ownership/coordination information, while response 14 rejected the
+corrected generic work directives as transient. Response 6 required a separate
+research step for an unresolved issue, while response 8 correctly found that
+requirement unsupported. These are failures, not successful source completion.
+Local evidence: `logs/step7-source-completeness-full-cycle-20261018.json` and the
+numbered provider-response records. No refused source was receipted as complete.
+
+Research rechecked on 2026-10-18: [OpenAI evaluation best practices](https://developers.openai.com/api/docs/guides/evaluation-best-practices)
+requires task-specific criteria and comparison against historical failures;
+[Anthropic evaluation guidance](https://platform.claude.com/docs/en/test-and-evaluate/develop-tests)
+recommends clear rubrics and ambiguous edge cases;
+[Ragas context recall](https://docs.ragas.io/en/stable/concepts/metrics/available_metrics/context_recall/)
+requires supported reference information for omission assessment. These sources
+motivate explicit criteria; they do not prove that any model judge is infallible.
+
+Chosen correction: one shared durability rubric in the draft, operation review
+and source review, bound into both program hashes. Explicit scoped assignments,
+constraints and unresolved risks can be durable; generic instructions to continue
+or check dependencies create no new project fact by themselves. Reported findings,
+uncertainty, suggestions, requests and completion must remain distinct. Neither
+review may invent a requirement for research or another next step from an open
+problem. No project-name special case, additional retry, model change, dependency,
+public interface or relaxed evidence check is introduced. Draft v21 and review v10
+replace the preceding programs. A shared rubric reduces inconsistent instructions;
+it cannot guarantee identical stochastic judgements.
+
+Alternatives rejected: raising retries leaves contradictory criteria intact;
+accepting either reviewer overrides a necessary check; hardcoded exclusions for
+individual projects hide the general defect. The extra rubric increases request
+size. Four existing tests correctly found their 19 KB admission fixture no longer
+fit the unknown-model whole-prompt budget. Their positive fixture is now 17 KB;
+all exact-byte and mandatory-context assertions remain, and the separate 38 KB
+unknown-capacity refusal remains unchanged. The product budget was not raised.
+
+Validation: 825 related Python 3.12 tests and 35 focused Python 3.10 tests passed;
+Ruff and measured complexity passed (424 changed functions since the refactor
+baseline). The regression first failed because no shared rubric existed. A real
+candidate probe passed eight judgments covering generic continuation, omitted and
+preserved explicit ownership, preserved unresolved status, and invented research
+requirements. The earlier probe used an unrelated fixture title; corrected probes
+use a neutral matching project title and are recorded separately as `*-v2`.
+The complete public Cedar cycle published through normal transactions in three
+calls / 16.81 seconds / 32083 input and 254 output tokens. The preceding version's
+observed cycle required seven calls / 44.25 seconds. This small stochastic example
+is not an aggregate performance guarantee or a production-day success.

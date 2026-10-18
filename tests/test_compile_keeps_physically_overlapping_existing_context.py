@@ -11,8 +11,10 @@ def _overlap_inputs(root, newline="\n"):
     daily.write_bytes(daily.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", newline.encode()))
     initial = cm.snapshot_compile_inputs([daily])
     binding, _block = cm._bound_evidence_block(_evidence(), initial)
+    # Keep this admitted fixture below the measured whole-prompt budget;
+    # the separate 38 KB case must still refuse without verified capacity.
     note = root / 'knowledge/notes/project-rule.md'
-    note.write_text('---\ntype: decision\n---\n# Accepted project boundary\n' + 'z' * 19000 + '\n\nEvidence: ' + binding['reference'] + '\n', encoding='utf-8', newline=newline)
+    note.write_text('---\ntype: decision\n---\n# Accepted project boundary\n' + 'z' * 17000 + '\n\nEvidence: ' + binding['reference'] + '\n', encoding='utf-8', newline=newline)
     other = root / 'knowledge/notes/lexical.md'
     other.write_text('---\ntype: pattern\n---\n' + (QUOTE + '\n') * 160, encoding='utf-8', newline=newline)
     return cm.snapshot_compile_inputs([daily]), note.read_bytes()
@@ -31,7 +33,7 @@ def test_physically_overlapping_decision_survives_optional_word_ranking(vault):
 def _large_required(root):
     inputs, original = _overlap_inputs(root)
     note = root / 'knowledge/notes/project-rule.md'
-    note.write_bytes(original.replace(b'z' * 19000, b'z' * 38000))
+    note.write_bytes(original.replace(b'z' * 17000, b'z' * 38000))
     return cm.snapshot_compile_inputs([root / inputs.dailies[0].logical_path])
 
 
