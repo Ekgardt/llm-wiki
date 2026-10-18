@@ -1014,7 +1014,7 @@ def test_postcommit_claim_index_rebuild_failure_invalidates_without_failing_comm
         raise OSError("derived cache failure")
 
     monkeypatch.setattr(ClaimIndex, "rebuild", fail_after_commit)
-    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args, **kwargs: [])
 
     result = compile_memory.apply_compile_plan(
         inputs, plan, action_key="6" * 64, trigger="manual",
@@ -1066,7 +1066,7 @@ def test_new_claim_page_inserted_after_assessment_fails_tree_manifest_preconditi
         return original_apply(transaction_id, **kwargs)
 
     monkeypatch.setattr(coordinator, "apply", insert_phantom_then_apply)
-    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args, **kwargs: [])
 
     # The first attempt is refused — the assessment really was computed against
     # a tree that no longer exists. The second reads the tree that does, and
@@ -1113,7 +1113,7 @@ def test_a_tree_that_never_stops_moving_still_refuses_the_compile(vault, monkeyp
         return original_apply(transaction_id, **kwargs)
 
     monkeypatch.setattr(coordinator, "apply", insert_a_new_page_then_apply)
-    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args, **kwargs: [])
 
     with pytest.raises(TransactionFailure, match="claim tree manifest"):
         compile_memory.apply_compile_plan(
@@ -1196,7 +1196,7 @@ def test_compile_same_id_replacement_after_assessment_quarantines_without_mutati
     monkeypatch.setattr(
         contradiction_pipeline.ContradictionPipeline, "assess", assess_then_replace
     )
-    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args, **kwargs: [])
     coordinator = MarkdownCoordinator(root, state_root)
 
     result = compile_memory.apply_compile_plan(
@@ -2554,7 +2554,7 @@ def test_stale_target_snapshot_does_not_repeat_claim_assessment(
         return original_apply(transaction_id, **kwargs)
 
     monkeypatch.setattr(compile_memory._ApplyPlan, "_assess_operation", observed_assessment)
-    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args, **kwargs: [])
     if during_apply:
         monkeypatch.setattr(coordinator, "apply", changed_target_then_apply)
     else:
@@ -2649,7 +2649,7 @@ def test_live_handoff_prose_does_not_repeat_claim_assessment(vault, monkeypatch)
         state.write_bytes(b"---\ntype: project-state\n---\n# State\nTask " + str(len(calls)).encode() + b".\n")
 
     monkeypatch.setattr(compile_memory._ApplyPlan, "assess_claims", assess_then_project_next_handoff)
-    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args, **kwargs: [])
     result = compile_memory.apply_compile_plan(inputs, plan, action_key="7" * 64,
         trigger="manual", coordinator=MarkdownCoordinator(root, state_root),
         completed_at="2026-07-14T12:00:00Z")
@@ -2681,7 +2681,7 @@ def test_live_handoff_claim_change_requires_fresh_assessment(vault, monkeypatch)
         state.write_bytes(changed)
 
     monkeypatch.setattr(compile_memory._ApplyPlan, "assess_claims", assess_then_change_ledger)
-    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args, **kwargs: [])
     result = compile_memory.apply_compile_plan(inputs, plan, action_key="8" * 64,
         trigger="manual", coordinator=MarkdownCoordinator(root, state_root),
         completed_at="2026-07-14T12:00:00Z")
@@ -2705,7 +2705,7 @@ def test_live_handoff_malformed_claim_ledger_refuses_publication(vault, monkeypa
         state.write_bytes(b"---\ntype: project-state\n---\n# State\n## Claims\n```json\n{broken}\n```\n")
 
     monkeypatch.setattr(compile_memory._ApplyPlan, "assess_claims", assess_then_break_ledger)
-    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args, **kwargs: [])
     with pytest.raises(ValueError):
         compile_memory.apply_compile_plan(inputs, plan, action_key="9" * 64,
             trigger="manual", coordinator=MarkdownCoordinator(root, state_root),
@@ -2740,7 +2740,7 @@ def test_live_handoff_ledger_restore_does_not_hide_assessed_bytes(vault, monkeyp
         state.write_bytes(original_bytes)
 
     monkeypatch.setattr(ClaimIndex, "rebuild", rebuild_transient_ledger)
-    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args, **kwargs: [])
     result = compile_memory.apply_compile_plan(inputs, plan, action_key="a" * 64,
         trigger="manual", coordinator=MarkdownCoordinator(root, state_root),
         completed_at="2026-07-14T12:00:00Z")
@@ -2804,3 +2804,24 @@ def test_contextual_receipts_resolve_identical_occurrences_only_after_both_commi
     _publish_empty_contextual_batch(cm, remaining, coordinator, 'd')
     assert queue.source_failure(first.logical_path, first.sha256) is None
     assert cm.daily_is_compiled(first.logical_path, daily.read_bytes(), cm._receipt_predicate(coordinator))
+
+
+@pytest.mark.parametrize("deadline", [123456789.0, float("inf")])
+def test_compile_secondary_search_preserves_its_stop_contract(vault, monkeypatch, deadline):
+    import compile_memory
+    import search_memory
+
+    root, _ = vault
+    observed = []
+    def cancelled():
+        return False
+
+    monkeypatch.setattr(search_memory, "ROOT", root)
+    monkeypatch.setattr(search_memory, "search", lambda *args, **kwargs: observed.append(kwargs) or [])
+    apply = object.__new__(compile_memory._ApplyPlan)
+    apply.deadline, apply.cancelled = deadline, cancelled
+    apply.claim_index, apply.coordinator = None, None
+    result = apply._pipeline("knowledge/notes/new.md").secondary_search("evidence", 5)
+    expected = {123456789.0: 123456789.0, float("inf"): None}[deadline]
+    assert result == []
+    assert observed == [{"limit": 5, "deadline_monotonic": expected, "cancelled": cancelled}]

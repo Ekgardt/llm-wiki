@@ -1305,29 +1305,39 @@ def _secondary_search_hit(
     }
 
 
+def _secondary_scan_deadline(deadline: float | None) -> float:
+    return float("inf") if deadline is None else deadline
+
+
 def _scan_secondary_pages(
-    root: Path, query: str, bounded_limit: int
+    root: Path, query: str, bounded_limit: int,
+    *, deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
 ) -> Sequence[Mapping[str, object]]:
     """Term-conjunction scan over a vault that is not the running installation."""
-    from search_memory import _collect_pages
+    from search_memory import _check_legacy_stop, _collect_pages
 
+    _check_legacy_stop(deadline, cancelled)
     terms = tuple(dict.fromkeys(re.findall(r"\w+", query.casefold())))
     if not terms:
         return ()
     pages = _collect_pages(
-        "all", knowledge_dir=root / "knowledge" / "notes", root=root
+        "all", knowledge_dir=root / "knowledge" / "notes", root=root,
+        deadline=_secondary_scan_deadline(deadline),
     )
     results: list[dict[str, object]] = []
     for page in pages:
+        _check_legacy_stop(deadline, cancelled)
         hit = _secondary_search_hit(page, root, terms)
         if hit is not None:
             results.append(hit)
     results.sort(key=lambda item: (-int(item["score"]), str(item["path"])))
+    _check_legacy_stop(deadline, cancelled)
     return results[:bounded_limit]
 
 
 def default_secondary_search(
-    root: Path, query: str, limit: int
+    root: Path, query: str, limit: int,
+    *, deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
 ) -> Sequence[Mapping[str, object]]:
     from search_memory import ROOT as search_root
     from search_memory import search
@@ -1337,8 +1347,8 @@ def default_secondary_search(
         return ()
     root = root.resolve()
     if root == search_root.resolve():
-        return search(query, limit=bounded_limit)
-    return _scan_secondary_pages(root, query, bounded_limit)
+        return search(query, limit=bounded_limit, deadline_monotonic=deadline, cancelled=cancelled)
+    return _scan_secondary_pages(root, query, bounded_limit, deadline=deadline, cancelled=cancelled)
 
 
 @dataclass

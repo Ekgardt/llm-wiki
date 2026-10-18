@@ -789,3 +789,33 @@ def test_assess_raw_runs_split_extract_verify_normalize_in_order():
 
     assert len(results) == 1
     assert pipeline.claim_pipeline.calls == ["split", "extract", "verify", "normalize"]
+
+
+@pytest.mark.parametrize("stop", ["expired", "cancelled"])
+def test_secondary_foreign_vault_refuses_stopped_scan(tmp_path, monkeypatch, stop):
+    import time
+
+    import search_memory
+    from contradiction_pipeline import default_secondary_search
+
+    def unexpected_collection(*args, **kwargs):
+        pytest.fail("stopped search began collecting pages")
+
+    monkeypatch.setattr(search_memory, "_collect_pages", unexpected_collection)
+    deadline = {"expired": time.monotonic() - 1, "cancelled": time.monotonic() + 60}[stop]
+    with pytest.raises(TimeoutError, match="deadline|cancelled"):
+        default_secondary_search(tmp_path, "evidence", 5, deadline=deadline,
+                                 cancelled=lambda: stop == "cancelled")
+
+
+def test_secondary_foreign_scan_observes_cancellation_between_pages(tmp_path, monkeypatch):
+    import contradiction_pipeline as pipeline
+    import search_memory
+
+    pages = [tmp_path / "first.md", tmp_path / "second.md"]
+    read = []
+    monkeypatch.setattr(search_memory, "_collect_pages", lambda *a, **kw: pages)
+    monkeypatch.setattr(pipeline, "_secondary_search_hit", lambda page, *a: read.append(page))
+    with pytest.raises(TimeoutError, match="cancelled"):
+        pipeline.default_secondary_search(tmp_path, "evidence", 5, cancelled=lambda: bool(read))
+    assert read == pages[:1]

@@ -1520,3 +1520,63 @@ then reverted byte-for-byte. Ruff passes across scripts/tests; the cumulative
 complexity check covers 454 changed functions with no violations. Installed
 97-package and isolated 66-package dependency checks pass. Evidence is retained in
 `logs/step7-impact-timeout-{tests,python310,mutation}-20261018.log`.
+
+### 2026-10-18: secondary claim retrieval inherits compilation's stop contract
+
+The isolated Sol trials exposed a `corpus collection deadline reached` failure
+while publishing reviewed plans. `compile_memory._ApplyPlan._pipeline` called
+`default_secondary_search` without its deadline or cancellation callback. The
+installed-vault route consequently reached `collect_corpus(deadline=None)` when
+no generation existed, selecting the collector's 30-second default regardless
+of the remaining compilation budget. The other-vault route also ignored stop
+requests while scanning pages. The exact changed source files were identical
+between the installed 22e54757 and candidate 97b46523. The built-in graph was
+queried, then the isolated checkout was indexed at 97b46523 and inspected via
+`get_architecture`; unresolved calls were checked directly in source.
+
+The correction propagates the existing caller deadline and cancellation flag
+through both routes. An unbounded compile retains the search default rather
+than passing infinity to the corpus collector, whose finite-deadline contract
+is unchanged. The foreign-vault scan checks cancellation before collection,
+between pages, and before returning; directory enumeration retains its deadline
+checks. No search scope, claim verification, lifecycle rule, corpus bound, retry
+count, or dependency changes. This is not a claim that a large unindexed corpus
+can always be searched within the caller's budget.
+
+Primary-source review on 2026-10-18:
+
+- [gRPC deadline propagation](https://grpc.io/docs/guides/deadlines/): downstream
+  work should honor the original caller's deadline and cancellation.
+- [AWS timeout guidance](https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/):
+  select budgets from observed latency; premature timeouts can amplify retries.
+- [Python 3.10 monotonic clock](https://docs.python.org/3.10/library/time.html#time.monotonic):
+  relative deadlines use a clock unaffected by wall-clock changes. The patch
+  uses the existing monotonic contract and remains Python 3.10-compatible.
+
+Alternatives rejected: increasing the global corpus default changes unrelated
+callers; suppressing the exception disguises an incomplete search; limiting
+this search to notes drops previously eligible context. Propagation retains
+all sources and reports actual exhaustion. It does not introduce a dependency
+on gRPC, AWS, or another search engine.
+
+Operational evidence, distinct from code validation: the installed generation
+rebuild was killed by Linux OOM at 21:04:39 UTC (PID 1297563, 3,477,212 KiB
+anonymous RSS). Concurrent code indexing added memory pressure. The dependent
+installation chain stopped without claiming success. The already-tested
+97b46523 changes were subsequently installed as manifest generation 71; the
+source's quarantined attempt received a committed matching-byte retry without
+deleting the original refusal. The approved health budget was installed as
+generation 72, followed by the user's selected Sol 6.1 / medium provider.
+Full generation, full nightly/weekly completion, and full CI remain unverified.
+The remaining Windows 3.12 shard exceeded its existing one-hour CI limit;
+GitHub refused an explicit rerun with HTTP 403 (admin rights required).
+
+Validation: 125 contradiction/publication tests passed on Python 3.12 and 125
+on Python 3.10. Restoring the original two production files makes all five new
+stop-contract cases fail; restored candidate passes. Ruff passes across
+`scripts/` and `tests/`; the cumulative changed-function check measured 472
+functions with no CCN/branch/nesting violations. Dependency consistency checks
+passed for all 97 installed packages and 66 isolated Python 3.10 packages.
+No package or lockfile change was needed. Operational doctor completed all 14
+checks in 1.48 seconds: 7 ok, 6 degraded, 1 error (scheduler history); this does
+not certify retained history or generation health.

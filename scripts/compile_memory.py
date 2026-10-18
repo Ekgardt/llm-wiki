@@ -6311,7 +6311,9 @@ class _ApplyPlan:
             coordinator=self.coordinator,
             source_page=source_page,
             secondary_search=lambda query, limit: default_secondary_search(
-                ROOT, query, limit
+                ROOT, query, limit,
+                deadline=None if self.deadline == math.inf else self.deadline,
+                cancelled=self.cancelled,
             ),
         )
 
