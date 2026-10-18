@@ -1384,10 +1384,10 @@ def test_a_busy_database_is_not_a_lost_fence(tmp_path, monkeypatch):
     monkeypatch.setattr(
         doctor,
         "_heartbeat_maintenance_owner",
-        lambda *args, **kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("locked")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked")),
     )
     fence_lost = RuntimeError("maintenance_owner_fence_lost")
-    busy = doctor._transient_beat_failure(sqlite3.OperationalError("locked"))
+    busy = doctor._transient_beat_failure(sqlite3.OperationalError("database is locked"))
     assert (busy, doctor._transient_beat_failure(fence_lost), guard.cancelled()) == (
         True,
         False,

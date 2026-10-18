@@ -14626,11 +14626,9 @@ _CLAIM_BUSY_RETRY_SECONDS = 0.05
 
 
 def _is_busy_database(error: sqlite3.OperationalError) -> bool:
-    code = getattr(error, "sqlite_errorcode", None)
-    if isinstance(code, int) and code & 0xFF in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
-        return True
-    message = str(error).casefold()
-    return "busy" in message or "locked" in message
+    from lease_renewal import busy_database
+
+    return busy_database(error)
 
 
 def _claim_when_reachable(

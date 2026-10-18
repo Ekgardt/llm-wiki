@@ -141,3 +141,29 @@ def test_the_measured_lock_still_lets_the_retry_that_fits_renew():
     ended = _run(clock, _Renewal(clock, [locked, None], cost=10.0), attempt_seconds=10.0)
 
     assert ended is None
+
+
+def test_a_missing_table_is_not_retried_as_a_busy_lease():
+    import pytest
+
+    with sqlite3.connect(":memory:") as database:
+        with pytest.raises(sqlite3.OperationalError) as caught:
+            database.execute("SELECT * FROM locked")
+    clock = _Clock(stop_after=60.0)
+    error = caught.value
+    renewal = _Renewal(clock, [error, None])
+    assert _run(clock, renewal) is error
+    assert clock.waits == [10.0]
+    assert renewal.outcomes == [None]
+
+
+def test_a_read_only_database_is_not_retried_as_a_busy_lease():
+    import pytest
+
+    with sqlite3.connect(":memory:") as database:
+        database.execute("PRAGMA query_only=ON")
+        with pytest.raises(sqlite3.OperationalError) as caught:
+            database.execute("CREATE TABLE example(value)")
+    clock = _Clock(stop_after=60.0)
+    assert _run(clock, _Renewal(clock, [caught.value, None])) is caught.value
+    assert clock.waits == [10.0]

@@ -8039,8 +8039,10 @@ def _lease_seconds(lease: dict[str, object]) -> float:
 
 
 def _transient_beat_failure(error: BaseException) -> bool:
-    """Every lost fence is a RuntimeError; anything else may pass if tried again."""
-    return not isinstance(error, RuntimeError)
+    """Retry confirmed SQLite contention, preserving other failure causes."""
+    from lease_renewal import busy_database
+
+    return busy_database(error)
 
 
 class _MaintenanceHeartbeat:

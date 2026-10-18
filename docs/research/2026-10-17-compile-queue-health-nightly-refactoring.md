@@ -591,3 +591,60 @@ law-9 review remain open.
 Validation: 12 related tests passed in 14.58 seconds. Lizard/AST checked 255
 changed functions without violations; Ruff and Python 3.10 grammar passed. All
 97 installed packages are compatible. Native Windows qualification is pending.
+
+## Retry only confirmed SQLite contention (2026-10-18)
+
+Tracing capture ownership renewal found a shared classification defect:
+lease_renewal.busy_database accepted every OperationalError, while the maintenance
+renewer accepted every non-RuntimeError. A failed SELECT against an absent table
+and a write on a query-only database were retried as temporary contention; a later
+successful beat could hide the original cause. The queue's separate classifier
+also treated any message containing "locked" or "busy" as contention, including
+SQLite's real "no such table: locked" error. Five lease/queue regressions and three
+maintenance regressions failed before their respective fixes.
+
+Use lease_renewal.busy_database for lease renewal, queue claim and maintenance.
+The numeric SQLite primary result (low byte) is authoritative when available:
+BUSY=5 and LOCKED=6 are contention. Other codes stay failures even if their text
+contains a lock-related word. Python 3.10 lacks sqlite_errorcode, so the fallback
+accepts only SQLite's database/table/schema locked messages, including the object
+suffix after a colon. It never searches arbitrary error text for a substring.
+The old permissive queue and maintenance implementations are replaced by calls
+to the shared function. No extra module, package, retry, sleep, deadline, schema,
+path, provider call or environment setting is introduced.
+
+The existing maintenance fixture used the invented message "locked"; it now uses
+SQLite's real "database is locked". Its expected retry/fence-loss behavior is
+unchanged. Positive tests acquire an actual conflicting SQLite write lock, test
+both its native exception and a code-less Python-3.10-style copy, and verify
+extended BUSY/LOCKED codes. Negative tests retain the original exception and
+verify that a permanent renewal error ends after the first attempt.
+
+Sources checked on 2026-10-18:
+- [SQLite result codes](https://www.sqlite.org/rescode.html) defines primary and
+  extended results, the low-byte encoding and the difference between contention,
+  readonly, SQL and I/O errors. The integers are an external protocol, not limits.
+- [Python 3.10 sqlite3](https://docs.python.org/3.10/library/sqlite3.html) documents
+  OperationalError as a broad category; it does not distinguish contention by
+  exception type alone. Local runtime is Python 3.12.3; the fallback retains the
+  supported 3.10 baseline without assuming newer symbolic constants exist.
+- [Microsoft retry guidance](https://learn.microsoft.com/en-us/azure/architecture/patterns/retry)
+  distinguishes transient conditions from failures unlikely to succeed on retry.
+  This is classification guidance, not a dependency on Azure or a new retry policy.
+
+Alternatives rejected: repeating every OperationalError hides permanent failures;
+message substring matching misclassifies object names; copying the classifier
+into each actor perpetuates drift. Existing consumers include capture publication,
+capture workers, source/task fences, Markdown writer ownership, maintenance and
+private-vault backup. Unknown failures stop renewal and retain their cause; no
+failure is converted to successful ownership. The former transient wait policy,
+TTL and attempt budgets are unchanged and are not newly qualified by this fix.
+
+This establishes the classification defect, not the cause of the historical
+owner_fence_lost event or Windows host-latency/trim failures. Those remain open.
+
+Validation: 232 related lease, queue, capture and doctor tests passed in 54.66
+seconds; four platform-specific tests were skipped. Lizard/AST checked 266 changed
+functions; Ruff and Python 3.10 grammar passed. All 97 installed packages remain
+compatible. A normal uv cache prune refused an in-use cache; its waiting process
+was stopped without --force, and no cache deletion was performed.

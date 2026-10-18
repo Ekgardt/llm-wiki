@@ -22,7 +22,16 @@ RETRY_DIVISOR = 5
 
 def busy_database(error: BaseException) -> bool:
     """A locked or busy SQLite database: the renewal may succeed if tried again."""
-    return isinstance(error, sqlite3.OperationalError)
+    if not isinstance(error, sqlite3.OperationalError):
+        return False
+    code = getattr(error, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        # SQLite primary codes are the low byte; 5=BUSY, 6=LOCKED.
+        return (code & 0xFF) in {5, 6}
+    # Python 3.10 exposes only SQLite's text, including optional table/schema.
+    return str(error).casefold().partition(":")[0].strip() in {
+        "database is locked", "database table is locked", "database schema is locked",
+    }
 
 
 def _attempt(renew: Callable[[], object]) -> BaseException | None:
