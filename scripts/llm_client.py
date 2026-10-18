@@ -1832,14 +1832,8 @@ def _codex_catalog_command_unsupported(command, result):
                           [b"error: unrecognized subcommand 'debug'"])
 
 
-# Native bootstrap and catalog semantics verified on these exact CLI releases.
-# Unknown versions keep implicit execution without claiming planning capacity.
-# Requalify on CLI upgrades; see the 2026-10-18 compile refactoring research.
-_CODEX_PLANNING_VERSIONS = frozenset({"codex-cli 0.160.0", "codex-cli 0.162.1"})
-
-
-def _codex_advertised_window(catalog, model, provider, cli_version):
-    if provider != "openai" or cli_version not in _CODEX_PLANNING_VERSIONS:
+def _codex_advertised_window(catalog, model, provider):
+    if provider != "openai":
         return None
     row = _codex_catalog_model(catalog, model)
     if row is None:
@@ -1888,7 +1882,7 @@ def _resolved_codex_basis(descriptor, executable, result, config, neutral, envir
     resolved = replace(descriptor, model=result["model"])
     command = _codex_basis_command(executable, resolved, ("debug", "models"))
     raw = _codex_optional_catalog(executable, command, neutral, environment, deadline)
-    window = _codex_verified_catalog_window(raw, result, version, verified)
+    window = _codex_verified_catalog_window(raw, result, verified)
     _codex_config_layers_verified(config)
     _require_codex_basis_files(files)
     return CodexPlanningBasis(descriptor, executable, result["model"], result["modelProvider"],
@@ -1910,13 +1904,13 @@ def _codex_optional_catalog(executable, command, neutral, environment, deadline)
         return None
 
 
-def _codex_verified_catalog_window(raw, result, version, verified):
+def _codex_verified_catalog_window(raw, result, verified):
     if raw is None:
         return None
     catalog = json.loads(raw)
     if not verified:
         return None
-    return _codex_advertised_window(catalog, result["model"], result["modelProvider"], version)
+    return _codex_advertised_window(catalog, result["model"], result["modelProvider"])
 
 
 def _codex_config_layers_verified(config):
@@ -1980,9 +1974,6 @@ def _resolve_selected_codex_basis(descriptor, executable, deadline):
     environment = provider_environment()
     with provider_cwd() as neutral:
         version = _codex_basis_version(executable, neutral, environment, deadline)
-        if version not in _CODEX_PLANNING_VERSIONS:
-            _require_codex_resolution_identity(executable, environment, deadline)
-            return None
         basis = _codex_qualified_basis(descriptor, executable, neutral, environment, deadline, version)
     if basis is None:
         return None
@@ -2412,7 +2403,7 @@ class _FlagsUnknown(RuntimeError):
 
 
 @functools.lru_cache(maxsize=1)
-def _probed_claude_flags(claude_bin: str) -> frozenset[str]:
+def _probed_claude_flags(claude_bin: str, identity: tuple) -> frozenset[str]:
     """The flags this CLI names in `--help`; only an answer is cached, a failure is not."""
     try:
         with provider_cwd() as neutral:
@@ -2431,7 +2422,17 @@ def _probed_claude_flags(claude_bin: str) -> frozenset[str]:
         raise _FlagsUnknown(type(exc).__name__) from exc
     if result.returncode != 0:
         raise _FlagsUnknown(f"exit {result.returncode}")
+    if _claude_executable_identity(claude_bin) != identity:
+        raise _FlagsUnknown("Claude changed during capability discovery")
     return frozenset(re.findall(r"--[a-z][a-z-]+", result.stdout or ""))
+
+
+def _claude_executable_identity(path):
+    """Invalidate help on in-place replacement or a changed resolved symlink target."""
+    resolved = Path(path).resolve(strict=True)
+    info = resolved.stat()
+    return (str(resolved), info.st_dev, info.st_ino, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
 
 
 def _claude_cli_flags() -> frozenset[str] | None:
@@ -2445,8 +2446,8 @@ def _claude_cli_flags() -> frozenset[str] | None:
     if not claude_bin:
         return frozenset()
     try:
-        return _probed_claude_flags(claude_bin)
-    except _FlagsUnknown:
+        return _probed_claude_flags(claude_bin, _claude_executable_identity(claude_bin))
+    except (_FlagsUnknown, OSError):
         return None
 
 

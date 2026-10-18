@@ -87,6 +87,7 @@ def test_the_claude_call_runs_outside_the_vault(
     recorder: _Recorder, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(llm_client.shutil, "which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr(llm_client, "_claude_executable_identity", lambda path: ("fixture",))
     monkeypatch.setattr(llm_client, "_claude_command", lambda *_a: ["claude"])
     monkeypatch.setattr(llm_client, "_claude_answer", lambda *_a: "")
     llm_client._probed_claude_flags.cache_clear()

@@ -31,6 +31,7 @@ def _help(monkeypatch, answers: list) -> list:
         return answer
 
     monkeypatch.setattr(llm_client.shutil, "which", lambda name: "/usr/bin/claude")
+    monkeypatch.setattr(llm_client, "_claude_executable_identity", lambda path: ("fixture",))
     monkeypatch.setattr(llm_client.subprocess, "run", run)
     return asked
 

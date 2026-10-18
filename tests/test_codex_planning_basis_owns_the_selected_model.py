@@ -115,14 +115,12 @@ def test_unverified_managed_layer_does_not_invent_capacity(name):
     assert not lc._codex_config_layers_verified({'layers': [{'name': name}]})
 
 
-@pytest.mark.parametrize('version', ['codex-cli 0.160.0', 'codex-cli 0.162.1'])
-def test_catalog_capacity_is_only_matching_native_advertisement(version):
+def test_catalog_capacity_is_only_matching_native_advertisement():
     row = {'slug': 'resolved-model', 'context_window': 272000,
            'effective_context_window_percent': 95}
-    assert lc._codex_advertised_window([row], 'resolved-model', 'openai', version) == 258400
-    assert lc._codex_advertised_window([row], 'other-model', 'openai', version) is None
-    assert lc._codex_advertised_window([row], 'resolved-model', 'custom', version) is None
-    assert lc._codex_advertised_window([row], 'resolved-model', 'openai', 'codex-cli unknown') is None
+    assert lc._codex_advertised_window([row], 'resolved-model', 'openai') == 258400
+    assert lc._codex_advertised_window([row], 'other-model', 'openai') is None
+    assert lc._codex_advertised_window([row], 'resolved-model', 'custom') is None
 
 
 @pytest.mark.parametrize('deadline', [float('nan'), float('inf'), -1.0])
@@ -180,7 +178,7 @@ def _native_peer():
     return "import json,sys\nfor line in sys.stdin:\n r=json.loads(line)\n m=r['method']\n results={'initialize':{},'config/read':{'layers':[{'name':{'type':'sessionFlags'}}],'config':{}},'thread/start':{'model':'resolved-model','modelProvider':'openai','thread':{'id':'ephemeral','ephemeral':True}},'thread/unsubscribe':{}}\n if 'id' in r: print(json.dumps({'id':r['id'],'result':results[m]}),flush=True)\n"
 
 
-@pytest.mark.parametrize('version', ['codex-cli 0.160.0', 'codex-cli 0.162.1'])
+@pytest.mark.parametrize('version', ['codex-cli 0.160.0', 'codex-cli 0.162.1', 'codex-cli 99.0.0', 'vendor-build'])
 def test_complete_resolver_pins_actual_response_only_once(monkeypatch, tmp_path, version):
     monkeypatch.delenv('MEMORY_CODEX_MODEL', raising=False)
     selected = _basis(tmp_path).executable

@@ -17,25 +17,14 @@ def _selected(monkeypatch, tmp_path):
     return executable
 
 
-def test_unknown_version_keeps_implicit_exec_without_native_bootstrap(monkeypatch, tmp_path):
-    monkeypatch.delenv('MEMORY_CODEX_MODEL', raising=False)
-    _selected(monkeypatch, tmp_path)
-    spawned = []
-    monkeypatch.setattr(lc, '_codex_basis_local_command', lambda *args: b'codex-cli 0.159.0\n')
-    monkeypatch.setattr(lc, '_spawn_codex_basis_rpc', lambda *args: spawned.append(True))
-    descriptor = lc.provider_candidates('codex')[0]
-    assert lc.resolve_codex_planning_basis(descriptor, deadline=time.monotonic() + LONG_TIMEOUT) is None
-    assert spawned == []
-    assert descriptor.model is None
-
-
 def _unsupported_peer():
     return "import json,sys\nfor line in sys.stdin:\n r=json.loads(line)\n if 'id' in r: print(json.dumps({'id':r['id'],'error':{'code':-32601,'message':'Method not found'}}),flush=True)\n"
 
 
-def test_unsupported_native_method_is_unknown_only_after_owned_cleanup(monkeypatch, tmp_path):
+@pytest.mark.parametrize('version', ['codex-cli 0.160.0', 'codex-cli 99.0.0'])
+def test_unsupported_native_method_is_unknown_only_after_owned_cleanup(monkeypatch, tmp_path, version):
     _selected(monkeypatch, tmp_path)
-    monkeypatch.setattr(lc, '_codex_basis_local_command', lambda *args: b'codex-cli 0.160.0\n')
+    monkeypatch.setattr(lc, '_codex_basis_local_command', lambda *args: version.encode())
     spawn = lc._spawn_codex_basis_rpc
     owned = []
 
@@ -171,7 +160,7 @@ def test_timeout_cannot_become_unknown(monkeypatch):
 def test_unknown_config_does_not_suppress_corrupt_successful_catalog():
     result = {'model': 'resolved-model', 'modelProvider': 'openai'}
     with pytest.raises(ValueError):
-        lc._codex_verified_catalog_window(b'not JSON', result, 'codex-cli 0.160.0', False)
+        lc._codex_verified_catalog_window(b'not JSON', result, False)
 
 
 def test_unavailable_after_config_read_still_rechecks_loaded_file(monkeypatch, tmp_path):

@@ -824,3 +824,64 @@ skips (25.09 s); this includes the earlier 81 checks rather than adding to them.
 Ruff, Python 3.10 parsing and complexity checks pass for all 291 changed functions
 in this refactoring series. All 97 installed packages have compatible dependencies.
 Full nightly completion and Windows CI remain separate, unresolved qualifications.
+
+## 2026-10-18: provider upgrades use observed capabilities
+
+The owner explicitly requires upgrades of Codex, Claude and OpenCode to remain
+supported. This supersedes the exact-release qualification policy above. A release
+allowlist itself reproduces the original refusal on the next otherwise compatible
+Codex upgrade. A second upgrade defect exists in Claude: cached `--help` results
+were keyed only by pathname, so replacement at that pathname retained old flags
+inside a long-lived process. Both defects were reproduced before changing code.
+
+Codex now attempts the existing native handshake irrespective of release text.
+The reported version remains provenance, not a permission to parse the protocol.
+Capacity still requires matching model/provider, validated catalog numbers,
+verified configuration layers, stable executable/config/environment, successful
+owned cleanup and the existing deadline. Missing optional methods retain the
+existing implicit execution fallback; malformed replies, invalid parameters,
+identity drift and cleanup failure still refuse rather than invent capacity.
+The exact-version set and obsolete catalog version arguments are removed.
+
+Claude still discovers flags through `--help`, without any release allowlist.
+The cache now includes resolved target, device/inode, size, modification and change
+timestamps. An unchanged executable reuses its help; a replacement refreshes it.
+A change during discovery refuses that result and does not cache it. Missing files
+return unknown capabilities. This is ordinary upgrade detection, not protection
+against a hostile actor able to rewrite a process's files and metadata. Cache size
+remains one because only the current selected CLI's answer needs retention.
+
+OpenCode already checks the authenticated live health response, not its version,
+and has no release-keyed capability cache. The existing HTTP interaction test now
+covers unfamiliar version strings and additive health fields without changing its
+assertions about authentication, prompt framing, response and session cleanup.
+No extra transport, daemon, path, package, environment variable, model selection,
+retry, token ceiling or persistent compatibility database is introduced.
+
+Sources checked 2026-10-18 (three independent maintainers):
+- [OpenAI Docs: App Server](https://learn.chatgpt.com/docs/app-server): native
+  initialize/config/thread operations and version-specific schemas. The interface
+  is experimental; future incompatible semantic changes cannot be promised away.
+- [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference): print
+  mode, output formatting and isolation options consumed by the existing adapter.
+- [OpenCode Server](https://docs.opencode.ai/docs/server/): authenticated health,
+  session operations and published OpenAPI contract.
+
+Alternatives rejected: adding each release forever repeats the defect; blindly
+accepting successful process exit ignores required capabilities; disabling checks
+would expose private inputs or invent capacity; a new persistent compatibility
+layer would duplicate the existing per-call validation. Contract-based checks
+support compatible releases automatically while incompatible external changes
+remain explicit failures. This does not certify future releases, repair every
+nightly failure or prove every deferred capture was recovered.
+
+Validation: the initial run reproduced seven failures (including repeated
+parameterized catalog assertions) in the new upgrade scenarios. The final related
+suite passes 486 checks, with 22 platform/optional skips (60.03 s). Complexity,
+Python 3.10 syntax and Ruff pass; all 97 installed dependencies are compatible.
+The candidate against installed Codex 0.162.1 resolves gpt-6-luna and its advertised
+258400 planning window; installed Claude exposes 71 discovered flags. No inference
+turn or private source was submitted. There is no configured authenticated OpenCode
+server here, so its qualification is the local HTTP regression, not a live-provider
+claim. Evidence: `logs/provider-upgrades-{red,green,consumers}.txt` and
+`logs/provider-upgrades-native.json`.

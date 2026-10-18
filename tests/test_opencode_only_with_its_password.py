@@ -26,6 +26,7 @@ EXPECTED_AUTH = "Basic " + base64.b64encode(f"opencode:{PASSWORD}".encode()).dec
 
 class _FakeOpenCode(BaseHTTPRequestHandler):
     seen: list[tuple[str, str, dict]] = []
+    version = "test"
 
     def log_message(self, *_args) -> None:
         return
@@ -53,7 +54,7 @@ class _FakeOpenCode(BaseHTTPRequestHandler):
         return self._reply(*routes.get(self.path, (404, {})))
 
     def do_GET(self) -> None:
-        self._handle({"/global/health": (200, {"healthy": True, "version": "test"})})
+        self._handle({"/global/health": (200, {"healthy": True, "version": type(self).version, "futureCapability": True})})
 
     def do_POST(self) -> None:
         self._handle({
@@ -84,7 +85,9 @@ def test_without_the_password_opencode_is_not_used_and_nothing_is_sent(server, m
     assert (llm_client._probe_opencode(None), _FakeOpenCode.seen) == (False, [])
 
 
-def test_with_the_password_the_documented_api_is_called_authenticated(server, monkeypatch):
+@pytest.mark.parametrize("version", ["test", "99.0.0", "vendor-build"])
+def test_with_the_password_the_documented_api_is_called_authenticated(server, monkeypatch, version):
+    monkeypatch.setattr(_FakeOpenCode, "version", version)
     monkeypatch.setenv("OPENCODE_SERVER_PASSWORD", PASSWORD)
 
     probed = llm_client._probe_opencode(None)
