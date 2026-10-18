@@ -112,6 +112,10 @@ REGISTRY: tuple[Setting, ...] = (
     Setting("index", "max_total_bytes", 32 * MIB, "bytes", "the notes the index is rebuilt from; " + _HELD_IN_MEMORY),
     Setting("compile", "max_sources", 2_000, "sources", "daily logs and notes one compile reads; " + _HELD_IN_MEMORY),
     Setting("compile", "max_total_source_bytes", 32 * MIB, "bytes", "the sources one compile reads; " + _HELD_IN_MEMORY),
+    Setting("compile", "validation_retries", 2, "correcting passes per provider",
+            "cost/quality choice: initial attempt plus format and semantic corrections; "
+            "not a measured optimum; reassess complete-cycle facts, tokens and latency "
+            "after model/prompt/workload changes (approved 2026-10-18)", lower=0),
     Setting("corpus", "max_files", MAX_CORPUS_INSPECTED_ENTRIES, "files", "shares the existing corpus discovery entry budget; " + _HELD_IN_MEMORY),
     Setting("corpus", "max_total_bytes", 64 * MIB, "bytes", "the corpus a search generation is built from; " + _HELD_IN_MEMORY),
     Setting("claims", "max_pages", 10_000, "pages", "notes and journals the claim tree hashes; " + _HELD_IN_MEMORY),

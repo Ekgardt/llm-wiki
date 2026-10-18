@@ -382,6 +382,7 @@ def test_critique_failure_lineage_records_stage_provider_and_stable_code(
                 '{"reviews": [{"slug": "safe-note", "verdict": "pass", "reason": "ok"}]}',
                 None,
             ),
+            (json.dumps({"source_review": {"complete": True, "reason": "Fixture assessment."}}), None),
         ]
     )
 

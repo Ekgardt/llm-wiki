@@ -1204,3 +1204,82 @@ An initial `pip install -e .[dev]` attempt failed because this uv project is not
 an editable setuptools package; the supported `uv sync --locked` succeeded.
 The preceding e4aaff4e GitHub matrix completed successfully; it does not validate
 this new commit and does not establish the cause of the earlier Windows failure.
+
+### 2026-10-18: selected capacity and independent source completeness
+
+Current implementation evidence: the automatic provider chain selected a verified
+Codex planning window, but `_mandatory_planning_window` discarded that window
+whenever any fallback provider was present. On the complete October 17 snapshot,
+136 of 875 atomic source groups were refused by that calculation; using the
+selected identity's verified window refused none. The candidate calculation also
+refuses none, without splitting atomic groups or increasing the model window.
+An unverified fallback cannot borrow the selected model's expanded capacity.
+Local reports: `logs/step7-auto-capacity-{measure,candidate}-20261018.json`.
+
+Independent primary references checked on 2026-10-18:
+
+- [Anthropic context windows](https://platform.claude.com/docs/en/build-with-claude/context-windows)
+  explains model-specific total context accounting and the quality implications
+  of long inputs.
+- [Google token accounting](https://ai.google.dev/gemini-api/docs/tokens)
+  distinguishes input/output limits and counting actual request content.
+- [OpenAI conversation state](https://developers.openai.com/api/docs/guides/conversation-state)
+  describes context consumed across requests and the need to respect the window.
+- [Ragas context recall](https://docs.ragas.io/en/stable/concepts/metrics/available_metrics/context_recall/)
+  separates missing reference information from faithfulness of generated claims.
+- [Anthropic evaluation guidance](https://platform.claude.com/docs/en/test-and-evaluate/develop-tests)
+  supports explicit success criteria and representative evaluations.
+- [OpenAI evaluation guidance](https://developers.openai.com/api/docs/guides/evaluation-best-practices)
+  supports task-specific, separately measured quality criteria and regression cases.
+
+The compiler now independently reviews the complete selected sources and existing
+context against the whole proposed plan, including an empty plan. Per-operation
+citation and meaning checks still apply. Missing durable facts prevent a receipt
+and return the omission diagnostic for correction. An empty correction can finish
+only when that independent review establishes no new durable content. This
+supersedes the preceding categorical empty-correction refusal. Structured claims
+are optional enrichment; every body assertion still needs supporting evidence.
+The prior unchecked-empty action/cache path is removed. Review program v9 and its
+schema-bound hash prevent reuse of the earlier unchecked cached results.
+
+Alternatives: rejecting all empty plans prevents legitimate duplicate/no-content
+completion; judging only proposed operations cannot detect omitted source facts;
+a keyword inventory cannot reliably decide semantic completeness. The chosen
+model review is a fallible assessment, not a mathematical proof. It costs another
+full-source call per successful batch. No aggregate efficiency gain is claimed;
+full production-cycle quality, tokens, retries and elapsed time remain required.
+No evaluation framework or other package was added.
+
+Any stage's input-budget refusal now permits the existing finite repartitioning
+of complete source groups. Structural correction diagnostics are preserved whole
+as untrusted data for each child; previously that path assumed every feedback
+record contained operation reviews and raised KeyError. Regression tests first
+reproduced this failure. No source/context truncation is introduced.
+
+The owner approved `compile.validation_retries` (standard environment override
+`LLM_WIKI_COMPILE_VALIDATION_RETRIES`) before implementation. Default 2 correction
+passes is an explicit cost/quality compromise, not a measured optimum. It is
+nonnegative with no additional upper cap, and must be reconsidered after changes
+to models, prompts or workload using complete-cycle evidence. The hidden constant
+and its unsupported claim about customary retry counts are removed.
+
+Candidate validation: 824 related tests passed on Python 3.12; 46 focused tests
+passed on Python 3.10.20. Ruff and complexity checks passed (420 changed functions
+since the refactor baseline). Installed 97-package and isolated 66-package checks
+found no dependency conflict; the lockfile is unchanged. Real Codex/luna probes
+refused an omitted durable fact, accepted its complete plan, and accepted empty
+only when existing context already held it. An optional-claims probe passed a
+fully evidenced two-fact body with one structured claim, and rejected changing
+30 seconds to an unsupported 60. These public fixtures do not qualify a complete
+production day. Malformed-review correction, native output qualification, full
+production/nightly completion and corpus capacity remain open.
+
+A complete public-fixture run subsequently committed the exact Cedar fact through
+normal compile transactions: seven real model calls, 44.25 seconds. The first
+empty draft was refused by source review; a wrong citation in its correction was
+refused by operation review; the final corrected plan passed both and published.
+This demonstrates recovery without weakening either check, while also exposing
+its cost. Report: `logs/step7-source-completeness-cycle-20261018.json`. A prior
+harness attempt omitted the required paired batch descriptor and failed before
+publication; the corrected harness used the ordinary batch contract. An additional
+41 structure tests passed. Production-day validation remains outstanding.

@@ -12,7 +12,7 @@ def test_new_review_work_cannot_be_bypassed_by_a_previous_source_plan(vault, has
     root, state = vault
     operations = [_proposed()] if has_operations else []
     attempt, provider = _attempt(_inputs(root), state, operations, ['pass'])
-    actions = attempt._actions(provider)
+    actions = attempt._action(provider)
     accepted = attempt._critiqued(provider, actions, operations)
     assert accepted is not None
     assert attempt._cached(actions, provider).cache_hit
@@ -31,11 +31,11 @@ def test_a_repair_does_not_even_read_a_plan_for_the_old_input(vault, monkeypatch
     root, state = vault
     operation = _proposed()
     attempt, provider = _attempt(_inputs(root), state, [operation], ['drop'])
-    assert attempt._critiqued(provider, attempt._actions(provider), [operation]) is None
+    assert attempt._critiqued(provider, attempt._action(provider), [operation]) is None
 
     def wrong_input(*_args):
         raise AssertionError('The old cache cannot decide this newly reviewed correction')
 
     monkeypatch.setattr(attempt.cache, 'get', wrong_input)
 
-    assert attempt._cached(attempt._actions(provider), provider) is None
+    assert attempt._cached(attempt._action(provider), provider) is None

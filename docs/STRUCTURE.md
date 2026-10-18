@@ -194,6 +194,18 @@ refusal at one names the setting that raises it. Decision and sources:
 `docs/research/2026-09-27-every-limit-states-its-reason.md`; inventory:
 `docs/LIMITS-2026-09-27.md`.
 
+The approved 2026-10-18 compile correction setting is `compile.validation_retries`
+(`LLM_WIKI_COMPILE_VALIDATION_RETRIES` for one run), default 2, minimum 0, no
+additional upper ceiling. It counts full correcting passes after the initial
+attempt for each provider; 0 disables correction retries. The default is an
+explicit cost/quality compromise: allow a format correction and a semantic
+correction while preventing unlimited model passes. It is not a measured optimum.
+Review it using complete-cycle retained facts, failures, tokens and latency after
+model/prompt or workload changes. Source, citation, completeness and publication
+checks remain mandatory regardless of the chosen value. The owner approved the
+new environment contract before implementation; the decision is retained privately
+as `compile-validation-retry-setting-decision-2026-10-18`.
+
 ### Generation maintenance windows (decision approved 2026-10-08)
 
 The existing settings registry exposes `generation.nightly_seconds` and

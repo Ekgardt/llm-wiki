@@ -81,7 +81,7 @@ def test_actual_repair_dispatch_does_not_repeat_an_already_offered_complete_quot
     monkeypatch.setattr(attempt, '_fits', examine)
     provider = _provider()
 
-    assert attempt._drafted(provider, attempt._actions(provider)) is None
+    assert attempt._drafted(provider, attempt._action(provider)) is None
 
 
 def test_roundtrip_must_preserve_json_scalar_types_not_only_python_equality(tmp_path, monkeypatch):

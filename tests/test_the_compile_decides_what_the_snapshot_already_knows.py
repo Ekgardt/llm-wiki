@@ -113,10 +113,17 @@ def _replies(monkeypatch: pytest.MonkeyPatch, replies: list[str]) -> list[str]:
 
     def call(descriptor, prompt, system_prompt, **kwargs):
         prompts.append(prompt)
+        if kwargs.get('schema') == compile_memory.SOURCE_REVIEW_SCHEMA:
+            return LLMResult(descriptor, _source_review(), True, None, "native")
         return LLMResult(descriptor, replies.pop(0), True, None, "native")
 
     monkeypatch.setattr(compile_memory, "call_candidate", call)
     return prompts
+
+
+def _source_review(complete=True):
+    """Explicit model verdict for fixtures testing publication, not semantic quality."""
+    return json.dumps({'source_review': {'complete': complete, 'reason': 'Fixture source assessment.'}})
 
 
 def _resolved(root: Path, state_root: Path, daily: Path):
@@ -190,8 +197,9 @@ def test_an_operation_the_critique_skipped_is_asked_about_again(vault, monkeypat
 
     resolved = _resolved(root, state_root, daily)
 
-    assert (_kinds(resolved), len(prompts)) == (["create"], 3)
+    assert (_kinds(resolved), len(prompts)) == (["create"], 4)
     assert SLUG in prompts[2]
+    assert 'COMPLETE SELECTED SOURCES' in prompts[3]
 
 
 def test_an_operation_without_a_verdict_is_never_written(vault, monkeypatch, capsys):

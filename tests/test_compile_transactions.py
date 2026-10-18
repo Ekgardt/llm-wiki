@@ -1384,6 +1384,10 @@ def test_resolver_refuses_llm_work_under_writer_gate(vault):
             )
 
 
+def _source_review():
+    return json.dumps({"source_review": {"complete": True, "reason": "Fixture assessment."}})
+
+
 def test_resolver_uses_exact_snapshot_for_draft_and_cited_critique_and_caches(
     vault, monkeypatch
 ):
@@ -1394,7 +1398,7 @@ def test_resolver_uses_exact_snapshot_for_draft_and_cited_critique_and_caches(
     inputs = compile_memory.snapshot_compile_inputs([daily])
     calls = []
     provider = _provider()
-    responses = [_draft_response(), _pass_review()]
+    responses = [_draft_response(), _pass_review(), _source_review()]
 
     monkeypatch.setattr(compile_memory, "provider_candidates", lambda *args, **kwargs: [provider])
     monkeypatch.setattr(compile_memory, "probe_candidate", lambda descriptor: True)
@@ -1417,7 +1421,8 @@ def test_resolver_uses_exact_snapshot_for_draft_and_cited_critique_and_caches(
         "A durable exact-byte observation." in calls[1][1],
         "A second durable exact-byte observation." in calls[1][1],
         _schemas_declared(calls),
-    ) == (2, True, False, True, False, True)
+    ) == (3, True, False, True, False, True)
+    assert exact in calls[2][1]
     cached = cache.get(
         resolved.action,
         lambda plan: compile_memory.validate_compile_plan(plan, inputs),
@@ -1443,7 +1448,7 @@ def test_resolver_cache_hit_revalidates_without_llm(vault, monkeypatch):
     provider = _provider()
     monkeypatch.setattr(compile_memory, "provider_candidates", lambda *args, **kwargs: [provider])
     monkeypatch.setattr(compile_memory, "probe_candidate", lambda descriptor: True)
-    responses = [_draft_response(), _pass_review()]
+    responses = [_draft_response(), _pass_review(), _source_review()]
     monkeypatch.setattr(
         compile_memory,
         "call_candidate",
@@ -1506,7 +1511,7 @@ def test_provider_failure_recomputes_descriptor_with_actual_fallback(vault, monk
     second = _provider("second", 1)
     monkeypatch.setattr(compile_memory, "provider_candidates", lambda *args, **kwargs: [first, second])
     monkeypatch.setattr(compile_memory, "probe_candidate", lambda descriptor: True)
-    responses = iter([None, _draft_response(), _pass_review()])
+    responses = iter([None, _draft_response(), _pass_review(), _source_review()])
 
     def call(descriptor, *args, **kwargs):
         text = next(responses)
@@ -1645,7 +1650,7 @@ def test_cache_contains_semantics_not_rendered_markdown(vault, monkeypatch):
 
     inputs = compile_memory.snapshot_compile_inputs([daily])
     provider = _provider()
-    responses = [_draft_response(), _pass_review()]
+    responses = [_draft_response(), _pass_review(), _source_review()]
     monkeypatch.setattr(compile_memory, "provider_candidates", lambda *args, **kwargs: [provider])
     monkeypatch.setattr(compile_memory, "probe_candidate", lambda descriptor: True)
     monkeypatch.setattr(

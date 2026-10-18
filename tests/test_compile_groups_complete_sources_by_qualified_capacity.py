@@ -134,3 +134,35 @@ def test_native_atomic_unit_cannot_exceed_the_qualified_model_window(tmp_path, m
     complete_unit = cm._subset_compile_inputs(inputs, {part.part_key for part in unit})
     with pytest.raises(ValueError, match='daily source exceeds compile input budget'):
         cm.pack_compile_batches(inputs, model=MODEL, planning_candidates=_candidates(_minimum(complete_unit) - 1))
+
+
+def test_automatic_provider_chain_uses_selected_models_verified_capacity():
+    inputs = _inputs()
+    selected = _candidates(_minimum(inputs))[0]
+    fallback = SimpleNamespace(provider='claude', model='other-model', _codex_basis=None)
+    unavailable = SimpleNamespace(provider='opencode', model=None, _codex_basis=None)
+    candidates = (unavailable, selected, fallback)
+    batches = cm.pack_compile_batches(inputs, model=MODEL, planning_candidates=candidates)
+    assert len(batches) == 1
+    assert batches[0].inputs.sources == inputs.sources
+    assert batches[0].inputs.dailies == inputs.dailies
+    assert batches[0].planning_candidates == candidates
+
+
+def test_automatic_chain_does_not_refuse_a_complete_native_source_that_fits(tmp_path, monkeypatch):
+    inputs, _snapshot = _native_inputs(tmp_path, monkeypatch, 'A complete native source. ' * 1000)
+    whole = cm._subset_compile_inputs(inputs, {part.part_key for part in inputs.dailies})
+    candidates = (*_candidates(_minimum(whole)),
+                  SimpleNamespace(provider='claude', model='other-model', _codex_basis=None))
+    admitted, refused = cm.partition_packable(inputs, model=MODEL, planning_candidates=candidates)
+    assert not refused
+    assert admitted.dailies == inputs.dailies
+
+
+def test_fallback_cannot_borrow_selected_models_expanded_window():
+    inputs = _inputs()
+    batch = cm.pack_compile_batches(inputs, model=MODEL, planning_candidates=_candidates(_minimum(inputs)))[0]
+    fallback = SimpleNamespace(provider='claude', model='other-model', _codex_basis=None)
+    assert batch.packing.max_input_tokens > cm._compile_budget(fallback.model).max_input_tokens
+    bounded = cm._attempt_input_budget(batch, fallback)
+    assert bounded.max_input_tokens == cm._compile_budget(fallback.model).max_input_tokens

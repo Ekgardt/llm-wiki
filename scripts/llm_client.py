@@ -2811,9 +2811,17 @@ def _call_fake(
 ) -> str:
     return os.environ.get(
         "MEMORY_LLM_FAKE_RESPONSE",
-        '{"operations": [], "audit": {"verified": 0, "dedup": 0, "stubs": 0, '
-        '"contradictions": 0, "rejected": 0}}',
+        _fake_default_response(schema),
     ).strip()
+
+
+def _fake_default_response(schema):
+    if schema is not None and 'source_review' in schema.get('properties', {}):
+        return '{"source_review":{"complete":true,"reason":"Fake backend fixture verdict; not a model assessment."}}'
+    return (
+        '{"operations": [], "audit": {"verified": 0, "dedup": 0, "stubs": 0, '
+        '"contradictions": 0, "rejected": 0}}'
+    )
 
 
 _BACKENDS = {

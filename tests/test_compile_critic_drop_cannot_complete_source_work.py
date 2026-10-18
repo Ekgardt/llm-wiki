@@ -7,7 +7,11 @@ import pytest
 from compile_cache import CompileCache
 from llm_client import LLMResult
 
-from tests.test_the_compile_decides_what_the_snapshot_already_knows import _operation, _provider
+from tests.test_the_compile_decides_what_the_snapshot_already_knows import (
+    _operation,
+    _provider,
+    _source_review,
+)
 from tests.test_the_compile_decides_what_the_snapshot_already_knows import vault as vault
 
 QUOTE = 'Project Cedar merged change C after changes A and B.'
@@ -32,7 +36,12 @@ def _attempt(inputs, state, operations, verdicts):
     attempt = cm._CompileAttempt(inputs, CompileCache(state), None, None)
     response = json.dumps({'reviews': [dict(slug=item['slug'], verdict=verdict, reason='Review source-specific scope.')
                                       for item, verdict in zip(operations, verdicts)]})
-    attempt._call = Mock(return_value=LLMResult(provider, response, True, None, 'native'))
+    def reply(_descriptor, _prompt, _system, schema):
+        text = response
+        if schema == cm.SOURCE_REVIEW_SCHEMA:
+            text = _source_review()
+        return LLMResult(provider, text, True, None, 'native')
+    attempt._call = Mock(side_effect=reply)
     cm._critique_prompt(inputs, operations)
     return attempt, provider
 
@@ -43,7 +52,7 @@ def test_dropped_source_bound_operation_is_not_an_accepted_empty_plan(vault, cap
     operation = _proposed()
     operation['body_markdown'] = 'Every project must apply this reusable merge order.'
     attempt, provider = _attempt(inputs, state, [operation], ['drop'])
-    resolved = attempt._critiqued(provider, attempt._actions(provider), [operation])
+    resolved = attempt._critiqued(provider, attempt._action(provider), [operation])
     assert resolved is None
     assert not list(attempt.cache.cache_dir.glob('*.json'))
     assert 'source work remains unresolved' in capsys.readouterr().err
@@ -54,7 +63,7 @@ def test_a_mixed_pass_and_drop_cannot_complete_the_related_source(vault):
     inputs = _inputs(root)
     operations = [_proposed(), _proposed('cedar-unproven-generalization')]
     attempt, provider = _attempt(inputs, state, operations, ['pass', 'drop'])
-    resolved = attempt._critiqued(provider, attempt._actions(provider), operations)
+    resolved = attempt._critiqued(provider, attempt._action(provider), operations)
     assert resolved is None
     assert not list(attempt.cache.cache_dir.glob('*.json'))
     assert len(operations) == 2
@@ -66,22 +75,23 @@ def test_same_evidence_with_distinct_supported_facts_is_not_auto_dropped(vault):
     operations = [_proposed(), _proposed('cedar-change-c-predecessors')]
     operations[1]['summary'] = 'Changes A and B preceded change C in this project.'
     attempt, provider = _attempt(inputs, state, operations, ['pass', 'pass'])
-    resolved = attempt._critiqued(provider, attempt._actions(provider), operations)
+    resolved = attempt._critiqued(provider, attempt._action(provider), operations)
     assert resolved is not None
     assert len(resolved.plan['operations']) == 2
     assert len(operations) == 2
 
 
-def test_a_direct_empty_draft_still_needs_no_critic(vault):
+def test_a_direct_empty_draft_requires_independent_source_review(vault):
     root, state = vault
     inputs = _inputs(root)
     attempt = cm._CompileAttempt(inputs, CompileCache(state), None, None)
     provider = _provider()
-    attempt._call = Mock(side_effect=AssertionError('Empty draft must not call a critic'))
-    resolved = attempt._critiqued(provider, attempt._actions(provider), [])
+    attempt._call = Mock(return_value=LLMResult(provider, _source_review(), True, None, 'native'))
+    resolved = attempt._critiqued(provider, attempt._action(provider), [])
     assert resolved is not None
     assert resolved.plan['operations'] == []
-    attempt._call.assert_not_called()
+    attempt._call.assert_called_once()
+    assert inputs.dailies[0].content.decode() in attempt._call.call_args.args[1]
 
 
 def test_existing_same_fact_and_quote_do_not_turn_drop_into_no_content_authority(vault):
@@ -90,7 +100,7 @@ def test_existing_same_fact_and_quote_do_not_turn_drop_into_no_content_authority
     inputs = _inputs(root)
     operation = _proposed()
     attempt, provider = _attempt(inputs, state, [operation], ['drop'])
-    resolved = attempt._critiqued(provider, attempt._actions(provider), [operation])
+    resolved = attempt._critiqued(provider, attempt._action(provider), [operation])
     assert resolved is None
     assert not list(attempt.cache.cache_dir.glob('*.json'))
 
@@ -101,7 +111,7 @@ def test_dropped_operations_do_not_change_the_original_semantic_records(vault):
     operations = [_proposed(), _proposed('cedar-specific-fact')]
     before = json.dumps(operations, sort_keys=True)
     attempt, provider = _attempt(inputs, state, operations, ['drop', 'pass'])
-    assert attempt._critiqued(provider, attempt._actions(provider), operations) is None
+    assert attempt._critiqued(provider, attempt._action(provider), operations) is None
     assert json.dumps(operations, sort_keys=True) == before
 
 
@@ -130,7 +140,7 @@ def test_normal_batch_never_publishes_or_receipts_a_critique_drop(vault, monkeyp
     operation = _proposed()
     draft = json.dumps({'operations': [operation], 'audit': {}})
     review = json.dumps({'reviews': [{'slug': operation['slug'], 'verdict': 'drop', 'reason': 'Scope is not supported.'}]})
-    prompts = _replies(monkeypatch, [draft, review] * (cm.VALIDATION_RETRIES + 1))
+    prompts = _replies(monkeypatch, [draft, review] * (cm.setting_value('compile.validation_retries') + 1))
     apply = Mock(side_effect=AssertionError('Rejected source work must not reach publication'))
     monkeypatch.setattr(cm, '_apply_batch', apply)
     batch = cm.pack_compile_batches(inputs, model=None)[0]
@@ -138,7 +148,7 @@ def test_normal_batch_never_publishes_or_receipts_a_critique_drop(vault, monkeyp
                            coordinator=MarkdownCoordinator(root, state), deadline=math.inf,
                            cancelled=None, owner=None)
     assert result.status != 0
-    assert len(prompts) == 2 * (cm.VALIDATION_RETRIES + 1)
+    assert len(prompts) == 2 * (cm.setting_value('compile.validation_retries') + 1)
     apply.assert_not_called()
     assert not list((root / 'knowledge/daily/receipts').iterdir())
     assert not list((root / 'knowledge/notes').iterdir())

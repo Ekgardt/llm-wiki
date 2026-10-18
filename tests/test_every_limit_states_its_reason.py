@@ -23,6 +23,7 @@ REPLACED = {
     "index.max_total_bytes": 32 * 1024 * 1024,
     "compile.max_sources": 2_000,
     "compile.max_total_source_bytes": 32 * 1024 * 1024,
+    "compile.validation_retries": 2,
     "corpus.max_files": 50_000,
     "corpus.max_total_bytes": 64 * 1024 * 1024,
     "claims.max_pages": 10_000,
@@ -47,6 +48,7 @@ REPLACED = {
     "mcp.retrieval_seconds": 14,
 }
 RETIRED_NAMES = (
+    "VALIDATION_RETRIES",
     "HEALTH_REPORT_BUDGET_SECONDS",
     "MAX_PAGE_COUNT",
     "MAX_TOTAL_PAGE_BYTES",

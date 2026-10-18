@@ -46,6 +46,18 @@ def _combined_feedback(children):
     return tuple(record for _child, feedback in children for record in feedback)
 
 
+def test_structural_diagnostic_survives_every_repair_partition(vault):
+    root, _state = vault
+    original, reviewed = _batch(root)
+    diagnostic = json.dumps({'stage': 'draft', 'validation_error': 'related[0]: expected string',
+                             'rejected_response': '{"operations": ['})
+    children = compiler._repartition_compile_repair(original, (*reviewed, diagnostic))
+    assert len(children) == 2
+    assert _parts(children) == list(original.inputs.dailies)
+    for _child, feedback in children:
+        assert diagnostic in feedback
+
+
 def test_repartition_keeps_each_physical_part_and_complete_reviewed_proposal_once(vault):
     root, _state = vault
     original, feedback = _batch(root)
@@ -133,8 +145,6 @@ def test_real_resolution_retains_validated_feedback_with_its_capacity_failure(va
 
 
 @pytest.mark.parametrize('failure,feedback', [
-    ('draft:codex:input_budget', ()),
-    ('critique:codex:input_budget', ('validated review',)),
     ('draft:codex:validation_error', ('validated review',)),
     ('probe:codex:unavailable', ('validated review',)),
 ])
@@ -143,6 +153,15 @@ def test_unrelated_failures_keep_the_original_failure_boundary(failure, feedback
 
     assert type(error) is RuntimeError
     assert failure in str(error)
+
+
+@pytest.mark.parametrize('stage', ['draft', 'critique'])
+def test_source_capacity_failure_can_split_before_any_semantic_review(stage):
+    lineage = (f'{stage}:codex:input_budget', 'probe:claude:unavailable')
+    error = compiler._unresolved_compile_error(SimpleNamespace(lineage=lineage, critic_feedback=()))
+    assert isinstance(error, compiler._CompileRepairCapacityError)
+    assert error.feedback == ()
+    assert 'probe:claude:unavailable' in str(error)
 
 
 def test_lost_context_fails_its_child_without_hiding_or_discarding_its_sibling(vault, monkeypatch):

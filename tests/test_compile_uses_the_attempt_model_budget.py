@@ -12,12 +12,13 @@ def _attempt():
     inputs = _inputs()
     batch = compiler.pack_compile_batches(inputs, model=None)[0]
     packing = replace(batch.packing, max_input_tokens=90000)
-    return compiler._CompileAttempt(inputs, None, replace(batch, packing=packing), None)
+    return compiler._CompileAttempt(inputs, None, replace(batch, packing=packing,
+                                   planning_model="actual-attempt-model"), None)
 
 
 def _descriptor(window):
-    return SimpleNamespace(model="actual-attempt-model",
-                           _codex_basis=SimpleNamespace(planning_window=window))
+    return SimpleNamespace(provider="codex", model="actual-attempt-model",
+                           _codex_basis=SimpleNamespace(model="actual-attempt-model", planning_window=window))
 
 
 def test_final_fit_uses_the_smaller_advertised_attempt_window(monkeypatch):
@@ -103,7 +104,7 @@ def test_each_fallback_keeps_its_own_model_and_capacity(monkeypatch):
     codex = client.provider_candidates("codex")[0]
     fallback = client.provider_candidates("fake")[0]
     owned = replace(codex, model="actual-attempt-model",
-                    _codex_basis=SimpleNamespace(planning_window=60000))
+                    _codex_basis=SimpleNamespace(model="actual-attempt-model", planning_window=60000))
     monkeypatch.setattr(compiler, "provider_candidates", lambda *args, **kwargs: [codex, fallback])
     monkeypatch.setattr(compiler, "probe_candidate", lambda candidate: True)
     monkeypatch.setattr(compiler, "resolve_codex_planning_basis",
@@ -113,4 +114,11 @@ def test_each_fallback_keeps_its_own_model_and_capacity(monkeypatch):
     attempt = _attempt()
     assert compiler._attempt_input_budget(attempt.batch, owned).max_input_tokens == 60000
     assert compiler._attempt_input_budget(attempt.batch, fallback).model == fallback.model
-    assert compiler._attempt_input_budget(attempt.batch, fallback).max_input_tokens == 90000
+    assert compiler._attempt_input_budget(attempt.batch, fallback).max_input_tokens == compiler._compile_budget(fallback.model).max_input_tokens
+
+
+def test_fallback_with_a_different_models_basis_cannot_borrow_capacity():
+    fallback = SimpleNamespace(provider='codex', model='fallback-model',
+                               _codex_basis=SimpleNamespace(model='another-model', planning_window=258400))
+    budget = compiler._attempt_input_budget(_attempt().batch, fallback, needs_complete_context=True)
+    assert budget.max_input_tokens == compiler._compile_budget(fallback.model).max_input_tokens

@@ -152,7 +152,7 @@ def _attempt(monkeypatch, outcomes: list[str]):
 
     monkeypatch.setattr(compile_memory, "probe_candidate", lambda _d: True)
     monkeypatch.setattr(
-        compile_memory._CompileAttempt, "_actions", lambda self, _d: ((), ())
+        compile_memory._CompileAttempt, "_action", lambda self, _d: ((), ())
     )
     monkeypatch.setattr(
         compile_memory._CompileAttempt, "_cached", lambda self, _a, _d: None
@@ -206,7 +206,7 @@ def test_the_validation_retry_is_bounded(monkeypatch):
     candidate = compile_memory.provider_candidates("", max_tokens=4000)[0]
 
     assert attempt.resolve(replace(candidate)) is None
-    assert len(calls) == compile_memory.VALIDATION_RETRIES + 1
+    assert len(calls) == compile_memory.setting_value('compile.validation_retries') + 1
 
 
 def test_a_lock_that_cannot_be_read_refuses_the_run_and_says_why(

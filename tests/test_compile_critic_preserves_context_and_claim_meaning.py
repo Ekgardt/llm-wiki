@@ -2,6 +2,7 @@
 import json
 
 import compile_memory as cm
+import pytest
 
 from tests.test_compile_claims_producer import _candidate, _daily, _operation
 from tests.test_compile_claims_producer import vault as vault
@@ -87,7 +88,11 @@ def test_unselected_existing_page_is_not_invented_context(vault):
     assert '### FILE: knowledge/notes/project-rule.md\n' not in prompt
 
 
-def test_selected_context_is_protected_before_actual_cli_stdin(vault, monkeypatch, tmp_path):
+@pytest.mark.parametrize('prompt_builder,heading', [
+    (cm._critique_prompt, 'SELECTED EXISTING CONTEXT'),
+    (cm._source_review_prompt, 'COMPLETE SELECTED SOURCES'),
+])
+def test_selected_context_is_protected_before_actual_cli_stdin(vault, monkeypatch, tmp_path, prompt_builder, heading):
     import llm_client as client
 
     from tests.test_codex_counts_the_prepared_invocation import _service
@@ -95,7 +100,7 @@ def test_selected_context_is_protected_before_actual_cli_stdin(vault, monkeypatc
 
     root, _state = vault
     inputs, operations = _review_inputs(root)
-    prompt = cm._critique_prompt(inputs, operations)
+    prompt = prompt_builder(inputs, operations)
     _, _, captured = _service(monkeypatch, tmp_path)
     policy = tmp_path / 'policy.json'
     _write_dlp_policy(policy, literals=('The lease rule applies only to the selected project.',))
@@ -105,4 +110,4 @@ def test_selected_context_is_protected_before_actual_cli_stdin(vault, monkeypatc
     assert result.text == 'answer'
     assert len(captured) == 1
     assert 'The lease rule applies only to the selected project.' not in captured[0][1]
-    assert 'SELECTED EXISTING CONTEXT' in captured[0][1]
+    assert heading in captured[0][1]
