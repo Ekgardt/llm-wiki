@@ -1917,6 +1917,10 @@ class TransactionDriftError(RuntimeError):
         return (self.__class__, (self.transaction_id, self.paths))
 
 
+class WriterAdmissionTimeout(TimeoutError):
+    """The caller deadline expired before acquiring the Markdown writer gate."""
+
+
 class ProjectPendingPriorError(TransactionFailure):
     """A project checkpoint is blocked by an unapplied lower sequence."""
 
@@ -2692,7 +2696,7 @@ def _retry_gate_or_fail(
         raise exc
     delay = _writer_retry_delay(attempt, deadline)
     if delay <= 0:
-        raise TimeoutError(
+        raise WriterAdmissionTimeout(
             "timed out waiting for the global Markdown writer gate"
         ) from exc
     time.sleep(delay)
@@ -8364,7 +8368,7 @@ class MarkdownCoordinator:
             if fencing_epoch is not None:
                 return fencing_epoch
             if time.monotonic() >= deadline:
-                raise TimeoutError(
+                raise WriterAdmissionTimeout(
                     "timed out waiting for the global Markdown writer gate"
                 )
             time.sleep(0.01)
@@ -8471,7 +8475,7 @@ class MarkdownCoordinator:
                     raise
                 delay = _writer_retry_delay(attempt, deadline)
                 if delay <= 0:
-                    raise TimeoutError(
+                    raise WriterAdmissionTimeout(
                         "timed out waiting for the global Markdown writer gate"
                     ) from exc
                 time.sleep(delay)

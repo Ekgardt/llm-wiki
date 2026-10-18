@@ -113,6 +113,7 @@ from markdown_transaction import (  # noqa: E402
     MarkdownChange,
     MarkdownCoordinator,
     TransactionFailure,
+    WriterAdmissionTimeout,
     _writer_wait_window,
     active_or_legacy_coordinator,
 )
@@ -5978,9 +5979,7 @@ def _enter_compile_writer_gate(stack, coordinator, owner, deadline, cancelled):
         wait = min(_writer_wait_window(None), max(0.0, deadline - time.monotonic()))
         try:
             return stack.enter_context(coordinator.writer_gate(owner=owner, wait_seconds=wait))
-        except TimeoutError as exc:
-            if str(exc) != "timed out waiting for the global Markdown writer gate":
-                raise
+        except WriterAdmissionTimeout:
             print("compile_memory: writer admission busy; retaining the validated plan and waiting within the compile deadline", file=sys.stderr)
 
 

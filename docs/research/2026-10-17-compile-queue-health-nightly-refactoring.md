@@ -885,3 +885,52 @@ turn or private source was submitted. There is no configured authenticated OpenC
 server here, so its qualification is the local HTTP regression, not a live-provider
 claim. Evidence: `logs/provider-upgrades-{red,green,consumers}.txt` and
 `logs/provider-upgrades-native.json`.
+
+## 2026-10-18: writer admission retains its error identity
+
+Recent hooks repeatedly log `TimeoutError: timed out waiting for the global
+Markdown writer gate`. The canonical gate converts `owner_busy` to an untyped
+TimeoutError on deadline expiry; legacy admission and SQLite contention expiry do
+the same. This loses the distinction used by capture diagnostics. Meanwhile compile
+publication reconstructs the distinction by comparing the exception's full message,
+so an unrelated timeout with identical text is retried. Three regressions reproduce
+both real competing-writer paths and the incorrect message-based retry.
+
+Use one `WriterAdmissionTimeout(TimeoutError)` at the three admission-expiry
+sites. Existing callers catching TimeoutError remain compatible. Compile retries
+only the explicit subtype under its original deadline/cancellation checks; capture
+classification recognizes the same subtype. Cause chains, deadlines, delays,
+leases, pending work and persisted history are unchanged. Generic timeouts remain
+errors even if their text matches. No historical counters are rewritten. The old
+compiler string comparison is removed. This repairs error identity, not the actual
+resource contention or the full nighttime failure.
+
+Sources checked 2026-10-18:
+- [Python exceptions](https://docs.python.org/3/library/exceptions.html): subclass
+  matching and explicit cause chaining separate failure meaning from presentation.
+- [SQLite result codes](https://www.sqlite.org/rescode.html): BUSY/LOCKED are distinct
+  from storage and corruption failures; preserve the original cause and existing
+  typed/code-based admission retry policy.
+- [Microsoft LockFileEx](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex):
+  lock acquisition can wait or return an error, distinct from successful ownership.
+  No platform locking policy is changed here.
+
+Alternatives: matching more message strings repeats brittle inference; classifying
+all timeouts as contention hides unrelated failures; increasing wait time would not
+restore the lost identity. A subtype is the smallest backwards-compatible contract.
+No new resource or numerical limit is introduced, and no source/queue records are
+deleted. The legacy admission implementation remains because v2 readers and their
+qualification tests still consume it; this change does not authorize its removal.
+
+Validation: three failures reproduced before the fix; 422 related checks pass
+(127.14 s), including real competing legacy/v3 writers, publication retry,
+cancellation, pending checkpoints and capture diagnostics. Separate checks verify
+that SQLite BUSY expiry retains its cause and an unrelated timeout is not classified
+as contention. Ruff and Python 3.10/complexity checks pass for 316 changed functions
+in the series; all 97 installed package dependencies are compatible.
+
+The preceding provider-upgrade CI exposed a missing measured shard weight for
+`test_provider_upgrade_contracts.py`. The documented shard-plan measurement now
+adds that file; its three tests and six weight-integrity tests pass. Existing weights
+are preserved. This CI preparation error is acknowledged, not evidence that the
+previous full CI passed. Logs: `writer-admission-{red,green,consumers,shard-weight}.txt`.

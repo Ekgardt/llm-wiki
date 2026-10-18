@@ -821,6 +821,7 @@
   "test_provider_runs_outside_the_vault.py": 0.08,
   "test_provider_temp_file_preserves_prepared_utf8_bytes.py": 0.01,
   "test_provider_timeout_is_not_an_empty_answer.py": 0.01,
+  "test_provider_upgrade_contracts.py": 0.05,
   "test_prune_generations.py": 14.92,
   "test_pyright_profile.py": 89.05,
   "test_pyright_session.py": 167.65,

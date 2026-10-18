@@ -107,3 +107,55 @@ def test_timeout_after_admission_is_never_retried(vault):
             entries.append('entered')
             raise TimeoutError('timed out waiting for the global Markdown writer gate')
     assert entries == ['entered']
+
+
+@pytest.mark.parametrize('contract', ['legacy', 'v3'])
+def test_writer_refusal_keeps_its_contention_identity(vault, monkeypatch, contract):
+    from capture_diagnostics import is_contention
+    from integration_adapter import _checkpoint_log_kind
+
+    with _contended_publication(vault, monkeypatch, contract) as (_, coordinator, _):
+        with pytest.raises(TimeoutError) as caught:
+            with coordinator.writer_gate(wait_seconds=0):
+                pytest.fail('competing writer was admitted')
+    assert is_contention(caught.value)
+    assert _checkpoint_log_kind(caught.value) == 'project checkpoint contention'
+
+
+def test_same_text_is_not_proof_of_writer_contention():
+    from types import SimpleNamespace
+
+    error = TimeoutError('timed out waiting for the global Markdown writer gate')
+    calls = []
+
+    def enter(_context):
+        calls.append(1)
+        if len(calls) == 1:
+            raise error
+        return 'incorrectly retried'
+
+    coordinator = SimpleNamespace(writer_gate=lambda **kwargs: None)
+    stack = SimpleNamespace(enter_context=enter)
+    with pytest.raises(TimeoutError) as caught:
+        compiler._enter_compile_writer_gate(stack, coordinator, None, float('inf'), None)
+    assert caught.value is error
+    assert calls == [1]
+
+
+def test_sqlite_busy_expiry_keeps_the_original_cause():
+    import sqlite3
+
+    from capture_diagnostics import is_contention
+
+    error = sqlite3.OperationalError('busy')
+    error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    with pytest.raises(TimeoutError) as caught:
+        markdown_transaction._retry_gate_or_fail(error, 0, time.monotonic() - 1)
+    assert caught.value.__cause__ is error
+    assert is_contention(caught.value)
+
+
+def test_unrelated_timeout_is_not_classified_as_contention():
+    from capture_diagnostics import is_contention
+
+    assert not is_contention(TimeoutError('timed out waiting for the global Markdown writer gate'))

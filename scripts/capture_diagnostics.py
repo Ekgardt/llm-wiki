@@ -88,10 +88,14 @@ def _sqlite_contention(error: BaseException) -> bool:
 
 
 def _typed_contention(error: BaseException) -> bool:
-    from markdown_transaction import OperationBoundElsewhereError, ProjectPendingPriorError
+    from markdown_transaction import (
+        OperationBoundElsewhereError,
+        ProjectPendingPriorError,
+        WriterAdmissionTimeout,
+    )
 
     return isinstance(
-        error, (ProjectPendingPriorError, OperationBoundElsewhereError, StateLockTimeout)
+        error, (ProjectPendingPriorError, OperationBoundElsewhereError, StateLockTimeout, WriterAdmissionTimeout)
     )
 
 
