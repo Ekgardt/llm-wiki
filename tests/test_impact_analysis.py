@@ -489,9 +489,12 @@ def test_active_graph_uses_configured_shared_state_for_external_repository(
     graph.close()
 
 
-@pytest.mark.parametrize("timeout_source", ["scope", "graph"])
+@pytest.mark.parametrize("timeout_source", ["scope", "code", "catalog", "graph"])
 def test_active_graph_propagates_deadline_timeout(tmp_path, monkeypatch, timeout_source):
+    from unittest.mock import Mock
+
     import evidence_graph
+    import generation_catalog
     import impact_analysis
     import repository_scope
 
@@ -503,19 +506,30 @@ def test_active_graph_propagates_deadline_timeout(tmp_path, monkeypatch, timeout
     catalog_path.touch()
     monkeypatch.setattr(impact_analysis, "ROOT", root)
     monkeypatch.setattr(impact_analysis, "STATE_ROOT", state)
-
-    def timed_out(*_args, **_kwargs):
-        raise TimeoutError("deadline exceeded")
-
-    if timeout_source == "scope":
-        monkeypatch.setattr(repository_scope, "resolve_repository_scope", timed_out)
-    else:
-        monkeypatch.setattr(
-            evidence_graph.EvidenceGraph, "open_active_for_repository", timed_out
-        )
-
-    with pytest.raises(TimeoutError, match="deadline exceeded"):
-        impact_analysis._active_graph(root, time.monotonic() + 5)
+    stages = {
+        "scope": Mock(return_value=object()),
+        "code": Mock(return_value=None),
+        "catalog": Mock(return_value=[]),
+        "graph": Mock(),
+    }
+    catalog = Mock(code_generations_for_repository=stages["catalog"])
+    monkeypatch.setattr(generation_catalog, "GenerationCatalog", Mock(return_value=catalog))
+    monkeypatch.setattr(repository_scope, "resolve_repository_scope", stages["scope"])
+    monkeypatch.setattr(evidence_graph.EvidenceGraph, "open_code_for_repository", stages["code"])
+    monkeypatch.setattr(evidence_graph.EvidenceGraph, "open_active_for_repository", stages["graph"])
+    failure = TimeoutError("deadline exceeded")
+    stages[timeout_source].side_effect = failure
+    # Routing, not elapsed wall time: real deadline enforcement has separate tests.
+    deadline = 123.0
+    with pytest.raises(TimeoutError, match="deadline exceeded") as caught:
+        impact_analysis._active_graph(root, deadline)
+    assert caught.value is failure
+    visited = list(stages).index(timeout_source) + 1
+    for stage in list(stages.values())[:visited]:
+        assert stage.call_count == 1
+        assert stage.call_args.kwargs["deadline"] == deadline
+    for stage in list(stages.values())[visited:]:
+        stage.assert_not_called()
 
 
 def test_public_analyze_impact_propagates_graph_open_timeout(tmp_path, monkeypatch):

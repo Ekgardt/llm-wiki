@@ -1477,3 +1477,46 @@ Python3.10 (3 platform skips). Ruff and measured complexity passed for453
 changed functions across the accumulated refactor. Installed97 and isolated66
 packages are compatible; uv.lock remains unchanged. Production recovery has
 not yet run: installation must wait for the live generation maintenance owner.
+
+## 2026-10-18: impact timeout propagation is independent of runner speed
+
+Windows Python 3.10 job 117755905783 failed
+`test_active_graph_propagates_deadline_timeout[graph]`: the fixture allowed five
+real seconds for Git scope resolution and code-generation lookup before reaching
+its injected active-generation timeout. The trace shows the real code-generation
+deadline firing first after 5.39 seconds. Production propagated that timeout
+correctly; the fixture expected another exception's message. This establishes a
+test-isolation defect, not evidence that production lost the deadline.
+
+The test now supplies controlled collaborators for scope, code generation,
+catalog registration and active generation. Each stage independently raises one
+sentinel TimeoutError. Assertions require the identical exception, the unchanged
+caller deadline at every visited stage, and no calls after refusal. Four cases
+replace the two partially isolated cases. Existing real Git, generation-open,
+expired-deadline and public analysis tests remain. There is no new dependency,
+production timeout, retry or configuration. The synthetic absolute deadline is
+only a routing token; this test makes no wall-time claim.
+
+Research checked 2026-10-18:
+- https://docs.pytest.org/en/stable/explanation/flaky.html — insufficiently
+  controlled system state can make a test intermittent; isolate the relevant unit.
+- https://docs.python.org/3/library/unittest.mock.html — side_effect and call
+  inspection support exact exception and argument checks with standard-library
+  test collaborators.
+- https://testing.googleblog.com/2020/12/test-flakiness-one-of-main-challenges.html
+  — nondeterministic test outcomes reduce the usefulness of the testing signal.
+
+Rejected: increasing five seconds (retains a speed-dependent routing test),
+accepting any timeout text (could pass without reaching the selected stage), and
+changing production exception handling (the trace confirms correct propagation).
+Tradeoff: this unit test no longer exercises real Git/catalog latency; existing
+integration cases retain that coverage. The changed function satisfies measured
+CCN, branch-count and nesting requirements.
+
+Validation: 188 related impact/code-graph tests pass on Python 3.12 (10.12 s)
+and Python 3.10.20 (12.43 s). Deliberately replacing the production TimeoutError
+rethrow with `return None` makes all four propagation cases fail; the mutation was
+then reverted byte-for-byte. Ruff passes across scripts/tests; the cumulative
+complexity check covers 454 changed functions with no violations. Installed
+97-package and isolated 66-package dependency checks pass. Evidence is retained in
+`logs/step7-impact-timeout-{tests,python310,mutation}-20261018.log`.
