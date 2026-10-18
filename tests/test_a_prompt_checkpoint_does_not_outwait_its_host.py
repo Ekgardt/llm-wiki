@@ -1,8 +1,9 @@
 """Durable hook capture must not wait another writer for its project handoff."""
 import threading
 import time
-from functools import partial
+from functools import partial, wraps
 
+import breadcrumb_storage
 import flush_memory
 import integration_adapter as adapter
 import markdown_transaction
@@ -41,6 +42,39 @@ def _deliver(state_root):
     assert work() is None
 
 
+def _timed_call(function, measurements, name):
+    @wraps(function)
+    def measured(*args, **kwargs):
+        started = time.perf_counter()
+        try:
+            return function(*args, **kwargs)
+        finally:
+            entry = measurements.setdefault(name, {"calls": 0, "seconds": 0.0})
+            entry["calls"] += 1
+            entry["seconds"] += time.perf_counter() - started
+    return measured
+
+
+def _measure_ingestion(envelope, monkeypatch):
+    measurements = {}
+    phases = (
+        (adapter, "_publish_event_breadcrumb"),
+        (memory_queue, "active_memory_queue"),
+        (markdown_transaction, "active_markdown_coordinator"),
+        (breadcrumb_storage, "_store_owned_bundle"),
+        (breadcrumb_storage, "_register_or_retain"),
+        (adapter, "_after_breadcrumb_safely"),
+        (adapter, "_wake_capture_worker"),
+    )
+    with monkeypatch.context() as timing:
+        for module, name in phases:
+            timing.setattr(module, name, _timed_call(getattr(module, name), measurements, name))
+        started = time.monotonic()
+        result = adapter.ingest_event(envelope)
+        elapsed = time.monotonic() - started
+    return result, elapsed, measurements
+
+
 @pytest.mark.parametrize("event", ["user_prompt", "post_tool_use"])
 def test_capture_keeps_its_checkpoint_pending_without_waiting_past_host(tmp_path, monkeypatch, event):
     state_root, project, coordinator = _configure(tmp_path, monkeypatch)
@@ -58,11 +92,13 @@ def test_capture_keeps_its_checkpoint_pending_without_waiting_past_host(tmp_path
         # Establish the competing actor before the host's stopwatch. The real
         # wake operation spawns a worker without waiting for its writer gate.
         assert held.wait(LONG_TIMEOUT)
-        started = time.monotonic()
-        result = adapter.ingest_event(envelope)
-        elapsed = time.monotonic() - started
+        result, elapsed, phases = _measure_ingestion(envelope, monkeypatch)
         assert result["capture_durable"] is True
-        assert elapsed < adapter.HOST_HOOK_TIMEOUT_SECONDS
+        assert elapsed < adapter.HOST_HOOK_TIMEOUT_SECONDS, {
+            "elapsed_seconds": elapsed, "nested_phases": phases,
+            "registration_error": result.get("capture_registration_error"),
+            "post_capture_error": result.get("post_capture_error"),
+        }
         assert list((state_root / "run/capture-intents/ready").rglob("*.json"))
     finally:
         release.set()

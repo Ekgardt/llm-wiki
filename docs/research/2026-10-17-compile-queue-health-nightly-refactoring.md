@@ -537,3 +537,57 @@ again failed the Windows 3.13 trim/append test (run 39071113802, job 11750906467
 That failure is retained, not disabled or attributed to short writes without
 proof. The live compiler was still running after nearly eight hours; it was not
 stopped for this change.
+
+## Host capture latency: keep the failed budget and expose phase evidence (2026-10-18)
+
+CI f233212d / 39074021574 failed Windows 3.13 shard 2: the ready-writer host
+scenario accepted its durable capture but ingestion took 6.8594699 seconds,
+exceeding HOST_HOOK_TIMEOUT_SECONDS=5. The log has no phase timings, so it does
+not establish whether publication, registration, filesystem operations or prompt
+follow-up consumed that time. The old trim failure did not recur in this run;
+that is not proof that its cause is resolved.
+
+A Linux cProfile baseline passed both ready-writer cases; ingestion averaged
+0.132 seconds (0.127 in publication). This is a different platform and cannot
+explain the Windows incident. The profile was a separate diagnostic invocation,
+not a replacement for the unprofiled timing test.
+
+One independently reproduced fixture defect: the wrapper calls a test function
+from a marked module but does not inherit that module's shipped_append_budgets
+mark. The conftest fixture therefore substitutes LONG_TIMEOUT append budgets
+inside a scenario that purports to use shipped values. Two assertions checking
+the collected item's marker failed before adding the explicit module mark. Keep
+those assertions. This correction is not claimed to explain the 6.86-second
+incident; the exercised breadcrumb path need not spend the replaced budgets.
+
+The original scenario now records lightweight nested elapsed times around queue
+and coordinator admission, whole publication, bundle storage, registration,
+follow-up and worker wake. Wrappers forward arguments/results/exceptions and are
+removed by monkeypatch.context. The five-second total still includes wrapper
+cost, and no overhead is subtracted. On failure the assertion includes phase
+counts/times and the existing registration/follow-up errors. Nested durations
+must not be added as independent phases. Fixture readiness, durable capture,
+pending-intent, eventual worker delivery and project-journal assertions remain.
+No production behavior, deadline, dependency, path or environment contract changes.
+
+Sources inspected 2026-10-18:
+- [pytest marks](https://docs.pytest.org/en/stable/how-to/mark.html): marks attach
+  to collected tests/classes/modules. An ordinary Python call does not collect
+  another test item or transfer its module metadata. Installed pytest is 9.0.3.
+- [Python clocks](https://docs.python.org/3/library/time.html#time.perf_counter):
+  elapsed-time clocks include waiting; the implementation uses APIs present in
+  Python 3.10 and locally runs on 3.12.3, with no new 3.15-only API.
+- [Microsoft high-resolution timing](https://learn.microsoft.com/en-us/windows/win32/sysinfo/acquiring-high-resolution-time-stamps):
+  QPC is intended for interval measurements. The test uses Python's clock rather
+  than another native binding or wall-clock timestamps.
+
+Alternatives rejected: raising the host timeout or removing its assertion hides
+the failed contract; declaring a Windows fix from a Linux pass lacks evidence;
+permanent full profiling adds avoidable measurement overhead. The phase report
+provides the evidence needed for a later reproduced fix. Native Windows latency,
+trim failure, live capture ownership loss, full nightly/history qualification and
+law-9 review remain open.
+
+Validation: 12 related tests passed in 14.58 seconds. Lizard/AST checked 255
+changed functions without violations; Ruff and Python 3.10 grammar passed. All
+97 installed packages are compatible. Native Windows qualification is pending.

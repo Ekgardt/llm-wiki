@@ -4,9 +4,12 @@ import pytest
 
 import tests.test_a_prompt_checkpoint_does_not_outwait_its_host as scenario
 
+pytestmark = pytest.mark.shipped_append_budgets
+
 
 @pytest.mark.parametrize("event", ["user_prompt", "post_tool_use"])
-def test_the_busy_writer_is_ready_before_host_ingestion(tmp_path, monkeypatch, event):
+def test_the_busy_writer_is_ready_before_host_ingestion(tmp_path, monkeypatch, event, request):
+    assert request.node.get_closest_marker(scenario.pytestmark.name) is not None
     observed = {}
     hold = scenario._hold_writer
     ingest = adapter.ingest_event
