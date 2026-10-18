@@ -1025,3 +1025,55 @@ checks overlap the full suite and are not additional unique coverage. Ruff,
 Python 3.10 syntax and complexity pass for 326 changed functions in the series.
 All 97 installed dependencies are compatible. Evidence:
 `logs/step7-pyright-diagnostics-{red,green,python310}.txt`.
+
+## First review uses verified model capacity, 2026-10-18
+
+The live automatic compile still reports `critique:...:input_budget`. Source and
+fresh graph inspection found a reproducible admission defect: the initial review
+used the draft packing target as a hard ceiling, while only a later corrective
+draft could use the selected model's verified capacity. A review carries the
+proposed operations and their evidence in addition to existing context; its size
+need not equal the draft's packing target. This defect is proven independently;
+it is not proof that every historical review refusal had this cause.
+
+Two regressions reproduce the preflight/dispatch mismatch with verified capacity.
+A third uses the real native citation layout and complete context: the unchanged
+baseline refuses its single review operation although the request fits the
+verified window. The change reuses the existing complete-context budget for both
+review and corrective draft, with one condition shared by preflight and dispatch.
+The previous correction-only helper and keyword are replaced. Ordinary draft
+packing stays unchanged. Matching model identity, verified Codex basis, output
+reserve, safety margin, evidence validation, DLP and real-overflow refusal remain.
+No numeric threshold, retry, dependency, runtime path or environment contract is
+introduced. Unknown capacity is not inferred from online model descriptions.
+
+Sources inspected 2026-10-18, three independent providers:
+- [Anthropic context windows](https://platform.claude.com/docs/en/build-with-claude/context-windows):
+  the complete request and output consume capacity; more context alone does not
+  establish better quality.
+- [Google token counting](https://ai.google.dev/gemini-api/docs/tokens):
+  input measurement and model input/output limits are separate concerns.
+- [OpenAI reasoning guidance](https://developers.openai.com/api/docs/guides/reasoning):
+  output/reasoning require capacity beyond the input prompt.
+
+Alternatives rejected: dropping evidence or context to fit the packing target,
+blindly retrying a deterministic preflight failure, hardcoding a larger model
+window, or changing the ordinary source packing target. The tradeoff is that a
+qualified review may be larger, including combining operations that previously
+required separate reviews. Every combined request is still measured. This may
+reduce repeated context, but full-cycle token/latency improvement is not claimed
+without a paired provider measurement.
+
+A direct installed compile invocation on October 15's source refused because the
+automatic compiler already owned its lock (PID 79619, started 09:15 UTC). It made
+zero provider calls, then generation refresh reported `corpus_entry_limit`.
+The live compiler was not terminated or mistaken for a successful rerun. The
+review fix alone does not close the corpus-capacity, transaction-history or whole
+nightly-cycle conditions of point 7.
+
+Validation: the baseline fails two stage-budget regressions and the separate
+native-layout regression. The candidate passes 143 related tests (25.77 s);
+20 overlapping budget/dispatch tests pass on real Python 3.10.20 (2.18 s).
+Ruff and Python 3.10 syntax pass; all 334 changed functions in the refactoring
+series meet CCN <= 5, at most two `if` statements and nesting <= 2.
+Evidence: `logs/step7-critic-context-{red,native-red,consumers,python310}.txt`.

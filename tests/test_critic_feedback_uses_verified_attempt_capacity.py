@@ -74,3 +74,65 @@ def test_initial_draft_keeps_its_original_packing_budget(monkeypatch):
     assert not attempt._fits(prompt, "system", {}, descriptor)
     assert attempt._call(descriptor, "small source", "system", {}) == "intercepted"
     assert dispatch.call_args.kwargs["input_budget"].max_input_tokens == 16000
+
+
+def test_first_review_can_use_verified_capacity_without_prior_rejection():
+    attempt, descriptor, prompt = _repair()
+    attempt.critic_feedback = ()
+
+    assert not attempt._fits(prompt, compiler.DRAFT_SYSTEM, {}, descriptor)
+    assert attempt._fits(prompt, compiler.CRITIQUE_SYSTEM, compiler.CRITIQUE_SCHEMA, descriptor)
+    assert attempt.critic_feedback == ()
+
+
+def test_first_review_dispatch_uses_the_same_verified_capacity(monkeypatch):
+    attempt, descriptor, prompt = _repair()
+    attempt.critic_feedback = ()
+    dispatch = Mock(return_value="intercepted")
+    monkeypatch.setattr(compiler, "call_candidate", dispatch)
+
+    assert attempt._call(descriptor, prompt, compiler.CRITIQUE_SYSTEM,
+                         compiler.CRITIQUE_SCHEMA) == "intercepted"
+    budget = dispatch.call_args.kwargs["input_budget"]
+    assert budget.max_input_tokens == 60000
+    assert budget.reserved_output_tokens == attempt.batch.packing.reserved_output_tokens
+    assert budget.safety_margin_tokens == attempt.batch.packing.safety_margin_tokens
+    assert dispatch.call_args.args[1] == prompt
+
+
+@pytest.mark.parametrize("window,basis_model,provider", [
+    (None, "repair-model", "codex"),
+    (60000, "another-model", "codex"),
+    (60000, "repair-model", "fake"),
+    (20000, "repair-model", "codex"),
+], ids=["unknown-window", "other-model", "other-provider", "real-overflow"])
+def test_first_review_still_requires_matching_sufficient_capacity(window, basis_model, provider):
+    attempt, descriptor, prompt = _repair(window, basis_model=basis_model, provider=provider)
+    attempt.critic_feedback = ()
+
+    assert not attempt._fits(prompt, compiler.CRITIQUE_SYSTEM,
+                             compiler.CRITIQUE_SCHEMA, descriptor)
+
+
+def test_native_review_retains_full_context_and_evidence_above_packing_target(tmp_path, monkeypatch):
+    from tests.test_compile_critic_preserves_native_claim_origin import _native_operation
+
+    inputs, operation = _native_operation(tmp_path, monkeypatch)
+    content = b"Existing background retained for review.\n" * 700
+    context = compiler.SourceSnapshot("knowledge/notes/background.md", content,
+                                      compiler.sha256_bytes(content))
+    inputs = replace(inputs, sources=(*inputs.sources, context))
+    template, descriptor, _ = _repair()
+    batch = replace(template.batch, inputs=inputs)
+    attempt = compiler._CompileAttempt(inputs, None, batch, None)
+    prompt = compiler._critique_prompt(inputs, [operation])
+
+    assert not compiler._compile_prompt_fits(
+        prompt, system=compiler.CRITIQUE_SYSTEM, schema=compiler.CRITIQUE_SCHEMA,
+        model=descriptor.model, token_adapters=None,
+        budget=compiler._attempt_input_budget(batch, descriptor), descriptor=descriptor)
+    assert attempt._critique_batches(descriptor, [operation]) == [[operation]]
+    assert content.decode() in prompt
+    assert 'The bicycle is red.' in prompt
+    assert 'The lease expires in 30 seconds.' in prompt
+    assert attempt.critic_feedback == ()

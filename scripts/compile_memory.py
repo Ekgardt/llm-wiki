@@ -1984,20 +1984,20 @@ def _packing_budget(packing, model):
                          packing.safety_margin_tokens)
 
 
-def _attempt_input_budget(batch, descriptor, *, needs_correction=False):
+def _attempt_input_budget(batch, descriptor, *, needs_complete_context=False):
     if batch is None:
         return None
     budget = _packing_budget(batch.packing, descriptor.model)
     basis = getattr(descriptor, "_codex_basis", None)
     window = getattr(basis, "planning_window", None)
     bounded = _bounded_attempt_budget(budget, window)
-    if not needs_correction:
+    if not needs_complete_context:
         return bounded
-    return _correction_input_budget(bounded, descriptor)
+    return _complete_context_input_budget(bounded, descriptor)
 
 
-def _correction_input_budget(budget, descriptor):
-    """A validated repair may use the selected model's verified remaining capacity."""
+def _complete_context_input_budget(budget, descriptor):
+    """Review and repair may use the selected model's verified remaining capacity."""
     if getattr(descriptor, "provider", None) != "codex":
         return budget
     window = _matching_basis_window(getattr(descriptor, "_codex_basis", None), descriptor.model)
@@ -2690,7 +2690,7 @@ class _CompileAttempt:
             model=descriptor.model,
             token_adapters=self.token_adapters,
             budget=_attempt_input_budget(
-                self.batch, descriptor, needs_correction=bool(self.critic_feedback)),
+                self.batch, descriptor, needs_complete_context=(system == CRITIQUE_SYSTEM or bool(self.critic_feedback))),
             descriptor=descriptor,
         )
 
@@ -2707,7 +2707,7 @@ class _CompileAttempt:
             available=True,
             token_adapters=self.token_adapters,
             input_budget=_attempt_input_budget(
-                self.batch, descriptor, needs_correction=bool(self.critic_feedback)),
+                self.batch, descriptor, needs_complete_context=(system == CRITIQUE_SYSTEM or bool(self.critic_feedback))),
         )
 
 
