@@ -4605,3 +4605,50 @@ def test_deletion_certification_uses_the_deadline_and_retains_unknown_state(tmp_
     assert result["quiescent"] is False
     assert result["permit"] is False
     assert result["blockers"] == [{"code": "run_deletion_state_unknown"}]
+
+
+@pytest.mark.parametrize("budget", [None, SHORT_TIMEOUT])
+def test_filesystem_probe_uses_doctor_budget_after_slow_sqlite_open(tmp_path, monkeypatch, budget):
+    import doctor
+    import reliable_memory
+
+    (tmp_path / "run").mkdir()
+    clock = [100.0]
+    real_open = reliable_memory._opened_probe
+
+    def slow_open(path, deadline, connections):
+        result = real_open(path, deadline, connections)
+        clock[0] += 1.1
+        return result
+
+    monkeypatch.setattr(doctor.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(reliable_memory, "_known_network_path", lambda path: False)
+    monkeypatch.setattr(reliable_memory, "_opened_probe", slow_open)
+    kwargs = {} if budget is None else {"deadline": clock[0] + budget}
+    result = doctor._filesystem_check(tmp_path, **kwargs)
+
+    assert result["status"] == "ok", result
+    assert list((tmp_path / "run").iterdir()) == []
+
+
+def test_filesystem_probe_keeps_caller_deadline_during_slow_sqlite_open(tmp_path, monkeypatch):
+    import doctor
+    import reliable_memory
+
+    (tmp_path / "run").mkdir()
+    clock = [100.0]
+    real_open = reliable_memory._opened_probe
+
+    def slow_open(path, deadline, connections):
+        result = real_open(path, deadline, connections)
+        clock[0] += SHORT_TIMEOUT
+        return result
+
+    monkeypatch.setattr(doctor.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(reliable_memory, "_known_network_path", lambda path: False)
+    monkeypatch.setattr(reliable_memory, "_opened_probe", slow_open)
+    result = doctor._filesystem_check(tmp_path, deadline=clock[0] + SHORT_TIMEOUT)
+
+    assert result["status"] == "degraded", result
+    assert result["details"]["locking"] == "unknown"
+    assert list((tmp_path / "run").iterdir()) == []

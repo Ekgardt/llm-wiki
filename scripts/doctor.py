@@ -181,10 +181,6 @@ from markdown_transaction import UNDO_RETENTION_DAYS  # noqa: E402
 # these must equal it, or the registry refuses the lease. A contract, not a tunable.
 MAINTENANCE_LEASE_SECONDS = 120
 MAINTENANCE_HEARTBEAT_SECONDS = 40.0
-# The runtime-root locking probe's share of the run: a local filesystem answers an
-# fcntl lock in microseconds, so 1 s only fails a network or hung mount, which the
-# check then reports. Basis unknown beyond that: value predates measurement.
-FILESYSTEM_PROBE_SECONDS = 1.0
 TRANSACTION_REQUIRED_COLUMNS = {
     "id",
     "operation_id",
@@ -3421,7 +3417,8 @@ def _read_claim_index(
         details["read_error"] = True
 
 
-def _filesystem_check(state_root: Path, deadline: float = float("inf")) -> dict:
+def _filesystem_check(state_root: Path, deadline: float | None = None) -> dict:
+    deadline = _validated_doctor_deadline(deadline, DEFAULT_TIME_BUDGET_SECONDS)
     if _deadline_reached(deadline):
         return _result(
             "filesystem",
@@ -3437,8 +3434,7 @@ def _filesystem_check(state_root: Path, deadline: float = float("inf")) -> dict:
     unusable = _filesystem_unusable(state_root)
     if unusable is not None:
         return unusable
-    probe_deadline = min(deadline, time.monotonic() + FILESYSTEM_PROBE_SECONDS)
-    return _locking_result(_probe_locking(state_root, probe_deadline))
+    return _locking_result(_probe_locking(state_root, deadline))
 
 
 def _filesystem_unusable(state_root: Path) -> dict | None:

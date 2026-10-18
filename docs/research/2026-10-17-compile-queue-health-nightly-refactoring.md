@@ -1396,3 +1396,37 @@ instruction initially displaced optional context in two packing regressions; the
 instruction was shortened in place and both original full-context assertions passed
 without changing their fixtures or product budgets. Real pending-day validation
 and the new full platform CI still have to qualify installation.
+
+## 2026-10-18: the filesystem probe uses the caller's deadline
+
+CI39145827607 on22e54757 failed only Windows/Python3.11 shard3: the real
+SQLite filesystem probe took1.12s and reported unknown locking. The caller
+allowed30s, but `_filesystem_check` silently replaced that deadline with1s.
+The constant itself documented that its numerical basis was unknown. This
+also affected operational/full doctor and generation maintenance, not just CI.
+
+Research checked2026-10-18:
+- [SQLite locking](https://www.sqlite.org/lockingv3.html): rollback-mode
+  correctness requires actual lock exclusion; elapsed startup time is not
+  evidence that locking is broken.
+- [CPython3.11 test support](https://docs.python.org/3.11/library/test.html):
+  completion waits must accommodate slow supported machines.
+- [pytest flaky tests](https://docs.pytest.org/en/stable/explanation/flaky.html):
+  timing-sensitive assertions can fail independently of functional correctness.
+
+Chosen: propagate the finite doctor/generation caller deadline unchanged.
+Standalone private calls use the existing doctor default,5s. Delete the
+independent1s constant. No new setting, dependency, timeout retry or success
+substitution. A longer caller allowance can spend more of that allowance on
+filesystem I/O; cooperative deadlines still cannot preempt an OS syscall.
+Rejected: increasing a hidden constant, skipping Windows, accepting degraded
+as success, or merely rerunning the failed job.
+
+Regression uses real SQLite and a controlled clock: each connection open
+consumes1.1s; both standalone and30s caller cases must prove writer exclusion
+and remove every probe artifact. A separate case exhausts the caller deadline
+and must remain degraded with no artifacts. The initial test setup omitted
+run/ and therefore did not exercise locking; only the corrected red-v2 run
+(2 failed,1 passed) is reproduction evidence. Candidate:241 passed,6 skipped
+across doctor and reliable-memory tests. Native Windows qualification still
+requires the subsequent CI run; Linux success is not a Windows result.
