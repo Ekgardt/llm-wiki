@@ -3113,7 +3113,7 @@ def _publication_heartbeat_interval(owner) -> float:
 class _CapturePublicationKeepAlive:
     """Keep both publication claims live and verify them before returning."""
 
-    def __init__(self, registry, coordinator, owner, fence) -> None:
+    def __init__(self, registry, coordinator, owner, fence, *, held_since: float) -> None:
         from markdown_transaction import INTENT_FENCE_SECONDS
         from reliable_memory import DEFAULTS
 
@@ -3122,7 +3122,7 @@ class _CapturePublicationKeepAlive:
         self._interval = _publication_heartbeat_interval(owner)
         self._lease_seconds = min(owner.ttl_seconds, INTENT_FENCE_SECONDS)
         self._attempt_seconds = 2 * DEFAULTS.markdown_busy_ms / 1_000
-        self._held_since = time.monotonic()
+        self._held_since = held_since
         self._stop = threading.Event()
         self._failure: BaseException | None = None
         self._thread = threading.Thread(target=self._run, name="capture-publication-keepalive", daemon=True)
@@ -3168,13 +3168,14 @@ class _CapturePublicationKeepAlive:
 def _capture_publication_fence(queue: object, coordinator: object, intent_id: str):
     registry = queue.ownership_registry()
     owner = registry.acquire("capture", scope=f"intent:{intent_id}")
+    held_since = time.monotonic()
     try:
         fence = coordinator.acquire_intent_fence(intent_id, mode="capture", owner=owner)
     except BaseException:
         registry.release(owner)
         raise
     try:
-        with _CapturePublicationKeepAlive(registry, coordinator, owner, fence):
+        with _CapturePublicationKeepAlive(registry, coordinator, owner, fence, held_since=held_since):
             yield owner, fence
     finally:
         # A retained fence still depends on its canonical owner. If releasing

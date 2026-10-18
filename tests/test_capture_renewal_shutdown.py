@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from types import SimpleNamespace
 
 import flush_memory
@@ -16,7 +17,7 @@ def _keeper(kind, monkeypatch):
     if kind == "worker":
         return flush_memory._CaptureKeepAlive(None, None, None, None, None, None)
     owner = SimpleNamespace(heartbeat_seconds=0.01, ttl_seconds=30)
-    keeper = integration_adapter._CapturePublicationKeepAlive(None, None, owner, None)
+    keeper = integration_adapter._CapturePublicationKeepAlive(None, None, owner, None, held_since=time.monotonic())
     keeper._attempt_seconds = 0.01
     monkeypatch.setattr(keeper, "_require_live", lambda: None)
     return keeper

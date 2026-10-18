@@ -104,3 +104,49 @@ def test_expired_publication_authority_cannot_report_acceptance(tmp_path, monkey
     assert list((tmp_path / "run/capture-intents").rglob("*.part"))
     monkeypatch.setattr(breadcrumb_storage, "_store_parts", store)
     assert _publish(queue, coordinator).registered
+
+
+@pytest.mark.parametrize("acquisition_delay, expected", [(0.0, [5.0, 7.0, 9.0, 10.0]), (9.0, [14.0]), (12.0, [17.0])])
+def test_publication_does_not_restart_owner_retry_clock(monkeypatch, acquisition_delay, expected):
+    import sqlite3
+    from types import SimpleNamespace
+
+    import lease_renewal
+
+    clock = SimpleNamespace(now=0.0)
+    attempts = []
+    owner = SimpleNamespace(heartbeat_seconds=5, ttl_seconds=30)
+    registry = SimpleNamespace(acquire=lambda *a, **k: owner, release=lambda value: None)
+
+    def acquire_fence(*args, **kwargs):
+        clock.now += acquisition_delay
+        return object()
+
+    coordinator = SimpleNamespace(acquire_intent_fence=acquire_fence, release_intent_fence=lambda value: None)
+    queue = SimpleNamespace(ownership_registry=lambda: registry)
+    monkeypatch.setattr(integration_adapter, "time", SimpleNamespace(monotonic=lambda: clock.now))
+
+    def wait(seconds):
+        clock.now += seconds
+        return False
+
+    def busy(self):
+        attempts.append(clock.now)
+        clock.now += 1.0
+        raise sqlite3.OperationalError("database is locked")
+
+    original = lease_renewal.renew_until_stopped
+
+    def controlled(renew, **kwargs):
+        return original(renew, **kwargs, wait=wait, monotonic=lambda: clock.now)
+
+    keeper = integration_adapter._CapturePublicationKeepAlive
+    monkeypatch.setattr(lease_renewal, "renew_until_stopped", controlled)
+    monkeypatch.setattr(keeper, "_renew", busy)
+    monkeypatch.setattr(keeper, "__enter__", lambda self: self._run())
+    monkeypatch.setattr(keeper, "__exit__", lambda *args: None)
+    with integration_adapter._capture_publication_fence(queue, coordinator, "intent"):
+        pass
+    # After acquisition + first interval, another full two-database attempt
+    # cannot fit into the original 30-second owner lease.
+    assert attempts == expected

@@ -648,3 +648,54 @@ seconds; four platform-specific tests were skipped. Lizard/AST checked 266 chang
 functions; Ruff and Python 3.10 grammar passed. All 97 installed packages remain
 compatible. A normal uv cache prune refused an in-use cache; its waiting process
 was stopped without --force, and no cache deletion was performed.
+
+## 2026-10-18: publication retry time starts with the canonical owner
+
+The fresh bd839c84 built-in graph identifies the publication keepalive call;
+source inspection supplies its unresolved registry and coordinator edges.
+Capture owners last 30 seconds. Acquiring the intent fence can wait for SQLite,
+and that fence's expiry is capped at the owner's expiry. The keepalive nevertheless
+stamped `held_since` after this second acquisition, adding the acquisition wait
+back into its retry allowance. Two controlled-clock regressions fail on the old
+code: after 9 or 12 seconds acquiring the fence, it makes four renewal attempts
+where only the initial attempt fits the existing retry policy. These tests advance
+time without sleeps; a no-delay control still permits the original retries.
+
+The caller now records the monotonic reading immediately after acquiring the owner
+and passes it as a required keyword to the keepalive. Its constructor no longer
+invents a new acquisition time. This preserves the common renewal algorithm,
+shutdown joining and final authoritative database checks. It does not introduce
+an expiry, retry count, timing override, package or runtime contract. The existing
+30-second lifetime and two-database attempt allowance are unchanged. The residual
+time between acquisition returning and the clock read is unchanged from the
+existing acquisition-clock contract; this correction removes the subsequent
+blocking call from that gap, not every possible process scheduling delay.
+
+Related-path inspection: worker capture uses a 120-second canonical owner and
+acquires the 30-second intent fence last; its situation differs from the publisher's
+30-second owner capped fence. Worker queue/task-fence age and general acquisition
+clock accuracy are not declared fully qualified by this change. Nor does this
+reproduction establish the cause of historical `owner_fence_lost` records.
+
+Primary sources checked on 2026-10-18:
+
+- [Python monotonic clock](https://docs.python.org/3/library/time.html#time.monotonic):
+  elapsed-time differences survive wall-clock adjustments; available at Python 3.10 floor.
+- [AWS leader election](https://aws.amazon.com/builders-library/leader-election-in-distributed-systems/):
+  lease validity must account for elapsed work and pauses before protected actions.
+- [Kubernetes leases](https://kubernetes.io/docs/concepts/architecture/leases/):
+  renewal time and lease duration govern ownership, rather than when a helper starts.
+
+Alternatives: increasing the TTL hides elapsed acquisition time; retrying all errors
+was already removed; adding a separate renewal thread during fence acquisition adds
+lifecycle complexity. Passing the existing acquisition reading is the smallest change
+that preserves the current ownership protocol. No claim of universally optimal lease
+design or complete law-9 qualification follows from these sources.
+
+Validation: 67 related tests pass in 56.81 seconds, including real publication
+beyond its original lease, expired-authority refusal, worker renewal, shutdown
+joining and queue/breadcrumb integration. Lizard plus AST checks cover 274 changed
+functions across the ongoing refactor with no CCN/if/nesting violations; Ruff and
+Python 3.10 parsing pass. All 97 installed packages remain compatible. Evidence:
+`logs/refactor-20261018-capture-clock-red.txt` and
+`logs/refactor-20261018-capture-clock-green.txt` (private installed vault logs).
