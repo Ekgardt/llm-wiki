@@ -1430,3 +1430,50 @@ run/ and therefore did not exercise locking; only the corrected red-v2 run
 (2 failed,1 passed) is reproduction evidence. Candidate:241 passed,6 skipped
 across doctor and reliable-memory tests. Native Windows qualification still
 requires the subsequent CI run; Linux success is not a Windows result.
+
+## 2026-10-18: restored breadcrumb bytes still need a committed retry witness
+
+Installed refusal9bf23154f31543b090e7e431e2ed49d1 has a byte-identical
+source head, restorable560-byte content and a succeeded linked queue task,
+but no committed create witness. The original mechanism that restored the
+file has not been established. The independently reproduced recovery defect
+is that `_create_source_document` returns immediately for matching bytes,
+so retrying this refused create cannot establish transactional completion.
+
+Research checked2026-10-18:
+- [SQLite atomic commit](https://www.sqlite.org/atomiccommit.html): durable
+  completion requires the transaction's write/flush/commit sequence.
+- [AWS idempotent APIs](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/):
+  request identity must bind the intended operation, and retries must preserve
+  caller intent rather than infer completion from a similar outcome.
+- [Microsoft idempotent consumer](https://learn.microsoft.com/en-us/azure/architecture/patterns/idempotent-consumer):
+  durable processed state and business effects must agree when messages repeat.
+
+Chosen: when the same path/content identity has a quarantined attempt and
+no committed retry, reassert identical bytes through the existing writer gate,
+hash-preconditioned replace, recoverable transaction and parent lineage.
+The original refusal remains quarantined history; the actual committed retry
+resolves it. Already committed requests and matching files without a refused
+attempt keep their no-write behavior. Conflicting bytes still fail; a moved
+archived file does not authorize recreating a missing hot path. Current capture
+preconditions remain mandatory for a worker retry. No new runtime path, setting,
+external dependency or diagnostic exemption is added.
+
+Rejected: manually changing a refused state to committed; trusting queue
+success alone; treating file existence as a durable transaction witness;
+deleting and recreating the immutable source. The chosen recovery incurs one
+same-byte transactional write and retained undo evidence only for an unresolved
+refusal. The recovery API's existing gate, CAS and transaction recovery provide
+the concurrency boundary. A regression now runs the existing refused-create
+scenario both with an absent source and with independently restored identical
+bytes, checks idempotent repeated retry, unchanged bytes, committed parent
+lineage and resolved-quarantine evidence. Before the change the restored case
+failed while the absent case passed.
+
+Validation:200 breadcrumb/queue/recovery tests passed, including real process
+termination and recovery after the persisted lease expiry (349.68s);57 lineage,
+retention and structure guards passed;210 doctor/breadcrumb tests passed on
+Python3.10 (3 platform skips). Ruff and measured complexity passed for453
+changed functions across the accumulated refactor. Installed97 and isolated66
+packages are compatible; uv.lock remains unchanged. Production recovery has
+not yet run: installation must wait for the live generation maintenance owner.

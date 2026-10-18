@@ -195,11 +195,12 @@ def _source_already_matches(vault: Path, relative: str, document: bytes) -> bool
 
 
 def _create_source_document(coordinator, owner, relative: str, document: bytes, preconditions: dict) -> None:
-    if _source_already_matches(coordinator.vault, relative, document):
-        return
     operation_id = "breadcrumb-source:" + sha256_bytes(canonical_json_bytes({
         "path": relative, "sha256": sha256_bytes(document),
     }))
+    if _source_already_matches(coordinator.vault, relative, document):
+        _commit_present_source_retry(coordinator, owner, operation_id, relative, document, preconditions)
+        return
     _commit_source_attempt(coordinator, owner, operation_id, relative, document, preconditions)
 
 
@@ -209,13 +210,29 @@ def _commit_source_attempt(coordinator, owner, operation_id, relative, document,
     with coordinator.writer_gate(owner=owner):
         coordinator.ensure_target_parent(relative)
         attempt_id, parent = coordinator.attempt_operation_id(operation_id)
-        transaction = coordinator.prepare(
-            [MarkdownChange.create(relative, document)], operation_id=attempt_id,
-            preconditions={**preconditions, relative: ABSENT},
-            _parent_transaction_id=parent,
-        )
-        committed = coordinator.apply(transaction.id)
-        _require_exact(committed.state, "committed")
+        _apply_source_attempt(coordinator, attempt_id, parent, MarkdownChange.create(relative, document),
+                              {**preconditions, relative: ABSENT})
+
+
+def _commit_present_source_retry(coordinator, owner, operation_id, relative, document, preconditions):
+    """Durably reassert identical bytes when a refused create lacks a committed retry."""
+    from markdown_transaction import MarkdownChange
+
+    with coordinator.writer_gate(owner=owner):
+        attempt_id, parent = coordinator.attempt_operation_id(operation_id)
+        if parent is None or coordinator.committed_attempt(operation_id) is not None:
+            return
+        _apply_source_attempt(coordinator, attempt_id, parent, MarkdownChange.replace(relative, document),
+                              {**preconditions, relative: sha256_bytes(document)})
+
+
+def _apply_source_attempt(coordinator, attempt_id, parent, change, preconditions):
+    transaction = coordinator.prepare(
+        [change], operation_id=attempt_id, preconditions=preconditions,
+        _parent_transaction_id=parent,
+    )
+    committed = coordinator.apply(transaction.id)
+    _require_exact(committed.state, "committed")
 
 
 def _bound_source_manifest(active, bundle) -> dict:

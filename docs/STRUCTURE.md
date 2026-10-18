@@ -457,6 +457,10 @@ Markdown inside the existing private `knowledge/raw/sessions/<date>/` tree and
 commits the journal entry for the original occurrence day. A short journal reference
 cannot authorize deletion of the only complete copy in runtime. Terminal proof and
 purge validation bind permanent evidence, the input and the journal transaction.
+If a refused source creation is retried after identical bytes were restored,
+the retry durably reasserts those bytes under a hash precondition and links its
+committed transaction to the refusal. The original refusal stays in history;
+file existence alone does not supply this transaction witness.
 Parts obey existing encoded-record and Markdown-reader contracts; no new logical
 event-size or part-count ceiling is introduced. Readers, recovery, diagnostics and
 cleanup must be qualified before producer cutover under the existing maintenance

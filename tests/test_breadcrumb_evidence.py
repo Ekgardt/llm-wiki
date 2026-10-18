@@ -136,7 +136,8 @@ def test_source_read_with_time_remaining_keeps_full_evidence(tmp_path, monkeypat
     assert evidence.read_permanent_source(tmp_path, head, deadline=12.0) == content
 
 
-def test_a_refused_source_can_retry_without_erasing_the_refusal(tmp_path):
+@pytest.mark.parametrize("source_restored", [False, True])
+def test_a_refused_source_can_retry_without_erasing_the_refusal(tmp_path, source_restored):
     from markdown_transaction import MarkdownChange, TransactionFailure
     from reliable_memory import canonical_json_bytes, sha256_bytes
 
@@ -163,13 +164,32 @@ def test_a_refused_source_can_retry_without_erasing_the_refusal(tmp_path):
             coordinator.apply(refused.id)
         assert coordinator._record(refused.id).state == "quarantined"
         assert not (coordinator.vault / relative).exists()
+        if source_restored:
+            (coordinator.vault / relative).write_bytes(document)
         evidence._create_source_document(coordinator, owner, relative, document, {})
         evidence._create_source_document(coordinator, owner, relative, document, {})
     assert (coordinator.vault / relative).read_bytes() == document
     assert coordinator._record(refused.id).state == "quarantined"
+    _assert_source_retry_witness(coordinator, refused.id, operation, document, source_restored)
+
+
+def _assert_source_retry_witness(coordinator, refused_id, operation, document, source_restored):
+    from reliable_memory import sha256_bytes
+
     with coordinator._connect() as database:
         committed = database.execute(
             'SELECT parent_transaction_id FROM "transaction" WHERE state=\'committed\' '
             'AND operation_id LIKE ?', (operation + "%",),
         ).fetchall()
-    assert [row[0] for row in committed] == [refused.id]
+        from transaction_lineage import resolved_quarantines
+        assert refused_id in resolved_quarantines(database)
+        rows = database.execute(
+            'SELECT operation.before_hash, operation.after_hash FROM operation '
+            'JOIN "transaction" ON operation.transaction_id="transaction".id '
+            'WHERE "transaction".parent_transaction_id=? AND "transaction".state=\'committed\'',
+            (refused_id,),
+        ).fetchall()
+    assert [row[0] for row in committed] == [refused_id]
+    assert [row[1] for row in rows] == [sha256_bytes(document)]
+    if source_restored:
+        assert [row[0] for row in rows] == [sha256_bytes(document)]
