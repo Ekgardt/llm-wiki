@@ -25,8 +25,13 @@ def test_actual_critic_keeps_the_selected_line_inside_one_native_container(tmp_p
 
     prompt = compiler._critique_prompt(inputs, [operation])
 
-    assert '"evidence_index":1' in prompt.replace(' ', '')
-    assert '"evidence_index":0' not in prompt.replace(' ', '')
+    encoded, cited = prompt.split('\nOPERATIONS\n', 1)[1].split('\nCITED EVIDENCE\n', 1)
+    reviewed = json.loads(encoded)[0]
+    assert [claim['evidence_index'] for claim in reviewed['claims']] == [1]
+    addresses = {row['evidence_index']: row for row in json.loads(cited)}
+    assert addresses[1]['operation_slug'] == reviewed['slug']
+    assert addresses[1]['native_event']['line_index'] == 1
+    assert addresses[1]['quoted_text'] == 'The lease expires in 30 seconds.'
     serialized = json.loads(compiler.canonical_json_bytes(operation))
     assert 'evidence_index' not in serialized['claims'][0]
 

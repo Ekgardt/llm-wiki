@@ -58,6 +58,27 @@ def test_forged_model_project_is_not_critic_authority(vault):
     assert 'invented-model-project' not in prompt
 
 
+def test_sorted_citations_keep_operation_local_claim_addresses(vault):
+    from tests.test_compile_claims_producer import QUOTE, SECOND_QUOTE, _evidence
+
+    root, _state = vault
+    inputs, _ = _review_inputs(root)
+    first = _operation([_candidate()])
+    first['evidence'] = [_evidence(QUOTE), _evidence(SECOND_QUOTE)]
+    second = _operation([_candidate(evidence_index=1)])
+    second['slug'] = 'second-lease'
+    second['evidence'] = list(reversed(first['evidence']))
+    operations = cm._with_derived_claims([first, second], inputs)
+    prompt = cm._critique_prompt(inputs, operations)
+    citations = json.loads(prompt.split('\nCITED EVIDENCE\n', 1)[1])
+    addressed = {(row['operation_slug'], row['evidence_index']): row for row in citations}
+    assert len(addressed) == 4
+    assert addressed[(first['slug'], 0)]['quoted_text'] == QUOTE
+    assert addressed[(second['slug'], 1)]['quoted_text'] == QUOTE
+    assert addressed[(first['slug'], 1)]['quoted_text'] == SECOND_QUOTE
+    assert addressed[(second['slug'], 0)]['quoted_text'] == SECOND_QUOTE
+
+
 def test_unselected_existing_page_is_not_invented_context(vault):
     root, _state = vault
     inputs, operations = _review_inputs(root)

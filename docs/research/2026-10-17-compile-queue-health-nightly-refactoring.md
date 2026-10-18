@@ -1077,3 +1077,64 @@ native-layout regression. The candidate passes 143 related tests (25.77 s);
 Ruff and Python 3.10 syntax pass; all 334 changed functions in the refactoring
 series meet CCN <= 5, at most two `if` statements and nesting <= 2.
 Evidence: `logs/step7-critic-context-{red,native-red,consumers,python310}.txt`.
+
+## 2026-10-18: make the critic's citation addresses explicit
+
+The installed October 15 compile was restarted gracefully after verifying the
+old owner's process identity. Its real provider replies exposed a second issue:
+one review called evidence index 3 nonexistent although the operation contained
+five citations. The prompt carried operation-local claim indices alongside a
+separately sorted, flattened citation list with no operation/index addresses.
+This was ambiguous presentation, not proof that the rejected content was sound.
+
+The critic's cited records now carry `operation_slug` and `evidence_index`.
+The instructions define the index as zero-based and local to that operation,
+and distinguish already computed hashes from the semantic judgment being asked
+of the model. Existing source, quote, claim-origin, DLP and verdict checks remain.
+The critique program becomes v8 so previously cached plans cannot bypass the new
+review. No runtime path, environment contract, dependency or numeric limit changes.
+The old unaddressed representation is replaced, not retained as an alternate mode.
+
+Research inspected on 2026-10-18:
+- [Anthropic prompting guidance](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices)
+  recommends explicit structure and document metadata where relationships matter.
+- [Google prompt design](https://ai.google.dev/gemini-api/docs/prompting-strategies)
+  describes clear instructions and consistently structured context.
+- [OpenAI prompt engineering](https://developers.openai.com/api/docs/guides/prompt-engineering)
+  recommends distinct context sections and evaluation when changing prompts.
+
+Keeping the flat list without addresses relies on inference about its ordering.
+Embedding all evidence again inside every claim would increase duplication.
+Explicit addresses preserve the existing full evidence and make the relationship
+machine-checkable at small prompt cost. These sources support the design choice;
+they do not establish that any prompt makes a model infallible.
+
+A regression uses two operations with the same two quotes in reversed order.
+It fails on the old prompt because neither citation has an operation address.
+The candidate passes 244 related tests and 42 overlapping tests on Python 3.10.20.
+Ruff, installed dependency compatibility (97 packages), and complexity analysis
+of 338 functions pass. Real Codex/gpt-6-luna reviews of the same public fixture
+provide a narrower causal check: the baseline wrongly drops the second operation
+because it reads the nightly-schedule quote instead of its selected lease quote;
+the candidate passes both correctly. A negative candidate with a 60-second claim
+against a 30-second quote is still dropped. These are three single-review calls,
+not a whole-cycle benchmark: baseline 10404 input/83 output tokens, 4.954 s;
+candidate 10525/91, 4.728 s; negative 10525/96, 5.536 s. Prompt growth is 568 bytes.
+No full-cycle latency or token saving is claimed from this small fixture.
+
+Other observed failures remain separate. Windows Python 3.12 CI job 117659144774
+failed four of eight telemetry writers at the second BEGIN IMMEDIATE; Linux's
+31 telemetry tests pass, so the Windows cause is still unproven. Real draft
+responses also contain malformed JSON. Codex 0.162.1 accepts --output-schema,
+but the original compile schema is refused (optional properties, then unsupported
+regex lookaround). An experimental all-required schema without regex works on an
+empty public fixture only; it is not installed or equivalent to production
+validation. The live corpus census found 220525 sources / 305660563 source bytes,
+exceeding the installed profile. This census is not a successful full generation.
+Point 7 remains open pending real compile/nightly, capacity and recovery evidence.
+
+Evidence: `logs/step7-critic-address-{red,tests,python310}-20261018.txt`,
+`logs/step7-critic-address-{baseline,candidate,negative}-probe-20261018.json`,
+`logs/step7-response-evidence-cycle-20261018.log`,
+`logs/step7-windows312-failure-20261018.log`,
+`logs/step7-current-corpus-capacity-20261018.json`.
