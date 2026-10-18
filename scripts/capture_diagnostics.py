@@ -482,30 +482,38 @@ def record_capture_failure(
     deferred by a writer race; without it, a failure is a loss.
     """
     record = _failure_record(kind, reason, slug, session_id, _outcome_of(error, kind))
-    written: list[bool] = []
-
-    def _under_the_state_lock(state: dict) -> None:
-        written.append(_trail_written(record, trim=True))
-        _bump_counter(state, record)
-
-    try:
-        update_state(_under_the_state_lock, lock_timeout=STATE_LOCK_TIMEOUT)
-    except Exception:  # noqa: BLE001 - the trail below still records the loss
-        pass
-    if not any(written):
-        # No lock, no trim: an append alone cannot erase anyone else's line.
+    # Publish the diagnostic before contending for shared state. The state
+    # mutator only changes counters; it never acquires the trail's lock.
+    if not _trail_written(record, trim=True):
         _trail_written(record, trim=False)
+    try:
+        update_state(lambda state: _bump_counter(state, record), lock_timeout=STATE_LOCK_TIMEOUT)
+    except Exception:  # noqa: BLE001 - a failed counter must not replay the trail
+        pass
+
+
+def _write_owned_failure(record: dict[str, str], *, trim: bool) -> bool:
+    written = _append_failure_line(record)
+    if not written or not trim:
+        return written
+    try:
+        _trim_under_lock()
+    except Exception:  # noqa: BLE001 - maintenance failure cannot undo a written line
+        pass
+    return written
 
 
 def _trail_written(record: dict[str, str], *, trim: bool) -> bool:
-    """Write the trail, whatever it raises: the counter still records the loss."""
+    """Append and optional trim under one trail lock, independently of counters."""
     try:
-        written = _append_failure_line(record)
-        if trim:
-            _trim_failure_log()
-    except Exception:  # noqa: BLE001 - diagnostics never break a hook
+        if _owns_trail_lock():
+            return _write_owned_failure(record, trim=trim)
+        with trail_lock() as held:
+            if not held:
+                return False
+            return _write_owned_failure(record, trim=trim)
+    except Exception:  # noqa: BLE001 - diagnostics never replace the primary failure
         return False
-    return written
 
 
 def _counter_entries(state: dict, *, operational: bool = False) -> dict[str, dict]:

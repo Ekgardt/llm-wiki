@@ -699,3 +699,63 @@ functions across the ongoing refactor with no CCN/if/nesting violations; Ruff an
 Python 3.10 parsing pass. All 97 installed packages remain compatible. Evidence:
 `logs/refactor-20261018-capture-clock-red.txt` and
 `logs/refactor-20261018-capture-clock-green.txt` (private installed vault logs).
+
+## 2026-10-18: diagnostic publication no longer holds shared state
+
+The current Windows CI (39087779301) fails the concurrent trail burst on Python
+3.11: some expected reasons are missing. Its second Windows failure has no
+available step log; its cause is unknown. Separately, the installed trail's latest
+loss records include SQLite disk-full errors during adoption and two failed
+locking probes at 02:19. These are not evidence that every recurrence shares the
+previous `owner_fence_lost` cause. Cleanup recovered space; recovery of each
+retained capture remains to be verified.
+
+Fresh built-in graph and source inspection expose a common diagnostic path used
+by hooks, the queue and other failure reporters: `record_capture_failure` acquired
+shared `state.json` before writing and trimming the separately locked trail.
+That couples diagnostic I/O to every unrelated state writer. Append and trim
+then acquired the sidecar separately. A trim exception after a completed append
+also made the entire operation report false, so the fallback duplicated the line.
+Three new tests reproduce these defects before changes; a fourth control confirms
+that a failed state commit must not replay a completed append.
+
+The pipeline now publishes to the trail first, releases its ownership, and only
+then updates counters. Its state callback only mutates the supplied dictionary.
+Append and trim share one sidecar acquisition, including the existing verified
+same-thread ownership path. A trim failure leaves the append result intact.
+The existing fallback remains for actual append refusal, not maintenance failure.
+No counter or historical failure is cleared. The old callback that performed
+file I/O under shared state and its mutable success list are removed.
+
+This is an internal lock-scope refactor: files, formats, runtime roots, providers,
+public interfaces and dependencies are unchanged. Existing byte-lock cooperation
+is retained for current consumers. No timeout/retry/count/size limit is increased
+or added; the historical limits are not declared justified by this change.
+Diagnostics remain best effort under real exhaustion or I/O errors. Independent
+trail and counter commits were already non-atomic; changing their order does not
+promise atomicity or guarantee delivery after an exhausted trail lock wait.
+The Windows burst failure is not declared fixed without matching platform evidence.
+
+Primary sources reviewed 2026-10-18:
+
+- [Python Logging Cookbook](https://docs.python.org/3/howto/logging-cookbook.html#logging-to-a-single-file-from-multiple-processes):
+  multi-process file logging requires explicit coordination; switching to a plain
+  standard FileHandler does not solve this product's cross-process writes.
+- [Microsoft critical sections](https://learn.microsoft.com/en-us/windows/win32/sync/using-critical-section-objects):
+  contenders have no guaranteed acquisition order; polling is not a fairness guarantee.
+- [SQLite locking](https://www.sqlite.org/lockingv3.html): exclusive work prevents
+  competing access, supporting the requirement to minimize unrelated work under locks.
+
+Alternatives: a logging listener/daemon changes the existing no-daemon contract;
+a new durable spool changes paths and recovery semantics; increasing lock waits
+hides coupling and spends host time. The chosen refactor keeps the existing protocol
+and removes avoidable nested work. A broader redesign must first establish durable
+acceptance, recovery and resource evidence; it is not justified solely by a passing
+unit test or by clearing health counters.
+
+Validation: 55 trail/capture/ownership checks pass (38.12 s), followed by 224
+hook/worker/host-budget/doctor consumer checks (52.63 s), with three platform
+skips. The original burst and trim tests retain their assertions. Lizard/AST
+checks pass for 285 changed functions across the refactor; Ruff and Python 3.10
+parsing pass. All 97 installed packages are compatible. Evidence lives in
+`logs/refactor-20261018-diagnostic-pipeline-{red,green,consumers}.txt`.

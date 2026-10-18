@@ -388,3 +388,57 @@ def test_the_text_of_an_error_never_decides_that_it_was_a_race(diagnostics):
 
     assert module.capture_failure_totals(state) == {"post_tool_append": 1, "session_end": 1}
     assert module.capture_deferred_totals(state) == {}
+
+
+def test_trail_is_published_before_waiting_for_shared_state(diagnostics, monkeypatch):
+    module, state = diagnostics
+    observed = []
+
+    def update(mutator, **kwargs):
+        observed.append(module.FAILURE_LOG.exists())
+        mutator(state)
+
+    monkeypatch.setattr(module, 'update_state', update)
+    module.record_capture_failure('session_end', 'independent publication')
+    assert observed == [True]
+    assert state['capture_failures']['session_end']['count'] == 1
+
+
+def test_trim_failure_does_not_repeat_a_committed_line(diagnostics, monkeypatch):
+    module, state = diagnostics
+
+    def broken_trim():
+        raise ValueError('invalid trim state')
+
+    monkeypatch.setattr(module, '_trim_under_lock', broken_trim)
+    module.record_capture_failure('session_end', 'one occurrence')
+    rows = [json.loads(line) for line in module.FAILURE_LOG.read_text().splitlines()]
+    assert [row['reason'] for row in rows] == ['one occurrence']
+    assert state['capture_failures']['session_end']['count'] == 1
+
+
+def test_append_and_trim_share_one_trail_acquisition(diagnostics, monkeypatch):
+    module, _state = diagnostics
+    acquired = []
+    original = module._hold_trail_lock
+
+    def hold(descriptor):
+        acquired.append(descriptor)
+        return original(descriptor)
+
+    monkeypatch.setattr(module, '_hold_trail_lock', hold)
+    module.record_capture_failure('session_end', 'one critical section')
+    assert len(acquired) == 1
+
+
+def test_failed_counter_commit_does_not_repeat_the_trail(diagnostics, monkeypatch):
+    module, state = diagnostics
+
+    def failing_update(mutator, **kwargs):
+        mutator(state)
+        raise OSError('state commit failed')
+
+    monkeypatch.setattr(module, 'update_state', failing_update)
+    module.record_capture_failure('session_end', 'retained diagnostic')
+    rows = [json.loads(line) for line in module.FAILURE_LOG.read_text().splitlines()]
+    assert [row['reason'] for row in rows] == ['retained diagnostic']
