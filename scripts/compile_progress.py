@@ -14,6 +14,8 @@ import sqlite3
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from reliable_memory import operational_deadline_active
+
 SCHEMA_STATEMENTS = (
     """CREATE TABLE compile_work_events (
         work_id TEXT NOT NULL,
@@ -194,3 +196,53 @@ def append_event(database: sqlite3.Connection, event: CompileEvent) -> None:
         (event.work_id, event.sequence, event.task_id, event.source_digest,
          event.stage, event.outcome, _canonical(event.details), _event_digest(event)),
     )
+
+
+def _require_schema_object(database, kind: str, name: str, sql: str) -> None:
+    row = database.execute(
+        'SELECT type,sql FROM sqlite_master WHERE name=?', (name,),
+    ).fetchone()
+    if row is None or (row['type'], row['sql']) != (kind, sql.strip()):
+        raise ProgressCorrupt('compile journal schema or protection changed')
+
+
+def _require_schema(database) -> None:
+    objects = (
+        ('table', 'compile_work_events'),
+        ('trigger', 'compile_work_events_no_update'),
+        ('trigger', 'compile_work_events_no_delete'),
+    )
+    for (kind, name), sql in zip(objects, SCHEMA_STATEMENTS):
+        _require_schema_object(database, kind, name, sql)
+
+
+def _audit_event(row, previous, counts, verify_artifact):
+    event = _verified_event(row)
+    if previous is None or previous.work_id != event.work_id:
+        previous = None
+        counts['works'] += 1
+    _require_next(previous, event)
+    if 'artifact' in event.details:
+        artifact_identity(event)
+        verify_artifact(event)
+        counts['artifacts'] += 1
+    counts['events'] += 1
+    return event
+
+
+def audit_events(database, verify_artifact, *, deadline=None) -> dict[str, int]:
+    """Stream retained history; certify neither publication nor a deletion permit."""
+    operational_deadline_active(deadline)
+    counts = {'events': 0, 'works': 0, 'artifacts': 0}
+    present = database.execute(
+        "SELECT 1 FROM sqlite_master WHERE name='compile_work_events'",
+    ).fetchone()
+    if present is None:
+        return counts
+    _require_schema(database)
+    previous = None
+    for row in database.execute('SELECT * FROM compile_work_events ORDER BY work_id,sequence'):
+        operational_deadline_active(deadline)
+        previous = _audit_event(row, previous, counts, verify_artifact)
+    operational_deadline_active(deadline)
+    return counts

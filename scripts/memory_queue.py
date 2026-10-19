@@ -2247,7 +2247,17 @@ def validate_queue_v3_database(
             raise _migration_error(
                 "queue_v3_validation_failed", "queue v3 database invariant failed"
             )
-        return _queue_v3_report(database)
+        report = _queue_v3_report(database)
+        report["compile_progress"] = audit_compile_progress(database, state_root)
+        return report
+
+
+def audit_compile_progress(database, state_root: Path, *, deadline=None):
+    """Share intermediate-artifact certification with doctor and staged backup."""
+    from compile_progress import audit_events
+
+    queue = _QueueV3CandidateReader(Path(state_root) / "run" / "queue-v3.sqlite3")
+    return audit_events(database, queue.read_compile_artifact, deadline=deadline)
 
 def _require_active(
     deadline: float, cancelled: Callable[[], bool] | None = None

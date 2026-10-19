@@ -2890,7 +2890,21 @@ def _scan_queue_database(
             state_root, tasks.references, tasks.result_hashes, details, deadline
         )
         _validate_capture_sources(database, tables, state_root, deadline, details)
+        _validate_compile_progress(database, state_root, deadline, details)
         return _QueueScan(None, tasks.unknown_state, tasks.corrupt_metadata)
+
+
+def _validate_compile_progress(database, state_root, deadline, details) -> None:
+    from memory_queue import audit_compile_progress
+
+    try:
+        counts = audit_compile_progress(database, state_root, deadline=deadline)
+    except (ValueError, sqlite3.Error) as error:
+        details["compile_progress_error"] = str(error)
+        raise ValueError("compile progress could not be verified") from error
+    details["compile_progress"] = counts
+    if counts["events"]:
+        details["deletion_codes"].append("queue_compile_progress_retained")
 
 
 def _validate_capture_sources(database, tables, state_root, deadline, details) -> None:
@@ -3026,6 +3040,9 @@ def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
 
 
 def _queue_read_error_message(details: dict) -> str:
+    compile_error = details.get("compile_progress_error")
+    if compile_error:
+        return f"Compile evidence cannot be verified: {compile_error}"
     capture_error = details.get("capture_intent_error")
     if capture_error:
         return f"Capture evidence cannot be verified: {capture_error}"

@@ -289,6 +289,10 @@ the existing maintenance fence after qualification on an isolated copy. The
 decision is `knowledge/notes/compile-durable-progress-decision-20261019.md`.
 Approval is not implementation or installed qualification. All nine development
 laws, complete-cycle validation and removal of replaced code remain required.
+The isolated implementation now shares journal/artifact auditing across full
+doctor, backup certification and runtime deletion guards. Migration, artifact
+retirement and the common transition controller remain pending; see
+`docs/research/2026-10-19-durable-compile-progress.md` for verification scope.
 
 ## External integration configuration preimages
 

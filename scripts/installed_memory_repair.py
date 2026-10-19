@@ -1245,7 +1245,8 @@ def _queue_database_blockers(state_root: Path, deadline: float) -> set[str]:
         open_readonly_operational_db(
             path,
             state_root,
-            max_bytes=_MAX_OPERATIONAL_DB_BYTES,
+            max_bytes=None,
+            deadline=deadline,
             owner_only=True,
             contract=_QUEUE_CONTRACT,
         )
@@ -1253,9 +1254,17 @@ def _queue_database_blockers(state_root: Path, deadline: float) -> set[str]:
         blockers = _queue_task_blockers(database, deadline)
         blockers.update(_queue_table_blockers(database, deadline))
         blockers.update(_capture_intent_blockers(database, state_root, deadline))
+        blockers.update(_compile_progress_blockers(database, state_root, deadline))
         if _holds_a_row(database, "queue_ownership", deadline=deadline):
             blockers.add("queue_owner_projection_orphan")
     return blockers
+
+
+def _compile_progress_blockers(
+    database: sqlite3.Connection, state_root: Path, deadline: float
+) -> set[str]:
+    report = memory_queue.audit_compile_progress(database, state_root, deadline=deadline)
+    return {"queue_compile_progress_retained"} if report["events"] else set()
 
 
 def _queue_task_blockers(
@@ -1439,7 +1448,8 @@ def _coordinator_database_blockers(
         open_readonly_operational_db(
             path,
             state_root,
-            max_bytes=_MAX_OPERATIONAL_DB_BYTES,
+            max_bytes=None,
+            deadline=deadline,
             owner_only=True,
             contract=_COORDINATOR_CONTRACT,
         )
@@ -1621,7 +1631,8 @@ def _blackboard_claim_blockers(
             open_readonly_operational_db(
                 path,
                 state_root,
-                max_bytes=_MAX_OPERATIONAL_DB_BYTES,
+                max_bytes=None,
+                deadline=deadline,
                 owner_only=True,
                 contract=_COORDINATOR_CONTRACT,
             )

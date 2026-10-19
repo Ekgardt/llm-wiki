@@ -81,6 +81,7 @@ _ALLOWED_RUNTIME_FINDINGS = frozenset(
     {
         "queue_task_retained",
         "queue_attempt_history_retained",
+        "queue_compile_progress_retained",
         "queue_source_failure_retained",
         "queue_source_link_retained",
         "capture_intent_retained",

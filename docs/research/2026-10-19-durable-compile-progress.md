@@ -96,6 +96,24 @@ execution report. Python 3.10 is checked as well as the installed Python version
 Native Windows/macOS lifecycle behavior and full real-model compilation remain
 unqualified. No useful-cycle cost or performance improvement is claimed yet.
 
+## Full health and recovery certification
+
+Full queue certification now streams the optional compile journal in primary-key
+order, verifies its schema and immutability triggers, event hashes, source identity,
+sequence continuity, and every referenced answer through the existing owner-only
+artifact reader. Full doctor, staged backup validation and the runtime deletion
+guard share this audit. Missing or changed answers fail validation. Retained events
+block runtime deletion; that finding alone does not block a backup.
+
+The journal is optional only for the current pre-migration schema. Migration must
+make its presence mandatory through the versioned schema contract.
+
+Page-based queue, coordinator and blackboard checks no longer apply the 256 MiB
+whole-file read ceiling. They retain caller deadlines and filesystem, ownership
+and database-contract validation. Actual whole-file artifact read bounds remain.
+Regression tests reproduced ignored journal damage, missing retention accounting
+and the inappropriate ceiling on each of these three page-based checks.
+
 ## Dependencies blocking activation
 
 The queue application/version contract is also pinned in the adopted database-pair
@@ -109,7 +127,8 @@ Before activation, complete all of the following:
 
 1. Versioned offline migration of the queue and adopted-pair manifest, including
    backup, interruption recovery, old-client refusal and bounded rollback rules.
-2. Intermediate-artifact accounting in backup, doctor, retention and deletion.
+2. Complete intermediate-artifact retirement and orphan cleanup. Backup, full
+   doctor and runtime deletion now account for retained journal evidence.
    The current no-delete trigger is fail-closed storage protection, not completed
    retention. It cannot be called a finished cleanup implementation.
 3. One semantic transition controller used by CLI, MCP, queue and nightly; durable
