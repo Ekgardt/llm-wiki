@@ -236,10 +236,65 @@ adds no dependency or new storage location. Sources rechecked on 2026-10-19:
 These support coherent copies, descriptor operations and preservation of migration
 evidence respectively; the adversarial regression is the evidence for this race.
 
+### Offline cutover design refinement (2026-10-19)
+
+Use the already-approved v2 adoption envelope as durable migration intent. First
+create and validate a coherent backup under the existing maintenance owner; then
+publish the v2 envelope through the existing CAS/fsync primitive; finally apply
+the qualified schema transaction to the original queue inode. A crash between
+intent and SQL commit leaves normal clients refusing the version mismatch. The
+explicit recovery operation validates the original adoption, backup manifest,
+queue identity and pre-upgrade bytes before resuming. A completed version4 is
+validated without restoring version3 over later work. Backup images are retained.
+
+This replaces the proposed candidate-file swap, not the approved journal/schema
+or paths. Candidate-only migration remains useful for isolated qualification and
+shares the same SQL transaction. File swapping would require extra rename states,
+preimage ownership and protection of hot journals. In-place DDL with durable
+admission intent needs none of those. A transaction alone cannot atomically update
+external JSON; publishing the requirement first makes the intermediate state
+explicitly unavailable. No model request, package, service or runtime root is added.
+
+Sources rechecked 2026-10-19: [SQLite atomic commit](https://www.sqlite.org/atomiccommit.html),
+[Python3.10 SQLite transactions](https://docs.python.org/3.10/library/sqlite3.html),
+[PostgreSQL upgrade guidance](https://www.postgresql.org/docs/current/upgrading.html).
+SQLite supplies the schema rollback boundary; Python's API requires explicit
+transaction management; PostgreSQL is comparative guidance on preserving recovery
+copies, not a dependency or proof of SQLite behavior. Qualification must include
+process death at intent/DDL/commit boundaries and rejection of changed backup,
+live owners, changed preimages and expired caller budgets.
+
+The isolated `upgrade_offline` API now implements this sequence with existing
+backup/fence/SQLite/publication primitives. It adds no online startup migration or
+CLI installer path. Its explicit confirmation that every agent process is stopped
+is required in addition to the registry fence: an old held client/SQL connection
+cannot be retroactively given the new admission check. A regression deliberately
+violates this precondition and verifies that changed queue bytes block recovery.
+The public operation introduces no new time limit; existing backup validators
+perform complete scans, so this API does not promise a caller-deadline bound.
+
+Failure injection covers seven abrupt process-death boundaries plus rollback on
+exceptions and owner loss before commit, corruption, valid but changed preimages, live ownership, backup ENOSPC,
+new-client refusal during an incomplete intent, and preservation of work added
+after completion. Recovery first refuses an unexpired dead owner's lease, then
+uses the unchanged expiry-plus-verified-death rule. Tests advance the registry
+clock past its recorded expiry while using the real process-liveness probe.
+
+Before intent publication a failed/finished image is retained, never silently
+erased; retry requires another empty directory. The image is owner-protected
+plaintext staging, not an encrypted Restic recovery proof. Integrating encrypted
+recovery, auditing inherited backup/queue limits and qualifying actual installation
+remain prerequisites. No private vault migration has been attempted. The initial
+test fixture omitted the existing staging directory and mistook enqueue's string
+ID for a task object; both were corrected. Python3.10 also required the shared
+ISO parser for the test clock, rather than newer datetime Z parsing.
+
 Before activation, complete all of the following:
 
-1. Versioned offline migration of the queue and adopted-pair manifest, including
-   backup, interruption recovery, old-client refusal and bounded rollback rules.
+1. Deployment qualification of the isolated offline migration, including encrypted
+   recovery integration, inherited-limit qualification and the stopped-agent
+   procedure. Backup/image and intent/schema recovery are tested in fixtures;
+   production installation and real-vault recovery are not yet qualified.
 2. Complete intermediate-artifact retirement and orphan cleanup. Backup, full
    doctor and runtime deletion now account for retained journal evidence.
    The current no-delete trigger is fail-closed storage protection, not completed

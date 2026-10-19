@@ -290,14 +290,17 @@ decision is `knowledge/notes/compile-durable-progress-decision-20261019.md`.
 Approval is not implementation or installed qualification. All nine development
 laws, complete-cycle validation and removal of replaced code remain required.
 The isolated implementation now shares journal/artifact auditing across full
-doctor, backup certification and runtime deletion guards. Migration, artifact
-retirement and the common transition controller remain pending; see
+doctor, backup certification and runtime deletion guards. Migration deployment
+qualification, artifact retirement and the common transition controller remain pending; see
 `docs/research/2026-10-19-durable-compile-progress.md` for verification scope.
-The migration's candidate-only schema step atomically creates the journal and
-stamps queue user_version 4. It refuses the active queue and inode aliases;
-installed clients still require version 3. Migration-controlled backup staging and
-recoverable adoption-record publication are not yet implemented. Compatible
-readers are implemented in the isolated development branch.
+The candidate-only schema step atomically creates the journal and stamps queue
+user_version4, refusing the active queue and inode aliases. The development branch
+also has an explicit offline upgrade API with retained backup-image validation,
+maintenance fencing and recoverable admission publication. It requires confirmation
+that all agent processes are stopped; a live/unknown registered owner still refuses
+the operation. This is not an online migration of existing SQL connections. The
+installed vault remains version3; deployment and full compiler qualification are
+pending. Compatible readers are implemented in the isolated development branch.
 
 The approved migration's admission transition uses a version-2 envelope at the
 existing `run/reliability-v3-adopted.json` path. It retains the complete original
@@ -307,6 +310,22 @@ records, tombstones and coordinator contracts remain verifiable. Version-1
 admission continues to require queue version 3; the version-2 envelope requires
 queue version 4 with all journal protections. No automatic migration is added to
 client admission. Publication/recovery and installation still require qualification.
+
+The offline upgrade uses the existing adoption envelope as the durable intent:
+after a coherent backup, it publishes the version-4 requirement before applying
+the transactional schema change to the existing queue inode. The mismatched
+intent/version refuses normal admission until explicit recovery finishes. This
+avoids renaming an operational SQLite database or adding a second activation
+pointer. Recovery must verify the supplied external backup image against the
+envelope digest and original adoption evidence; it never restores an old database
+over new queue work. The backup path is an explicit operation argument, not a new
+runtime location or an automatically deleted staging context.
+After process death, recovery waits for the existing lease expiry and verified
+process death; it does not force an owner away. Before intent publication, a failed
+backup is kept and a retry requires a fresh empty image directory. The retained
+image is owner-protected plaintext staging, not a claim of completed encrypted
+Restic recovery. Encrypted recovery/installation qualification remains required
+before deployment. No automatic migration is wired into startup or nightly.
 
 ## External integration configuration preimages
 
