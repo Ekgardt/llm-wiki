@@ -5,7 +5,10 @@ semantic callers still own complete work/dependency identity and publication.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import zipfile
+from contextlib import contextmanager
 from dataclasses import asdict, replace
 from functools import partial
 
@@ -420,19 +423,6 @@ def _snapshot_types():
             'targets': TargetSnapshot, 'vault_files': SourceSnapshot}
 
 
-def _snapshot_blob(content, blobs):
-    import base64
-    import hashlib
-
-    if content is None:
-        return None
-    if type(content) is not bytes:
-        raise ValueError('snapshot content must be bytes')
-    digest = hashlib.sha256(content).hexdigest()
-    blobs[digest] = base64.b64encode(content).decode('ascii')
-    return digest
-
-
 def _require_snapshot_digest(content, digest):
     import hashlib
 
@@ -440,58 +430,10 @@ def _require_snapshot_digest(content, digest):
         raise ValueError('snapshot content digest mismatch')
 
 
-def _snapshot_record(record, blobs):
-    _require_snapshot_digest(record.content, record.sha256)
-    value = asdict(record)
-    for name in ('content', 'original_content', 'prompt_content'):
-        if name in value:
-            value[name] = _snapshot_blob(value[name], blobs)
-    _require_original_digest(value)
-    return value
-
-
 def _require_original_digest(value):
     original = value.get('original_content')
     if original is not None and original != value['original_sha256']:
         raise ValueError('original snapshot content digest mismatch')
-
-
-def encode_compile_inputs(inputs):
-    """Lossless captured inputs; partition_context is only a process-local cache.
-
-    One self-contained artifact keeps existing backup/retention reachability.
-    Identical byte strings share a digest entry inside it. This codec does not
-    certify source admissibility, work identity, or queue artifact capacity.
-    """
-    from compile_memory import CompileInputs
-
-    if type(inputs) is not CompileInputs:
-        raise ValueError('expected captured CompileInputs')
-    blobs = {}
-    records = {name: [_snapshot_record(item, blobs) for item in getattr(inputs, name)]
-               for name in _snapshot_types()}
-    # The shared model JSON normalizes Unicode; source provenance must not.
-    return progress._canonical({'schema': 'compile-input-snapshot/v1',
-                                'inputs': records, 'blobs': blobs}).encode('utf-8')
-
-
-def _decoded_snapshot_blobs(blobs):
-    import base64
-
-    result = {}
-    for digest, encoded in blobs.items():
-        content = base64.b64decode(encoded, validate=True)
-        _require_snapshot_digest(content, digest)
-        result[digest] = content
-    return result
-
-
-def _restore_snapshot_bytes(value, blobs):
-    result = dict(value)
-    for name in ('content', 'original_content', 'prompt_content'):
-        if name in result and result[name] is not None:
-            result[name] = blobs[result[name]]
-    return result
 
 
 def _restore_snapshot_daily(value):
@@ -502,54 +444,29 @@ def _restore_snapshot_daily(value):
     return value
 
 
-def _restore_snapshot_record(kind, value, blobs):
-    from compile_memory import DailySnapshot
-
-    value = _restore_snapshot_bytes(value, blobs)
-    if kind is DailySnapshot:
-        value = _restore_snapshot_daily(value)
-    return kind(**value)
-
-
-def _restore_compile_inputs(value):
-    from compile_memory import CompileInputs
-
-    if value['schema'] != 'compile-input-snapshot/v1':
-        raise ValueError('unknown compile input snapshot schema')
-    kinds = _snapshot_types()
-    blobs = _decoded_snapshot_blobs(value['blobs'])
-    return CompileInputs(**{
-        name: tuple(_restore_snapshot_record(kinds[name], item, blobs) for item in records)
-        for name, records in value['inputs'].items()
-    })
-
-
-def decode_compile_inputs(data):
-    """Restore without filesystem reads; refuse corrupt or lossy representations."""
-    try:
-        inputs = _restore_compile_inputs(json.loads(data))
-        if encode_compile_inputs(inputs) != data:
-            raise ValueError('compile input snapshot is not lossless and canonical')
-        return inputs
-    except (ValueError, TypeError, KeyError, AttributeError) as error:
-        raise progress.ProgressCorrupt('invalid compile input snapshot') from error
-
-
 def save_compile_inputs(queue, lease, checkpoint, inputs):
-    """Persist the exact captured bytes through the existing fenced artifact API."""
+    """Write record-addressable inputs without a whole-archive bytes object."""
     _require_input_checkpoint(checkpoint)
-    data = encode_compile_inputs(inputs)
-    _require_snapshot_digest(data, checkpoint.source_digest)
-    return queue.save_compile_artifact(lease, checkpoint, data)
+    if compile_inputs_digest(inputs) != checkpoint.source_digest:
+        raise ValueError('snapshot content digest mismatch')
+    producer = partial(_write_archive_snapshot, inputs, checkpoint.source_digest)
+    return queue.save_compile_artifact_writer(lease, checkpoint, producer)
+
+
+@contextmanager
+def open_compile_inputs(queue, lease, checkpoint):
+    """Own a verified snapshot reader; callers load only the records they need."""
+    _require_input_checkpoint(checkpoint)
+    queue.verify_compile_checkpoint_owner(lease, checkpoint)
+    with queue.open_compile_artifact(checkpoint) as handle:
+        with zipfile.ZipFile(handle) as archive:
+            yield CompileInputArchive(archive, checkpoint.source_digest)
 
 
 def load_compile_inputs(queue, lease, checkpoint):
-    """Read only the queue-bound snapshot, never changed live source files."""
-    _require_input_checkpoint(checkpoint)
-    queue.verify_compile_checkpoint_owner(lease, checkpoint)
-    data = queue.read_compile_artifact(checkpoint)
-    _require_snapshot_digest(data, checkpoint.source_digest)
-    return decode_compile_inputs(data)
+    """Explicit eager compatibility for callers that require a complete value."""
+    with open_compile_inputs(queue, lease, checkpoint) as snapshot:
+        return snapshot.materialize()
 
 
 def _require_input_checkpoint(checkpoint):
@@ -557,3 +474,219 @@ def _require_input_checkpoint(checkpoint):
         raise progress.ProgressConflict('captured inputs require a ready snapshot checkpoint')
     if 'model_call' in checkpoint.details:
         raise progress.ProgressConflict('model answer is not an input snapshot')
+
+
+_ARCHIVE_SCHEMA = 'compile-input-archive/v1'
+_ARCHIVE_BYTES_FIELDS = ('content', 'original_content', 'prompt_content')
+_ARCHIVE_JSON_FIELDS = ('original_entries', 'native_frames')
+
+
+def _snapshot_json(value):
+    return progress._canonical(value).encode('utf-8')
+
+
+def _blob_digest(content):
+    if content is None:
+        return None
+    if type(content) is not bytes:
+        raise ValueError('snapshot content must be bytes')
+    return hashlib.sha256(content).hexdigest()
+
+
+def _archive_record_value(record, put):
+    _require_snapshot_digest(record.content, record.sha256)
+    value = asdict(record)
+    _archive_record_fields(value, _ARCHIVE_BYTES_FIELDS, put)
+    _require_original_digest(value)
+    _archive_record_fields(value, _ARCHIVE_JSON_FIELDS, partial(_put_snapshot_json, put))
+    return value
+
+
+def _archive_record_fields(value, names, put):
+    for name in names:
+        if name in value:
+            value[name] = put(value[name])
+
+
+def _put_snapshot_json(put, value):
+    return put(_snapshot_json(value))
+
+
+def _archive_manifest(inputs, put, write_record):
+    records = {group: _archive_group(getattr(inputs, group), group, put, write_record)
+               for group in _snapshot_types()}
+    return {'schema': _ARCHIVE_SCHEMA, 'records': records}
+
+
+def _archive_group(records, group, put, write_record):
+    digests = []
+    for index, record in enumerate(records):
+        data = _snapshot_json(_archive_record_value(record, put))
+        digests.append(hashlib.sha256(data).hexdigest())
+        write_record(_archive_record_name(group, index), data)
+    return digests
+
+
+def _archive_record_name(group, index):
+    return f'records/{group}/{index}.json'
+
+
+def _discard_record(_name, _data):
+    """Identity computation does not publish archive entries."""
+
+
+def compile_inputs_digest(inputs):
+    """Bind all record metadata and original byte digests, without base64 copies."""
+    manifest = _archive_manifest(inputs, _blob_digest, _discard_record)
+    return hashlib.sha256(_snapshot_json(manifest)).hexdigest()
+
+
+class _SnapshotArchiveWriter:
+    def __init__(self, archive):
+        self.archive = archive
+        self.blobs = set()
+
+    def put(self, content):
+        digest = _blob_digest(content)
+        if digest is None or digest in self.blobs:
+            return digest
+        self.write('blobs/' + digest, content)
+        self.blobs.add(digest)
+        return digest
+
+    def write(self, name, data):
+        # A fixed ZIP epoch makes retries byte-identical; it is not source time.
+        info = zipfile.ZipInfo(name)
+        info.compress_type = zipfile.ZIP_STORED
+        self.archive.writestr(info, data)
+
+
+def _write_archive_snapshot(inputs, expected, output):
+    with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+        writer = _SnapshotArchiveWriter(archive)
+        manifest = _archive_manifest(inputs, writer.put, writer.write)
+        data = _snapshot_json(manifest)
+        _require_snapshot_digest(data, expected)
+        writer.write('manifest.json', data)
+
+
+class CompileInputArchive:
+    """Context-owned record reader; opening keeps metadata, not source bodies."""
+
+    def __init__(self, archive, expected):
+        self.archive = archive
+        _require_archive_members(archive)
+        data = archive.read('manifest.json')
+        _require_snapshot_digest(data, expected)
+        self.manifest = _decoded_archive_manifest(data)
+        _require_archive_records(archive, self.manifest)
+
+    def record_count(self, group):
+        return len(self.manifest['records'][group])
+
+    def record_metadata(self, group, index):
+        expected = self.manifest['records'][group][index]
+        data = self.archive.read(_archive_record_name(group, index))
+        _require_snapshot_digest(data, expected)
+        value = json.loads(data)
+        if _snapshot_json(value) != data:
+            raise progress.ProgressCorrupt('noncanonical snapshot record')
+        return value
+
+    def blob(self, digest):
+        if digest is None:
+            return None
+        progress._require_digest(digest)
+        content = self.archive.read('blobs/' + digest)
+        _require_snapshot_digest(content, digest)
+        return content
+
+    def json_blob(self, digest):
+        data = self.blob(digest)
+        value = json.loads(data)
+        if _snapshot_json(value) != data:
+            raise progress.ProgressCorrupt('noncanonical snapshot metadata')
+        return value
+
+    def record(self, group, index):
+        value = self.record_metadata(group, index)
+        _archive_record_fields(value, _ARCHIVE_BYTES_FIELDS, self.blob)
+        _archive_record_fields(value, _ARCHIVE_JSON_FIELDS, self.json_blob)
+        kind = _snapshot_types()[group]
+        return _restored_archive_record(kind, value)
+
+    def records(self, group):
+        for index in range(self.record_count(group)):
+            yield self.record(group, index)
+
+    def materialize(self):
+        from compile_memory import CompileInputs
+
+        return CompileInputs(**{group: tuple(self.records(group)) for group in _snapshot_types()})
+
+
+def _restored_archive_record(kind, value):
+    from compile_memory import DailySnapshot
+
+    if kind is DailySnapshot:
+        _require_original_digest({**value, 'original_content': _blob_digest(value['original_content'])})
+        value = _restore_snapshot_daily(value)
+    result = kind(**value)
+    _require_snapshot_digest(result.content, result.sha256)
+    return result
+
+
+def _decoded_archive_manifest(data):
+    value = json.loads(data)
+    expected = {'schema', 'records'}
+    if not isinstance(value, dict) or set(value) != expected or value['schema'] != _ARCHIVE_SCHEMA:
+        raise progress.ProgressCorrupt('unknown snapshot archive schema')
+    _require_archive_record_groups(value['records'])
+    if _snapshot_json(value) != data:
+        raise progress.ProgressCorrupt('invalid snapshot archive manifest')
+    return value
+
+
+def _require_archive_members(archive):
+    names = archive.namelist()
+    if len(names) != len(set(names)):
+        raise progress.ProgressCorrupt('duplicate snapshot archive member')
+    for info in archive.infolist():
+        _require_stored_member(info)
+
+
+def _require_stored_member(info):
+    if info.compress_type != zipfile.ZIP_STORED or info.flag_bits & 1:
+        raise progress.ProgressCorrupt('snapshot members must be uncompressed and unencrypted')
+    if info.file_size != info.compress_size:
+        raise progress.ProgressCorrupt('snapshot member size mismatch')
+
+
+def _require_archive_records(archive, manifest):
+    expected = {'manifest.json'}
+    for group, digests in manifest['records'].items():
+        expected.update(_archive_group_names(group, digests))
+    actual = set(archive.namelist())
+    for name in actual - expected:
+        _require_blob_member(name)
+    if not expected.issubset(actual):
+        raise progress.ProgressCorrupt('snapshot record is missing')
+
+
+def _require_blob_member(name):
+    if not name.startswith('blobs/'):
+        raise progress.ProgressCorrupt('unknown snapshot member')
+    progress._require_digest(name.removeprefix('blobs/'))
+
+
+def _require_archive_record_groups(records):
+    if not isinstance(records, dict) or set(records) != set(_snapshot_types()):
+        raise progress.ProgressCorrupt('invalid snapshot record groups')
+
+
+def _archive_group_names(group, digests):
+    if not isinstance(digests, list):
+        raise progress.ProgressCorrupt('snapshot record digests must be a list')
+    for index, digest in enumerate(digests):
+        progress._require_digest(digest)
+        yield _archive_record_name(group, index)

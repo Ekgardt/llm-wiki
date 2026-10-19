@@ -11889,6 +11889,11 @@ class _QueueV3CandidateReader:
 
     def save_compile_artifact_stream(self, lease: QueueLease, event, chunks, *, deadline=None):
         """Persist an iterable without a total-size or in-memory-result ceiling."""
+        return self.save_compile_artifact_writer(
+            lease, event, partial(_copy_artifact_chunks, chunks=chunks), deadline=deadline)
+
+    def save_compile_artifact_writer(self, lease, event, producer, *, deadline=None):
+        """Run a sequential format writer inside the same durable publication."""
         event = compile_progress._snapshot_event(event)
         self._with_verified_lease(
             lease, partial(self._verify_compile_artifact_owner, event=event)
@@ -11896,7 +11901,7 @@ class _QueueV3CandidateReader:
         self.results_dir.mkdir(parents=True, exist_ok=True)
         _harden_owner_only(self.results_dir, 0o700)
         name = sha256_bytes(self._compile_artifact_operation(event).encode('utf-8')) + '.result'
-        digest = _write_durable_stream(self.results_dir / name, chunks, deadline=deadline)
+        digest = _write_durable_producer(self.results_dir / name, producer, deadline=deadline)
         saved = replace(event, details={**event.details, 'artifact': {
             'reference': f'run/queue-results/{name}', 'sha256': digest}})
         self.record_compile_event(lease, saved)
@@ -11914,6 +11919,21 @@ class _QueueV3CandidateReader:
         if digest != expected:
             raise compile_progress.ProgressCorrupt('compile artifact digest mismatch')
         return size
+
+    @contextmanager
+    def open_compile_artifact(self, event, *, deadline=None):
+        """A verified seekable file; the descriptor stays owned by this context."""
+        relative, expected = compile_progress.artifact_identity(event)
+        path = self.state_root / relative
+        before = path.lstat()
+        _check_owner_file_metadata(path, before, before.st_size)
+        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_BINARY', 0)
+        with os.fdopen(os.open(path, flags), 'rb') as handle:
+            _verify_open_artifact(handle, path, before, expected, deadline)
+            try:
+                yield handle
+            finally:
+                _require_stream_identity(path, handle.fileno(), before)
 
     @staticmethod
     def _compile_artifact_operation(event) -> str:
@@ -13617,18 +13637,45 @@ def _digest_stable_owner_file(path, *, deadline=None):
         return result
 
 
-def _write_stream_chunks(handle, chunks, *, deadline=None):
-    operational_deadline_active(deadline)
-    digest = hashlib.sha256()
+class _ArtifactOutput:
+    """Sequential output accepted by stdlib archive writers; no seek or overwrite."""
+
+    def __init__(self, handle, deadline):
+        self.handle = handle
+        self.deadline = deadline
+        self.digest = hashlib.sha256()
+        self.size = 0
+
+    def write(self, data):
+        operational_deadline_active(self.deadline)
+        written = self.handle.write(data)
+        if written != len(data):
+            raise QueueOperationError('artifact_short_write')
+        self.digest.update(data)
+        self.size += written
+        return written
+
+    def tell(self):
+        return self.size
+
+    def flush(self):
+        self.handle.flush()
+
+
+def _copy_artifact_chunks(output, *, chunks):
     for chunk in chunks:
-        operational_deadline_active(deadline)
         if not isinstance(chunk, bytes):
             raise TypeError('artifact chunks must be bytes')
-        handle.write(chunk)
-        digest.update(chunk)
-    handle.flush()
-    os.fsync(handle.fileno())
-    return digest.hexdigest()
+        output.write(chunk)
+
+
+def _verify_open_artifact(handle, path, before, expected, deadline):
+    _require_stream_identity(path, handle.fileno(), before)
+    actual, _ = _stream_digest(handle, before.st_size, deadline=deadline)
+    if actual != expected:
+        raise compile_progress.ProgressCorrupt('compile artifact digest mismatch')
+    _require_stream_identity(path, handle.fileno(), before)
+    handle.seek(0)
 
 
 def _require_matching_stream_file(path, digest):
@@ -13650,12 +13697,22 @@ def _publish_stream_file(temporary, path, digest):
 
 
 def _write_durable_stream(path, chunks, *, deadline=None):
+    return _write_durable_producer(
+        path, partial(_copy_artifact_chunks, chunks=chunks), deadline=deadline)
+
+
+def _write_durable_producer(path, producer, *, deadline=None):
+    operational_deadline_active(deadline)
     temporary = path.with_name(f'.{path.name}.{uuid.uuid4().hex}.tmp')
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_BINARY', 0)
     descriptor = os.open(temporary, flags, 0o600)
     try:
         with os.fdopen(descriptor, 'wb') as handle:
-            digest = _write_stream_chunks(handle, chunks, deadline=deadline)
+            output = _ArtifactOutput(handle, deadline)
+            producer(output)
+            handle.flush()
+            os.fsync(handle.fileno())
+            digest = output.digest.hexdigest()
         operational_deadline_active(deadline)
         _harden_owner_only(temporary, 0o600)
         _publish_stream_file(temporary, path, digest)

@@ -1157,9 +1157,10 @@ pending. See `docs/research/2026-10-19-durable-compile-progress.md`.
 The uninstalled durable compile controller also stores lossless input snapshots in
 one existing queue-result artifact: content-addressed bytes inside the envelope,
 original partition/provenance metadata, prompt projections and target context.
-Its checkpoint binds the whole snapshot digest. It adds no recursively referenced
-artifact tree. The existing queue artifact size ceiling still requires real-workload
-qualification before routing installed compile entrypoints through this mechanism.
+Its checkpoint binds the canonical manifest of record digests. It adds no recursively
+referenced artifact tree. The streaming format replaces the uninstalled JSON/base64
+codec; source capture and batch planning still require incremental consumption
+before routing installed compile entrypoints through this mechanism.
 
 Owner-approved target (2026-10-19): large compile artifacts use streaming local
 file I/O under existing `run/queue-results/`, with immutable references in the
@@ -1170,3 +1171,13 @@ complete. A streaming file verifier alone is not that completion. No new runtime
 root, service or cloud dependency is required. This supersedes raising the inherited
 small-result ceiling as the solution for large snapshots; ordinary small queue
 results retain their existing compatibility contract during uninstalled development.
+
+Streaming snapshot implementation target within the approved artifact contract:
+one uncompressed ZIP64-capable queue-result file, containing digest-named raw
+byte members and individually addressable record metadata. No archive member is
+extracted into the filesystem. The queue still retains one immutable artifact;
+there are no recursive external blob references. A context-managed reader exposes
+record metadata and selected records, allowing the batch planner to avoid loading
+unselected source bodies. ZIP directory metadata is held in memory; source bodies
+are not loaded by opening the container. Python's standard library supplies the
+container format; there is no new package, runtime path or operational database.

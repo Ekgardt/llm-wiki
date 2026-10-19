@@ -319,7 +319,7 @@ def test_historical_read_checks_sequence_and_original_digest(work):
         queue.get_compile_event(checkpoint.work_id, sequence=checkpoint.sequence)
 
 
-def test_snapshot_restores_original_bytes_projection_and_provenance(compiler_case):
+def test_snapshot_restores_original_bytes_projection_and_provenance(compiler_case, work):
     import hashlib
 
     compiler, inputs, _ = compiler_case
@@ -332,58 +332,78 @@ def test_snapshot_restores_original_bytes_projection_and_provenance(compiler_cas
                                     hashlib.sha256(raw).hexdigest(), b'projected')
     captured = replace(inputs, dailies=(daily,), sources=(source,), vault_files=(source,),
                        partition_context=object())
-    data = controller.encode_compile_inputs(captured)
-    restored = controller.decode_compile_inputs(data)
+    saved_work = _archive_work(work, captured)
+    restored = controller.load_compile_inputs(*saved_work)
     assert restored == captured
     assert restored.partition_context is None
     assert restored.sources[0].content == raw
-    assert controller.encode_compile_inputs(restored) == data
+    assert controller.compile_inputs_digest(restored) == controller.compile_inputs_digest(captured)
 
 
 def test_snapshot_refuses_content_with_stale_hash(compiler_case):
     _, inputs, _ = compiler_case
     bad = replace(inputs, dailies=(replace(inputs.dailies[0], content=b'changed'),))
     with pytest.raises(ValueError, match='digest'):
-        controller.encode_compile_inputs(bad)
+        controller.compile_inputs_digest(bad)
+
+
+def _archive_members(inputs):
+    import io
+    import zipfile
+
+    handle = io.BytesIO()
+    digest = controller.compile_inputs_digest(inputs)
+    controller._write_archive_snapshot(inputs, digest, handle)
+    with zipfile.ZipFile(handle) as archive:
+        return {name: archive.read(name) for name in archive.namelist()}
+
+
+def _read_modified_archive(inputs, members):
+    import hashlib
+    import io
+    import zipfile
+
+    handle = io.BytesIO()
+    with zipfile.ZipFile(handle, 'w') as archive:
+        for name, content in members.items():
+            archive.writestr(name, content)
+    with zipfile.ZipFile(handle) as archive:
+        snapshot = controller.CompileInputArchive(archive, hashlib.sha256(members['manifest.json']).hexdigest())
+        return snapshot.materialize()
 
 
 def test_snapshot_refuses_tampered_blob(compiler_case):
+    _, inputs, _ = compiler_case
+    members = _archive_members(inputs)
+    key = next(name for name in members if name.startswith('blobs/'))
+    members[key] = b'altered'
+    with pytest.raises(ValueError, match='digest'):
+        _read_modified_archive(inputs, members)
+
+
+@pytest.mark.parametrize('mutation', ['unknown', 'noncanonical'])
+def test_snapshot_refuses_unknown_fields_and_noncanonical_data(compiler_case, mutation):
     import json
 
-    from reliable_memory import canonical_json_bytes
-
     _, inputs, _ = compiler_case
-    value = json.loads(controller.encode_compile_inputs(inputs))
-    key = next(iter(value['blobs']))
-    value['blobs'][key] = 'YWx0ZXJlZA=='
+    members = _archive_members(inputs)
+    if mutation == 'noncanonical':
+        members['manifest.json'] += b'\n'
+    else:
+        value = json.loads(members['manifest.json'])
+        value['records']['future_field'] = 'must not silently lose'
+        members['manifest.json'] = controller._snapshot_json(value)
     with pytest.raises(ValueError):
-        controller.decode_compile_inputs(canonical_json_bytes(value))
-
-
-def test_snapshot_refuses_unknown_fields_and_noncanonical_data(compiler_case):
-    import json
-
-    from reliable_memory import canonical_json_bytes
-
-    _, inputs, _ = compiler_case
-    data = controller.encode_compile_inputs(inputs)
-    with pytest.raises(ValueError):
-        controller.decode_compile_inputs(data + b'\n')
-    value = json.loads(data)
-    value['inputs']['future_field'] = 'must not silently lose'
-    with pytest.raises(ValueError):
-        controller.decode_compile_inputs(canonical_json_bytes(value))
+        _read_modified_archive(inputs, members)
 
 
 def test_snapshot_survives_queue_reopen_without_reading_sources(compiler_case, work):
-    import hashlib
-
     import compile_progress as progress
     import memory_queue
 
     _, inputs, _ = compiler_case
     queue, lease, _ = work
-    digest = hashlib.sha256(controller.encode_compile_inputs(inputs)).hexdigest()
+    digest = controller.compile_inputs_digest(inputs)
     event = progress.CompileEvent('a' * 64, lease.id, 0, digest, 'pending', 'ready', {})
     queue.record_compile_event(lease, event)
     saved = controller.save_compile_inputs(queue, lease, replace(event, sequence=1,
@@ -404,12 +424,10 @@ def test_snapshot_rejects_changed_digest_before_artifact_write(compiler_case, wo
 
 
 def _captured_work(work, inputs):
-    import hashlib
-
     import compile_progress as progress
 
     queue, lease, _ = work
-    digest = hashlib.sha256(controller.encode_compile_inputs(inputs)).hexdigest()
+    digest = controller.compile_inputs_digest(inputs)
     event = progress.CompileEvent('9' * 64, lease.id, 0, digest, 'pending', 'ready', {})
     queue.record_compile_event(lease, event)
     saved = controller.save_compile_inputs(queue, lease, replace(event, sequence=1,
@@ -543,3 +561,131 @@ def test_stream_digest_reads_only_initial_extent_even_if_producer_never_ends():
     _, size = memory_queue._stream_digest(handle, io.DEFAULT_BUFFER_SIZE * 3)
     assert size == io.DEFAULT_BUFFER_SIZE * 3
     assert handle.read.call_count == 3
+
+
+def test_archive_snapshot_reads_selected_record_without_loading_other_bodies(compiler_case, work):
+    import hashlib
+
+    compiler, inputs, _ = compiler_case
+    large = b'z' * (20 * 1024 * 1024)
+    source = compiler.SourceSnapshot('knowledge/notes/large.md', large,
+                                    hashlib.sha256(large).hexdigest())
+    inputs = replace(inputs, sources=(source,), vault_files=(source,))
+    saved_work = _archive_work(work, inputs)
+    with controller.open_compile_inputs(*saved_work) as snapshot:
+        assert snapshot.record_count('sources') == 1
+        assert snapshot.record_metadata('sources', 0)['logical_path'] == source.logical_path
+        assert snapshot.record('sources', 0) == source
+        assert snapshot.materialize() == inputs
+
+
+def _archive_work(work, inputs):
+    import compile_progress as progress
+
+    queue, lease, _ = work
+    event = progress.CompileEvent('8' * 64, lease.id, 0,
+                                  controller.compile_inputs_digest(inputs), 'pending', 'ready', {})
+    queue.record_compile_event(lease, event)
+    saved = controller.save_compile_inputs(queue, lease, replace(event, sequence=1,
+                                            stage='snapshot_ready'), inputs)
+    return queue, lease, saved
+
+
+def test_archive_snapshot_open_does_not_load_blob_members(compiler_case, work, monkeypatch):
+    import zipfile
+
+    _, inputs, _ = compiler_case
+    saved_work = _archive_work(work, inputs)
+    original = zipfile.ZipFile.read
+
+    def guarded(archive, name, *args, **kwargs):
+        assert not str(name).startswith('blobs/')
+        return original(archive, name, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, 'read', guarded)
+    with controller.open_compile_inputs(*saved_work) as snapshot:
+        assert snapshot.record_count('dailies') == len(inputs.dailies)
+        assert snapshot.record_metadata('dailies', 0)['sha256'] == inputs.dailies[0].sha256
+
+
+def test_archive_snapshot_reader_cannot_outlive_context(compiler_case, work):
+    _, inputs, _ = compiler_case
+    saved_work = _archive_work(work, inputs)
+    with controller.open_compile_inputs(*saved_work) as snapshot:
+        assert snapshot.record_count('dailies')
+    with pytest.raises(ValueError, match='closed'):
+        snapshot.record('dailies', 0)
+
+
+def test_archive_snapshot_retry_after_event_failure_is_byte_identical(compiler_case, work, monkeypatch):
+    import compile_progress as progress
+
+    _, inputs, _ = compiler_case
+    queue, lease, _ = work
+    pending = progress.CompileEvent('8' * 64, lease.id, 0,
+                                   controller.compile_inputs_digest(inputs), 'pending', 'ready', {})
+    queue.record_compile_event(lease, pending)
+    ready = replace(pending, sequence=1, stage='snapshot_ready')
+
+    def interrupted(*args):
+        raise RuntimeError('event commit failed')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(queue, 'record_compile_event', interrupted)
+        with pytest.raises(RuntimeError, match='event commit failed'):
+            controller.save_compile_inputs(queue, lease, ready, inputs)
+    saved = controller.save_compile_inputs(queue, lease, ready, inputs)
+    assert controller.load_compile_inputs(queue, lease, saved) == inputs
+
+
+def test_archive_snapshot_restoration_rejects_original_digest_mismatch(compiler_case):
+    compiler, inputs, _ = compiler_case
+    from dataclasses import asdict
+
+    value = asdict(inputs.dailies[0])
+    value.update(original_content=b'changed', original_sha256='0' * 64)
+    with pytest.raises(ValueError, match='digest mismatch'):
+        controller._restored_archive_record(compiler.DailySnapshot, value)
+
+
+@pytest.mark.parametrize('records', [None, [], {'dailies': {}, 'sources': [],
+                                              'targets': [], 'vault_files': []}])
+def test_archive_snapshot_rejects_malformed_record_lists(records):
+    import hashlib
+    import io
+    import zipfile
+
+    import compile_progress as progress
+
+    data = controller._snapshot_json({'schema': controller._ARCHIVE_SCHEMA, 'records': records})
+    handle = io.BytesIO()
+    with zipfile.ZipFile(handle, 'w') as archive:
+        archive.writestr('manifest.json', data)
+    with zipfile.ZipFile(handle) as archive:
+        with pytest.raises(progress.ProgressCorrupt):
+            controller.CompileInputArchive(archive, hashlib.sha256(data).hexdigest())
+
+
+def test_open_compile_artifact_rejects_replacement_during_read(work):
+    import memory_queue
+
+    queue, _, checkpoint = work
+    path = queue.state_root / checkpoint.details['artifact']['reference']
+    with pytest.raises(memory_queue.QueueOperationError):
+        with queue.open_compile_artifact(checkpoint) as handle:
+            assert handle.read(1)
+            path.write_bytes(b'changed')
+
+
+def test_open_compile_artifact_refuses_symlink(work, tmp_path):
+    import memory_queue
+
+    queue, _, checkpoint = work
+    path = queue.state_root / checkpoint.details['artifact']['reference']
+    target = tmp_path / 'elsewhere'
+    target.write_bytes(path.read_bytes())
+    path.unlink()
+    path.symlink_to(target)
+    with pytest.raises(memory_queue.QueueOperationError):
+        with queue.open_compile_artifact(checkpoint):
+            pytest.fail('symlink artifact was opened')

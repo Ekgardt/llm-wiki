@@ -619,3 +619,65 @@ and deadline cases were rerun separately: 10 streaming tests passed on each
 version. An intermediate additional 3.12 snapshot/health run had 45 passed.
 Ruff, diff checks and dependency compatibility checks passed. The slower 3.10
 run waited on filesystem journal commits; durability checks were not relaxed.
+
+## Record-addressable snapshot container (2026-10-19)
+
+The next slice replaces the uninstalled JSON/base64 snapshot codec with one
+uncompressed ZIP64-capable artifact. Rechecked the three primary sources above
+and Python 3.10's maintained standard-library contract:
+https://docs.python.org/3.10/library/zipfile.html
+ZIP_STORED avoids decompression and a compression dependency; individual records
+and digest-named byte members permit selected reads. JSON/base64 duplicates
+whole-input data; plain sequential JSON/tar requires scanning earlier records;
+a separate blob tree would change backup and retention reachability. The selected
+format retains the existing single-file contract. Its central directory and
+record-digest manifest cost memory proportional to record count; selected source
+bodies still cost their actual size. This is not a constant-memory claim for the
+whole compiler. ZIP64 handles the format's large-file case without a new product
+size setting. No extraction API is used, and compressed/encrypted or duplicate
+members, unknown names, missing records and invalid digest lists are refused.
+
+The producer callback runs inside the existing queue durability implementation.
+Fixed container timestamps make retries byte-identical. The reader owns a verified
+seekable descriptor for its context lifetime; the whole artifact is hashed in
+bounded reads before use, and descriptor/path identity is rechecked on exit.
+A logical checkpoint binds the canonical manifest of record digests; each record
+binds original bytes, prompt projection and provenance. Native frame metadata is
+also an addressed blob, so opening the manifest does not load all frame text.
+Reading a record verifies its metadata and byte digests, including original daily
+bytes. Existing DLP dispatch, publication and source-admissibility rules are not
+replaced by container integrity.
+
+Three initial missing-API tests failed before implementation. Additional red tests
+exposed malformed record-list acceptance and missing original-digest validation;
+both were corrected. Regression coverage includes a snapshot over the former
+small-result ceiling, metadata-only opening, context lifetime, exact non-UTF8 and
+Unicode provenance round trips, tampering, schema/canonicality checks, and retry
+after artifact publication but before event commit. A completed journal event
+remains immutable: callers resume it instead of appending the same revision again.
+
+The old codec's repository uses were exclusively its own tests and the replaced
+save/load pair. It was never installed, so it was removed rather than retained as
+a parallel production implementation; its provenance and corruption tests now
+exercise the replacement. The explicit `load_compile_inputs` convenience still
+materializes a complete value for current semantic-replay callers. Source capture,
+metadata-first batching and installed entrypoint integration remain open; this
+slice does not close point 7 or certify the installed nightly pipeline.
+
+Isolated measurements exclude already-captured input bytes. Writing, verifying
+and opening metadata for a 32 MiB source used 64,690 additional traced Python
+bytes (0.369 s); for 128 MiB, 23,187 bytes (1.415 s). The first run includes lazy
+initialization. These are codec/I/O measurements, not RSS, full capture, model
+cost or complete useful-cycle evidence. The source appears in two record groups
+but its bytes are stored once. Test environments retain the locked package sets:
+65 compatible packages on Python 3.12.3 and 67 on Python 3.10.20; no new package
+was introduced.
+
+Read-only live-context qualification captured 7,500 records (3,750 sources,
+3,747 targets, three vault files, no dailies). The container occupied 32,994,280
+bytes and round-tripped exactly; encoding added a traced peak of 7,226,869 bytes,
+with encoding plus eager round-trip taking 3.038 s. This excludes source-capture
+allocations and is not a direct before/after comparison against the earlier
+7,472-record measurement. Descriptor replacement and symlink refusal tests passed
+on both Python versions. All 67 changed/new functions satisfy CCN <= 5, at most
+two ifs and nesting <= 2; repository Ruff checks pass.
