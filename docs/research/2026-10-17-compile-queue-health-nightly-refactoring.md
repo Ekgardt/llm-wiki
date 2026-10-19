@@ -1640,3 +1640,47 @@ The import is now formatted by that same Ruff version. A separate full
 lizard/AST checks succeed. The existing CI rule caught the original error and
 remains enabled. No behavioral code, dependencies, or checks were weakened.
 Subsequent checks are invoked independently and each exit status is inspected.
+
+## 2026-10-19: stale model context is terminal even without structured claims
+
+Live publication twice failed against the progress-note precondition after the
+agent edited that note during compilation. Each plan carries immutable target
+snapshots. `_ApplyPlan.assess_claims` checked their freshness only after the
+`claims` guard; plans without structured claims skipped that check. Their
+transaction refused correctly, but `_published` retried the same stale target
+preconditions instead of classifying this as `compile_snapshot_changed`.
+
+Move the existing snapshot check before the claims guard and reuse the manifest
+for claim assessment when needed. No context hash is refreshed to make an old
+plan pass. No read dependency, transaction precondition, receipt check, cache
+validation or completeness review is removed. The existing committed-receipt
+shortcut still runs first. No new retry limit, setting, path or dependency is
+introduced. Derived-tree races remain distinct from changed model inputs.
+
+The two new public-apply regressions cover a no-claims plan whose input page
+changes before preparation and one whose page changes during publication. Both
+fail on the original implementation; after the fix the latter attempts publication
+once, then refuses the stale snapshot, preserving the concurrent edit and issuing
+no success receipt. The existing tests also exercise cached resolution without
+LLM calls, committed replay, interrupted transaction recovery and claim-tree races.
+
+Research checked 2026-10-19:
+- [PostgreSQL transaction isolation](https://www.postgresql.org/docs/current/transaction-iso.html):
+  a serialization conflict needs a fresh transaction snapshot, not blind reuse of stale reads.
+- [SQLite isolation](https://sqlite.org/isolation.html): serialized writes do not make
+  application decisions based on an older read valid. This product retains rollback-journal mode.
+- [AWS retry guidance](https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/retry-backoff.html):
+  distinguish transient from non-transient failures and preserve idempotency.
+
+These sources support the failure classification; they do not establish that
+Markdown transactions have database-wide isolation. The simpler reuse of the
+existing freshness check was selected over adding another plan store (validated
+plans are already cached), overwriting stale hashes, or holding a writer gate
+through model calls. A genuinely changed model input still requires a fresh plan;
+this change does not pretend to solve all quality refusals or concurrent edits.
+
+Evidence: `logs/step7-publication-snapshot-red-20261019.log`,
+`logs/step7-publication-snapshot-tests-20261019.log`. Python 3.12: 96 passed;
+Ruff over scripts/tests/benchmark passed separately; cumulative lizard/AST: 482
+changed functions, no CCN/branch/nesting violations.
+Python 3.10: the same 96 tests passed; its 66 installed packages pass `uv pip check`.

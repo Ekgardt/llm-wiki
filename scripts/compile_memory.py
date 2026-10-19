@@ -6276,10 +6276,11 @@ class _ApplyPlan:
 
     def assess_claims(self) -> None:
         """Assess every claim before the gate; nothing is committed here."""
+        manifest = snapshot_claim_tree(ROOT)
+        _require_current_compile_targets(self.inputs, manifest)
         if not _plan_carries_claims(self.operations):
             return
-        self.claim_tree_manifest = snapshot_claim_tree(ROOT)
-        _require_current_compile_targets(self.inputs, self.claim_tree_manifest)
+        self.claim_tree_manifest = manifest
         self.claim_index = ClaimIndex(self.coordinator.state_root, vault=ROOT)
         self.claim_index.rebuild(self._claim_tree_paths,
                                  ledger_snapshot=self.claim_ledger_snapshot)

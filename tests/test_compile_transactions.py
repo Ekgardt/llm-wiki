@@ -2873,3 +2873,53 @@ def test_publication_capacity_stops_later_batches(vault, monkeypatch):
     with pytest.raises(IndexCapacityError, match='shared publication capacity'):
         cm._run(Namespace(file=None, all=False, dry_run=False, trigger='manual'))
     assert calls == [batches[0]]
+
+
+def test_plan_without_claims_refuses_changed_context_before_prepare(vault, monkeypatch):
+    import compile_memory as cm
+    from markdown_transaction import TransactionFailure
+
+    root, state_root = vault
+    daily = _daily(root)
+    page = root / 'knowledge/notes/context.md'
+    page.write_bytes(b'# Original context\n')
+    inputs = cm.snapshot_compile_inputs([daily])
+    page.write_bytes(b'# Changed context\n')
+    coordinator = MarkdownCoordinator(root, state_root)
+    monkeypatch.setattr(coordinator, 'prepare', lambda *a, **kw: pytest.fail('stale plan reached prepare'))
+    with pytest.raises(TransactionFailure) as refusal:
+        cm.apply_compile_plan(inputs, _semantic_plan(), action_key='e' * 64,
+                              trigger='manual', coordinator=coordinator)
+    assert refusal.value.code == 'compile_snapshot_changed'
+    assert page.read_bytes() == b'# Changed context\n'
+    assert not (root / 'knowledge/notes/exact-byte-pattern.md').exists()
+    assert cm.read_compile_receipt_v2(inputs.dailies[0].sha256, coordinator) is None
+
+
+def test_context_race_without_claims_does_not_repeat_stale_publication(vault, monkeypatch):
+    import compile_memory as cm
+    from markdown_transaction import TransactionFailure
+
+    root, state_root = vault
+    daily = _daily(root)
+    page = root / 'knowledge/notes/context.md'
+    page.write_bytes(b'# Original context\n')
+    inputs = cm.snapshot_compile_inputs([daily])
+    coordinator = MarkdownCoordinator(root, state_root)
+    original = cm._ApplyPlan._build_changes
+    publications = []
+
+    def race(publication):
+        publications.append(publication)
+        page.write_bytes(b'# Concurrent edit\n')
+        original(publication)
+
+    monkeypatch.setattr(cm._ApplyPlan, '_build_changes', race)
+    with pytest.raises(TransactionFailure) as refusal:
+        cm.apply_compile_plan(inputs, _semantic_plan(), action_key='e' * 64,
+                              trigger='manual', coordinator=coordinator)
+    assert refusal.value.code == 'compile_snapshot_changed'
+    assert len(publications) == 1
+    assert page.read_bytes() == b'# Concurrent edit\n'
+    assert not (root / 'knowledge/notes/exact-byte-pattern.md').exists()
+    assert cm.read_compile_receipt_v2(inputs.dailies[0].sha256, coordinator) is None
