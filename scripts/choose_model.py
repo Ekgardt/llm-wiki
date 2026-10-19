@@ -1,17 +1,8 @@
 #!/usr/bin/env python3
-"""Choose the model the memory pipeline calls, from those the user's provider offers.
+"""Select one subscription model for all memory work in llm-wiki.toml.
 
-The installers run this before the install transaction and export the answer, so
-`integration_hook_config.provider_environment` persists it into the hooks' env and
-the scheduler units. The provider is the one `llm_client` would pick. Claude has no
-model listing, so its documented aliases are each asked one short question and only
-those that answer are offered; Codex, Ollama and OpenAI list theirs. OpenCode's
-model is set in OpenCode's own configuration and is not chosen here.
-See docs/research/2026-09-29-the-installer-asks-which-model.md.
-
-Prints one JSON object on stdout: provider, variable, model ("" is the provider's
-own default) and source (chosen, flag, previous, default, none). Messages go to
-stderr.
+Catalog entries are candidates, not entitlement evidence. A selected model must
+complete one protected short request before its choice is atomically saved.
 """
 
 from __future__ import annotations
@@ -21,6 +12,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import urllib.request
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -44,10 +36,6 @@ MODEL_VARIABLES = {
 # there is no command that lists them for an account.
 CLAUDE_ALIASES = ("sonnet", "opus", "haiku", "fable")
 PROBE_PROMPT = "Reply with the single word OK."
-# A local CLI answering a local question, as llm_client's `claude --help` probe.
-LISTING_TIMEOUT_SECONDS = 30
-# Every listing reply is read to this size at most, as llm_client reads Ollama's tags.
-MAX_LISTING_BYTES = 1024 * 1024
 
 
 def _say(message: str) -> None:
@@ -101,22 +89,45 @@ def _named(items: object) -> list[str]:
     return [name for name in map(_model_name, items) if name]
 
 
-def _codex_models(_descriptor: llm_client.ProviderDescriptor) -> list[str]:
-    """`codex debug models` prints the catalog as JSON: a list, or an object holding one."""
-    completed = subprocess.run(
-        [llm_client._find_codex_binary() or "codex", "debug", "models"],
-        capture_output=True,
-        text=True,
-        timeout=LISTING_TIMEOUT_SECONDS,
-        check=True,
-    )
-    payload = json.loads(completed.stdout[:MAX_LISTING_BYTES])
-    return _named(payload.get("models") if isinstance(payload, dict) else payload)
+def _codex_catalog():
+    """Ask the installed CLI; hidden entries are not menu choices."""
+    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+        subprocess.run(
+            [llm_client._find_codex_binary() or "codex", "debug", "models"],
+            stdout=output, stderr=errors, timeout=llm_client._timeout_s(), check=True,
+        )
+        size = output.tell()
+        if size > _catalog_byte_budget():
+            raise ValueError('provider catalog exceeds the metadata byte budget')
+        output.seek(0)
+        payload = json.load(output)
+    records = payload.get('models') if isinstance(payload, dict) else payload
+    return _visible_models(records)
+
+
+def _visible_models(records):
+    if not isinstance(records, list):
+        raise ValueError('provider catalog is not a model list')
+    return [row for row in records if isinstance(row, dict) and row.get('visibility', 'list') == 'list']
+
+
+def _codex_models(_descriptor):
+    return _named(_codex_catalog())
+
+
+def _catalog_byte_budget():
+    from settings import setting_value
+
+    return setting_value("provider.catalog_max_bytes")
 
 
 def _fetched_json(request: urllib.request.Request) -> object:
-    with llm_client.open_provider_request(request, timeout=LISTING_TIMEOUT_SECONDS) as response:
-        return json.loads(response.read(MAX_LISTING_BYTES).decode("utf-8"))
+    with llm_client.open_provider_request(request, timeout=llm_client._timeout_s()) as response:
+        budget = _catalog_byte_budget()
+        payload = response.read(budget + 1)
+        if len(payload) > budget:
+            raise ValueError('provider catalog exceeds the metadata byte budget')
+        return json.loads(payload.decode("utf-8"))
 
 
 def _ollama_models(descriptor: llm_client.ProviderDescriptor) -> list[str]:
@@ -152,37 +163,113 @@ def offered_models(descriptor: llm_client.ProviderDescriptor) -> list[str]:
         return []
 
 
-# --- The current choice ---------------------------------------------------------------
+# --- One vault-wide selection ---------------------------------------------------------
 
 
-def _settings_env(home: Path) -> dict[str, object]:
-    """The env the installer wrote into Claude's settings, where the last choice lives."""
-    try:
-        settings = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    env = settings.get("env") if isinstance(settings, dict) else None
-    return env if isinstance(env, dict) else {}
+def _discovery_provider(provider):
+    import model_selection
+
+    with model_selection.using(None):
+        candidates = llm_client.provider_candidates(provider)
+        return next((candidate for candidate in candidates if llm_client.probe_candidate(candidate)), None)
 
 
-def previous_choice(variable: str, home: Path) -> str:
-    """This shell's value, else the one the last install persisted, else ""."""
-    value = os.environ.get(variable) or _settings_env(home).get(variable) or ""
-    return str(value).strip()
+def _provider(args):
+    import model_selection
+
+    chosen = model_selection.current(args.root)
+    requested = args.provider or (chosen.provider if chosen else llm_client.forced_provider())
+    descriptor = _discovery_provider(requested)
+    if descriptor is None:
+        raise ValueError('no provider is available; sign in to the subscription CLI first')
+    if descriptor.provider not in MODEL_VARIABLES:
+        raise ValueError('this provider adapter cannot select an explicit model')
+    return descriptor
 
 
-# --- Asking ---------------------------------------------------------------------------
+def _show(args):
+    import model_selection
+
+    chosen = model_selection.current(args.root)
+    if chosen is None:
+        return {'status': 'unconfigured', 'source': str(args.root / 'llm-wiki.toml')}
+    return {**model_selection.selection_table(chosen), 'status': 'configured',
+            'source': str(args.root / 'llm-wiki.toml')}
 
 
-def _menu(models: Sequence[str], current: str) -> str:
-    lines = [f"  {number}. {model}" for number, model in enumerate(models, start=1)]
-    shown = current or "the provider's own default"
-    return "\n".join([*lines, f"Enter keeps {shown}; a number or any model name chooses."])
+def _list(args):
+    descriptor = _provider(args)
+    models = offered_models(descriptor)
+    if not models:
+        raise ValueError('provider returned no selectable models')
+    return {'provider': descriptor.provider, 'models': models,
+            'access': 'catalog candidates; selection is verified with one short request'}
 
 
-def resolved_answer(answer: str, models: Sequence[str], current: str) -> str:
-    """Enter keeps the current choice, a listed number picks it, anything else is a name."""
-    answer = answer.strip()
+def _codex_reasoning(model, requested):
+    record = _catalog_model(model)
+    if record is None:
+        raise ValueError('selected model is absent from the visible provider catalog')
+    effort = requested or record.get('default_reasoning_level')
+    levels = [item.get('effort') for item in record.get('supported_reasoning_levels', [])]
+    if effort not in levels:
+        raise ValueError(f'unsupported reasoning setting; provider offers {levels}')
+    return effort
+
+
+def _catalog_model(model):
+    return next((row for row in _codex_catalog() if _model_name(row) == model), None)
+
+
+def _chosen(descriptor, model, reasoning):
+    import model_selection
+
+    if descriptor.provider == 'codex':
+        reasoning = _codex_reasoning(model, reasoning)
+    return model_selection.selection(f'{descriptor.provider}/{model}', reasoning)
+
+
+def _verified_selection(chosen):
+    import model_selection
+
+    with model_selection.using(chosen):
+        descriptor, = llm_client.provider_candidates(chosen.provider)
+        refused = refusal(descriptor, chosen.model)
+    if refused is not None:
+        raise ValueError(f'model verification failed; selection unchanged: {refused}')
+
+
+def _save_choice(args, descriptor, model, expected):
+    import model_selection
+
+    chosen = _chosen(descriptor, model, args.reasoning)
+    _verified_selection(chosen)
+    model_selection.save(chosen, expected=expected, root=args.root)
+    return {**model_selection.selection_table(chosen), 'provider': chosen.provider,
+            'status': 'saved', 'source': str(args.root / 'llm-wiki.toml')}
+
+
+def _set(args):
+    import model_selection
+
+    expected = model_selection.file_bytes(args.root)
+    provider, separator, model = (args.choice or '').partition('/')
+    if not separator:
+        raise ValueError('set requires provider/model, for example codex/gpt-6.1-sol')
+    args.provider = provider
+    _keep_reasoning(args, _current_for(provider, args.root), provider)
+    return _save_choice(args, _provider(args), model, expected)
+
+
+def _menu_choice(models, current):
+    _say('Catalog candidates (access is checked after selection):')
+    for number, model in enumerate(models, start=1):
+        _say(f'  {number}. {model}')
+    answer = input(f'Model number or name [{current or "no selection"}]: ').strip()
+    return _menu_answer(answer, models, current)
+
+
+def _menu_answer(answer, models, current):
     if not answer:
         return current
     if answer.isdigit() and 1 <= int(answer) <= len(models):
@@ -190,93 +277,75 @@ def resolved_answer(answer: str, models: Sequence[str], current: str) -> str:
     return answer
 
 
-def _verified(descriptor: llm_client.ProviderDescriptor, model: str) -> str | None:
-    """The provider's default needs no check; a named model gets one short call."""
+def _select(args):
+    import model_selection
+
+    expected = model_selection.file_bytes(args.root)
+    descriptor = _provider(args)
+    chosen = _current_for(descriptor.provider, args.root)
+    model = _requested_model(args, descriptor, chosen)
+    if sys.stdin.isatty() and not args.model:
+        model = _menu_choice(offered_models(descriptor), model)
     if not model:
-        return None
-    return refusal(descriptor, model)
+        return {'status': 'unconfigured', 'model': '', 'provider': descriptor.provider}
+    _keep_reasoning(args, chosen, descriptor.provider)
+    return _save_choice(args, descriptor, model, expected)
 
 
-def chosen_interactively(
-    descriptor: llm_client.ProviderDescriptor,
-    models: Sequence[str],
-    current: str,
-    read: Callable[[str], str] = input,
-) -> str:
-    """Ask until the person names a model the provider answers with, or keeps the current one."""
-    _say(f"Models {descriptor.provider} offers you:\n{_menu(models, current)}")
-    while True:
-        model = resolved_answer(read("Model: "), models, current)
-        refused = _verified(descriptor, model)
-        if refused is None:
-            return model
-        _say(f"{model} is not available to you: {refused}")
+def _requested_model(args, descriptor, chosen):
+    inherited = os.environ.get(MODEL_VARIABLES[descriptor.provider], '')
+    return args.model or getattr(chosen, 'model', inherited)
 
 
-# --- Deciding -------------------------------------------------------------------------
+def _keep_reasoning(args, chosen, provider):
+    inherited = _initial_reasoning(provider)
+    args.reasoning = args.reasoning or getattr(chosen, 'reasoning', inherited)
 
 
-def _without_terminal(descriptor, flag: str | None, current: str) -> tuple[str, str]:
-    """No one to ask: the flag (verified), else the last choice, else the default."""
-    if flag:
-        return _flagged(descriptor, flag)
-    return (current, "previous") if current else ("", "default")
-
-
-def _flagged(descriptor: llm_client.ProviderDescriptor, flag: str) -> tuple[str, str]:
-    refused = refusal(descriptor, flag)
-    if refused is not None:
-        raise SystemExit(f"choose_model: --model {flag} is not available: {refused}")
-    return flag, "flag"
-
-
-def decide(
-    descriptor: llm_client.ProviderDescriptor,
-    home: Path,
-    flag: str | None,
-    interactive: bool,
-    read: Callable[[str], str] = input,
-) -> dict[str, str]:
-    variable = MODEL_VARIABLES[descriptor.provider]
-    current = previous_choice(variable, home)
-    if interactive and not flag:
-        model = chosen_interactively(descriptor, offered_models(descriptor), current, read)
-        return _answer(descriptor.provider, variable, model, "chosen")
-    model, source = _without_terminal(descriptor, flag, current)
-    return _answer(descriptor.provider, variable, model, source)
-
-
-def _answer(provider: str, variable: str, model: str, source: str) -> dict[str, str]:
-    return {"provider": provider, "variable": variable, "model": model, "source": source}
-
-
-def _nothing_to_choose(descriptor: llm_client.ProviderDescriptor | None) -> dict[str, str] | None:
-    """No provider, or one whose model is not ours to set (OpenCode, the test double)."""
-    if descriptor is None:
-        _say("choose_model: no provider answered; the model is chosen once one is installed")
-        return _answer("", "", "", "none")
-    if descriptor.provider not in MODEL_VARIABLES:
-        _say(f"choose_model: {descriptor.provider} sets its model in its own configuration")
-        return _answer(descriptor.provider, "", "", "none")
+def _initial_reasoning(provider):
+    if provider == 'codex':
+        return os.environ.get('MEMORY_CODEX_REASONING')
     return None
 
 
-def _report(answer: dict[str, str]) -> None:
-    shown = answer["model"] or "the provider's own default"
-    _say(f"choose_model: {answer['provider']} will use {shown} ({answer['source']})")
+def _current_for(provider, root):
+    import model_selection
+
+    chosen = model_selection.current(root)
+    if chosen is not None and chosen.provider == provider:
+        return chosen
+    return None
+
+
+_COMMANDS = {'show': _show, 'list': _list, 'set': _set, 'select': _select}
+
+
+def _arguments(argv):
+    import settings
+
+    parser = argparse.ArgumentParser(description='Choose one model for every LLM Wiki call.')
+    parser.add_argument('command', nargs='?', default='select', choices=tuple(_COMMANDS))
+    parser.add_argument('choice', nargs='?', help='Provider/model identifier for set')
+    parser.add_argument('--provider', choices=tuple(MODEL_VARIABLES))
+    parser.add_argument('--reasoning', help='Reasoning level offered by the selected model')
+    parser.add_argument('--model', help='Installer-compatible explicit model selection')
+    parser.add_argument('--home', type=Path, help=argparse.SUPPRESS)
+    parser.add_argument('--root', type=Path, default=settings.settings_path().parent)
+    return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", help="Use this model; it is checked with one short call.")
-    parser.add_argument("--home", type=Path, default=Path.home())
-    args = parser.parse_args(argv)
-    descriptor = detected_provider()
-    answer = _nothing_to_choose(descriptor) or decide(descriptor, args.home, args.model, sys.stdin.isatty())
-    _report(answer)
-    print(json.dumps(answer))
+    from model_selection import using_root
+
+    try:
+        args = _arguments(argv)
+        with using_root(args.root):
+            print(json.dumps(_COMMANDS[args.command](args)))
+    except (OSError, ValueError, RuntimeError) as error:
+        _say(f'choose_model: {error}')
+        return 1
     return 0
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     raise SystemExit(main())

@@ -230,7 +230,7 @@ def _cron_environment(root: Path, state_root: Path, uv_path: Path) -> list[str]:
     values = {
         "LLM_WIKI_ROOT": str(root),
         "LLM_WIKI_STATE_ROOT": str(state_root),
-        **dict(sorted(provider_environment().items())),
+        **dict(sorted(provider_environment(root).items())),
         "PATH": scheduled_path(uv_path, CRON_DEFAULT_PATH),
     }
     return [f"{key}={cron_quote(value)}" for key, value in values.items()]

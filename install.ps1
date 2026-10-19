@@ -537,9 +537,8 @@ if ($Model) { $chooserArgs += @("--model", $Model) }
 $modelChoice = (& uv @chooserArgs | Out-String).Trim()
 if ($LASTEXITCODE -ne 0) { Fail "Model choice failed" }
 $modelAnswer = $modelChoice | ConvertFrom-Json
-if ($modelAnswer.variable -and $modelAnswer.model) {
-    Set-Item -Path "Env:$($modelAnswer.variable)" -Value $modelAnswer.model
-    Ok "Memory model: $($modelAnswer.model)"
+if ($modelAnswer.model) {
+    Ok "Memory model saved in llm-wiki.toml: $($modelAnswer.model)"
 }
 
 # --- 6. Register Task Scheduler -----------------------------------

@@ -429,14 +429,21 @@ CLAUDE_ENV_KEYS = ("LLM_WIKI_ROOT", "LLM_WIKI_STATE_ROOT", *PROVIDER_ENV_KEYS)
 _UNPERSISTED_PROVIDERS = frozenset({"fake"})
 
 
-def provider_environment() -> dict[str, str]:
+def provider_environment(root: Path | None = None) -> dict[str, str]:
     """The provider variables set in the installing process, verbatim."""
     import os
 
     found = {key: os.environ.get(key, "").strip() for key in PROVIDER_ENV_KEYS}
     if found.get("MEMORY_LLM_PROVIDER", "").casefold() in _UNPERSISTED_PROVIDERS:
         return {}
-    return {key: value for key, value in found.items() if value}
+    return _provider_projection(found, root)
+
+
+def _provider_projection(found, root):
+    from model_selection import MODEL_ENV_KEYS, current
+
+    excluded = MODEL_ENV_KEYS if current(root) is not None else frozenset()
+    return {key: value for key, value in found.items() if value and key not in excluded}
 
 
 def _family_error(family: _HookFamily, suffix: str) -> InstallControlError:
@@ -774,7 +781,7 @@ def claude_settings_resource(
     env = {
         "LLM_WIKI_ROOT": str(_absolute_destination(vault_root)),
         "LLM_WIKI_STATE_ROOT": str(_absolute_destination(state_root)),
-        **provider_environment(),
+        **provider_environment(vault_root),
     }
     return _hook_family_resource(
         resource_id="claude-user-settings",
@@ -899,7 +906,7 @@ def codex_launch_args(root: Path, script: str, tail: Sequence[str],
     target = root / "scripts" / script
     if script not in (*OUR_CODEX_SCRIPTS, "mcp_server.py"):
         raise ValueError("invalid installed Codex target")
-    installed = provider_environment() if bundle is None else bundle
+    installed = provider_environment(root) if bundle is None else bundle
     return ["run", "--locked", "--no-sync", "--directory", str(root), "python", "-c",
             codex_provider_bootstrap(), codex_provider_payload(installed),
             f"scripts/{script}" if relative_target else str(target), *tail]
@@ -1156,7 +1163,7 @@ def codex_hooks_resource(
         path=path,
         family=CODEX_FAMILY,
         desired=_family_desired(_codex_resource_template(template, root,
-            provider_environment() if provider_bundle is None else provider_bundle), {}, CODEX_FAMILY),
+            provider_environment(root) if provider_bundle is None else provider_bundle), {}, CODEX_FAMILY),
         config_existed=path.exists() if config_existed is None else config_existed,
         finish=_no_finish,
     )

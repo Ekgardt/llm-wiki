@@ -43,6 +43,7 @@ REPLACED = {
     "generation.nightly_seconds": 2131,
     "generation.post_compile_seconds": 2131,
     "provider.draft_ceiling_seconds": 600,
+    "provider.catalog_max_bytes": 1024 * 1024,
     # Not a replaced constant: recall and get_decisions had MCP_OPERATION_SECONDS (10 s);
     # 14 s is the budget measured for the reranker (B-9).
     "mcp.retrieval_seconds": 14,

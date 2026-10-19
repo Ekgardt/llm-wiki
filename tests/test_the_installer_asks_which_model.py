@@ -27,7 +27,10 @@ import llm_client  # noqa: E402
 
 from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT  # noqa: E402
 
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="a shell stub stands in for the CLI")
+pytestmark = [
+    pytest.mark.usefixtures("unconfigured_model_settings"),
+    pytest.mark.skipif(sys.platform == "win32", reason="a shell stub stands in for the CLI"),
+]
 
 # A Claude CLI that knows its flags and answers only the models in $FAKE_ALLOWED.
 _CLAUDE = """#!/bin/sh
@@ -121,61 +124,33 @@ def test_openai_offers_what_its_models_endpoint_lists(listing_server, monkeypatc
     assert choose_model.offered_models(llm_client.provider_candidates("openai")[0]) == ["gpt-6", "gpt-6-mini"]
 
 
-def _home_with_choice(tmp_path: Path, model: str) -> Path:
-    home = tmp_path / "home"
-    (home / ".claude").mkdir(parents=True)
-    settings = {"env": {"MEMORY_CLAUDE_MODEL": model}}
-    (home / ".claude" / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
-    return home
+def test_selection_is_saved_once_in_the_vault(claude, tmp_path, monkeypatch):
+    import settings
 
-
-def test_without_a_terminal_the_last_choice_is_kept(claude, tmp_path: Path) -> None:
-    home = _home_with_choice(tmp_path, "haiku")
-
-    assert choose_model.decide(claude, home, None, interactive=False) == {
-        "provider": "claude",
-        "variable": "MEMORY_CLAUDE_MODEL",
-        "model": "haiku",
-        "source": "previous",
-    }
-
-
-def test_a_flag_is_checked_and_used(claude, tmp_path: Path) -> None:
-    answer = choose_model.decide(claude, tmp_path, "sonnet", interactive=False)
-
-    assert (answer["model"], answer["source"]) == ("sonnet", "flag")
-
-
-def test_a_flag_the_subscription_refuses_stops_the_install(claude, tmp_path: Path) -> None:
-    with pytest.raises(SystemExit) as refused:
-        choose_model.decide(claude, tmp_path, "opus", interactive=False)
-
-    assert "--model opus is not available" in str(refused.value)
-
-
-def test_a_refused_answer_is_asked_again(claude, capsys) -> None:
-    answers = iter(["opus", "2"])
-
-    chosen = choose_model.chosen_interactively(claude, ["sonnet", "haiku"], "", lambda _prompt: next(answers))
-
-    assert (chosen, "opus is not available to you" in capsys.readouterr().err) == ("haiku", True)
-
-
-def test_enter_keeps_the_current_choice_without_a_call() -> None:
-    assert choose_model.resolved_answer("", ["sonnet"], "haiku") == "haiku"
-
-
-def test_the_choice_reaches_the_persisted_provider_environment(claude, tmp_path: Path, monkeypatch) -> None:
-    """What the installers export is what the install transaction writes into hooks and units."""
+    root = tmp_path / 'vault'
+    root.mkdir()
     printed = subprocess.run(
-        [sys.executable, str(SCRIPTS / "choose_model.py"), "--model", "sonnet", "--home", str(tmp_path)],
-        capture_output=True,
-        text=True,
-        stdin=subprocess.DEVNULL,
-        check=True,
-        timeout=LONG_TIMEOUT,
+        [sys.executable, str(SCRIPTS / 'choose_model.py'), '--model', 'sonnet',
+         '--provider', 'claude', '--root', str(root)],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        check=True, timeout=LONG_TIMEOUT,
     )
-    answer = json.loads(printed.stdout)
-    monkeypatch.setenv(answer["variable"], answer["model"])
+    assert json.loads(printed.stdout)['model'] == 'claude/sonnet'
+    monkeypatch.setattr(settings, '_default_root', lambda: root)
+    assert llm_client.provider_candidates('claude')[0].model == 'sonnet'
+    assert 'MEMORY_CLAUDE_MODEL' not in integration_hook_config.provider_environment()
 
-    assert integration_hook_config.provider_environment()["MEMORY_CLAUDE_MODEL"] == "sonnet"
+
+def test_refused_selection_leaves_the_settings_unchanged(claude, tmp_path):
+    root = tmp_path / 'vault'
+    root.mkdir()
+    settings = root / 'llm-wiki.toml'
+    original = '[llm]\nmodel="claude/sonnet"\n'
+    settings.write_text(original)
+    printed = subprocess.run(
+        [sys.executable, str(SCRIPTS / 'choose_model.py'), 'set', 'claude/opus', '--root', str(root)],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=LONG_TIMEOUT,
+    )
+    assert printed.returncode == 1
+    assert settings.read_text() == original
+    assert 'selection unchanged' in printed.stderr
