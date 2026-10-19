@@ -116,6 +116,46 @@ and the inappropriate ceiling on each of these three page-based checks.
 
 ## Dependencies blocking activation
 
+### Candidate schema migration (2026-10-19; isolated implementation)
+
+The approved offline migration will first qualify a separate queue copy. Its
+schema step uses one SQLite transaction for all journal objects and user_version
+4. Version 4 is the next queue schema identity, not a new database path or a change
+to the coordinator. Existing version-3 clients must refuse the candidate. The
+candidate API must reject the active queue path and aliases to its inode.
+
+`compile_progress_migration.migrate_candidate` now implements this schema step.
+It validates the existing queue schema and retained data before upgrading, uses
+the common operational database opener and transaction boundary, requires all
+journal protections in version 4, and verifies already-migrated candidates on
+retry. It does not overwrite or repair a partial unversioned journal. It neither
+creates missing database files nor changes normal client version support.
+
+Tests cover abrupt process exit at each DDL/version/commit boundary, exceptions,
+SQLite page exhaustion, invalid source identity and payload, partial schema,
+retained queue data, idempotence, deadlines and active-file/hardlink refusal.
+The first missing-feature run failed because the module did not exist; that is
+not evidence of a repaired production outage. The candidate step is isolated
+from installed runtime and does not yet implement publication or backup staging.
+
+Alternatives considered: installing each DDL statement separately exposes partial
+schema; changing the global supported version first disables the unmigrated vault;
+rewriting the adopted-pair manifest without preserving its preimage destroys
+recovery evidence. The chosen first step changes only a candidate and preserves
+the existing queue rows. Publication still needs the maintenance fence, verified
+backup of both databases and artifacts, coherent adoption-record transition and
+interruption recovery. Candidate qualification is not publication authorization.
+
+Primary sources checked on 2026-10-19: [SQLite transactions](https://www.sqlite.org/lang_transaction.html)
+for explicit transaction boundaries; [Python 3.10 sqlite3](https://docs.python.org/3.10/library/sqlite3.html)
+for supported APIs and transaction behavior; [PostgreSQL upgrade guidance](https://www.postgresql.org/docs/current/upgrading.html)
+for distinguishing migration from compatible updates and preserving recovery
+copies. PostgreSQL is a comparison source, not a runtime dependency or evidence
+for SQLite behavior. [SQLite backup API](https://www.sqlite.org/backup.html)
+supports coherent database copies. Python 3.10 compatibility tests remain useful,
+but upstream now marks that Python release unsupported; they do not establish
+upstream security support.
+
 The queue application/version contract is also pinned in the adopted database-pair
 manifest. Updating SQLite user_version alone would make ordinary clients refuse
 the active queue. Offline migration must update that contract coherently, preserve

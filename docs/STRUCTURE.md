@@ -293,6 +293,10 @@ The isolated implementation now shares journal/artifact auditing across full
 doctor, backup certification and runtime deletion guards. Migration, artifact
 retirement and the common transition controller remain pending; see
 `docs/research/2026-10-19-durable-compile-progress.md` for verification scope.
+The migration's candidate-only schema step atomically creates the journal and
+stamps queue user_version 4. It refuses the active queue and inode aliases;
+installed clients still require version 3. Backup staging, adoption-record
+publication and new-client activation are not yet implemented.
 
 ## External integration configuration preimages
 
