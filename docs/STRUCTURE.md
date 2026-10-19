@@ -266,6 +266,30 @@ compile work rather than inferring success from unrelated global timestamps.
 No database, daemon, dependency or runtime root is added. A queue schema/index
 migration, if needed, requires its own approved migration design.
 
+### Approved durable compile progress (2026-10-19; implementation pending)
+
+The owner approved one append-only `compile_work_events` table in the existing
+queue database, with an explicit offline schema migration. The current stage is
+the latest event for a work identity; there is no second current-state table.
+Intermediate artifacts use the existing `run/queue-results/` with explicit event
+references included in retention, backup, doctor and deletion guards. Existing
+queue ownership and payload verification fence transitions; terminal queue results
+are not reused as intermediate checkpoints. Markdown transaction receipts remain
+the authority for published work. Index refresh has a separate outcome.
+
+CLI, MCP, queue and nightly are to share the same transition controller. A stored
+model answer survives process restart. An uncertain dispatched request whose
+answer cannot be recovered blocks automatic repeat expense until explicitly
+authorized; a restart or provider fallback alone is not authorization. Current
+provider adapters do not offer verified recovery of that response.
+
+No new database, daemon, runtime root, MCP tool or package dependency is authorized.
+Migration must reject old clients, preserve retained evidence, and run only under
+the existing maintenance fence after qualification on an isolated copy. The
+decision is `knowledge/notes/compile-durable-progress-decision-20261019.md`.
+Approval is not implementation or installed qualification. All nine development
+laws, complete-cycle validation and removal of replaced code remain required.
+
 ## External integration configuration preimages
 
 Claude and Codex configuration merges may create byte-exact sibling preimages

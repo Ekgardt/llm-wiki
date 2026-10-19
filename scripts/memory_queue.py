@@ -11789,6 +11789,98 @@ class _QueueV3CandidateReader:
         _write_durable_file(self.results_dir / result_name, result)
         return f"run/queue-results/{result_name}", sha256_bytes(result)
 
+    def get_compile_event(self, work_id: str):
+        """Read a checkpoint only after the explicit journal migration."""
+        from compile_progress import latest_event
+
+        with closing(self._connect()) as database:
+            return latest_event(database, work_id)
+
+    def record_compile_event(self, lease: QueueLease, event) -> None:
+        """Use the same ownership and payload fence as terminal results."""
+        from compile_progress import ProgressConflict, _snapshot_event
+
+        event = _snapshot_event(event)
+        if event.task_id != lease.id:
+            raise ProgressConflict("compile checkpoint names another task")
+        if "artifact" in event.details:
+            self.read_compile_artifact(event)
+        self._with_verified_lease(
+            lease, partial(self._append_compile_event, event=event)
+        )
+
+    def _append_compile_event(self, database, row, now, *, event) -> None:
+        from compile_progress import ProgressConflict, append_event
+
+        if row["kind"] != "compile":
+            raise ProgressConflict("only compile tasks may append compile progress")
+        append_event(database, event)
+
+    def save_compile_artifact(self, lease: QueueLease, event, data: bytes):
+        """Durably store intermediate bytes before publishing their checkpoint.
+
+        The existing queue byte bound is retained pending resource qualification;
+        it is not a new limit or a claim that arbitrary model output is accepted.
+        A fence loss after the file write leaves an unreferenced file, not progress.
+        """
+        from compile_progress import _snapshot_event
+
+        _check_result_bytes(data)
+        event = _snapshot_event(event)
+        self._with_verified_lease(
+            lease, partial(self._verify_compile_artifact_owner, event=event)
+        )
+        identity = self._compile_artifact_operation(event)
+        relative, digest = self._store_result_bytes(identity, data)
+        saved = replace(event, details={
+            **event.details, "artifact": {"reference": relative, "sha256": digest},
+        })
+        self.record_compile_event(lease, saved)
+        return saved
+
+    @staticmethod
+    def _compile_artifact_operation(event) -> str:
+        return f"compile:{event.work_id}:{event.sequence}"
+
+    def recover_compile_artifact(self, lease: QueueLease, event):
+        """Adopt an atomic answer file left before the event transaction committed."""
+        from compile_progress import _snapshot_event
+
+        event = _snapshot_event(event)
+        self._with_verified_lease(
+            lease, partial(self._verify_compile_artifact_owner, event=event)
+        )
+        name = sha256_bytes(self._compile_artifact_operation(event).encode('utf-8'))
+        relative = f"run/queue-results/{name}.result"
+        try:
+            data = _read_stable_owner_file(self.state_root / relative, _MAX_RESULT_BYTES)
+        except FileNotFoundError:
+            return None
+        saved = replace(event, details={
+            **event.details, "artifact": {"reference": relative, "sha256": sha256_bytes(data)},
+        })
+        self.record_compile_event(lease, saved)
+        return saved
+
+    @staticmethod
+    def _verify_compile_artifact_owner(database, row, now, *, event) -> None:
+        from compile_progress import ProgressConflict
+
+        if row["kind"] != "compile" or row["id"] != event.task_id:
+            raise ProgressConflict("compile artifact does not belong to this task")
+
+    def read_compile_artifact(self, event) -> bytes:
+        from compile_progress import ProgressCorrupt, artifact_identity
+
+        relative, digest = artifact_identity(event)
+        try:
+            data = _read_stable_owner_file(self.state_root / relative, _MAX_RESULT_BYTES)
+        except (OSError, ValueError, QueueOperationError) as error:
+            raise ProgressCorrupt("compile artifact is unavailable") from error
+        if sha256_bytes(data) != digest:
+            raise ProgressCorrupt("compile artifact digest mismatch")
+        return data
+
     def _require_publication_is_new(
         self, row: sqlite3.Row, operation_id: str, relative: str, digest: str
     ) -> None:
@@ -13373,13 +13465,22 @@ def _write_durable_file(path: Path, data: bytes) -> None:
         try:
             os.link(temporary, path)
         except FileExistsError:
-            if path.read_bytes() != data or not _is_owner_only(path):
-                raise QueueOperationError("durable_file_conflict") from None
+            _require_matching_durable_file(path, data)
         else:
             fsync_file(path)
             fsync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _require_matching_durable_file(path: Path, data: bytes) -> None:
+    """An existing answer must be a stable owner-only file of the expected size."""
+    try:
+        existing = _read_stable_owner_file(path, len(data))
+    except (OSError, QueueOperationError) as error:
+        raise QueueOperationError("durable_file_conflict") from error
+    if existing != data:
+        raise QueueOperationError("durable_file_conflict")
 
 
 def _check_owner_file_metadata(
