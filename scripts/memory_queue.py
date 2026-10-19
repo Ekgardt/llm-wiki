@@ -11841,6 +11841,18 @@ class _QueueV3CandidateReader:
         with closing(self._connect()) as database:
             return latest_event(database, work_id)
 
+    def verify_compile_checkpoint_owner(self, lease: QueueLease, checkpoint) -> None:
+        """Reuse the lease/payload fence and immutable redrive lineage."""
+        self._with_verified_lease(
+            lease, partial(self._require_compile_checkpoint_owner, checkpoint=checkpoint),
+        )
+
+    @staticmethod
+    def _require_compile_checkpoint_owner(database, row, now, *, checkpoint) -> None:
+        family = _redrive_ancestors(database, row["id"]) | {row["id"]}
+        if row["kind"] != "compile" or checkpoint.task_id not in family:
+            raise compile_progress.ProgressConflict("compile checkpoint belongs to another task family")
+
     def record_compile_event(self, lease: QueueLease, event) -> None:
         """Use the same ownership and payload fence as terminal results."""
         from compile_progress import ProgressConflict, _snapshot_event
@@ -11888,7 +11900,7 @@ class _QueueV3CandidateReader:
     def _compile_artifact_operation(event) -> str:
         return f"compile:{event.work_id}:{event.sequence}"
 
-    def recover_compile_artifact(self, lease: QueueLease, event):
+    def recover_compile_artifact(self, lease: QueueLease, event, *, validate=None):
         """Adopt an atomic answer file left before the event transaction committed."""
         from compile_progress import _snapshot_event
 
@@ -11902,6 +11914,8 @@ class _QueueV3CandidateReader:
             data = _read_stable_owner_file(self.state_root / relative, _MAX_RESULT_BYTES)
         except FileNotFoundError:
             return None
+        if validate is not None:
+            validate(data)
         saved = replace(event, details={
             **event.details, "artifact": {"reference": relative, "sha256": sha256_bytes(data)},
         })

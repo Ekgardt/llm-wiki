@@ -363,3 +363,65 @@ advances the clock during the actual artifact read. The append now rechecks the
 same lease after validation before writing the event. No new lease duration or
 retry allowance is introduced. This is tested ownership at append, not a claim
 that an arbitrary filesystem operation can be interrupted at its deadline.
+
+### Durable model-call controller (2026-10-19, isolated implementation)
+
+The next controller slice reserves a call in the existing journal before invoking
+its supplied, protected transport. The reservation and answer stay at the current
+semantic stage; an answer alone cannot certify review or publication. A caller
+supplies the verified source checkpoint and digest of its complete prepared request
+(including model/settings, policy and dependency identities). It must not derive
+that digest only from prompt text. The compiler integration that constructs that
+identity and preserves correction budgets is still pending; this API is not yet
+wired into the running compiler.
+
+After reservation, any exception or missing answer leaves an uncertain call.
+Recovery first attempts the deterministic answer artifact. Without one it raises
+an explicit unknown-outcome refusal and never invokes the transport again. The
+journal's running reservation is durable uncertainty evidence, not permission to
+retry; the controller maps that refusal to the queue's existing blocked state.
+A saved answer includes request/work/source identity and reported TokenUsage;
+unknown usage remains unknown. This is not provider-side exactly-once execution.
+A crash just before actual dispatch may conservatively require operator resolution.
+
+A second ledger/service or transactional outbox would not atomically cover an
+external model whose adapter offers no verified idempotency/recovery handle. The
+existing journal plus deterministic artifacts therefore supplies the smallest
+approved boundary. An automatic retry on timeout was rejected because it can pay
+for the same work twice. No new count, retry limit, dependency or runtime location
+is introduced. Call preparation/DLP and whole-work retry accounting must be
+integrated before activation; a supplied callback is not a DLP bypass permission.
+
+Primary sources rechecked 2026-10-19: [SQLite transaction boundary](https://www.sqlite.org/lang_transaction.html),
+[AWS retry/idempotency guidance](https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/retry-backoff.html),
+and [Temporal durable execution](https://docs.temporal.io/workflow-execution).
+These support journal-before-effect ordering and cautious replay, not a claim that
+SQLite makes the external provider atomic. No Temporal/AWS package is required.
+
+`scripts/compile_controller.py` now implements this call boundary. The queue's
+existing immutable redrive ancestry and lease/payload fence authorize continuation;
+an unrelated task cannot take over. Recovery validates an orphan's canonical
+answer envelope and request/source binding before publishing its event. No SQL
+writer lock spans the provider call. Missing/corrupt saved answers refuse, and
+unblocking delivery alone does not authorize redispatch. An empty returned answer
+is retained with its known cost; it is not a validated plan. Semantic validation
+is required before another call can be requested from that answer checkpoint.
+
+Qualification includes real subprocess os._exit before an answer and after the
+answer file but before its event, uncertainty on transport exceptions, checkpoint
+reservation failure, stale/expired leases, redrive of answered/uncertain calls,
+unknown usage, retained known cost of an empty answer, corrupt/foreign orphans,
+and refusal of a changed request. Initial tests failed because the controller
+module did not exist, not because they exercised an installed compiler fix.
+One implementation function initially measured CCN6; removing an unnecessary
+comprehension brought it within the required bound. Lint import ordering was
+corrected; no guard was disabled.
+
+Pending before activation: derive complete protected request/work identities in
+all compiler entrypoints, persist correction budgets and semantic revisions,
+implement explicit repeat authorization, bind review/publication to existing
+receipts, qualify the inherited artifact byte bound including envelope overhead,
+and complete the previously listed rollout/retirement/full-cycle checks. The
+callback is a testable internal transport boundary, not a new public MCP tool or
+an alternate permission to call a model. The old compiler remains the installed
+consumer until the complete replacement is qualified, then must be removed.
