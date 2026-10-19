@@ -467,14 +467,23 @@ The memory pipeline needs an LLM for classification, compilation,
 contradiction checks, and playbook crystallization. Backend is
 **auto-detected** via `scripts/llm_client.py` — no API keys required.
 
-Priority: OpenCode (only when `OPENCODE_SERVER_PASSWORD` protects its server) →
+The saved `[llm]` selection in the private `llm-wiki.toml` is authoritative for
+all memory calls. `scripts/choose_model.py show|list|set|select` is the common
+operator command. `model` is `provider/model-id`; Codex also stores `reasoning`.
+The chooser verifies one short protected request before saving. A catalog is not
+proof of subscription entitlement. The saved choice overrides historical model
+and provider environment copies; endpoint credentials and DLP/local-only settings
+remain separate. Explicit `fake` is reserved for tests. Restart old long-lived
+clients before activating this configuration section during an upgrade.
+
+Without a saved selection, compatibility priority is OpenCode (only when `OPENCODE_SERVER_PASSWORD` protects its server) →
 Codex → Claude CLI → OpenAI → Ollama. If none answers, the call returns
 nothing: a capture already sits in `run/queue.sqlite3` and waits an hour before
 its next attempt, and every other caller skips or fails its step; nothing else is
 queued for later (2026-09-25). A `run/queue/` directory left by a release before
 v4.0.0 is refused and named by `doctor`, never imported (2026-09-23).
 
-Override via `MEMORY_LLM_PROVIDER` env var. `fake` returns a canned response
+Before central selection, override via `MEMORY_LLM_PROVIDER` env var. `fake` returns a canned response
 for tests/e2e. A value that names no provider calls none, and `doctor` names it.
 
 **Zero-cost path:** no paid API beyond existing agent subscriptions. Ollama remains

@@ -1,4 +1,4 @@
-"""The one registry of limits an operator may set, and where each value came from.
+"""The vault settings reader and registry of limits with their declared basis.
 
 Law 9: a limit that depends on operating conditions is stated with its basis and,
 where it can be, set by the operator rather than hidden in the code. Every such
@@ -11,7 +11,9 @@ An operator overrides a default in an optional `llm-wiki.toml` at the vault root
     [corpus]
     max_files = 20000
 
-Precedence is default < file < environment, as in uv. An unknown section or key, a
+For limits, precedence is default < file < environment, as in uv.
+The separate [llm] section is validated by model_selection and is authoritative
+for model selection; it is not a numeric limit or an environment projection. An unknown section or key, a
 value that is not an integer, or one below its bound stops the caller with the
 key's name and its source; a limit never falls back silently. With no file and no
 variable every value is its default, exactly the constant it replaced. See
@@ -108,6 +110,10 @@ class Effective:
 
 
 REGISTRY: tuple[Setting, ...] = (
+    Setting("provider", "catalog_max_bytes", MIB, "bytes",
+            "provider metadata admission budget: 561046-byte Codex catalog parsed at "
+            "2182523-byte peak on 2026-10-19; roughly twice current catalog input; "
+            "raise after measuring parser memory when catalogs grow; not an entitlement limit"),
     Setting("index", "max_pages", 2_000, "pages", "knowledge/index.md is rebuilt from every note; " + _HELD_IN_MEMORY),
     Setting("index", "max_total_bytes", 32 * MIB, "bytes", "the notes the index is rebuilt from; " + _HELD_IN_MEMORY),
     Setting("compile", "max_sources", 2_000, "sources", "daily logs and notes one compile reads; " + _HELD_IN_MEMORY),
@@ -145,7 +151,7 @@ _SECTIONS = frozenset(setting.section for setting in REGISTRY)
 # are at most 64 KiB, so reading them per call costs microseconds and parsing stays
 # once per content. Only the latest content is kept: a long-lived process that sees the
 # operator edit the file many times holds one parse, not one per edit.
-_PARSED: dict[str, dict[str, int]] = {}
+_PARSED: dict[str, dict[str, int | str]] = {}
 
 
 class SettingsError(ValueError):
@@ -154,8 +160,9 @@ class SettingsError(ValueError):
 
 def _default_root() -> Path:
     from memory_state import ROOT
+    from model_selection import settings_root
 
-    return ROOT
+    return settings_root(ROOT)
 
 
 def settings_path(root: Path | None = None) -> Path:
@@ -185,7 +192,15 @@ def _require_value(setting: Setting, raw: object, source: str) -> int:
     return raw
 
 
-def _section_values(section: str, table: object, source: str) -> dict[str, int]:
+def _section_values(section: str, table: object, source: str) -> dict[str, int | str]:
+    if section == "llm":
+        from model_selection import table_values
+
+        return table_values(table, source)
+    return _limit_section_values(section, table, source)
+
+
+def _limit_section_values(section: str, table: object, source: str) -> dict[str, int]:
     if section not in _SECTIONS or not isinstance(table, Mapping):
         raise SettingsError(f"{source}: unknown section [{section}]")
     values: dict[str, int] = {}
@@ -197,18 +212,18 @@ def _section_values(section: str, table: object, source: str) -> dict[str, int]:
     return values
 
 
-def _parsed_bytes(raw: bytes, name: str) -> dict[str, int]:
+def _parsed_bytes(raw: bytes, name: str) -> dict[str, int | str]:
     try:
         document = tomllib.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         raise SettingsError(f"{name}: not valid TOML: {error}") from error
-    values: dict[str, int] = {}
+    values: dict[str, int | str] = {}
     for section, table in document.items():
         values.update(_section_values(section, table, name))
     return values
 
 
-def _file_values(path: Path) -> dict[str, int]:
+def _file_values(path: Path) -> dict[str, int | str]:
     """The file's values, parsed once per distinct content; none when it is absent."""
     try:
         raw = read_stable_bytes(path, MAX_SETTINGS_FILE_BYTES, label="settings file")

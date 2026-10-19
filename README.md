@@ -121,10 +121,20 @@ runs it with `--apply --adopt-ownership-v3 --confirm-all-agents-stopped` to move
 runtime to its current database format; on a vault that already holds work it asks you
 to confirm that no agent is running first. It never deletes knowledge or `run/`.
 
-The installer asks which model the memory pipeline calls, from those your provider
-answers with (for Claude each of `sonnet`, `opus`, `haiku`, `fable` is asked once);
-Enter keeps the last choice. Without a terminal, `--model <name>` (`-Model` on
-Windows) sets it, else the last choice or the provider's default stays.
+Model selection is stored once in `llm-wiki.toml`, shared by manual calls, hooks,
+MCP and scheduled maintenance. The installer uses the same chooser. Catalog entries
+are candidates; saving a model requires one successful short subscription request.
+
+```bash
+uv run python scripts/choose_model.py show
+uv run python scripts/choose_model.py list --provider codex
+uv run python scripts/choose_model.py set codex/gpt-6.1-sol --reasoning medium
+```
+
+Use `select` for the interactive menu. A failed check leaves the previous choice
+intact. The saved choice overrides old model/provider environment copies; endpoint
+and DLP configuration remain separate. Restart already-running old clients when
+upgrading to this configuration format.
 
 Code navigation for another language is one command each, when you need it:
 

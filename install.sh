@@ -594,17 +594,14 @@ fi
 
 # ─── 5a. Choose the memory model ───────────────────────────────────
 
-# The provider's own list (Claude: each alias asked once); the answer is exported so
-# the install transaction persists it into the hooks' env and the scheduler units.
+# The chooser saves one vault setting; hooks and schedulers read it at runtime.
 info "Choosing the model the memory pipeline calls..."
 MODEL_CHOICE="$(uv run --locked --no-sync --directory "$VAULT_ROOT" python \
   "$VAULT_ROOT/scripts/choose_model.py" --home "$HOME" \
   ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"})" || fail "Model choice failed"
-MODEL_VARIABLE="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["variable"])' "$MODEL_CHOICE")"
 MODEL_VALUE="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["model"])' "$MODEL_CHOICE")"
-if [ -n "$MODEL_VARIABLE" ] && [ -n "$MODEL_VALUE" ]; then
-  export "$MODEL_VARIABLE=$MODEL_VALUE"
-  ok "Memory model: $MODEL_VALUE"
+if [ -n "$MODEL_VALUE" ]; then
+  ok "Memory model saved in llm-wiki.toml: $MODEL_VALUE"
 fi
 
 # ─── 6. Set up scheduled maintenance ────────────────────────────────

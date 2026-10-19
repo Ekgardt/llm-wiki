@@ -113,9 +113,19 @@ uv run --locked --no-sync python scripts/repair_installed_memory.py --check --js
 当前的数据库格式；若知识库中已有工作，会先请你确认没有代理在运行。它从不删除知识
 或 `run/`。
 
-安装程序会询问记忆流水线调用哪个模型，只列出你的提供方能应答的模型（Claude 的
-`sonnet`、`opus`、`haiku`、`fable` 各试调一次）；按回车保留上次的选择。没有终端时，
-用 `--model <名称>`（Windows 上为 `-Model`）指定，否则保留上次的选择或提供方的默认模型。
+模型只在 `llm-wiki.toml` 中保存一次，手动调用、hooks、MCP 和定时维护共用
+这一设置，安装程序也使用同一选择命令。目录中的条目只是候选项；保存前会通过
+当前订阅完成一次简短请求，以验证所选模型。
+
+```bash
+uv run python scripts/choose_model.py show
+uv run python scripts/choose_model.py list --provider codex
+uv run python scripts/choose_model.py set codex/gpt-6.1-sol --reasoning medium
+```
+
+使用 `select` 打开交互菜单。验证失败不会改变原有选择。保存的选择优先于旧的
+模型和提供方环境变量副本；连接地址和 DLP 规则仍单独配置。升级到此配置格式时，
+需要重启仍在运行的旧客户端。
 
 其他语言的代码导航按需安装，每种语言一条命令：
 

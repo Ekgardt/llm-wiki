@@ -1052,3 +1052,21 @@ any of these appearing.
 
 Never skip steps 1-2. Architectural improvisation is the root cause of the
 most expensive bugs in this project's history.
+
+### Central model selection (owner requested 2026-10-19; isolated implementation)
+
+The existing private `llm-wiki.toml` will hold `[llm] model = "provider/model-id"`
+and its reasoning setting. `choose_model.py` is the one selection command;
+`llm_client` reads this choice for CLI, MCP, hooks, queue and scheduled work.
+Saved selection takes precedence over historical model/provider environment
+projections and the host CLI's global model; endpoint credentials and DLP/local-only
+requirements keep their existing boundaries. Explicit fake remains a test mode.
+A resolved request keeps its identity across preparation/dispatch; an update does
+not relabel in-flight calls. No new database, service or runtime root is added.
+
+Provider catalogs are candidates, not proof of subscription entitlement. Selection
+requires a successful short protected call before saving; failure leaves the old
+selection intact. Existing provider model projections must be removed after
+qualified adoption; pre-centralization installs retain compatibility until then.
+The owner request and scope are recorded privately in
+`knowledge/notes/central-memory-model-selection-decision-20261019.md`.

@@ -195,13 +195,15 @@ def _candidate_descriptor(
 
 
 def forced_provider() -> str:
-    """The provider the operator chose in `MEMORY_LLM_PROVIDER`, normalised; "" for automatic.
+    """The central provider selection, or legacy environment/auto before selection.
 
     The one reader of that variable for choosing candidates: a readiness check
     that skipped it answered about providers the calls would never use.
     Research: docs/research/2026-09-17-repair-asks-about-the-provider-the-operator-chose.md
     """
-    return os.environ.get("MEMORY_LLM_PROVIDER", "").strip().lower()
+    from model_selection import selected_provider
+
+    return selected_provider(os.environ.get("MEMORY_LLM_PROVIDER", "").strip().lower())
 
 
 def provider_candidates(
@@ -212,7 +214,17 @@ def provider_candidates(
     """Resolve ordered provider identities without probing or calling them."""
     if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= 0:
         raise ValueError("max_tokens must be a positive integer")
+    from model_selection import current, using
+
     forced = forced.lower().strip()
+    chosen = None if forced == "fake" else current()
+    with using(chosen):
+        return _selected_candidates(forced, max_tokens, chosen)
+
+
+def _selected_candidates(forced, max_tokens, chosen):
+    if chosen is not None:
+        forced = chosen.provider
     return [
         _candidate_descriptor(provider, index, forced, max_tokens)
         for index, provider in enumerate(_candidate_order(forced))
@@ -911,7 +923,9 @@ def _provider_configuration(provider: str, max_tokens: int) -> ProviderConfigura
     build = _PROVIDER_CONFIGURATIONS.get(provider)
     if build is None:
         return None, _base_capabilities(provider), {"max_tokens": max_tokens}, None
-    return build(max_tokens)
+    from model_selection import configure
+
+    return configure(provider, build(max_tokens))
 
 
 def _split_endpoint(endpoint: str):

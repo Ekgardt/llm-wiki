@@ -9,6 +9,7 @@ dependencies = [
     # docs/research/2026-09-14-a-base-install-can-search.md.
     "pyyaml>=6.0.3,<7",
     "tomli>=2.4.1,<3; python_version < '3.11'",
+    "tomlkit>=0.15.2,<0.16",
 ]
 
 # Optional heavy dependencies — install via `uv sync --extra <name>`.
