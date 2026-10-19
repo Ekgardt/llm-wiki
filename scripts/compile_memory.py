@@ -128,7 +128,7 @@ from memory_state import (  # noqa: E402
     update_state,
 )
 from page_status import DEFAULT_STATUS, is_retired, normalized_status  # noqa: E402
-from rebuild_memory_index import MAX_INDEX_BYTES  # noqa: E402
+from rebuild_memory_index import MAX_INDEX_BYTES, IndexCapacityError, build_index_bytes  # noqa: E402
 from reliable_memory import (  # noqa: E402
     _validate_rule,
     canonical_json_bytes,
@@ -6675,8 +6675,6 @@ class _ApplyPlan:
         self.pending[change.path] = change.content
 
     def _append_index_and_log(self) -> None:
-        from rebuild_memory_index import build_index_bytes
-
         # Both derived targets are materialized under the existing writer gate.
         # Source/target-note snapshots still govern the semantic changes.
         sources = self._publication_sources()
@@ -7828,6 +7826,8 @@ def _run(
         _mark_ok_unless_dry(args)
         return 0
 
+    # Publication capacity is shared by every batch; reject before spending on models.
+    build_index_bytes(ROOT)
     _announce_compile(args, dailies)
     inputs = snapshot_compile_inputs(dailies, compiled=selection)
     try:
@@ -8146,7 +8146,7 @@ def _apply_batch(
             deadline=deadline,
             cancelled=cancelled,
         )
-    except TimeoutError:
+    except (TimeoutError, IndexCapacityError):
         raise
     except CandidatesAlreadyQuarantined as already:
         return _still_quarantined_outcome(already)

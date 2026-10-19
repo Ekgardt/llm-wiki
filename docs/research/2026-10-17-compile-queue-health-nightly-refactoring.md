@@ -1580,3 +1580,48 @@ passed for all 97 installed packages and 66 isolated Python 3.10 packages.
 No package or lockfile change was needed. Operational doctor completed all 14
 checks in 1.48 seconds: 7 ok, 6 degraded, 1 error (scheduler history); this does
 not certify retained history or generation health.
+
+## 2026-10-19: shared index capacity must stop the compile pass
+
+The live run reached exactly 3,452 notes, the installed `index.max_pages`.
+Publication of another page failed, but `_apply_batch` treated this global
+resource refusal as an independent bad source. Later batches continued spending
+model calls. The old process was interrupted with SIGINT; committed receipts and
+source data were retained. The interrupted run is not a successful compile.
+
+The index now raises `IndexCapacityError`, a `ValueError` subtype, for its two
+existing aggregate admission checks. The compiler checks the real index before
+model planning and propagates that exception through publication, stopping the
+whole pass, including recursively repaired partitions. Other independent source
+failures retain their existing continuation behavior. Publication still checks
+current bytes under the writer gate; the preflight is not a reservation. No new
+setting, dependency, runtime path or retry limit is introduced.
+
+Research checked on 2026-10-19:
+- [Google SRE, Handling Overload](https://sre.google/sre-book/handling-overload/):
+  reject resource refusals cheaply; capacity proxies need review as workloads grow.
+- [AWS, Timeouts, retries, and backoff with jitter](https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/):
+  retries can amplify failure and load; repeated attempts cannot fix unchanged capacity.
+- [Python 3.10, user-defined exceptions](https://docs.python.org/3.10/tutorial/errors.html#user-defined-exceptions):
+  a specific exception type permits selective handling without matching message text.
+
+Alternatives rejected: suppressing the publication error would lie about durability;
+continuing every batch repeats an unchanged failure; stopping on every ValueError
+would hold independent good sources behind malformed ones. Raising the capacity
+alone would leave the same failure mode at the next boundary. The selected change
+retains existing admission rules and distinguishes their shared failure precisely.
+
+Read-only live measurement: 3,452 notes, 25,724,108 source bytes, index rendering
+0.531 s, process peak RSS 54,228 KiB, published index 626 bytes. Evidence:
+`logs/step7-index-capacity-measurement-20261019.json`. The existing 80% inventory
+warning convention gives a reviewed page allowance of 4,315. This measures today's
+workload, not every workload at that allowance; byte guards remain unchanged.
+Tests cover both preflight limits before model planning and a publication failure
+that must stop the next batch. Removing the compiler fix makes those three cases
+fail. The full live compile, CI and health are separate completion gates.
+
+Validation: 126 relevant tests passed on Python 3.12 and 3.10; Ruff passed;
+all 478 cumulatively changed functions passed actual lizard/AST CCN, if-count,
+and nesting checks. `uv pip check` passed for installed 97 packages and isolated
+Python 3.10's 66 packages. The lockfile is unchanged. Evidence is in
+`logs/step7-index-capacity-{tests,python310,original-red}-20261019.log`.

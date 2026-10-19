@@ -73,6 +73,10 @@ INDEX_FOOTER = (
 NOTES_PREFIX = "knowledge/notes/"
 
 
+class IndexCapacityError(ValueError):
+    """The shared index cannot admit publication under its configured capacity."""
+
+
 def build_index_bytes(
     root: Path = ROOT,
     pending: Mapping[str, bytes | None] | None = None,
@@ -107,9 +111,9 @@ def _virtual_pages(
 def _require_within_limits(virtual: Mapping[str, bytes], root: Path) -> None:
     """The index.max_pages and index.max_total_bytes ceilings of `settings`."""
     if len(virtual) > setting_value("index.max_pages", root):
-        raise ValueError(f"knowledge index page count exceeds limit; {raise_hint('index.max_pages')}")
+        raise IndexCapacityError(f"knowledge index page count exceeds limit; {raise_hint('index.max_pages')}")
     if sum(len(content) for content in virtual.values()) > setting_value("index.max_total_bytes", root):
-        raise ValueError(f"knowledge index source bytes exceed limit; {raise_hint('index.max_total_bytes')}")
+        raise IndexCapacityError(f"knowledge index source bytes exceed limit; {raise_hint('index.max_total_bytes')}")
 
 
 def _apply_pending(

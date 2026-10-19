@@ -2825,3 +2825,51 @@ def test_compile_secondary_search_preserves_its_stop_contract(vault, monkeypatch
     expected = {123456789.0: 123456789.0, float("inf"): None}[deadline]
     assert result == []
     assert observed == [{"limit": 5, "deadline_monotonic": expected, "cancelled": cancelled}]
+
+
+@pytest.mark.parametrize('setting,value', [('MAX_PAGES', '1'), ('MAX_TOTAL_BYTES', '1')])
+def test_index_capacity_stops_run_before_model_planning(vault, monkeypatch, setting, value):
+    import compile_memory as cm
+    from rebuild_memory_index import IndexCapacityError
+
+    root, _ = vault
+    _daily(root)
+    (root / 'knowledge/notes/one.md').write_text('# One\n')
+    (root / 'knowledge/notes/two.md').write_text('# Two\n')
+    monkeypatch.setenv('LLM_WIKI_INDEX_' + setting, value)
+    planned = []
+    monkeypatch.setattr(cm, '_pack_for_run', lambda *args: planned.append(args))
+    monkeypatch.setattr(cm, 'load_state', lambda: {})
+    with pytest.raises(IndexCapacityError):
+        cm._run(Namespace(file=None, all=False, dry_run=False, trigger='manual'))
+    assert planned == []
+    assert (root / 'knowledge/index.md').read_bytes() == b'# Old index\n'
+    assert (root / 'knowledge/daily/2026-07-14.md').exists()
+
+
+def test_publication_capacity_stops_later_batches(vault, monkeypatch):
+    import compile_memory as cm
+    from rebuild_memory_index import IndexCapacityError
+
+    root, _ = vault
+    _daily(root)
+    monkeypatch.setattr(cm, 'load_state', lambda: {})
+    monkeypatch.setattr(cm, '_refresh_compile_batch', lambda batch, **kwargs: batch)
+    monkeypatch.setattr(cm, '_require_ready_compile_batch', lambda batch: None)
+    calls = []
+
+    def resolve(batch, *args):
+        calls.append(batch)
+        return SimpleNamespace(plan={}, action_key='a', provider_budget={})
+
+    def apply(*args, **kwargs):
+        raise IndexCapacityError('shared publication capacity exhausted')
+
+    monkeypatch.setattr(cm, '_resolve_batch_work', resolve)
+    monkeypatch.setattr(cm, 'apply_compile_plan', apply)
+    # Inputs are only needed by publication; keep the actual batch/run boundaries.
+    batches = [SimpleNamespace(inputs=None), SimpleNamespace(inputs=None)]
+    monkeypatch.setattr(cm, '_pack_for_run', lambda *args: (batches, []))
+    with pytest.raises(IndexCapacityError, match='shared publication capacity'):
+        cm._run(Namespace(file=None, all=False, dry_run=False, trigger='manual'))
+    assert calls == [batches[0]]
