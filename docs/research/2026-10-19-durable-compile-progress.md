@@ -457,3 +457,64 @@ now includes unchanged-request binding, saved/orphan answer preference, invalid
 consent metadata, stale leases, redrive with retained history, and lost
 acknowledgement after permission commit. Full compiler orchestration, operator
 UI/CLI consent, correction accounting and deployment remain pending.
+
+## Protected dispatch and semantic replay integration (2026-10-19)
+
+The compile development branch now includes the installed central-model selection.
+The shared `call_candidate` path accepts an internal dispatch callback only after
+availability, DLP input protection, backend preparation and input admission. Ordinary
+callers keep the same path. The callback receives a digest and a callable whose
+result has passed the existing output DLP checks. No raw model response bypass is
+added. The digest covers the protected inputs/schema, policy, model/inference
+selection, endpoint, counting evidence and available prepared Codex identity.
+An implicit model is refused for durable dispatch because it cannot identify the
+request; ordinary unjournaled compatibility calls retain their existing behavior.
+
+`run_candidate_call` connects this boundary to the existing journal. It also requires
+the semantic caller's dependency digest: a protected-request hash does not establish
+complete work identity. Saved candidate results retain descriptor, failure outcome,
+input counting and `TokenUsage`. Empty returned answers and output-policy refusals
+retain their known cost without retaining prohibited output. Provider timeout, exit
+and other ambiguous transport failures leave an uncertain reservation and block
+repeat, even though the common client represents them as returned error objects.
+Earlier `BackendResponse` envelopes remain readable by the same controller; they
+are an existing development/retained-artifact contract, not a second dispatcher.
+
+The queue can read one historical event by indexed work ID and sequence with the
+same content verification. Historical replay verifies both the dispatch and answer,
+the current lease/payload fence and immutable redrive ancestry. It never starts a
+new call merely because later checkpoints exist. `CompileReplay` advances a cursor
+only after a completed journaled response; a preflight refusal cannot skip a saved
+answer. Changed request order, policy, model or dependency identity refuses reuse.
+
+`resolve_compile_plan` and `_CompileAttempt` now accept this shared call runner.
+The existing parsers, draft repair, operation review, completeness review and final
+normalization execute again over saved answers. An integration test stops after a
+durable draft answer but before validation; a fresh resolver finishes the plan with
+one total draft call and two review calls. This is deterministic replay of the
+existing semantic code, not a claim that a saved answer passed a semantic check.
+
+Five missing-boundary tests failed before implementation; two missing-replay tests
+then failed before the replay cursor was added. Related existing tests also run.
+One integration assertion initially expected the pre-normalization `slug` where
+the final plan contract uses `path`; the assertion was corrected to the exact
+expected note path. Import-order lint issues were fixed. No validation, durability,
+DLP or existing test assertion was relaxed. Exact final results are in the private
+execution checkpoint. Tests use isolated databases and synthetic model responses;
+no real provider expense or live schema migration is claimed by this phase.
+
+Primary sources rechecked on 2026-10-19: SQLite atomic commit, AWS idempotent retry
+semantics and Temporal workflow replay (links above). The selected design reuses
+our journal and validators; introducing Temporal would add a service and storage
+contract, while replaying the provider directly would repeat uncertain expense.
+There is no new package, runtime root, database, daemon or numeric workload cap.
+
+Activation is still pending. The caller must construct and retain the complete
+source/work/dependency identity and original snapshot; CLI, MCP, queue and nightly
+must supply the same context and queue ownership. Replay currently re-runs local
+preparation: missing providers or changed executable/configuration evidence can
+refuse even when an answer is retained. Continuing across an operator-authorized
+uncertain retry needs semantic-cursor integration; the internal authorization API
+alone is insufficient. Whole-work accounting, receipt publication/recovery, event
+retirement, inherited-cap qualification and encrypted stopped-agent deployment
+remain required. This optional resolver seam is not installed production routing.

@@ -11834,11 +11834,13 @@ class _QueueV3CandidateReader:
         _write_durable_file(self.results_dir / result_name, result)
         return f"run/queue-results/{result_name}", sha256_bytes(result)
 
-    def get_compile_event(self, work_id: str):
+    def get_compile_event(self, work_id: str, *, sequence: int | None = None):
         """Read a checkpoint only after the explicit journal migration."""
-        from compile_progress import latest_event
+        from compile_progress import event_at, latest_event
 
         with closing(self._connect()) as database:
+            if sequence is not None:
+                return event_at(database, work_id, sequence)
             return latest_event(database, work_id)
 
     def verify_compile_checkpoint_owner(self, lease: QueueLease, checkpoint) -> None:

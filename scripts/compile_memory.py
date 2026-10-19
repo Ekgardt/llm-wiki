@@ -2363,13 +2363,14 @@ def resolve_compile_plan(
     batch: CompileBatch | None = None,
     token_adapters: Mapping[str, TokenCounter] | None = None,
     critic_feedback: tuple[str, ...] = (),
+    call_runner=None,
 ) -> ResolvedCompilePlan:
     """Resolve a validated semantic plan without entering the writer gate."""
     _require_ready_compile_batch(batch)
     _assert_external_work_allowed(coordinator)
     if batch is not None and batch.inputs != inputs:
         raise ValueError("compile batch inputs disagree")
-    attempt = _CompileAttempt(inputs, cache, batch, token_adapters)
+    attempt = _CompileAttempt(inputs, cache, batch, token_adapters, call_runner=call_runner)
     attempt.critic_feedback = critic_feedback
     resolved = _first_resolved_plan(attempt)
     if resolved is None:
@@ -2459,7 +2460,10 @@ class _CompileAttempt:
         cache: CompileCache,
         batch: CompileBatch | None,
         token_adapters: Mapping[str, TokenCounter] | None,
+        *,
+        call_runner=None,
     ) -> None:
+        self.call_runner = call_runner
         _require_ready_compile_batch(batch)
         self.inputs = inputs
         self.cache = cache
@@ -2770,7 +2774,8 @@ class _CompileAttempt:
         self, descriptor: object, prompt: str, system: str, schema: object
     ) -> object:
         _require_ready_compile_batch(self.batch)
-        return call_candidate(
+        runner = call_candidate if self.call_runner is None else self.call_runner
+        return runner(
             descriptor,
             prompt,
             system,

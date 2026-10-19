@@ -160,6 +160,19 @@ def latest_event(database: sqlite3.Connection, work_id: str) -> CompileEvent | N
     return _verified_event(row)
 
 
+def event_at(database: sqlite3.Connection, work_id: str, sequence: int) -> CompileEvent | None:
+    """Read one verified historical event for deterministic replay, without a scan."""
+    _require_digest(work_id)
+    _require_sequence(sequence)
+    row = database.execute(
+        'SELECT * FROM compile_work_events WHERE work_id=? AND sequence=?',
+        (work_id, sequence),
+    ).fetchone()
+    if row is None:
+        return None
+    return _verified_event(row)
+
+
 def _require_next(previous: CompileEvent | None, event: CompileEvent) -> None:
     if previous is None:
         _require_initial(event)

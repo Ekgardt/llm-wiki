@@ -56,7 +56,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import NamedTuple
@@ -655,6 +655,7 @@ def _dispatched_call(
     available: bool | None,
     token_adapters: Mapping[str, TokenCounter] | None,
     input_budget: ContextBudget | None = None,
+    dispatch=None,
 ) -> LLMResult:
     mode = _structured_mode(descriptor, schema)
     caller = _BACKENDS.get(descriptor.provider)
@@ -668,10 +669,10 @@ def _dispatched_call(
         return LLMResult(
             descriptor, None, False, transport.code, mode, failure_detail=transport.detail
         )
-    return _prepared_candidate_call(descriptor, caller, transport, mode, schema, token_adapters, input_budget)
+    return _prepared_candidate_call(descriptor, caller, transport, mode, schema, token_adapters, input_budget, dispatch)
 
 
-def _prepared_candidate_call(descriptor, caller, transport, mode, schema, token_adapters, input_budget=None):
+def _prepared_candidate_call(descriptor, caller, transport, mode, schema, token_adapters, input_budget=None, dispatch=None):
     try:
         transport = _prepare_backend_transport(caller, descriptor, transport)
     except Exception as exc:  # noqa: BLE001 - executable preparation is a provider boundary
@@ -681,7 +682,66 @@ def _prepared_candidate_call(descriptor, caller, transport, mode, schema, token_
     refused = _prepared_input_refusal(descriptor, transport, mode, count, input_budget)
     if refused is not None:
         return refused
-    return _completed_call(descriptor, caller, transport, mode, count)
+    return _completed_dispatch(descriptor, caller, transport, mode, count, dispatch)
+
+
+
+@dataclass(frozen=True)
+class PreparedModelCall:
+    """Protected request identity and an output-checked invocation, not a work identity."""
+
+    request_digest: str
+    invoke: object = field(repr=False, compare=False)
+
+
+def _completed_dispatch(descriptor, caller, transport, mode, count, dispatch):
+    invoke = functools.partial(_completed_call, descriptor, caller, transport, mode, count)
+    if dispatch is None:
+        return invoke()
+    digest = _protected_call_digest(descriptor, transport, mode, count)
+    return dispatch(PreparedModelCall(digest, invoke))
+
+
+def _policy_identity(policy):
+    return {
+        'literals': list(policy.literals),
+        'allow_fingerprints': sorted(policy.allow_fingerprints),
+        'allow_finding_fingerprints': sorted(policy.allow_finding_fingerprints),
+    }
+
+
+def _prepared_codex_identity(prepared):
+    if prepared is None:
+        return None
+    return {
+        'executable': None if prepared.executable is None else asdict(prepared.executable),
+        'model': prepared.model, 'reasoning': prepared.reasoning,
+        'payload': prepared.payload, 'basis': _prepared_basis_identity(prepared.basis),
+    }
+
+
+def _prepared_basis_identity(basis):
+    if basis is None:
+        return None
+    return {
+        'model': basis.model, 'model_provider': basis.model_provider,
+        'planning_window': basis.planning_window, 'catalog_sha256': basis.catalog_sha256,
+        'config_files': list(basis.config_files), 'environment_sha256': basis.environment_sha256,
+        'cli_version': basis.cli_version, 'mcp_server_names': list(basis.mcp_server_names),
+    }
+
+
+def _protected_call_digest(descriptor, transport, mode, count):
+    if not isinstance(descriptor.model, str) or not descriptor.model.strip():
+        raise ValueError("durable dispatch requires an explicit resolved model")
+    value = {
+        'schema': 'protected-model-request/v1', 'provider': descriptor.canonical(),
+        'endpoint': descriptor._endpoint, 'system': transport.system_prompt,
+        'prompt': transport.prompt, 'schema_value': transport.schema,
+        'policy': _policy_identity(transport.policy), 'mode': mode,
+        'count': asdict(count), 'codex': _prepared_codex_identity(transport.codex),
+    }
+    return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
 def _local_budget_exceeded(count, budget):
@@ -714,15 +774,16 @@ def call_candidate(
     available: bool | None = None,
     token_adapters: Mapping[str, TokenCounter] | None = None,
     input_budget: ContextBudget | None = None,
+    dispatch=None,
 ) -> LLMResult:
-    """Probe and call one resolved candidate, returning a stable outcome."""
+    """Prepare before optional durable dispatch; every invocation retains DLP checks."""
     if descriptor.resolution_failure is not None:
         return LLMResult(
             descriptor, None, False, descriptor.resolution_failure, "prompt"
         )
     _require_token_contract(descriptor, max_tokens)
     return _dispatched_call(
-        descriptor, prompt, system_prompt, schema, available, token_adapters, input_budget
+        descriptor, prompt, system_prompt, schema, available, token_adapters, input_budget, dispatch
     )
 
 

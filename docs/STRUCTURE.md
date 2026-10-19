@@ -1143,3 +1143,13 @@ selection intact. Installed provider model projections are removed after qualifi
 unconfigured installations retain their existing environment-based compatibility.
 The owner request and scope are recorded privately in
 `knowledge/notes/central-memory-model-selection-decision-20261019.md`.
+
+The uninstalled compile-progress branch also connects its journal to the shared
+post-DLP, post-preparation dispatch boundary. Candidate results retain safe output,
+failure classification and usage. Indexed historical event reads let `CompileReplay`
+feed saved answers back through the existing `resolve_compile_plan` validators;
+unknown transport outcomes remain blocked. The semantic caller must still bind and
+retain complete work/source/dependency identity and supply this runner through all
+entrypoints. This optional integration does not activate queue schema 4 or replace
+the installed controller; deployment and complete useful-cycle qualification remain
+pending. See `docs/research/2026-10-19-durable-compile-progress.md`.
