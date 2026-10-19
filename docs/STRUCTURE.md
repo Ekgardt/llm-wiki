@@ -281,7 +281,11 @@ CLI, MCP, queue and nightly are to share the same transition controller. A store
 model answer survives process restart. An uncertain dispatched request whose
 answer cannot be recovered blocks automatic repeat expense until explicitly
 authorized; a restart or provider fallback alone is not authorization. Current
-provider adapters do not offer verified recovery of that response.
+provider adapters do not offer verified recovery of that response. The isolated
+controller has an internal explicit-repeat transition bound to the exact dispatch,
+actor and reason. It first recovers an available answer, preserves history, and
+authorizes only the same request. Operator consent entrypoints remain unconnected;
+ordinary unblock/redrive never grants that authorization.
 
 No new database, daemon, runtime root, MCP tool or package dependency is authorized.
 Migration must reject old clients, preserve retained evidence, and run only under

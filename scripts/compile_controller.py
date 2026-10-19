@@ -30,6 +30,7 @@ def _require_checkpoint(checkpoint):
 
 def _dispatch_event(checkpoint, task_id, request_digest):
     progress._require_digest(request_digest)
+    _require_repeat_request(checkpoint, request_digest)
     identity = {
         'schema': 'compile-model-call/v1', 'request_digest': request_digest,
         'checkpoint_sequence': checkpoint.sequence,
@@ -157,3 +158,61 @@ def _run_reserved_call(queue, lease, checkpoint, dispatch, invoke):
     queue.read_compile_artifact(checkpoint)
     queue.record_compile_event(lease, dispatch)
     return _invoke_and_save(queue, lease, dispatch, invoke)
+
+
+def _repeat_checkpoint(checkpoint, task_id, request_digest, authorization):
+    if set(authorization) != {'dispatch_digest', 'actor', 'reason'}:
+        raise ValueError('repeat authorization requires dispatch identity, actor and reason')
+    progress._require_digest(authorization['dispatch_digest'])
+    _require_authorization_text(authorization)
+    details = {**checkpoint.details, 'repeat_authorization': {
+        **authorization, 'request_digest': request_digest,
+    }}
+    return progress._snapshot_event(replace(
+        checkpoint, task_id=task_id, sequence=checkpoint.sequence + 2, details=details,
+    ))
+
+
+def _require_authorization_text(authorization):
+    for field in ('actor', 'reason'):
+        value = authorization[field]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError('repeat authorization requires a nonempty actor and reason')
+
+
+def _require_repeat_request(checkpoint, request_digest):
+    authorization = checkpoint.details.get('repeat_authorization')
+    if authorization is not None and authorization['request_digest'] != request_digest:
+        raise progress.ProgressConflict('repeat authorization belongs to another request')
+
+
+def authorize_model_repeat(queue, lease, checkpoint, *, request_digest, authorization):
+    """Record an explicit operator decision for one identified uncertain call.
+
+    Internal API, not an authorization verifier: the eventual operator entrypoint
+    must establish consent and supply its actor/reason. Unblocking or redriving a
+    task must never call this automatically. Retained history and unknown costs
+    are not reset. This function neither invokes a provider nor publishes memory.
+    """
+    checkpoint = progress._snapshot_event(checkpoint)
+    _require_checkpoint(checkpoint)
+    queue.verify_compile_checkpoint_owner(lease, checkpoint)
+    dispatch = _dispatch_event(checkpoint, lease.id, request_digest)
+    resumed = _repeat_checkpoint(checkpoint, lease.id, request_digest, authorization)
+    current = queue.get_compile_event(checkpoint.work_id)
+    if current == resumed:
+        queue.read_compile_artifact(current)
+        return current
+    return _authorize_uncertain_call(queue, lease, dispatch, current, resumed)
+
+
+def _authorize_uncertain_call(queue, lease, dispatch, current, resumed):
+    _require_same_call(current, dispatch)
+    if progress._event_digest(current) != resumed.details['repeat_authorization']['dispatch_digest']:
+        raise progress.ProgressConflict('repeat authorization names another dispatch')
+    try:
+        _resume_call(queue, lease, dispatch, current)
+    except ProviderOutcomeUnknown:
+        queue.record_compile_event(lease, resumed)
+        return resumed
+    raise progress.ProgressConflict('a durable answer exists; resume it instead of repeating')

@@ -419,9 +419,41 @@ corrected; no guard was disabled.
 
 Pending before activation: derive complete protected request/work identities in
 all compiler entrypoints, persist correction budgets and semantic revisions,
-implement explicit repeat authorization, bind review/publication to existing
+connect explicit operator repeat authorization, bind review/publication to existing
 receipts, qualify the inherited artifact byte bound including envelope overhead,
 and complete the previously listed rollout/retirement/full-cycle checks. The
 callback is a testable internal transport boundary, not a new public MCP tool or
 an alternate permission to call a model. The old compiler remains the installed
 consumer until the complete replacement is qualified, then must be removed.
+
+### Explicit repeat decision (2026-10-19, internal API only)
+
+`authorize_model_repeat` records an operator-supplied actor and reason bound to
+the digest of the exact uncertain dispatch. It retains the original checkpoint
+artifact and all prior events; unknown usage is not replaced with zero. The next
+call must have the same complete request digest. Replaying the authorization
+after its commit returns its existing checkpoint, not another allowance.
+
+Before recording permission, recovery checks the deterministic answer artifact.
+A valid answer is adopted and the repeat refused; corruption also refuses.
+Lease/payload fences and next-sequence checks arbitrate concurrent event writers.
+No SQL lock spans a model call. A late response from an earlier invocation remains
+possible: operator consent accepts the risk of another expense, not exactly-once
+execution. This API does not prove user identity or consent from a string; the
+eventual explicit operator entrypoint must establish consent before calling it.
+No installed entrypoint invokes it yet, and ordinary unblock/redrive does not.
+
+Alternatives: treating queue unblock as consent loses the distinction between
+delivery and paid work; a second authorization database duplicates journal
+coordination; automatic repeat cannot disambiguate lost responses. The selected
+implementation uses the approved journal and existing artifact/fencing APIs.
+The three primary sources above were rechecked on 2026-10-19 for this transition.
+SQLite provides local serialization only; AWS guidance requires care about
+idempotency; Temporal is a comparison for retained execution history, not an
+added dependency. No new numeric limit or package is introduced.
+
+The initial two tests failed because the authorization API was absent. Coverage
+now includes unchanged-request binding, saved/orphan answer preference, invalid
+consent metadata, stale leases, redrive with retained history, and lost
+acknowledgement after permission commit. Full compiler orchestration, operator
+UI/CLI consent, correction accounting and deployment remain pending.

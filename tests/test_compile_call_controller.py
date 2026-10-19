@@ -334,3 +334,136 @@ def test_answer_for_another_call_cannot_be_adopted_from_an_orphan(work, monkeypa
     with pytest.raises(progress.ProgressCorrupt):
         _run(work, _must_not_call)
     assert queue.get_compile_event(checkpoint.work_id) == dispatch
+
+
+def test_explicit_repeat_preserves_unknown_dispatch_and_reuses_checkpoint(work):
+    from compile_controller import authorize_model_repeat
+
+    queue, lease, checkpoint = work
+    def interrupted():
+        raise SystemExit()
+
+    with pytest.raises(SystemExit):
+        _run(work, interrupted)
+    dispatch = queue.get_compile_event(checkpoint.work_id)
+    authorization = {'dispatch_digest': progress._event_digest(dispatch),
+                     'actor': 'owner', 'reason': 'Accept one additional call despite unknown cost'}
+    resumed = authorize_model_repeat(queue, lease, checkpoint, request_digest='e' * 64,
+                                     authorization=authorization)
+    assert resumed.sequence == dispatch.sequence + 1
+    assert resumed.details['artifact'] == checkpoint.details['artifact']
+    assert authorize_model_repeat(queue, lease, checkpoint, request_digest='e' * 64,
+                                  authorization=authorization) == resumed
+    assert _run((queue, lease, resumed), _answer) == _answer()
+    assert _run((queue, lease, resumed), _must_not_call) == _answer()
+
+
+def test_repeat_authorization_cannot_discard_a_saved_answer(work):
+    from compile_controller import authorize_model_repeat
+
+    _run(work, _answer)
+    queue, lease, checkpoint = work
+    with pytest.raises(progress.ProgressConflict):
+        authorize_model_repeat(queue, lease, checkpoint, request_digest='e' * 64,
+                               authorization={'dispatch_digest': 'f' * 64,
+                                              'actor': 'owner', 'reason': 'retry'})
+    assert _run(work, _must_not_call) == _answer()
+
+
+@pytest.fixture
+def uncertain(work):
+    def interrupted():
+        raise SystemExit()
+
+    with pytest.raises(SystemExit):
+        _run(work, interrupted)
+    queue, _, checkpoint = work
+    dispatch = queue.get_compile_event(checkpoint.work_id)
+    return {'dispatch_digest': progress._event_digest(dispatch), 'actor': 'owner', 'reason': 'retry'}
+
+
+def _authorize(work, authorization):
+    from compile_controller import authorize_model_repeat
+
+    return authorize_model_repeat(*work, request_digest='e' * 64, authorization=authorization)
+
+
+@pytest.mark.parametrize('field,value', [('dispatch_digest', 'f' * 64), ('actor', ''), ('reason', None)])
+def test_invalid_repeat_authorization_leaves_dispatch_unchanged(work, uncertain, field, value):
+    queue, _, checkpoint = work
+    before = queue.get_compile_event(checkpoint.work_id)
+    with pytest.raises(ValueError):
+        _authorize(work, {**uncertain, field: value})
+    assert queue.get_compile_event(checkpoint.work_id) == before
+
+
+def test_repeat_authorization_does_not_allow_changed_request(work, uncertain):
+    from compile_controller import run_model_call
+
+    resumed = _authorize(work, uncertain)
+    queue, lease, _ = work
+    with pytest.raises(progress.ProgressConflict, match='another request'):
+        run_model_call(queue, lease, resumed, request_digest='f' * 64, invoke=_must_not_call)
+    assert _run((queue, lease, resumed), _answer) == _answer()
+
+
+def test_authorization_recovers_an_orphan_answer_instead_of_repeating(work, monkeypatch):
+    queue, _, checkpoint = work
+    original = queue.record_compile_event
+
+    def interrupt_answer(lease, event):
+        if event.details.get('model_call', {}).get('phase') == 'answer':
+            raise SystemExit()
+        return original(lease, event)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(queue, 'record_compile_event', interrupt_answer)
+        with pytest.raises(SystemExit):
+            _run(work, _answer)
+    dispatch = queue.get_compile_event(checkpoint.work_id)
+    authorization = {'dispatch_digest': progress._event_digest(dispatch), 'actor': 'owner', 'reason': 'retry'}
+    with pytest.raises(progress.ProgressConflict, match='durable answer exists'):
+        _authorize(work, authorization)
+    assert _run(work, _must_not_call) == _answer()
+
+
+def test_stale_lease_cannot_authorize_repeat(work, uncertain):
+    queue, lease, _ = work
+    queue.fail(lease, memory_queue.QueueFailure('unknown', blocked_capability='unknown'))
+    with pytest.raises(memory_queue.LeaseFenceError):
+        _authorize(work, uncertain)
+
+
+def test_repeat_authorization_survives_redrive_without_erasing_history(work, uncertain):
+    queue, lease, checkpoint = work
+    queue.fail(lease, memory_queue.QueueFailure('worker_failed', permanent=True))
+    queue.redrive(lease.id)
+    child = queue.claim('redrive-worker')
+    resumed = _authorize((queue, child, checkpoint), uncertain)
+    assert _run((queue, child, resumed), _answer) == _answer()
+    with queue._connect() as database:
+        rows = database.execute(
+            'SELECT task_id,sequence FROM compile_work_events WHERE work_id=? ORDER BY sequence',
+            (checkpoint.work_id,),
+        ).fetchall()
+    assert [row['sequence'] for row in rows] == list(range(6))
+    assert rows[2]['task_id'] == lease.id
+    assert rows[3]['task_id'] == child.id
+
+
+def test_repeat_authorization_commit_survives_lost_acknowledgement(work, uncertain, monkeypatch):
+    queue, lease, checkpoint = work
+    original = queue.record_compile_event
+
+    def commit_then_stop(held, event):
+        original(held, event)
+        raise SystemExit()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(queue, 'record_compile_event', commit_then_stop)
+        with pytest.raises(SystemExit):
+            _authorize(work, uncertain)
+    reopened = memory_queue.active_memory_queue(queue.vault, queue.state_root)
+    resumed = _authorize((reopened, lease, checkpoint), uncertain)
+    assert resumed.sequence == checkpoint.sequence + 2
+    assert _run((reopened, lease, resumed), _answer) == _answer()
