@@ -290,7 +290,11 @@ decision is `knowledge/notes/compile-durable-progress-decision-20261019.md`.
 Approval is not implementation or installed qualification. All nine development
 laws, complete-cycle validation and removal of replaced code remain required.
 The isolated implementation now shares journal/artifact auditing across full
-doctor, backup certification and runtime deletion guards. Migration deployment
+doctor, backup certification and runtime deletion guards. Ordinary queue cleanup
+preserves files named by any retained compile event and reports retained tasks
+without blocking deletion of unrelated finished work. Reference checks and unlink
+share the queue write transaction with checkpoint artifact validation. This is
+reference safety, not completed event retirement or orphan collection. Migration deployment
 qualification, artifact retirement and the common transition controller remain pending; see
 `docs/research/2026-10-19-durable-compile-progress.md` for verification scope.
 The candidate-only schema step atomically creates the journal and stamps queue

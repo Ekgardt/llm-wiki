@@ -313,3 +313,53 @@ Before activation, complete all of the following:
 The running vault remains on its previous installed code. The old foreground
 qualification was interrupted before recording this decision; it is not reported
 as a successful rebuild. No migration or automatic repeat model expense was started.
+
+### Retention reference race (2026-10-19, isolated implementation)
+
+The adopted queue's ordinary result cleanup checks only task result references,
+then closes its connection before unlinking. Compile events can retain the same
+result, including through an older event. Moreover, checkpoint publication checks
+the file before acquiring the queue write transaction. These two omissions can
+leave a committed checkpoint pointing at deleted bytes. Existing foreign keys
+protect task rows, not files.
+
+The chosen correction uses the existing queue write transaction for reference
+checks and unlink, and validates checkpoint bytes within that same serialization
+boundary before appending. Check both task results and every retained event;
+corrupt journal evidence refuses deletion. The capture-export cleanup shares the
+same check because capture source artifacts also inhabit queue-results. This
+protects cooperating queue API writers; it is not an OS filesystem sandbox.
+No table, path, dependency, new limit or retention duration is introduced.
+
+Alternatives: an independent file lock would duplicate queue ownership and need
+all publishers to adopt it; a new reference table would add a migration and a
+second projection to reconcile. Scanning the existing journal uses bounded memory
+but costs linear reads per candidate deletion. This is an explicit initial tradeoff,
+not a scalability measurement. A measured index/projection optimization can follow
+without weakening the reference invariant. Terminal event retirement and orphan
+collection still require the semantic controller's completion proof.
+
+Sources checked 2026-10-19: [SQLite transactions](https://www.sqlite.org/lang_transaction.html)
+(single writer and BEGIN IMMEDIATE), [CPython sqlite3](https://docs.python.org/3/library/sqlite3.html)
+(explicit transaction control), and [MITRE CWE-367](https://cwe.mitre.org/data/definitions/367.html)
+(check/use synchronization). The implementation uses existing Python3.10-compatible
+transaction helpers, not the newer sqlite3 autocommit interface. These sources
+support the synchronization choice, not a claim of end-to-end product completion.
+
+A second reproduced failure was batch-wide foreign-key rollback: a finished task
+still named by a compile event entered ordinary purge selection, preventing
+unrelated tasks from being purged. Selection now keeps and reports those task IDs.
+This honors existing history protection; it does not invent a new retention period
+or authorize deletion of completed events. Regressions cover succeeded/cancelled
+deliveries, an older event's reference, a vanished file before the write transaction,
+competing SQL writers at unlink, capture-source cleanup, corrupted journal evidence
+and ordinary task references. The legacy v2 cleanup implementation cannot open the
+adopted v4 database and remains only for pre-adoption compatibility; it has not been
+qualified as a v4 consumer or silently granted the new journal contract.
+
+Moving artifact validation under the write lock exposed another boundary in the
+new implementation: a slow read could outlive the task lease. A failing regression
+advances the clock during the actual artifact read. The append now rechecks the
+same lease after validation before writing the event. No new lease duration or
+retry allowance is introduced. This is tested ownership at append, not a claim
+that an arbitrary filesystem operation can be interrupted at its deadline.

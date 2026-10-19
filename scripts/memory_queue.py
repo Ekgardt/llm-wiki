@@ -2976,8 +2976,8 @@ class WorkerSummary:
 class PurgeReceipt:
     purged: int
     task_ids: tuple[str, ...]
-    # Finished rows the purge left in place because their capture has no terminal
-    # record yet; see `_rows_with_resolved_captures`.
+    # Finished rows retained by unresolved capture or compile history;
+    # see `_rows_with_releasable_evidence`.
     retained: tuple[str, ...] = ()
 
 
@@ -4694,7 +4694,7 @@ def _ordinary_purge_selection(include_dead: bool) -> str:
     Attempts-exhausted work is retained by default and leaves only when asked
     for with `--include-dead`, which the weekly pass does after 30 days; a dead
     capture whose capture has no terminal record stays even then
-    (`_rows_with_resolved_captures`). A row demoted to
+    (`_rows_with_releasable_evidence`). A row demoted to
     `dead / payload_hash_mismatch` is never taken here whatever the caller asks:
     its payload no longer hashes to its record, so it cannot be exported, and
     `quarantine-corrupt` is the route the product has for it. See
@@ -11848,17 +11848,18 @@ class _QueueV3CandidateReader:
         event = _snapshot_event(event)
         if event.task_id != lease.id:
             raise ProgressConflict("compile checkpoint names another task")
-        if "artifact" in event.details:
-            self.read_compile_artifact(event)
         self._with_verified_lease(
-            lease, partial(self._append_compile_event, event=event)
+            lease, partial(self._append_compile_event, event=event, lease=lease)
         )
 
-    def _append_compile_event(self, database, row, now, *, event) -> None:
+    def _append_compile_event(self, database, row, now, *, event, lease) -> None:
         from compile_progress import ProgressConflict, append_event
 
         if row["kind"] != "compile":
             raise ProgressConflict("only compile tasks may append compile progress")
+        if "artifact" in event.details:
+            self.read_compile_artifact(event)
+        self._require_lease_row(database, lease, _utc_now())
         append_event(database, event)
 
     def save_compile_artifact(self, lease: QueueLease, event, data: bytes):
@@ -12330,7 +12331,7 @@ class _QueueV3CandidateReader:
                 f"{_ordinary_purge_selection(include_dead)} ORDER BY created_at,id",
                 (cutoff,),
             ).fetchall()
-            rows, retained = self._rows_with_resolved_captures(database, selected)
+            rows, retained = self._rows_with_releasable_evidence(database, selected)
             records = tuple(
                 self._export_task_in_transaction(database, row) for row in rows
             )
@@ -12352,7 +12353,7 @@ class _QueueV3CandidateReader:
             retained,
         )
 
-    def _rows_with_resolved_captures(
+    def _rows_with_releasable_evidence(
         self, database: sqlite3.Connection, rows: list[sqlite3.Row]
     ) -> tuple[list[sqlite3.Row], tuple[str, ...]]:
         """The rows the purge can prove, and the ids of those it keeps.
@@ -12361,16 +12362,23 @@ class _QueueV3CandidateReader:
         one unresolved capture kept every finished row in the queue. It is left
         in place and named instead. See
         `docs/research/2026-09-25-a-dead-capture-gets-its-second-chance-after-a-fix.md`.
+        Compile history likewise retains its task; its foreign key must not abort
+        deletion of unrelated finished work. Semantic retirement is separate.
         """
         kept: list[sqlite3.Row] = []
         retained: list[str] = []
         for row in rows:
             task_id = str(row["id"])
-            if self._capture_resolved(database, task_id):
+            if self._ordinary_task_evidence_releasable(database, task_id):
                 kept.append(row)
                 continue
             retained.append(task_id)
         return kept, tuple(retained)
+
+    def _ordinary_task_evidence_releasable(self, database, task_id: str) -> bool:
+        if compile_progress.retains_task(database, task_id):
+            return False
+        return self._capture_resolved(database, task_id)
 
     def _capture_resolved(self, database: sqlite3.Connection, task_id: str) -> bool:
         link = database.execute(
@@ -13271,12 +13279,19 @@ class _QueueV3CandidateReader:
         reference = _cleanable_result_reference(record, retained_terminals)
         if reference is None:
             return
-        with closing(self._connect()) as database:
-            retained = database.execute(
-                "SELECT 1 FROM tasks WHERE result_reference=? LIMIT 1", (reference,)
-            ).fetchone()
-        if retained is None:
-            (self.state_root / reference).unlink(missing_ok=True)
+        with closing(self._connect()) as database, begin_immediate(database):
+            if self._result_reference_retained(database, reference):
+                return
+            path = self.state_root / reference
+            path.unlink(missing_ok=True)
+            fsync_directory(path.parent)
+
+    @staticmethod
+    def _result_reference_retained(database, reference: str) -> bool:
+        retained = database.execute(
+            "SELECT 1 FROM tasks WHERE result_reference=? LIMIT 1", (reference,)
+        ).fetchone()
+        return retained is not None or compile_progress.retains_artifact(database, reference)
 
     def _unlink_capture_purge_artifacts(
         self, export: Path, evidence: _CapturePurgeEvidence
@@ -13303,7 +13318,10 @@ class _QueueV3CandidateReader:
             before = source.lstat()
         except FileNotFoundError:
             return
-        self._unlink_verified_source(source, before, artifact)
+        with closing(self._connect()) as database, begin_immediate(database):
+            if self._result_reference_retained(database, artifact.source_path):
+                return
+            self._unlink_verified_source(source, before, artifact)
 
     def _unlink_verified_source(
         self, source: Path, before: os.stat_result, artifact: _CapturePurgeArtifact

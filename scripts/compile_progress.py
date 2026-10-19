@@ -236,10 +236,7 @@ def audit_events(database, verify_artifact, *, deadline=None) -> dict[str, int]:
     """Stream retained history; certify neither publication nor a deletion permit."""
     operational_deadline_active(deadline)
     counts = {'events': 0, 'works': 0, 'artifacts': 0}
-    present = database.execute(
-        "SELECT 1 FROM sqlite_master WHERE name='compile_work_events'",
-    ).fetchone()
-    if present is None:
+    if not _journal_present(database):
         return counts
     _require_schema(database)
     previous = None
@@ -248,3 +245,41 @@ def audit_events(database, verify_artifact, *, deadline=None) -> dict[str, int]:
         previous = _audit_event(row, previous, counts, verify_artifact)
     operational_deadline_active(deadline)
     return counts
+
+
+def retains_artifact(database: sqlite3.Connection, reference: str) -> bool:
+    """Protect every retained event's file, including superseded checkpoints.
+
+    No journal is normal for v3. A v4 opener independently requires its schema.
+    Malformed evidence refuses deletion rather than guessing that a file is free.
+    The caller must hold the queue write transaction through the subsequent unlink.
+    """
+    if not _journal_present(database):
+        return False
+    _require_schema(database)
+    return any(_references_artifact(row, reference) for row in database.execute(
+        'SELECT * FROM compile_work_events ORDER BY work_id,sequence',
+    ))
+
+
+def _references_artifact(row: sqlite3.Row, reference: str) -> bool:
+    event = _verified_event(row)
+    if 'artifact' not in event.details:
+        return False
+    return artifact_identity(event)[0] == reference
+
+
+def _journal_present(database: sqlite3.Connection) -> bool:
+    return database.execute(
+        "SELECT 1 FROM sqlite_master WHERE name='compile_work_events'",
+    ).fetchone() is not None
+
+
+def retains_task(database: sqlite3.Connection, task_id: str) -> bool:
+    """A task named by retained history is not eligible for ordinary purge."""
+    if not _journal_present(database):
+        return False
+    _require_schema(database)
+    return database.execute(
+        'SELECT 1 FROM compile_work_events WHERE task_id=? LIMIT 1', (task_id,),
+    ).fetchone() is not None
