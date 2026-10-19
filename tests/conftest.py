@@ -276,3 +276,12 @@ def pytest_runtest_logstart(nodeid, location):  # noqa: ARG001
             progress.write(f"{nodeid}\n")
     except OSError:
         return
+
+
+@pytest.fixture
+def unconfigured_model_settings(tmp_path):
+    """Legacy-provider cases must not inherit the installed vault's model choice."""
+    import model_selection
+
+    with model_selection.using_root(tmp_path):
+        yield

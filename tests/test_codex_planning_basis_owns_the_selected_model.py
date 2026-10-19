@@ -10,6 +10,8 @@ import pytest
 
 from tests.slow_machine import LONG_TIMEOUT
 
+pytestmark = pytest.mark.usefixtures("unconfigured_model_settings")
+
 
 def _descriptor():
     return lc.provider_candidates('codex')[0]

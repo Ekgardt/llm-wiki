@@ -16,6 +16,9 @@ if str(ROOT / "scripts") not in sys.path:
 
 import integration_hook_config  # noqa: E402
 
+pytestmark = pytest.mark.usefixtures("unconfigured_model_settings")
+
+
 LOCAL_ONLY = {
     "MEMORY_LLM_PROVIDER": "ollama",
     "OLLAMA_NO_CLOUD": "1",

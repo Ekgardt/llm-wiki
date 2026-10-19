@@ -1,6 +1,6 @@
 # One model selection for memory work
 
-Status: implemented in an isolated branch; deployment pending (2026-10-19).
+Status: installed in the running vault on 2026-10-19; broader point 7 remains open.
 
 Observed defect: installer choice is copied to agent environment blocks and
 scheduler definitions. Local systemd overrides can supersede a newer base unit.
@@ -91,3 +91,47 @@ Its 11 reload and graceful-shutdown regression tests passed on Python 3.12.
 Activation therefore requires stopping old background work, coordinating the
 maintenance fence and reconciling installer projections; unsupervised clients
 need a restart. Source qualification alone is not deployment.
+
+
+## Installation evidence (2026-10-19)
+
+The live checkout advanced from `995f18b8` to `f91a1cd7`. The existing maintenance
+admission was held for configuration publication and installer reconciliation.
+The old compiler and its provider child exited after SIGINT; the interrupted call
+is not claimed completed and this upgrade did not automatically retry it.
+A first activation attempt safely rejected the new section because the upgrade
+process itself had imported the old settings module before updating the checkout.
+No settings bytes changed on that attempt. A fresh process completed publication.
+The standard MCP supervisor replaced its worker and answered the next request
+without closing the client connection.
+
+The installed chooser completed another protected short call through the current
+Codex login and saved `codex/gpt-6.1-sol` / `medium`. Deliberately stale provider,
+model and reasoning environment values no longer overrode this choice. Installer
+reconciliation removed model copies from the owned shell, Claude, Codex hooks and
+scheduler fragments. The owned Codex MCP entry was replaced with its standard
+verified preimage mechanism; unrelated interactive Codex settings were preserved.
+The two model-only scheduler drop-ins were removed after preserving preimages.
+
+Before installation, related regression suites passed on locked Python 3.12
+(356 passed, 20 skipped) and Python 3.10 (355 passed, 21 skipped). Readme checks
+passed 20; supervisor checks passed 11. Static analysis, shell syntax, lockfile
+validation and dependency consistency passed. All 82 initially changed functions
+met the law-5 thresholds. TOMLKit 0.15.2 has no runtime dependencies; its locked
+artifact was hash-verified and its package vulnerability audit found no known
+vulnerabilities. This is not a whole-environment vulnerability audit.
+
+An installed-checkout regression run exposed six tests reading the real selected
+model instead of an unconfigured fixture. A wider configured-checkout run exposed six more cases with the same assumption.
+Four legacy test modules now request a shared empty-settings fixture; no assertions
+or production selection rules were weakened. The same run's knowledge-write
+guard observed a genuine concurrent tool capture from this session; that record
+was retained. The final configured-checkout run passed 376 tests with 20 skips on Python 3.12;
+the affected provider/selection set passed 66 with 9 skips on Python 3.10.
+All 83 final changed functions meet the law-5 thresholds. Native Windows/macOS runtime behavior and opt-in Codex protocol tests
+that were skipped are not claimed qualified.
+
+Operational doctor confirms roots, model configuration admission and install state,
+but still reports existing capture history, failed nightly/weekly maintenance,
+retained queue/transaction and LSP evidence, and capacity warnings. This change
+does not close those issues or prove completion of the separate point-7 refactor.

@@ -27,7 +27,10 @@ import llm_client  # noqa: E402
 
 from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT  # noqa: E402
 
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="a shell stub stands in for the CLI")
+pytestmark = [
+    pytest.mark.usefixtures("unconfigured_model_settings"),
+    pytest.mark.skipif(sys.platform == "win32", reason="a shell stub stands in for the CLI"),
+]
 
 # A Claude CLI that knows its flags and answers only the models in $FAKE_ALLOWED.
 _CLAUDE = """#!/bin/sh

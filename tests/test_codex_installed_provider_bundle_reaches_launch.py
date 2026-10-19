@@ -9,6 +9,8 @@ import codex_memory
 import integration_hook_config as hooks
 import pytest
 
+pytestmark = pytest.mark.usefixtures("unconfigured_model_settings")
+
 BUNDLE = {'MEMORY_LLM_PROVIDER': 'codex', 'MEMORY_CODEX_MODEL': 'gpt-6-luna',
           'MEMORY_CODEX_REASONING': 'max'}
 
