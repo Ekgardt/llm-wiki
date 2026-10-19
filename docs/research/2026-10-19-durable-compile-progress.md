@@ -518,3 +518,48 @@ uncertain retry needs semantic-cursor integration; the internal authorization AP
 alone is insufficient. Whole-work accounting, receipt publication/recovery, event
 retirement, inherited-cap qualification and encrypted stopped-agent deployment
 remain required. This optional resolver seam is not installed production routing.
+
+## Captured input artifacts (2026-10-19)
+
+The controller can now encode, persist and restore `CompileInputs` through the
+existing fenced queue artifact API. It retains original bytes, prompt projections,
+targets, complete vault context, daily partitions, original entry boundaries,
+native frames and compiled flags. Only the process-local partition cache is omitted;
+the compiler already reconstructs its proofs when that cache is absent. Identical
+byte strings share a digest entry within one self-contained artifact. Blob hashes,
+original-source hashes, canonical roundtrip and the checkpoint's snapshot digest
+are checked. Unknown fields or versions, changed bytes and lossy encodings refuse.
+No source file is reread during restoration. This codec preserves captured evidence;
+it does not replace source admissibility or semantic validation.
+
+The model-oriented canonical JSON helper normalizes Unicode and rejects tuples.
+The first implementation's tests exposed that it was unsuitable here. The snapshot
+uses the journal's non-normalizing deterministic JSON representation; a regression
+includes decomposed Unicode in native provenance and non-UTF-8 source bytes.
+
+Research rechecked on 2026-10-19: [SQLite atomic commit](https://sqlite.org/atomiccommit.html),
+[AWS idempotency guidance](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/)
+and [Temporal execution history](https://docs.temporal.io/workflow-execution).
+Reopening live files would change the original work; serializing process objects
+would couple recovery to executable object loading. Separate shared blob files
+would need new recursive backup/retention reachability. The selected self-contained
+format reuses existing artifact ownership and sacrifices cross-job deduplication.
+No package, new directory or numeric limit is added.
+
+Tests first failed for the absent snapshot API. Coverage includes lossless capture,
+corruption, stale source digests, queue reopen, snapshot identity mismatch and the
+real semantic compiler replaying a saved draft with inputs restored from its queue
+artifact. Runtime schema adoption and entrypoint routing remain pending. The
+inherited 16 MiB queue-artifact ceiling is explicitly **not** qualified by small
+fixtures; live-context sizing is reported separately. Full work/dependency identity,
+complete job capture/packing, uncertain-retry continuation, publication and deployment
+remain unfinished. The installed compiler is unchanged.
+
+The read-only installed-vault measurement found 7,472 snapshot records encode to
+40,275,638 bytes **without daily sources**; encode/decode equality passed in 1.95 s.
+That already exceeds 16,777,216 bytes. Activation is blocked by measured capacity,
+not an assumed future workload. Raising only the writer bound would leave reader,
+backup, recovery and retention bounds inconsistent; that common contract must be
+resolved before installed routing. Related suites: 90 passed on Python 3.12 and
+90 on Python 3.10; the updated real-compiler integration was additionally rerun on
+3.12. The complexity check covers 23 changed/new functions, all within law 5.

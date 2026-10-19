@@ -411,3 +411,149 @@ def _is_completed_result(result):
     return result.available is True and (
         result.text is not None or result.failure_class in _COMPLETED_REFUSALS
     )
+
+
+def _snapshot_types():
+    from compile_memory import DailySnapshot, SourceSnapshot, TargetSnapshot
+
+    return {'dailies': DailySnapshot, 'sources': SourceSnapshot,
+            'targets': TargetSnapshot, 'vault_files': SourceSnapshot}
+
+
+def _snapshot_blob(content, blobs):
+    import base64
+    import hashlib
+
+    if content is None:
+        return None
+    if type(content) is not bytes:
+        raise ValueError('snapshot content must be bytes')
+    digest = hashlib.sha256(content).hexdigest()
+    blobs[digest] = base64.b64encode(content).decode('ascii')
+    return digest
+
+
+def _require_snapshot_digest(content, digest):
+    import hashlib
+
+    if hashlib.sha256(content).hexdigest() != digest:
+        raise ValueError('snapshot content digest mismatch')
+
+
+def _snapshot_record(record, blobs):
+    _require_snapshot_digest(record.content, record.sha256)
+    value = asdict(record)
+    for name in ('content', 'original_content', 'prompt_content'):
+        if name in value:
+            value[name] = _snapshot_blob(value[name], blobs)
+    _require_original_digest(value)
+    return value
+
+
+def _require_original_digest(value):
+    original = value.get('original_content')
+    if original is not None and original != value['original_sha256']:
+        raise ValueError('original snapshot content digest mismatch')
+
+
+def encode_compile_inputs(inputs):
+    """Lossless captured inputs; partition_context is only a process-local cache.
+
+    One self-contained artifact keeps existing backup/retention reachability.
+    Identical byte strings share a digest entry inside it. This codec does not
+    certify source admissibility, work identity, or queue artifact capacity.
+    """
+    from compile_memory import CompileInputs
+
+    if type(inputs) is not CompileInputs:
+        raise ValueError('expected captured CompileInputs')
+    blobs = {}
+    records = {name: [_snapshot_record(item, blobs) for item in getattr(inputs, name)]
+               for name in _snapshot_types()}
+    # The shared model JSON normalizes Unicode; source provenance must not.
+    return progress._canonical({'schema': 'compile-input-snapshot/v1',
+                                'inputs': records, 'blobs': blobs}).encode('utf-8')
+
+
+def _decoded_snapshot_blobs(blobs):
+    import base64
+
+    result = {}
+    for digest, encoded in blobs.items():
+        content = base64.b64decode(encoded, validate=True)
+        _require_snapshot_digest(content, digest)
+        result[digest] = content
+    return result
+
+
+def _restore_snapshot_bytes(value, blobs):
+    result = dict(value)
+    for name in ('content', 'original_content', 'prompt_content'):
+        if name in result and result[name] is not None:
+            result[name] = blobs[result[name]]
+    return result
+
+
+def _restore_snapshot_daily(value):
+    from compile_memory import NativeCompileFrame
+
+    value['original_entries'] = tuple(tuple(entry) for entry in value['original_entries'])
+    value['native_frames'] = tuple(NativeCompileFrame(**frame) for frame in value['native_frames'])
+    return value
+
+
+def _restore_snapshot_record(kind, value, blobs):
+    from compile_memory import DailySnapshot
+
+    value = _restore_snapshot_bytes(value, blobs)
+    if kind is DailySnapshot:
+        value = _restore_snapshot_daily(value)
+    return kind(**value)
+
+
+def _restore_compile_inputs(value):
+    from compile_memory import CompileInputs
+
+    if value['schema'] != 'compile-input-snapshot/v1':
+        raise ValueError('unknown compile input snapshot schema')
+    kinds = _snapshot_types()
+    blobs = _decoded_snapshot_blobs(value['blobs'])
+    return CompileInputs(**{
+        name: tuple(_restore_snapshot_record(kinds[name], item, blobs) for item in records)
+        for name, records in value['inputs'].items()
+    })
+
+
+def decode_compile_inputs(data):
+    """Restore without filesystem reads; refuse corrupt or lossy representations."""
+    try:
+        inputs = _restore_compile_inputs(json.loads(data))
+        if encode_compile_inputs(inputs) != data:
+            raise ValueError('compile input snapshot is not lossless and canonical')
+        return inputs
+    except (ValueError, TypeError, KeyError, AttributeError) as error:
+        raise progress.ProgressCorrupt('invalid compile input snapshot') from error
+
+
+def save_compile_inputs(queue, lease, checkpoint, inputs):
+    """Persist the exact captured bytes through the existing fenced artifact API."""
+    _require_input_checkpoint(checkpoint)
+    data = encode_compile_inputs(inputs)
+    _require_snapshot_digest(data, checkpoint.source_digest)
+    return queue.save_compile_artifact(lease, checkpoint, data)
+
+
+def load_compile_inputs(queue, lease, checkpoint):
+    """Read only the queue-bound snapshot, never changed live source files."""
+    _require_input_checkpoint(checkpoint)
+    queue.verify_compile_checkpoint_owner(lease, checkpoint)
+    data = queue.read_compile_artifact(checkpoint)
+    _require_snapshot_digest(data, checkpoint.source_digest)
+    return decode_compile_inputs(data)
+
+
+def _require_input_checkpoint(checkpoint):
+    if (checkpoint.stage, checkpoint.outcome) != ('snapshot_ready', 'ready'):
+        raise progress.ProgressConflict('captured inputs require a ready snapshot checkpoint')
+    if 'model_call' in checkpoint.details:
+        raise progress.ProgressConflict('model answer is not an input snapshot')

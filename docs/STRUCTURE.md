@@ -1153,3 +1153,10 @@ retain complete work/source/dependency identity and supply this runner through a
 entrypoints. This optional integration does not activate queue schema 4 or replace
 the installed controller; deployment and complete useful-cycle qualification remain
 pending. See `docs/research/2026-10-19-durable-compile-progress.md`.
+
+The uninstalled durable compile controller also stores lossless input snapshots in
+one existing queue-result artifact: content-addressed bytes inside the envelope,
+original partition/provenance metadata, prompt projections and target context.
+Its checkpoint binds the whole snapshot digest. It adds no recursively referenced
+artifact tree. The existing queue artifact size ceiling still requires real-workload
+qualification before routing installed compile entrypoints through this mechanism.

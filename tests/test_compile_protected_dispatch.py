@@ -220,6 +220,8 @@ def test_real_compile_validation_resumes_saved_draft_without_new_draft_call(
     )
 
     compiler, inputs, state = compiler_case
+    work = _captured_work(work, inputs)
+    inputs = controller.load_compile_inputs(*work)
     provider = _provider()
     queue, _, _ = work
     coordinator = active_markdown_coordinator(queue.vault, state)
@@ -245,8 +247,9 @@ def test_real_compile_validation_resumes_saved_draft_without_new_draft_call(
                 inputs, CompileCache(state), coordinator=coordinator,
                 call_runner=controller.CompileReplay(*work, dependency_digest='f' * 64),
             )
+    restored_inputs = controller.load_compile_inputs(*work)
     result = compiler.resolve_compile_plan(
-        inputs, CompileCache(state), coordinator=coordinator,
+        restored_inputs, CompileCache(state), coordinator=coordinator,
         call_runner=controller.CompileReplay(*work, dependency_digest='f' * 64),
     )
     assert result.plan['operations'][0]['path'] == 'knowledge/notes/cedar-merge-order.md'
@@ -314,3 +317,101 @@ def test_historical_read_checks_sequence_and_original_digest(work):
                          ('{}', checkpoint.sequence))
     with pytest.raises(compile_progress.ProgressCorrupt):
         queue.get_compile_event(checkpoint.work_id, sequence=checkpoint.sequence)
+
+
+def test_snapshot_restores_original_bytes_projection_and_provenance(compiler_case):
+    import hashlib
+
+    compiler, inputs, _ = compiler_case
+    raw = b'original\xff bytes'
+    daily = replace(inputs.dailies[0], original_content=raw,
+                    original_sha256=hashlib.sha256(raw).hexdigest(),
+                    original_entries=(('12:34:56', 0, len(raw)),),
+                    native_frames=(compiler.NativeCompileFrame('journal', 0, 3, '12:34:56', 'e\u0301', 'e\u0301'),))
+    source = compiler.SourceSnapshot('knowledge/notes/example.md', raw,
+                                    hashlib.sha256(raw).hexdigest(), b'projected')
+    captured = replace(inputs, dailies=(daily,), sources=(source,), vault_files=(source,),
+                       partition_context=object())
+    data = controller.encode_compile_inputs(captured)
+    restored = controller.decode_compile_inputs(data)
+    assert restored == captured
+    assert restored.partition_context is None
+    assert restored.sources[0].content == raw
+    assert controller.encode_compile_inputs(restored) == data
+
+
+def test_snapshot_refuses_content_with_stale_hash(compiler_case):
+    _, inputs, _ = compiler_case
+    bad = replace(inputs, dailies=(replace(inputs.dailies[0], content=b'changed'),))
+    with pytest.raises(ValueError, match='digest'):
+        controller.encode_compile_inputs(bad)
+
+
+def test_snapshot_refuses_tampered_blob(compiler_case):
+    import json
+
+    from reliable_memory import canonical_json_bytes
+
+    _, inputs, _ = compiler_case
+    value = json.loads(controller.encode_compile_inputs(inputs))
+    key = next(iter(value['blobs']))
+    value['blobs'][key] = 'YWx0ZXJlZA=='
+    with pytest.raises(ValueError):
+        controller.decode_compile_inputs(canonical_json_bytes(value))
+
+
+def test_snapshot_refuses_unknown_fields_and_noncanonical_data(compiler_case):
+    import json
+
+    from reliable_memory import canonical_json_bytes
+
+    _, inputs, _ = compiler_case
+    data = controller.encode_compile_inputs(inputs)
+    with pytest.raises(ValueError):
+        controller.decode_compile_inputs(data + b'\n')
+    value = json.loads(data)
+    value['inputs']['future_field'] = 'must not silently lose'
+    with pytest.raises(ValueError):
+        controller.decode_compile_inputs(canonical_json_bytes(value))
+
+
+def test_snapshot_survives_queue_reopen_without_reading_sources(compiler_case, work):
+    import hashlib
+
+    import compile_progress as progress
+    import memory_queue
+
+    _, inputs, _ = compiler_case
+    queue, lease, _ = work
+    digest = hashlib.sha256(controller.encode_compile_inputs(inputs)).hexdigest()
+    event = progress.CompileEvent('a' * 64, lease.id, 0, digest, 'pending', 'ready', {})
+    queue.record_compile_event(lease, event)
+    saved = controller.save_compile_inputs(queue, lease, replace(event, sequence=1,
+                                            stage='snapshot_ready'), inputs)
+    reopened = memory_queue.active_memory_queue(queue.vault, queue.db_path.parent.parent)
+    assert controller.load_compile_inputs(reopened, lease, saved) == inputs
+    wrong = replace(saved, source_digest='b' * 64)
+    with pytest.raises(ValueError):
+        controller.load_compile_inputs(reopened, lease, wrong)
+
+
+def test_snapshot_rejects_changed_digest_before_artifact_write(compiler_case, work):
+    _, inputs, _ = compiler_case
+    queue, lease, checkpoint = work
+    with pytest.raises(ValueError, match='digest'):
+        controller.save_compile_inputs(queue, lease, checkpoint, inputs)
+    assert queue.get_compile_event(checkpoint.work_id) == checkpoint
+
+
+def _captured_work(work, inputs):
+    import hashlib
+
+    import compile_progress as progress
+
+    queue, lease, _ = work
+    digest = hashlib.sha256(controller.encode_compile_inputs(inputs)).hexdigest()
+    event = progress.CompileEvent('9' * 64, lease.id, 0, digest, 'pending', 'ready', {})
+    queue.record_compile_event(lease, event)
+    saved = controller.save_compile_inputs(queue, lease, replace(event, sequence=1,
+                                            stage='snapshot_ready'), inputs)
+    return queue, lease, saved
