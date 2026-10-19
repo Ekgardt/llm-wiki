@@ -125,7 +125,8 @@ uv run python scripts/choose_model.py set codex/gpt-6.1-sol --reasoning medium
 
 使用 `select` 打开交互菜单。验证失败不会改变原有选择。保存的选择优先于旧的
 模型和提供方环境变量副本；连接地址和 DLP 规则仍单独配置。升级到此配置格式时，
-需要重启仍在运行的旧客户端。
+先停止旧的后台任务。标准 MCP 会在没有未完成调用的下一次请求时自动更新工作进程；
+不使用 supervisor 的客户端需要重启。
 
 其他语言的代码导航按需安装，每种语言一条命令：
 

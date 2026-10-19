@@ -133,8 +133,9 @@ uv run python scripts/choose_model.py set codex/gpt-6.1-sol --reasoning medium
 
 Use `select` for the interactive menu. A failed check leaves the previous choice
 intact. The saved choice overrides old model/provider environment copies; endpoint
-and DLP configuration remain separate. Restart already-running old clients when
-upgrading to this configuration format.
+and DLP configuration remain separate. During this format upgrade, stop old background jobs first. Standard MCP clients
+reload their worker automatically on the next idle request; unsupervised clients
+need a restart.
 
 Code navigation for another language is one command each, when you need it:
 

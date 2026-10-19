@@ -473,8 +473,9 @@ operator command. `model` is `provider/model-id`; Codex also stores `reasoning`.
 The chooser verifies one short protected request before saving. A catalog is not
 proof of subscription entitlement. The saved choice overrides historical model
 and provider environment copies; endpoint credentials and DLP/local-only settings
-remain separate. Explicit `fake` is reserved for tests. Restart old long-lived
-clients before activating this configuration section during an upgrade.
+remain separate. Explicit `fake` is reserved for tests. Stop old background jobs before activating this configuration section during an
+upgrade. Standard MCP supervisors reload workers on the next idle request after
+a source update; unsupervised long-lived clients need an explicit restart.
 
 Without a saved selection, compatibility priority is OpenCode (only when `OPENCODE_SERVER_PASSWORD` protects its server) →
 Codex → Claude CLI → OpenAI → Ollama. If none answers, the call returns

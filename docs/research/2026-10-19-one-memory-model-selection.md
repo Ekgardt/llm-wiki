@@ -85,5 +85,9 @@ in the execution report after final checks.
 Upgrade constraint: already-running old Python processes validate llm-wiki.toml
 against the old schema. Activating [llm] before stopping/restarting those processes
 would make their settings reads fail. A source update alone cannot reload imported
-Python modules. Therefore activation requires a coordinated client restart and
-installer projection reconciliation; source qualification alone is not deployment.
+Python modules. The existing MCP supervisor reloads workers before the next request when no
+request is in flight, replaying initialization while keeping the client connected.
+Its 11 reload and graceful-shutdown regression tests passed on Python 3.12.
+Activation therefore requires stopping old background work, coordinating the
+maintenance fence and reconciling installer projections; unsupervised clients
+need a restart. Source qualification alone is not deployment.
