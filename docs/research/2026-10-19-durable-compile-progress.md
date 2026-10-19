@@ -202,6 +202,40 @@ preimages and evidence, reject old clients, and recover from every interrupted s
 The SQL statements are deliberately not added to automatic v3 initialization while
 that migration is unfinished. Ordinary reads never create the new table.
 
+### Offline artifact fingerprints (2026-10-19)
+
+The migration receipt helper previously read all artifact bytes, then captured
+file identity separately. A path replacement between these operations produced
+a receipt with the old digest and the new inode. A regression reproduces that
+acceptance. Whole-file reading also made the inherited 256 MiB database budget
+unsuitable for the installed queue (364 MiB) and coordinator (1.8 GiB).
+
+Receipt creation now streams through the shared 64 KiB I/O chunk size, checks
+descriptor and path metadata before/after hashing, and returns the identity bound
+to that read. A second adversarial test found that an immediate same-size rewrite
+with restored mtime also retained identical ctime on the execution filesystem.
+Two complete hash passes through the same descriptor now have to agree. This is
+a read-and-verification pair, not a retry limit. It doubles offline read I/O,
+keeps constant memory, and detects that reproduced rewrite. It is not an atomic
+snapshot against noncooperating writers; the canonical maintenance fence remains
+mandatory. Its memory bound does not limit artifact size. Growth past the
+initial size, truncation, replacement and caller deadline expiry fail explicitly.
+Small JSON artifact budgets remain explicit. Other legacy adoption paths still
+have whole-file limits; this change does not claim those paths handle large DBs.
+This primitive requires offline files and closed SQLite connections: descriptor
+closure can release process-owned SQLite locks. It does not replace quiescence,
+SQLite backup, or atomic publication. Native Windows/macOS remain unqualified.
+
+Alternatives: raising the whole-file ceiling would retain proportional memory
+cost and the identity race; unguarded streaming would permit mixed-version hashes.
+The selected implementation shares existing owner/containment/identity checks and
+adds no dependency or new storage location. Sources rechecked on 2026-10-19:
+[SQLite backup API](https://www.sqlite.org/backup.html),
+[Python filesystem APIs](https://docs.python.org/3/library/os.html),
+[PostgreSQL upgrade guidance](https://www.postgresql.org/docs/current/upgrading.html).
+These support coherent copies, descriptor operations and preservation of migration
+evidence respectively; the adversarial regression is the evidence for this race.
+
 Before activation, complete all of the following:
 
 1. Versioned offline migration of the queue and adopted-pair manifest, including

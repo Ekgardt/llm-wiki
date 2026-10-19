@@ -27,6 +27,7 @@ from reliable_memory import (
     capture_operational_database_identity,
     capture_runtime_file_identity,
     durable_publish_file,
+    fingerprint_runtime_file,
     open_readonly_operational_db,
     operational_deadline_active,
     publish_runtime_file,
@@ -2375,14 +2376,15 @@ def _resume_active_database(
     _remove_matching_candidate(candidate, active, state_root)
 
 
-def _artifact_record(path: Path, state_root: Path, max_bytes: int) -> dict[str, object]:
-    payload = read_runtime_bytes(
-        path, state_root, max_bytes=max_bytes, owner_only=True
+def _artifact_record(
+    path: Path, state_root: Path, max_bytes: int | None, *, deadline=None,
+) -> dict[str, object]:
+    digest, identity = fingerprint_runtime_file(
+        path, state_root, max_bytes=max_bytes, deadline=deadline,
     )
-    identity = capture_runtime_file_identity(path, state_root=state_root)
     return {
         "path": path.relative_to(state_root).as_posix(),
-        "sha256": sha256_bytes(payload),
+        "sha256": digest,
         "identity": _identity_value(identity),
     }
 
@@ -2397,7 +2399,7 @@ def _adoption_database_record(
     record: dict[str, object] = {
         "database": spec.name,
         "active": _artifact_record(
-            paths[spec.active_key], state_root, _MAX_OPERATIONAL_DB_BYTES
+            paths[spec.active_key], state_root, None
         ),
         "tombstone": _artifact_record(
             paths[spec.legacy_key], state_root, _MAX_TOMBSTONE_BYTES
@@ -2413,7 +2415,7 @@ def _adoption_database_record(
     }
     if source_state == "upgrade":
         record["retired"] = _artifact_record(
-            paths[spec.retired_key], state_root, _MAX_OPERATIONAL_DB_BYTES
+            paths[spec.retired_key], state_root, None
         )
     return record
 

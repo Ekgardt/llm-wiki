@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
+from bounded_io import IO_CHUNK_BYTES
+
 
 # The Reliability v3 contract's coordination values, fixed in its plan
 # (docs/superpowers/plans/2026-07-13-reliable-memory.md) and pinned by
@@ -1158,6 +1160,70 @@ def read_runtime_bytes(
         data = os.read(descriptor, max_bytes + 1)
         _require_stable_read(opened, os.fstat(descriptor), len(data), max_bytes)
         return data
+    finally:
+        os.close(descriptor)
+
+
+def _fingerprint_metadata(metadata: os.stat_result) -> tuple[int, ...]:
+    return (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size,
+            metadata.st_mtime_ns, metadata.st_ctime_ns)
+
+
+def _require_fingerprint_metadata(expected, actual) -> None:
+    if _fingerprint_metadata(expected) != _fingerprint_metadata(actual):
+        raise PermissionError("runtime file changed during fingerprint")
+
+
+def _digest_runtime_descriptor(descriptor: int, size: int, deadline) -> str:
+    digest, length = hashlib.sha256(), 0
+    while length <= size:
+        operational_deadline_active(deadline)
+        chunk = os.read(descriptor, min(IO_CHUNK_BYTES, size + 1 - length))
+        if not chunk:
+            break
+        digest.update(chunk)
+        length += len(chunk)
+    operational_deadline_active(deadline)
+    if length != size:
+        raise PermissionError("runtime file size changed during fingerprint")
+    return digest.hexdigest()
+
+
+def _verified_runtime_digest(descriptor, expected, deadline) -> str:
+    digest = _digest_runtime_descriptor(descriptor, expected.st_size, deadline)
+    _require_fingerprint_metadata(expected, os.fstat(descriptor))
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    if _digest_runtime_descriptor(descriptor, expected.st_size, deadline) != digest:
+        raise PermissionError("runtime file content changed during fingerprint")
+    return digest
+
+
+def fingerprint_runtime_file(
+    path: Path, state_root: Path, *, max_bytes: int | None = None, deadline=None,
+) -> tuple[str, RuntimeFileIdentity]:
+    """Stream a stable owner-only artifact, binding its digest to its identity.
+
+    Only use for offline artifacts: closing a descriptor for a live SQLite file
+    can release this process's advisory locks. The maintenance fence and closed
+    SQLite connections remain the caller's responsibility. Chunk size bounds
+    memory, not accepted file size; a growing file is refused at its initial size.
+    A second hash detects rewrites hidden by coarse/restored timestamps. This
+    consistency witness cannot replace exclusion of noncooperating writers.
+    """
+    operational_deadline_active(deadline)
+    path = Path(path)
+    expected = _validated_runtime_metadata(
+        path, state_root, max_bytes=max_bytes, owner_only=True,
+    )
+    identity = _runtime_identity_from_metadata(path, expected)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        _require_fingerprint_metadata(expected, os.fstat(descriptor))
+        digest = _verified_runtime_digest(descriptor, expected, deadline)
+        _require_fingerprint_metadata(expected, os.fstat(descriptor))
+        _require_fingerprint_metadata(expected, path.stat(follow_symlinks=False))
+        return digest, identity
     finally:
         os.close(descriptor)
 
