@@ -11,7 +11,7 @@ from pathlib import Path
 import compile_progress_migration as migration
 import memory_queue
 import pytest
-from reliable_memory import OperationalDatabaseContractError
+from reliable_memory import OperationalDatabaseContractError, open_readonly_operational_db
 
 from tests.adopted_vault import adopt
 
@@ -49,7 +49,11 @@ def test_migration_preserves_work_and_blocks_old_clients(candidate):
     assert _snapshot(state / 'run/queue-v3.sqlite3') == before
     assert set(before).issubset(_snapshot(path))
     with pytest.raises(OperationalDatabaseContractError):
-        memory_queue.require_queue_v3_openable(path, state_root=state)
+        open_readonly_operational_db(
+            path, state, max_bytes=None, owner_only=True,
+            contract=memory_queue._QUEUE_V3_CONTRACT,
+        )
+    memory_queue.require_queue_v3_openable(path, state_root=state)
 
 
 def test_completed_migration_is_verified_and_reusable(candidate):

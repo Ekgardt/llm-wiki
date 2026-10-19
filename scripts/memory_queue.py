@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from markdown_transaction import IntentFence
     from operational_ownership import OwnerLease
 
+import compile_progress
 from reliable_memory import (
     DEFAULTS,
     MAX_CAPTURE_DECISION_BYTES,
@@ -40,6 +41,7 @@ from reliable_memory import (
     OperationalDatabaseContract,
     OperationalDatabaseContractError,
     _set_owner_only,
+    _validate_or_initialize_operational_contract,
     begin_immediate,
     canonical_json_bytes,
     configure_operational_deadline,
@@ -989,6 +991,16 @@ QUEUE_V3_SCHEMA_SHA256 = sha256_bytes(
             "user_version": _QUEUE_V3_CONTRACT.user_version,
         }
     )
+)
+
+QUEUE_COMPILE_SCHEMA_SHA256 = sha256_bytes(canonical_json_bytes({
+    "base": QUEUE_V3_SCHEMA_SHA256,
+    "version": compile_progress.QUEUE_SCHEMA_VERSION,
+    "journal": list(compile_progress.SCHEMA_STATEMENTS),
+}))
+_QUEUE_COMPILE_CONTRACT = OperationalDatabaseContract(
+    application_id=_QUEUE_V3_CONTRACT.application_id,
+    user_version=compile_progress.QUEUE_SCHEMA_VERSION,
 )
 
 
@@ -2161,17 +2173,45 @@ def _require_inside_state_root(path: Path, state_root: Path) -> None:
         raise PermissionError("queue v3 database is outside the state root") from exc
 
 
-def _open_queue_v3_readonly(path: Path, state_root: Path, *, deadline: float | None = None) -> sqlite3.Connection:
-    """A read-only handle on a queue v3 database under the runtime root."""
-    return open_readonly_operational_db(
-        path,
-        state_root,
-        max_bytes=1 << 50,
-        owner_only=True,
-        busy_ms=DEFAULTS.queue_busy_ms,
-        contract=_QUEUE_V3_CONTRACT,
-        deadline=deadline,
-    )
+def _queue_contract_for_version(version: int) -> OperationalDatabaseContract:
+    contracts = {_QUEUE_V3_CONTRACT.user_version: _QUEUE_V3_CONTRACT,
+                 compile_progress.QUEUE_SCHEMA_VERSION: _QUEUE_COMPILE_CONTRACT}
+    if version not in contracts:
+        raise OperationalDatabaseContractError("unsupported queue database version")
+    return contracts[version]
+
+
+def _require_supported_queue_contract(database: sqlite3.Connection) -> None:
+    version = database.execute("PRAGMA user_version").fetchone()[0]
+    contract = _queue_contract_for_version(version)
+    _validate_or_initialize_operational_contract(database, contract, initialize=False)
+    if version == compile_progress.QUEUE_SCHEMA_VERSION:
+        compile_progress._require_schema(database)
+
+
+def _checked_queue_connection(database: sqlite3.Connection, expected_contract=None) -> sqlite3.Connection:
+    try:
+        _require_supported_queue_contract(database)
+        if expected_contract is not None:
+            _validate_or_initialize_operational_contract(database, expected_contract, initialize=False)
+        return database
+    except BaseException:
+        database.close()
+        raise
+
+
+def _open_queue_v3_readonly(path: Path, state_root: Path, *, deadline: float | None = None, expected_contract=None) -> sqlite3.Connection:
+    """Read a supported queue version; adoption still binds the exact active one."""
+    return _checked_queue_connection(open_readonly_operational_db(
+        path, state_root, max_bytes=None, owner_only=True,
+        busy_ms=DEFAULTS.queue_busy_ms, deadline=deadline,
+    ), expected_contract)
+
+
+def _open_queue_operational(path: Path, *, busy_ms: int, deadline=None, expected_contract=None) -> sqlite3.Connection:
+    return _checked_queue_connection(open_operational_db(
+        path, busy_ms=busy_ms, deadline=deadline,
+    ), expected_contract)
 
 
 def _queue_v3_payload_violations(database: sqlite3.Connection) -> int:
@@ -2217,7 +2257,7 @@ def _queue_v3_report(database: sqlite3.Connection) -> dict[str, object]:
     }
 
 
-def require_queue_v3_openable(path: Path, *, state_root: Path, deadline: float | None = None) -> None:
+def require_queue_v3_openable(path: Path, *, state_root: Path, deadline: float | None = None, expected_contract=None) -> None:
     """What every open of the adopted queue checks: place, contract, schema.
 
     The whole-file check (`validate_queue_v3_database`) reads every retained row,
@@ -2226,7 +2266,9 @@ def require_queue_v3_openable(path: Path, *, state_root: Path, deadline: float |
     transition that touches that task demotes it, which a veto on open prevents.
     """
     _require_inside_state_root(Path(path), Path(state_root))
-    with closing(_open_queue_v3_readonly(Path(path), Path(state_root), deadline=deadline)) as database:
+    with closing(_open_queue_v3_readonly(
+        Path(path), Path(state_root), deadline=deadline, expected_contract=expected_contract,
+    )) as database:
         if not _queue_v3_schema_complete(database):
             raise _migration_error(
                 "queue_v3_schema_incomplete", "queue v3 schema is incomplete"
@@ -5609,8 +5651,11 @@ class MemoryQueue:
     def _from_v3_candidate(
         cls, path: Path, *, state_root: Path, vault: Path | None = None
     ) -> _QueueV3CandidateReader:
-        validate_queue_v3_database(path, state_root=state_root)
-        return _QueueV3CandidateReader(Path(path), vault=state_root if vault is None else vault)
+        report = validate_queue_v3_database(path, state_root=state_root)
+        return _QueueV3CandidateReader(
+            Path(path), vault=state_root if vault is None else vault,
+            expected_contract=_queue_contract_for_version(report["user_version"]),
+        )
 
     def __init__(
         self,
@@ -7386,7 +7431,9 @@ class _QueueV3CandidateReader:
     `active_or_legacy_memory_queue` hands every caller once adoption is in force.
     """
 
-    def __init__(self, path: Path, *, coordinator_path: Path | None = None, vault: Path | None = None) -> None:
+    def __init__(self, path: Path, *, coordinator_path: Path | None = None, vault: Path | None = None,
+                 expected_contract: OperationalDatabaseContract = _QUEUE_V3_CONTRACT) -> None:
+        self.expected_contract = expected_contract
         self.db_path = Path(path)
         self.state_root = self.db_path.parent.parent
         self.results_dir = self.state_root / "run" / "queue-results"
@@ -7403,11 +7450,11 @@ class _QueueV3CandidateReader:
         )
 
     def _connect(self, *, busy_ms: int | None = None, deadline: float | None = None) -> sqlite3.Connection:
-        return open_operational_db(
+        return _open_queue_operational(
             self.db_path,
             busy_ms=DEFAULTS.queue_busy_ms if busy_ms is None else busy_ms,
-            contract=_QUEUE_V3_CONTRACT,
             deadline=deadline,
+            expected_contract=self.expected_contract,
         )
 
     def _heartbeat_wait(self, stop: threading.Event, interval: float) -> bool:
@@ -11379,11 +11426,7 @@ class _QueueV3CandidateReader:
         domain_role = "worker" if role == "queue-worker" else "operator"
         owners = self.ownership_registry() if registry is None else registry
         with closing(
-            open_operational_db(
-                self.db_path,
-                busy_ms=DEFAULTS.queue_busy_ms,
-                contract=_QUEUE_V3_CONTRACT,
-            )
+            self._connect()
         ) as database, begin_immediate(database):
             _reclaim_dead_queue_projections(database, owners, lease)
             database.execute(
@@ -11411,11 +11454,7 @@ class _QueueV3CandidateReader:
         registry = self.ownership_registry()
         current = registry.heartbeat(lease)
         with closing(
-            open_operational_db(
-                self.db_path,
-                busy_ms=DEFAULTS.queue_busy_ms,
-                contract=_QUEUE_V3_CONTRACT,
-            )
+            self._connect()
         ) as database, begin_immediate(database):
             updated = database.execute(
                 """UPDATE queue_ownership SET heartbeat_at=?,expires_at=?
@@ -11444,11 +11483,7 @@ class _QueueV3CandidateReader:
         if not isinstance(lease, OwnerLease):
             raise TypeError("lease must be an OwnerLease")
         with closing(
-            open_operational_db(
-                self.db_path,
-                busy_ms=DEFAULTS.queue_busy_ms,
-                contract=_QUEUE_V3_CONTRACT,
-            )
+            self._connect()
         ) as database, begin_immediate(database):
             deleted = database.execute(
                 """DELETE FROM queue_ownership
@@ -13588,6 +13623,7 @@ def active_memory_queue(vault: Path, state_root: Path, *, deadline: float | None
     Normal admission checks adoption evidence, identities and schema; complete
     retained-history certification belongs to adoption, backup and doctor.
     """
+    from installed_memory_repair import _read_adoption_record
     from markdown_transaction import _require_adopted_once
 
     resolved_vault = Path(vault).resolve(strict=True)
@@ -13595,10 +13631,21 @@ def active_memory_queue(vault: Path, state_root: Path, *, deadline: float | None
     _require_adopted_once(resolved_vault, state, deadline=deadline)
     queue_path = state / "run" / "queue-v3.sqlite3"
     coordinator_path = state / "run" / "markdown-transactions-v3.sqlite3"
-    require_queue_v3_openable(queue_path, state_root=state, deadline=deadline)
-    return _QueueV3CandidateReader(
-        queue_path, coordinator_path=coordinator_path, vault=resolved_vault
+    adoption = _read_adoption_record(state / "run/reliability-v3-adopted.json", state)
+    contract = _adopted_queue_contract(adoption)
+    require_queue_v3_openable(
+        queue_path, state_root=state, deadline=deadline, expected_contract=contract,
     )
+    return _QueueV3CandidateReader(
+        queue_path, coordinator_path=coordinator_path, vault=resolved_vault,
+        expected_contract=contract,
+    )
+
+
+def _adopted_queue_contract(adoption: dict) -> OperationalDatabaseContract:
+    if adoption["schema_version"] == "reliability-v3-adoption/v2":
+        return _QUEUE_COMPILE_CONTRACT
+    return _QUEUE_V3_CONTRACT
 
 
 class QueueRetryPolicy(NamedTuple):

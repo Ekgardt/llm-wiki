@@ -22,7 +22,7 @@ from reliable_memory import (
 )
 
 # Schema identity, not an operational resource limit. The coordinator stays v3.
-COMPILE_QUEUE_VERSION = 4
+COMPILE_QUEUE_VERSION = compile_progress.QUEUE_SCHEMA_VERSION
 
 
 def _require_candidate(path: Path, state_root: Path) -> None:

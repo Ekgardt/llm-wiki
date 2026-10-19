@@ -16,6 +16,8 @@ from typing import Any
 
 from reliable_memory import operational_deadline_active
 
+QUEUE_SCHEMA_VERSION = 4
+
 SCHEMA_STATEMENTS = (
     """CREATE TABLE compile_work_events (
         work_id TEXT NOT NULL,

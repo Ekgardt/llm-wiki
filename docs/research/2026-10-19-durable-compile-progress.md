@@ -116,6 +116,45 @@ and the inappropriate ceiling on each of these three page-based checks.
 
 ## Dependencies blocking activation
 
+### Adoption envelope and compatible readers (2026-10-19)
+
+For the approved offline migration, use a v2 envelope at the existing adoption
+record path. Embed the complete original v1 record plus its canonical digest;
+bind the new queue identity, queue schema digest, operation identity and verified
+backup manifest digest. Validate the original migration and tombstones through
+the existing validator, substituting only the queue file identity/version for
+active-file validation. Old clients reject the v2 record. New clients require
+the exact version named by the applicable adoption record; accepting a v4 file
+alone must never bypass adoption. The coordinator remains v3.
+
+This avoids rewriting every old migration/tombstone reference or adding permanent
+sidecar activation pointers. The envelope is a completed-migration receipt, not an
+in-flight journal or a substitute for backup verification. Publication must still
+block admission while incomplete, preserve preimages and recover after interruption.
+The JSON reader budget is the existing 64 KiB budget per component: original record
+plus fixed upgrade envelope. This bounds metadata parsing, not the SQLite database.
+
+Sources rechecked on 2026-10-19: [SQLite atomic commit](https://www.sqlite.org/atomiccommit.html),
+[Python filesystem replacement](https://docs.python.org/3/library/os.html#os.replace)
+and [PostgreSQL upgrade guidance](https://www.postgresql.org/docs/current/upgrading.html).
+One SQLite commit does not atomically replace an external JSON file. Therefore
+schema completion alone cannot be reported as a completed installed migration.
+
+The development implementation now reads both envelopes, checks all original v1
+evidence, and pins each adopted queue client to the version declared by its record.
+All queue ownership connections use that same opener. A cached successful admission
+does not authorize a later downgrade: existing and newly opened clients reject it.
+Full adoption certification additionally audits retained compile artifacts, while
+ordinary admission checks contracts without scanning all event history.
+
+Admission tests manually construct a migrated fixture and a v2 envelope. The backup
+manifest digest in that fixture is test data, not proof of a real verified backup.
+The fixture's file replacement is not a production publication/recovery procedure.
+Those procedures remain unfinished and this code is not installed on the live vault.
+The old v1 reader remains necessary for unmigrated installations and historical
+adoption evidence embedded in v2. It is not a duplicate compile controller; removing
+it before migrating those consumers would break admission and recovery.
+
 ### Candidate schema migration (2026-10-19; isolated implementation)
 
 The approved offline migration will first qualify a separate queue copy. Its

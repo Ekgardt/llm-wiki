@@ -47,6 +47,7 @@ _SCHEMA_DIR = Path(__file__).with_name("schemas")
 _TOMBSTONE_SCHEMA = _SCHEMA_DIR / "operational-db-tombstone-v1.json"
 _MIGRATION_SCHEMA = _SCHEMA_DIR / "reliability-v3-migration-v1.json"
 _ADOPTION_SCHEMA = _SCHEMA_DIR / "reliability-v3-adoption-v1.json"
+_UPGRADED_ADOPTION_SCHEMA = _SCHEMA_DIR / "reliability-v3-adoption-v2.json"
 # Bounded reads of the adoption's own JSON records; each is refused past its bound,
 # never cut. Measured 2026-09-27 on the installed vault: a tombstone is 487-541
 # bytes, the migration record 1 333 and the adoption record 2 507, so 4 KiB and
@@ -230,6 +231,12 @@ def _read_record(
     schema: Path,
     max_bytes: int,
 ) -> dict[str, object]:
+    value = _read_record_value(path, state_root, max_bytes=max_bytes)
+    validate_schema(value, schema)
+    return value
+
+
+def _read_record_value(path: Path, state_root: Path, *, max_bytes: int) -> dict[str, object]:
     raw = read_runtime_bytes(
         path,
         state_root,
@@ -246,7 +253,36 @@ def _read_record(
         raise ValueError("runtime record is not strict JSON") from exc
     if not isinstance(value, dict) or canonical_json_bytes(value) != raw:
         raise ValueError("runtime record is not canonical JSON")
-    validate_schema(value, schema)
+    return value
+
+
+def _bounded_adoption_component(value: dict) -> None:
+    if len(canonical_json_bytes(value)) > _MAX_RECORD_BYTES:
+        raise ValueError("adoption component exceeds its metadata byte budget")
+
+
+def _validate_previous_adoption(previous: dict) -> None:
+    _bounded_adoption_component(previous)
+    validate_schema(previous, _ADOPTION_SCHEMA)
+
+
+def _validate_upgrade_envelope(value: dict) -> None:
+    validate_schema(value, _UPGRADED_ADOPTION_SCHEMA)
+    _validate_previous_adoption(value["previous"])
+    _bounded_adoption_component({key: item for key, item in value.items() if key != "previous"})
+    if sha256_bytes(canonical_json_bytes(value["previous"])) != value["previous_sha256"]:
+        raise ValueError("previous adoption digest changed")
+    if value["queue_schema_sha256"] != memory_queue.QUEUE_COMPILE_SCHEMA_SHA256:
+        raise ValueError("compile queue schema digest changed")
+
+
+def _read_adoption_record(path: Path, state_root: Path) -> dict[str, object]:
+    # One existing bounded record plus one bounded upgrade envelope, not DB bytes.
+    value = _read_record_value(path, state_root, max_bytes=2 * _MAX_RECORD_BYTES)
+    if value.get("schema_version") == "reliability-v3-adoption/v2":
+        _validate_upgrade_envelope(value)
+        return value
+    _validate_previous_adoption(value)
     return value
 
 
@@ -342,6 +378,16 @@ def _validate_immutable_artifact(
     return payload
 
 
+def _open_adopted_database(database_name, path, state_root, *, deadline=None):
+    if database_name == "queue":
+        return memory_queue._open_queue_v3_readonly(path, state_root, deadline=deadline)
+    return open_readonly_operational_db(
+        path, state_root, max_bytes=None, owner_only=True,
+        contract=_database_contract(database_name),
+        busy_ms=DEFAULTS.markdown_busy_ms, deadline=deadline,
+    )
+
+
 @contextlib.contextmanager
 def _active_database_snapshot(record: dict[str, object], *, database_name: str, path: Path, state_root: Path, deadline: float | None = None) -> Iterator[sqlite3.Connection]:
     operational_deadline_active(deadline)
@@ -354,15 +400,8 @@ def _active_database_snapshot(record: dict[str, object], *, database_name: str, 
     )
     try:
         with contextlib.closing(
-            open_readonly_operational_db(
-                path,
-                state_root,
-                max_bytes=None,
-                owner_only=True,
-                contract=_database_contract(database_name),
-                busy_ms={"queue": DEFAULTS.queue_busy_ms,
-                         "coordinator": DEFAULTS.markdown_busy_ms}[database_name],
-                deadline=deadline,
+            _open_adopted_database(
+                database_name, path, state_root, deadline=deadline,
             )
         ) as database:
             database.execute("BEGIN")
@@ -425,6 +464,8 @@ def _validate_active_database_reference(record: dict[str, object], *, database_n
         record, database_name=database_name, path=path, state_root=state_root, deadline=deadline
     ) as database:
         _certify_active_database_contents(database_name, database)
+        if database_name == "queue":
+            memory_queue.audit_compile_progress(database, state_root, deadline=deadline)
 
 
 def _certify_active_database_contents(database_name: str, database: sqlite3.Connection) -> None:
@@ -496,6 +537,12 @@ def _validate_complete_adoption(
     active_validator: Callable[..., None] = _validate_active_database_reference,
     deadline: float | None = None,
 ) -> dict[str, object]:
+    if adoption.get("schema_version") == "reliability-v3-adoption/v2":
+        return _validate_upgraded_adoption(
+            root=root, state_root=state_root, paths=paths, migration=migration,
+            adoption=adoption, operation_artifacts=operation_artifacts,
+            active_validator=active_validator, deadline=deadline,
+        )
     operational_deadline_active(deadline)
     _require_adoption_artifacts_complete(paths, operation_artifacts)
     _require_adoption_header(adoption, migration)
@@ -516,6 +563,24 @@ def _validate_complete_adoption(
             migration_record=migration_by_name[database_name],
             adoption_record=adoption_by_name[database_name],
         )
+    return adoption
+
+
+def _upgraded_active_validator(record, *, upgraded_active, validator, database_name, **kwargs):
+    if database_name == "queue":
+        record = dict(record, active=upgraded_active, user_version=memory_queue._QUEUE_COMPILE_CONTRACT.user_version)
+    return validator(record, database_name=database_name, **kwargs)
+
+
+def _validate_upgraded_adoption(*, adoption, active_validator, **kwargs):
+    _validate_upgrade_envelope(adoption)
+    validator = partial(
+        _upgraded_active_validator, upgraded_active=adoption["queue_active"],
+        validator=active_validator,
+    )
+    _validate_complete_adoption(
+        adoption=adoption["previous"], active_validator=validator, **kwargs,
+    )
     return adoption
 
 
@@ -1087,9 +1152,7 @@ def _load_complete_adoption(
         paths["migration"], state, schema=_MIGRATION_SCHEMA, max_bytes=_MAX_RECORD_BYTES
     )
     operational_deadline_active(deadline)
-    adoption = _read_record(
-        paths["adoption"], state, schema=_ADOPTION_SCHEMA, max_bytes=_MAX_RECORD_BYTES
-    )
+    adoption = _read_adoption_record(paths["adoption"], state)
     operational_deadline_active(deadline)
     return _validate_complete_adoption(
         deadline=deadline,
@@ -1242,14 +1305,7 @@ def validate_queue_v3_runtime(
 def _queue_database_blockers(state_root: Path, deadline: float) -> set[str]:
     path = state_root / "run" / "queue-v3.sqlite3"
     with contextlib.closing(
-        open_readonly_operational_db(
-            path,
-            state_root,
-            max_bytes=None,
-            deadline=deadline,
-            owner_only=True,
-            contract=_QUEUE_CONTRACT,
-        )
+        memory_queue._open_queue_v3_readonly(path, state_root, deadline=deadline)
     ) as database:
         blockers = _queue_task_blockers(database, deadline)
         blockers.update(_queue_table_blockers(database, deadline))
@@ -2654,9 +2710,7 @@ def _inspect_adopted(
 ) -> dict[str, object]:
     if _kind(paths["adoption"]) != "file":
         raise ValueError("adoption record path has the wrong kind")
-    adoption = _read_record(
-        paths["adoption"], state, schema=_ADOPTION_SCHEMA, max_bytes=_MAX_RECORD_BYTES
-    )
+    adoption = _read_adoption_record(paths["adoption"], state)
     _validate_complete_adoption(
         root=vault,
         state_root=state,

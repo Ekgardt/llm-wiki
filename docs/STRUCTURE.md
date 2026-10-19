@@ -295,8 +295,18 @@ retirement and the common transition controller remain pending; see
 `docs/research/2026-10-19-durable-compile-progress.md` for verification scope.
 The migration's candidate-only schema step atomically creates the journal and
 stamps queue user_version 4. It refuses the active queue and inode aliases;
-installed clients still require version 3. Backup staging, adoption-record
-publication and new-client activation are not yet implemented.
+installed clients still require version 3. Migration-controlled backup staging and
+recoverable adoption-record publication are not yet implemented. Compatible
+readers are implemented in the isolated development branch.
+
+The approved migration's admission transition uses a version-2 envelope at the
+existing `run/reliability-v3-adopted.json` path. It retains the complete original
+version-1 record and its digest, the new queue file identity, the compile schema
+digest, and the migration operation/backup-manifest digests. Original migration
+records, tombstones and coordinator contracts remain verifiable. Version-1
+admission continues to require queue version 3; the version-2 envelope requires
+queue version 4 with all journal protections. No automatic migration is added to
+client admission. Publication/recovery and installation still require qualification.
 
 ## External integration configuration preimages
 
