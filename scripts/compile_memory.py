@@ -128,7 +128,11 @@ from memory_state import (  # noqa: E402
     update_state,
 )
 from page_status import DEFAULT_STATUS, is_retired, normalized_status  # noqa: E402
-from rebuild_memory_index import MAX_INDEX_BYTES, IndexCapacityError, build_index_bytes  # noqa: E402
+from rebuild_memory_index import (  # noqa: E402
+    MAX_INDEX_BYTES,
+    IndexCapacityError,
+    build_index_bytes,
+)
 from reliable_memory import (  # noqa: E402
     _validate_rule,
     canonical_json_bytes,

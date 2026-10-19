@@ -1620,8 +1620,23 @@ Tests cover both preflight limits before model planning and a publication failur
 that must stop the next batch. Removing the compiler fix makes those three cases
 fail. The full live compile, CI and health are separate completion gates.
 
-Validation: 126 relevant tests passed on Python 3.12 and 3.10; Ruff passed;
+Validation: 126 relevant tests passed on Python 3.12 and 3.10; the initial claim
+that Ruff passed was incorrect (see correction below);
 all 478 cumulatively changed functions passed actual lizard/AST CCN, if-count,
 and nesting checks. `uv pip check` passed for installed 97 packages and isolated
 Python 3.10's 66 packages. The lockfile is unchanged. Evidence is in
 `logs/step7-index-capacity-{tests,python310,original-red}-20261019.log`.
+
+
+### 2026-10-19: correction of the lint evidence
+
+CI run 39218333004 correctly rejected the new single-line import with I001.
+Local and CI Ruff are both lockfile version 0.15.21. The local lint also failed,
+but its asynchronously returned output was not inspected; the shell command
+continued to pytest and returned that successful exit status. This was an agent
+verification/reporting error, not a version discrepancy or a Ruff cache defect.
+The import is now formatted by that same Ruff version. A separate full
+`ruff check --no-cache scripts/ tests/ benchmark/` succeeds, and the cumulative
+lizard/AST checks succeed. The existing CI rule caught the original error and
+remains enabled. No behavioral code, dependencies, or checks were weakened.
+Subsequent checks are invoked independently and each exit status is inspected.
