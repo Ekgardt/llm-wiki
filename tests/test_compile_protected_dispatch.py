@@ -415,3 +415,131 @@ def _captured_work(work, inputs):
     saved = controller.save_compile_inputs(queue, lease, replace(event, sequence=1,
                                             stage='snapshot_ready'), inputs)
     return queue, lease, saved
+
+
+def test_streamed_artifact_exceeds_small_result_limit_and_audits(work):
+    import hashlib
+
+    import compile_progress as progress
+
+    queue, lease, checkpoint = work
+    chunk = b'x' * (1024 * 1024)
+    event = replace(checkpoint, sequence=2, details={})
+    saved = queue.save_compile_artifact_stream(lease, event, (chunk for _ in range(20)))
+    expected = hashlib.sha256(chunk * 20).hexdigest()
+    assert saved.details['artifact']['sha256'] == expected
+    assert queue.verify_compile_artifact(saved) == 20 * len(chunk)
+    with queue._connect() as database:
+        result = progress.audit_events(database, queue.verify_compile_artifact)
+    assert result['artifacts'] == 2
+
+
+def test_interrupted_stream_does_not_publish_or_leave_partial_file(work):
+    queue, lease, checkpoint = work
+
+    def interrupted():
+        yield b'first bytes'
+        raise OSError('disk exhausted')
+
+    before = set(queue.results_dir.iterdir())
+    with pytest.raises(OSError, match='disk exhausted'):
+        queue.save_compile_artifact_stream(lease, replace(checkpoint, sequence=2, details={}), interrupted())
+    assert set(queue.results_dir.iterdir()) == before
+    assert queue.get_compile_event(checkpoint.work_id) == checkpoint
+
+
+def test_stream_conflicting_existing_artifact_is_not_overwritten(work):
+    import memory_queue
+
+    queue, lease, checkpoint = work
+    event = replace(checkpoint, sequence=2, details={})
+    saved = queue.save_compile_artifact_stream(lease, event, iter((b'original',)))
+    with pytest.raises(memory_queue.QueueOperationError, match='durable_file_conflict'):
+        queue.save_compile_artifact_stream(lease, event, iter((b'different',)))
+    assert queue.read_compile_artifact(saved) == b'original'
+
+
+def test_stream_verifier_refuses_mutated_artifact(work):
+    queue, lease, checkpoint = work
+    saved = queue.save_compile_artifact_stream(
+        lease, replace(checkpoint, sequence=2, details={}), iter((b'original',)))
+    path = queue.state_root / saved.details['artifact']['reference']
+    path.write_bytes(b'mutated!')
+    with pytest.raises(ValueError, match='digest'):
+        queue.verify_compile_artifact(saved)
+
+
+def test_stream_recovery_adopts_complete_file_after_event_commit_failure(work, monkeypatch):
+    import hashlib
+
+    queue, lease, checkpoint = work
+    event = replace(checkpoint, sequence=2, details={})
+    digest = hashlib.sha256(b'complete').hexdigest()
+
+    def failed(*args):
+        raise OSError('event commit unavailable')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(queue, 'record_compile_event', failed)
+        with pytest.raises(OSError, match='event commit'):
+            queue.save_compile_artifact_stream(lease, event, iter((b'complete',)))
+    saved = queue.recover_compile_artifact_stream(lease, event, expected_digest=digest)
+    assert queue.read_compile_artifact(saved) == b'complete'
+
+
+def test_stream_writer_checks_lease_before_consuming_input(work):
+    import memory_queue
+
+    queue, lease, checkpoint = work
+
+    def forbidden():
+        pytest.fail('stale lease consumed source bytes')
+        yield b'never'
+
+    with pytest.raises(memory_queue.LeaseFenceError):
+        queue.save_compile_artifact_stream(replace(lease, token='wrong'), checkpoint, forbidden())
+
+
+def test_stream_verification_keeps_memory_below_artifact_size(work):
+    import tracemalloc
+
+    queue, lease, checkpoint = work
+    block = b'x' * (1024 * 1024)
+    saved = queue.save_compile_artifact_stream(
+        lease, replace(checkpoint, sequence=2, details={}), (block for _ in range(20)))
+    tracemalloc.start()
+    try:
+        assert queue.verify_compile_artifact(saved) == 20 * len(block)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < len(block)  # Even one MiB is above this verifier's fixed working set.
+
+
+def test_stream_verification_honours_expired_deadline(work):
+    queue, _, checkpoint = work
+    with pytest.raises(TimeoutError):
+        queue.verify_compile_artifact(checkpoint, deadline=0)
+
+
+def test_stream_write_expired_deadline_leaves_no_artifact(work):
+    queue, lease, checkpoint = work
+    before = set(queue.results_dir.iterdir())
+    with pytest.raises(TimeoutError):
+        queue.save_compile_artifact_stream(
+            lease, replace(checkpoint, sequence=2, details={}), iter((b'bytes',)), deadline=0)
+    assert set(queue.results_dir.iterdir()) == before
+    assert queue.get_compile_event(checkpoint.work_id) == checkpoint
+
+
+def test_stream_digest_reads_only_initial_extent_even_if_producer_never_ends():
+    import io
+    from unittest.mock import Mock
+
+    import memory_queue
+
+    handle = Mock()
+    handle.read.side_effect = lambda size: b'x' * size
+    _, size = memory_queue._stream_digest(handle, io.DEFAULT_BUFFER_SIZE * 3)
+    assert size == io.DEFAULT_BUFFER_SIZE * 3
+    assert handle.read.call_count == 3

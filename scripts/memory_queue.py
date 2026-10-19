@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import email.utils
 import hashlib
+import io
 import json
 import math
 import multiprocessing
@@ -2299,7 +2300,7 @@ def audit_compile_progress(database, state_root: Path, *, deadline=None):
     from compile_progress import audit_events
 
     queue = _QueueV3CandidateReader(Path(state_root) / "run" / "queue-v3.sqlite3")
-    return audit_events(database, queue.read_compile_artifact, deadline=deadline)
+    return audit_events(database, partial(queue.verify_compile_artifact, deadline=deadline), deadline=deadline)
 
 def _require_active(
     deadline: float, cancelled: Callable[[], bool] | None = None
@@ -11872,7 +11873,7 @@ class _QueueV3CandidateReader:
         if row["kind"] != "compile":
             raise ProgressConflict("only compile tasks may append compile progress")
         if "artifact" in event.details:
-            self.read_compile_artifact(event)
+            self.verify_compile_artifact(event)
         self._require_lease_row(database, lease, _utc_now())
         append_event(database, event)
 
@@ -11883,20 +11884,36 @@ class _QueueV3CandidateReader:
         it is not a new limit or a claim that arbitrary model output is accepted.
         A fence loss after the file write leaves an unreferenced file, not progress.
         """
-        from compile_progress import _snapshot_event
-
         _check_result_bytes(data)
-        event = _snapshot_event(event)
+        return self.save_compile_artifact_stream(lease, event, (data,))
+
+    def save_compile_artifact_stream(self, lease: QueueLease, event, chunks, *, deadline=None):
+        """Persist an iterable without a total-size or in-memory-result ceiling."""
+        event = compile_progress._snapshot_event(event)
         self._with_verified_lease(
             lease, partial(self._verify_compile_artifact_owner, event=event)
         )
-        identity = self._compile_artifact_operation(event)
-        relative, digest = self._store_result_bytes(identity, data)
-        saved = replace(event, details={
-            **event.details, "artifact": {"reference": relative, "sha256": digest},
-        })
+        self.results_dir.mkdir(parents=True, exist_ok=True)
+        _harden_owner_only(self.results_dir, 0o700)
+        name = sha256_bytes(self._compile_artifact_operation(event).encode('utf-8')) + '.result'
+        digest = _write_durable_stream(self.results_dir / name, chunks, deadline=deadline)
+        saved = replace(event, details={**event.details, 'artifact': {
+            'reference': f'run/queue-results/{name}', 'sha256': digest}})
         self.record_compile_event(lease, saved)
         return saved
+
+    def verify_compile_artifact(self, event, *, deadline=None) -> int:
+        """Verify retained bytes in bounded memory; return the physical size."""
+        relative, expected = compile_progress.artifact_identity(event)
+        try:
+            digest, size = _digest_stable_owner_file(self.state_root / relative, deadline=deadline)
+        except TimeoutError:
+            raise
+        except (OSError, ValueError, QueueOperationError) as error:
+            raise compile_progress.ProgressCorrupt('compile artifact is unavailable') from error
+        if digest != expected:
+            raise compile_progress.ProgressCorrupt('compile artifact digest mismatch')
+        return size
 
     @staticmethod
     def _compile_artifact_operation(event) -> str:
@@ -11921,6 +11938,26 @@ class _QueueV3CandidateReader:
         saved = replace(event, details={
             **event.details, "artifact": {"reference": relative, "sha256": sha256_bytes(data)},
         })
+        self.record_compile_event(lease, saved)
+        return saved
+
+    def recover_compile_artifact_stream(self, lease, event, *, expected_digest, deadline=None):
+        """Adopt a complete orphan only when it matches the expected snapshot."""
+        compile_progress._require_digest(expected_digest)
+        event = compile_progress._snapshot_event(event)
+        self._with_verified_lease(
+            lease, partial(self._verify_compile_artifact_owner, event=event)
+        )
+        name = sha256_bytes(self._compile_artifact_operation(event).encode('utf-8'))
+        saved = replace(event, details={**event.details, 'artifact': {
+            'reference': f'run/queue-results/{name}.result', 'sha256': expected_digest}})
+        try:
+            digest, _ = _digest_stable_owner_file(
+                self.state_root / saved.details['artifact']['reference'], deadline=deadline)
+        except FileNotFoundError:
+            return None
+        if digest != expected_digest:
+            raise compile_progress.ProgressCorrupt('compile artifact digest mismatch')
         self.record_compile_event(lease, saved)
         return saved
 
@@ -13531,35 +13568,100 @@ def _add_missing_queue_columns(connection: sqlite3.Connection) -> None:
 
 
 def _write_durable_file(path: Path, data: bytes) -> None:
-    """Binary: the bytes linked into place are the bytes a conflict compares."""
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    """Small-result compatibility delegates to the same durable stream writer."""
+    _write_durable_stream(path, (data,))
+
+
+def _stream_digest(handle, expected_size, *, deadline=None):
+    # The stdlib file buffer is an I/O working-set choice, never a file-size cap.
+    operational_deadline_active(deadline)
+    digest = hashlib.sha256()
+    size = 0
+    for chunk in _artifact_chunks(handle, expected_size, deadline):
+        digest.update(chunk)
+        size += len(chunk)
+    operational_deadline_active(deadline)
+    return digest.hexdigest(), size
+
+
+def _artifact_chunks(handle, remaining, deadline):
+    """Read the observed file extent; concurrent growth cannot extend this scan."""
+    while remaining:
+        operational_deadline_active(deadline)
+        chunk = handle.read(min(io.DEFAULT_BUFFER_SIZE, remaining))
+        if not chunk:
+            raise QueueOperationError('artifact_truncated_during_read')
+        remaining -= len(chunk)
+        yield chunk
+
+
+def _require_stream_identity(path, descriptor, before):
+    after = os.fstat(descriptor)
+    named = path.lstat()
+    if _file_identity(before) != _file_identity(after):
+        raise QueueOperationError('artifact_changed_during_read')
+    if _file_identity(after) != _file_identity(named):
+        raise QueueOperationError('artifact_replaced_during_read')
+    _check_owner_file_metadata(path, named, named.st_size)
+
+
+def _digest_stable_owner_file(path, *, deadline=None):
+    before = path.lstat()
+    _check_owner_file_metadata(path, before, before.st_size)
+    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_BINARY', 0)
+    descriptor = os.open(path, flags)
+    with os.fdopen(descriptor, 'rb') as handle:
+        _require_stream_identity(path, descriptor, before)
+        result = _stream_digest(handle, before.st_size, deadline=deadline)
+        _require_stream_identity(path, descriptor, before)
+        return result
+
+
+def _write_stream_chunks(handle, chunks, *, deadline=None):
+    operational_deadline_active(deadline)
+    digest = hashlib.sha256()
+    for chunk in chunks:
+        operational_deadline_active(deadline)
+        if not isinstance(chunk, bytes):
+            raise TypeError('artifact chunks must be bytes')
+        handle.write(chunk)
+        digest.update(chunk)
+    handle.flush()
+    os.fsync(handle.fileno())
+    return digest.hexdigest()
+
+
+def _require_matching_stream_file(path, digest):
+    try:
+        existing, _ = _digest_stable_owner_file(path)
+    except (OSError, QueueOperationError) as error:
+        raise QueueOperationError('durable_file_conflict') from error
+    if existing != digest:
+        raise QueueOperationError('durable_file_conflict')
+
+
+def _publish_stream_file(temporary, path, digest):
+    try:
+        os.link(temporary, path)
+    except FileExistsError:
+        _require_matching_stream_file(path, digest)
+    fsync_file(path)
+    fsync_directory(path.parent)
+
+
+def _write_durable_stream(path, chunks, *, deadline=None):
+    temporary = path.with_name(f'.{path.name}.{uuid.uuid4().hex}.tmp')
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_BINARY', 0)
     descriptor = os.open(temporary, flags, 0o600)
     try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
+        with os.fdopen(descriptor, 'wb') as handle:
+            digest = _write_stream_chunks(handle, chunks, deadline=deadline)
+        operational_deadline_active(deadline)
         _harden_owner_only(temporary, 0o600)
-        try:
-            os.link(temporary, path)
-        except FileExistsError:
-            _require_matching_durable_file(path, data)
-        else:
-            fsync_file(path)
-            fsync_directory(path.parent)
+        _publish_stream_file(temporary, path, digest)
+        return digest
     finally:
         temporary.unlink(missing_ok=True)
-
-
-def _require_matching_durable_file(path: Path, data: bytes) -> None:
-    """An existing answer must be a stable owner-only file of the expected size."""
-    try:
-        existing = _read_stable_owner_file(path, len(data))
-    except (OSError, QueueOperationError) as error:
-        raise QueueOperationError("durable_file_conflict") from error
-    if existing != data:
-        raise QueueOperationError("durable_file_conflict")
 
 
 def _check_owner_file_metadata(

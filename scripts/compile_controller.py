@@ -156,7 +156,7 @@ def _run_reserved_call(queue, lease, checkpoint, dispatch, invoke):
     current = queue.get_compile_event(checkpoint.work_id)
     if current != checkpoint:
         return _resume_recorded_call(queue, lease, dispatch, current)
-    queue.read_compile_artifact(checkpoint)
+    queue.verify_compile_artifact(checkpoint)
     queue.record_compile_event(lease, dispatch)
     return _invoke_and_save(queue, lease, dispatch, invoke)
 
@@ -202,7 +202,7 @@ def authorize_model_repeat(queue, lease, checkpoint, *, request_digest, authoriz
     resumed = _repeat_checkpoint(checkpoint, lease.id, request_digest, authorization)
     current = queue.get_compile_event(checkpoint.work_id)
     if current == resumed:
-        queue.read_compile_artifact(current)
+        queue.verify_compile_artifact(current)
         return current
     return _authorize_uncertain_call(queue, lease, dispatch, current, resumed)
 
@@ -389,7 +389,7 @@ def _advance_replay(queue, lease, checkpoint):
     if answer.details.get('model_call', {}).get('phase') != 'answer':
         raise progress.ProgressConflict('replay requires a completed recorded call')
     queue.verify_compile_checkpoint_owner(lease, answer)
-    queue.read_compile_artifact(answer)
+    queue.verify_compile_artifact(answer)
     following = replace(checkpoint, task_id=lease.id, sequence=answer.sequence + 1,
                         details={'artifact': checkpoint.details['artifact'],
                                  'replay': {'answer_digest': progress._event_digest(answer)}})

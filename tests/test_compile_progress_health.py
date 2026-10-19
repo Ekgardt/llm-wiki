@@ -123,3 +123,24 @@ def test_page_based_blackboard_scan_does_not_use_whole_file_read_cap(stored, mon
     assert repair._blackboard_claim_blockers(
         state_root=queue.state_root, now=datetime.now(timezone.utc), deadline=math.inf,
     ) == []
+
+
+def test_backup_and_doctor_certify_streamed_artifact_above_small_result_cap(stored):
+    from dataclasses import replace
+
+    queue, saved = stored
+    row = queue.get(saved.task_id)
+    lease = memory_queue.QueueLease(
+        id=row.id, kind=row.kind, handler_version=row.handler_version,
+        payload=row.payload, input_hash=row.input_hash, owner=row.lease_owner,
+        token=row.lease_token, expires_at=row.lease_expires_at, attempt=row.attempts,
+        created_at=row.created_at, last_attempt_at=row.last_attempt_at,
+        prior_attempts=row.attempts - 1,
+    )
+    block = b'x' * (1024 * 1024)
+    queue.save_compile_artifact_stream(
+        lease, replace(saved, sequence=1, details={}), (block for _ in range(20)))
+    _, report = private_vault_backup._validated_databases(queue.state_root)
+    assert report['compile_progress']['artifacts'] == 2
+    result = doctor._queue_v2_check(queue.state_root, datetime.now(timezone.utc), math.inf)
+    assert result['details']['compile_progress']['artifacts'] == 2

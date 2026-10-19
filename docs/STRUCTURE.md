@@ -1160,3 +1160,13 @@ original partition/provenance metadata, prompt projections and target context.
 Its checkpoint binds the whole snapshot digest. It adds no recursively referenced
 artifact tree. The existing queue artifact size ceiling still requires real-workload
 qualification before routing installed compile entrypoints through this mechanism.
+
+Owner-approved target (2026-10-19): large compile artifacts use streaming local
+file I/O under existing `run/queue-results/`, with immutable references in the
+existing journal. Persist and verify bytes before publishing their reference;
+health, recovery, backup and retention must follow the same identity checks.
+The compiler must also consume snapshots incrementally before this is considered
+complete. A streaming file verifier alone is not that completion. No new runtime
+root, service or cloud dependency is required. This supersedes raising the inherited
+small-result ceiling as the solution for large snapshots; ordinary small queue
+results retain their existing compatibility contract during uninstalled development.

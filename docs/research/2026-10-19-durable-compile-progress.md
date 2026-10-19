@@ -563,3 +563,59 @@ backup, recovery and retention bounds inconsistent; that common contract must be
 resolved before installed routing. Related suites: 90 passed on Python 3.12 and
 90 on Python 3.10; the updated real-compiler integration was additionally rerun on
 3.12. The complexity check covers 23 changed/new functions, all within law 5.
+
+## Streaming artifact I/O (approved 2026-10-19)
+
+The owner accepted the follow-up proposal: keep small immutable queue references,
+stream the local snapshot files, retain recovery/backup/cleanup guarantees, and
+remove whole-snapshot materialization throughout the compiler. This approval
+supersedes raising `queue.max_result_bytes` as the proposed solution. No new env
+contract was introduced. Rechecked primary sources: AWS SQS large-message storage,
+Temporal workflow input/result references, and Restic's content storage design:
+https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-managing-large-messages.html
+https://docs.temporal.io/references/workflow-task-errors
+https://github.com/restic/restic/blob/master/doc/design.rst
+
+The first implementation slice streams artifact writes into an owner-only temporary
+file, fsyncs before atomic create-only publication, and checks an existing destination
+by stable streamed SHA-256. Ordinary byte-result writes delegate to this same writer;
+there is no second durability implementation. Interruption removes only that writer's
+temporary file. A complete file left before an event commit can be adopted only with
+its expected digest and current queue lease. A stale lease cannot consume input;
+a lost lease cannot publish its checkpoint. Existing artifact references continue
+to protect files from retirement. No new directory, database or dependency appears.
+
+A separate verification operation reads bounded chunks and checks path/descriptor
+identity before and after the digest, file permissions and the retained checksum.
+Event admission, controller validation-only reads and the common full-health/backup
+audit use it. Deadline expiration is preserved as expiration, not misreported as
+corruption (a regression caught and corrected the OSError subclass interaction).
+The standard-library I/O buffer controls the working set, not admitted file size.
+
+Four missing-API regressions failed before code. Additional cases cover interrupted
+writes, conflicting existing destinations, corruption, stale leases, event-commit
+failure recovery, expired verification deadlines, and full doctor/backup validation
+of a 20 MiB artifact. Legacy symlink/conflict and queue migration/corruption tests
+remain in the related suite. A local isolated write+verify measurement, excluding
+its reused 1 MiB input block, traced 23,556 bytes of Python allocations for a 32 MiB
+file and 22,502 for a 128 MiB file (0.167 and 0.440 s). This demonstrates bounded
+additional allocations for this I/O layer, not total RSS or whole-compiler memory.
+
+This slice does not make the snapshot codec or source capture streaming. They still
+materialize whole-input JSON/CompileInputs and retain the ordinary bounded bytes API.
+Large snapshot encoding, lazy compiler consumption and safe deployment remain open;
+no installed routing or complete point-7 claim follows from the I/O qualification.
+
+The verifier reads only the extent observed at open, then rechecks identity; a
+concurrently growing producer cannot extend the scan indefinitely. Per-operation
+caller deadlines are supported for streaming writes, reads and orphan recovery;
+no fixed workload timeout is introduced. A regression uses a producer that never
+returns EOF and proves the initial extent bounds the reads. Final changed/new
+function checks cover 32 functions, all CCN <= 5, at most two ifs and nesting <= 2.
+
+Validation: broad related suite 138 passed on Python 3.12; Python 3.10 includes
+an added large-artifact health/backup test and has 139 passed. The final extent
+and deadline cases were rerun separately: 10 streaming tests passed on each
+version. An intermediate additional 3.12 snapshot/health run had 45 passed.
+Ruff, diff checks and dependency compatibility checks passed. The slower 3.10
+run waited on filesystem journal commits; durability checks were not relaxed.
