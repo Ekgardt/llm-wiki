@@ -221,7 +221,6 @@ def test_real_compile_validation_resumes_saved_draft_without_new_draft_call(
 
     compiler, inputs, state = compiler_case
     work = _captured_work(work, inputs)
-    inputs = controller.load_compile_inputs(*work)
     provider = _provider()
     queue, _, _ = work
     coordinator = active_markdown_coordinator(queue.vault, state)
@@ -240,18 +239,20 @@ def test_real_compile_validation_resumes_saved_draft_without_new_draft_call(
         raise SystemExit('process stopped after durable draft answer, before validation')
 
     monkeypatch.setitem(client._BACKENDS, 'fake', backend)
-    with monkeypatch.context() as patch:
-        patch.setattr(compiler._CompileAttempt, '_planned', interrupted)
-        with pytest.raises(SystemExit):
-            compiler.resolve_compile_plan(
-                inputs, CompileCache(state), coordinator=coordinator,
-                call_runner=controller.CompileReplay(*work, dependency_digest='f' * 64),
-            )
-    restored_inputs = controller.load_compile_inputs(*work)
-    result = compiler.resolve_compile_plan(
-        restored_inputs, CompileCache(state), coordinator=coordinator,
-        call_runner=controller.CompileReplay(*work, dependency_digest='f' * 64),
-    )
+    with controller.open_compile_inputs(*work) as snapshot:
+        inputs = snapshot.planning_inputs()
+        with monkeypatch.context() as patch:
+            patch.setattr(compiler._CompileAttempt, '_planned', interrupted)
+            with pytest.raises(SystemExit):
+                compiler.resolve_compile_plan(
+                    inputs, CompileCache(state), coordinator=coordinator,
+                    call_runner=controller.CompileReplay(*work, dependency_digest='f' * 64),
+                )
+    with controller.open_compile_inputs(*work) as snapshot:
+        result = compiler.resolve_compile_plan(
+            snapshot.planning_inputs(), CompileCache(state), coordinator=coordinator,
+            call_runner=controller.CompileReplay(*work, dependency_digest='f' * 64),
+        )
     assert result.plan['operations'][0]['path'] == 'knowledge/notes/cedar-merge-order.md'
     assert len(calls) == 3  # One draft, operation review and source-completeness review.
 
@@ -689,3 +690,110 @@ def test_open_compile_artifact_refuses_symlink(work, tmp_path):
     with pytest.raises(memory_queue.QueueOperationError):
         with queue.open_compile_artifact(checkpoint):
             pytest.fail('symlink artifact was opened')
+
+
+def test_archive_planning_keeps_context_records_lazy(compiler_case, work, monkeypatch):
+    compiler, inputs, _ = compiler_case
+    saved_work = _archive_work(work, inputs)
+    with controller.open_compile_inputs(*saved_work) as snapshot:
+        planned = snapshot.planning_inputs()
+        assert planned.dailies == inputs.dailies
+        original = snapshot.record
+        reads = []
+
+        def observed(group, index):
+            reads.append((group, index))
+            return original(group, index)
+
+        monkeypatch.setattr(snapshot, 'record', observed)
+        selected = compiler._context_sources(planned, set(), {'absent'})
+        assert selected == ()
+        assert reads == []
+        assert tuple(planned.targets) == inputs.targets
+
+
+def test_archive_planning_batches_match_eager_snapshot(compiler_case, work):
+    compiler, inputs, _ = compiler_case
+    saved_work = _archive_work(work, inputs)
+    expected = compiler.pack_compile_batches(inputs, model=None)
+    with controller.open_compile_inputs(*saved_work) as snapshot:
+        actual = compiler.pack_compile_batches(snapshot.planning_inputs(), model=None)
+        assert len(actual) == len(expected)
+        for left, right in zip(actual, expected):
+            assert left.manifest == right.manifest
+            assert left.packing == right.packing
+            assert left.inputs.sources == right.inputs.sources
+            assert tuple(left.inputs.targets) == right.inputs.targets
+            assert left.required_context_paths == right.required_context_paths
+
+
+def test_context_ranking_does_not_keep_source_bodies(compiler_case):
+    compiler, inputs, _ = compiler_case
+    import weakref
+
+    source = compiler.SourceSnapshot('knowledge/notes/temporary.md', b'temporary body', 'd' * 64)
+    observed = weakref.ref(source)
+    sources = [source]
+    ranking = compiler._ContextRanking(sources)
+    sources.clear()
+    del source
+    assert observed() is None
+    assert ranking.sources is sources
+
+
+def test_archive_byte_measure_indexes_metadata_before_body_reads(compiler_case, work, monkeypatch):
+    compiler, inputs, _ = compiler_case
+    saved_work = _archive_work(work, inputs)
+    with controller.open_compile_inputs(*saved_work) as snapshot:
+        planned = snapshot.planning_inputs()
+
+        def forbidden(*args):
+            pytest.fail('byte measure initialization loaded context bodies')
+
+        monkeypatch.setattr(snapshot, 'record', forbidden)
+        measure = compiler._ByteBatchMeasure(planned)
+        assert measure.context
+
+
+@pytest.mark.parametrize('context_pending', [False, True])
+def test_archive_planning_preserves_required_citations(compiler_case, work, context_pending):
+    from tests.test_compile_keeps_physically_overlapping_existing_context import _overlap_inputs
+
+    compiler, _, _ = compiler_case
+    inputs, original = _overlap_inputs(work[0].vault)
+    saved_work = _archive_work(work, inputs)
+    expected = compiler._pack_compile_batches(inputs, model=None, context_pending=context_pending)
+    with controller.open_compile_inputs(*saved_work) as snapshot:
+        actual = compiler._pack_compile_batches(snapshot.planning_inputs(), model=None,
+                                                context_pending=context_pending)
+        assert len(actual) == len(expected)
+        assert actual[0].inputs.sources == expected[0].inputs.sources
+        assert actual[0].packing == expected[0].packing
+        assert actual[0].required_context_paths == expected[0].required_context_paths
+        sources = {source.logical_path: source.content for source in actual[0].inputs.sources}
+        assert sources['knowledge/notes/project-rule.md'] == original
+
+
+def test_archive_byte_size_cache_keeps_no_decoded_context(compiler_case, work, monkeypatch):
+    import weakref
+
+    compiler, inputs, _ = compiler_case
+    saved_work = _archive_work(work, inputs)
+    with controller.open_compile_inputs(*saved_work) as snapshot:
+        planned = snapshot.planning_inputs()
+        original = snapshot.record
+        observed = []
+
+        def track(group, index):
+            record = original(group, index)
+            observed.append(weakref.ref(record))
+            return record
+
+        monkeypatch.setattr(snapshot, 'record', track)
+        measure = compiler._ByteBatchMeasure(planned)
+        path = next(iter(measure.context))
+        assert measure._context_size(path) > 0
+        assert observed and all(ref() is None for ref in observed)
+        first_count = len(observed)
+        assert measure._context_size(path) > 0
+        assert len(observed) == first_count

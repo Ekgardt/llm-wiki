@@ -284,11 +284,14 @@ def test_changed_required_target_refuses_normal_publication(vault):
     plan = cm._normalize_plan([_operation()], selected)
     note = root / 'knowledge/notes/project-rule.md'
     note.write_bytes(note.read_bytes() + b'\nExternal change.\n')
-    with pytest.raises(TransactionFailure, match='persisted precondition failed') as refusal:
+    changed = note.read_bytes()
+    with pytest.raises(TransactionFailure, match='fresh snapshot and model plan') as refusal:
         cm.apply_compile_plan(selected, plan, action_key='a' * 64, trigger='manual',
                               coordinator=MarkdownCoordinator(root, state))
-    assert refusal.value.code == 'precondition_failed'
+    assert refusal.value.code == 'compile_snapshot_changed'
+    assert note.read_bytes() == changed
     assert not (root / 'knowledge/notes/bounded-lease-expiry.md').exists()
+    assert cm.read_compile_receipt_v2(inputs.dailies[0].sha256, MarkdownCoordinator(root, state)) is None
 
 
 def _repeated_part_inputs(root):

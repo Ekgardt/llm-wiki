@@ -681,3 +681,63 @@ allocations and is not a direct before/after comparison against the earlier
 7,472-record measurement. Descriptor replacement and symlink refusal tests passed
 on both Python versions. All 67 changed/new functions satisfy CCN <= 5, at most
 two ifs and nesting <= 2; repository Ruff checks pass.
+
+## Context planning from the retained archive (2026-10-19)
+
+A follow-up dependency trace found that a lazy archive reader alone was insufficient:
+`_ContextRanking` copied all sources into a tuple, `_ByteBatchMeasure` retained all
+context records (including as dictionary keys), and citation association first built
+a tuple of all pages. These consumers would repopulate memory with decoded bodies.
+The existing planner now accepts a context-managed archive planning view. Daily
+parts still materialize for the current physical partition proofs; sources, targets
+and vault context keep verified metadata paths and record indices. Path selection
+occurs before body reads. Ranking retains lexical statistics and ordering indices;
+byte sizing retains numeric frame sizes keyed by logical path. Non-additive
+measurements still serialize selected records, and required citation association
+still examines every relevant page. No citation or page is dropped to make a batch
+fit. Existing snapshots remain supported as ordinary in-memory sequences.
+
+Rechecked primary sources for the approved local-reference design: Python zipfile,
+AWS SQS large-message references, and Restic's immutable storage design (links above).
+The Python 3.10 documentation now labels that Python version unsupported upstream;
+3.10 tests establish compatibility with the repository contract, not upstream support.
+The installed interpreter remains 3.12. No package or operating-system dependency
+was added. Rejected alternatives: a transparent byte proxy would hide I/O and break
+identity-keyed partition caches; copying lazy records into tuples would defeat the
+working-set objective; a second planner would duplicate grouping and citation rules.
+This change reuses the existing planner with explicit indexed context collections.
+
+Three initial regressions failed before code. A further red test proved that byte
+measure initialization decoded context bodies; the corrected initializer reads
+metadata only. Tests compare eager/archive batch sources, manifests, packing identity
+and required citations, exercise context-pending and final planning, and prove that
+numeric sizing retains no decoded context records. The semantic recovery test now
+opens an archive view separately before and after interruption: the saved draft is
+reused and the operation/source-completeness reviews still run (three calls total).
+
+A broader regression exposed an already-failing publication test. Reproduction in
+a clean detached worktree at 4394308f produced the same failure: the earlier target
+snapshot check correctly refuses before the persisted transaction precondition.
+The test now requires the specific `compile_snapshot_changed` code, unchanged
+external edits, no published destination and no compile receipt. The production
+refusal was not weakened or delayed. Related suites, including compile transaction
+publication and recovery, passed 225 tests on Python 3.12 and 225 on Python 3.10;
+Ruff, dependency checks and all 40 changed/new function complexity checks passed.
+
+This does not activate the candidate controller. The archive context must remain
+open for planning and semantic processing; source capture and daily partition
+planning still materialize their inputs. Full work/dependency identity, all-entrypoint
+integration, receipt/retention handling, recovery qualification, installation and
+useful-cycle measurements remain completion requirements. It is not a point-7 closure.
+
+A paired isolated measurement opened the same live-context artifact with one
+synthetic simple daily source (no timestamp-choice layout), then ran the actual
+planner. Eager restoration peaked at 141,994,104 traced Python bytes in 5.735 s;
+selected restoration peaked at 83,584,274 bytes in 7.215 s. Batch manifest, selected
+source paths/digests, required context and packing identity matched exactly. This
+is about 41% lower traced peak at about 26% greater elapsed time in that scenario;
+it is not an acceleration or a real nightly/token-efficiency qualification. Archive
+metadata and lexical statistics still scale with corpus size. A first profiling
+invocation was stopped after identifying a wrong result-field name in the measuring
+script; it produced no claimed measurement. The corrected script and results are
+retained in /tmp/measure-compile-context-selection.py and logs/step7-context-selection-measurement.*.

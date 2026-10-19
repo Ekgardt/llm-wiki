@@ -417,12 +417,12 @@ class TargetSnapshot:
 @dataclass(frozen=True)
 class CompileInputs:
     dailies: tuple[DailySnapshot, ...]
-    sources: tuple[SourceSnapshot, ...]
-    targets: tuple[TargetSnapshot, ...]
+    sources: Sequence[SourceSnapshot]
+    targets: Sequence[TargetSnapshot]
     # The complete original vault context, even when `sources` is narrowed for
     # a prompt. Publication rereads derived index/log targets under its writer
     # gate; this model-input snapshot remains immutable.
-    vault_files: tuple[SourceSnapshot, ...] = ()
+    vault_files: Sequence[SourceSnapshot] = ()
     partition_context: object | None = dataclass_field(default=None, compare=False, repr=False)
 
 
@@ -802,12 +802,21 @@ def _context_sources(
     inputs: CompileInputs, daily_paths: set[str], optional_paths: set[str] | None
 ) -> tuple[SourceSnapshot, ...]:
     """The non-daily pages this batch was given room to carry."""
-    wanted = optional_paths or set()
-    return tuple(
-        item
-        for item in inputs.sources
-        if item.logical_path not in daily_paths and item.logical_path in wanted
-    )
+    return tuple(_select_snapshot_paths(inputs.sources, (optional_paths or set()) - daily_paths))
+
+
+def _snapshot_paths(records):
+    paths = getattr(records, 'logical_paths', None)
+    if paths is not None:
+        return paths()
+    return tuple(record.logical_path for record in records)
+
+
+def _select_snapshot_paths(records, wanted):
+    select = getattr(records, 'select_paths', None)
+    if select is not None:
+        return select(wanted)
+    return tuple(record for record in records if record.logical_path in wanted)
 
 
 def _deduplicated_sources(
@@ -1121,7 +1130,7 @@ def _inputs_with_parts(inputs: CompileInputs, parts: tuple) -> CompileInputs:
         return inputs
     omitted = _part_logical_paths(inputs.dailies) - _part_logical_paths(parts)
     return replace(inputs, dailies=parts,
-                   sources=tuple(source for source in inputs.sources if source.logical_path not in omitted))
+                   sources=_select_snapshot_paths(inputs.sources, set(_snapshot_paths(inputs.sources)) - omitted))
 
 
 def _part_logical_paths(parts):
@@ -1238,9 +1247,9 @@ class _RequiredCitationContext:
 
 
 def _existing_context_pages(inputs):
-    return tuple(source for source in inputs.sources
-                 if source.logical_path.startswith('knowledge/notes/')
-                 and source.logical_path.endswith('.md'))
+    wanted = {path for path in _snapshot_paths(inputs.sources)
+              if path.startswith('knowledge/notes/') and path.endswith('.md')}
+    return iter(_select_snapshot_paths(inputs.sources, wanted))
 
 
 def _context_reference_parts(parts):
@@ -1397,7 +1406,7 @@ def _packing_context_ranking(inputs, context_pending):
     if context_pending:
         return None
     daily_paths = {item.logical_path for item in inputs.dailies}
-    optional = tuple(item for item in inputs.sources if item.logical_path not in daily_paths)
+    optional = _select_snapshot_paths(inputs.sources, set(_snapshot_paths(inputs.sources)) - daily_paths)
     return _ContextRanking(optional)
 
 
@@ -1509,19 +1518,49 @@ class _ContextRanking:
     """
 
     def __init__(self, sources: Sequence[SourceSnapshot]) -> None:
-        self.sources = tuple(sources)
+        self.sources = sources
+        self.paths = _snapshot_paths(sources)
         self.words = {item.logical_path: _words(item.content) for item in self.sources}
         self.idf = _inverse_document_frequency(self.words.values(), len(self.sources))
         self.length_factor = _length_factors(self.words)
 
-    def ordered(self, day_text: bytes) -> tuple[SourceSnapshot, ...]:
+    def ordered(self, day_text: bytes) -> Sequence[SourceSnapshot]:
         day = _words(day_text)
-        return tuple(sorted(self.sources, key=lambda item: (-self._score(item, day), item.logical_path)))
+        indices = sorted(range(len(self.paths)), key=lambda index: (
+            -self._score(self.paths[index], day), self.paths[index]))
+        return _RankedSources(self.sources, indices)
 
-    def _score(self, item: SourceSnapshot, day: frozenset[str]) -> float:
+    def _score(self, path: str, day: frozenset[str]) -> float:
         """BM25 with every shared word counted once: a long page does not win by length."""
-        shared = sum(self.idf[word] for word in self.words[item.logical_path] & day)
-        return shared * self.length_factor[item.logical_path]
+        shared = sum(self.idf[word] for word in self.words[path] & day)
+        return shared * self.length_factor[path]
+
+
+class _RankedSources(Sequence):
+    """An ordering of a snapshot collection, without retaining decoded records."""
+
+    def __init__(self, sources, indices):
+        self.sources, self.indices = sources, tuple(indices)
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return _RankedSources(self.sources, self.indices[index])
+        return self.sources[self.indices[index]]
+
+    def logical_paths(self):
+        paths = _snapshot_paths(self.sources)
+        return tuple(paths[index] for index in self.indices)
+
+
+def _context_measure_index(sources, daily_paths):
+    indices = {}
+    for index, path in enumerate(_snapshot_paths(sources)):
+        if path not in daily_paths:
+            indices.setdefault(path, []).append(index)
+    return indices
 
 
 def _draft_prompt_text(inputs: CompileInputs) -> str:
@@ -1578,7 +1617,7 @@ def _source_id_range(values):
 
 def _draft_evidence_sources(inputs: CompileInputs) -> tuple[SourceSnapshot, ...]:
     daily_paths = {part.logical_path for part in inputs.dailies}
-    return tuple(item for item in inputs.sources if item.logical_path in daily_paths)
+    return tuple(_select_snapshot_paths(inputs.sources, daily_paths))
 
 
 def _legacy_draft_schema() -> dict:
@@ -1724,10 +1763,8 @@ class _ByteBatchMeasure:
         for item in inputs.dailies:
             self.dailies.setdefault(item.part_key, []).append(item)
         daily_paths = {item.logical_path for item in inputs.dailies}
-        self.context: dict[str, list[SourceSnapshot]] = {}
-        for item in _context_sources(inputs, daily_paths, {s.logical_path for s in inputs.sources}):
-            self.context.setdefault(item.logical_path, []).append(item)
-        self.sizes: dict[SourceSnapshot, int] = {}
+        self.context = _context_measure_index(inputs.sources, daily_paths)
+        self.context_sizes = {}
         self.projection_parts: tuple[DailySnapshot, ...] = ()
         self.projection_key: tuple[int, ...] | None = None
         self.projection_sources: tuple[SourceSnapshot, ...] = ()
@@ -1737,23 +1774,26 @@ class _ByteBatchMeasure:
         self.choice_bindings = {}
         self.redaction_lines = {}
 
-    def _size(self, item: SourceSnapshot) -> int:
-        if item not in self.sizes:
-            self.sizes[item] = len(_source_blob(item).encode("utf-8"))
-        return self.sizes[item]
+    def _context_records(self, paths):
+        return tuple(self.inputs.sources[index] for index in _selected_buckets(self.context, paths))
+
+    def _context_size(self, path):
+        if path not in self.context_sizes:
+            self.context_sizes[path] = sum(len(_source_blob(self.inputs.sources[index]).encode('utf-8'))
+                                           for index in self.context.get(path, ()))
+        return self.context_sizes[path]
 
     def __call__(self, paths: set[str], optional_paths: set[str] | None = None) -> int:
         optional_paths = _with_required_context(self, paths, optional_paths)
         selected = _selected_buckets(self.dailies, paths)
         sources = self._projection(selected)
-        context = _selected_buckets(self.context, optional_paths)
         if _measured_choice_layout_needed(self, selected, sources):
             with _measure_choice_resolution(self):
-                return _choice_measure_bytes(self.inputs, selected, sources, context)
-        frames = (*sources, *context)
-        separators = 2 * max(0, len(frames) - 1)
+                return _choice_measure_bytes(self.inputs, selected, sources, self._context_records(optional_paths))
+        frame_count = len(sources) + len(_selected_buckets(self.context, optional_paths))
+        separators = 2 * max(0, frame_count - 1)
         entry_bytes = self._entry_size(selected)
-        return self.base + self.projection_bytes + sum(self._size(item) for item in context) + separators + entry_bytes - self.base_context_bytes + _draft_schema_size_extra(sources)
+        return self.base + self.projection_bytes + sum(self._context_size(path) for path in optional_paths) + separators + entry_bytes - self.base_context_bytes + _draft_schema_size_extra(sources)
 
     def _projection(self, selected: tuple[DailySnapshot, ...]) -> tuple[SourceSnapshot, ...]:
         """Reuse only this measure's last immutable selection for size planning.
@@ -1784,8 +1824,8 @@ class _ByteBatchMeasure:
         if _measured_choice_layout_needed(self, selected, sources) or _required_context_paths(self, paths):
             return _fitting_measured_context(paths, optional_sources, budget, self)
         selection = _ByteContextSelection(self, paths, budget)
-        for source in optional_sources:
-            selection.offer(source.logical_path)
+        for path in _snapshot_paths(optional_sources):
+            selection.offer(path)
         return selection.chosen
 
 
@@ -1824,7 +1864,7 @@ class _ByteContextSelection:
         if path in self.chosen:
             return
         sources = self.measure.context.get(path, ())
-        size = sum(self.measure._size(source) for source in sources)
+        size = self.measure._context_size(path)
         separators = 2 * (max(0, self.frames + len(sources) - 1) - max(0, self.frames - 1))
         prospective = self.total + size + separators
         if prospective > self.limit:
@@ -1926,8 +1966,8 @@ def _fitting_context(
 def _fitting_measured_context(paths, optional_sources, budget, measure):
     """Keep full measurement for arbitrary, potentially non-additive tokenizers."""
     chosen = _required_context_paths(measure, paths)
-    for source in optional_sources:
-        prospective = {*chosen, source.logical_path}
+    for path in _snapshot_paths(optional_sources):
+        prospective = {*chosen, path}
         if measure(paths, prospective) <= budget.available_input_tokens:
             chosen = prospective
     return chosen
@@ -4293,7 +4333,7 @@ def _dailies_for_evidence(inputs: CompileInputs, date: str) -> list[DailySnapsho
 
 
 def _target_snapshot(inputs: CompileInputs, path: str) -> TargetSnapshot | None:
-    return next((item for item in inputs.targets if item.logical_path == path), None)
+    return next(iter(_select_snapshot_paths(inputs.targets, {path})), None)
 
 
 # Fields the compile derives from the quoted bytes, never takes from the model.

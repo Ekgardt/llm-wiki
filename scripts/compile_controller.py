@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import zipfile
+from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, replace
 from functools import partial
@@ -619,6 +620,13 @@ class CompileInputArchive:
         for index in range(self.record_count(group)):
             yield self.record(group, index)
 
+    def planning_inputs(self):
+        from compile_memory import CompileInputs
+
+        return CompileInputs(tuple(self.records('dailies')),
+                             ArchiveRecords(self, 'sources'), ArchiveRecords(self, 'targets'),
+                             ArchiveRecords(self, 'vault_files'))
+
     def materialize(self):
         from compile_memory import CompileInputs
 
@@ -690,3 +698,30 @@ def _archive_group_names(group, digests):
     for index, digest in enumerate(digests):
         progress._require_digest(digest)
         yield _archive_record_name(group, index)
+
+
+class ArchiveRecords(Sequence):
+    """Explicit file-backed sequence; every loaded record belongs to its reader."""
+
+    def __init__(self, reader, group, indices=None, paths=None):
+        self.reader, self.group = reader, group
+        self.indices = tuple(range(reader.record_count(group))) if indices is None else indices
+        self.paths = tuple(reader.record_metadata(group, index)['logical_path']
+                           for index in self.indices) if paths is None else paths
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return ArchiveRecords(self.reader, self.group, self.indices[index], self.paths[index])
+        return self.reader.record(self.group, self.indices[index])
+
+    def logical_paths(self):
+        return self.paths
+
+    def select_paths(self, wanted):
+        positions = tuple(index for index, path in enumerate(self.paths) if path in wanted)
+        return ArchiveRecords(self.reader, self.group,
+                              tuple(self.indices[index] for index in positions),
+                              tuple(self.paths[index] for index in positions))

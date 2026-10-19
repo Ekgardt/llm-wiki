@@ -1181,3 +1181,11 @@ record metadata and selected records, allowing the batch planner to avoid loadin
 unselected source bodies. ZIP directory metadata is held in memory; source bodies
 are not loaded by opening the container. Python's standard library supplies the
 container format; there is no new package, runtime path or operational database.
+
+The archive's planning view keeps daily records materialized for existing partition
+proofs, while context source/target/vault collections retain verified record indices
+and logical paths. Selection filters metadata before reading bodies. Ranking stores
+word statistics and indices; byte sizing stores numeric frame sizes. Required
+citation association still scans every context page. The view is owned by the open
+archive context and must not escape it. Source capture and daily-part planning are
+not yet streaming; this is not installed entrypoint completion.
