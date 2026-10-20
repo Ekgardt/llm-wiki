@@ -966,20 +966,21 @@ def _regenerable_dependency_bytecode(path):
         return False
 
 
-def _compile_dependency_tree(directory, ancestors=(), *, deadline=None):
+def _compile_dependency_tree(directory, ancestors=(), *, deadline=None, excluded=frozenset()):
     operational_deadline_active(deadline)
     resolved = directory.resolve(strict=True)
-    if resolved in ancestors:
-        raise ValueError('compile dependency directory cycle')
+    if resolved in excluded:
+        return
+    _require_acyclic_dependency_directory(resolved, ancestors)
     for child in sorted(directory.iterdir()):
-        yield from _compile_dependency_entry(child, (*ancestors, resolved), deadline)
+        yield from _compile_dependency_entry(child, (*ancestors, resolved), deadline, excluded)
     if directory.resolve(strict=True) != resolved:
         raise PermissionError('compile dependency directory resolution changed')
 
 
-def _compile_dependency_entry(path, ancestors, deadline):
+def _compile_dependency_entry(path, ancestors, deadline, excluded):
     if path.is_dir():
-        yield from _compile_dependency_tree(path, ancestors, deadline=deadline)
+        yield from _compile_dependency_tree(path, ancestors, deadline=deadline, excluded=excluded)
         return
     if not _regenerable_dependency_bytecode(path):
         yield path
@@ -1068,3 +1069,65 @@ class CompileDependencies:
         if compile_dependency_digest(self.inspect()) != self.digest:
             raise progress.ProgressConflict('compile dependency identity changed')
         return self.digest
+
+
+def _require_acyclic_dependency_directory(resolved, ancestors):
+    if resolved in ancestors:
+        raise ValueError('compile dependency directory cycle')
+
+
+def _compile_runtime_library(config):
+    if config.get('Py_ENABLE_SHARED') == 0:
+        return {}
+    if config.get('Py_ENABLE_SHARED') != 1:
+        raise ValueError('Python shared-library configuration is unavailable')
+    name = config.get('INSTSONAME') or config.get('LDLIBRARY')
+    return {'python-library': Path(config['LIBDIR']) / name}
+
+
+def _compile_runtime_parameters(config):
+    import sys
+
+    return {
+        'version': sys.version, 'implementation': sys.implementation.name,
+        'cache_tag': sys.implementation.cache_tag, 'platform': sys.platform,
+        'byteorder': sys.byteorder, 'flags': list(sys.flags), 'xoptions': sys._xoptions,
+        'warnoptions': sys.warnoptions, 'sys_path': sys.path,
+        'prefixes': [sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix],
+        'configuration': config,
+    }
+
+
+def _compile_runtime_tree_layout(paths):
+    excluded = frozenset(Path(paths[name]).resolve() for name in ('purelib', 'platlib'))
+    roots = sorted({Path(paths[name]) for name in ('stdlib', 'platstdlib')})
+    return roots, excluded - frozenset(root.resolve() for root in roots)
+
+
+def _compile_standard_library_files(paths, deadline):
+    roots, excluded = _compile_runtime_tree_layout(paths)
+    for root in roots:
+        prefix = _compile_identity_digest(str(root))
+        for path in _compile_dependency_tree(root, deadline=deadline, excluded=excluded):
+            yield f'stdlib/{prefix}/{path.relative_to(root).as_posix()}', path
+
+
+def compile_runtime_dependency_manifest(*, deadline=None):
+    """Inventory configured Python files and execution flags, without new limits.
+
+    Package roots are covered by the separate package inventory. This component
+    binds on-disk interpreter/stdlib bytes, not old code already loaded in memory
+    or transitive operating-system libraries. Unsupported shared-library metadata
+    refuses qualification explicitly; no guessed platform pathname is substituted.
+    """
+    import sys
+    import sysconfig
+
+    operational_deadline_active(deadline)
+    paths, config = sysconfig.get_paths(), sysconfig.get_config_vars()
+    files = dict(_compile_standard_library_files(paths, deadline))
+    files.update(_compile_runtime_library(config))
+    files['python-executable'] = Path(sys.executable)
+    files.update({f'search-path/{index}': Path(path) for index, path in enumerate(sys.path)
+                  if Path(path).is_file()})
+    return compile_dependency_manifest(files, _compile_runtime_parameters(config), deadline=deadline)

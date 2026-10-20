@@ -1154,3 +1154,56 @@ logs/step7-dependency-guard-red-20261020.txt.
 Related protected-dispatch/call/replay suites completed with 107 tests passed on
 Python 3.12 (71.51 s) and 3.10 (79.65 s). The final restoration assertion was also
 covered by the 22 focused tests reported above. No new runtime package was added.
+
+### 2026-10-20: configured Python runtime dependency component
+
+The candidate compile_runtime_dependency_manifest fingerprints the interpreter
+executable, the configured installed shared Python library (when enabled), standard
+and platform-standard library trees, and existing files directly on sys.path
+(including normal archive entries). It binds Python version/implementation/cache
+tag, platform/byte order, flags, xoptions, warning options, prefixes, sys.path and
+sysconfig build configuration through the existing hashed-parameter manifest.
+This uses the existing stable streaming fingerprint path, with caller deadlines
+and no new size/file-count threshold.
+
+Research rechecked today: https://docs.python.org/3.12/library/sysconfig.html,
+https://bazel.build/remote/caching and
+https://nix.dev/manual/nix/2.35/store/derivation/. sysconfig distinguishes stdlib,
+platstdlib, purelib and platlib, and exposes build configuration rather than a
+complete loaded-process dependency graph. The current Linux 3.12 environment
+proved why blindly using LDLIBRARY is wrong: libpython3.12.so is absent, while
+INSTSONAME names installed libpython3.12.so.1.0. Both tested runtimes have this
+configured installed library. Version-only identity and guessed platform paths
+were rejected; unsupported/missing shared-library metadata refuses qualification.
+No new package, service, path contract or configuration option is introduced.
+
+Normally package directories are handled by the separate package inventory.
+A red regression showed that a valid installation scheme with identical stdlib
+and package roots would drop the entire standard library. Roots that overlap are
+now included conservatively, preserving bytes rather than pretending that the
+components are disjoint. Directory exclusion is implemented by the shared tree
+walker; its default product/package behavior is unchanged. Source-backed bytecode
+continues to follow the previously documented normal-cache assumption.
+
+Nine initial missing-API cases failed before implementation. The overlap regression
+failed before its fix. The first complexity measurement rejected
+_compile_standard_library_files at CCN 6; splitting path-layout calculation from
+traversal brought all 18 changed/new functions within the law-5 thresholds.
+Ruff for scripts/tests and diff checks pass. Related runtime/dependency/protected
+call suites: 84 tests passed on Python 3.12 (43.03 s) and 3.10 (47.86 s). After the
+complexity extraction and final unsupported-configuration check, all 33 focused
+runtime/dependency tests passed on both (2.69 s / 3.05 s).
+
+Two actual runtime inventories agreed on each interpreter: Python 3.12, 632 files /
+40,305,226 bytes, 0.711 s total; Python 3.10, 1,705 files / 64,557,504 bytes, 2.335 s
+total. Measurement logs: logs/step7-runtime-identity-py{312,310}-measurement-20261020.json;
+regression logs: logs/step7-runtime-identity-py{312,310}-20261020.txt.
+
+This is an on-disk configured-Python component, not proof of full execution
+closure. Loaded modules/native libraries versus replaced files, transitive OS
+libraries, custom import hooks and archive subdirectory import paths remain
+unqualified. Windows/macOS layouts are unqualified; absent shared-library metadata
+is explicitly refused, not misreported as a static build. Full configuration
+composition, fenced startup/update handling, durable preflight, entrypoint adoption,
+backup/recovery, installation/retirement and the useful real full-cycle gate remain
+open. No change in installed routing is claimed.
