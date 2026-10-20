@@ -1252,6 +1252,17 @@ using the existing spawn-token check. This token is never retained in the task
 payload or source-selection identity; a borrowing child does not release its
 parent's lock.
 
+The candidate worker propagates the caller's optional cancellation callback
+through its existing parent supervisor. It checks before claim and spawn, during
+busy claim retries, while awaiting a child answer and while joining the child.
+The callback stays in the parent; lease-loss interruption remains independent.
+A canceled running task is blocked with `caller_cancelled`, so automatic workers
+do not restart it. Explicit unblock does not clear a retained unknown model call:
+the compile controller still requires resolution or repeat consent. Completed
+answers already in hand retain normal validation and cleanup. Custom injected
+synchronous runners retain responsibility for their own interruption. This does
+not yet connect the CLI/MCP/nightly compile entrypoints to the candidate worker.
+
 The uninstalled refreshed-context format stores only complete changed context
 records and explicit removed paths in another self-contained ZIP64 artifact.
 It binds one complete source capture by manifest digest; it never follows delta

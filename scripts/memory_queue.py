@@ -15008,6 +15008,7 @@ class _ChildRun:
     deadline: float
     tracked_descendants: set[int] | None = None
     lease_lost: Callable[[], bool] | None = None
+    cancelled: Callable[[], bool] | None = None
 
     def remaining(self) -> float:
         return self.deadline - time.monotonic()
@@ -15049,13 +15050,22 @@ def _stop_child_if_done_waiting(run: _ChildRun) -> None:
     check became `worker_timeout` and the finished work was thrown away. See
     `docs/research/2026-09-18-an-answer-that-arrived-is-not-a-timeout.md`.
     """
-    if run.lost():
+    reason = _child_stop_reason(run)
+    if reason is not None:
         run.stop()
-        raise QueueOperationError("lease_lost")
+        raise QueueOperationError(reason)
     if _may_keep_waiting(run):
         return
     run.stop()
     raise TimeoutError
+
+
+def _child_stop_reason(run: _ChildRun) -> str | None:
+    if run.lost():
+        return 'lease_lost'
+    if run.cancelled is not None and run.cancelled():
+        return 'worker_cancelled'
+    return None
 
 
 def _may_keep_waiting(run: _ChildRun) -> bool:
@@ -15105,9 +15115,10 @@ def _child_result_frame(run: _ChildRun) -> bytes:
 
 def _child_left_in_time(run: _ChildRun) -> bool:
     """Whether the child exited within its deadline; a lingering one is stopped."""
-    remaining = run.remaining()
-    if remaining > 0:
-        run.process.join(remaining)
+    while run.process.is_alive() and run.remaining() > 0:
+        if _child_stop_reason(run) is not None:
+            break
+        run.process.join(min(run.remaining(), CHILD_LEASE_CHECK_SECONDS))
     if not run.process.is_alive():
         return True
     run.stop()
@@ -15128,14 +15139,21 @@ def _settle_child_exit(run: _ChildRun) -> None:
         raise QueueOperationError("processor_child_failed")
 
 
+def _require_child_start(timeout, cancelled):
+    if timeout <= 0:
+        raise TimeoutError
+    if cancelled is not None and cancelled():
+        raise QueueOperationError('worker_cancelled')
+
+
 def _run_processor_child(
     processor: Callable[[dict], bool | DeferredResult],
     task: dict[str, Any],
     timeout: float,
     lease_lost: Callable[[], bool] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> bool | DeferredResult:
-    if timeout <= 0:
-        raise TimeoutError
+    _require_child_start(timeout, cancelled)
     context = multiprocessing.get_context("spawn")
     receiver, sender = context.Pipe(duplex=True)
     process = context.Process(
@@ -15143,7 +15161,8 @@ def _run_processor_child(
         args=(sender, processor, task),
         daemon=False,
     )
-    run = _ChildRun(process, receiver, time.monotonic() + timeout, lease_lost=lease_lost)
+    run = _ChildRun(process, receiver, time.monotonic() + timeout,
+                    lease_lost=lease_lost, cancelled=cancelled)
     started = False
     try:
         process.start()
@@ -15180,6 +15199,10 @@ def _worker_claim_options(lease_seconds, max_attempts, task_id):
     return options
 
 
+def _worker_claim_active(deadline, monotonic, cancelled):
+    return monotonic() < deadline and not (cancelled is not None and cancelled())
+
+
 def _claim_when_reachable(
     queue: MemoryQueue,
     *,
@@ -15189,6 +15212,7 @@ def _claim_when_reachable(
     deadline: float,
     monotonic: Callable[[], float],
     task_id: str | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> QueueLease | None:
     """A busy database means "try again shortly", not a dead worker.
 
@@ -15196,7 +15220,7 @@ def _claim_when_reachable(
     `database is locked` out of the worker loop, which ended the run.
     """
     options = _worker_claim_options(lease_seconds, max_attempts, task_id)
-    while True:
+    while _worker_claim_active(deadline, monotonic, cancelled):
         try:
             return queue.claim(owner, **options)
         except sqlite3.OperationalError as error:
@@ -15204,9 +15228,8 @@ def _claim_when_reachable(
             # a missing table is a failure the operator has to see, not an idle queue.
             if not _is_busy_database(error):
                 raise
-            if monotonic() >= deadline:
-                return None
-            time.sleep(_CLAIM_BUSY_RETRY_SECONDS)
+            time.sleep(max(0.0, min(_CLAIM_BUSY_RETRY_SECONDS, deadline - monotonic())))
+    return None
 
 
 PROCESSOR_ERROR_CODE_BYTES = 64  # `attempt_history.error_code` CHECK in the v3 schema
@@ -15270,11 +15293,12 @@ def _run_processor(
     return _ProcessorOutcome(outcome, False, False)
 
 
-def _interruptible(processor_runner, heartbeat: _LeaseHeartbeat):
+def _interruptible(processor_runner, heartbeat: _LeaseHeartbeat, *, cancelled=None):
     """The child runner stops its child when the lease is lost; injected runners stay as they are."""
     if processor_runner is not _run_processor_child:
         return processor_runner
-    return partial(_run_processor_child, lease_lost=lambda: heartbeat.error is not None)
+    return partial(_run_processor_child, lease_lost=lambda: heartbeat.error is not None,
+                   cancelled=cancelled)
 
 
 def _processor_result(
@@ -15287,13 +15311,14 @@ def _processor_result(
     heartbeat: _LeaseHeartbeat,
     deadline: float,
     monotonic: Callable[[], float],
+    cancelled: Callable[[], bool] | None = None,
 ) -> _ProcessorOutcome:
     heartbeat.start()
     try:
         remaining = deadline - monotonic()
         if remaining <= 0:
             return _ProcessorOutcome(False, True, False)
-        result = _run_processor(processor, _interruptible(processor_runner, heartbeat), lease, remaining)
+        result = _run_processor(processor, _interruptible(processor_runner, heartbeat, cancelled=cancelled), lease, remaining)
         if monotonic() >= deadline:
             return _ProcessorOutcome(result.outcome, True, result.cleanup_failed, result.error_code)
         return result
@@ -15335,6 +15360,8 @@ def _worker_failure(result: _ProcessorOutcome) -> QueueFailure | None:
         return QueueFailure(
             "process_cleanup_failed", blocked_capability="process_cleanup"
         )
+    if result.error_code == 'worker_cancelled':
+        return QueueFailure('worker_cancelled', blocked_capability='caller_cancelled')
     return _unsuccessful_worker_failure(result)
 
 
@@ -15459,6 +15486,7 @@ def _work_one(
     retry_base_seconds: int,
     retry_cap_seconds: int,
     task_id: str | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, int]:
     counts = {"ok": 0, "failed": 0, "dead": 0, "skipped": 0, "halted": 0}
     lease = _claim_when_reachable(
@@ -15469,6 +15497,7 @@ def _work_one(
         deadline=deadline,
         monotonic=monotonic,
         task_id=task_id,
+        cancelled=cancelled,
     )
     if lease is None:
         return counts
@@ -15487,6 +15516,7 @@ def _work_one(
         max_attempts=max_attempts,
         retry_base_seconds=retry_base_seconds,
         retry_cap_seconds=retry_cap_seconds,
+        cancelled=cancelled,
     )
     return counts
 
@@ -15526,6 +15556,7 @@ def _run_and_settle(
     max_attempts: int,
     retry_base_seconds: int,
     retry_cap_seconds: int,
+    cancelled: Callable[[], bool] | None = None,
 ) -> None:
     """Run one claimed task under a heartbeat and settle whatever came back."""
     processor = _bind_lease_processor(processor, queue, lease, deadline)
@@ -15536,7 +15567,7 @@ def _run_and_settle(
         lease_seconds=lease_seconds,
     )
     result = _processor_result(
-        processor, processor_runner, lease, heartbeat, deadline, monotonic
+        processor, processor_runner, lease, heartbeat, deadline, monotonic, cancelled=cancelled
     )
     if _heartbeat_lost(heartbeat, result):
         counts["failed"] += 1
@@ -15650,6 +15681,7 @@ def _worker_turn(
     monotonic: Callable[[], float],
     sleep: Callable[[float], None],
     policy: Mapping[str, int],
+    cancelled: Callable[[], bool] | None = None,
 ) -> bool:
     """One turn of the worker loop; False when it should stop."""
     counts = _work_one(
@@ -15659,6 +15691,7 @@ def _worker_turn(
         owner=owner,
         deadline=deadline,
         monotonic=monotonic,
+        cancelled=cancelled,
         **policy,
     )
     outcome = progress.advance(counts)
@@ -15714,6 +15747,7 @@ def _drive_worker(
             monotonic=monotonic,
             sleep=sleep,
             policy=policy,
+            cancelled=cancelled,
         ):
             return
 

@@ -2980,3 +2980,72 @@ avoid more competing edits. Read-only findings are retained separately in
 `logs/step7-live-compile-conflict-20261020.json`; input-budget and validation
 failures are also present, so page contention does not explain all failures.
 The exact contribution of each append to each failed batch was not traced.
+
+
+### 2026-10-20 — caller cancellation through the existing worker lifecycle
+
+Source inspection after the parent-lock change shows that `run_worker` accepts
+cancellation but `_drive_worker` checks it only between tasks. The running child
+waits for a result, deadline or lease loss. A foreground MCP request therefore
+cannot yet stop its requested work through this lifecycle. Wrapping the child
+runner in a partial would bypass `_interruptible`'s identity check and silently
+remove heartbeat-loss interruption; this alternative is rejected. A second
+foreground process supervisor would duplicate cleanup and settlement authority.
+
+Extend the existing worker argument chain and child-run state with an optional
+caller cancellation callback. The callback stays in the parent, never in the
+spawned processor payload. Preserve lease-loss checking alongside cancellation.
+Check bounds before claiming and spawning, while retrying busy claims, and while
+waiting for the child; refuse a new claim once cancellation/deadline is observed.
+A result already available still goes through normal result/cleanup validation.
+Cancellation does not erase durable model dispatch or answer records and does
+not prove the remote request did not execute. Existing unknown-call recovery
+must block another model invocation after a stopped child dispatched a call.
+
+Research uses the three primary sources checked in the preceding section on
+2026-10-20 (Python process lifecycle, MCP cancellation, AWS retry identity).
+Reusing the existing child lease-check interval avoids a new polling policy;
+its original documented basis and remaining worker limits still belong to the
+full law-9 audit. No new worker, queue, persisted state, environment variable or
+runtime directory is introduced. Injected custom runners remain responsible
+for their own synchronous execution; the standard spawned runner provides the
+interruptible lifecycle. This design requires regression proof, including a
+real child stopped after durable model dispatch and recovery without a repeat.
+
+
+Cancellation of already claimed work settles through the existing failure path
+as `worker_cancelled` with capability `caller_cancelled`. This blocks automatic
+retry until explicit unblock, rather than silently rescheduling canceled work.
+Any dispatched model call remains unknown until its own durable recovery resolves
+it; unblock is not repeat consent. Before claim, cancellation or expiry returns
+no lease and spends no task attempt. The existing deadline is also checked before
+the first claim, fixing the previous first-attempt exception. The former busy
+retry pause is capped to the remaining deadline; its inherited 50 ms policy has
+not been justified by this change and remains in the limits audit.
+
+Built-in navigation used generation `generation-18e031df2939ec44-c58c0efb` at
+`8af8f95d`, with source supplementation for the partial graph. Seven new scenarios
+failed before implementation from unsupported callback interfaces; a separate
+baseline expired-claim regression reproduced a claim after the deadline. The
+public-worker cancellation scenario was not run against the old implementation:
+its known missing propagation would wait out the full hosted-platform hang bound.
+Focused qualification now passes ten scenarios, including a real child stopped
+after a durable model dispatch and an explicit unblock that still cannot repeat
+that call. The existing lease-loss regression now expects both parent callbacks,
+and a separate test proves neither replaces the other. Cancellation during child
+exit cleanup does not discard an answer already received. This remains a local
+fake-provider qualification, not an installed full-cycle or cost claim.
+
+
+Final related regression qualification passed 239 tests on Python 3.12 (143.92s)
+and 239 on Python 3.10 (148.52s), covering the core queue/CLI, targeted claim and
+worker, compile dispatch/parent lock, lost leases, child-tree cleanup, answers
+arriving at a deadline, SQLite failures, heartbeat stop and processor errors.
+All 31 changed/new functions pass lizard/AST complexity checks; whole Ruff and
+whitespace checks pass. Evidence: `step7-worker-cancellation-{red,expired-red,
+focused,py312,py310}-20261020.txt` and
+`step7-worker-cancellation-complexity-20261020.json` in private vault logs.
+The callback check surrounds claim attempts; it does not interrupt a SQLite
+statement already executing inside the queue's existing busy-timeout contract.
+Full dependency/update fencing, limits qualification and frontend routing remain
+open, as do installation, encrypted restore and the real medium-model full cycle.

@@ -44,5 +44,5 @@ def test_only_the_child_runner_is_made_interruptible():
 
     assert (
         memory_queue._interruptible(injected, Heartbeat()) is injected,
-        memory_queue._interruptible(memory_queue._run_processor_child, Heartbeat()).keywords.keys() == {"lease_lost"},
+        memory_queue._interruptible(memory_queue._run_processor_child, Heartbeat()).keywords.keys() == {"lease_lost", "cancelled"},
     ) == (True, True)
