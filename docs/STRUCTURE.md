@@ -1304,6 +1304,16 @@ snapshot and a matching complete orphan is reported, never silently rewritten.
 Production routing must adopt this path before the independent root/capture
 helpers can be removed.
 
+The candidate tree executor also distinguishes exhausted plan resolution
+(`CompilePlanUnavailable`) from arbitrary runtime failures. It records that
+source's failure through the existing diagnostics before continuing independent
+siblings and roots. The failed source remains incomplete, preventing whole-work
+proof and queue success. Re-evaluating saved calls does not dispatch them again.
+A failure to write diagnostics propagates, as do unrelated runtime, storage,
+ownership and dependency errors. Capacity failures keep the retained partition
+path; unknown outcomes keep the delivery's explicit blocked state. This change
+does not authorize a new model attempt or retire unresolved source evidence.
+
 The archive's eager compatibility planning view keeps daily records materialized for existing partition
 proofs, while context source/target/vault collections retain verified record indices
 and logical paths. Selection filters metadata before reading bodies. Ranking stores

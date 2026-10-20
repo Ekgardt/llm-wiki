@@ -2302,3 +2302,59 @@ whole scripts/tests Ruff and diff whitespace checks passed. Logs:
 `logs/step7-atomic-capture-final-py310-20261020.txt`,
 `logs/step7-atomic-capture-complexity-20261020.json`.
 This candidate is not installed and does not finish point7.
+
+### Independent known resolution failures (2026-10-20, candidate implemented)
+
+Source inspection before production routing found that the tree executor
+continues after retained capacity partitions and unknown provider outcomes, but
+the resolver's ordinary exhausted/invalid-plan outcome is a generic RuntimeError.
+That exception stops independent siblings and later roots. Catching RuntimeError
+would also hide programming or authority failures. The proposed correction is a
+specific resolver-outcome exception, caught only at the independent leaf boundary.
+The existing source-failure diagnostics must be written before continuing;
+diagnostic write failures must propagate. No completion proof may cover the
+failed source. Recovery uses the existing recorded model calls, without another
+automatic provider attempt for the same request.
+
+Primary sources checked2026-10-20: Python exception hierarchy
+https://docs.python.org/3/library/exceptions.html (specific exception types permit
+selective handling); SQLite atomic commit https://www.sqlite.org/atomiccommit.html
+(recorded transitions must retain their existing transaction semantics); AWS
+https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/
+(retained request identity distinguishes retries from new intent). The choice
+is an application of these mechanisms to this existing local queue, not a claim
+that any source specifies this compiler workflow.
+
+Alternatives rejected: catch all RuntimeError/Exception and continue; retry the
+model blindly; count an incomplete tree as success; add a second failure ledger.
+Use the existing source-failure store and diagnostic function. Unknown outcome,
+storage failure, DLP authority errors escaping the resolver, deadline, cancellation
+and dependency/ownership failures retain their existing semantics. No new
+numeric limit, database, path, package or service is needed. Full production
+routing and semantic evidence/retention qualification remain open.
+
+Reproduction: three new tests failed before the correction; actual malformed
+provider answers exhausted validation and raised RuntimeError before the next
+child was admitted. The fourth capacity control already passed. The new
+CompilePlanUnavailable remains a RuntimeError subclass; the existing
+non-capacity test now asserts that precise boundary and continued exclusion
+from capacity repartition. Arbitrary RuntimeError still stops the tree.
+
+Qualification covers malformed first child and first root, preserved failure
+keys, later source publication, refusal of queue success, replay without another
+provider call, and diagnostic-storage failure stopping siblings. The root test
+initially called publish_result with positional arguments; its actual keyword
+contract was corrected without changing product code or the expected refusal.
+Related3.12 suites:38 passed in48.48s, then16 passed with that one fixture failure;
+3.10:50 passed with the same fixture failure in140.65s. All five resolution
+regressions passed after the fixture correction on3.12/3.10 in30.17s/31.68s.
+Together these cover51 distinct related cases on each interpreter. All17
+changed/new functions pass measured complexity, and whole Ruff/diff checks pass.
+Logs are retained as `logs/step7-resolution-failure-*20261020*`.
+
+The fresh graph generation-18e028b9456ce6bf-dbc25795 covers d843b707. The MCP
+tool's observation timed out; the same builtin get_architecture implementation
+queried locally reported matching commits and returned resolver callers. Graph
+coverage remains partial (111597 unresolved edges); source inspection covered
+the tree, replay, proof, diagnostics and queue boundaries. This is an uninstalled
+candidate with simulated-provider qualification, not completion of point7.

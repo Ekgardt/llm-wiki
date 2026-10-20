@@ -151,7 +151,9 @@ def test_real_resolution_retains_validated_feedback_with_its_capacity_failure(va
 def test_unrelated_failures_keep_the_original_failure_boundary(failure, feedback):
     error = compiler._unresolved_compile_error(SimpleNamespace(lineage=(failure,), critic_feedback=feedback))
 
-    assert type(error) is RuntimeError
+    assert type(error) is compiler.CompilePlanUnavailable
+    assert isinstance(error, RuntimeError)
+    assert not isinstance(error, compiler._CompileRepairCapacityError)
     assert failure in str(error)
 
 

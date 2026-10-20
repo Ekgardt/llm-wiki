@@ -1167,8 +1167,8 @@ def execute_compile_tree(queue, lease, context, batch, *, coordinator, dependenc
 
     The caller owns the open archive. An owned delivery blocks on unknown calls
     after independent siblings; a supplied delivery retains that obligation.
-    Capacity refusals with no partition return no completion, preserving evidence.
-    All other failures propagate. This does not settle the enclosing queue task.
+    Capacity refusals and recorded resolution failures return no completion.
+    Other failures propagate. This does not settle the enclosing queue task.
     """
     _require_publication_coordinator(queue, coordinator)
     scope = CompileDelivery(queue, lease) if delivery is None else nullcontext(delivery)
@@ -1219,7 +1219,7 @@ class _CompileTreeExecution:
         return _CompileTreeFrame(context, frame.child.batch, frame.child.feedback)
 
     def _visit(self, frame, stack):
-        from compile_memory import _CompileRepairCapacityError
+        from compile_memory import CompilePlanUnavailable, _CompileRepairCapacityError
 
         try:
             _execute_context_compile_batch(self.queue, self.lease, frame.context, frame.batch,
@@ -1231,6 +1231,17 @@ class _CompileTreeExecution:
         except ProviderOutcomeUnknown:
             # CompileDelivery retains uncertainty; final proof cannot complete this leaf.
             return
+        except CompilePlanUnavailable as failure:
+            self._record_resolution_failure(frame, failure)
+
+    def _record_resolution_failure(self, frame, failure):
+        from compile_memory import _record_failed_batch
+
+        self._check_active()
+        _check_batch_context_owner(self.queue, self.lease, frame.context,
+                                   self.dependencies, self.deadline)
+        _record_failed_batch(frame.batch.inputs, failure,
+                             deadline=float('inf') if self.deadline is None else self.deadline)
 
     def _expand(self, frame, stack):
         repair = _compile_work_cursor(self.queue, frame.context.work_id)

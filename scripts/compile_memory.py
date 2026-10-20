@@ -2597,12 +2597,20 @@ class _CompileRepairCapacityError(RuntimeError):
         self.feedback = feedback
 
 
+class CompilePlanUnavailable(RuntimeError):
+    """Resolution exhausted its known outcomes without a validated plan.
+
+    Independent source work may continue after recording this failure. Generic
+    runtime, storage, ownership and dependency errors are not this outcome.
+    """
+
+
 def _unresolved_compile_error(attempt):
     message = _no_plan_message(attempt.lineage)
     capacity = any(item.endswith(':input_budget') for item in attempt.lineage)
     if capacity:
         return _CompileRepairCapacityError(message, attempt.critic_feedback)
-    return RuntimeError(message)
+    return CompilePlanUnavailable(message)
 
 
 def _first_resolved_plan(attempt: _CompileAttempt) -> ResolvedCompilePlan | None:
