@@ -1326,3 +1326,74 @@ Validation: 113 related tests passed on Python 3.12 (10.54 s) and Python 3.10
 `logs/step7-stream-admission-py{312,310}-20261020.txt`,
 `logs/step7-stream-admission-red-20261020.txt`, and
 `logs/step7-stream-admission-complexity-20261020.json` in the installed vault.
+
+### 2026-10-20: durable, complete preflight metadata
+
+The previously missing step between captured sources and per-batch execution now
+has an internal `save_compile_preflight` boundary. Seven feature regressions first
+failed because the boundary did not exist. It saves canonical line-delimited JSON
+through the existing queue artifact writer, then publishes one journal event.
+No directory, database, service, configuration switch, package, or schema migration
+is added. Its `pending/ready` event explicitly cannot authorize a model call.
+
+The header binds the recorded snapshot event, original-work request digest and
+original-work dependency digest. Every accepted or refused unit names the exact
+archive daily-record digests, including original bytes, spans and native-frame
+metadata identities. A counter verifies all captured records occur exactly once
+before the completion record is written. Checking newly consumed records avoids
+rescanning the whole source inventory per batch. Accepted entries retain complete
+receipt descriptors, packing identity, model, required context and selected source
+metadata/hashes; source bodies remain in the snapshot. Refusals remain failures,
+not compiled receipts. This is O(source-count) compact metadata, plus one current
+batch, not a complete retained source-body snapshot.
+
+Ownership, source identity, and the original root work are checked before planning;
+the dependency witness is checked before and after. A separate regression reproduced
+accepting a different internally consistent dependency witness for an existing
+root; the root binding now rejects it. A test initially expected the wrong exception
+class after cancellation: the actual fence raised `LeaseFenceError`, and the test
+now names that precise required error. The mixed-source test initially compared
+against a helper's intentionally filtered input rather than the actual saved
+snapshot; it now checks the exact multiset of saved record identities.
+
+A crash during planning leaves no published artifact/event. A durable file left by
+a journal-commit failure is recovered only if its bytes equal a complete local
+replan of the immutable snapshot under unchanged dependencies and request. Recorded
+plans are verified the same way. This costs local planning again on recovery, but
+neither rereads live source files nor invokes the model. It avoids a second semantic
+plan parser/validator while the consumer is unfinished. The injected planner is a
+trusted internal function; callers must supply the complete effective dependency
+inventory and request, and it must not dispatch models. This boundary does not
+infer dependency closure or make arbitrary producer code safe.
+
+Research checked 2026-10-20, three independent primary sources:
+- [SQLite atomic commit](https://www.sqlite.org/atomiccommit.html): transaction
+  atomicity relies on correct locking/fsync; a database transaction does not make
+  an unrelated artifact write atomic. Keep existing durable-file-then-event order.
+- [Temporal workflow execution](https://docs.temporal.io/workflow-execution):
+  durable history supports recovery; replay needs deterministic work identity.
+- [AWS Step Functions redrive](https://docs.aws.amazon.com/step-functions/latest/dg/redrive-executions.html):
+  preserve execution history and successful work across retry.
+
+Alternatives considered: materializing all batch bodies; persisting an incomplete
+prefix as ready; accepting an orphan from its filename or digest alone; maintaining
+a second plan decoder/semantic checker now. The chosen implementation streams
+metadata and verifies source coverage, then reuses deterministic planning for
+recovery. No new numeric work/retry/size ceiling is imposed. The 64 KiB read chunk
+is transfer granularity, never an artifact-size limit. Caller deadlines apply to
+artifact IO and plan-record writes; existing producer operations still need their
+own inherited deadline checks, so this is not an interruptible CPU-task guarantee.
+
+Still open: the preflight consumer and per-batch durable identities/execution,
+independent-batch progress with unknown outcomes, cross-origin discovery, source
+refresh/publication, complete production dependency inventory/update recovery,
+retention/doctor/backup qualification, CLI/MCP/nightly installation and real-cycle
+quality/cost evidence. The production entrypoints still use the installed compiler.
+This change is not point-7 completion or a claim of installed health.
+
+Validation: 176 related tests passed on Python 3.12 (107.73 s) and Python 3.10
+(121.71 s), including 16 new preflight tests. All 46 changed/new functions passed
+lizard and AST law-5 measurement; whole scripts/tests Ruff and diff checks passed.
+Evidence: `logs/step7-preflight-{red,root-red}-20261020.txt`,
+`logs/step7-preflight-py{312,310}-20261020.txt`, and
+`logs/step7-preflight-complexity-20261020.json` in the installed vault.
