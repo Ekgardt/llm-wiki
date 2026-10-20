@@ -7329,8 +7329,8 @@ class _ContextReceiptSelector:
         self.deadline = deadline
         self.catalog: dict[tuple[str, str], list[tuple[Path, dict[str, object]]]] | None = None
         self.prefix_hashes: dict[tuple[str, int], str] = {}
-        self.sources: dict[str, list[DailySnapshot]] = {}
-        self.source_identities: dict[str, tuple] = {}
+        self.current_source: tuple[str, tuple] | None = None
+        self.current_parts: list[DailySnapshot] = []
         self.historical_receipts: dict[tuple[str, str], tuple | None] = {}
 
     def _active(self) -> None:
@@ -7360,18 +7360,20 @@ class _ContextReceiptSelector:
 
     def __call__(self, logical_path: str, digest: str) -> bool:
         self._active()
-        self._source_parts(logical_path)
-        return self._matching_parts_are_compiled(logical_path, digest)
+        parts = self._source_parts(logical_path)
+        return self._matching_parts_are_compiled(parts, digest)
 
     def _source_parts(self, logical_path):
         self._active()
         path = self.vault / logical_path
-        identity = _daily_file_identity(path)
-        if self.source_identities.get(logical_path) != identity:
-            self.sources[logical_path] = _daily_parts(logical_path, _read_daily_source(path))
-            self.source_identities[logical_path] = identity
+        identity = (logical_path, _daily_file_identity(path))
+        if self.current_source != identity:
+            self.current_source = None
+            self.current_parts = []
+            self.current_parts = _daily_parts(logical_path, _read_daily_source(path))
+            self.current_source = identity
         self._active()
-        return self.sources[logical_path]
+        return self.current_parts
 
     def matches_saved_source(self, source):
         self._active()
@@ -7384,8 +7386,8 @@ class _ContextReceiptSelector:
             return False
         return self.matches(part)
 
-    def _matching_parts_are_compiled(self, logical_path, digest):
-        matches = [part for part in self.sources[logical_path] if part.sha256 == digest]
+    def _matching_parts_are_compiled(self, parts, digest):
+        matches = [part for part in parts if part.sha256 == digest]
         return bool(matches) and all(self.matches(part) for part in matches)
 
     def matches(self, part: DailySnapshot) -> bool:

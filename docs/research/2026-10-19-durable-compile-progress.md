@@ -2541,3 +2541,46 @@ pass. Evidence: `logs/step7-leased-entry-*20261020*`. Pre-edit builtin graph
 generation-18e02a5adf040abb-f143e13f matched8009079b and showed both lock and
 worker entry dependencies; source inspection supplemented its partial coverage.
 The installed compiler PID2129006 remained live and was not interrupted.
+
+### 2026-10-20 — receipt discovery source lifetime
+
+Fresh built-in `get_architecture` callees for `_source_parts` used generation
+`generation-18e02b32effb905f-aa6f21c6`, matching `bbeba73a`; graph partial
+(111870 unresolved), supplemented with all source callers and receipt tests.
+The regression `test_receipt_scan_releases_previous_daily_before_reading_next`
+failed before the fix: weak references still saw the preceding `DailySnapshot`
+when the next daily was read. Both source maps retained all visited bodies.
+
+Primary sources inspected on 2026-10-20:
+- Python weak-reference documentation explains that ordinary dictionary values
+  keep their referents alive, while weak references allow lifetime observation:
+  https://docs.python.org/3/library/weakref.html
+- Oracle's Java stream contract distinguishes incremental pipelines from stateful
+  operations that require buffering; used as an independent design comparison,
+  not a Java dependency: https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/stream/package-summary.html
+- Apache Arrow documents record-batch streaming versus collecting a full table:
+  https://arrow.apache.org/docs/python/ipc.html
+
+Chosen implementation: own only the current source's parts, keyed by logical path
+and the existing file identity. Release the previous view before reading the next.
+No corpus, file, or receipt is excluded; no numeric cache capacity, new dependency,
+path, environment contract or durable format is introduced. Switching back rereads
+that source; repeated queries within the current unchanged source reuse the parse.
+A failed replacement read must leave no usable cached identity. Alternatives:
+unbounded memoization reproduces corpus retention; a configurable LRU adds policy
+and still retains multiple bodies; weak-value caching makes reuse depend on unrelated
+object ownership and garbage collection. The deterministic current-source lifetime
+matches this sequential consumer. Receipt metadata and prefix hashes remain retained;
+this change does not claim constant total memory or streaming within a single daily.
+
+Validation: the new regression failed on the original implementation (1 failed,
+3 passed), then the source-lifetime, compile-transaction and leased-entry suites
+passed all 113 cases on Python 3.12 (31.56s) and 3.10 (34.02s). Coverage includes
+same-source reuse, changed bytes, read error/retry, expired discovery deadline,
+real receipt authority/identical occurrences and spawned queue execution.
+Lizard plus AST checked all 15 changed/new functions with no violations of CCN5,
+two-if or nesting2; whole scripts/tests Ruff and diff whitespace checks passed.
+Evidence: live logs `step7-receipt-lifetime-{red,py312,py310}-20261020.txt`
+and `step7-receipt-lifetime-complexity-20261020.json`.
+This candidate fix is not installed; full ingress, recovery and installation
+qualification remain outstanding as recorded above.

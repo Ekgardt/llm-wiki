@@ -1349,6 +1349,14 @@ This is an uninstalled worker integration: direct CLI/MCP/nightly ingress,
 per-batch diagnostic projection, discovery-independent recovery and full
 dependency/retention/installation qualification remain unfinished.
 
+Receipt discovery retains parsed bodies only for the current daily file, keyed
+by its logical path and existing file identity. Switching sources releases that
+view before reading the next source; returning to an earlier source rereads it.
+Receipt metadata and prefix hashes remain separate. This removes cumulative
+daily-body retention during maintenance without discarding any sources or
+introducing a configurable corpus/cache limit. A single daily is still parsed
+in memory, and this is not a constant-total-memory guarantee.
+
 The archive's eager compatibility planning view keeps daily records materialized for existing partition
 proofs, while context source/target/vault collections retain verified record indices
 and logical paths. Selection filters metadata before reading bodies. Ranking stores
