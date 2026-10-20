@@ -2234,6 +2234,16 @@ def _tokenizer_identity(count_source: str, model: str | None) -> str:
 def _refresh_compile_batch(batch: CompileBatch, *, deadline: float = math.inf,
                            retained_context: bool = False) -> CompileBatch:
     refreshed = _fresh_compile_batch_inputs(batch)
+    return _refresh_compile_batch_inputs(batch, refreshed, deadline, retained_context)
+
+
+def refresh_compile_batch_from_context(batch, context, *, deadline=math.inf, retained_context=False):
+    """Use exact caller-owned context with the ordinary semantic refresh checks."""
+    refreshed = _compile_batch_context_inputs(batch, context)
+    return _refresh_compile_batch_inputs(batch, refreshed, deadline, retained_context)
+
+
+def _refresh_compile_batch_inputs(batch, refreshed, deadline, retained_context):
     candidates = _refreshed_batch_candidates(batch, deadline)
     batches = _refreshed_context_batches(batch, refreshed, candidates, retained_context)
     if len(batches) != 1 or batches[0].manifest != batch.manifest:
@@ -2243,22 +2253,43 @@ def _refresh_compile_batch(batch: CompileBatch, *, deadline: float = math.inf,
 
 
 def _fresh_compile_batch_inputs(batch):
-    context = snapshot_compile_inputs(())
-    daily_sources = tuple(
-        SourceSnapshot(item.logical_path, item.content, item.sha256)
-        for item in batch.inputs.dailies
-    )
-    return CompileInputs(
-        batch.inputs.dailies,
-        tuple(
-            sorted(
-                (*daily_sources, *context.sources),
-                key=lambda item: item.logical_path,
-            )
-        ),
-        context.targets,
-        context.vault_files,
-    )
+    return _compile_batch_context_inputs(batch, snapshot_compile_inputs(()))
+
+
+def _compile_batch_context_inputs(batch, context):
+    daily_sources = tuple(SourceSnapshot(item.logical_path, item.content, item.sha256)
+                          for item in batch.inputs.dailies)
+    sources = _combined_context_sources((daily_sources, context.sources))
+    return CompileInputs(batch.inputs.dailies, sources, context.targets, context.vault_files)
+
+
+def _combined_context_sources(groups):
+    positions = []
+    for group, records in enumerate(groups):
+        positions.extend((path, group, index) for index, path in enumerate(_snapshot_paths(records)))
+    return _CombinedSources(groups, tuple(sorted(positions)))
+
+
+class _CombinedSources(Sequence):
+    """Merge source metadata while retaining no decoded archive context bodies."""
+
+    def __init__(self, groups, positions):
+        self.groups, self.positions = groups, positions
+
+    def __len__(self):
+        return len(self.positions)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return _CombinedSources(self.groups, self.positions[index])
+        _path, group, position = self.positions[index]
+        return self.groups[group][position]
+
+    def logical_paths(self):
+        return tuple(position[0] for position in self.positions)
+
+    def select_paths(self, wanted):
+        return _CombinedSources(self.groups, tuple(pos for pos in self.positions if pos[0] in wanted))
 
 
 def _refreshed_context_batches(batch, refreshed, candidates, retained_context):

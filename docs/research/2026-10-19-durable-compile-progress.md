@@ -1671,3 +1671,54 @@ including the real compiler capture iterator. All 43 changed/new functions pass
 lizard/AST checks, whole scripts/tests Ruff and diff pass. Installed-vault evidence:
 `logs/step7-batch-context-{red,type-red,green,expanded,py312,py310}-20261020.txt`
 and `logs/step7-batch-context-complexity-20261020.json`.
+
+### 2026-10-20 — semantic preparation from retained context
+
+The installed refresh wrapper and `refresh_compile_batch_from_context` now share
+one `_refresh_compile_batch_inputs` path. This preserves the existing provider
+requalification, source-manifest, required-citation and capacity identity checks.
+Only the live wrapper captures current pages. Daily source records and the supplied
+context are joined through metadata positions; constructing the view does not load
+archive bodies. Selected prompt sources are materialized by the existing packer,
+while complete publication targets keep their caller-owned lazy view.
+`open_prepared_compile_batch` keeps the saved context archives open across semantic
+preparation and consumer work, with owner/dependency checks before yielding.
+
+Research checked 2026-10-20:
+[Python Sequence contracts](https://docs.python.org/3/library/collections.abc.html)
+(index-based mixins and their complexity),
+[Temporal execution](https://docs.temporal.io/workflow-execution) (reconstruct from
+retained history), [SQLite isolation](https://www.sqlite.org/isolation.html) (the
+scope of database snapshots). SQLite isolation does not make mutable Markdown a
+snapshot; the existing verified files remain necessary. Python's current docs
+refer to 3.15; this change uses longstanding Sequence methods and separately tests
+3.10 compatibility, not its upstream support. No new package is added.
+
+Alternatives: a separate replay packer; converting the restored context into a full
+tuple; or continuing to call live refresh during replay. Sharing semantic checks
+and merging metadata avoids duplicated logic and whole-context body retention.
+The indexed view adds O(number of records) metadata and path sorting, rather than
+a claimed constant-memory plan. There is no new record/token/retry/size cutoff.
+The live path stays until installed durable routing is qualified; it now uses the
+same semantic preparation implementation rather than a parallel algorithm.
+
+Seven red tests preceded implementation. The saved path matches ordinary ready
+packing and preserves all four tested identity-drift guards. A metadata-only source
+fixture refuses body access during joining. An additional integrated test uses
+actual semantic compiler validation plus CompileReplay: interrupt after a durable
+draft, resume with live capture forbidden, then accept the supported plan with
+only three simulated provider calls total (one draft and two reviews). This is
+local regression evidence, not a real selected-model quality/token/latency run.
+
+Next: route durable prepared work through resolution, publication, receipts and
+repair children in the production execution loop. Prepared archives must stay open
+through consumers of all publication targets. Required remaining work includes
+queue semantic references, retention/doctor/backup, cross-origin unknown work,
+complete dependency/update handling, all CLI/MCP/queue/nightly entries, installation,
+legacy cleanup and real useful full-cycle evidence. Candidate remains uninstalled.
+
+Validation: 125 related tests pass on Python 3.12 (66.55s) and 3.10 (74.09s).
+All 27 changed/new functions pass lizard/AST law-5 analysis. Whole scripts/tests
+Ruff and diff checks pass. Evidence: installed-vault
+`logs/step7-saved-refresh-{red,green,semantic,py312,py310}-20261020.txt`
+and `logs/step7-saved-refresh-complexity-20261020.json`.

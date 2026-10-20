@@ -989,6 +989,22 @@ def open_compile_batch_context(queue, lease, planned, snapshot, saved, *, depend
                 _check_batch_context_owner(queue, lease, saved, dependencies, deadline)
 
 
+@contextmanager
+def open_prepared_compile_batch(queue, lease, planned, snapshot, *, dependencies,
+                                capture=_capture_current_compile_context, deadline=None):
+    """Prepare from retained context while its lazy source/target views stay open."""
+    from compile_memory import refresh_compile_batch_from_context
+
+    saved = save_compile_batch_context(queue, lease, planned, snapshot,
+        dependencies=dependencies, capture=capture, deadline=deadline)
+    with open_compile_batch_context(queue, lease, planned, snapshot, saved,
+                                    dependencies=dependencies, deadline=deadline) as context:
+        compiler_deadline = float('inf') if deadline is None else deadline
+        ready = refresh_compile_batch_from_context(planned.batch, context, deadline=compiler_deadline)
+        _check_batch_context_owner(queue, lease, saved, dependencies, deadline)
+        yield ready, saved
+
+
 def _check_batch_context_owner(queue, lease, saved, dependencies, deadline):
     dependencies.verify()
     operational_deadline_active(deadline)

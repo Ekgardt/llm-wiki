@@ -1201,6 +1201,12 @@ semantic reference enforcement and retention/doctor/backup traversal are still
 required before production routing. The candidate reader validates the complete
 restored context while keeping both archive lifetimes open.
 
+The candidate prepared-batch scope now uses the saved context with the same
+semantic selection/identity checks as live refresh. Joining selected daily sources
+with archive context retains metadata positions, not all context bodies. The scope
+owns archive lifetimes across preparation and consumer work. Production execution,
+publication/receipts and repair-child routing still need integration before install.
+
 The archive's eager compatibility planning view keeps daily records materialized for existing partition
 proofs, while context source/target/vault collections retain verified record indices
 and logical paths. Selection filters metadata before reading bodies. Ranking stores
