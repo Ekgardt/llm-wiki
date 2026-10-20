@@ -1080,7 +1080,7 @@ class _NativeJournalIndexes:
     """Pure parsing for one owned layout; strong refs prevent identity reuse."""
 
     def __init__(self):
-        self.sources: dict[int, tuple[bytes, dict]] = {}
+        self.sources: dict[int, tuple[bytes, Mapping]] = {}
 
     def for_content(self, content):
         if type(content) is not bytes:

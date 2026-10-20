@@ -197,7 +197,7 @@ class _NativeSourceAuthority:
     def _unrepresented_daily_links(self, name, content):
         index = _native_journal_index(content)
         self.journals[name] = index
-        return _journal_link_heads(content) - {head for head, _ in index.values()}
+        return _journal_link_heads(content) - index.heads()
 
     def _require_represented_head(self, head):
         import json
@@ -300,9 +300,110 @@ class _NativeSourceAuthority:
 
 
 def _native_journal_index(content):
-    pattern = rb'\n<!-- llm-wiki-operation:[0-9a-f]{64} -->\n## \[[0-9:]{8}\] Captured event\n\n\[Complete captured event\]\(\.\./(raw/sessions/[^)\r\n]+\.breadcrumb\.md)\)\n\[Complete captured event if archived\]\([^\r\n]+\)\n\n(?P<body>    \{[^\r\n]*\}\n)'
-    return {match.start("body"): ("knowledge/" + match.group(1).decode(), match.group())
-            for match in re.finditer(pattern, content)}
+    return _NativeJournalIndex(content)
+
+
+_NATIVE_MARKER_PREFIX = b'\n<!-- llm-wiki-operation:'
+_NATIVE_FIXED_HEADER_RE = re.compile(
+    rb'\n<!-- llm-wiki-operation:[0-9a-f]{64} -->\n## \[[0-9:]{8}\] Captured event\n\n'
+)
+# Width of the existing fixed grammar, never a source or event-size limit.
+_NATIVE_FIXED_HEADER_BYTES = len(
+    _NATIVE_MARKER_PREFIX + b'0' * 64 + b' -->\n## [00:00:00] Captured event\n\n'
+)
+_NATIVE_HEAD_PREFIX = b'[Complete captured event](../raw/sessions/'
+_NATIVE_ARCHIVE_PREFIX = b'[Complete captured event if archived]('
+
+
+class _NativeJournalIndex(Mapping):
+    """Keep source heads and spans; load only the requested physical block."""
+
+    def __init__(self, content):
+        self.content = _native_range_source(content)
+        self.spans = dict(_native_journal_spans(self.content))
+
+    def __len__(self):
+        return len(self.spans)
+
+    def __iter__(self):
+        return iter(self.spans)
+
+    def __contains__(self, key):
+        return key in self.spans
+
+    def __getitem__(self, key):
+        head, start, end = self.spans[key]
+        return head, self.content[start:end]
+
+    def heads(self):
+        return {head for head, _start, _end in self.spans.values()}
+
+
+def _native_range_source(content):
+    if type(content) is bytes:
+        return content
+    try:
+        with memoryview(content) as view:
+            return view.tobytes()
+    except TypeError:
+        return content
+
+
+def _native_journal_spans(content):
+    position = content.find(_NATIVE_MARKER_PREFIX)
+    while position != -1:
+        entry = _native_match_range(content, position)
+        if entry is not None:
+            yield entry
+        following = entry[1][2] if entry is not None else position + 1
+        position = content.find(_NATIVE_MARKER_PREFIX, following)
+
+
+def _native_match_range(content, position):
+    after_header = position + _NATIVE_FIXED_HEADER_BYTES
+    if _NATIVE_FIXED_HEADER_RE.fullmatch(content[position:after_header]) is None:
+        return None
+    head = _native_line_payload(content, after_header, _NATIVE_HEAD_PREFIX, b'.breadcrumb.md)')
+    if head is None or content.find(b')', head[0], head[1]) >= 0:
+        return None
+    return _native_after_head(content, position, head)
+
+
+def _native_line_payload(content, start, prefix, suffix):
+    end = content.find(b'\n', start)
+    first, last = start + len(prefix), end - len(suffix)
+    if last <= first:
+        return None
+    if content[start:first] != prefix or content[last:end] != suffix:
+        return None
+    return (first, last, end + 1) if content.find(b'\r', first, last) < 0 else None
+
+
+def _native_after_head(content, position, head):
+    archived = _native_line_payload(content, head[2], _NATIVE_ARCHIVE_PREFIX, b')')
+    if archived is None:
+        return None
+    if content[archived[2]:archived[2] + 1] != b'\n':
+        return None
+    return _native_index_entry(content, position, head, archived[2] + 1)
+
+
+def _native_index_entry(content, position, head, body_start):
+    end = _native_body_end(content, body_start)
+    if end is None:
+        return None
+    path_start, path_end = head[0] - len(b'raw/sessions/'), head[1] + len(b'.breadcrumb.md')
+    path = 'knowledge/' + content[path_start:path_end].decode()
+    return body_start, (path, position, end)
+
+
+def _native_body_end(content, start):
+    end = content.find(b'\n', start)
+    if end < 0:
+        return None
+    if content[start:start + len(b'    {')] != b'    {' or content[end - 1:end] != b'}':
+        return None
+    return end + 1 if content.find(b'\r', start, end) < 0 else None
 
 
 def _journal_link_heads(content):

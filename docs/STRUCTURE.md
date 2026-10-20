@@ -1513,6 +1513,15 @@ part of that event is pending. Existing list-returning consumers collect the sam
 iterator. Original daily bytes and entry/frame metadata still remain in memory:
 this removes all-part buffering, not the remaining whole-daily read.
 
+The native journal lookup is a read-only mapping of body offsets to source
+heads and physical spans. It retains the source reference and metadata, not
+copies of every matched block. A requested value reads its complete block;
+head-set discovery reads metadata only. Candidate discovery accepts verified
+range sources and preserves the old LF-only, strict-path-UTF-8, non-overlapping
+grammar. Mutable buffer inputs are copied once to preserve stable lookup
+results. Native frame encoded/text values still remain in the frame tuples and
+archive metadata; removing matched-block copies does not finish that migration.
+
 Canonical daily entry identification uses byte ranges instead of copying entry
 bodies. Heading identifiers need no body read; captured marker identifiers use
 incremental UTF-8 decoding and block searches with the existing Python Unicode

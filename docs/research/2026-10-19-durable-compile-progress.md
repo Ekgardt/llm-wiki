@@ -3604,3 +3604,64 @@ allocation. Raw measurements and scope are in
 `logs/step7-original-ranges-memory-20261020.json`. This is neither RSS nor
 real-provider full-cycle performance, token cost or output quality. No installed
 source, runtime ownership, private page or live compiler was changed.
+
+### 2026-10-20 — native journal index retains ranges, not matched bodies
+
+Fresh callers at generation-18e03a2ea9099e04-36317867 match c9a89060.
+The graph remains partial (113013 unresolved); direct inspection covers the
+compiler's journal cache, frame verification and fact-key source authority.
+`_native_journal_index` currently copies every complete matched block into its
+dictionary and requires a regex buffer for the entire source. Two regressions
+reproduce rejection of a non-buffer range reader, including the real verified
+ZIP original range introduced above.
+
+Sources reviewed today:
+[Python Mapping contracts](https://docs.python.org/3.10/library/collections.abc.html),
+[Unicode line breaking](https://www.unicode.org/reports/tr14/), and
+[RFC 3629 UTF-8](https://www.rfc-editor.org/rfc/rfc3629.txt).
+The Python 3.10 documentation now labels that upstream version unsupported;
+the project's existing compatibility floor is retained here, not presented as
+upstream support. Broader dependency/support qualification remains open.
+
+Use a read-only Mapping from physical body offset to source head and byte
+span. Indexing a value reads that complete block on demand; the index retains
+only paths and offsets. Head-set discovery reads metadata directly. Immutable
+bytes are retained by reference; other buffer inputs are copied once so an
+existing mutable-buffer caller cannot change an already-created index. Verified
+non-buffer ranges retain their owner's read-time integrity/lifetime contract.
+
+Discover candidates with byte searches. Apply the existing fixed-width operation
+and timestamp grammar to only its fixed header, then check both link lines,
+the blank separator, and the JSON-shaped physical line through ranges.
+Preserve LF-only delimiters, strict head-path UTF-8 and regex non-overlap;
+decode the head only after a complete structural match, so an invalid later body
+does not introduce a new early UTF-8 failure. The operation/timestamp widths come
+from the existing grammar, not new data caps. No path, body or event is truncated.
+
+Alternatives: caching regex matches avoids body copies but still requires the
+whole buffer; independently matching chunks loses split events; collecting
+physical lines retains the giant-event allocation; a new streaming-regex
+dependency is unnecessary for this fixed grammar. A single selected block still
+materializes when a caller needs its complete physical proof, and complete head
+paths remain metadata. NativeCompileFrame's encoded/text tuples and frame
+serialization still need their own coordinated streaming migration.
+
+Qualification: 274 related tests passed on Python 3.12 (33.70s) and Python
+3.10 (36.39s). The final suite covers the frozen previous regex grammar,
+mutable-buffer snapshots, shared-newline non-overlap, malformed/Unicode
+headers, and verified ZIP ranges at both seven-byte and normal transfer sizes.
+Lizard plus AST checks covered all 27 changed/new functions with no law-5
+failures; Ruff and whitespace checks passed.
+
+Three final local measurement pairs against c9a89060 separated untraced timing
+from allocation tracing. For sixteen 512 KiB events, median retained additional
+Python allocations fell from 8,396,663 to 4,962 bytes; construction time fell
+from 37.94ms to 0.62ms. Requesting one block then allocates about 524,580 bytes.
+For 10,000 short events, retained allocations fell from 4,952,903 to 2,674,390
+bytes, but construction increased from 14.15ms to 32.67ms. The range parser
+therefore trades some small-event CPU for bounded body retention and support
+for verified non-buffer originals. These are additional Python allocations,
+not RSS, end-to-end compilation performance, model quality or token costs.
+Raw evidence: logs/step7-native-range-index-final-measurement-20261020.json
+and logs/step7-native-range-index-final-py{312,310}-20261020.txt. The installed
+vault and live compiler remain unchanged; point 7 remains incomplete.
