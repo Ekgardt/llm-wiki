@@ -1641,8 +1641,11 @@ its existing parent handle. Source hashes, append-prefix comparisons and compres
 image writes consume blocks within that ownership scope. Final content and parent
 identity checks precede returning staged work, including absent-file checks for
 creates. Parent-identity migration uses the same capture scope. Image formats and
-undo contracts are unchanged; apply/undo readers and after-image inputs still
-materialize bytes. This candidate change is not proof of live installation.
+undo contracts are unchanged. Image loading and digest checks share one owned
+plain/XZ input stream; undo descriptor verification hashes without materializing
+plaintext. Apply/undo still materialize plaintext for their bytes contract and
+full publication DLP checks, but no longer retain the full encoded image as well.
+This candidate change is not proof of live installation.
 
 Fallback receipt lookup now opens a verified source scope and yields parts
 incrementally. Digest lookup, saved-source matching and committed-failure

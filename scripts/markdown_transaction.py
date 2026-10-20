@@ -2404,11 +2404,19 @@ IMAGE_COMPRESSION_PRESET = 1
 
 def _image_bytes(path: Path) -> bytes:
     """One staged image as the bytes it stands for, compressed or not."""
-    return _decoded_image_bytes(path.read_bytes())
+    with _open_image_stream(path) as stream:
+        return stream.read()
 
 
 def _image_digest(path: Path) -> str:
     """Hash every decoded byte, preserving historical plain and XZ images."""
+    with _open_image_stream(path) as stream:
+        return _image_stream_digest(stream)
+
+
+@contextlib.contextmanager
+def _open_image_stream(path):
+    """Own both encoded input and decoder, preserving historical error categories."""
     import lzma
 
     try:
@@ -2416,9 +2424,10 @@ def _image_digest(path: Path) -> str:
             prefix = raw.read(len(_LZMA_MAGIC))
             raw.seek(0)
             if prefix != _LZMA_MAGIC:
-                return _image_stream_digest(raw)
+                yield raw
+                return
             with lzma.LZMAFile(raw, "rb") as decoded:
-                return _image_stream_digest(decoded)
+                yield decoded
     except EOFError as exc:
         raise lzma.LZMAError(str(exc)) from exc
 
@@ -2823,8 +2832,7 @@ def _recorded_before_length(root: Path, transaction_id: str, row: sqlite3.Row) -
 
 
 def _verified_before_image(artifact: Path, row: sqlite3.Row) -> dict[str, object]:
-    content = _image_bytes(artifact)
-    if sha256_bytes(content) != row["before_hash"]:
+    if _image_digest(artifact) != row["before_hash"]:
         raise RefusedOperation(
             f"transaction before-image is corrupt for {row['path']}",
             "before_image_corrupt",

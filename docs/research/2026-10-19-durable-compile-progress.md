@@ -5384,3 +5384,66 @@ Linux. Logs: `logs/step7-streamed-capture-py312-20261020.log` and
 CCN <= 5, at most two if statements and at most two nested control levels;
 `logs/step7-streamed-capture-complexity-20261020.json` records actual measurements.
 Ruff and diff checks pass. These results qualify this candidate slice only.
+
+### Image loading and undo verification (2026-10-20, design before implementation)
+
+Apply, undo and refused-work repair all reach `_image_bytes`, which reads the
+complete encoded artifact before decoding a complete plaintext. `_verified_before_image`
+also materializes that plaintext merely to hash it, before `_undo_bytes` reads the
+same image again. Use one owned plain/XZ input stream for byte-returning consumers
+and incremental digest consumers. The bytes contract still materializes plaintext;
+it no longer needs a complete encoded buffer as well. Undo metadata verification
+uses only the complete incremental plaintext digest.
+
+This does not justify replacing publication with a block-at-a-time DLP scan.
+`model_dlp.require_safe_publication` authenticates the complete after-text and a
+preserved prefix, including full-payload allowlist fingerprints and cross-boundary
+findings. `_materialized_state`, `_undo_change` and both platform publication
+paths still require bytes. Streaming those paths requires preserving that scanner
+contract, not skipping it. No DLP rule, image format, public API, runtime path or
+numeric limit is changed by this loading change.
+
+Three primary sources rechecked today:
+- https://docs.python.org/3.12/library/lzma.html — borrowed stream ownership,
+  concatenated input streams and the file-oriented decompressor.
+- https://www.sqlite.org/atomiccommit.html — durable rollback depends on preserving
+  recovery data and ordering; this is not a claim of SQLite atomicity for Markdown.
+- https://restic.readthedocs.io/en/stable/045_working_with_repos.html — structural
+  checks alone do not establish data integrity; retain complete plaintext checks.
+
+Alternatives rejected: keeping encoded and decoded buffers together; using only a
+compressed-file hash instead of the recorded plaintext hash; extracting temporary
+plaintext files with a second cleanup lifecycle; or weakening publication scans.
+Selected implementation uses the standard library already deployed on Python
+3.10/3.12. Plain historical images, concatenated XZ, empty images and corruption
+must keep their observable behavior, including the historical LZMAError category
+for truncated input. The raw-buffer decoder remains used by bounded doctor
+receipt evidence and cannot be retired without migrating those consumers.
+
+Implemented: `_image_bytes` and `_image_digest` share `_open_image_stream`, which
+owns the raw file and optional decoder. The byte-returning consumer reads decoded
+plaintext directly; undo descriptor verification uses the digest consumer.
+`_decoded_image_bytes` remains for bounded doctor evidence. All publication DLP,
+CAS, ownership, fsync and recovery paths retain their existing checks.
+
+Ten new regression cases failed before implementation and all 13 loading tests
+passed after it: plain, XZ, concatenated, empty and multi-block input; before-image
+hash-only verification; incomplete concatenated tail refusal; wrong plaintext hash
+refusal; and an actual prepare/apply/undo cycle with the eager decoder disabled.
+Source/graph evidence is `logs/step7-image-loading-graph-20261020.json` at 834a0391;
+partial static results were supplemented by direct source searches, particularly
+the preserved-prefix DLP contract and bounded doctor consumers.
+
+With 4 MiB incompressible plaintext, the isolated image-loading traced peak fell
+from 15,076,343 to 9,549,888 bytes; decoded size and SHA-256 matched. This includes
+the returned plaintext and decoder buffers and is not constant-memory publication
+or a full-cycle result. Evidence: `logs/step7-image-loading-memory-20261020.json`.
+
+Qualification: 274 related tests passed on Python 3.12 (48.73 s) and Python 3.10
+(52.20 s); five Windows-native checks skipped on Linux. The suites include actual
+transaction recovery/undo, refused append/page repair, bounded doctor decoding,
+authenticated preserved-prefix publication and DLP allowlists. Logs:
+`logs/step7-image-loading-py312-20261020.log` and
+`logs/step7-image-loading-py310-20261020.log`. All 10 changed functions pass actual
+Lizard/AST checks (`logs/step7-image-loading-complexity-20261020.json`), Ruff and
+diff checks pass. Candidate only; no live installation or full-cycle claim.
