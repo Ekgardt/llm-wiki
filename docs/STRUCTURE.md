@@ -1509,6 +1509,11 @@ incremental UTF-8 decoding and block searches with the existing Python Unicode
 line/whitespace semantics. Only the timestamp grammar prefix is retained after
 unbounded leading or bullet whitespace. Byte spans and malformed-UTF-8 replacement
 behavior remain unchanged. This does not remove the original daily buffer.
+Boundary discovery itself uses length, byte searches and bounded slices, so it
+also accepts a range source without a whole-file buffer. Delimiter line endings
+remain EOF, LF or CRLF; Unicode content-line semantics do not widen delimiter
+matching. Heading ID validation decodes through the complete ID incrementally,
+including after a grammar rejection, preserving strict UTF-8 error priority.
 
 Sequential daily reads reuse verified original bytes and parsed entry/frame
 metadata only while the following record names the same shared identities.

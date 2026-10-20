@@ -53,10 +53,8 @@ _REF_RE = re.compile(
     rf"block:(?P<block>{_BLOCK_ID_PATTERN}) "
     r"bytes:(?P<start>0|[1-9]\d*)-(?P<end>0|[1-9]\d*)"
 )
-_HEADER_RE = re.compile(rb"(?m)^## \[([^\]\r\n]+)\][^\r\n]*(?:\r?\n|$)")
-_MARKER_RE = re.compile(
-    rb"(?m)^<!-- llm-wiki-operation:[0-9a-f]+ -->[^\r\n]*(?:\r?\n|$)"
-)
+_HEADING_PREFIX = b"## ["
+_OPERATION_PREFIX = b"<!-- llm-wiki-operation:"
 _MARKER_ID_RE = re.compile(
     r"^(?:[-+*]\s+)?`?\[((?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d)\]"
 )
@@ -273,22 +271,95 @@ def daily_entries(content: bytes) -> list[tuple[str, int, int]]:
 
 def _entry_starts(content: bytes) -> list[tuple[int, str | None]]:
     """Where each entry begins, with the id its own delimiter declares."""
-    headings = [
-        (match.start(), _heading_block_id(match[1]))
-        for match in _HEADER_RE.finditer(content)
-    ]
-    markers = [(match.start(), None) for match in _MARKER_RE.finditer(content)]
-    return sorted(headings + markers, key=lambda item: item[0])
+    return sorted(chain(_heading_starts(content), _operation_starts(content)),
+                  key=lambda item: item[0])
 
 
-def _heading_block_id(raw: bytes) -> str:
+def _line_prefix_offsets(content, prefix):
+    position = content.find(prefix)
+    while position != -1:
+        if position == 0 or content[position - 1] == ord('\n'):
+            yield position
+        position = content.find(prefix, position + 1)
+
+
+def _header_line_end(content, start):
+    newline = content.find(b'\n', start)
+    end = len(content) if newline < 0 else newline
+    carriage = content.find(b'\r', start, end)
+    if carriage < 0:
+        return end
+    if newline >= 0 and carriage == end - 1:
+        return carriage
+    return None
+
+
+def _heading_starts(content):
+    for offset in _line_prefix_offsets(content, _HEADING_PREFIX):
+        end = _header_line_end(content, offset)
+        if end is None:
+            continue
+        declared = _heading_declaration(content, offset, end)
+        if declared is not None:
+            yield offset, declared
+
+
+def _heading_declaration(content, offset, end):
+    start = offset + len(_HEADING_PREFIX)
+    closing = content.find(b']', start, end)
+    if closing <= start:
+        return None
+    return _heading_block_id_chunks(_entry_byte_chunks(content, start, closing))
+
+
+def _operation_starts(content):
+    for offset in _line_prefix_offsets(content, _OPERATION_PREFIX):
+        end = _header_line_end(content, offset)
+        if end is not None and _operation_declaration(content, offset, end):
+            yield offset, None
+
+
+def _operation_declaration(content, offset, end):
+    start = offset + len(_OPERATION_PREFIX)
+    closing = content.find(b' -->', start, end)
+    if closing <= start:
+        return False
+    return all(not content[cursor:min(closing, cursor + IO_CHUNK_BYTES)].strip(b'0123456789abcdef')
+               for cursor in range(start, closing, IO_CHUNK_BYTES))
+
+
+def _heading_block_id_chunks(chunks):
     try:
-        block_id = raw.decode("utf-8", errors="strict")
+        return _decoded_block_id(_decoded_id_chunks(chunks))
     except UnicodeDecodeError as exc:
         raise EvidenceResolutionError("daily block ID is not UTF-8") from exc
-    if _BLOCK_ID_RE.fullmatch(block_id) is None:
+
+
+def _decoded_id_chunks(chunks):
+    chunks = iter(chunks)
+    first, second = next(chunks, b''), next(chunks, None)
+    if second is None:
+        yield first.decode("utf-8", errors="strict")
+        return
+    yield from codecs.iterdecode(chain((first, second), chunks), "utf-8", errors="strict")
+
+
+def _decoded_block_id(chunks):
+    candidate = ''
+    for text in chunks:
+        candidate = _extend_block_id(candidate, text)
+    if not candidate:
         raise EvidenceResolutionError("daily block ID is invalid")
-    return block_id
+    return candidate
+
+
+def _extend_block_id(candidate, text):
+    if candidate is None:
+        return None
+    combined = candidate + text
+    if _BLOCK_ID_RE.fullmatch(combined) is None:
+        return None
+    return combined
 
 
 def _entry_id(content, start, end, declared):
@@ -307,10 +378,13 @@ def _marker_entry_id(content, start, end):
 
 
 def _decoded_entry_range(content, start, end):
-    decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+    yield from codecs.iterdecode(_entry_byte_chunks(content, start, end),
+                                 'utf-8', errors='replace')
+
+
+def _entry_byte_chunks(content, start, end):
     for cursor in range(start, end, IO_CHUNK_BYTES):
-        yield decoder.decode(content[cursor:min(end, cursor + IO_CHUNK_BYTES)])
-    yield decoder.decode(b'', final=True)
+        yield content[cursor:min(end, cursor + IO_CHUNK_BYTES)]
 
 
 def _after_first_text_line(chunks):

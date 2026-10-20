@@ -3454,3 +3454,86 @@ Final related suites pass on both supported interpreters: 400 tests on Python
 claims, citation, source-choice, transaction and foreground queue consumers.
 Logs: `step7-entry-ranges-bulk-py312-20261020.txt` and
 `step7-entry-ranges-bulk-py310-20261020.txt`.
+
+### 2026-10-20 — remove the canonical boundary parser's buffer requirement
+
+Fresh built-in callers at generation-18e037dab3164973-9893fdda match be067a7a.
+The graph is partial (112821 unresolved); source inspection confirms that
+`daily_entries` still calls `re.finditer` on the whole original, although its
+identifier reader now uses ranges. The splitter already needs only length,
+searches and bounded slices. A non-buffer range source reproduces the blocker:
+the canonical parser raises TypeError before it can discover any entry.
+
+Primary sources rechecked today:
+[Python regex anchors and byte patterns](https://docs.python.org/3.12/library/re.html),
+[Unicode line breaks](https://www.unicode.org/reports/tr14/), and
+[UTF-8 byte encoding](https://www.rfc-editor.org/rfc/rfc3629).
+Delimiter matching here is the existing ASCII-byte/LF grammar; Unicode
+splitlines applies only to the marker's content lookup. Replacing both by a
+generic Unicode line reader would change stored byte boundaries. Strict UTF-8
+and the existing block-ID validator remain authoritative for declared IDs.
+
+Select range-based prefix discovery and line-ending validation. Find heading
+and marker prefixes only at offset zero or immediately after LF, locate LF and
+the first preceding CR, and require EOF, LF or CRLF exactly as the old regex
+does. Find the heading's closing bracket within that valid line and retain its
+existing ID validation. Scan a marker's lowercase hexadecimal identifier in
+existing I/O chunks; do not copy its unrestricted tail or impose a new ID limit.
+Use one implementation for byte buffers and future verified file ranges.
+
+Alternatives: retaining regex would still require a buffer; independently
+applying it to chunks loses split delimiters; accumulating lines keeps the
+giant-line memory problem; adding a partial-regex dependency is unnecessary for
+these two fixed delimiter grammars. The tradeoff is more explicit parsing code
+and additional searches, so compare semantics against the committed regex and
+measure representative runtime before acceptance. A follow-up regression found
+that a malformed giant heading ID was still copied in full. Validate its UTF-8
+incrementally through the complete ID, retaining the candidate only while the
+existing block-ID regex accepts it. Even after syntax/length rejection, continue
+strict decoding so a later malformed UTF-8 byte keeps the previous error priority.
+This uses the existing ID grammar, not a new source/line restriction. This stage
+does not claim the file reader, native journal parser or full source path is
+streamed.
+
+The first range-source regression fails on be067a7a with the expected buffer
+TypeError. A second regression rejects full materialization of giant malformed
+IDs; both ASCII-invalid and trailing-invalid-UTF-8 variants fail before the
+incremental validation change. Differential cases freeze the former regex and
+whole-ID decoder independently of the new implementation. They cover EOF/LF/
+CRLF/stray CR, mid-line prefixes, malformed markers, invalid IDs, exact spans,
+unrestricted marker identifier length, and UTF-8 split across 1/2/3-byte chunks.
+
+Three local timing pairs against be067a7a preserved identical entry IDs and byte
+spans. An 8 MiB heading tail changed from median 78.5ms to 3.18ms; an 8 MiB marker
+tail from 110.3ms to 34.6ms. The 20,000-short-entry fixture initially changed from
+62.9ms to 101.4ms after full incremental ID validation. A single-chunk decoding
+path avoids creating an incremental decoder when the ID has only one transfer;
+both paths share strict decoding/error handling and the same ID validator. A
+fresh three-pair short-entry check then measured 65.4ms versus 93.9ms. The
+remaining approximately 29ms overhead is an explicit tradeoff for range-based
+parsing, not a claimed universal speedup. It introduces no new data limit or
+package. These are parser fixtures, not real-provider full-cycle measurements.
+Raw records: `step7-range-boundaries-final-timing-20261020.json` and
+`step7-range-boundaries-single-chunk-timing-20261020.json`.
+
+Remaining original-range integration, confirmed by direct source inspection:
+`_daily_capture_records` still calls `_read_daily_source`; `_restore_archive_day`
+still asks `CompileInputArchive.blob` for the entire original; `_blob_digest`
+and partition/journal proof caches require exact `bytes`; `_archive_record_value`
+uses recursive `asdict`; `_native_journal_index` still requires a regex buffer
+and retains matched bodies; native frame metadata retains encoded/text values.
+These consumers must change together with owned range lifetime and read-time
+integrity verification. Mapping a mutable live file is not an immutable capture.
+Removing the type guards alone would weaken proofs and is not an acceptable
+integration. Existing per-page/source/part/ID limits still require the broader
+law-9 audit; this parser change does not certify those inherited limits.
+
+Final related suites after the single-chunk change: 849 passed on Python 3.12
+(80.22 seconds) and 849 on Python 3.10 (87.38 seconds), including compilation,
+claims, archives, source choices, historical partitions, transaction and
+foreground queue consumers. Ruff/diff checks pass. Lizard plus AST measured all
+25 changed/new functions without violations. Evidence is retained in
+`logs/step7-range-boundaries-qualified-py312-20261020.txt`,
+`logs/step7-range-boundaries-qualified-py310-20261020.txt`, and
+`logs/step7-range-boundaries-complexity-20261020.json`. No installation or
+real-provider qualification has been performed for this change.
