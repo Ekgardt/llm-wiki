@@ -380,6 +380,53 @@ class NativeCompileFrame:
     text: str
 
 
+@dataclass(frozen=True, eq=False)
+class _NativeFrameViews(Sequence):
+    content: bytes | VerifiedByteRange
+    coordinates: tuple
+
+    def __len__(self):
+        require_immutable_source(self.content)
+        return len(self.coordinates)
+
+    def __getitem__(self, index):
+        require_immutable_source(self.content)
+        if isinstance(index, slice):
+            return _NativeFrameViews(self.content, self.coordinates[index])
+        return _native_frame_from_coordinates(self.content, self.coordinates[index])
+
+    def __eq__(self, other):
+        if not isinstance(other, Sequence):
+            return NotImplemented
+        return len(self) == len(other) and all(left == right for left, right in zip(self, other))
+
+
+def _native_frame_from_coordinates(content, coordinates):
+    from event_envelope import native_user_text
+
+    path, start, end, timestamp = coordinates
+    encoded = content[start:end].decode()
+    text = native_user_text("    " + encoded)
+    if text is None:
+        raise ValueError("native frame source no longer names a user event")
+    return NativeCompileFrame(path, start, end, timestamp, encoded, text)
+
+
+def _native_frame_views(content, observed):
+    coordinates = tuple((frame.source_path, frame.byte_start, frame.byte_end, frame.timestamp)
+                        for frame in observed if frame is not None)
+    if not coordinates:
+        return ()
+    return _NativeFrameViews(content, coordinates)
+
+
+def _native_frame_spans(frames):
+    if type(frames) is _NativeFrameViews:
+        require_immutable_source(frames.content)
+        return ((row[1], row[2]) for row in frames.coordinates)
+    return ((frame.byte_start, frame.byte_end) for frame in frames)
+
+
 @dataclass(frozen=True)
 class DailySnapshot:
     logical_path: str
@@ -396,7 +443,7 @@ class DailySnapshot:
     original_content: bytes | VerifiedByteRange | None = None
     original_sha256: str = ""
     original_entries: tuple[tuple[str, int, int], ...] = ()
-    native_frames: tuple[NativeCompileFrame, ...] = ()
+    native_frames: Sequence[NativeCompileFrame] = ()
     already_compiled: bool = False
 
     @property
@@ -661,7 +708,7 @@ def _daily_parts(
     logical_path: str,
     content: bytes,
     compiled: Callable[[str, str], bool] | None = None,
-    *, native_frames: tuple[NativeCompileFrame, ...] = (),
+    *, native_frames: Sequence[NativeCompileFrame] = (),
     bounds=None,
 ) -> list[DailySnapshot]:
     """This day as the one or more parts the compiler still has to take."""
@@ -696,9 +743,9 @@ def _daily_part_record(logical, original, bounds, index, digest, entries, frames
 def _native_daily_frames(logical_path, content, vault):
     from fact_keys import _native_journal_index
 
-    frames = [_verified_native_frame(logical_path, content, start, head, block, vault)
-              for start, (head, block) in _native_journal_index(content).items()]
-    return tuple(frame for frame in frames if frame is not None)
+    observed = (_verified_native_frame(logical_path, content, start, head, block, vault)
+                for start, (head, block) in _native_journal_index(content).items())
+    return _native_frame_views(content, observed)
 
 
 def _verified_native_frame(path, content, start, head, block, vault):
@@ -769,7 +816,7 @@ def _native_unit_boundary(current, part, predicate):
 def _native_parts_join(left, right):
     if left.logical_path != right.logical_path or left.byte_end != right.byte_start:
         return False
-    return (any(frame.byte_start < left.byte_end < frame.byte_end for frame in left.native_frames)
+    return (any(start < left.byte_end < end for start, end in _native_frame_spans(left.native_frames))
             or _captured_tool_cut(left, left.byte_end))
 
 
@@ -1016,9 +1063,9 @@ class _CapturedPartitions:
         index = self.journal_indexes.for_content(content)
         observed = (_verified_native_frame(logical, content, start, head, block, ROOT)
                     for start, (head, block) in index.items())
-        frames = tuple(frame for frame in observed if frame is not None)
+        frames = _native_frame_views(content, observed)
         bounds = _daily_part_bounds(content)
-        spans = tuple((frame.byte_start, frame.byte_end) for frame in frames)
+        spans = tuple(_native_frame_spans(frames))
         key = (id(content), immutable_source_digest(content))
         self.partitions.sources[key] = (content, (bounds, spans))
         return _iter_daily_parts(logical, content, compiled, native_frames=frames, bounds=bounds)
@@ -1091,8 +1138,9 @@ def _native_prompt_content(parts, raw, *, journal_indexes=None):
 
 def _overlapping_native_frames(parts):
     first, last = parts[0].byte_start, parts[-1].byte_end
-    return [frame for frame in parts[0].native_frames
-            if frame.byte_start < last and frame.byte_end > first]
+    frames = parts[0].native_frames
+    return [frames[index] for index, (start, end) in enumerate(_native_frame_spans(frames))
+            if start < last and end > first]
 
 
 def _selected_native_frames(parts, *, journal_indexes=None):
@@ -4873,8 +4921,9 @@ def _bound_native_evidence(item, inputs):
 def _native_evidence_frames(parts, selector):
     if not parts or parts[0].logical_path != selector["source_path"]:
         raise ValueError("native evidence source is not selected")
-    return [frame for frame in parts[0].native_frames
-            if frame.byte_start == selector["byte_start"]]
+    frames = parts[0].native_frames
+    return [frames[index] for index, (start, _end) in enumerate(_native_frame_spans(frames))
+            if start == selector["byte_start"]]
 
 
 def _require_native_line(frame, selector, timestamp, quote, inputs):

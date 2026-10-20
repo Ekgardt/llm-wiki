@@ -4203,3 +4203,48 @@ preflight and whole-native-container tests passed on each of Python 3.12 and
 3.10. All 14 changed/new functions passed Lizard/AST complexity gates, Ruff and
 diff checks. Remaining: retained native frame payloads, eager JSON metadata
 restoration, original full point-7 qualification and installation.
+
+Source-backed native frame design, 2026-10-20: source inspection found two
+producers, `_native_daily_frames` for historical doctor work and
+`_CapturedPartitions.iter_daily` for normal capture. Both eagerly retain the
+encoded container and extracted text of every frame. Consumers also inspect
+frame positions repeatedly for part grouping and overlap; simply regenerating
+every full frame for every position test would introduce avoidable repeated
+decoding.
+
+Reviewed independent primary ownership/view references:
+https://docs.python.org/3/library/stdtypes.html#memoryview,
+https://arrow.apache.org/docs/format/Columnar.html, and
+https://doc.rust-lang.org/book/ch04-02-references-and-borrowing.html.
+They inform the distinction between payload copies, offset-based views and
+source lifetime; this Python implementation must enforce lifetime explicitly,
+not claim Rust's compile-time guarantees. No Arrow dependency is needed.
+Keep the existing initial verification of every native frame and its linked
+permanent source, then retain only immutable coordinates/timestamps with the
+owned original source. Reify an ordinary `NativeCompileFrame` only when its
+payload is requested; positional grouping should read coordinates directly.
+Preserve explicit eager APIs, tuple-compatible comparisons/indexing, archive
+wire identity, full-container citation and renewed permanent-source checks.
+Alternatives: retaining strings preserves the measured duplication; fully lazy
+initial validation risks hiding malformed unselected captures; a separate
+payload store adds an unnecessary ownership/cleanup contract.
+
+Implemented the shared source-backed sequence in both producers. Initial
+verification still consumes every candidate and permanent-source proof, then
+releases decoded frames. Coordinates are immutable; indexing reifies the same
+ordinary frame type from the owned source. Sequence access requires an active
+source. Grouping and overlap use coordinate spans without decoding unrelated
+payloads; renewed permanent-source validation in semantic consumers remains.
+Archive field names and canonical frame JSON remain unchanged.
+
+On the same 521,960-byte, 16-event isolated fixture, retained memory fell from
+1,151,328 to 121,384 bytes and peak from 1,396,600 to 496,474 bytes; initial
+verification took 178.36 ms versus the earlier 177.73 ms observation. These
+single-stage measurements are not whole-cycle timing evidence:
+`logs/step7-native-views-measurement-20261020.json`.
+Both Python 3.12 and 3.10 passed 145 related regressions (60.03/66.68 s),
+then all six final lifetime/position/initial-proof/archive round-trip tests.
+Lizard/AST checks passed for 19 changed/new functions, as did Ruff and diff
+checks. Full archive JSON metadata restoration still eagerly materializes
+arrays; historical doctor's complete daily snapshot also remains eager.
+Neither full streaming nor installed point-7 completion is claimed.
