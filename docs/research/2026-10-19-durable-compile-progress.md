@@ -4154,3 +4154,52 @@ changed/new functions with no CCN, if-count or nesting violations. Ruff and
 `git diff --check` passed. These results qualify this candidate change only;
 they do not prove installation, full dependency qualification or the real model
 cycle.
+
+Native-frame retention investigation, 2026-10-20: an isolated 521,960-byte
+daily containing 16 valid repeated captured events retained 1,151,328 bytes
+after `_native_daily_frames` (peak 1,396,600). Separately encoding the native
+array produced 1,029,784 JSON bytes with a 2,064,546-byte peak. These are
+stage-local tracemalloc measurements, not whole-process or full-cycle evidence:
+`logs/step7-native-retention-baseline-20261020.json`.
+
+Before choosing the serialization change, reviewed independent primary APIs:
+Python 3.12 `json` (https://docs.python.org/3.12/library/json.html),
+Rust `Read` (https://doc.rust-lang.org/std/io/trait.Read.html), and Go
+`encoding/json` (https://pkg.go.dev/encoding/json). Python exposes incremental
+encoding; Rust distinguishes incremental reads from reading to the end; Go
+offers token/stream decoding and writer encoding. A stream-shaped API alone
+does not prove bounded internal memory. No new runtime dependency or language
+is justified here. Alternatives: retaining the complete serialized array keeps
+the observed allocation; a new per-frame archive format changes snapshot
+identity and recovery compatibility; a temporary spool adds disk ownership
+and cleanup obligations. Prefer replayable canonical array chunks within the
+existing snapshot writer, keeping exact delimiters, item encoding, order and
+blob hashes. Known-length ZIP records need a complete length/hash pass, so
+this trades repeated serialization for bounded aggregate allocation.
+
+A separate Unicode-heavy synthetic prototype compared whole-array encoding
+with canonical item-by-item encoding of the same 16 frozen frame records.
+Both produced 2,306,299 bytes and identical SHA-256. The eager peak was
+10,258,594 bytes; the prototype peak was 644,043 bytes. This is only a
+prototype, not integrated code:
+`logs/step7-native-json-prototype-20261020.json`. The next implementation must
+verify immutable/replayable input, exact byte identity, archive round trips,
+error propagation and the existing verified-range path. It must also address
+the separate retained `encoded`/`text` frame collection and eager metadata
+restoration; streaming array output alone does not finish source streaming.
+
+Canonical array serialization is now implemented inside the existing archive
+writer. Each item retains the old canonical encoder. A first pass binds length
+and SHA-256; the emission pass verifies both before completing the blob. Changed
+replay data raises instead of silently publishing under the earlier digest.
+No archive schema, record name, recovery format, dependency or runtime path
+changes. The integrated two-pass synthetic measurement preserved the prototype's
+exact bytes/digest: peak 646,468 bytes versus eager 10,258,594; 22.27 ms versus
+12.81 ms. This is a measured memory/CPU tradeoff for one metadata array, not
+proof of whole-cycle performance (`logs/step7-native-json-integrated-20261020.json`).
+
+Validation: 120 archive/capture/range/protected-dispatch tests plus 78 context,
+preflight and whole-native-container tests passed on each of Python 3.12 and
+3.10. All 14 changed/new functions passed Lizard/AST complexity gates, Ruff and
+diff checks. Remaining: retained native frame payloads, eager JSON metadata
+restoration, original full point-7 qualification and installation.

@@ -2305,9 +2305,54 @@ def _snapshot_json(value):
     return progress._canonical(value).encode('utf-8')
 
 
+def _snapshot_json_chunks(values, encode):
+    yield b'['
+    for index, value in enumerate(values):
+        if index:
+            yield b','
+        yield encode(value)
+    yield b']'
+
+
+class _SnapshotJsonArray:
+    """Replay canonical items and reject changed data before publication."""
+
+    def __init__(self, values, encode=_snapshot_json):
+        self.values, self.encode = values, encode
+        digest = hashlib.sha256()
+        self.size = 0
+        for chunk in _snapshot_json_chunks(values, encode):
+            self.size += len(chunk)
+            digest.update(chunk)
+        self.digest = digest.hexdigest()
+
+    def __len__(self):
+        return self.size
+
+    def iter_chunks(self):
+        digest = hashlib.sha256()
+        size = 0
+        for chunk in _snapshot_json_chunks(self.values, self.encode):
+            size += len(chunk)
+            digest.update(chunk)
+            yield chunk
+        if size != self.size or digest.hexdigest() != self.digest:
+            raise ValueError('snapshot JSON metadata changed during serialization')
+
+
+def _native_frame_json(frame):
+    return _snapshot_json(asdict(frame))
+
+
 def _blob_digest(content):
     if content is None:
         return None
+    if type(content) is _SnapshotJsonArray:
+        return content.digest
+    return _source_blob_digest(content)
+
+
+def _source_blob_digest(content):
     if type(content) not in (bytes, VerifiedByteRange):
         raise ValueError('snapshot content must be bytes or a verified range')
     return immutable_source_digest(content)
@@ -2317,7 +2362,7 @@ def _archive_record_value(record, put):
     _require_snapshot_digest(record.content, record.sha256)
     value = {item.name: getattr(record, item.name) for item in fields(record)}
     if 'native_frames' in value:
-        value['native_frames'] = tuple(asdict(frame) for frame in value['native_frames'])
+        value['native_frames'] = _SnapshotJsonArray(value['native_frames'], _native_frame_json)
     _archive_record_fields(value, _ARCHIVE_BYTES_FIELDS, put)
     _require_original_digest(value)
     _archive_record_fields(value, _ARCHIVE_JSON_FIELDS, partial(_put_snapshot_json, put))
@@ -2331,7 +2376,9 @@ def _archive_record_fields(value, names, put):
 
 
 def _put_snapshot_json(put, value):
-    return put(_snapshot_json(value))
+    if type(value) is not _SnapshotJsonArray:
+        value = _SnapshotJsonArray(value, _snapshot_json)
+    return put(value)
 
 
 def _archive_manifest(inputs, put, write_record):
@@ -2814,6 +2861,9 @@ def _eager_daily_records(records):
 def _snapshot_content_chunks(content):
     if type(content) is VerifiedByteRange:
         yield from content.iter_chunks(0, len(content))
+        return
+    if type(content) is _SnapshotJsonArray:
+        yield from content.iter_chunks()
         return
     yield content
 
