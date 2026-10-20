@@ -308,8 +308,8 @@ def _unreceipted_daily_exists(paths: list[Path], deadline: float) -> bool:
 
 def _daily_receipted(path: Path, selection, compiler) -> bool:
     selection._active()
-    content = compiler._read_daily_source(path)
-    return compiler.daily_is_compiled(path.relative_to(ROOT).as_posix(), content, selection)
+    with compiler._open_daily_source(path, deadline=selection.deadline) as content:
+        return compiler.daily_is_compiled(path.relative_to(ROOT).as_posix(), content, selection)
 
 
 def _candidate_logs(closed_days_only: bool) -> list[Path]:

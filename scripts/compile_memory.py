@@ -502,7 +502,21 @@ def _daily_read_budget():
 
 
 def _open_daily_source(path, *, deadline=None):
+    deadline = None if deadline == math.inf else deadline
     return open_stable_range(path, _daily_read_budget(), label="daily source", deadline=deadline)
+
+
+@contextmanager
+def _open_optional_daily_source(path, *, deadline=None):
+    with ExitStack() as owner:
+        yield _enter_optional_daily_source(owner, path, deadline)
+
+
+def _enter_optional_daily_source(owner, path, deadline):
+    try:
+        return owner.enter_context(_open_daily_source(path, deadline=deadline))
+    except FileNotFoundError:
+        return None
 
 
 def _snapshot(path: Path, *, label: str = "compile source") -> SourceSnapshot:
@@ -804,7 +818,7 @@ def daily_is_compiled(
     logical_path: str, content: bytes, compiled: Callable[[str, str], bool]
 ) -> bool:
     """Whether every part of this day already has a receipt."""
-    return all(_snapshot_compiled(compiled, part) for part in _daily_parts(logical_path, content))
+    return all(_snapshot_compiled(compiled, part) for part in _iter_daily_parts(logical_path, content))
 
 
 def _snapshot_compiled(compiled: Callable[[str, str], bool], part: DailySnapshot) -> bool:
@@ -7415,9 +7429,8 @@ class _ContextReceiptSelector:
     def _source_parts(self, logical_path):
         self._active()
         self.prefix_source = None
-        deadline = None if self.deadline == math.inf else self.deadline
         try:
-            with _open_daily_source(self.vault / logical_path, deadline=deadline) as content:
+            with _open_daily_source(self.vault / logical_path, deadline=self.deadline) as content:
                 yield _iter_daily_parts(logical_path, content)
                 self._active()
         finally:
@@ -7675,21 +7688,17 @@ def _declared_context_owner(path: Path, dailies: frozenset[Path]) -> Mapping[str
 
 
 def _record_receipt_owners(owners: dict[str, str], path: Path) -> None:
-    content = _readable_daily(path)
-    if content is None:
-        return
+    with _open_optional_daily_source(path) as content:
+        if content is not None:
+            _record_daily_receipt_owners(owners, path, content)
+
+
+def _record_daily_receipt_owners(owners, path, content):
     logical = path.relative_to(ROOT).as_posix()
-    owners[f"{sha256_bytes(content)}.md"] = path.name
-    for part in _daily_parts(logical, content):
+    owners[f"{immutable_source_digest(content)}.md"] = path.name
+    for part in _iter_daily_parts(logical, content):
         owners[f"v3-{compile_source_identity(logical, part.sha256)}.md"] = path.name
         owners[_context_receipt_path(_v4_source_descriptor(part)).name] = path.name
-
-
-def _readable_daily(path: Path) -> bytes | None:
-    try:
-        return _read_daily_source(path)
-    except (OSError, ValueError):
-        return None
 
 
 def _repair_compile_mirror(coordinator: MarkdownCoordinator, *, deadline: float = math.inf, selection=None) -> None:
@@ -7778,9 +7787,7 @@ def _explicit_daily(path: Path, coordinator: MarkdownCoordinator, *, selection=N
         raise SystemExit(
             f"compile_memory: --file must be an existing .md daily log: {path}"
         )
-    content = _read_daily_source(path)
-    logical_path = path.relative_to(ROOT).as_posix()
-    if daily_is_compiled(logical_path, content, selection or _receipt_predicate(coordinator)):
+    if _daily_already_compiled(path, selection or _receipt_predicate(coordinator)):
         return []
     return [path]
 
@@ -7796,9 +7803,9 @@ def _require_inside_daily_dir(path: Path) -> None:
 
 
 def _daily_already_compiled(path: Path, selection) -> bool:
-    content = _read_daily_source(path)
     logical_path = path.relative_to(ROOT).as_posix()
-    return daily_is_compiled(logical_path, content, selection)
+    with _open_daily_source(path, deadline=getattr(selection, 'deadline', None)) as content:
+        return daily_is_compiled(logical_path, content, selection)
 
 
 def _mark_started_unless_dry(args: argparse.Namespace) -> None:
@@ -8834,13 +8841,12 @@ def _transactional_owner(
 
 def _whole_daily_digest(logical_path: str, compiled) -> str | None:
     """The digest of the file itself, once every part of it has a receipt."""
-    try:
-        content = _read_daily_source(ROOT / logical_path)
-    except (OSError, ValueError):
-        return None
-    if not daily_is_compiled(logical_path, content, compiled):
-        return None
-    return sha256_bytes(content)
+    with _open_optional_daily_source(ROOT / logical_path, deadline=getattr(compiled, 'deadline', None)) as content:
+        if content is None:
+            return None
+        if not daily_is_compiled(logical_path, content, compiled):
+            return None
+        return immutable_source_digest(content)
 
 
 def _mirror_digests(batch: CompileBatch, coordinator: MarkdownCoordinator, *, deadline: float = math.inf) -> dict:
@@ -8983,14 +8989,17 @@ def _current_source_digests(
 ) -> frozenset[str]:
     """Unresolved source digests; committed receipts resolve the whole and every part."""
     _require_compile_active(deadline, None)
-    content = _readable_daily(ROOT / logical_path)
-    _require_compile_active(deadline, None)
-    if content is None:
-        return frozenset()
+    with _open_optional_daily_source(ROOT / logical_path, deadline=deadline) as content:
+        if content is None:
+            return frozenset()
+        return _unresolved_daily_digests(logical_path, content, coordinator, deadline, selection)
+
+
+def _unresolved_daily_digests(logical_path, content, coordinator, deadline, selection):
     if coordinator is not None and daily_is_compiled(logical_path, content, _existing_receipt_selection(selection, coordinator, deadline)):
         return frozenset()
     parts = {sha256_bytes(content[start:end]) for start, end in _daily_part_bounds(content)}
-    return frozenset({sha256_bytes(content), *parts})
+    return frozenset({immutable_source_digest(content), *parts})
 
 
 def _clear_compile_source_failures(inputs: CompileInputs, coordinator: MarkdownCoordinator, *, deadline: float = math.inf) -> None:

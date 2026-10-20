@@ -4103,3 +4103,54 @@ generations after a dry-run review, preserving current/previous generations and
 other checkouts, increasing free disk from 1.9 to 4.0 GiB. No run state or
 private knowledge was removed. Installed vault and real-cycle qualification
 remain unchanged and incomplete.
+
+
+Service-reader/error-boundary investigation, 2026-10-20: a real temporary queue
+retaining the current daily digest lost that failure when _read_daily_source
+raised PermissionError. _readable_daily catches all OSError/ValueError and
+returns None; _current_source_digests treats None as no current content, and
+_retire_stale_source_failures deletes the evidence. Reproduction is retained at
+logs/step7-unreadable-failure-red-20261020.json. No live state was changed.
+
+Before implementation, reviewed primary error contracts:
+https://docs.python.org/3.12/library/exceptions.html#FileNotFoundError,
+https://pkg.go.dev/io/fs#ErrNotExist,
+https://doc.rust-lang.org/std/io/enum.ErrorKind.html.
+All distinguish absence from permission/I/O failure. Use Python's explicit
+FileNotFoundError for optional source admission; propagate permission, timeout,
+corruption and source-change failures. A context owner must catch only admission
+failure, not exceptions from receipt authority or final source validation.
+Alternatives: broad failure-to-empty conversion falsely retires evidence;
+blanket refusal of genuinely missing files breaks the existing missing-source
+retirement contract; a second error-status schema is unnecessary when existing
+typed exceptions already carry this distinction. Existing verified source scopes
+and ExitStack are sufficient, without a new path, dependency or runtime service.
+The migration must also replace whole-part-list construction in daily_is_compiled
+and preserve receipt authority, digest provenance and consumer deadlines.
+
+The service migration now covers explicit and automatic daily selection, receipt
+owner discovery, whole-day mirror digests, source-failure retirement, and both
+current and legacy doctor receipt checks. Doctor keeps its caller's vault root
+and deadline; the legacy digest and receipt checks share one owned source rather
+than reading the file twice. Daily receipt evaluation consumes parts incrementally.
+Only the explicitly eager snapshot compatibility path still calls
+`_read_daily_source`.
+
+Regression coverage uses a real temporary queue: permission, I/O, timeout and
+validation errors preserve its source-failure row. Failure during source-scope
+release also preserves the row, including when its recorded digest differs from
+the current file. A consumer's missing receipt error is not confused with a
+missing source at admission. Doctor checks are tested against a forbidden eager
+reader, including the legacy path. No live queue or private knowledge is modified.
+The inherited daily-size ceiling remains unchanged and still needs the larger
+law-9 audit; native-frame payload retention and the full installed real-cycle
+qualification remain unfinished.
+
+Final service-reader qualification: 129 tests passed on Python 3.12 (145.33 s)
+and Python 3.10 (162.06 s), including large-day committed receipts, historical
+source outcomes, context authority, secondary receipt consumers, automatic
+selection and compile hardening. Lizard plus AST inspection measured all 30
+changed/new functions with no CCN, if-count or nesting violations. Ruff and
+`git diff --check` passed. These results qualify this candidate change only;
+they do not prove installation, full dependency qualification or the real model
+cycle.

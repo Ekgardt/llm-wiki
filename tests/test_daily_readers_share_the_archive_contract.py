@@ -31,7 +31,8 @@ def test_pending_and_explicit_readers_accept_the_same_actual_day(vault):
     root, state = vault
     day, content = _large_day(root)
     coordinator = MarkdownCoordinator(root, state)
-    assert compile_memory._readable_daily(day) == content
+    with compile_memory._open_optional_daily_source(day) as source:
+        assert source[:] == content
     assert compile_memory._explicit_daily(day, coordinator) == [day]
     assert not compile_memory._daily_already_compiled(day, compile_memory._receipt_predicate(coordinator))
 
@@ -62,4 +63,6 @@ def test_the_existing_daily_archive_bound_is_still_enforced(vault):
         stream.write(b"x")
     with pytest.raises(ValueError, match="exceeds"):
         compile_memory.snapshot_compile_inputs([day])
-    assert compile_memory._readable_daily(day) is None
+    with pytest.raises(ValueError, match="exceeds"):
+        with compile_memory._open_optional_daily_source(day):
+            pytest.fail("oversized existing source reported as readable or absent")

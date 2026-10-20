@@ -30,7 +30,7 @@ from typing import Any, NamedTuple
 import integration_hook_config as _hook_config
 import process_liveness
 import reliable_memory
-from bounded_io import read_stable_bytes
+from bounded_io import open_stable_range, read_stable_bytes
 from evidence_resolver import MAX_DAILY_BYTES
 from install_control import SCHEDULER_LIMIT_HOURS, installed_at, validate_install_state
 from iso_time import utc_text
@@ -2168,12 +2168,14 @@ class _CompiledDaySupersession:
         return self._cached_selection().matches_saved_source(source)
 
     def _whole_legacy_source_compiled(self, source):
+        from bounded_io import immutable_source_digest
+
         self._require_active()
         logical = source["logical_path"]
-        content = read_stable_bytes(self.vault_root / logical, MAX_DAILY_BYTES, label="daily source")
-        if hashlib.sha256(content).hexdigest() != source["sha256"]:
-            return False
-        return self._day_compiled(logical, set())
+        with self._open_daily(logical) as content:
+            if immutable_source_digest(content) != source["sha256"]:
+                return False
+            return self._daily_content_compiled(logical, content)
 
     def _staged_days_compiled(self, identifier: str, intended: set[str], committed_creates: set[str]) -> bool:
         days = self._staged_days(identifier, intended)
@@ -2203,10 +2205,20 @@ class _CompiledDaySupersession:
         return day
 
     def _day_compiled(self, logical_path: str, committed_creates: set[str]) -> bool:
+        self._require_active()
+        with self._open_daily(logical_path) as content:
+            return self._daily_content_compiled(logical_path, content)
+
+    def _open_daily(self, logical_path):
+        deadline = None if self.deadline == math.inf else self.deadline
+        return open_stable_range(
+            self.vault_root / logical_path, MAX_DAILY_BYTES, label="daily source",
+            deadline=deadline,
+        )
+
+    def _daily_content_compiled(self, logical_path, content):
         from compile_memory import daily_is_compiled
 
-        self._require_active()
-        content = read_stable_bytes(self.vault_root / logical_path, MAX_DAILY_BYTES, label="daily source")
         if self.database is not None:
             return daily_is_compiled(logical_path, content, self._cached_selection())
         return self._standalone_day_compiled(logical_path, content)
