@@ -477,3 +477,103 @@ def test_repeat_authorization_commit_survives_lost_acknowledgement(work, uncerta
     resumed = _authorize((reopened, lease, checkpoint), uncertain)
     assert resumed.sequence == checkpoint.sequence + 2
     assert _run((reopened, lease, resumed), _answer) == _answer()
+
+
+def _blocked_unknown(work):
+    from compile_controller import ProviderOutcomeUnknown
+
+    def timeout():
+        raise TimeoutError('possibly executed')
+
+    with pytest.raises(ProviderOutcomeUnknown):
+        _run(work, timeout)
+    queue, lease, checkpoint = work
+    return queue, lease, queue.get_compile_event(checkpoint.work_id)
+
+
+def test_operator_claim_keeps_unknown_call_and_excludes_worker(work):
+    queue, old, dispatch = _blocked_unknown(work)
+    before = queue.get(old.id)
+    lease = queue.claim_uncertain_compile(
+        'operator', task_id=old.id, work_id=dispatch.work_id,
+        dispatch_digest=progress._event_digest(dispatch),
+    )
+    assert lease.id == old.id
+    assert lease.prior_attempts == before.attempts
+    assert queue.claim('competing-worker', task_id=old.id) is None
+    assert queue.get_compile_event(dispatch.work_id) == dispatch
+
+
+def test_operator_claim_rejects_stale_dispatch_without_unblocking(work):
+    queue, old, dispatch = _blocked_unknown(work)
+    with pytest.raises(progress.ProgressConflict):
+        queue.claim_uncertain_compile(
+            'operator', task_id=old.id, work_id=dispatch.work_id,
+            dispatch_digest='0' * 64,
+        )
+    assert queue.get(old.id).state == 'blocked'
+
+
+def test_operator_claim_rolls_back_unblock_when_claim_fails(work, monkeypatch):
+    queue, old, dispatch = _blocked_unknown(work)
+    monkeypatch.setattr(queue, '_claim_in', lambda *args, **kwargs: None)
+    with pytest.raises(memory_queue.QueueOperationError, match='compile_recovery_not_claimable'):
+        queue.claim_uncertain_compile(
+            'operator', task_id=old.id, work_id=dispatch.work_id,
+            dispatch_digest=progress._event_digest(dispatch),
+        )
+    assert queue.get(old.id).state == 'blocked'
+    assert queue.get(old.id).blocked_capability == 'provider_outcome_unknown'
+
+
+def test_separate_unblock_claim_allows_worker_to_win(work):
+    queue, old, _ = _blocked_unknown(work)
+    queue.unblock(old.id)
+    competitor = queue.claim('competing-worker', task_id=old.id)
+    assert competitor.id == old.id
+    assert queue.claim('operator', task_id=old.id) is None
+
+
+def test_operator_claim_does_not_expose_ready_state(work, monkeypatch):
+    queue, old, dispatch = _blocked_unknown(work)
+    claim = queue._claim_in
+
+    def inspect_before_claim(*args, **kwargs):
+        # A separate connection sees the committed blocked state, never ready.
+        assert queue.get(old.id).state == 'blocked'
+        return claim(*args, **kwargs)
+
+    monkeypatch.setattr(queue, '_claim_in', inspect_before_claim)
+    lease = queue.claim_uncertain_compile(
+        'operator', task_id=old.id, work_id=dispatch.work_id,
+        dispatch_digest=progress._event_digest(dispatch),
+    )
+    assert queue.get(old.id).state == 'leased'
+    assert lease.id == old.id
+
+
+@pytest.mark.parametrize('state', ['ready', 'cancelled'])
+def test_operator_claim_cannot_take_work_in_another_state(work, state):
+    queue, old, dispatch = _blocked_unknown(work)
+    {'ready': queue.unblock, 'cancelled': queue.cancel}[state](old.id)
+    with pytest.raises(memory_queue.QueueOperationError, match='compile_recovery_requires_unknown_outcome'):
+        queue.claim_uncertain_compile(
+            'operator', task_id=old.id, work_id=dispatch.work_id,
+            dispatch_digest=progress._event_digest(dispatch),
+        )
+    assert queue.get(old.id).state == state
+
+
+def test_operator_claim_cannot_take_another_task_family(work):
+    queue, old, dispatch = _blocked_unknown(work)
+    other_id = queue.enqueue('compile', 1, {'daily': 'other'})
+    other = queue.claim('worker', task_id=other_id)
+    queue.fail(other, memory_queue.QueueFailure(
+        'provider_outcome_unknown', blocked_capability='provider_outcome_unknown'))
+    with pytest.raises(progress.ProgressConflict, match='another task family'):
+        queue.claim_uncertain_compile(
+            'operator', task_id=other_id, work_id=dispatch.work_id,
+            dispatch_digest=progress._event_digest(dispatch),
+        )
+    assert queue.get(other_id).state == 'blocked'
+    assert queue.get(old.id).state == 'blocked'

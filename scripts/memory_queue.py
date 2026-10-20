@@ -7500,6 +7500,25 @@ def _require_compile_task_family(database, row, checkpoint):
         raise compile_progress.ProgressConflict('compile checkpoint belongs to another task family')
 
 
+def _require_uncertain_compile_dispatch(database, task_id, work_id, dispatch_digest):
+    row = database.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
+    if row is None:
+        raise KeyError(task_id)
+    if (row['state'], row['blocked_capability']) != ('blocked', 'provider_outcome_unknown'):
+        raise QueueOperationError('compile_recovery_requires_unknown_outcome')
+    event = compile_progress.latest_event(database, work_id)
+    _require_dispatch_identity(event, dispatch_digest)
+    _require_compile_task_family(database, row, event)
+
+
+def _require_dispatch_identity(event, dispatch_digest):
+    if event is None:
+        raise compile_progress.ProgressConflict('compile dispatch is absent')
+    if (event.details.get('model_call', {}).get('phase') != 'dispatch'
+            or compile_progress._event_digest(event) != dispatch_digest):
+        raise compile_progress.ProgressConflict('compile dispatch changed')
+
+
 def _require_compile_work_family(database, row, event):
     previous = compile_progress.latest_event(database, event.work_id)
     if previous is not None:
@@ -11689,6 +11708,29 @@ class _QueueV3CandidateReader:
             last_attempt_at=_parse_timestamp(row["last_attempt_at"]),
             prior_attempts=int(row["attempts"]),
         )
+
+    def claim_uncertain_compile(
+        self, owner: str, *, task_id: str, work_id: str, dispatch_digest: str,
+        lease_seconds: int = DEFAULTS.queue_lease_seconds,
+        max_attempts: int = DEFAULTS.queue_max_attempts,
+    ) -> QueueLease:
+        """Acquire one blocked dispatch atomically; this does not authorize a repeat.
+
+        The operator entrypoint must hold its canonical queue owner, heartbeat the
+        returned task lease and settle it. Normal payload, attempt and source
+        fences remain in force. A failed acquisition leaves the task blocked.
+        """
+        _check_claim_arguments(owner, lease_seconds, max_attempts)
+        task_filter = _claim_task_filter(task_id)
+        compile_progress._require_digest(dispatch_digest)
+        with closing(self._connect()) as database, begin_immediate(database):
+            _require_uncertain_compile_dispatch(database, task_id, work_id, dispatch_digest)
+            _unblock_in(database, task_id, _utc_now())
+            lease = self._claim_in(database, owner=owner, lease_seconds=lease_seconds,
+                                   max_attempts=max_attempts, task_filter=task_filter)
+            if lease is None:
+                raise QueueOperationError('compile_recovery_not_claimable')
+            return lease
 
     def _next_claimable_task(
         self, database: sqlite3.Connection, now: datetime, max_attempts: int, task_filter

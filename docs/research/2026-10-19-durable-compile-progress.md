@@ -4719,3 +4719,62 @@ work includes source/archive/output and claim/guardrail limits, operator handlin
 of unrecoverable model outcomes beyond the internal authorization API, actual
 private-vault recovery/installation, qualified compatibility removal, and complete
 useful-cycle quality/token/time evidence on the agreed medium model.
+
+### 2026-10-20: operator recovery admission (in progress)
+
+The current graph at f9993443 and direct source inspection agree: explicit
+`authorize_model_repeat` is an internal API, called by tests, not an operator
+command. Plain `unblock` followed by `claim` exposes a ready task between the two
+transactions; a concurrent worker can acquire it before the operator records
+consent. This does not bypass the unknown-outcome guard, but makes the intended
+recovery race with delivery. The operator interface remains unfinished.
+
+Current primary-source review (2026-10-20):
+- [Stripe idempotent requests](https://docs.stripe.com/api/idempotent_requests):
+  replay is tied to the original parameters and retained result; a changed
+  request is not the same operation.
+- [AWS retry design](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/):
+  intent identification and the corresponding mutations need atomic handling;
+  a lost response is not proof that execution failed.
+- [Temporal activity definition](https://docs.temporal.io/activity-definition):
+  successful work can repeat when its completion was not recorded; idempotency
+  requires cooperation from the called service.
+
+Chosen local admission step: check the exact retained dispatch and acquire the
+blocked compile task within one existing SQLite immediate transaction. Reuse
+normal claim validation, payload checks, source fences, attempt policy and task
+lease. Do not reset attempt history, invoke a provider, or record repeat consent
+in admission itself. Existing controller recovery still decides whether a saved
+answer exists; admission cannot assert its absence. No new database, dependency,
+runtime root, environment variable or numerical limit is needed.
+
+Rejected: two independent unblock/claim commits (delivery race), direct journal
+writes without task ownership (bypasses the mutation fence), and automatic model
+retry based only on timeout (may repeat paid execution). Provider-native
+idempotency would be preferable where verifiably supported, but these references
+do not establish that guarantee for the installed subscription CLI providers.
+Tradeoff: admission briefly holds the existing database write lock; it performs
+no model or network call. A failed claim must roll back the unblock as well.
+The operator CLI, exact consent handling, heartbeat, settlement and crash recovery
+remain required before this recovery path is usable by the owner.
+
+Admission implementation qualification: the old two-call race is reproduced
+with a real adopted queue; the new path rejects stale dispatches, other task
+families and nonblocked states, preserves the dispatch, rolls back on failed
+acquisition, and keeps the intermediate ready state invisible to a second
+connection. Controller/source-overlap/admission regressions: 72 passed on Python
+3.12 (52.93 s) and 72 on Python 3.10 (59.95 s). Thirteen changed/new functions,
+including test helpers, passed Lizard/AST checks (CCN <= 5, <= 2 if statements,
+nesting <= 2); Ruff passed. No live task was unblocked or retried. This is the
+admission primitive, not completed operator recovery. Canonical owner lifecycle,
+consent UI, saved-answer recovery and crash-safe settlement still need integration.
+Evidence: `logs/step7-operator-admission-{py312,py310}-20261020.log`,
+`logs/step7-operator-admission-complexity-20261020.json` and
+`logs/step7-operator-callers-20261020.json` in the installed private vault.
+
+Separately, built-in repository retention removed four obsolete development
+index generations while retaining current/previous and other checkouts. Free
+space rose from 1.7 to 3.5 GiB. No operational `run/` or knowledge was deleted.
+The installed compiler PID 2129006 remains alive; this is not permission to
+replace its runtime or evidence that its full cycle succeeded. Private knowledge
+updates remain deferred while that compiler owns its snapshot.
