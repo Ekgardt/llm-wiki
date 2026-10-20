@@ -867,3 +867,83 @@ CCN <= 5, at most two ifs and nesting <= 2. Whole scripts/tests Ruff, diff check
 and 65/67-package consistency checks passed. Test output is retained in the private
 logs/step7-iter-batches-py{312,310}-20261020.txt files. No useful model-cycle,
 installation, backup/restore or point-7 completion is claimed.
+
+### 2026-10-20 — streamed daily planning and global citation identity
+
+The next dependency trace found that citation association retained its entire input,
+all physical-part objects, and an EvidenceResolver whose immutable cache held every
+resolved source. The regression proving snapshot retention failed on 5a896f7d.
+Required-context construction now makes two replayable daily passes. The first
+stores compact ordinal/path/digest/span identities, including part keys; global
+fragment ambiguity is decided across all identities. Pages are verified and their
+references associated with these identities. The second resolves physical evidence
+with a resolver and, for an archive pass, partition proofs scoped to each day.
+Ordinal identity and count checks refuse changed, omitted or added daily records.
+The result retains no input snapshot, resolver or daily body. An existing measure
+may still own its own immutable proofs; the association does not clear another
+owner's cache or weaken native frame/partition validation.
+
+CompileInputArchive.required_context() performs this scan without planning_inputs()
+or materialize(). Its iter_batches() consumes sequential daily records and filters
+all pending daily paths from optional context before planning. This is necessary:
+merely presenting the current day's parts would incorrectly offer other pending
+days as optional context. Target and vault context remain indexed archive views.
+Both eager and streamed callers now use one group-state algorithm and the same
+unit admission, physical joins, required/optional context selection, exact tokenizer
+path, and final batch construction. The streaming measure holds current parts and
+lookahead instead of all days. After a boundary it drops the previous group's
+measure before handling the final group. A two-day weak-reference regression
+caught the initial final-group retention; it failed before that correction.
+
+This implements the already approved local immutable-artifact design. The three
+independent primary sources rechecked for this phase are the Python iterator,
+AWS large-payload-reference and Restic immutable-storage documents linked in the
+preceding section. Alternatives: per-day isolation would change valid cross-day
+packing and global fragment ambiguity; proxy bytes would hide I/O and invalidate
+identity-bound proof assumptions; a second grouping implementation would duplicate
+admission logic. Two passes trade additional local reads for a compact global
+identity index while preserving proof rules. Metadata still scales with records
+and citations, and one physical day/current atomic unit must fit the existing
+resource contracts. No new numeric limit or dependency was introduced.
+
+Tests cover archive/eager equality of all batch fields and materialized collections,
+required ordinary/fragment/native citations, ambiguous repeated fragments, optional
+context, qualified cross-day capacity, a non-additive tokenizer, invalid DLP, empty
+work, lifetime of completed source objects, changed stream identity/count, and
+release of the finished citation snapshot/resolver. Initial comparisons incorrectly
+compared a lazy collection object directly with a tuple; final comparisons
+materialize only the test's returned target/source/vault collections and compare
+every field. The native test uses its measured required window, matching the
+existing qualification fixture, rather than assuming the default budget admits it.
+
+A synthetic citation scan with one MiB per day and equal resulting associations:
+8 days: eager traced peak 9,516,377 bytes / 0.151 s, streamed 2,139,826 / 0.168 s.
+32 days: eager 34,712,754 / 0.569 s, streamed 2,206,788 / 0.628 s.
+These measure Python allocations while opening and scanning a prepared archive,
+not installed RSS, model quality, paid tokens or capture cost. The separate full
+planner measurement is recorded after the final lifetime fix below.
+
+Installed entrypoints still use eager capture/planning. The streamed archive API
+must be bound to complete work/dependency identity and durable preflight/failure
+accounting before dispatch; direct substitution into the current run loop would
+move errors after earlier model calls. Backup/restore qualification, migration,
+installation, replaced-production-legacy cleanup and a useful full model cycle
+remain open. No installed reliability or point-7 completion claim is made here.
+
+Final validation: 210 related tests passed on Python 3.12 (48.90 s) and Python
+3.10 (53.89 s), after the final-group lifetime correction. All 46 changed/new
+functions satisfy the measured complexity bounds; whole scripts/tests Ruff,
+diff checks and 65/67-package consistency checks passed. No package was added.
+Logs: logs/step7-stream-planner-final-py{312,310}-20261020.txt and
+logs/step7-stream-planner-complexity-20261020.json.
+
+Final paired archive-open/full-planner experiment, each synthetic source admitted
+as one batch, compares manifest digests, packing identities, required paths and
+all selected source path/digest pairs. No input budget was raised:
+32 days: eager peak 1,923,151 traced bytes / 3.776 s; streamed 1,065,708 / 4.408 s.
+128 days: eager 5,435,147 / 14.786 s; streamed 1,559,339 / 17.239 s.
+Metadata and recorded output signatures scale with source count. The streamed
+path uses less memory but more local planning time; this is not a claim of lower
+end-to-end latency or model cost. Measurements include archive opening and planning,
+exclude construction of the prepared archive, and ran alongside the existing live
+system. Raw results: logs/step7-stream-planner-final-measure-20261020.jsonl.

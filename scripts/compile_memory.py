@@ -1212,32 +1212,111 @@ def iter_compile_batches(inputs, *, model, token_adapters=None, budget=None,
     measure = _batch_measure(inputs, model, token_adapters)
     _attach_required_context(measure, inputs, planning_candidates)
     ranking = _packing_context_ranking(inputs, context_pending)
-    yield from (
-        _compile_batch(
-            inputs, paths, budget, model, token_adapters,
-            optional_paths=_packing_context_paths(inputs, paths, ranking, budget, measure),
-            journal_indexes=_packing_journal_indexes(measure),
-            partitions=_measure_partitions(measure, _measure_owns_inputs(measure, inputs)),
-            planning_candidates=planning_candidates, context_pending=context_pending,
-            required_paths=_required_context_paths(measure, paths),
-        )
-        for paths in _iter_daily_groups(inputs, budget, measure)
+    for paths in _iter_daily_groups(inputs, budget, measure):
+        yield _compile_measured_batch(inputs, paths, budget, model, token_adapters,
+                                      measure, ranking, planning_candidates, context_pending)
+
+
+def _compile_measured_batch(inputs, paths, budget, model, adapters, measure, ranking,
+                            candidates, context_pending):
+    return _compile_batch(
+        inputs, paths, budget, model, adapters,
+        optional_paths=_packing_context_paths(inputs, paths, ranking, budget, measure),
+        journal_indexes=_packing_journal_indexes(measure),
+        partitions=_measure_partitions(measure, _measure_owns_inputs(measure, inputs)),
+        planning_candidates=candidates, context_pending=context_pending,
+        required_paths=_required_context_paths(measure, paths),
     )
 
 
-class _RequiredCitationContext:
-    """Pure association of captured page citations and exact physical source units."""
+def iter_streamed_compile_batches(records, context_inputs, required_context, *, model,
+                                  token_adapters=None, budget=None, planning_candidates=None,
+                                  context_pending=False):
+    """Plan current units against global context without retaining completed days."""
+    budget = _validated_packing_budget(budget, model)
+    ranking = _packing_context_ranking(context_inputs, context_pending)
+    _report_required_context(required_context)
+    prepare = partial(_stream_batch_measure, context_inputs, required_context,
+                      model, token_adapters, planning_candidates)
+    for paths, measure in _iter_measured_groups(_iter_native_part_units(records), budget, prepare):
+        yield _compile_measured_batch(measure.inputs, paths, budget, model, token_adapters,
+                                      measure, ranking, planning_candidates, context_pending)
 
-    def __init__(self, inputs, measure):
-        self.inputs = inputs
-        self.resolver = EvidenceResolver(ROOT)
-        self.parts = _context_reference_parts(inputs.dailies)
+
+def _stream_batch_measure(context_inputs, required, model, adapters, candidates, parts):
+    inputs = replace(context_inputs, dailies=tuple(parts))
+    measure = _batch_measure(inputs, model, adapters)
+    measure.required_context = required
+    measure.planning_candidates = candidates
+    return inputs, measure
+
+
+@dataclass(frozen=True)
+class _ContextPartIdentity:
+    index: int
+    part_key: str
+    logical_path: str
+    sha256: str
+    original_sha256: str
+    byte_start: int
+    byte_end: int
+    has_original: bool
+
+
+def _context_part_identity(index, part):
+    return _ContextPartIdentity(index, part.part_key, part.logical_path, part.sha256,
+                                part.original_sha256, part.byte_start, part.byte_end,
+                                part.original_content is not None)
+
+
+def _require_context_identity(identities, index, part):
+    if index >= len(identities) or _context_part_identity(index, part) != identities[index]:
+        raise ValueError('daily citation identity changed between passes')
+
+
+def _context_day_partitions(measure):
+    partitions = getattr(measure, 'partitions', None)
+    if partitions is not None:
+        return partitions
+    return _DailyPartitionProofs(_NativeJournalIndexes())
+
+
+class _RequiredCitationContext:
+    """Global citation identity, with physical proofs scoped to each daily pass."""
+
+    def __init__(self, inputs, measure, *, daily_records=None):
+        records = daily_records or partial(iter, inputs.dailies)
+        identities = tuple(_context_part_identity(index, part)
+                           for index, part in enumerate(records()))
+        self.parts = _context_reference_parts(identities)
         self.dates = {key[0] for key in self.parts}
         self.paths = {}
         self.unresolved = 0
-        self.measure = measure
+        self.pending = {}
         for source in _existing_context_pages(inputs):
             self._page(source)
+        self._resolve_records(records(), identities, measure)
+
+    def _resolve_records(self, records, identities, measure):
+        count = 0
+        for _, day in groupby(enumerate(records), key=lambda row: row[1].logical_path):
+            count += self._resolve_day(day, identities, measure)
+        if count != len(identities):
+            raise ValueError('daily citation count changed between passes')
+
+    def _resolve_day(self, day, identities, measure):
+        resolver = EvidenceResolver(ROOT)
+        partitions = _context_day_partitions(measure)
+        count = 0
+        for index, part in day:
+            _require_context_identity(identities, index, part)
+            self._resolve_part(index, part, resolver, partitions)
+            count += 1
+        return count
+
+    def _resolve_part(self, index, part, resolver, partitions):
+        for path, reference, original in self.pending.pop(index, ()):
+            self._associate(path, reference, part, original, resolver, partitions)
 
     def _page(self, source):
         if sha256_bytes(source.content) != source.sha256:
@@ -1252,19 +1331,19 @@ class _RequiredCitationContext:
         parts = self.parts.get((reference.daily_id, reference.source_sha256), ())
         self.unresolved += int(not parts and reference.daily_id in self.dates)
         for part, original in parts:
-            self._associate(path, reference, part, original)
+            self.pending.setdefault(part.index, []).append((path, reference, original))
 
-    def _associate(self, path, reference, part, original):
+    def _associate(self, path, reference, part, original, resolver, partitions):
         content = _physical_source(part).content if original else part.content
         try:
-            self.resolver.resolve_bytes(reference, content, source_path=ROOT / part.logical_path,
-                                        reuse_immutable=True)
+            resolver.resolve_bytes(reference, content, source_path=ROOT / part.logical_path,
+                                   reuse_immutable=True)
         except ValueError:
             self.unresolved += 1
             return
         start, end = _context_reference_bounds(part, reference, original)
         if part.byte_start < end and part.byte_end > start:
-            _require_context_part(part, getattr(self.measure, 'partitions', None))
+            _require_context_part(part, partitions)
             self.paths.setdefault(part.part_key, set()).add(path)
 
     def for_paths(self, paths):
@@ -1296,9 +1375,9 @@ def _index_context_part(indexed, part):
     date = Path(part.logical_path).stem
     if part.logical_path != f"knowledge/daily/{date}.md":
         return
-    physical = _physical_source(part)
-    indexed.setdefault((date, physical.sha256), []).append((part, True))
-    if part.original_content is not None and part.sha256 != physical.sha256:
+    physical_digest = part.original_sha256 if part.has_original else part.sha256
+    indexed.setdefault((date, physical_digest), []).append((part, True))
+    if part.has_original and part.sha256 != physical_digest:
         indexed.setdefault((date, part.sha256), []).append((part, False))
 
 
@@ -1331,9 +1410,12 @@ def _with_required_context(measure, paths, optional_paths):
 def _attach_required_context(measure, inputs, candidates):
     measure.required_context = _RequiredCitationContext(inputs, measure)
     measure.planning_candidates = candidates
-    if measure.required_context.unresolved:
-        _report_stage_detail('context', 'unresolved_association',
-                             str(measure.required_context.unresolved))
+    _report_required_context(measure.required_context)
+
+
+def _report_required_context(required):
+    if required.unresolved:
+        _report_stage_detail('context', 'unresolved_association', str(required.unresolved))
 
 
 def _required_selection_budget(measure, paths, target):
@@ -1905,23 +1987,44 @@ def _group_dailies(inputs: CompileInputs, budget: ContextBudget,
 
 
 def _iter_daily_groups(inputs, budget, measure):
-    """Yield maximal groups under the existing admission and physical-join rules."""
-    current: set[str] = set()
-    days: set[str] = set()
-    current_parts = []
-    source_bound = _measure_owns_inputs(measure, inputs)
-    partitions = _measure_partitions(measure, source_bound)
-    for unit in _iter_native_part_units(inputs.dailies):
+    def prepare(_parts):
+        return inputs, measure
+
+    for paths, _measure in _iter_measured_groups(_iter_native_part_units(inputs.dailies), budget, prepare):
+        yield paths
+
+
+class _CompileGroup:
+    def __init__(self):
+        self.paths = set()
+        self.days = set()
+        self.parts = []
+
+    def starts_new(self, unit, budget, inputs, measure):
+        source_bound = _measure_owns_inputs(measure, inputs)
+        return _starts_a_new_group(self.paths, self.days, unit, budget, measure,
+                                   current_parts=self.parts,
+                                   partitions=_measure_partitions(measure, source_bound),
+                                   source_bound=source_bound)
+
+    def add(self, unit):
+        self.parts.extend(unit)
+        self.paths.update(part.part_key for part in unit)
+        self.days.add(unit[0].logical_path)
+
+
+def _iter_measured_groups(units, budget, prepare):
+    current = _CompileGroup()
+    for unit in units:
+        inputs, measure = prepare((*current.parts, *unit))
         _require_unit_fits(unit, budget, measure)
-        if _starts_a_new_group(current, days, unit, budget, measure, current_parts=current_parts, partitions=partitions, source_bound=source_bound):
-            yield current
-            current, days = set(), set()
-            current_parts = []
-        current_parts.extend(unit)
-        current.update(part.part_key for part in unit)
-        days.add(unit[0].logical_path)
-    if current:
-        yield current
+        if current.starts_new(unit, budget, inputs, measure):
+            yield current.paths, measure
+            current = _CompileGroup()
+            inputs, measure = prepare(unit)
+        current.add(unit)
+    if current.paths:
+        yield current.paths, measure
 
 
 def _starts_a_new_group(

@@ -1209,3 +1209,16 @@ iteration. Existing eager callers collect that same iterator and retain their
 preflight error timing. Incremental consumers must handle iteration failures
 before dispatch or record them against complete durable work identity; the
 installed run loop is not switched by merely exposing this interface.
+
+Required citation association uses two replayable passes over immutable daily
+records. The first retains only citation identity metadata across the whole corpus
+so ambiguous repeated fragments remain ambiguous. The second validates references
+with day-scoped byte/proof caches and checks ordinal identities against the first
+pass. The completed association retains paths and diagnostics, not source bodies.
+
+Archive batch planning feeds sequential daily records through the same atomic-unit
+and group boundary algorithm. A group's measure owns only its current parts and
+lookahead; context collections remain archive-backed. Required citations are built
+globally first, and optional ranking excludes every pending daily source even when
+that source is outside the current group. No installed dispatch boundary changes
+until complete durable preflight and per-source failure accounting are integrated.

@@ -663,6 +663,33 @@ class CompileInputArchive:
         for _, records in groupby(metadata, key=lambda value: value['logical_path']):
             yield from _restore_archive_day(self, records)
 
+    def iter_batches(self, *, model, token_adapters=None, budget=None,
+                     planning_candidates=None, context_pending=False):
+        from compile_memory import iter_streamed_compile_batches
+
+        required = self.required_context()
+        yield from iter_streamed_compile_batches(
+            self.daily_records(), self.batch_context_inputs(), required,
+            model=model, token_adapters=token_adapters, budget=budget,
+            planning_candidates=planning_candidates, context_pending=context_pending,
+        )
+
+    def batch_context_inputs(self):
+        from compile_memory import CompileInputs
+
+        pending = {self.record_metadata('dailies', index)['logical_path']
+                   for index in range(self.record_count('dailies'))}
+        sources = ArchiveRecords(self, 'sources')
+        context = sources.select_paths(set(sources.logical_paths()) - pending)
+        return CompileInputs((), context, ArchiveRecords(self, 'targets'),
+                             ArchiveRecords(self, 'vault_files'))
+
+    def required_context(self):
+        from compile_memory import CompileInputs, _RequiredCitationContext
+
+        inputs = CompileInputs((), ArchiveRecords(self, 'sources'), ())
+        return _RequiredCitationContext(inputs, None, daily_records=self.daily_records)
+
     def planning_inputs(self):
         from compile_memory import CompileInputs
 
