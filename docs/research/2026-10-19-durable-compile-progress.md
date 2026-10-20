@@ -4919,3 +4919,100 @@ Evidence in the installed private vault:
 `logs/step7-call-resolution-callees-20261020.json`.
 No installed task was claimed, unblocked or retried. The operator mutation
 entrypoint, heartbeat and crash-safe queue settlement are still unfinished.
+
+### 2026-10-20: crash-safe operator queue settlement (in progress)
+
+Fresh primary-source review:
+- [SQLite transactions](https://www.sqlite.org/lang_transaction.html): claim and
+  settlement each use the existing immediate transaction for all-or-nothing
+  changes to task state and attempt history.
+- [AWS idempotent retries](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/):
+  bind recovery to explicit operation identity and reconcile a committed result
+  after acknowledgement loss rather than replaying its effect.
+- [Kubernetes Job failure policy](https://kubernetes.io/docs/concepts/workloads/controllers/job/#pod-failure-policy):
+  distinguishes failures that consume execution attempts from disruptions that
+  do not. This is a design analogy, not a new runtime dependency or copied quota.
+
+Chosen local rule: a compile task claimed for operator recovery retains its
+`provider_outcome_unknown` blocking capability while leased. Ordinary worker
+unblock/claim clears that capability. This existing field therefore preserves the
+reason ordinary execution is still prohibited, including across operator death.
+Only the recovery admission transition creates this leased/blocked combination.
+A recovery lease must be refused by the model execution boundary. Expiry returns
+it to blocked and refunds only the administrative claim's increment, retaining
+an explicit lease-expired history record and all original unknown cost evidence.
+Successful/unknown operator settlement similarly records its own outcome, returns
+the previous execution-attempt count, and releases the lease atomically. No prior
+attempt or compile event is edited or erased.
+
+Rejected: clearing the blocking cause at claim and treating operator death as a
+normal compile retry (loses purpose and spends execution budget); encoding purpose
+in an arbitrary worker-name prefix (not independently meaningful state); a new
+recovery table/schema/runtime directory (unnecessary duplicate state); silently
+marking the whole compile task successful after only resolving one model call.
+The tradeoff is a documented leased/blocked-capability state, with explicit
+execution rejection, expiry handling and retained-history qualification. It adds
+no path, environment contract, package, numeric limit or second owner registry.
+The CLI must acquire and heartbeat the canonical queue-operator owner and task
+lease, establish consent before mutations, and expose only filtered metadata.
+
+Implemented candidate behavior:
+- `compile-recover <task-id> --work-id <id> --dispatch-digest <digest>` uses
+  the original request identity exposed by `compile-progress.recovery_dispatch`.
+  It holds the canonical queue-operator owner and both existing heartbeats.
+- Without `--accept-unknown-cost`, recovery never grants a new repeat. The flag
+  requires a nonempty `--reason`; the local account supplies the actor. The CLI
+  returns filtered checkpoint metadata, never the reason, source or model text.
+- A ready unresolved delivery can be recovered directly, including after explicit
+  redrive. Requiring a worker to first re-block that already-known unknown call
+  would add an unnecessary round trip. Completed handoffs leave task/progress unchanged
+  (`not_blocked`) on command replay; canonical operator ownership is still acquired; cancelled/dead work is not silently reopened.
+- A pending recorded answer/consent is accepted at the original dispatch's next
+  sequence. A later semantic step or another dispatch is not substituted for the
+  one the owner selected. Task family and payload fences still apply.
+- Execution refusal is in the existing dispatch-record transaction, before any
+  provider invocation. It adds no separate database read to ordinary model calls.
+- Settlement revalidates the resolution and canonical owner before its fenced
+  transition. The task heartbeat remains active through verification/settlement;
+  a renewal seeing the deliberately released lease after a successful commit is
+  distinguished from a failed operation. Cleanup/join failures still fail the
+  command. An interrupted operation aborts only a lease it still owns; otherwise
+  normal fenced expiry preserves recovery state.
+
+Reproductions before implementation: an expired administrative claim became
+ordinary `ready` work and retained its incremented attempt count; an administrative
+lease could also dispatch a model request. Both regression tests failed on the
+old implementation. The completed tests now exercise these original scenarios.
+
+A real child process exits via `os._exit` after recording consent and before queue
+settlement. The initial test correctly hit `owner_busy`: it had advanced only the
+queue clock, while canonical-owner expiry was still in the future. Advance both
+fixture clocks, retaining the real proven-dead child identity. The command then
+reuses the stored decision without new consent, returns the task to the worker,
+and that worker executes the authorized fake-provider request once and reuses its
+saved response on replay. Live canonical owners still refuse takeover. This is
+real process-death/SQLite/CLI evidence, not a paid-provider or installed-vault cycle.
+
+Operator-owner refusals now have the redacted stable
+`compile_recovery_owner_unavailable` code and the canonical reason code, rather
+than a generic internal error. The reason code is validated before printing.
+
+
+Qualification on 2026-10-20 (candidate only): the related controller, source
+identity, protected dispatch, queue fencing, reclaim, health and retention suite
+passed 199 tests on each of Python 3.12 and 3.10. The final CLI checks, including
+post-settlement heartbeat races, backup database certification and missing-journal
+admission, passed 16 tests on each version. The journal admission check reports
+`compile_progress_upgrade_required` for the old schema without modifying its
+bytes; both inspection and recovery use that common gate. These are targeted
+regressions, not the entire project suite or installed-vault qualification.
+
+Local Lizard and AST analysis measured all 64 changed Python functions against
+`090f5981`: none exceeds CCN 5, two if statements or two nesting levels. Ruff and
+`git diff --check` passed. Evidence is in the private vault's
+`logs/step7-recovery-settlement-py{312,310}-20261020.log`,
+`logs/step7-recovery-cli-final-py{312,310}-20261020.log` and
+`logs/step7-recovery-settlement-complexity-20261020.json`.
+The installed checkout remains unchanged. Real-vault encrypted backup/restore,
+installation, remaining limit/consumer review, legacy removal and a useful paid
+provider full-cycle measurement remain required before point 7 can close.

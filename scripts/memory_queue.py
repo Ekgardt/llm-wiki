@@ -7504,11 +7504,21 @@ def _require_uncertain_compile_dispatch(database, task_id, work_id, dispatch_dig
     row = database.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
     if row is None:
         raise KeyError(task_id)
-    if (row['state'], row['blocked_capability']) != ('blocked', 'provider_outcome_unknown'):
+    if (row['state'], row['blocked_capability']) not in {
+            ('blocked', 'provider_outcome_unknown'), ('ready', None)}:
         raise QueueOperationError('compile_recovery_requires_unknown_outcome')
-    event = compile_progress.latest_event(database, work_id)
+    event = compile_progress.latest_dispatch(database, work_id)
     _require_dispatch_identity(event, dispatch_digest)
     _require_compile_task_family(database, row, event)
+    current = compile_progress.latest_event(database, work_id)
+    _require_compile_task_family(database, row, current)
+    _require_recovery_position(event, current)
+    return row
+
+
+def _require_recovery_position(dispatch, current):
+    if current.sequence not in (dispatch.sequence, dispatch.sequence + 1):
+        raise QueueOperationError('compile_recovery_progress_advanced')
 
 
 def _require_dispatch_identity(event, dispatch_digest):
@@ -7517,6 +7527,55 @@ def _require_dispatch_identity(event, dispatch_digest):
     if (event.details.get('model_call', {}).get('phase') != 'dispatch'
             or compile_progress._event_digest(event) != dispatch_digest):
         raise compile_progress.ProgressConflict('compile dispatch changed')
+
+
+def _is_compile_recovery(row):
+    return (row['state'] == 'leased' and row['kind'] == 'compile'
+            and row['blocked_capability'] == 'provider_outcome_unknown')
+
+
+def _require_compile_recovery(row):
+    if not _is_compile_recovery(row) or row['attempts'] < 1:
+        raise QueueOperationError('compile_recovery_lease_required')
+
+
+def _require_dispatch_execution(row, event):
+    if _is_compile_recovery(row) and 'model_call' in event.details:
+        compile_progress._require_model_phase(event)
+        if event.details['model_call']['phase'] == 'dispatch':
+            raise QueueOperationError('compile_recovery_is_not_execution')
+
+
+def _mark_compile_recovery(database, lease):
+    changed = database.execute(
+        """UPDATE tasks SET blocked_capability='provider_outcome_unknown',
+           error_code='provider_outcome_unknown'
+           WHERE id=? AND state='leased' AND lease_token=?""", (lease.id, lease.token),
+    ).rowcount
+    if changed != 1:
+        raise LeaseFenceError('compile recovery claim lost its lease')
+
+
+def _settle_compile_recovery(database, row, now, *, state, outcome, code):
+    _require_compile_recovery(row)
+    database.execute(
+        """INSERT INTO attempt_history(task_id,attempt,started_at,finished_at,outcome,error_code)
+           VALUES (?,?,?,?,?,?)""",
+        (row['id'], row['attempts'], row['attempt_started_at'], _timestamp(now), outcome, code),
+    )
+    error, capability = {
+        'ready': (None, None),
+        'blocked': ('provider_outcome_unknown', 'provider_outcome_unknown'),
+    }[state]
+    changed = database.execute(
+        """UPDATE tasks SET state=?,attempts=attempts-1,error_code=?,blocked_capability=?,
+           updated_at=?,available_at=?,lease_owner=NULL,lease_token=NULL,
+           lease_expires_at=NULL,lease_heartbeat_at=NULL,attempt_started_at=NULL
+           WHERE id=? AND state='leased' AND lease_token=?""",
+        (state, error, capability, _timestamp(now), _timestamp(now), row['id'], row['lease_token']),
+    ).rowcount
+    if changed != 1:
+        raise LeaseFenceError('compile recovery settlement lost its lease')
 
 
 def _require_compile_work_family(database, row, event):
@@ -7554,7 +7613,9 @@ def _compile_operator_work(database, work_id, origin):
     row = _required_redrive_row(database, event.task_id)
     if _compile_lineage_origin(database, row) != origin:
         raise compile_progress.ProgressCorrupt('compile work changed task family')
-    return compile_progress.operator_summary(event)
+    return {**compile_progress.operator_summary(event),
+            'recovery_dispatch': compile_progress.dispatch_summary(
+                compile_progress.latest_dispatch(database, work_id))}
 
 
 def _require_compile_root_work(database, row, event):
@@ -11746,7 +11807,7 @@ class _QueueV3CandidateReader:
         lease_seconds: int = DEFAULTS.queue_lease_seconds,
         max_attempts: int = DEFAULTS.queue_max_attempts,
     ) -> QueueLease:
-        """Acquire one blocked dispatch atomically; this does not authorize a repeat.
+        """Acquire one uncertain dispatch atomically; this does not authorize a repeat.
 
         The operator entrypoint must hold its canonical queue owner, heartbeat the
         returned task lease and settle it. Normal payload, attempt and source
@@ -11756,12 +11817,14 @@ class _QueueV3CandidateReader:
         task_filter = _claim_task_filter(task_id)
         compile_progress._require_digest(dispatch_digest)
         with closing(self._connect()) as database, begin_immediate(database):
-            _require_uncertain_compile_dispatch(database, task_id, work_id, dispatch_digest)
-            _unblock_in(database, task_id, _utc_now())
+            row = _require_uncertain_compile_dispatch(database, task_id, work_id, dispatch_digest)
+            if row['state'] == 'blocked':
+                _unblock_in(database, task_id, _utc_now())
             lease = self._claim_in(database, owner=owner, lease_seconds=lease_seconds,
                                    max_attempts=max_attempts, task_filter=task_filter)
             if lease is None:
                 raise QueueOperationError('compile_recovery_not_claimable')
+            _mark_compile_recovery(database, lease)
             return lease
 
     def _next_claimable_task(
@@ -12069,6 +12132,10 @@ class _QueueV3CandidateReader:
                 return event_at(database, work_id, sequence)
             return latest_event(database, work_id)
 
+    def get_compile_dispatch(self, work_id: str):
+        with closing(self._connect()) as database:
+            return compile_progress.latest_dispatch(database, work_id)
+
     def inspect_compile_progress(self, task_id: str):
         """Read one consistent lineage/checkpoint snapshot without recovering work."""
         _require_task_identifier(task_id)
@@ -12081,6 +12148,52 @@ class _QueueV3CandidateReader:
         self._with_verified_lease(
             lease, partial(self._require_compile_checkpoint_owner, checkpoint=checkpoint),
         )
+
+    def settle_compile_resolution(self, lease, dispatch, resolution, *, check_owner=None):
+        """Revalidate the result, then release only this administrative lease."""
+        from compile_controller import resolve_model_call
+
+        if resolve_model_call(self, lease, dispatch) != resolution:
+            raise compile_progress.ProgressConflict('compile resolution changed before settlement')
+        if check_owner is not None:
+            check_owner()
+        outcome, event = resolution
+        return self._with_verified_lease(
+            lease, partial(self._settle_compile_resolution, event=event, outcome=outcome))
+
+    @staticmethod
+    def _settle_compile_resolution(database, row, now, *, event, outcome):
+        if compile_progress.latest_event(database, event.work_id) != event:
+            raise compile_progress.ProgressConflict('compile resolution changed before release')
+        _require_compile_task_family(database, row, event)
+        state, history = {
+            'answer_recovered': ('ready', 'succeeded'),
+            'repeat_authorized': ('ready', 'succeeded'),
+            'outcome_unknown': ('blocked', 'blocked'),
+        }[outcome]
+        _settle_compile_recovery(database, row, now, state=state,
+                                 outcome=history, code=f'compile_{outcome}')
+        return state
+
+    def abort_compile_recovery(self, lease):
+        self._with_verified_lease(lease, self._abort_compile_recovery)
+
+    @staticmethod
+    def _abort_compile_recovery(database, row, now):
+        _settle_compile_recovery(database, row, now, state='blocked',
+                                 outcome='blocked', code='compile_recovery_interrupted')
+
+    def recover_expired_compile_recovery(self, task_id, dispatch):
+        """Recover only the named administrative lease, never unrelated work."""
+        with closing(self._connect()) as database, begin_immediate(database):
+            row = _required_redrive_row(database, task_id)
+            _require_compile_task_family(database, row, dispatch)
+            now = _utc_now()
+            if not _is_compile_recovery(row) or row['lease_expires_at'] > _timestamp(now):
+                return
+            _require_dispatch_identity(compile_progress.latest_dispatch(database, dispatch.work_id),
+                                       compile_progress._event_digest(dispatch))
+            self._settle_expired_lease(database, row, now)
 
     @staticmethod
     def _require_compile_checkpoint_owner(database, row, now, *, checkpoint) -> None:
@@ -12102,6 +12215,7 @@ class _QueueV3CandidateReader:
 
         if row["kind"] != "compile":
             raise ProgressConflict("only compile tasks may append compile progress")
+        _require_dispatch_execution(row, event)
         _require_compile_work_family(database, row, event)
         _require_compile_root_work(database, row, event)
         if "artifact" in event.details:
@@ -12457,6 +12571,14 @@ class _QueueV3CandidateReader:
     ) -> None:
         if self._require_valid_task_payload(database, row, now=now, parse=True) is None:
             return
+        if _is_compile_recovery(row):
+            _settle_compile_recovery(database, row, now, state='blocked',
+                                     outcome='lease_expired', code='compile_recovery_expired')
+            return
+        self._settle_execution_expired_lease(database, row, now)
+
+    @staticmethod
+    def _settle_execution_expired_lease(database, row, now):
         state, error_code = _EXPIRED_LEASE_OUTCOMES[
             int(row["attempts"]) >= DEFAULTS.queue_max_attempts
         ]
@@ -16256,6 +16378,7 @@ def _build_cli_parser() -> _RedactedArgumentParser:
             "list",
             "status",
             "compile-progress",
+            "compile-recover",
             "work",
             "cancel",
             "redrive",
@@ -16292,6 +16415,9 @@ def _build_cli_parser() -> _RedactedArgumentParser:
         help="Also purge attempts-exhausted tasks; they are retained by default.",
     )
     parser.add_argument("--reason")
+    parser.add_argument("--work-id")
+    parser.add_argument("--dispatch-digest")
+    parser.add_argument("--accept-unknown-cost", action="store_true")
     return parser
 
 
@@ -16308,9 +16434,145 @@ def _cli_status(_args, _parser) -> int:
 
 def _cli_compile_progress(args, _parser) -> int:
     task_id = _require_cli_task_id(args)
-    queue = active_memory_queue(_vault_root(), _state_root())
+    queue = _compile_queue_for_cli()
     print(json.dumps(queue.inspect_compile_progress(task_id), sort_keys=True))
     return 0
+
+
+def _compile_queue_for_cli():
+    queue = active_memory_queue(_vault_root(), _state_root())
+    if not _uses_compile_journal(queue):
+        raise QueueOperationError('compile_progress_upgrade_required')
+    return queue
+
+
+def _cli_compile_recover(args, _parser) -> int:
+    from operational_ownership import OperationalOwnershipError
+
+    task_id = _require_cli_task_id(args)
+    _require_task_identifier(task_id)
+    compile_progress._require_digest(args.work_id)
+    compile_progress._require_digest(args.dispatch_digest)
+    authorization = _cli_compile_consent(args)
+    _validate_worker_policy(args.lease_seconds, args.heartbeat_seconds, args.max_attempts,
+                            args.retry_base_seconds, args.retry_cap_seconds)
+    queue = _compile_queue_for_cli()
+    dispatch = queue.get_compile_dispatch(args.work_id)
+    _require_dispatch_identity(dispatch, args.dispatch_digest)
+    try:
+        result = _operator_compile_recovery(queue, task_id, dispatch, authorization, args)
+    except OperationalOwnershipError as error:
+        reason = _queue_operation_code(QueueOperationError(error.code))
+        raise QueueOperationError('compile_recovery_owner_unavailable', reason) from error
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+def _cli_compile_consent(args):
+    import getpass
+
+    if not args.accept_unknown_cost:
+        return None
+    if not isinstance(args.reason, str) or not args.reason.strip():
+        raise QueueOperationError('compile_repeat_reason_required')
+    return {'dispatch_digest': args.dispatch_digest, 'actor': getpass.getuser(), 'reason': args.reason}
+
+
+def _operator_compile_recovery(queue, task_id, dispatch, authorization, policy):
+    with _compile_recovery_owner(queue, task_id) as (owner, lost):
+        _require_compile_recovery_owner(queue, owner, lost)
+        queue.recover_expired_compile_recovery(task_id, dispatch)
+        observed = queue.inspect_compile_progress(task_id)
+        work = _inspected_compile_work(observed, dispatch.work_id)
+        if not _needs_compile_recovery(observed['state'], work, dispatch):
+            return {'outcome': 'not_blocked', 'task_state': observed['state'], 'work': work}
+        return _owned_compile_recovery(queue, task_id, dispatch, authorization, policy, owner, lost)
+
+
+def _needs_compile_recovery(state, work, dispatch):
+    return state == 'blocked' or (state == 'ready' and work['sequence'] == dispatch.sequence)
+
+
+def _inspected_compile_work(observed, work_id):
+    for work in observed['works']:
+        if work['work_id'] == work_id:
+            return work
+    raise QueueOperationError('compile_recovery_work_not_in_task')
+
+
+@contextmanager
+def _compile_recovery_owner(queue, task_id):
+    from types import SimpleNamespace
+
+    from operational_ownership import heartbeat_owner
+
+    lost = threading.Event()
+    renewer = SimpleNamespace(heartbeat=queue.heartbeat_queue_owner)
+    with queue.queue_owner(role='queue-operator', scope=f'compile-recovery:{task_id}') as owner:
+        with heartbeat_owner(owner, registry=renewer, lost=lost):
+            yield owner, lost
+
+
+def _require_compile_recovery_owner(queue, owner, lost):
+    if lost.is_set():
+        raise QueueOperationError('compile_recovery_owner_lost')
+    registry = queue.ownership_registry()
+    with closing(registry._connect()) as database:
+        registry.require(database, owner)
+
+
+def _owned_compile_recovery(queue, task_id, dispatch, authorization, policy, owner, lost):
+    _require_compile_recovery_owner(queue, owner, lost)
+    lease = queue.claim_uncertain_compile(
+        owner.actor_id, task_id=task_id, work_id=dispatch.work_id,
+        dispatch_digest=compile_progress._event_digest(dispatch),
+        lease_seconds=policy.lease_seconds, max_attempts=policy.max_attempts)
+    try:
+        resolution, state = _heartbeat_compile_resolution(
+            queue, lease, dispatch, authorization, policy, owner, lost)
+    except BaseException:
+        _abort_owned_compile_recovery(queue, lease, owner, lost)
+        raise
+    outcome, event = resolution
+    return {'outcome': outcome, 'task_state': state, 'work': compile_progress.operator_summary(event)}
+
+
+def _heartbeat_compile_resolution(queue, lease, dispatch, authorization, policy, owner, lost):
+    heartbeat = _LeaseHeartbeat(queue, lease, heartbeat_seconds=policy.heartbeat_seconds,
+                                 lease_seconds=policy.lease_seconds)
+    heartbeat.start()
+    try:
+        result = _finish_compile_recovery(queue, lease, dispatch, authorization, owner, lost)
+    finally:
+        heartbeat.stop()
+    _require_settled_recovery_heartbeat(heartbeat)
+    return result
+
+
+def _finish_compile_recovery(queue, lease, dispatch, authorization, owner, lost):
+    from compile_controller import resolve_model_call
+
+    resolution = resolve_model_call(queue, lease, dispatch, authorization=authorization)
+    state = queue.settle_compile_resolution(
+        lease, dispatch, resolution,
+        check_owner=partial(_require_compile_recovery_owner, queue, owner, lost))
+    return resolution, state
+
+
+def _require_settled_recovery_heartbeat(heartbeat):
+    # Called only after fenced settlement committed. A concurrent renewal may
+    # then observe that intentionally released lease; no work continues under it.
+    if heartbeat.error is None or isinstance(heartbeat.error, LeaseFenceError):
+        return
+    raise heartbeat.error
+
+
+def _abort_owned_compile_recovery(queue, lease, owner, lost):
+    task = queue.get(lease.id)
+    if (task.state, task.lease_token) != ('leased', lease.token):
+        return
+    _require_compile_recovery_owner(queue, owner, lost)
+    queue.abort_compile_recovery(lease)
 
 
 def _cli_work(args, parser) -> int:
@@ -16502,6 +16764,7 @@ _CLI_COMMANDS = {
     "list": _cli_list,
     "status": _cli_status,
     "compile-progress": _cli_compile_progress,
+    "compile-recover": _cli_compile_recover,
     "work": _cli_work,
     "quarantine-corrupt": _cli_quarantine_corrupt,
     "purge-corrupt": _cli_purge_corrupt,

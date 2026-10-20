@@ -552,16 +552,15 @@ def test_operator_claim_does_not_expose_ready_state(work, monkeypatch):
     assert lease.id == old.id
 
 
-@pytest.mark.parametrize('state', ['ready', 'cancelled'])
-def test_operator_claim_cannot_take_work_in_another_state(work, state):
+def test_operator_claim_cannot_take_cancelled_work(work):
     queue, old, dispatch = _blocked_unknown(work)
-    {'ready': queue.unblock, 'cancelled': queue.cancel}[state](old.id)
+    queue.cancel(old.id)
     with pytest.raises(memory_queue.QueueOperationError, match='compile_recovery_requires_unknown_outcome'):
         queue.claim_uncertain_compile(
             'operator', task_id=old.id, work_id=dispatch.work_id,
             dispatch_digest=progress._event_digest(dispatch),
         )
-    assert queue.get(old.id).state == state
+    assert queue.get(old.id).state == 'cancelled'
 
 
 def test_operator_claim_cannot_take_another_task_family(work):
@@ -880,3 +879,366 @@ def test_recorded_consent_cannot_be_rebound_to_unrelated_delivery(work, uncertai
     actions = {'repeat': lambda: _authorize(work, uncertain), 'resolve': lambda: _resolve(work)}
     with pytest.raises(progress.ProgressConflict, match='another task family'):
         actions[operation]()
+
+
+def _claim_recovery(work):
+    queue, old, dispatch = _blocked_unknown(work)
+    lease = queue.claim_uncertain_compile(
+        'operator', task_id=old.id, work_id=dispatch.work_id,
+        dispatch_digest=progress._event_digest(dispatch),
+    )
+    return queue, lease, dispatch
+
+
+def test_expired_recovery_keeps_block_and_execution_budget(work, monkeypatch):
+    from datetime import timedelta
+
+    queue, lease, dispatch = _claim_recovery(work)
+    monkeypatch.setattr(memory_queue, '_utc_now', lambda: lease.expires_at + timedelta(seconds=1))
+    assert queue.recover_expired_leases() == 1
+    task = queue.get(lease.id)
+    assert task.state == 'blocked'
+    assert task.blocked_capability == 'provider_outcome_unknown'
+    assert task.attempts == lease.prior_attempts
+    assert task.attempt_history[-1].outcome == 'lease_expired'
+    assert queue.get_compile_event(dispatch.work_id) == dispatch
+
+
+def test_recovery_lease_cannot_execute_model(work):
+    from compile_controller import resolve_model_call
+
+    queue, lease, dispatch = _claim_recovery(work)
+    consent = {'dispatch_digest': progress._event_digest(dispatch), 'actor': 'owner', 'reason': 'retry'}
+    _, resumed = resolve_model_call(queue, lease, dispatch, authorization=consent)
+    calls = []
+    with pytest.raises(memory_queue.QueueOperationError, match='compile_recovery_is_not_execution'):
+        _run((queue, lease, resumed), lambda: calls.append(True) or _answer())
+    assert calls == []
+    assert queue.get_compile_event(dispatch.work_id) == resumed
+
+
+def _recover_cli(queue, task_id, dispatch, monkeypatch, capsys, extra=()):
+    import json
+    import sys
+
+    monkeypatch.setattr(memory_queue, 'active_memory_queue', lambda *args: queue)
+    monkeypatch.setattr(sys, 'argv', ['memory_queue.py', 'compile-recover', task_id,
+        '--work-id', dispatch.work_id, '--dispatch-digest', progress._event_digest(dispatch), *extra])
+    code = memory_queue._cli()
+    return code, json.loads(capsys.readouterr().out)
+
+
+def test_recovery_cli_without_consent_keeps_unknown_blocked(work, monkeypatch, capsys):
+    queue, old, dispatch = _blocked_unknown(work)
+    before = queue.get(old.id).attempts
+    code, result = _recover_cli(queue, old.id, dispatch, monkeypatch, capsys)
+    assert code == 0
+    assert result['outcome'] == 'outcome_unknown'
+    assert result['task_state'] == 'blocked'
+    assert queue.get(old.id).attempts == before
+    assert queue.get_compile_event(dispatch.work_id) == dispatch
+
+
+def test_recovery_cli_consent_releases_work_without_calling_provider(work, monkeypatch, capsys):
+    import compile_controller
+
+    queue, old, dispatch = _blocked_unknown(work)
+    monkeypatch.setattr(compile_controller, '_invoke_and_save', lambda *args: _must_not_call())
+    code, result = _recover_cli(queue, old.id, dispatch, monkeypatch, capsys,
+                               ('--accept-unknown-cost', '--reason', 'explicit local decision'))
+    assert code == 0
+    assert result['outcome'] == 'repeat_authorized'
+    assert result['task_state'] == 'ready'
+    task = queue.get(old.id)
+    assert task.attempts == 0
+    assert task.attempt_history[-1].error_code == 'compile_repeat_authorized'
+    resumed = queue.get_compile_event(dispatch.work_id)
+    assert resumed.details['repeat_authorization']['reason'] == 'explicit local decision'
+    code, replay = _recover_cli(queue, old.id, dispatch, monkeypatch, capsys)
+    assert code == 0
+    assert replay['outcome'] == 'not_blocked'
+    assert queue.get(old.id).attempt_history == task.attempt_history
+
+
+def test_recovery_cli_requires_reason_before_mutation(work, monkeypatch, capsys):
+    queue, old, dispatch = _blocked_unknown(work)
+    before = queue.db_path.read_bytes()
+    code, result = _recover_cli(queue, old.id, dispatch, monkeypatch, capsys, ('--accept-unknown-cost',))
+    assert code == 2
+    assert result == {'codes': ['compile_repeat_reason_required']}
+    assert queue.db_path.read_bytes() == before
+
+
+def test_recovery_cli_finishes_recorded_consent_after_expiry(work, monkeypatch, capsys):
+    from datetime import timedelta
+
+    from compile_controller import resolve_model_call
+
+    queue, lease, dispatch = _claim_recovery(work)
+    consent = {'dispatch_digest': progress._event_digest(dispatch), 'actor': 'owner', 'reason': 'retry'}
+    _, recorded = resolve_model_call(queue, lease, dispatch, authorization=consent)
+    monkeypatch.setattr(memory_queue, '_utc_now', lambda: lease.expires_at + timedelta(seconds=1))
+    code, result = _recover_cli(queue, lease.id, dispatch, monkeypatch, capsys)
+    assert code == 0
+    assert result['outcome'] == 'repeat_authorized'
+    assert result['task_state'] == 'ready'
+    assert queue.get(lease.id).attempts == lease.prior_attempts
+    assert queue.get_compile_event(dispatch.work_id) == recorded
+
+
+def test_recovery_cli_lost_settlement_ack_is_safe_to_repeat(work, monkeypatch, capsys):
+    queue, old, dispatch = _blocked_unknown(work)
+    settle = queue.settle_compile_resolution
+
+    def commit_then_stop(*args, **kwargs):
+        settle(*args, **kwargs)
+        raise SystemExit()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(queue, 'settle_compile_resolution', commit_then_stop)
+        with pytest.raises(SystemExit):
+            _recover_cli(queue, old.id, dispatch, patch, capsys,
+                         ('--accept-unknown-cost', '--reason', 'retry'))
+    task = queue.get(old.id)
+    assert task.state == 'ready'
+    code, result = _recover_cli(queue, old.id, dispatch, monkeypatch, capsys)
+    assert code == 0
+    assert result['outcome'] == 'not_blocked'
+    assert queue.get(old.id).attempt_history == task.attempt_history
+
+
+def test_recovery_cli_recovers_orphan_answer_without_consent(work, monkeypatch, capsys):
+    queue, lease, checkpoint = work
+    original = queue.record_compile_event
+
+    def interrupt_answer(owned, event):
+        if event.details.get('model_call', {}).get('phase') == 'answer':
+            raise SystemExit()
+        return original(owned, event)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(queue, 'record_compile_event', interrupt_answer)
+        with pytest.raises(SystemExit):
+            _run(work, _answer)
+    dispatch = queue.get_compile_event(checkpoint.work_id)
+    queue.fail(lease, memory_queue.QueueFailure('provider_outcome_unknown',
+                                               blocked_capability='provider_outcome_unknown'))
+    code, result = _recover_cli(queue, lease.id, dispatch, monkeypatch, capsys)
+    assert code == 0
+    assert result['outcome'] == 'answer_recovered'
+    assert result['task_state'] == 'ready'
+    next_lease = queue.claim('worker', task_id=lease.id)
+    assert _run((queue, next_lease, checkpoint), _must_not_call) == _answer()
+
+
+_RECOVERY_CRASH_CHILD = '''
+import os, sys
+sys.path.insert(0, sys.argv.pop(1))
+import memory_queue
+memory_queue._QueueV3CandidateReader.settle_compile_resolution = lambda *a, **kw: os._exit(41)
+sys.argv[0] = 'memory_queue.py'
+raise SystemExit(memory_queue._cli())
+'''
+
+
+def test_recovery_cli_survives_real_process_death_after_consent(work, upgraded, monkeypatch, capsys):
+    import os
+    import subprocess
+    import sys
+    from datetime import timedelta
+    from pathlib import Path
+
+    queue, old, dispatch = _blocked_unknown(work)
+    root, state, _ = upgraded
+    environment = {**os.environ, 'LLM_WIKI_ROOT': str(root), 'LLM_WIKI_STATE_ROOT': str(state)}
+    child = subprocess.run([sys.executable, '-c', _RECOVERY_CRASH_CHILD,
+        str(Path(memory_queue.__file__).parent), 'compile-recover', old.id,
+        '--work-id', dispatch.work_id, '--dispatch-digest', progress._event_digest(dispatch),
+        '--accept-unknown-cost', '--reason', 'explicit crash test decision'],
+        env=environment, capture_output=True, text=True, check=False)
+    assert child.returncode == 41, child.stderr
+    held = queue.get(old.id)
+    assert held.state == 'leased'
+    assert held.blocked_capability == 'provider_outcome_unknown'
+    recorded = queue.get_compile_event(dispatch.work_id)
+    future = held.lease_expires_at + timedelta(seconds=1)
+    registry = queue.ownership_registry()
+    registry._clock = lambda: future
+    monkeypatch.setattr(queue, 'ownership_registry', lambda: registry)
+    monkeypatch.setattr(memory_queue, '_utc_now', lambda: future)
+    code, result = _recover_cli(queue, old.id, dispatch, monkeypatch, capsys)
+    assert code == 0, result
+    assert result['outcome'] == 'repeat_authorized'
+    assert queue.get(old.id).attempts == 0
+    assert queue.get_compile_event(dispatch.work_id) == recorded
+    worker = queue.claim('worker', task_id=old.id)
+    assert _run((queue, worker, recorded), _answer) == _answer()
+    assert _run((queue, worker, recorded), _must_not_call) == _answer()
+
+
+def test_recovery_settlement_refuses_unverified_result(work):
+    queue, lease, dispatch = _claim_recovery(work)
+    with pytest.raises(progress.ProgressConflict):
+        queue.settle_compile_resolution(lease, dispatch, ('answer_recovered', dispatch))
+    assert queue.get(lease.id).state == 'leased'
+    assert queue.get_compile_event(dispatch.work_id) == dispatch
+
+
+def test_recovery_settlement_checks_owner_before_releasing(work):
+    from compile_controller import resolve_model_call
+
+    queue, lease, dispatch = _claim_recovery(work)
+    resolution = resolve_model_call(queue, lease, dispatch)
+
+    def lost_owner():
+        raise memory_queue.QueueOperationError('compile_recovery_owner_lost')
+
+    with pytest.raises(memory_queue.QueueOperationError, match='compile_recovery_owner_lost'):
+        queue.settle_compile_resolution(lease, dispatch, resolution, check_owner=lost_owner)
+    assert queue.get(lease.id).state == 'leased'
+
+
+def test_recovery_snapshot_reports_original_dispatch_after_consent(work):
+    from compile_controller import resolve_model_call
+
+    queue, lease, dispatch = _claim_recovery(work)
+    consent = {'dispatch_digest': progress._event_digest(dispatch), 'actor': 'owner', 'reason': 'retry'}
+    resolve_model_call(queue, lease, dispatch, authorization=consent)
+    report = queue.inspect_compile_progress(lease.id)
+    assert report['works'][0]['recovery_dispatch']['event_digest'] == consent['dispatch_digest']
+    assert report['works'][0]['recovery_dispatch']['sequence'] == dispatch.sequence
+
+
+def test_recovery_cli_does_not_take_over_live_operator(work, monkeypatch, capsys):
+    queue, old, dispatch = _blocked_unknown(work)
+    before = queue.get(old.id)
+    with queue.queue_owner(role='queue-operator', scope=f'compile-recovery:{old.id}'):
+        code, result = _recover_cli(queue, old.id, dispatch, monkeypatch, capsys)
+    assert code == 2
+    assert result['codes'] == ['compile_recovery_owner_unavailable']
+    assert queue.get(old.id).attempt_history == before.attempt_history
+    assert queue.get(old.id).state == 'blocked'
+
+
+def test_expired_ordinary_compile_lease_still_spends_attempt(work, monkeypatch):
+    from datetime import timedelta
+
+    queue, lease, _ = work
+    monkeypatch.setattr(memory_queue, '_utc_now', lambda: lease.expires_at + timedelta(seconds=1))
+    assert queue.recover_expired_leases() == 1
+    task = queue.get(lease.id)
+    assert task.state == 'ready'
+    assert task.attempts == lease.attempt
+    assert task.attempt_history[-1].outcome == 'lease_expired'
+
+
+def test_operator_cannot_settle_an_execution_lease_as_recovery(work):
+    from compile_controller import resolve_model_call
+
+    queue, lease, checkpoint = work
+    _run(work, _answer)
+    dispatch = queue.get_compile_event(checkpoint.work_id, sequence=checkpoint.sequence + 1)
+    resolution = resolve_model_call(queue, lease, dispatch)
+    with pytest.raises(memory_queue.QueueOperationError, match='compile_recovery_lease_required'):
+        queue.settle_compile_resolution(lease, dispatch, resolution)
+    assert queue.get(lease.id).attempts == lease.attempt
+
+
+def test_recovery_cli_handles_ready_redrive_without_running_worker_first(work, uncertain, monkeypatch, capsys):
+    queue, lease, checkpoint = work
+    dispatch = queue.get_compile_event(checkpoint.work_id)
+    queue.fail(lease, memory_queue.QueueFailure('worker_failed', permanent=True))
+    child = queue.redrive(lease.id)
+    code, result = _recover_cli(queue, child, dispatch, monkeypatch, capsys,
+                               ('--accept-unknown-cost', '--reason', 'recover retained request'))
+    assert code == 0, result
+    assert result['outcome'] == 'repeat_authorized'
+    assert queue.get(child).state == 'ready'
+    assert queue.get(child).attempts == 0
+    assert queue.get(lease.id).state == 'dead'
+    assert queue.get_compile_event(checkpoint.work_id).task_id == child
+
+
+def test_ready_unknown_recovery_without_consent_returns_to_blocked(work, monkeypatch, capsys):
+    queue, old, dispatch = _blocked_unknown(work)
+    queue.unblock(old.id)
+    code, result = _recover_cli(queue, old.id, dispatch, monkeypatch, capsys)
+    assert code == 0
+    assert result['outcome'] == 'outcome_unknown'
+    assert queue.get(old.id).state == 'blocked'
+    assert queue.get(old.id).attempts == 0
+
+
+def test_recovery_commit_survives_heartbeat_observing_released_lease(work, monkeypatch, capsys):
+    queue, old, dispatch = _blocked_unknown(work)
+    stop = memory_queue._LeaseHeartbeat.stop
+
+    def renew_after_release(heartbeat):
+        try:
+            heartbeat._renew()
+        except memory_queue.LeaseFenceError as error:
+            heartbeat.error = error
+        stop(heartbeat)
+
+    monkeypatch.setattr(memory_queue._LeaseHeartbeat, 'stop', renew_after_release)
+    code, result = _recover_cli(queue, old.id, dispatch, monkeypatch, capsys,
+                               ('--accept-unknown-cost', '--reason', 'retry'))
+    assert code == 0, result
+    assert result['task_state'] == 'ready'
+    assert queue.get(old.id).attempts == 0
+
+
+def test_recovery_reports_unexpected_heartbeat_error_after_commit(work, monkeypatch, capsys):
+    queue, old, dispatch = _blocked_unknown(work)
+    stop = memory_queue._LeaseHeartbeat.stop
+
+    def unexpected_failure(heartbeat):
+        stop(heartbeat)
+        heartbeat.error = memory_queue.QueueOperationError('unexpected_heartbeat_failure')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(memory_queue._LeaseHeartbeat, 'stop', unexpected_failure)
+        code, result = _recover_cli(queue, old.id, dispatch, patch, capsys,
+                                   ('--accept-unknown-cost', '--reason', 'retry'))
+    assert code == 2
+    assert result == {'codes': ['unexpected_heartbeat_failure']}
+    task = queue.get(old.id)
+    assert task.state == 'ready'
+    code, result = _recover_cli(queue, old.id, dispatch, monkeypatch, capsys)
+    assert code == 0
+    assert result['outcome'] == 'not_blocked'
+    assert queue.get(old.id).attempt_history == task.attempt_history
+
+
+@pytest.mark.parametrize('stage', ['leased', 'ready'])
+def test_recovery_states_pass_backup_database_certification(work, monkeypatch, capsys, stage):
+    import private_vault_backup
+
+    queue, lease, dispatch = _claim_recovery(work)
+    if stage == 'ready':
+        queue.abort_compile_recovery(lease)
+        code, result = _recover_cli(queue, lease.id, dispatch, monkeypatch, capsys,
+                                   ('--accept-unknown-cost', '--reason', 'certify retained decision'))
+        assert code == 0, result
+    _, report = private_vault_backup._validated_databases(queue.state_root)
+    assert report['compile_progress']['events'] >= 3
+    assert queue.get(lease.id).state == stage
+
+
+@pytest.mark.parametrize('command', ['compile-progress', 'compile-recover'])
+def test_operator_cli_names_missing_journal_upgrade(tmp_path, monkeypatch, capsys, command):
+    from tests.adopted_vault import adopt
+
+    root, state = adopt(tmp_path)
+    queue = memory_queue.active_memory_queue(root, state)
+    task_id = queue.enqueue('compile', 1, {'daily': 'before journal migration'})
+    dispatch = progress.CompileEvent('c' * 64, task_id, 2, 'd' * 64, 'snapshot_ready', 'running', {})
+    before = queue.db_path.read_bytes()
+    actions = {
+        'compile-progress': lambda: _inspect_cli(queue, task_id, monkeypatch, capsys),
+        'compile-recover': lambda: _recover_cli(queue, task_id, dispatch, monkeypatch, capsys),
+    }
+    code, result = actions[command]()
+    assert code == 2
+    assert result == {'codes': ['compile_progress_upgrade_required']}
+    assert queue.db_path.read_bytes() == before

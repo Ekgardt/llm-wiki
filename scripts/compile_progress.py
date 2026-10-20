@@ -310,6 +310,23 @@ def _latest_model_call(database, current):
     return None
 
 
+def latest_dispatch(database, work_id):
+    """The last retained model call's dispatch, including a recorded resolution."""
+    call = _latest_model_call(database, latest_event(database, work_id))
+    if call is None:
+        return None
+    if call.details['model_call']['phase'] == 'answer':
+        return answer_dispatch(database, call)
+    return call
+
+
+def dispatch_summary(dispatch):
+    if dispatch is None:
+        return None
+    return {'sequence': dispatch.sequence, 'event_digest': _event_digest(dispatch),
+            'model_call': _operator_model_call(dispatch)}
+
+
 def _require_model_phase(event):
     call = event.details['model_call']
     if not isinstance(call, dict):

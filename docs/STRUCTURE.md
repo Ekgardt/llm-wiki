@@ -316,17 +316,21 @@ authorized; a restart or provider fallback alone is not authorization. Current
 provider adapters do not offer verified recovery of that response. The isolated
 controller has an internal explicit-repeat transition bound to the exact dispatch,
 actor and reason. It first recovers an available answer, preserves history, and
-authorizes only the same request. Operator consent entrypoints remain unconnected;
-ordinary unblock/redrive never grants that authorization.
+authorizes only the same request. The candidate's explicit operator entrypoint is
+`memory_queue.py compile-recover <task-id> --work-id <work-id>
+--dispatch-digest <digest>`. Without additional flags it recovers a saved answer
+or leaves the unknown outcome blocked. `--accept-unknown-cost --reason <reason>`
+permits one repeat of that exact request when no answer can be recovered.
+Ordinary unblock/redrive never grants that authorization.
 
 The controller's `resolve_model_call` distinguishes a recovered response, retained
 repeat consent and an unresolved outcome. It verifies the original dispatch and
 semantic checkpoint, checks current task ownership and reuses the existing answer
 recovery path. An existing repeat decision remains the original immutable event
-when a redrive changes delivery ownership. The operation neither invokes a
-provider nor settles the queue task; operator ownership, heartbeat and settlement
-integration remain required. A recovered response is not proof of a valid compile
-plan or completed work.
+when a redrive changes delivery ownership. The controller operation neither invokes
+a provider nor settles the queue task. The CLI surrounds it with canonical
+queue-operator ownership, owner/task heartbeats and fenced queue settlement.
+A recovered response is not proof of a valid compile plan or completed work.
 
 The candidate queue CLI exposes `memory_queue.py compile-progress <task-id>`.
 It reads the task's verified redrive lineage and latest checkpoints in one read
@@ -337,6 +341,27 @@ and `history_audited: false` distinguish this view from answer recovery and a fu
 history audit. In particular, recorded dispatch without recorded answer does not
 prove that no orphan answer exists. Corrupt lineage/checkpoints produce a failure,
 not a partial success. The command requires the adopted compile journal.
+`recovery_dispatch` identifies the original request even after its resolution was
+recorded; its digest is the one the recovery command accepts.
+
+Recovery can acquire a blocked unknown call or an unresolved ready delivery
+(including an explicit redrive). It retains `provider_outcome_unknown` in
+`blocked_capability` while leased: the original cause remains until the operator
+handoff completes. The dispatch-record transaction refuses a new model call under
+such a lease. Expiry restores the block and returns the administrative claim's
+attempt increment, while retaining a `lease_expired` history entry. Ordinary
+execution-lease expiry retains its existing attempt policy.
+Successful recovery/consent records a successful administrative attempt and makes
+the task ready; an unresolved outcome records a blocked attempt and leaves it
+blocked. Both return only the administrative increment, preserve previous
+execution/unknown-cost history and release the task lease in one transaction.
+Cancelled/dead work is not silently reopened: the existing explicit redrive
+operation handles dead tasks. Repeating the command after release returns
+`not_blocked` with observed state and filtered work metadata, without a new consent
+record or execution. Already-recorded consent after a crash is reused without
+requesting it again. Canonical takeover still requires an expired, proven-dead
+owner; live or uncertain owners are not bypassed. Installation and real full-cycle
+qualification remain unfinished.
 
 No new database, daemon, runtime root, MCP tool or package dependency is authorized.
 Migration must reject old clients, preserve retained evidence, and run only under
