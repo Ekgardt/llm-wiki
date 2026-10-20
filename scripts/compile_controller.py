@@ -1033,17 +1033,209 @@ def execute_planned_compile_batch(queue, lease, planned, snapshot, *, coordinato
 
 def _resolve_compile_publication(queue, lease, context, batch, *, coordinator, dependencies,
                                  delivery, deadline):
-    from compile_cache import CompileCache
-    from compile_memory import resolve_compile_plan
-
     current = _publication_cursor(queue, context.work_id)
     if current.stage == 'publication_ready':
         return current
+    if 'compile_repair' in current.details:
+        return _raise_retained_compile_repair(queue, lease, current, context, batch, dependencies, deadline)
+    return _resolve_new_compile_publication(queue, lease, context, batch, coordinator,
+                                            dependencies, delivery, deadline)
+
+
+def _resolve_new_compile_publication(queue, lease, context, batch, coordinator, dependencies, delivery, deadline):
+    from compile_cache import CompileCache
+    from compile_memory import _CompileRepairCapacityError, resolve_compile_plan
+
     replay = CompileReplay(queue, lease, context, dependencies=dependencies, delivery=delivery)
-    resolved = resolve_compile_plan(batch.inputs, CompileCache(queue.state_root),
-                                   coordinator=coordinator, batch=batch, call_runner=replay)
+    try:
+        resolved = resolve_compile_plan(batch.inputs, CompileCache(queue.state_root),
+                                       coordinator=coordinator, batch=batch, call_runner=replay)
+    except _CompileRepairCapacityError as failure:
+        save_compile_repair(queue, lease, context, batch, failure, dependencies=dependencies, deadline=deadline)
+        raise
     return save_compile_publication(queue, lease, context, batch, resolved,
                                     dependencies=dependencies, deadline=deadline)
+
+
+@dataclass(frozen=True)
+class RepairCompileBatch:
+    """A checked partition borrowing its parent's open context, not call admission."""
+
+    batch: object
+    feedback: tuple[str, ...]
+    repair: progress.CompileEvent
+    entry_digest: str
+    work_id: str
+
+
+def _repair_failure_content(failure):
+    from compile_memory import _CompileRepairCapacityError
+
+    if not isinstance(failure, _CompileRepairCapacityError):
+        raise TypeError('repair requires a compile capacity failure')
+    content = {'reason': str(failure), 'feedback': list(failure.feedback)}
+    _require_repair_failure_content(content)
+    return content
+
+
+def _require_repair_failure_content(content):
+    if not isinstance(content, dict) or set(content) != {'reason', 'feedback'}:
+        raise progress.ProgressCorrupt('invalid repair failure fields')
+    if not isinstance(content['reason'], str) or not isinstance(content['feedback'], list):
+        raise progress.ProgressCorrupt('invalid repair failure values')
+    _require_repair_feedback_strings(content['feedback'])
+
+
+def _require_repair_feedback_strings(feedback):
+    if any(not isinstance(item, str) for item in feedback):
+        raise progress.ProgressCorrupt('repair feedback must retain strings')
+
+
+def _repair_binding(context, batch, failure, dependencies):
+    return {'schema': 'compile-repair/v1', 'context_sequence': context.sequence,
+            'context_digest': progress._event_digest(context),
+            'batch_digest': _compile_identity_digest(_preflight_batch_details(batch)),
+            'failure_digest': _compile_identity_digest(failure), 'dependency_digest': dependencies.digest}
+
+
+def _repair_checkpoint(queue, lease, context, binding):
+    latest = queue.get_compile_event(context.work_id)
+    queue.verify_compile_checkpoint_owner(lease, latest)
+    if 'compile_repair' in latest.details:
+        return _existing_repair_checkpoint(latest, binding)
+    _require_checkpoint(latest)
+    if latest.details['artifact'] != context.details['artifact']:
+        raise progress.ProgressConflict('repair cursor lost its context artifact')
+    return replace(context, task_id=lease.id, sequence=latest.sequence + 1,
+                   stage='review_ready', outcome='waiting', details={'compile_repair': binding})
+
+
+def _existing_repair_checkpoint(event, binding):
+    if (event.stage, event.outcome, event.details.get('compile_repair')) != ('review_ready', 'waiting', binding):
+        raise progress.ProgressConflict('repair decision identity changed')
+    details = dict(event.details)
+    details.pop('artifact', None)
+    return replace(event, details=details)
+
+
+def _require_repair_partition(batch, children):
+    if not children:
+        return
+    remaining = Counter(_preflight_source_records(batch.inputs))
+    for child, _feedback in children:
+        _require_repair_child(batch, child)
+        remaining.subtract(_preflight_source_records(child.inputs))
+    if any(remaining.values()):
+        raise progress.ProgressCorrupt('repair source coverage changed')
+
+
+def _require_repair_child(parent, child):
+    from compile_memory import _require_repair_context
+
+    if not 0 < len(child.inputs.dailies) < len(parent.inputs.dailies):
+        raise progress.ProgressCorrupt('repair child does not reduce complete source work')
+    _require_repair_context(parent, child)
+    if (child.inputs.targets, child.inputs.vault_files) != (parent.inputs.targets, parent.inputs.vault_files):
+        raise progress.ProgressCorrupt('repair child changed publication context')
+
+
+def _repair_child_record(child, feedback):
+    return {'source_records': _preflight_source_records(child.inputs),
+            **_preflight_batch_details(child), 'feedback': list(feedback)}
+
+
+def _repair_document(event, batch, failure):
+    from compile_memory import _repartition_compile_repair
+
+    children = _repartition_compile_repair(batch, tuple(failure['feedback']))
+    _require_repair_partition(batch, children)
+    records = [_repair_child_record(child, feedback) for child, feedback in children]
+    document = {'schema': 'compile-repair-document/v1', 'binding': event.details['compile_repair'],
+                'failure': failure, 'children': records}
+    return document, children
+
+
+def _write_repair_document(document, dependencies, deadline, output):
+    dependencies.verify()
+    operational_deadline_active(deadline)
+    output.write(_snapshot_json(document))
+    dependencies.verify()
+    operational_deadline_active(deadline)
+
+
+def _validate_repair_document(document, dependencies, deadline, handle):
+    if handle.read() != _snapshot_json(document):
+        raise progress.ProgressCorrupt('retained repair partition changed')
+    dependencies.verify()
+    operational_deadline_active(deadline)
+
+
+def save_compile_repair(queue, lease, context, batch, failure, *, dependencies, deadline=None):
+    """Retain a capacity repair decision before admitting any child model call."""
+    operational_deadline_active(deadline)
+    _require_publication_context(queue, lease, context, batch, dependencies)
+    content = _repair_failure_content(failure)
+    binding = _repair_binding(context, batch, content, dependencies)
+    event = _repair_checkpoint(queue, lease, context, binding)
+    document, _children = _repair_document(event, batch, content)
+    saved = _save_verified_compile_artifact(queue, lease, event,
+        partial(_write_repair_document, document, dependencies, deadline),
+        partial(_validate_repair_document, document, dependencies, deadline), deadline)
+    _check_batch_context_owner(queue, lease, saved, dependencies, deadline)
+    return saved
+
+
+def _decoded_repair_document(event, raw):
+    document = json.loads(raw)
+    fields = {'schema', 'binding', 'failure', 'children'}
+    if not isinstance(document, dict) or set(document) != fields:
+        raise progress.ProgressCorrupt('invalid repair document fields')
+    expected = ('compile-repair-document/v1', event.details['compile_repair'], raw)
+    if (document['schema'], document['binding'], _snapshot_json(document)) != expected:
+        raise progress.ProgressCorrupt('repair document identity changed')
+    _require_repair_failure_content(document['failure'])
+    return document
+
+
+def _repair_child_identity(event, batch, feedback, record):
+    digest = _compile_identity_digest(record)
+    work_id = _compile_identity_digest({'schema': 'compile-repair-child/v1',
+        'repair_digest': progress._event_digest(event), 'entry_digest': digest})
+    return RepairCompileBatch(batch, tuple(feedback), progress._snapshot_event(event), digest, work_id)
+
+
+def read_compile_repair(queue, lease, event, context, batch, *, dependencies, deadline=None):
+    """Reconstruct checked children while the caller keeps the parent context open."""
+    document, children = _read_verified_compile_repair(queue, lease, event, context, batch, dependencies, deadline)
+    return tuple(_repair_child_identity(event, child, feedback, record)
+                 for (child, feedback), record in zip(children, document['children']))
+
+
+def _raise_retained_compile_repair(queue, lease, event, context, batch, dependencies, deadline):
+    from compile_memory import _CompileRepairCapacityError
+
+    document, _children = _read_verified_compile_repair(queue, lease, event, context, batch, dependencies, deadline)
+    raise _CompileRepairCapacityError(document['failure']['reason'], tuple(document['failure']['feedback']))
+
+
+def _read_verified_compile_repair(queue, lease, event, context, batch, dependencies, deadline):
+    _require_publication_context(queue, lease, context, batch, dependencies)
+    _require_recorded_repair(queue, lease, event)
+    with queue.open_compile_artifact(event, deadline=deadline) as handle:
+        document = _decoded_repair_document(event, handle.read())
+    _existing_repair_checkpoint(event, _repair_binding(context, batch, document['failure'], dependencies))
+    expected, children = _repair_document(event, batch, document['failure'])
+    if document != expected:
+        raise progress.ProgressCorrupt('retained repair partition changed')
+    _check_batch_context_owner(queue, lease, event, dependencies, deadline)
+    return document, children
+
+
+def _require_recorded_repair(queue, lease, event):
+    queue.verify_compile_checkpoint_owner(lease, event)
+    if queue.get_compile_event(event.work_id, sequence=event.sequence) != event:
+        raise progress.ProgressConflict('repair requires a recorded decision')
+    _existing_repair_checkpoint(event, event.details['compile_repair'])
 
 
 def _check_batch_context_owner(queue, lease, saved, dependencies, deadline):

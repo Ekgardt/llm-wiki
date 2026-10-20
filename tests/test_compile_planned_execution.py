@@ -120,3 +120,24 @@ def test_unknown_call_blocks_delivery_and_cannot_repeat_after_reclaim(work, plan
         _execute((work[0], replacement, work[2]), planned, capture=_forbidden)
     assert calls == [True]
     assert work[0].get(work[1].id).state == 'blocked'
+
+
+def test_capacity_decision_resumes_without_resolving_parent_again(work, planned, monkeypatch):
+    failure = compiler._CompileRepairCapacityError('partition needed', ())
+
+    def capacity(*args, **kwargs):
+        raise failure
+
+    with monkeypatch.context() as patch:
+        patch.setattr(compiler, 'resolve_compile_plan', capacity)
+        with pytest.raises(compiler._CompileRepairCapacityError) as caught:
+            _execute(work, planned)
+        assert caught.value is failure
+    current = work[0].get_compile_event(planned[0].work_id)
+    assert 'compile_repair' in current.details
+    monkeypatch.setattr(compiler, 'resolve_compile_plan', _forbidden)
+    with pytest.raises(compiler._CompileRepairCapacityError) as recovered:
+        _execute(work, planned, capture=_forbidden)
+    assert str(recovered.value) == str(failure)
+    assert recovered.value.feedback == failure.feedback
+    assert planned[3] == []

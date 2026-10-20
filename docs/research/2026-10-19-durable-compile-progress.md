@@ -1960,3 +1960,53 @@ writer gate and the publication-filtered index was rebuilt. This is still an
 uninstalled batch executor with a simulated model in tests. Whole delivery and
 repair-child execution, unknown-source overlap, dependency closure, all entrypoint
 routing, retention, backup/restore and useful real-model qualification remain open.
+
+### Durable repair partition decision (2026-10-20)
+
+The existing `_repartition_compile_repair` preserves complete native source units,
+selected context and validated proposal/review feedback. Its output is currently
+only in memory. Extend the approved journal/artifact design by recording that
+partition decision before any child call. A `review_ready/waiting` event names the
+retained batch context, dependency identity, original feedback and deterministic
+child descriptors. Waiting deliberately fails the ordinary ready-model-call gate.
+No new stage enum, table, directory, daemon, package or numeric bound is needed.
+A child work identity binds the exact recorded decision and complete child record.
+Reconstruct/validate children using the existing partitioner over retained inputs;
+do not add a second partition algorithm or trust stored metadata as executable
+instructions. The parent archive scope owns borrowed bodies throughout consumption.
+
+Current primary-source basis is the SQLite atomic-commit, AWS idempotent-request
+identity and Temporal event-history references rechecked on this date above.
+Alternatives: repartitioning without a retained decision loses correction identity;
+new queue tasks lose the original uncertain-call/ownership lineage; storing full
+child snapshots redundantly copies the already retained authoritative context.
+Choose metadata plus exact references to the retained parent context/event, as with
+the accepted-publication document. This is not a recursive blob archive: the full
+base archive and one context delta remain the existing context contract.
+
+Validate complete nonduplicated daily-record coverage and strict child progress,
+retain indivisible refusal explicitly, and require a ready semantic cursor before
+saving a new partition decision. An uncertain dispatch must fail before partition
+computation or any new child authority. This stage records a decision, not child
+execution or parent/task success. Child admission, context/feedback routing,
+recursive completion and doctor/retention semantic reference checks remain needed.
+
+The planned executor now records a capacity decision before propagating the
+original exception. On recovery it validates that recorded decision and restores
+its reason/feedback without invoking parent resolution. A separate red integration
+case proved the prior loss of the decision. Nine checkpoint tests cover source
+coverage, context/feedback preservation, stable child identities, orphan recovery,
+changed-feedback rejection, refusal before repartition on uncertain dispatch,
+recorded-parent checks, indivisible refusal, partition drift and ready-call denial
+(the combined preservation case covers several of those invariants).
+
+Qualification: 51 related tests pass on Python 3.12 (41.90s) and 3.10 (46.19s).
+Measured complexity initially rejected
+`test_repair_decision_preserves_complete_sources_context_and_feedback` at CCN9;
+its independent assertions were extracted without removing any check. All 40
+changed/new functions now satisfy CCN/if/nesting limits. Whole scripts/tests Ruff
+and diff checks pass. Logs: `step7-repair-checkpoint-{red,green,py312,py310}-20261020.txt`,
+`step7-repair-routing-red-20261020.txt`, and
+`step7-repair-checkpoint-complexity-20261020.json` in private vault logs.
+Child admission/execution and recursive outcome accounting remain explicitly open;
+this is neither a completed task nor installed runtime qualification.

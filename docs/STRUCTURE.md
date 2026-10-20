@@ -1237,6 +1237,18 @@ delivery owner, and a caller's existing CompileDelivery can span independent wor
 The return confirms one batch only. Whole-task accounting, production entrypoints
 and repair-child routing still need integration before install.
 
+The candidate planned executor now saves capacity-driven repair decisions before
+propagating the failure. The `review_ready/waiting` event binds the parent context,
+batch, dependencies and original correction feedback. Its immutable artifact holds
+the deterministic partition records; the reader reconstructs them using the existing
+partitioner and checks exact source coverage, smaller complete child work and retained
+publication context. Child identities bind that recorded decision and their full
+record, including feedback. An uncertain dispatch cannot authorize a partition; a
+waiting repair cannot be used as an ordinary model-call checkpoint. Recovery reads
+the retained failure without resolving the parent again. No partition remains an
+explicit unresolved refusal. Child admission/execution, recursive completion and
+semantic reference auditing remain unfinished.
+
 The archive's eager compatibility planning view keeps daily records materialized for existing partition
 proofs, while context source/target/vault collections retain verified record indices
 and logical paths. Selection filters metadata before reading bodies. Ranking stores
