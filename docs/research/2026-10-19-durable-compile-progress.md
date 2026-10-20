@@ -1110,3 +1110,47 @@ Related dispatch/call/capture suites completed: 114 tests passed on Python 3.12
 the final 18 identity tests were then separately verified on each version (7.40 /
 9.10 s). Logs: logs/step7-dependency-identity-py{312,310}-20261020.txt. No full-suite,
 Windows/macOS, complete dependency closure or real paid-model claim is made.
+
+### 2026-10-20: require live dependency verification at durable dispatch
+
+A plain dependency digest supplied to run_candidate_call/CompileReplay could be
+stale by dispatch time. Source inspection confirmed that the previous API never
+recomputed it. Three new witness tests failed before implementation. The candidate
+now requires CompileDependencies: an expected digest plus a live inventory
+inspector. The unchecked digest-only internal API is removed; all its known
+callers and tests use the witness, with no compatibility bypass. Workflow identity
+still uses a digest; dispatch requires a means of verifying it.
+
+Verification runs at call entry, after protected provider preparation immediately
+before journal dispatch, and after the returned/saved result before semantic use.
+A change before dispatch leaves the journal checkpoint unchanged and does not
+invoke the model. A change during the model call retains the completed answer and
+usage, then refuses further semantic use. Restoring the expected dependencies
+replays that saved answer without another provider call. A replay cursor checks
+its witness when constructed as well. These tests use explicit file inventories
+and a fake provider, not a claim that the complete runtime inventory is solved.
+
+This follows the action/input identity and durable-history sources already checked
+above (Bazel, Nix, Temporal; 2026-10-20). Checking only at construction was rejected
+because preparation/model latency allows intervening updates. Discarding a saved
+answer on mismatch was rejected because it loses cost/recovery evidence. Reusing
+the existing dispatch and artifact machinery adds no storage location, schema,
+configuration limit, service or third-party dependency. Full re-inventory costs
+local I/O; metadata-only optimization is not accepted as an equivalent byte witness.
+
+The checks do not lock arbitrary writers. Existing fenced admission and coherent
+code-update ownership remain necessary, especially between the final pre-dispatch
+check and actual invocation. Previously imported code versus current disk contents
+is still unresolved for the in-process MCP path; queue compile uses a fresh child
+process. A complete environment inspector and entrypoint integration remain open.
+No production installation or full-cycle completion is claimed.
+
+Final focused tests: 22 passed on Python 3.12 (3.79 s) and 3.10 (4.90 s), including
+mutation during preparation, mutation during the model call, retained answer and
+replay after restoration. All 24 changed/new functions pass actual complexity
+checks; whole scripts/tests Ruff and diff checks pass. Related suites and logs:
+logs/step7-dependency-guard-py{312,310}-final-20261020.txt. Earlier red evidence:
+logs/step7-dependency-guard-red-20261020.txt.
+Related protected-dispatch/call/replay suites completed with 107 tests passed on
+Python 3.12 (71.51 s) and 3.10 (79.65 s). The final restoration assertion was also
+covered by the 22 focused tests reported above. No new runtime package was added.

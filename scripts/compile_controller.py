@@ -8,9 +8,9 @@ from __future__ import annotations
 import hashlib
 import json
 import zipfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from functools import cache, partial
 from itertools import groupby
 from pathlib import Path
@@ -312,7 +312,7 @@ def _count_from_document(value):
     return TokenCount(**value)
 
 
-def run_candidate_call(queue, lease, checkpoint, *, dependency_digest, descriptor,
+def run_candidate_call(queue, lease, checkpoint, *, dependencies, descriptor,
                        prompt, system_prompt, **options):
     """Use the shared DLP/preparation path, journaling only external invocation.
 
@@ -321,17 +321,18 @@ def run_candidate_call(queue, lease, checkpoint, *, dependency_digest, descripto
     """
     from llm_client import call_candidate
 
-    progress._require_digest(dependency_digest)
-    dispatch = partial(_journal_candidate, queue, lease, checkpoint,
-                       dependency_digest, descriptor)
-    return call_candidate(descriptor, prompt, system_prompt, dispatch=dispatch, **options)
+    dependencies.verify()
+    dispatch = partial(_journal_candidate, queue, lease, checkpoint, dependencies, descriptor)
+    result = call_candidate(descriptor, prompt, system_prompt, dispatch=dispatch, **options)
+    dependencies.verify()
+    return result
 
 
-def _journal_candidate(queue, lease, checkpoint, dependency_digest, descriptor, prepared):
+def _journal_candidate(queue, lease, checkpoint, dependencies, descriptor, prepared):
     from reliable_memory import sha256_bytes
 
     request = sha256_bytes(canonical_json_bytes({
-        'protected_request': prepared.request_digest, 'dependencies': dependency_digest,
+        'protected_request': prepared.request_digest, 'dependencies': dependencies.verify(),
     }))
     result = run_model_call(queue, lease, checkpoint, request_digest=request,
                            invoke=partial(_invoke_candidate, prepared, descriptor))
@@ -371,20 +372,20 @@ class CompileReplay:
     """Replay checked call results while existing semantic validators run again.
 
     This cursor neither certifies publication nor invents work/dependency identity.
-    Its caller supplies a verified snapshot checkpoint and the dependency digest.
+    Its caller supplies a verified snapshot checkpoint and a live dependency witness.
     """
 
-    def __init__(self, queue, lease, checkpoint, *, dependency_digest):
-        progress._require_digest(dependency_digest)
+    def __init__(self, queue, lease, checkpoint, *, dependencies):
+        dependencies.verify()
         _require_checkpoint(checkpoint)
         self.queue = queue
         self.lease = lease
         self.checkpoint = progress._snapshot_event(checkpoint)
-        self.dependency_digest = dependency_digest
+        self.dependencies = dependencies
 
     def __call__(self, descriptor, prompt, system_prompt, **options):
         result = run_candidate_call(
-            self.queue, self.lease, self.checkpoint, dependency_digest=self.dependency_digest,
+            self.queue, self.lease, self.checkpoint, dependencies=self.dependencies,
             descriptor=descriptor, prompt=prompt, system_prompt=system_prompt, **options,
         )
         if _is_completed_result(result):
@@ -1040,3 +1041,30 @@ def compile_package_dependency_manifest(*, deadline=None):
                       _compile_distribution_files(distribution, deadline=deadline)})
     return compile_dependency_manifest(files, {'packages': packages, 'sys_path': sys.path},
                                        deadline=deadline)
+
+
+@dataclass(frozen=True)
+class CompileDependencies:
+    """An expected inventory plus a live inspector, never just an unchecked hash.
+
+    The workflow persists digest and reconstructs the inspector on recovery.
+    Inventory completeness remains the inspector's contract. Rechecking cannot
+    lock noncooperating installers; execution still requires the admission fence.
+    """
+
+    digest: str
+    inspect: Callable[[], object]
+
+    def __post_init__(self):
+        progress._require_digest(self.digest)
+        if not callable(self.inspect):
+            raise TypeError('compile dependency inspector must be callable')
+
+    @classmethod
+    def capture(cls, inspect):
+        return cls(compile_dependency_digest(inspect()), inspect)
+
+    def verify(self):
+        if compile_dependency_digest(self.inspect()) != self.digest:
+            raise progress.ProgressConflict('compile dependency identity changed')
+        return self.digest

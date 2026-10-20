@@ -17,10 +17,14 @@ def provider(monkeypatch):
     return replace(client.provider_candidates('fake')[0], model='test-model')
 
 
+def _dependencies(seed='fixture'):
+    return controller.CompileDependencies.capture(lambda: {'fixture': seed})
+
+
 def _call(work, provider, **options):
     queue, lease, checkpoint = work
     return controller.run_candidate_call(
-        queue, lease, checkpoint, dependency_digest='f' * 64,
+        queue, lease, checkpoint, dependencies=_dependencies(),
         descriptor=provider, prompt='private-literal task', system_prompt='system', **options,
     )
 
@@ -128,7 +132,7 @@ def test_changed_dependency_identity_cannot_reuse_answer(work, provider, monkeyp
     queue, lease, checkpoint = work
     with pytest.raises(ValueError, match='identity'):
         controller.run_candidate_call(
-            queue, lease, checkpoint, dependency_digest='0' * 64,
+            queue, lease, checkpoint, dependencies=_dependencies('changed'),
             descriptor=provider, prompt='private-literal task', system_prompt='system',
         )
 
@@ -157,10 +161,10 @@ def test_replay_reads_earlier_answer_after_later_calls(work, provider, monkeypat
         return client.BackendResponse(prompt, TokenUsage(input_tokens=1, output_tokens=1))
 
     monkeypatch.setitem(client._BACKENDS, 'fake', backend)
-    first = controller.CompileReplay(*work, dependency_digest='f' * 64)
+    first = controller.CompileReplay(*work, dependencies=_dependencies())
     assert first(provider, 'draft', 'system').text == 'draft'
     assert first(provider, 'review', 'system').text == 'review'
-    resumed = controller.CompileReplay(*work, dependency_digest='f' * 64)
+    resumed = controller.CompileReplay(*work, dependencies=_dependencies())
     assert resumed(provider, 'draft', 'system').text == 'draft'
     assert resumed(provider, 'review', 'system').text == 'review'
     assert calls == ['draft', 'review']
@@ -174,10 +178,10 @@ def test_replay_refuses_changed_order_before_another_call(work, provider, monkey
         return 'answer'
 
     monkeypatch.setitem(client._BACKENDS, 'fake', backend)
-    first = controller.CompileReplay(*work, dependency_digest='f' * 64)
+    first = controller.CompileReplay(*work, dependencies=_dependencies())
     first(provider, 'draft', 'system')
     first(provider, 'review', 'system')
-    resumed = controller.CompileReplay(*work, dependency_digest='f' * 64)
+    resumed = controller.CompileReplay(*work, dependencies=_dependencies())
     with pytest.raises(ValueError, match='identity'):
         resumed(provider, 'different first request', 'system')
     assert len(calls) == 2
@@ -247,12 +251,12 @@ def test_real_compile_validation_resumes_saved_draft_without_new_draft_call(
             with pytest.raises(SystemExit):
                 compiler.resolve_compile_plan(
                     inputs, CompileCache(state), coordinator=coordinator,
-                    call_runner=controller.CompileReplay(*work, dependency_digest='f' * 64),
+                    call_runner=controller.CompileReplay(*work, dependencies=_dependencies()),
                 )
     with controller.open_compile_inputs(*work) as snapshot:
         result = compiler.resolve_compile_plan(
             _replay_inputs(snapshot, snapshot_mode), CompileCache(state), coordinator=coordinator,
-            call_runner=controller.CompileReplay(*work, dependency_digest='f' * 64),
+            call_runner=controller.CompileReplay(*work, dependencies=_dependencies()),
         )
     assert result.plan['operations'][0]['path'] == 'knowledge/notes/cedar-merge-order.md'
     assert len(calls) == 3  # One draft, operation review and source-completeness review.
@@ -260,8 +264,8 @@ def test_real_compile_validation_resumes_saved_draft_without_new_draft_call(
 
 def test_preflight_refusal_during_replay_does_not_skip_saved_call(work, provider, monkeypatch):
     monkeypatch.setitem(client._BACKENDS, 'fake', lambda *args: 'answer')
-    controller.CompileReplay(*work, dependency_digest='f' * 64)(provider, 'draft', 'system')
-    resumed = controller.CompileReplay(*work, dependency_digest='f' * 64)
+    controller.CompileReplay(*work, dependencies=_dependencies())(provider, 'draft', 'system')
+    resumed = controller.CompileReplay(*work, dependencies=_dependencies())
     monkeypatch.setattr(client, 'probe_candidate', lambda descriptor: False)
     result = resumed(provider, 'draft', 'system')
     assert result.failure_class == 'unavailable'
@@ -270,14 +274,14 @@ def test_preflight_refusal_during_replay_does_not_skip_saved_call(work, provider
 
 def test_replay_historical_answer_still_requires_current_lease(work, provider, monkeypatch):
     monkeypatch.setitem(client._BACKENDS, 'fake', lambda *args: 'answer')
-    first = controller.CompileReplay(*work, dependency_digest='f' * 64)
+    first = controller.CompileReplay(*work, dependencies=_dependencies())
     first(provider, 'draft', 'system')
     first(provider, 'review', 'system')
     queue, lease, checkpoint = work
     import memory_queue
 
     stale = controller.CompileReplay(queue, replace(lease, token='stale'), checkpoint,
-                                    dependency_digest='f' * 64)
+                                    dependencies=_dependencies())
     with pytest.raises(memory_queue.LeaseFenceError):
         stale(provider, 'draft', 'system')
 
@@ -292,14 +296,14 @@ def test_redriven_replay_reuses_all_saved_calls(work, provider, monkeypatch):
         return 'answer'
 
     monkeypatch.setitem(client._BACKENDS, 'fake', backend)
-    first = controller.CompileReplay(*work, dependency_digest='f' * 64)
+    first = controller.CompileReplay(*work, dependencies=_dependencies())
     first(provider, 'draft', 'system')
     first(provider, 'review', 'system')
     queue, lease, checkpoint = work
     queue.fail(lease, memory_queue.QueueFailure('handler_failed', permanent=True))
     queue.redrive(lease.id)
     replacement = queue.claim('redriven')
-    resumed = controller.CompileReplay(queue, replacement, checkpoint, dependency_digest='f' * 64)
+    resumed = controller.CompileReplay(queue, replacement, checkpoint, dependencies=_dependencies())
     resumed(provider, 'draft', 'system')
     resumed(provider, 'review', 'system')
     assert calls == [True, True]

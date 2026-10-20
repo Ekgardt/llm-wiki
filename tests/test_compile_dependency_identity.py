@@ -110,9 +110,9 @@ def test_changed_real_dependency_refuses_saved_answer_without_another_call(
     monkeypatch.setitem(client._BACKENDS, 'fake', backend)
 
     def run():
-        digest = controller.compile_dependency_digest(_manifest(path))
+        dependencies = controller.CompileDependencies.capture(lambda: _manifest(path))
         return controller.run_candidate_call(
-            queue, lease, checkpoint, dependency_digest=digest,
+            queue, lease, checkpoint, dependencies=dependencies,
             descriptor=provider, prompt='task', system_prompt='system',
         )
 
@@ -225,3 +225,73 @@ def test_expired_package_inventory_does_not_start_discovery(monkeypatch):
     monkeypatch.setattr(importlib.metadata, 'distributions', forbidden)
     with pytest.raises(TimeoutError):
         controller.compile_package_dependency_manifest(deadline=time.monotonic() - 1)
+
+
+def test_dependency_witness_rechecks_after_capture(tmp_path):
+    path = _file(tmp_path)
+    witness = controller.CompileDependencies.capture(lambda: _manifest(path))
+    assert witness.verify() == controller.compile_dependency_digest(_manifest(path))
+    path.write_bytes(b'modified')
+    with pytest.raises(controller.progress.ProgressConflict, match='dependency identity'):
+        witness.verify()
+
+
+def test_stale_witness_refuses_before_provider_or_journal(work, provider, tmp_path, monkeypatch):
+    path = _file(tmp_path)
+    witness = controller.CompileDependencies.capture(lambda: _manifest(path))
+    path.write_bytes(b'modified')
+    monkeypatch.setattr(client, 'call_candidate', lambda *a, **k: pytest.fail('entered provider'))
+    queue, lease, checkpoint = work
+    with pytest.raises(controller.progress.ProgressConflict, match='dependency identity'):
+        controller.run_candidate_call(queue, lease, checkpoint, dependencies=witness,
+                                      descriptor=provider, prompt='task', system_prompt='system')
+    assert queue.get_compile_event(checkpoint.work_id) == checkpoint
+
+
+def test_update_during_model_call_retains_answer_but_refuses_semantic_use(
+    work, provider, tmp_path, monkeypatch,
+):
+    path = _file(tmp_path)
+    witness = controller.CompileDependencies.capture(lambda: _manifest(path))
+    calls = []
+
+    def backend(*args):
+        calls.append(True)
+        path.write_bytes(b'modified')
+        return 'answer'
+
+    monkeypatch.setitem(client._BACKENDS, 'fake', backend)
+    queue, lease, checkpoint = work
+    with pytest.raises(controller.progress.ProgressConflict, match='dependency identity'):
+        controller.run_candidate_call(queue, lease, checkpoint, dependencies=witness,
+                                      descriptor=provider, prompt='task', system_prompt='system')
+    saved = queue.get_compile_event(checkpoint.work_id)
+    assert saved.details['model_call']['phase'] == 'answer'
+    with pytest.raises(controller.progress.ProgressConflict):
+        controller.CompileReplay(queue, lease, checkpoint, dependencies=witness)
+    assert calls == [True]
+    path.write_bytes(b'original')
+    restored = controller.CompileReplay(queue, lease, checkpoint, dependencies=witness)
+    assert restored(provider, 'task', 'system').text == 'answer'
+    assert calls == [True]
+
+
+def test_change_during_provider_preparation_refuses_before_dispatch(
+    work, provider, tmp_path, monkeypatch,
+):
+    path = _file(tmp_path)
+    witness = controller.CompileDependencies.capture(lambda: _manifest(path))
+    original = client._protected_call_digest
+
+    def change_after_preparation(*args):
+        digest = original(*args)
+        path.write_bytes(b'modified')
+        return digest
+
+    monkeypatch.setattr(client, '_protected_call_digest', change_after_preparation)
+    monkeypatch.setitem(client._BACKENDS, 'fake', lambda *args: pytest.fail('called model'))
+    queue, lease, checkpoint = work
+    with pytest.raises(controller.progress.ProgressConflict, match='dependency identity'):
+        controller.run_candidate_call(queue, lease, checkpoint, dependencies=witness,
+                                      descriptor=provider, prompt='task', system_prompt='system')
+    assert queue.get_compile_event(checkpoint.work_id) == checkpoint
