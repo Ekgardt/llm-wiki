@@ -2760,21 +2760,57 @@ def _decision_sealer(
     return seal
 
 
+def _redrive_lineage(database: sqlite3.Connection, task_id: str) -> tuple[str, ...]:
+    """Current task through origin; corruption never means a fresh execution."""
+    seen, lineage = set(), []
+    current: str | None = task_id
+    while current is not None:
+        if current in seen:
+            raise QueueOperationError("redrive_lineage_cycle")
+        seen.add(current)
+        lineage.append(current)
+        current = _redrive_parent(database, current)
+    return tuple(lineage)
+
+
 def _redrive_ancestors(database: sqlite3.Connection, task_id: str) -> set[str]:
-    """Every task this one was redriven from, however deep the chain."""
-    ancestors: set[str] = set()
-    parent = _redrive_parent(database, task_id)
-    while parent is not None and parent not in ancestors:
-        ancestors.add(parent)
-        parent = _redrive_parent(database, parent)
-    return ancestors
+    """Every ancestor after rejecting cycles and missing rows; no depth cap."""
+    return set(_redrive_lineage(database, task_id)[1:])
+
+
+def _required_redrive_row(database, task_id):
+    row = database.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if row is None:
+        raise QueueOperationError("redrive_lineage_missing")
+    return row
 
 
 def _redrive_parent(database: sqlite3.Connection, task_id: str) -> str | None:
-    row = database.execute("SELECT redrive_of FROM tasks WHERE id=?", (task_id,)).fetchone()
-    if row is None or row["redrive_of"] is None:
+    row = _required_redrive_row(database, task_id)
+    if row["redrive_of"] is None:
         return None
     return str(row["redrive_of"])
+
+
+def _compile_lineage_signature(row):
+    return tuple(row[name] for name in ('kind', 'handler_version', 'input_hash'))
+
+
+def _require_compile_lineage_row(database, task_id, expected):
+    row = _required_redrive_row(database, task_id)
+    validation = validate_payload_blob(bytes(row['payload_blob']), row['input_hash'], parse=True)
+    if validation.code is not None or _compile_lineage_signature(row) != expected:
+        raise QueueOperationError('redrive_lineage_payload_mismatch')
+
+
+def _compile_lineage_origin(database, row):
+    if row['kind'] != 'compile':
+        raise compile_progress.ProgressConflict('only compile tasks have compile work')
+    lineage = _redrive_lineage(database, row['id'])
+    expected = _compile_lineage_signature(row)
+    for task_id in lineage:
+        _require_compile_lineage_row(database, task_id, expected)
+    return lineage[-1]
 
 
 def _decision_seal_of(
@@ -7436,6 +7472,13 @@ def _require_compile_work_family(database, row, event):
         _require_compile_task_family(database, row, previous)
 
 
+def _require_compile_root_work(database, row, event):
+    if event.sequence != 0 or 'compile_work' not in event.details:
+        return
+    origin = _compile_lineage_origin(database, row)
+    compile_progress.validate_root_event(event, origin)
+
+
 class _QueueV3CandidateReader:
     """The queue-v3 backend: an unpublished candidate, or the adopted database.
 
@@ -11847,6 +11890,14 @@ class _QueueV3CandidateReader:
         _write_durable_file(self.results_dir / result_name, result)
         return f"run/queue-results/{result_name}", sha256_bytes(result)
 
+    def compile_origin(self, lease: QueueLease) -> str:
+        """Resolve original work under the current lease and payload fence."""
+        return self._with_verified_lease(lease, self._compile_origin)
+
+    @staticmethod
+    def _compile_origin(database, row, now):
+        return _compile_lineage_origin(database, row)
+
     def get_compile_event(self, work_id: str, *, sequence: int | None = None):
         """Read a checkpoint only after the explicit journal migration."""
         from compile_progress import event_at, latest_event
@@ -11883,6 +11934,7 @@ class _QueueV3CandidateReader:
         if row["kind"] != "compile":
             raise ProgressConflict("only compile tasks may append compile progress")
         _require_compile_work_family(database, row, event)
+        _require_compile_root_work(database, row, event)
         if "artifact" in event.details:
             self.verify_compile_artifact(event)
         self._require_lease_row(database, lease, _utc_now())
@@ -12014,6 +12066,7 @@ class _QueueV3CandidateReader:
         if row["kind"] != "compile" or row["id"] != event.task_id:
             raise ProgressConflict("compile artifact does not belong to this task")
         _require_compile_work_family(database, row, event)
+        _require_compile_root_work(database, row, event)
 
     def read_compile_artifact(self, event) -> bytes:
         from compile_progress import ProgressCorrupt, artifact_identity

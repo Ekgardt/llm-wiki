@@ -1207,3 +1207,73 @@ is explicitly refused, not misreported as a static build. Full configuration
 composition, fenced startup/update handling, durable preflight, entrypoint adoption,
 backup/recovery, installation/retirement and the useful real full-cycle gate remain
 open. No change in installed routing is claimed.
+
+### 2026-10-20: find original work before inspecting live sources
+
+The candidate now resolves the original compile task under the existing lease,
+payload and BEGIN IMMEDIATE boundary. Every lineage task must retain the same
+compile kind, handler version and verified canonical payload. The shared lineage
+reader used by compile and capture now rejects cycles and missing rows instead of
+silently treating them as the end of history. Three corruption cases reproduced
+that old behavior before the fix; four initial missing-API cases also failed.
+
+begin_compile_work first looks up a stable root address derived from that origin.
+Only absent root history permits its local preparation callback to read current
+sources/dependencies. Immutable event zero binds the full semantic identity:
+origin, source digest, dependency digest and invocation digest. The stable lookup
+address is deliberately separate from this complete content identity. Otherwise a
+changed source/code hash could select a new work key and bypass an old uncertain
+provider call. Root metadata creation/validation is shared in compile_progress;
+there is no additional table, index, runtime path or service.
+
+Normal redrive finds the same initial event without calling preparation again.
+Tests connect that root to streamed capture and recover the retained snapshot after
+live sources change. A separate protected-call fixture interrupts after dispatch,
+redrives, finds the old root, and refuses an uncertain provider outcome without a
+second call. This uses an isolated queue and fake provider, not installed routing.
+Independent tasks remain separate even with identical semantic inputs.
+
+Primary research rechecked 2026-10-20:
+- https://docs.temporal.io/workflow-execution — replay follows retained history;
+  a stable execution identity is distinct from mutable current files.
+- https://docs.aws.amazon.com/step-functions/latest/dg/redrive-executions.html —
+  redrive preserves completed work rather than starting an unrelated execution.
+- https://www.sqlite.org/lang_transaction.html — serialized write transactions
+  provide the existing local boundary for publishing the initial record.
+
+Alternatives rejected: deriving lookup only from current content (misses old work),
+scanning all journal records on every recovery (unnecessary when origin is known),
+and another registry/table (duplicates existing task lineage and journal ownership).
+These sources do not imply provider-side exactly-once execution.
+
+A related red regression found that the first root validator ran only when appending
+an event: a writer could leave an artifact before rejecting a wrong origin, and
+orphan recovery could return absence without rejecting that origin. The common
+artifact-owner validator now checks the same root contract before filesystem work.
+Tests assert both rejection and no newly created result file.
+
+One initial test incorrectly attempted two public redrives. The existing
+MAX_REDRIVE_GENERATIONS=1 policy rejected it. Its September rationale is in
+2026-09-07-how-many-second-chances-an-intent-gets.md and
+2026-09-14-one-second-chance-and-no-stuck-task.md. The public test now exercises the
+supported redrive, while a separate saved-lineage fixture proves traversal has no
+new depth cutoff. The production cap and its existing regression tests remain
+unchanged; its law-9 qualification remains part of the overall limit audit, not
+proven by this change. No policy override was used to make these tests pass.
+
+Still open: complete environment/configuration composition and loaded-code/update
+handling, durable full-batch preflight, CLI/MCP/queue/nightly adoption, retention and
+limit audit, backup/restore, installation/legacy retirement and useful real-model
+full-cycle evidence. This root lookup is a controller integration primitive; no
+claim of an installed end-to-end controller is made.
+
+Validation: 105 related queue/journal/identity/capture/redrive tests passed on Python
+3.12 (44.83 s) and 3.10 (49.46 s). After tightening artifact-owner admission, 43
+related origin/owner/capture tests passed on each (30.12 s / 33.54 s). The final
+streamed-root test initially had a missing work fixture dependency; its fixture
+wiring was corrected without changing production behavior, then all 17 origin
+cases passed on both (6.27 s / 7.22 s). All 39 changed/new functions meet actual
+CCN/if/nesting checks; whole scripts/tests Ruff and diff checks pass. Logs:
+logs/step7-task-origin-py{312,310}-final-20261020.txt,
+logs/step7-task-origin-owner-py{312,310}-20261020.txt and
+logs/step7-task-origin-complexity-20261020.json.

@@ -296,3 +296,45 @@ def retains_task(database: sqlite3.Connection, task_id: str) -> bool:
     return database.execute(
         'SELECT 1 FROM compile_work_events WHERE task_id=? LIMIT 1', (task_id,),
     ).fetchone() is not None
+
+
+def root_work_id(origin_task_id: str) -> str:
+    """Stable lookup address; immutable event zero binds the semantic identity."""
+    if not isinstance(origin_task_id, str) or not origin_task_id:
+        raise ValueError('compile origin task identity must be nonempty text')
+    value = {'schema': 'compile-root/v1', 'origin_task_id': origin_task_id}
+    return hashlib.sha256(_canonical(value).encode('utf-8')).hexdigest()
+
+
+def work_identity(origin, source_digest, dependency_digest, request_digest):
+    root_work_id(origin)
+    for digest in (source_digest, dependency_digest, request_digest):
+        _require_digest(digest)
+    value = {'schema': 'compile-work/v1', 'origin_task_id': origin,
+             'source_digest': source_digest, 'dependency_digest': dependency_digest,
+             'request_digest': request_digest}
+    return hashlib.sha256(_canonical(value).encode('utf-8')).hexdigest()
+
+
+def root_details(origin, source_digest, dependency_digest, request_digest):
+    identity = work_identity(origin, source_digest, dependency_digest, request_digest)
+    return {'schema': 'compile-work/v1', 'origin_task_id': origin,
+            'dependency_digest': dependency_digest, 'request_digest': request_digest,
+            'identity': identity}
+
+
+def _require_root_details_shape(details):
+    fields = {'schema', 'origin_task_id', 'dependency_digest', 'request_digest', 'identity'}
+    if not isinstance(details, dict) or set(details) != fields:
+        raise ProgressCorrupt('compile root identity is missing or changed')
+
+
+def validate_root_event(event, origin):
+    if event.work_id != root_work_id(origin):
+        raise ProgressConflict('compile root belongs to another origin')
+    details = event.details.get('compile_work')
+    _require_root_details_shape(details)
+    expected = root_details(origin, event.source_digest,
+                            details['dependency_digest'], details['request_digest'])
+    if details != expected:
+        raise ProgressCorrupt('compile root semantic identity changed')

@@ -948,11 +948,9 @@ def compile_work_identity(origin_task_id, source_digest, dependency_digest, requ
         raise ValueError('compile origin task identity must be nonempty text')
     progress._require_digest(source_digest)
     progress._require_digest(dependency_digest)
-    return _compile_identity_digest({
-        'schema': 'compile-work/v1', 'origin_task_id': origin_task_id,
-        'source_digest': source_digest, 'dependency_digest': dependency_digest,
-        'request': request,
-    })
+    return progress.work_identity(origin_task_id, source_digest, dependency_digest,
+                                      _compile_identity_digest(request))
+
 
 
 def _regenerable_dependency_bytecode(path):
@@ -1131,3 +1129,30 @@ def compile_runtime_dependency_manifest(*, deadline=None):
     files.update({f'search-path/{index}': Path(path) for index, path in enumerate(sys.path)
                   if Path(path).is_file()})
     return compile_dependency_manifest(files, _compile_runtime_parameters(config), deadline=deadline)
+
+
+def _compile_root_details(origin, source_digest, dependency_digest, request):
+    return progress.root_details(origin, source_digest, dependency_digest,
+                                 _compile_identity_digest(request))
+
+
+def begin_compile_work(queue, lease, prepare):
+    """Find retained original work before any live input/dependency preparation.
+
+    prepare is called only for new work and returns source digest, dependency
+    digest and invocation parameters. This never authorizes a model call itself.
+    The existing queue transaction serializes publication of immutable event zero.
+    """
+    origin = queue.compile_origin(lease)
+    work_id = progress.root_work_id(origin)
+    previous = queue.get_compile_event(work_id, sequence=0)
+    if previous is not None:
+        queue.verify_compile_checkpoint_owner(lease, previous)
+        progress.validate_root_event(previous, origin)
+        return previous
+    source_digest, dependency_digest, request = prepare()
+    details = _compile_root_details(origin, source_digest, dependency_digest, request)
+    event = progress.CompileEvent(work_id, lease.id, 0, source_digest, 'pending', 'ready',
+                                  {'compile_work': details})
+    queue.record_compile_event(lease, event)
+    return event
