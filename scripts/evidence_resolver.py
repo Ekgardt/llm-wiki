@@ -1,6 +1,7 @@
 """Resolve content-addressed daily evidence from flat files or sealed bags."""
 from __future__ import annotations
 
+import codecs
 import contextlib
 import hashlib
 import json
@@ -11,10 +12,10 @@ from bisect import bisect_left, bisect_right
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
-from itertools import islice
+from itertools import chain, islice
 from pathlib import Path
 
-from bounded_io import read_stable_bytes
+from bounded_io import IO_CHUNK_BYTES, read_stable_bytes
 from reliable_memory import canonical_json_bytes, sha256_bytes, validate_schema
 
 # Bounded reads of evidence files; a file past its bound is refused by name, never
@@ -59,6 +60,7 @@ _MARKER_RE = re.compile(
 _MARKER_ID_RE = re.compile(
     r"^(?:[-+*]\s+)?`?\[((?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d)\]"
 )
+_TEXT_LINE_BREAK_RE = re.compile(r"[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]")
 _HASH_LINE_RE = re.compile(r"([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._/-]*)\n")
 
 
@@ -263,7 +265,7 @@ def daily_entries(content: bytes) -> list[tuple[str, int, int]]:
     starts = _entry_starts(content)
     ends = [item[0] for item in starts[1:]] + [len(content)]
     entries = [
-        (_entry_id(content[start:end], declared), start, end)
+        (_entry_id(content, start, end, declared), start, end)
         for (start, declared), end in zip(starts, ends)
     ]
     return [(item[0], item[1], item[2]) for item in entries if item[0] is not None]
@@ -289,21 +291,75 @@ def _heading_block_id(raw: bytes) -> str:
     return block_id
 
 
-def _entry_id(entry: bytes, declared: str | None) -> str | None:
+def _entry_id(content, start, end, declared):
     if declared is not None:
         return declared
-    return _marker_entry_id(entry)
+    return _marker_entry_id(content, start, end)
 
 
-def _marker_entry_id(entry: bytes) -> str | None:
+def _marker_entry_id(content, start, end):
     """A captured entry declares its time at the head of its first content line."""
-    for raw in entry.decode("utf-8", errors="replace").splitlines()[1:]:
-        line = raw.strip()
-        if not line:
-            continue
-        match = _MARKER_ID_RE.match(line)
-        return match.group(1) if match else None
-    return None
+    chunks = _decoded_entry_range(content, start, end)
+    after_header = _after_first_text_line(chunks)
+    line = _first_text_line(_drop_leading_text_space(after_header))
+    match = _MARKER_ID_RE.match(_marker_time_prefix(line))
+    return match.group(1) if match else None
+
+
+def _decoded_entry_range(content, start, end):
+    decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+    for cursor in range(start, end, IO_CHUNK_BYTES):
+        yield decoder.decode(content[cursor:min(end, cursor + IO_CHUNK_BYTES)])
+    yield decoder.decode(b'', final=True)
+
+
+def _after_first_text_line(chunks):
+    for text in chunks:
+        match = _TEXT_LINE_BREAK_RE.search(text)
+        if match:
+            yield text[match.end():]
+            yield from chunks
+            return
+
+
+def _drop_leading_text_space(chunks):
+    for text in chunks:
+        trimmed = text.lstrip()
+        if trimmed:
+            yield trimmed
+            yield from chunks
+            return
+
+
+def _first_text_line(chunks):
+    for text in chunks:
+        match = _TEXT_LINE_BREAK_RE.search(text)
+        if match:
+            yield text[:match.start()]
+            return
+        yield text
+
+
+def _marker_time_prefix(line):
+    first = next(line, '')
+    if not first:
+        return ''
+    if first[0] in {'-', '+', '*'}:
+        return _bullet_time_prefix(first[0], chain((first[1:],), line))
+    return _clock_prefix(chain.from_iterable(chain((first,), line)))
+
+
+def _bullet_time_prefix(symbol, chunks):
+    following = next(filter(None, chunks), '')
+    if not following or not following[0].isspace():
+        return ''
+    normalized = _drop_leading_text_space(chain((following,), chunks))
+    return symbol + ' ' + _clock_prefix(chain.from_iterable(normalized))
+
+
+def _clock_prefix(characters):
+    # Grammar width, not a source/line limit; bullet whitespace is scanned above.
+    return ''.join(islice(characters, len('`[00:00:00]')))
 
 
 

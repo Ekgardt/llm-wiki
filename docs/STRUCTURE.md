@@ -1503,6 +1503,13 @@ part of that event is pending. Existing list-returning consumers collect the sam
 iterator. Original daily bytes and entry/frame metadata still remain in memory:
 this removes all-part buffering, not the remaining whole-daily read.
 
+Canonical daily entry identification uses byte ranges instead of copying entry
+bodies. Heading identifiers need no body read; captured marker identifiers use
+incremental UTF-8 decoding and block searches with the existing Python Unicode
+line/whitespace semantics. Only the timestamp grammar prefix is retained after
+unbounded leading or bullet whitespace. Byte spans and malformed-UTF-8 replacement
+behavior remain unchanged. This does not remove the original daily buffer.
+
 Sequential daily reads reuse verified original bytes and parsed entry/frame
 metadata only while the following record names the same shared identities.
 Part bodies are read and verified without retaining them in the reader.

@@ -3390,3 +3390,67 @@ This is a local tracemalloc/fixture result, not RSS, production throughput,
 real-provider tokens, useful output quality or completion of point7. Source
 capture, daily parsing, native-frame metadata and planning still need the
 coordinated original-range refactor. No installation was performed.
+
+### 2026-10-20 — parse entry identifiers from ranges, not copied entry bodies
+
+The canonical `daily_entries` parser slices every complete entry before checking
+whether the heading already declares its identifier. For operation markers it
+then decodes and splits the complete entry, although only the first nonempty
+content-line prefix determines its time. This creates full-entry copies on the
+capture, citation, claim and archive paths.
+
+Primary sources reviewed today: [Python splitlines and strip semantics](https://docs.python.org/3.12/library/stdtypes.html#str.splitlines),
+[Unicode line breaking](https://www.unicode.org/reports/tr14/), and
+[RFC 3629 UTF-8](https://www.rfc-editor.org/rfc/rfc3629). Python's documented line
+boundary set is the compatibility contract here, not the whole UAX14 algorithm.
+UTF-8 may span transfer boundaries, so per-chunk independent decoding would
+change malformed/partial sequences. Keep the existing replacement-error behavior
+through an incremental decoder.
+
+Choose range-based identifier lookup: declared heading IDs require no entry body
+slice. Marker lookup decodes existing IO_CHUNK_BYTES transfers, skips the first
+Unicode line and leading whitespace/blank lines, then examines only the first
+nonempty content line. Normalize only the already-allowed bullet whitespace;
+retain the existing timestamp regex as authority. The remaining candidate needs
+at most the grammar width of an optional backtick plus `[00:00:00]`, not an
+arbitrary text cutoff. Leading/bullet whitespace remains unbounded and is scanned
+incrementally. Ordinary `readline` would change Unicode separator behavior;
+collecting whole lines would retain the giant-line defect; a custom parser state
+machine is unnecessary when iterator composition preserves the existing grammar.
+No source, line or record is truncated. Entry start/end detection is unchanged.
+No new path, dependency, runtime root or persistent format is introduced. The
+original source buffer and boundary metadata still remain; this is a prerequisite
+for range-backed originals, not completion of whole-daily streaming.
+
+The first incremental implementation still iterated discarded text character by
+character. An 8 MiB long-header/bullet-space fixture took 0.479/0.621 seconds,
+versus 0.092/0.120 seconds in the original parser. A regression that rejects
+character iteration of discarded chunks failed before the correction (82 other
+cases passed). Replace that traversal with regex line-boundary search and
+`lstrip` on bounded decoded chunks; preserve the first-content-line boundary
+before normalizing bullet whitespace, so a timestamp on a later line never
+becomes valid by accident. No new numeric limit is introduced.
+
+The corrected paired fixture compares actual entry IDs and byte spans against
+the committed 00d11b6a parser. For the long header, additional traced Python peak
+allocations fell from 25,167,069 to 199,174 bytes; for long bullet whitespace,
+from 25,167,075 to 396,739 bytes. Times were 0.093/0.112 seconds and 0.127/0.136
+seconds respectively (baseline/candidate). These single local pairs ran while
+regression suites were active: they establish neither a throughput improvement
+nor RSS/full-cycle performance. The earlier fivefold slowdown no longer appears
+in this measurement. Raw first/final measurements are retained separately in
+`logs/step7-entry-ranges-memory-first-20261020.json` and
+`logs/step7-entry-ranges-memory-bulk-20261020.json`.
+
+The fresh built-in graph at generation-18e03698cde9ac31-e46ff3a1 matches
+00d11b6a, but remains partial (112770 unresolved). Direct parser/caller inspection
+supplements the graph for compilation, claims, archive and citation consumers.
+Ruff and diff checks pass; Lizard plus AST measured all 21 changed/new functions
+without violations. Installation and the complete real-provider cycle remain
+outstanding.
+
+Final related suites pass on both supported interpreters: 400 tests on Python
+3.12 (82.76 seconds), and 400 on Python 3.10 (90.65 seconds), including archive,
+claims, citation, source-choice, transaction and foreground queue consumers.
+Logs: `step7-entry-ranges-bulk-py312-20261020.txt` and
+`step7-entry-ranges-bulk-py310-20261020.txt`.
