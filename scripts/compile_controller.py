@@ -222,7 +222,10 @@ def _run_reserved_call(queue, lease, checkpoint, dispatch, invoke):
     if current != checkpoint:
         return _resume_recorded_call(queue, lease, dispatch, current)
     queue.verify_compile_artifact(checkpoint)
-    queue.record_compile_event(lease, dispatch)
+    try:
+        queue.record_compile_event(lease, dispatch)
+    except progress.SourceOutcomeConflict as error:
+        raise ProviderOutcomeUnknown(f'source_outcome_unknown: {error}') from error
     return _invoke_and_save(queue, lease, dispatch, invoke)
 
 
@@ -1100,7 +1103,19 @@ def _batch_admission_event(lease, planned, dependencies):
                'dependency_digest': dependencies.digest}
     sources = _compile_identity_digest(_preflight_source_records(planned.batch.inputs))
     return progress.CompileEvent(planned.work_id, lease.id, 0, sources,
-                                 'pending', 'ready', {'compile_batch': details})
+                                 'pending', 'ready', {'compile_batch': details,
+                                 'source_scope': _batch_source_scope(planned.batch)})
+
+
+def _batch_source_scope(batch):
+    return progress.make_source_scope(_batch_source_span(part) for part in batch.inputs.dailies)
+
+
+def _batch_source_span(part):
+    from compile_memory import _v4_source_descriptor
+
+    source = _v4_source_descriptor(part)
+    return {key: source[key] for key in ('logical_path', 'byte_start', 'byte_end', 'sha256')}
 
 
 def begin_compile_batch(queue, lease, planned, *, dependencies, deadline=None):
@@ -1594,7 +1609,8 @@ def _repair_child_admission(lease, child, dependencies):
                'entry_digest': child.entry_digest, 'dependency_digest': dependencies.digest}
     source_digest = _compile_identity_digest(_preflight_source_records(child.batch.inputs))
     return progress.CompileEvent(child.work_id, lease.id, 0, source_digest,
-                                 'pending', 'ready', {'compile_batch': binding})
+                                 'pending', 'ready', {'compile_batch': binding,
+                                 'source_scope': _batch_source_scope(child.batch)})
 
 
 def _repair_child_context(lease, admission, parent_context):

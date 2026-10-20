@@ -1196,6 +1196,27 @@ offset addresses the entry without decoding the whole plan again; the existing
 file boundary still verifies its complete digest. Pending admission alone grants
 no model call or publication. Its saved context binding is described below.
 
+Batch and repair roots also bind `compile-source-scope/v1`: logical paths, byte
+spans and source hashes derived from the verified snapshot. Before recording a
+model dispatch, the existing queue write transaction checks other work for
+overlapping source spans and unresolved calls. The check and reservation share
+the same lease/payload fence and `BEGIN IMMEDIATE`; there is no separate lock,
+table, index or database. Repartitioning or appending a day cannot bypass an
+overlapping span. Rewriting that span does not establish independence; disjoint
+spans and different paths may continue. Historical work without scope cannot
+prove independence from an uncertain call.
+
+The guard verifies journal rows, follows the tail to the latest model call and
+uses the existing answer decoder to validate retained bytes against their
+dispatch. A file hash or a `published` status alone cannot clear uncertainty.
+An orphan answer must first be recovered by its owning work. Explicit repeat
+consent does not release another work before a durable answer exists. The
+semantic controller blocks the competing task through the existing unknown
+outcome delivery path and may continue independent roots. This protects the
+candidate queue only; it does not recover unjournaled legacy calls or provide
+semantic deduplication of copied sources. The metadata scan is linear in retained
+work count; archive/retention and full-cycle cost qualification remain required.
+
 The uninstalled refreshed-context format stores only complete changed context
 records and explicit removed paths in another self-contained ZIP64 artifact.
 It binds one complete source capture by manifest digest; it never follows delta

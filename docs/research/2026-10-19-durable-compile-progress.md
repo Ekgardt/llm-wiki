@@ -2672,3 +2672,85 @@ The providers in these fault tests are simulated. Native Codex transport, full
 dependency/update closure, cross-origin source uncertainty, retention/doctor/backup,
 other ingress routes, diagnostics projection and safe installation remain open.
 This does not establish point 7 completion or installed behavior.
+
+### 2026-10-20 — cross-work source uncertainty
+
+Fresh built-in graph generation `generation-18e02cf0a34023a4-4ddcb556` matches
+152247c9. `_append_compile_event`, `_batch_admission_event`, repair-child admission
+and `_run_reserved_call` were inspected through the graph; partial coverage
+(112070 unresolved) was supplemented with source and queue ownership code.
+Current reservation protects one work identity; another task/work can dispatch
+against the same source after the original outcome becomes uncertain.
+
+Primary research inspected on 2026-10-20:
+- SQLite transactions permit one writer; BEGIN IMMEDIATE makes check/reservation
+  one serialized operation: https://www.sqlite.org/lang_transaction.html
+- PostgreSQL range/exclusion documentation illustrates non-overlap invariants
+  and half-open intervals; used as a design reference, not a new dependency:
+  https://www.postgresql.org/docs/current/rangetypes.html
+- AWS idempotency guidance distinguishes request identity from changed intent:
+  https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/
+
+Chosen implementation direction: add source scope metadata to existing batch
+and repair-root journal events, derived from verified source descriptors. Check
+other unresolved calls inside the existing queue write transaction immediately
+before appending dispatch. No table, index, database, runtime directory, external
+service or persistent lock is added. Existing lease/payload fencing remains.
+A ready result whose retained bytes are missing/corrupt cannot silently count as
+recovered. An orphan answer is conservatively unresolved until its original work
+adopts it. Repeat consent permits the original call's recovery path; it must not
+open a race for another work before a durable answer exists.
+
+The source exclusion is logical path plus overlapping half-open byte span, not
+only a whole-file or request digest: repartitioning and appending a day must not
+bypass uncertainty. Daily logs are append-only evidence. Rewriting the overlapping
+part does not prove independence and requires resolving the original uncertainty;
+non-overlapping new spans and different paths remain independent. This is an
+explicit safety constraint, not a workload/volume limit. Missing historical scope
+cannot establish independence and therefore fails closed for competing uncertain
+work. Reconsider the representation only with verified revision/byte lineage that
+proves independence. Alternatives rejected: a whole-vault stop (blocks unrelated
+sources), prompt-hash-only dedupe (context changes bypass it), and a preflight-only
+check (race before dispatch). A future lookup index would require measurement and
+the existing explicit migration process, rather than unapproved runtime DDL.
+
+Initial fault reproduction: six cross-work cases failed, including changed spans,
+changed bytes at the same address, missing scope and a lost answer. After the guard,
+two older independent-delivery fixtures failed because neither declared source
+scope. Their existing assertions were preserved; fixture roots now name the actual
+fixture bytes and different logical paths. The focused pass then succeeded in 23
+cases, including a two-thread/two-connection dispatch race and repeat-consent timing.
+A broad intermediate pass succeeded in 177 cases on Python 3.12 (427.00s) and 3.10
+(494.58s). Review additionally reproduced an invalid-but-hash-valid answer releasing
+a competing work (one failing test). The queue now reuses the existing canonical
+answer decoder and call-binding validator, not only the artifact hash. Tests also
+cover a syntactically valid answer belonging to another work, an orphan answer,
+actual worker source spans, and a fake published status after an unknown dispatch.
+Final expanded regressions finished in `step7-source-overlap-final-py312-20261020.txt`
+and `step7-source-overlap-final-py310-20261020.txt`: each passed 178 cases and failed
+only the mistaken foreign-answer fixture described below (476.46s / 553.92s).
+All 48 changed/new functions pass lizard+AST complexity checks; Ruff/diff pass.
+
+A separate local rollback-journal/FULL measurement over 10,000 disjoint historical
+works / 20,000 rows took 0.8517s with a warm cache. It measures metadata scanning,
+not answer-artifact I/O, model work or real end-to-end cost. The scan is linear in
+retained work count; semantic retention and full-cycle scaling qualification remain
+open. Evidence: `step7-source-overlap-scan-cost-20261020.json`,
+`step7-source-overlap-{red,answer-red,green,focused,py312,py310}-20261020.txt`,
+`step7-source-overlap-complexity-20261020.json`. No production bound was inferred
+from the benchmark size. The lazy queue-to-controller decoder dependency uses the
+one existing response protocol; it adds no package and invokes no provider.
+
+The final run exposed a fixture mistake in the new foreign-answer case: changing
+only task_id does not change `_call_binding`, deliberately, because redelivery can
+change ownership while preserving the same work/call. The test now changes work_id
+instead; the original refusal assertion remains. This corrects the evidence being
+injected, not the validator or the acceptance condition. The two binding cases are
+rerun on both Python versions in `step7-source-overlap-binding-py{312,310}-20261020.txt`:
+2 passed on Python 3.12 (11.95s) and 2 passed on Python 3.10 (15.33s).
+Production code did not change between the expanded runs and those reruns; only
+the foreign work identity in that fixture changed. Together these runs qualify
+all 179 distinct cases on each version, without claiming either original broad
+run was green. Final Ruff, whitespace and all 48 function complexity checks pass.
+The implementation remains a candidate: no installed-vault behavior or real-model
+full-cycle cost is established by these simulated-provider regression cases.

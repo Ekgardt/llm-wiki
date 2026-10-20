@@ -6,13 +6,16 @@ import memory_queue
 import pytest
 from llm_client import BackendResponse
 
+from tests.test_compile_call_controller import _source_scope
 from tests.test_compile_call_controller import work as work
 from tests.test_compile_progress_admission import upgraded as upgraded
 
 
 def _independent(work):
     queue, lease, first = work
-    root = replace(first, work_id='b' * 64, sequence=0, stage='pending', details={})
+    scope = _source_scope('knowledge/daily/2026-10-21.md', b'independent')
+    root = replace(first, work_id='b' * 64, sequence=0, stage='pending',
+                   details={'source_scope': scope})
     queue.record_compile_event(lease, root)
     return queue.save_compile_artifact(lease, replace(root, sequence=1, stage='snapshot_ready'), b'independent')
 

@@ -53,6 +53,15 @@ class ProgressCorrupt(ValueError):
     """Stored checkpoint bytes or their identity failed validation."""
 
 
+class SourceOutcomeConflict(ProgressConflict):
+    """Another work may already have paid for an overlapping source span."""
+
+    def __init__(self, event):
+        self.work_id = event.work_id
+        self.sequence = event.sequence
+        super().__init__(f'source outcome unresolved in work {event.work_id} at {event.sequence}')
+
+
 @dataclass(frozen=True)
 class CompileEvent:
     work_id: str
@@ -171,6 +180,150 @@ def event_at(database: sqlite3.Connection, work_id: str, sequence: int) -> Compi
     if row is None:
         return None
     return _verified_event(row)
+
+
+def make_source_scope(sources):
+    scope = {'schema': 'compile-source-scope/v1', 'sources': list(sources)}
+    _require_source_scope(scope)
+    return scope
+
+
+def _require_source_scope(scope):
+    if not isinstance(scope, dict) or set(scope) != {'schema', 'sources'}:
+        raise ProgressCorrupt('invalid compile source scope fields')
+    if scope['schema'] != 'compile-source-scope/v1':
+        raise ProgressCorrupt('unsupported compile source scope')
+    _require_scope_sources(scope['sources'])
+
+
+def _require_scope_sources(sources):
+    if not isinstance(sources, list):
+        raise ProgressCorrupt('compile source scope must contain a source list')
+    for source in sources:
+        _require_scope_source(source)
+
+
+def _require_scope_source(source):
+    from compile_cache import SourceDescriptor
+
+    fields = {'logical_path', 'byte_start', 'byte_end', 'sha256'}
+    if not isinstance(source, dict) or set(source) != fields:
+        raise ProgressCorrupt('invalid compile source span')
+    _require_sequence(source['byte_start'])
+    _require_sequence(source['byte_end'])
+    SourceDescriptor(source['logical_path'], source['byte_end'] - source['byte_start'],
+                     source['sha256']).canonical()
+
+
+def _work_source_ranges(database, work_id):
+    root = event_at(database, work_id, 0)
+    if root is None:
+        raise ProgressCorrupt('compile work has no source root')
+    scope = root.details.get('source_scope')
+    if scope is None:
+        return None  # Historical evidence cannot prove source independence.
+    _require_source_scope(scope)
+    return _scope_ranges(scope)
+
+
+def _scope_ranges(scope):
+    grouped = {}
+    for source in scope['sources']:
+        grouped.setdefault(source['logical_path'], []).append((source['byte_start'], source['byte_end']))
+    return {path: sorted(bounds) for path, bounds in grouped.items()}
+
+
+def _source_ranges_overlap(first, second):
+    if first is None or second is None:
+        return True
+    return any(_intervals_overlap(first[path], second[path]) for path in first.keys() & second.keys())
+
+
+def _intervals_overlap(first, second):
+    left = right = 0
+    while left < len(first) and right < len(second):
+        if max(first[left][0], second[right][0]) < min(first[left][1], second[right][1]):
+            return True
+        if first[left][1] <= second[right][0]:
+            left += 1
+        else:
+            right += 1
+    return False
+
+
+def _other_latest_events(database, work_id):
+    cursor = database.execute(
+        """SELECT events.* FROM compile_work_events events
+           JOIN (SELECT work_id,MAX(sequence) sequence FROM compile_work_events GROUP BY work_id) latest
+           USING(work_id,sequence) WHERE events.work_id<>? ORDER BY events.work_id""", (work_id,))
+    for row in cursor:
+        yield _verified_event(row)
+
+
+def _previous_event(database, event):
+    if event.sequence == 0:
+        return None
+    previous = event_at(database, event.work_id, event.sequence - 1)
+    if previous is None:
+        raise ProgressCorrupt('compile progress history has a gap')
+    return previous
+
+
+def _latest_model_call(database, current):
+    while current is not None:
+        if 'model_call' in current.details:
+            _require_model_phase(current)
+            return current
+        current = _previous_event(database, current)
+    return None
+
+
+def _require_model_phase(event):
+    call = event.details['model_call']
+    if not isinstance(call, dict):
+        raise ProgressCorrupt('invalid retained model call')
+    if call.get('phase') not in {'dispatch', 'answer'}:
+        raise ProgressCorrupt('invalid retained model call phase')
+
+
+def answer_dispatch(database, answer):
+    dispatch = _previous_event(database, answer)
+    if dispatch is None:
+        raise ProgressCorrupt('retained model answer has no dispatch')
+    _require_model_phase(dispatch)
+    if dispatch.details['model_call']['phase'] != 'dispatch':
+        raise ProgressCorrupt('retained model answer follows no dispatch')
+    return dispatch
+
+
+def _model_outcome_unresolved(call, verify_answer):
+    if call.details['model_call']['phase'] == 'dispatch':
+        return True
+    try:
+        verify_answer(call)
+    except (ValueError, TypeError, KeyError):
+        return True
+    return False
+
+
+def require_disjoint_dispatch(database, event, verify_answer):
+    """Reserve source independence inside the caller's existing write transaction."""
+    if event.details.get('model_call', {}).get('phase') != 'dispatch':
+        return
+    if not database.in_transaction:
+        raise ProgressConflict('source reservation requires the queue write transaction')
+    ranges = _work_source_ranges(database, event.work_id)
+    _require_disjoint_calls(database, event, ranges, verify_answer)
+
+
+def _require_disjoint_calls(database, event, ranges, verify_answer):
+    for latest in _other_latest_events(database, event.work_id):
+        other = _work_source_ranges(database, latest.work_id)
+        if not _source_ranges_overlap(ranges, other):
+            continue
+        call = _latest_model_call(database, latest)
+        if call is not None and _model_outcome_unresolved(call, verify_answer):
+            raise SourceOutcomeConflict(call)
 
 
 def _require_next(previous: CompileEvent | None, event: CompileEvent) -> None:

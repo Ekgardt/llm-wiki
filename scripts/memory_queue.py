@@ -11968,8 +11968,17 @@ class _QueueV3CandidateReader:
         _require_compile_root_work(database, row, event)
         if "artifact" in event.details:
             self.verify_compile_artifact(event)
+        compile_progress.require_disjoint_dispatch(
+            database, event, partial(self._verify_retained_compile_answer, database))
         self._require_lease_row(database, lease, _utc_now())
         append_event(database, event)
+
+    def _verify_retained_compile_answer(self, database, answer):
+        from compile_controller import _decoded_answer, _require_same_call
+
+        dispatch = compile_progress.answer_dispatch(database, answer)
+        _require_same_call(answer, dispatch)
+        _decoded_answer(dispatch, self.read_compile_artifact(answer))
 
     def save_compile_artifact(self, lease: QueueLease, event, data: bytes):
         """Durably store intermediate bytes before publishing their checkpoint.
