@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
-from claim_tree_manifest import snapshot_claim_tree_with_content  # noqa: E402
+from claim_tree_manifest import ClaimTreeChanged, snapshot_claim_tree  # noqa: E402
 from markdown_transaction import (  # noqa: E402
     ABSENT,
     TransactionDriftError,
@@ -330,17 +330,34 @@ def main() -> int:
     raise RuntimeError("knowledge index rebuild did not converge")
 
 
+class _ManifestIndexPages(Mapping[str, bytes]):
+    """Read each note against the exact digest named by the transaction snapshot."""
+
+    def __init__(self, root: Path, manifest: Mapping[str, object]) -> None:
+        self.root = root
+        self.digests = {entry["path"]: entry["sha256"] for entry in manifest["entries"]
+                        if entry["path"].startswith(NOTES_PREFIX)}
+
+    def __len__(self) -> int:
+        return len(self.digests)
+
+    def __iter__(self):
+        return iter(self.digests)
+
+    def __getitem__(self, relative: str) -> bytes:
+        expected = self.digests[relative]
+        content = read_stable_bytes(self.root / relative, MAX_PAGE_BYTES, label="index snapshot source")
+        if sha256_bytes(content) != expected:
+            raise ClaimTreeChanged("index source differs from claim snapshot")
+        return content
+
+
 def _rebuild_plan(
     repair_lineage: str,
 ) -> tuple[str, bytes, dict[str, object]] | None:
     """The write to make, or None when the index already matches the vault."""
-    manifest, tree = snapshot_claim_tree_with_content(ROOT)
-    notes = {
-        path: content
-        for path, content in tree.items()
-        if path.startswith("knowledge/notes/")
-    }
-    content = build_index_bytes(ROOT, base=notes)
+    manifest = snapshot_claim_tree(ROOT)
+    content = build_index_bytes(ROOT, base=_ManifestIndexPages(ROOT, manifest))
     before_bytes, before_hash = _current_index()
     if before_bytes == content:
         return None

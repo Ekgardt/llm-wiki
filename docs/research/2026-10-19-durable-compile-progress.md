@@ -4651,3 +4651,71 @@ and confirmed no other use of the replaced private eager helpers. Those helpers
 were removed from the candidate. Standalone claim-tree materialization,
 per-source/daily/archive/output limits, actual-vault recovery/installation and
 full useful-cycle qualification remain open.
+
+### Manifest-only claim capture and standalone index planning — design 2026-10-20
+
+`claim_tree_manifest.snapshot_claim_tree` currently obtains every content body
+only to discard the content dictionary. Standalone `_rebuild_plan` deliberately
+retains that dictionary to bind rendered content to its claim manifest. Warm
+measurements with 16,778,128 input bytes showed peak traced allocations of
+17,840,583 bytes for manifest-only capture and 17,840,559 for rebuild planning;
+these are retained-body costs even after the renderer itself became streaming.
+Evidence: `logs/step7-manifest-stream-before-20261020.json`.
+
+Primary contracts reviewed 2026-10-20:
+- Git content-addressed objects distinguish content identity from a filename:
+  https://git-scm.com/book/en/v2/Git-Internals-Git-Objects . Keep SHA-256 evidence
+  as the existing contract; do not adopt Git's object format or perform writes.
+- Python Mapping supplies `items()` over key/value access:
+  https://docs.python.org/3.12/library/collections.abc.html#collections.abc.Mapping .
+  A read-only mapping can load one body on demand without a payload dictionary.
+- SQLite isolation covers database transactions, not unrelated Markdown files:
+  https://www.sqlite.org/isolation.html . Keep Markdown content checks and the
+  existing claim-tree transaction precondition; do not infer file immutability
+  from SQLite alone.
+
+Add an internal retention choice to the shared hash collector. Manifest-only
+claim capture stores digests but releases bodies; callers explicitly requiring
+content retain the existing exact content-bearing result. Standalone index
+planning consumes a read-only mapping of note paths to the manifest's digests;
+each body is read once for rendering and must match its recorded digest before
+use. Existing commit-time claim membership/content preconditions remain intact.
+The bytes cannot merely be reread without comparison: a change between manifest
+capture and rendering, even if later reverted, must not publish an index from
+bytes not bound by its manifest.
+
+Alternatives: unchecked rereads weaken provenance; retained complete bodies
+preserve the memory problem; new snapshot files/locks add an unnecessary storage
+or ownership mechanism. The selected mapping retains only digest metadata and
+uses existing stable reads and CAS. It adds a second read/hash for index pages,
+a measured I/O/latency tradeoff for removing corpus-sized heap retention. Existing
+claim quotas, manifest formats, guardrail content consumers and per-file bounds
+are preserved; their independent law-9 review is not declared complete here.
+
+The shared collector fix also covers manifest-only guardrail readers, which had
+exactly the same retain-then-discard path. Content-bearing claim and guardrail
+APIs preserve their outputs and existing admission checks. Qualification: 265
+tests passed on Python 3.12 (86.74 s) and Python 3.10 (89.77 s), including
+manifest/explicit-body parity, input-mutation refusal, unlisted-path refusal
+before any read, full automatic-writer integration, index tree-race retries,
+committed index-drift repair, guardrail readers and compile transactions.
+
+For the same warm 16,778,128-byte input, manifest-only capture now peaked at
+3,158,859 traced bytes (0.0387 s), versus 17,840,583 (0.0426 s). Standalone
+rebuild planning peaked at 3,160,117 bytes (0.1508 s), versus 17,840,559
+(0.1231 s). Guardrail manifest-only capture peaked at 3,160,501 bytes (0.0362 s).
+The extra index reread/hash trades about 27.7 ms in this experiment for avoiding
+whole-tree body retention. These are isolated planning measurements, not full
+publication/model-cycle or total RSS measurements. Evidence:
+`logs/step7-manifest-stream-{before,after}-20261020.json`.
+
+All twenty changed/new functions passed Lizard/AST gates; Ruff and diff checks
+passed. Fresh partial graph caller views at `ef09484b` covered
+`snapshot_claim_tree`, `snapshot_guardrail_sources` and `_rebuild_plan`, with
+source inspection of the shared hash collector and content-bearing consumers.
+The original transaction manifest and index-before-state preconditions are
+unchanged. No private-vault publication or installation was attempted. Remaining
+work includes source/archive/output and claim/guardrail limits, operator handling
+of unrecoverable model outcomes beyond the internal authorization API, actual
+private-vault recovery/installation, qualified compatibility removal, and complete
+useful-cycle quality/token/time evidence on the agreed medium model.

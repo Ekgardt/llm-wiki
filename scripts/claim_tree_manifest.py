@@ -26,7 +26,8 @@ MAX_GUARDRAIL_SOURCE_DIRECTORIES = 5_000
 # refuses a symlink-free runaway tree.
 MAX_GUARDRAIL_SOURCE_DEPTH = 12
 MAX_GUARDRAIL_SOURCE_FILE_BYTES = MAX_KNOWLEDGE_PAGE_BYTES
-# Bytes one guard-rail snapshot holds in memory at once; the live sources are 0.74 MB of it
+# Bytes a content-bearing guard-rail snapshot holds; manifest-only reads release bodies.
+# The live sources are 0.74 MB of it
 # (2026-09-27). A vault-size ceiling like `claims.max_total_bytes`; review when doctor's 80%
 # warning fires for that setting.
 MAX_GUARDRAIL_SOURCE_TOTAL_BYTES = 32 * 1024 * 1024
@@ -120,6 +121,7 @@ def _hash_sources(
     label: str,
     total_message: str,
     relative_of: Callable[[Path, Path], str],
+    retain_content: bool = True,
 ) -> tuple[list[dict[str, str]], dict[str, bytes]]:
     entries: list[dict[str, str]] = []
     contents: dict[str, bytes] = {}
@@ -130,7 +132,8 @@ def _hash_sources(
         if total > total_limit:
             raise ValueError(total_message)
         relative = relative_of(vault, path)
-        contents[relative] = content
+        if retain_content:
+            contents[relative] = content
         entries.append({"path": relative, "sha256": sha256_bytes(content)})
     return entries, contents
 
@@ -181,7 +184,7 @@ def _paths(vault: Path) -> list[Path]:
 
 
 def _snapshot_claim_tree(
-    vault: Path,
+    vault: Path, *, retain_content: bool = True,
 ) -> tuple[dict[str, object], dict[str, bytes]]:
     vault = Path(vault).resolve(strict=True)
     discovered = _paths(vault)
@@ -193,6 +196,7 @@ def _snapshot_claim_tree(
         label="claim tree page",
         total_message=f"claim tree exceeds the total byte limit; {raise_hint('claims.max_total_bytes')}",
         relative_of=_claim_relative,
+        retain_content=retain_content,
     )
     if _relative_names(vault, discovered) != _relative_names(vault, _paths(vault)):
         raise ClaimTreeChanged("claim tree membership changed during snapshot")
@@ -209,7 +213,7 @@ def _snapshot_claim_tree(
 
 
 def snapshot_claim_tree(vault: Path) -> dict[str, object]:
-    return _snapshot_claim_tree(vault)[0]
+    return _snapshot_claim_tree(vault, retain_content=False)[0]
 
 
 def snapshot_claim_tree_with_content(
@@ -403,10 +407,10 @@ def _guardrail_source_paths(vault: Path) -> list[Path]:
     return walk.paths()
 
 
-def snapshot_guardrail_sources_with_content(
-    vault: Path,
+def _snapshot_guardrail_sources(
+    vault: Path, *, retain_content: bool,
 ) -> tuple[dict[str, object], dict[str, bytes]]:
-    """Return a bounded manifest and the exact source bytes it hashes."""
+    """Capture one manifest, retaining its exact bodies only when requested."""
     vault = Path(vault).resolve(strict=True)
     discovered = _guardrail_source_paths(vault)
     entries, contents = _hash_sources(
@@ -417,6 +421,7 @@ def snapshot_guardrail_sources_with_content(
         label="guardrails source",
         total_message="guardrails sources exceed the total byte limit",
         relative_of=_guardrail_relative,
+        retain_content=retain_content,
     )
     if discovered != _guardrail_source_paths(vault):
         raise ClaimTreeChanged("guardrails source membership changed during snapshot")
@@ -434,8 +439,15 @@ def snapshot_guardrail_sources_with_content(
     return manifest, contents
 
 
+def snapshot_guardrail_sources_with_content(
+    vault: Path,
+) -> tuple[dict[str, object], dict[str, bytes]]:
+    """Return a bounded manifest and the exact source bytes it hashes."""
+    return _snapshot_guardrail_sources(vault, retain_content=True)
+
+
 def snapshot_guardrail_sources(vault: Path) -> dict[str, object]:
-    return snapshot_guardrail_sources_with_content(vault)[0]
+    return _snapshot_guardrail_sources(vault, retain_content=False)[0]
 
 
 def _is_notes_page_path(path: str) -> bool:

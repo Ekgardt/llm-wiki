@@ -210,9 +210,13 @@ only extracted navigation entries for ordering. Original and resulting page sets
 are both checked against any explicit `index.max_pages` /
 `index.max_total_bytes` quota; both now default to 0 (disabled). Private sources
 remain subject to input checks and are excluded before their text is decoded
-into public index entries. Per-page/output limits remain in force. This renderer
-does not make the standalone `_rebuild_plan` streaming: that caller still obtains
-a content-bearing claim-tree snapshot, a separate remaining memory boundary.
+into public index entries. Per-page/output limits remain in force. Standalone
+`_rebuild_plan` now captures a digest-only claim manifest and reads note bodies
+through a manifest-bound mapping: a changed body is refused before rendering.
+The existing claim-tree transaction precondition still checks membership and
+content at publication. Manifest-only claim/guardrail readers release bodies;
+explicit content-bearing readers retain their original exact-body contract.
+This adds a second read/hash of index notes instead of retaining the whole tree.
 
 The approved 2026-10-18 compile correction setting is `compile.validation_retries`
 (`LLM_WIKI_COMPILE_VALIDATION_RETRIES` for one run), default 2, minimum 0, no
