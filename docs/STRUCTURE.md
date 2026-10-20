@@ -1395,6 +1395,16 @@ Production routing must adopt this path before the independent root/capture
 helpers can be removed.
 
 Saved-snapshot and initial-orphan validation share a streaming body verifier.
+For daily records with an original, validation also proves that the part's
+content hash matches its declared original byte range. The original member is
+read through a context-owned range view: a complete pass proves its whole hash
+and records block hashes; subsequent reads verify blocks and retain only the
+current I/O block. Consecutive records reuse that open original; a different
+digest or scope exit closes it. Deadlines and closed-scope checks apply to cached
+reads too. Rewinds use zero plus bounded reads so Python 3.10 does not perform
+large hidden reads inside forward ZIP seeks. This adds no persisted block index
+or temporary file. The planner's restored original and live capture still use
+whole bytes until the remaining native-frame and proof consumers migrate.
 Each referenced byte blob is hashed through EOF using the existing I/O transfer
 buffer; only verified digest identities are retained for that pass. Record
 metadata must bind its content/original digests, satisfy the existing snapshot

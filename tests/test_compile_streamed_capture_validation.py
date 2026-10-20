@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import zipfile
+from contextlib import contextmanager, nullcontext
 
 import compile_controller as controller
 import compile_memory as compiler
@@ -90,6 +91,53 @@ def test_stream_validation_detects_damage_at_end_of_original(vault):
     members[name] = members[name][:-1] + b'!'
     with pytest.raises(ValueError, match='snapshot content digest mismatch'):
         _validate(members)
+
+
+def test_validation_rejects_a_self_consistent_part_from_another_original(vault):
+    inputs = _inputs(vault)
+    members = _archive_members(inputs)
+    original = inputs.dailies[0].content
+    foreign = b'!' + original[1:]
+    digest = hashlib.sha256(foreign).hexdigest()
+    members['blobs/' + digest] = foreign
+    _change_first_record(members, lambda value: value.update(content=digest, sha256=digest))
+    with pytest.raises(ValueError, match='original source range'):
+        _validate(members)
+
+
+@pytest.mark.parametrize('change', [
+    lambda value: value.update(byte_start=True),
+    lambda value: value.update(byte_start=-1),
+    lambda value: value.update(byte_end=value['byte_start'] - 1),
+    lambda value: value.update(byte_end=10**9),
+])
+def test_validation_rejects_invalid_original_range(vault, change):
+    members = _archive_members(_inputs(vault))
+    _change_first_record(members, change)
+    with pytest.raises(ValueError, match='original source range'):
+        _validate(members)
+
+
+@pytest.mark.parametrize('invalid', [False, True])
+def test_original_range_is_shared_only_within_validation_and_closed(vault, monkeypatch, invalid):
+    members = _archive_members(_inputs(vault))
+    if invalid:
+        _change_first_record(members, lambda value: value.update(byte_start=-1))
+    opened = []
+    original_range = controller.CompileInputArchive.original_range
+
+    @contextmanager
+    def observed(reader, digest, *, deadline=None):
+        with original_range(reader, digest, deadline=deadline) as content:
+            opened.append(content)
+            yield content
+
+    monkeypatch.setattr(controller.CompileInputArchive, 'original_range', observed)
+    expected = pytest.raises(ValueError, match='original source range') if invalid else nullcontext()
+    with expected:
+        _validate(members)
+    assert len(opened) == 1
+    assert opened[0].stream.closed
 
 
 def test_stream_validation_preserves_native_frame_shape_check(vault):

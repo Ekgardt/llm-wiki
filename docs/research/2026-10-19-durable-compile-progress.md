@@ -3537,3 +3537,70 @@ foreground queue consumers. Ruff/diff checks pass. Lizard plus AST measured all
 `logs/step7-range-boundaries-qualified-py310-20261020.txt`, and
 `logs/step7-range-boundaries-complexity-20261020.json`. No installation or
 real-provider qualification has been performed for this change.
+
+### 2026-10-20 — owned verified original ranges and part provenance
+
+Fresh built-in callees at generation-18e038c8049b17be-516be737 match 5b390aff;
+the partial graph has 112859 unresolved edges and is supplemented by the
+validator, archive reader, queue artifact guard and partition proof source.
+The retained-capture validator checks each blob hash independently, but does not
+prove a daily part equals the declared range of its original. Replacing one part,
+its blob hash, record hash and manifest hash with a self-consistent foreign body
+is accepted today. A new regression reproduces that acceptance before any change.
+
+Primary sources reviewed today:
+[Python ZIP member streams](https://docs.python.org/3.12/library/zipfile.html),
+[Restic content-addressed blobs and integrity](https://restic.readthedocs.io/en/stable/100_references.html),
+and [NIST secure hash standard](https://csrc.nist.gov/pubs/fips/180-4/upd1/final).
+NIST's page notes planned revision; this uses the project's existing SHA-256,
+not a new cryptographic algorithm. Content hashes depend on the already trusted
+queue checkpoint/manifest; they are not independent authentication or an OS
+sandbox. Restic's design motivates per-blob verification, not a claim that this
+unencrypted archive inherits Restic's encryption guarantees.
+
+Choose a context-owned original member reader. Scan its full declared extent
+and EOF, verifying the existing whole hash while recording hashes of existing
+IO_CHUNK_BYTES blocks. Subsequent ranges reread and verify touched blocks;
+one current verified bytes block is retained as the I/O buffer. The scope closes
+the member even on failure; closed/expired scopes cannot read cached bytes.
+Use the resulting range iterator to hash each part's declared original span and
+compare with its content identity before accepting the capture. Reuse the current
+original only while consecutive records name that same digest.
+
+Alternatives: whole bytes keep the memory problem; copying to temporary files
+adds disk space and lifecycle obligations; mmap of live/mutable files does not
+make immutable evidence; reading ZIP private offsets introduces a second format
+parser. Standard member streams preserve the current ZIP validation. Inspected
+Python 3.10 and 3.12 ZipExtFile.seek implementations differ: 3.10 may read large
+amounts internally to seek forward. Therefore rewind only to zero and advance
+with explicit bounded reads and deadline checks. This can cost extra sequential
+I/O for backward access; measure the actual validation/canonical-parser paths
+before qualification. No new runtime path, package, archive format or data cap.
+The full capture/planner/native-frame range migration remains unfinished.
+
+Implemented the range view inside the existing controller and used it in the
+shared retained/orphan capture validator. It retains computed block digests and
+the current verified block, not the original body. The canonical entry parser
+and partitioner run against the actual ZIP-backed view in a regression, without
+a buffer adapter. Range/index/search tests cover backward access, cross-block
+matches, partial underlying reads, empty originals, changed blocks, declared
+extent mismatch, and closed/expired scopes. Capture tests reject self-consistent
+foreign parts and invalid ranges; consecutive parts reuse one member and both
+success and validation failure close it. Native frame metadata and the planner's
+existing bytes-only proof consumers have not yet migrated.
+
+Related suites passed 227 tests on Python 3.12 (81.51s) and 227 on 3.10 (94.38s).
+After inlining an unnecessary scope iterator helper and adding the empty-original
+case, the final focused suites passed 57 tests on each interpreter (0.90s and
+0.86s). Ruff/diff checks pass; Lizard plus AST measured all 41 changed/new
+functions without violations. Evidence: `step7-original-ranges-*20261020*`.
+
+Three local pairs against 5b390aff used the same archive with four pending parts
+of an 8 MiB original, constructed outside tracing. Median additional traced
+Python allocations were 149,446 bytes before and 161,676 after. Median validation
+time was 14.10ms before and 21.79ms after. The extra block hashes and part-range
+proof therefore have measured CPU/metadata cost, while avoiding a whole-original
+allocation. Raw measurements and scope are in
+`logs/step7-original-ranges-memory-20261020.json`. This is neither RSS nor
+real-provider full-cycle performance, token cost or output quality. No installed
+source, runtime ownership, private page or live compiler was changed.
