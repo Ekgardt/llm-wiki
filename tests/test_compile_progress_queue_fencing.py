@@ -12,10 +12,6 @@ from tests.adopted_vault import adopt
 def queue(tmp_path):
     root, state = adopt(tmp_path)
     queue = memory_queue.active_or_legacy_memory_queue(root, state)
-    # Isolated storage tests only: installation will use the offline migration.
-    with queue.connection() as database:
-        for statement in progress.SCHEMA_STATEMENTS:
-            database.execute(statement)
     return queue
 
 

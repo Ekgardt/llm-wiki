@@ -49,6 +49,7 @@ _TOMBSTONE_SCHEMA = _SCHEMA_DIR / "operational-db-tombstone-v1.json"
 _MIGRATION_SCHEMA = _SCHEMA_DIR / "reliability-v3-migration-v1.json"
 _ADOPTION_SCHEMA = _SCHEMA_DIR / "reliability-v3-adoption-v1.json"
 _UPGRADED_ADOPTION_SCHEMA = _SCHEMA_DIR / "reliability-v3-adoption-v2.json"
+_FRESH_ADOPTION_SCHEMA = _SCHEMA_DIR / "reliability-v3-adoption-v3.json"
 # Bounded reads of the adoption's own JSON records; each is refused past its bound,
 # never cut. Measured 2026-09-27 on the installed vault: a tombstone is 487-541
 # bytes, the migration record 1 333 and the adoption record 2 507, so 4 KiB and
@@ -283,7 +284,7 @@ def _read_adoption_record(path: Path, state_root: Path) -> dict[str, object]:
     if value.get("schema_version") == "reliability-v3-adoption/v2":
         _validate_upgrade_envelope(value)
         return value
-    _validate_previous_adoption(value)
+    _validate_direct_adoption(value)
     return value
 
 
@@ -657,6 +658,56 @@ def _expected_schema_digests() -> dict[str, str]:
     }
 
 
+def _current_schema_digests() -> dict[str, str]:
+    return dict(_expected_schema_digests(),
+                queue_schema_sha256=memory_queue.QUEUE_COMPILE_SCHEMA_SHA256,
+                adoption_schema_sha256=sha256_bytes(_FRESH_ADOPTION_SCHEMA.read_bytes()))
+
+
+def _initial_schema_digests(source_state):
+    if source_state == "fresh":
+        return _current_schema_digests()
+    return _expected_schema_digests()
+
+
+def _validated_schema_digests(record):
+    schemas = record.get("schemas")
+    if schemas == _expected_schema_digests():
+        return schemas
+    if record.get("source_state") == "fresh" and schemas == _current_schema_digests():
+        return schemas
+    raise ValueError("adoption schema digests changed")
+
+
+def _current_initialization(record):
+    return record.get("schemas") == _current_schema_digests()
+
+
+def _adoption_schema(record):
+    schemas = {"reliability-v3-adoption/v1": _ADOPTION_SCHEMA,
+               "reliability-v3-adoption/v3": _FRESH_ADOPTION_SCHEMA}
+    version = record.get("schema_version")
+    if version not in schemas:
+        raise ValueError("unsupported adoption schema version")
+    return schemas[version]
+
+
+def _validate_direct_adoption(value):
+    _bounded_adoption_component(value)
+    validate_schema(value, _adoption_schema(value))
+    expected = _expected_schema_digests()
+    if value["schema_version"] == "reliability-v3-adoption/v3":
+        expected = _current_schema_digests()
+    if value.get("schemas") != expected:
+        raise ValueError("adoption schema digests changed")
+
+
+def _initial_adoption_version(migration):
+    if _current_initialization(migration):
+        return "reliability-v3-adoption/v3"
+    return "reliability-v3-adoption/v1"
+
+
 def _require_adoption_sources(
     root: Path, adoption: dict[str, object]
 ) -> dict[str, object]:
@@ -685,9 +736,7 @@ def _require_adoption_sources(
     the producer must still be installed. An absent adapter is a broken
     installation and fails closed; a changed one is an ordinary update.
     """
-    schemas = adoption.get("schemas")
-    if not isinstance(schemas, dict) or schemas != _expected_schema_digests():
-        raise ValueError("adoption schema digests changed")
+    schemas = _validated_schema_digests(adoption)
     if _kind(root / "scripts" / "integration_adapter.py") != "file":
         raise ValueError("installed integration is missing")
     return schemas
@@ -2038,7 +2087,7 @@ def _new_migration_record(
     body = {
         "source_state": source_state,
         "databases": databases,
-        "schemas": _expected_schema_digests(),
+        "schemas": _initial_schema_digests(source_state),
         "installed_integration_sha256": _integration_digest(root),
     }
     operation_hash = sha256_bytes(canonical_json_bytes(body))
@@ -2103,8 +2152,7 @@ def _load_migration(paths: dict[str, Path], state_root: Path) -> dict[str, objec
 def _validate_migration_context(
     migration: dict[str, object], root: Path
 ) -> dict[str, dict[str, object]]:
-    if migration.get("schemas") != _expected_schema_digests():
-        raise ValueError("migration schema digests changed")
+    _validated_schema_digests(migration)
     if migration.get("installed_integration_sha256") != _integration_digest(root):
         raise ValueError("installed integration changed during adoption")
     records = _named_database_records(migration.get("databases"))
@@ -2214,12 +2262,22 @@ def _prepare_candidate(
     candidate: Path,
     source: Path | None,
     state_root: Path,
+    migration: dict[str, object],
 ) -> None:
     kind = _kind(candidate)
     if kind not in {"missing", "file"}:
         raise ValueError("Reliability V3 candidate path has the wrong kind")
-    spec.initialize(candidate, source_v2=source)
+    _initialize_adoption_candidate(spec, candidate, source, state_root, migration)
     spec.validate(candidate, state_root=state_root)
+
+
+def _initialize_adoption_candidate(spec, candidate, source, state_root, migration):
+    if spec.name == "queue" and _current_initialization(migration):
+        from compile_progress_migration import initialize_fresh_candidate
+
+        initialize_fresh_candidate(candidate, state_root=state_root)
+        return
+    spec.initialize(candidate, source_v2=source)
 
 
 def _publish_candidate(
@@ -2339,7 +2397,7 @@ def _adopt_database(
     if _kind(active) == "file":
         _resume_active_database(spec, candidate, active, state_root)
         return
-    _prepare_candidate(spec, candidate, source, state_root)
+    _prepare_candidate(spec, candidate, source, state_root, migration)
     tombstone = _expected_tombstone(
         database_name=spec.name,
         source_state=source_state,
@@ -2428,7 +2486,7 @@ def _build_adoption_record(
     )
     source_state = str(migration["source_state"])
     return {
-        "schema_version": "reliability-v3-adoption/v1",
+        "schema_version": _initial_adoption_version(migration),
         "operation_id": migration["operation_id"],
         "source_state": source_state,
         "migration": {
@@ -2462,7 +2520,7 @@ def _complete_adoption(
         paths["adoption"],
         adoption,
         state_root=state_root,
-        schema=_ADOPTION_SCHEMA,
+        schema=_adoption_schema(adoption),
         limit=_MAX_RECORD_BYTES,
     )
     return require_reliability_v3_adopted(root=root, state_root=state_root)
@@ -2727,6 +2785,7 @@ def _inspect_adopted(
     report["details"]["compile_progress"] = {
         "reliability-v3-adoption/v1": "upgrade-required",
         "reliability-v3-adoption/v2": "upgraded",
+        "reliability-v3-adoption/v3": "upgraded",
     }[adoption["schema_version"]]
     return report
 

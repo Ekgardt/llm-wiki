@@ -5447,3 +5447,101 @@ authenticated preserved-prefix publication and DLP allowlists. Logs:
 `logs/step7-image-loading-py310-20261020.log`. All 10 changed functions pass actual
 Lizard/AST checks (`logs/step7-image-loading-complexity-20261020.json`), Ruff and
 diff checks pass. Candidate only; no live installation or full-cycle claim.
+
+### Fresh-install compile journal (2026-10-20, design before implementation)
+
+Production adoption of an empty isolated vault returned adopted with queue version
+3, zero compile journal tables, and compile_progress=upgrade-required. Evidence:
+`logs/step7-fresh-journal-before-20261020.json`. Both installers then demand an
+external backup and stopped-agent confirmation for this newly created database.
+The defect is common initialization, not either shell's argument parsing.
+
+Within the approved versioned compile-journal contract, new fresh adoption plans
+will select the existing queue schema 4 before publishing an active queue. Preserve
+all old migration plans and adoption records exactly: an old planned schema still
+resumes as that schema. Queue 4 is built using the same transactional journal
+migration on an unpublished, empty candidate. Coordinator schema 3, database paths,
+tombstones, operational owners and the existing migration record layout stay the
+same. A versioned adoption/v3 record denotes a fresh queue-4/coordinator-3 pair;
+it has no fictitious previous installation or backup. Its schema pins each
+component version and permits only source_state=fresh. Existing adoption/v1 still
+requires the backed-up offline upgrade; adoption/v2 retains its real prior-record
+and backup binding. No existing active database is silently upgraded. New fresh
+records must be accepted consistently by admission, queue, doctor and backup.
+This is initialization of the already-approved journal, not another runtime store,
+provider, process, environment contract or path.
+
+Research checked today:
+- https://www.sqlite.org/pragma.html#pragma_user_version — application-owned
+  schema version, separate from SQLite's internal schema counter.
+- https://docs.python.org/3.12/library/sqlite3.html#transaction-control — explicit
+  transaction control for atomic schema updates; keep begin_immediate and the
+  existing FULL/rollback-journal contract on Python 3.10 as well.
+- https://www.postgresql.org/docs/current/app-initdb.html — initialization creates
+  a complete owned database system before use. This is an initialization analogy,
+  not a proposal to add PostgreSQL or its cluster architecture.
+
+Alternatives rejected: asking an empty new install to back up and upgrade itself;
+pretending an upgrade envelope has a prior backup; changing historical v1 schemas
+and thereby invalidating their recorded digests; or silently upgrading already
+active queues. Tradeoff: immutable old metadata readers remain necessary for
+existing installations and interrupted old plans, while new creation uses current
+metadata. They can retire only when supported old installations no longer exist.
+Qualification must include real fresh admission, compile journal writes, interrupted
+candidate/publication resumption, refusal of populated or mismatched candidates,
+legacy plans/upgrade preservation, and both installer ready branches.
+
+Implementation: current fresh plans bind queue schema 4 and the fresh adoption/v3
+schema; historical migration plans retain their recorded digests and resume the
+old initialization. The existing migration-record structure and runtime paths are
+unchanged. The current journal is built on the empty unpublished candidate before
+publication. Active paths/aliases, outside-state destinations, populated candidates
+and inconsistent metadata are refused. Fresh adoption validates exact queue-4 and
+coordinator-3 versions. Initial read/write admission, queue contract selection,
+doctor, backup and repair reporting recognize that record. An explicit upgrade
+request on an already-current fresh installation returns verified readiness with
+no invented backup digest or migration action.
+
+The two original fresh-install regressions failed before the fix: inspection
+required an upgrade and the first checkpoint failed because compile_work_events
+was absent. New tests also cover actual process death after candidate creation,
+queue publication and final adoption publication, resumable old plans, candidate
+containment/emptiness, component-version pinning, and both Bash/PowerShell ready
+branches without backup flags. The first implementation's outside-state refusal
+occurred after creating the destination; a reproducing test caught that and the
+shared runtime-parent containment check now runs before initialization.
+
+Historical upgrade tests now explicitly construct an old planned installation
+through the same production adoption API. Their backup, crash and old-client
+assertions are unchanged. Ordinary health/fencing fixtures now use the real current
+fresh journal instead of patching schema statements into a legacy database. The
+operator CLI's missing-journal tests likewise retain an explicit old installation;
+they still require the original upgrade-required response and unchanged DB bytes.
+
+A real Restic 0.19.1 experiment backed up and restored an isolated current fresh
+vault, including queue schema 4, adoption/v3, exact Markdown and queued payload.
+The receipt-bound restore validated both databases in 12.10 seconds. Evidence:
+`logs/step7-fresh-journal-real-restic-20261020.json`. This does not qualify the
+installed private vault or remove the requirement for its backup and restore.
+
+Final qualification: all 513 tests across 30 related files passed on Python 3.12
+(70.88 s) and Python 3.10 (69.34 s), including both installed Bash and PowerShell
+command slices, real process-death/resumption, migration, capture/queue consumers,
+controller recovery, doctor, publication DLP, backup and schema checks. Final logs:
+`logs/step7-fresh-journal-final-py312-20261020.log` and
+`logs/step7-fresh-journal-final-py310-20261020.log`. Those final runs used dedicated
+local tmpfs fixture roots to avoid the heavily delayed disk. Earlier disk runs
+contained the two subsequently corrected historical-fixture tests and were
+interrupted after the final complete runs passed; their logs are retained, not
+reported as successes. The 16 focused fresh-install checks also passed on disk,
+and the separate real Restic experiment used disk. These runs do not claim native
+Windows qualification or power-loss durability testing.
+
+All 42 changed functions pass actual Lizard/AST complexity constraints; Ruff and
+diff checks pass. The new JSON schema is present in the real product dependency
+inventory (251 files), confirmed in
+`logs/step7-fresh-journal-dependency-proof-20261020.json`. Graph evidence is in
+`logs/step7-fresh-journal-graph-20261020.json`, with repair/containment follow-up
+queries in their matching logs. The installed vault, existing active owners and
+live compiler were not changed. Real-vault backup/restore, remaining limit review,
+safe rollout, and useful model full-cycle qualification still prevent closure.

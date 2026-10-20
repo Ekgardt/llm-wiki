@@ -18,7 +18,7 @@ import private_vault_backup
 import pytest
 from reliable_memory import canonical_json_bytes, validate_schema
 
-from tests.adopted_vault import adopt
+from tests.adopted_vault import adopt_legacy as adopt
 
 
 def _write_record(state, value):

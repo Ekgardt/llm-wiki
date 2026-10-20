@@ -8,7 +8,7 @@ import memory_queue
 import private_vault_backup as backup
 import pytest
 
-from tests.adopted_vault import adopt
+from tests.adopted_vault import adopt_legacy as adopt
 from tests.test_repair_installed_memory import _run
 
 

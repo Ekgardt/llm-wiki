@@ -5,12 +5,13 @@ from __future__ import annotations
 import sqlite3
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from installed_memory_repair import repair_installed_vault  # noqa: E402
+from installed_memory_repair import _expected_schema_digests, repair_installed_vault  # noqa: E402
 
 
 def adopt(tmp_path: Path) -> tuple[Path, Path]:
@@ -30,6 +31,13 @@ def adopt(tmp_path: Path) -> tuple[Path, Path]:
     if report["overall_status"] != "ok":
         raise AssertionError(report)
     return root, state_root
+
+
+def adopt_legacy(tmp_path: Path) -> tuple[Path, Path]:
+    """Recreate an old planned installation for explicit upgrade regressions."""
+    with patch("installed_memory_repair._initial_schema_digests",
+               return_value=_expected_schema_digests()):
+        return adopt(tmp_path)
 
 
 def tamper_payload(state_root: Path, task_id: str) -> None:

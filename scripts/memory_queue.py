@@ -14266,7 +14266,7 @@ def active_memory_queue(vault: Path, state_root: Path, *, deadline: float | None
 
 
 def _adopted_queue_contract(adoption: dict) -> OperationalDatabaseContract:
-    if adoption["schema_version"] == "reliability-v3-adoption/v2":
+    if adoption["schema_version"] in {"reliability-v3-adoption/v2", "reliability-v3-adoption/v3"}:
         return _QUEUE_COMPILE_CONTRACT
     return _QUEUE_V3_CONTRACT
 

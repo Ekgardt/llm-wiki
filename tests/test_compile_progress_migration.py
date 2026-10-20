@@ -13,7 +13,7 @@ import memory_queue
 import pytest
 from reliable_memory import OperationalDatabaseContractError, open_readonly_operational_db
 
-from tests.adopted_vault import adopt
+from tests.adopted_vault import adopt_legacy as adopt
 
 
 @pytest.fixture

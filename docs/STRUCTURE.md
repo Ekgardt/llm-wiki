@@ -427,8 +427,16 @@ operation with `--compile-backup-image <absolute-directory>` /
 `-CompileBackupImage <absolute-directory>` plus their explicit stopped-agent
 confirmation. Validated inspection exposes `details.compile_progress` as
 `upgrade-required` or `upgraded`; invalid/incomplete admission exposes neither.
-An upgraded installation needs no image. An installation requiring migration
-without the explicit inputs reports a warning, including after fresh v3 adoption.
+An upgraded installation needs no image. New fresh adoption creates the compile
+journal on the empty unpublished queue candidate before activation. Its version-3
+adoption record pins queue schema 4 and coordinator schema 3, without inventing a
+previous installation or backup. It uses the same database, migration-record and
+tombstone paths. Old plans resume their recorded schemas; existing version-1
+adoptions still require the explicit backed-up offline migration, and version-2
+upgrade envelopes retain their prior-record and backup proof. Normal admission
+never upgrades an active database. The same initial-adoption API serves both
+installers, whose validated ready branch needs no backup flags. An existing
+installation requiring migration without explicit inputs reports a warning.
 No image directory is chosen or deleted automatically. An isolated migrated fixture has passed backup and
 restore using real Restic 0.19.1, including exact Markdown and queued payload
 checks; the installed private vault has not passed this deployment qualification.

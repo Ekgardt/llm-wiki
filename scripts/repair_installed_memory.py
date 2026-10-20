@@ -163,14 +163,23 @@ def _upgrade_compile_report(args, root: Path, state_root: Path) -> dict:
     return {
         "mode": "apply",
         "overall_status": "ok",
-        "actions": [{"code": "compile_progress_upgraded"}],
+        "actions": _compile_upgrade_actions(record),
         "blockers": [],
-        "details": {
-            "adoption_state": "adopted",
-            "compile_progress": "upgraded",
-            "backup_manifest_sha256": record["backup_manifest_sha256"],
-        },
+        "details": _compile_upgrade_details(record),
     }
+
+
+def _compile_upgrade_actions(record):
+    if record["schema_version"] == "reliability-v3-adoption/v3":
+        return []
+    return [{"code": "compile_progress_upgraded"}]
+
+
+def _compile_upgrade_details(record):
+    details = {"adoption_state": "adopted", "compile_progress": "upgraded"}
+    if "backup_manifest_sha256" in record:
+        details["backup_manifest_sha256"] = record["backup_manifest_sha256"]
+    return details
 
 
 def _report_status(report: dict) -> str:

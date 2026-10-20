@@ -18,6 +18,7 @@ from reliable_memory import (
     DEFAULTS,
     OperationalDatabaseContractError,
     RuntimeFileIdentity,
+    _require_runtime_parent_containment,
     begin_immediate,
     canonical_json_bytes,
     capture_runtime_file_identity,
@@ -97,6 +98,35 @@ def migrate_candidate(path: Path, *, state_root: Path, deadline=None, killpoint=
         path, busy_ms=DEFAULTS.queue_busy_ms, deadline=deadline,
     )) as database:
         return _upgrade_transaction(database, state_root, emit, deadline)
+
+
+def _candidate_has_current_schema(path, state_root):
+    if not path.exists():
+        return False
+    validate_operational_db_file(path, state_root, max_bytes=None, owner_only=True)
+    with closing(open_operational_db(path, busy_ms=DEFAULTS.queue_busy_ms)) as database:
+        return database.execute("PRAGMA user_version").fetchone()[0] == COMPILE_QUEUE_VERSION
+
+
+def _require_fresh_candidate_path(path, state_root):
+    _require_runtime_parent_containment(path.parent.resolve(strict=True),
+                                        Path(state_root).resolve(strict=True))
+    if path.absolute() == (state_root / "run/queue-v3.sqlite3").absolute():
+        raise ValueError("active queue cannot be a fresh candidate")
+    if path.exists():
+        _require_candidate(path, state_root)
+
+
+def initialize_fresh_candidate(path, *, state_root):
+    """Build the current journal only on an unpublished empty adoption candidate."""
+    path = Path(path)
+    _require_fresh_candidate_path(path, state_root)
+    if not _candidate_has_current_schema(path, state_root):
+        memory_queue.initialize_queue_v3_candidate(path, source_v2=None)
+    report = migrate_candidate(path, state_root=state_root)
+    with closing(open_operational_db(path, busy_ms=DEFAULTS.queue_busy_ms)) as database:
+        memory_queue._require_empty_queue_v3(database)
+    return report
 
 
 def _require_owner(registry, lease):
@@ -237,5 +267,8 @@ def upgrade_offline(*, root: Path, state_root: Path, backup_image: Path,
     emit = killpoint or (lambda _point: None)
     with backup._held_backup_owner(state) as (registry, lease), backup._heartbeat(registry, lease):
         record = repair._read_adoption_record(state / 'run/reliability-v3-adopted.json', state)
+        if record['schema_version'] == 'reliability-v3-adoption/v3':
+            _require_owner(registry, lease)
+            return repair.require_reliability_v3_adopted(root=root, state_root=state)
         record = _prepare_or_resume(root, state, image, record, registry, lease, emit)
         return _finish_upgrade(root, state, record, registry, lease, emit)

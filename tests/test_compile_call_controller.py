@@ -1227,7 +1227,7 @@ def test_recovery_states_pass_backup_database_certification(work, monkeypatch, c
 
 @pytest.mark.parametrize('command', ['compile-progress', 'compile-recover'])
 def test_operator_cli_names_missing_journal_upgrade(tmp_path, monkeypatch, capsys, command):
-    from tests.adopted_vault import adopt
+    from tests.adopted_vault import adopt_legacy as adopt
 
     root, state = adopt(tmp_path)
     queue = memory_queue.active_memory_queue(root, state)

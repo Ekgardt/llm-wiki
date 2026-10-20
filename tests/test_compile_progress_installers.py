@@ -11,7 +11,7 @@ from pathlib import Path
 import installed_memory_repair as repair
 import pytest
 
-from tests.adopted_vault import adopt
+from tests.adopted_vault import adopt_legacy as adopt
 from tests.powershell_literal import ps_literal
 from tests.test_installer_bootstrap import _powershell_functions, _shell_function
 

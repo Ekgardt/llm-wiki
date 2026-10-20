@@ -16,9 +16,6 @@ from tests.adopted_vault import adopt
 def stored(tmp_path):
     root, state = adopt(tmp_path)
     queue = memory_queue.active_memory_queue(root, state)
-    with queue.connection() as database:
-        for sql in progress.SCHEMA_STATEMENTS:
-            database.execute(sql)
     queue.enqueue('compile', 1, {'daily': 'fixture'})
     lease = queue.claim('worker')
     event = progress.CompileEvent('a'*64, lease.id, 0, 'b'*64, 'pending', 'ready', {})

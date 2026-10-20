@@ -10,6 +10,7 @@ import sys
 from contextlib import closing
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 import compile_progress_migration as migration
 import installed_memory_repair as repair
@@ -20,7 +21,7 @@ import pytest
 from iso_time import parse_instant
 from reliable_memory import OperationalDatabaseContractError
 
-from tests.adopted_vault import adopt
+from tests.adopted_vault import adopt_legacy as adopt
 
 
 def _upgrade(root, state, image, **kwargs):
@@ -69,6 +70,7 @@ def test_abrupt_process_death_recovers(tmp_path, point, monkeypatch):
     code = '''
 import os, sys
 from pathlib import Path
+from unittest.mock import patch
 import compile_progress_migration as migration
 root, state, image, point = sys.argv[1:]
 def die(event):
@@ -153,8 +155,10 @@ def test_upgrade_supports_the_installed_single_directory_layout(tmp_path):
     (root / 'scripts').mkdir(parents=True)
     (root / 'scripts/integration_adapter.py').write_bytes(
         Path(migration.__file__).with_name('integration_adapter.py').read_bytes())
-    repair.repair_installed_vault(root=root, state_root=root, adopt_ownership_v3=True,
-                                  confirm_all_agents_stopped=True)
+    with patch("installed_memory_repair._initial_schema_digests",
+               return_value=repair._expected_schema_digests()):
+        repair.repair_installed_vault(root=root, state_root=root, adopt_ownership_v3=True,
+                                      confirm_all_agents_stopped=True)
     image = tmp_path / 'backup'
     image.mkdir(mode=0o700)
     record = _upgrade(root, root, image)
