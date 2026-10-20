@@ -2416,3 +2416,68 @@ packing and protected-digest dependencies, supplemented with source inspection.
 
 Not installed. Production capture selection, full live dependency preparation,
 CLI/MCP/queue/nightly routing and the remaining point7 gates are still required.
+
+### Configuration and execution inventory composition (2026-10-20, candidate implemented)
+
+The dependency boundary has separate product/package/Python inventories, but no
+production composition including live configuration. Add a configuration digest
+covering vault identity, settings bytes and effective numeric settings, current
+authoritative/scoped model choice, the actual provider child environment and the
+validated DLP policy. Collect twice and refuse a change rather than admitting
+mixed observed configuration. Compose existing inventories and check configuration
+again after their collection. This is an observation plus later re-verification,
+not an atomic lock on external editors or installers.
+
+Primary sources checked2026-10-20: Python subprocess documentation
+https://docs.python.org/3/library/subprocess.html (env defines the child process
+environment); SQLite https://www.sqlite.org/isolation.html (database transactions
+do not freeze external files); SLSA provenance
+https://slsa.dev/spec/v1.2/provenance (distinguishing execution parameters and
+resolved dependencies). These support explicit inputs/inventory; they do not
+prove this compiler's dependency closure.
+
+Use provider_environment unchanged. It currently passes the entire process
+environment with the automation marker, so excluding supposedly unrelated keys
+would silently omit inputs available to a CLI. Any inherited environment change
+therefore changes this witness, including benign changes. This conservative
+behavior follows the existing child contract; reconsider it only alongside an
+explicit provider environment contract, not a guessed allowlist. Secrets and
+private paths enter only hashes. Invalid DLP/settings remain errors.
+
+Reject package versions alone, raw environment/configuration persistence,
+per-provider duplicated setting readers and caching by mtime only. No retry loop,
+new numerical limit, directory, database, environment variable or package is
+introduced. Measure real inventory cost before claiming efficient runtime use.
+Loaded-code identity, non-package imports, transitive OS/CLI libraries and
+cooperative update fencing remain separate required qualification; composing
+these components does not certify them or finish production routing.
+
+Read-only measurement on the candidate with the existing Python3.12 test
+environment: product250 files/8935946 bytes in0.108s; packages8772 files/172014387
+bytes in3.699s; Python632 files/40305226 bytes in0.375s. This is one observed
+collection under current host load, not a latency bound or full-cycle efficiency
+qualification. Repeated witness checks can multiply this cost and must be
+included in the eventual real-cycle measurement. Evidence:
+`logs/step7-dependency-inventory-cost-20261020.json`.
+
+Implementation exposes compile_configuration_dependency_manifest,
+compile_execution_dependency_manifest and capture_compile_dependencies using
+the existing CompileDependencies verifier. It reuses settings.effective,
+model_selection's scoped choice/file reader, provider_environment and the
+validated DLP policy/identity encoder. Nine initial red tests preceded code.
+The related suites then passed98 cases on3.12/3.10 (44.60s/49.60s); all10 focused
+cases passed afterward (1.13s/1.20s), including the additional during-call
+configuration change, retained answer and no-call replay after restoration.
+Together99 distinct related cases per interpreter. All24 changed/new functions
+pass measured lizard/AST complexity; whole Ruff/diff pass.
+
+Real read-only composed capture on the candidate/test environment took4.1s;
+re-verification took2.82s and returned the identical digest. No model was called
+and no operational state was changed by that measurement. Evidence:
+`logs/step7-execution-inventory-cost-20261020.json`,
+`logs/step7-execution-inventory-*20261020*`. Pre-edit builtin graph
+generation-18e029dd29ad8df7-67b0c5e3 matched12c2b418 and showed the product
+inventory dependencies; partial graph coverage was supplemented by source.
+
+Not installed or routed as a default worker yet. Full dependency closure and
+the remaining routing, recovery, installation and real-cycle gates remain open.

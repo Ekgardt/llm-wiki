@@ -1325,6 +1325,18 @@ protected-call identity encoder converts native tuple evidence to JSON arrays
 before canonical hashing, preserving configuration and executable identity
 without relaxing the canonical serializer.
 
+The candidate dependency factory composes product, installed-package, Python
+runtime and configuration inventories into one re-inspected witness. Configuration
+binds settings bytes/effective values, scoped model choice, authenticated DLP
+policy, vault identity and the actual inherited provider environment. Only
+digests escape that configuration reader. Changed observations before/after
+inventory refuse admission. All inherited environment keys participate because
+the existing CLI child receives them; even a benign environment change therefore
+changes this witness. This does not lock external editors, exclude ABA races,
+prove loaded-code/OS-library closure or replace update fencing. Measured candidate
+capture/verification cost was 4.1s/2.82s on the current Python3.12 test environment;
+full-cycle cost remains a qualification requirement.
+
 The archive's eager compatibility planning view keeps daily records materialized for existing partition
 proofs, while context source/target/vault collections retain verified record indices
 and logical paths. Selection filters metadata before reading bodies. Ranking stores

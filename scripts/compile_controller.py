@@ -2657,6 +2657,60 @@ def compile_dependency_digest(manifest):
     return _compile_identity_digest(manifest)
 
 
+def _compile_configuration_identity(root, deadline):
+    import model_selection
+    import settings
+    from llm_client import _policy_identity, provider_environment
+    from model_dlp import load_policy
+
+    operational_deadline_active(deadline)
+    environment = provider_environment()
+    with model_selection.using_root(root):
+        chosen = model_selection.current()
+        values = {name: item.value for name, item in settings.effective(root, environment).items()}
+        model = None if chosen is None else model_selection.selection_table(chosen)
+        policy = _policy_identity(load_policy())
+        raw_digest = hashlib.sha256(model_selection.file_bytes(root)).hexdigest()
+    operational_deadline_active(deadline)
+    return _compile_identity_digest({'root': str(Path(root).resolve(strict=True)),
+        'settings_bytes': raw_digest, 'settings': values, 'model': model,
+        'provider_environment': environment, 'dlp_policy': policy})
+
+
+def _require_same_compile_configuration(before, after):
+    if before != after:
+        raise progress.ProgressConflict('compile configuration changed during inventory')
+
+
+def compile_configuration_dependency_manifest(root, *, deadline=None):
+    """Observe settings, scoped model, validated DLP and the actual child environment.
+
+    Only the resulting digest escapes. Two equal observations reject detected
+    concurrent changes; they do not lock noncooperating editors or prevent ABA.
+    """
+    before = _compile_configuration_identity(root, deadline)
+    _require_same_compile_configuration(before, _compile_configuration_identity(root, deadline))
+    return {'schema': 'compile-configuration/v1', 'parameters_digest': before}
+
+
+def compile_execution_dependency_manifest(root, parameters, *, deadline=None):
+    """Compose verified inventories without claiming loaded-code or OS closure."""
+    configuration = compile_configuration_dependency_manifest(root, deadline=deadline)
+    product = compile_product_dependency_manifest(root, parameters, deadline=deadline)
+    packages = compile_package_dependency_manifest(deadline=deadline)
+    runtime = compile_runtime_dependency_manifest(deadline=deadline)
+    _require_same_compile_configuration(configuration,
+        compile_configuration_dependency_manifest(root, deadline=deadline))
+    return {'schema': 'compile-execution-dependencies/v1', 'configuration': configuration,
+            'product': product, 'packages': packages, 'python': runtime}
+
+
+def capture_compile_dependencies(root, parameters, *, deadline=None):
+    """Build a live re-inspected witness from the same execution inventory."""
+    inspect = partial(compile_execution_dependency_manifest, root, parameters, deadline=deadline)
+    return CompileDependencies.capture(inspect)
+
+
 def compile_work_identity(origin_task_id, source_digest, dependency_digest, request):
     """Bind execution to its original queue task, retained across explicit redrive."""
     if not isinstance(origin_task_id, str) or not origin_task_id:
