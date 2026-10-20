@@ -1182,13 +1182,15 @@ unselected source bodies. ZIP directory metadata is held in memory; source bodie
 are not loaded by opening the container. Python's standard library supplies the
 container format; there is no new package, runtime path or operational database.
 
-The archive's planning view keeps daily records materialized for existing partition
+The archive's eager compatibility planning view keeps daily records materialized for existing partition
 proofs, while context source/target/vault collections retain verified record indices
 and logical paths. Selection filters metadata before reading bodies. Ranking stores
 word statistics and indices; byte sizing stores numeric frame sizes. Required
 citation association still scans every context page. The view is owned by the open
-archive context and must not escape it. Source capture and daily-part planning are
-not yet streaming; this is not installed entrypoint completion.
+archive context and must not escape it. Source capture and daily-part planning now
+have the streaming paths described below; installed entrypoint routing remains
+unfinished. The eager view remains for existing replay/compatibility consumers
+until they adopt the streamed controller and their recovery tests pass.
 
 The capture iterator emits one source's records at a time into the same snapshot
 container. The ordinary in-memory capture uses that iterator too and retains its
@@ -1201,8 +1203,9 @@ writer and complete-work binding must surround it before production routing.
 
 Sequential daily reads share verified immutable blobs and parsed metadata within
 one consecutive physical day. The reader drops that scope before the next day;
-there is no corpus-wide body cache or numeric eviction threshold. Planning still
-materializes the resulting daily records until the streaming planner is integrated.
+there is no corpus-wide body cache or numeric eviction threshold. The eager
+compatibility view materializes daily records; iter_batches() consumes them
+sequentially through the shared planner.
 
 The common batch planner exposes incremental atomic-unit, group and batch
 iteration. Existing eager callers collect that same iterator and retain their
