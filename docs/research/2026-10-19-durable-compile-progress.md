@@ -3665,3 +3665,74 @@ not RSS, end-to-end compilation performance, model quality or token costs.
 Raw evidence: logs/step7-native-range-index-final-measurement-20261020.json
 and logs/step7-native-range-index-final-py{312,310}-20261020.txt. The installed
 vault and live compiler remain unchanged; point 7 remains incomplete.
+
+### 2026-10-20 — shared verified source authority for evidence resolution
+
+Fresh graph generation-18e03be16f2d3c6f-df70873d matches 8bbcd7b2.
+The graph is partial (113073 unresolved): direct inspection additionally covers
+archive-range construction, every original-range consumer, entry metadata,
+canonical partition guards and live daily reads. Eight initial regressions
+reproduced EvidenceResolver rejecting verified ranges with TypeError. Simply
+loosening the bytes guard would lose the source proof rather than fix the seam.
+
+Sources inspected today:
+[Python incremental codecs](https://docs.python.org/3/library/codecs.html#incremental-encoding-and-decoding),
+[RFC 3629](https://www.rfc-editor.org/rfc/rfc3629), and
+[Restic repository design](https://restic.readthedocs.io/en/stable/100_references.html).
+Incremental codecs preserve decoding state across chunks; finalization rejects
+incomplete suffixes. Strict UTF-8 validation covers the whole source, including
+bytes outside a citation. Content-addressed block verification binds returned
+bytes to the initially verified source; it is not encryption or authentication
+of the source's author. The existing Python 3.10 compatibility floor still needs
+local validation and does not imply upstream support.
+
+Move the existing implementation into bounded_io, already the shared I/O layer,
+and remove its controller-local copy. Freeze identity/extent/block geometry;
+keep one bounded mutable cursor. The resolver accepts exactly this verified type
+or its existing bytes contract. It checks owner activity even for cached entry
+metadata. Stream full-source UTF-8/newline indexing and complete-block hashes;
+retain exact entry offsets and materialize only the requested citation. All
+reference digest, block, span and UTF-8-boundary checks remain in place.
+
+Alternatives: mmap would require a stable backing file and cannot directly map
+compressed ZIP members; arbitrary slice/digest interfaces do not prove source
+identity; importing the compiler controller into the resolver reverses the
+low-level dependency direction; duplicating the range reader duplicates security
+logic. No new file layout, runtime format, provider call, dependency, configurable
+limit or truncation is introduced. Transfer width remains the existing I/O step,
+not a maximum source size.
+
+A mutation test initially expected rejection while the cited bytes were still
+in the immutable captured block cache. That expectation was wrong: the cache
+correctly returned the original bytes. The reload regression now evicts that
+block before changing the underlying stream and confirms the changed reload is
+rejected. This retains the established immutable snapshot semantics.
+
+The live source capture, archive record restoration, partition-identity guards
+and retained native frame payloads still need coordinated adoption. This stage
+makes that migration possible without making arbitrary objects authoritative;
+it does not claim the full compiler or installed vault has already migrated.
+
+Qualification: 842 related tests passed on Python 3.12 (46.87s) and Python
+3.10 (51.07s), with one Windows reparse-point test skipped on Linux. The final
+24-test range-evidence suite also passed on both (0.44s/0.37s), including an
+unverified subclass that cannot bypass exact-type source admission. Ruff and
+whitespace checks passed. Lizard plus AST measured all 50 changed/new functions;
+none exceeds the law-5 thresholds. Old private controller implementation and
+its now-unused helpers were removed, with consumers updated to the one shared
+implementation. No installed legacy or private runtime data was deleted.
+
+Three local measurement pairs compare initial source proof plus one citation;
+inputs exist before measurement, and range measurements include complete initial
+stream/hash verification. For one 8 MiB event, median additional Python peak
+allocations were 8,391,120 bytes before, 134,770 for candidate bytes, and 211,587
+for candidate verified ranges. Times were 25.50ms, 25.96ms and 48.37ms respectively.
+For 10,000 short events, peaks were 2,947,903 / 3,747,725 / 3,811,361 bytes and
+times 25.75 / 26.75 / 152.72ms. Range scanning has real seek/hash/Python overhead,
+and entry/newline metadata still scales with event/line count. The bytes path
+also changes metadata construction order and has a higher short-event peak;
+this is not reported as a universal memory or speed improvement. Whole-source
+body allocations are removed from the range evidence path without dropping
+proofs, content or references. These measurements are not RSS, ZIP end-to-end
+compile latency, model quality or token cost; full-cycle qualification remains
+required. Raw measurements: logs/step7-evidence-ranges-measurement-20261020.json.

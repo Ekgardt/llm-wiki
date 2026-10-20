@@ -1513,6 +1513,20 @@ part of that event is pending. Existing list-returning consumers collect the sam
 iterator. Original daily bytes and entry/frame metadata still remain in memory:
 this removes all-part buffering, not the remaining whole-daily read.
 
+The archive range reader and evidence resolver share the existing low-level
+`bounded_io.VerifiedByteRange`. Its verified size, digest, block hashes and
+transfer geometry are frozen; only its read cursor changes. A resolver accepts
+this exact type or the existing immutable bytes contract, never an arbitrary
+object claiming a digest. It checks range ownership/deadline even when reusing
+entry metadata. Full-source UTF-8 validation and physical newline indexing are
+incremental; complete cited-block hashes use verified ranges without copying
+the block. The requested citation still materializes for the existing result
+contract. Closed owners, changed reloaded blocks, bad UTF-8, and mismatched
+references fail. Cached blocks remain the original immutable captured bytes.
+Live daily capture, archive restoration and native-frame retention have not yet
+all adopted this shared source; their remaining whole-body paths are not claimed
+to be streaming.
+
 The native journal lookup is a read-only mapping of body offsets to source
 heads and physical spans. It retains the source reference and metadata, not
 copies of every matched block. A requested value reads its complete block;

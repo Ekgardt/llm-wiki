@@ -1,10 +1,14 @@
 """Bounded, no-follow, stable reads for compile-time authoritative files."""
 from __future__ import annotations
 
+import hashlib
 import math
+import operator
 import os
+import re
 import stat
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # The ceiling for one Markdown page under `knowledge/`, declared once: every
@@ -212,5 +216,192 @@ def read_stable_bytes(
         )
     finally:
         os.close(descriptor)
+
+
+
+
+@dataclass
+class _VerifiedRangeCursor:
+    cached: tuple = (-1, b'')
+    next_index: int = 0
+
+
+@dataclass(frozen=True, eq=False)
+class VerifiedByteRange:
+    """Owned verified source; immutable identity, bounded mutable read cursor.
+
+    The stream owner must keep the stream open. Each reloaded block is checked
+    against its initial hash; cached blocks are immutable captured bytes.
+    """
+
+    stream: object = field(repr=False)
+    size: int
+    digest: str
+    deadline: float | None = None
+    chunk_size: int = IO_CHUNK_BYTES
+    hashes: tuple = field(init=False, repr=False)
+    _cursor: _VerifiedRangeCursor = field(default_factory=_VerifiedRangeCursor, init=False, repr=False)
+
+    def __post_init__(self):
+        hashes = _verified_original_blocks(self.stream, self.size, self.digest,
+                                            self.deadline, self.chunk_size)
+        object.__setattr__(self, 'hashes', hashes)
+        self.stream.seek(0)
+        self.require_active()
+
+    def __len__(self):
+        return self.size
+
+    def require_active(self):
+        _check_deadline(self.deadline, 'original source')
+        if self.stream.closed:
+            raise ValueError('original range scope is closed')
+
+    def iter_chunks(self, start, end):
+        self.require_active()
+        require_byte_range(start, end, self.size)
+        while start < end:
+            index, offset = divmod(start, self.chunk_size)
+            block = self._block(index)
+            take = min(len(block) - offset, end - start)
+            yield block[offset:offset + take]
+            start += take
+
+    def _block(self, index):
+        self.require_active()
+        if self._cursor.cached[0] == index:
+            return self._cursor.cached[1]
+        return self._load_block(index)
+
+    def _load_block(self, index):
+        if index < self._cursor.next_index:
+            self.stream.seek(0)
+            self._cursor.next_index = 0
+        while self._cursor.next_index <= index:
+            block = self._read_proven_block(self._cursor.next_index)
+            self._cursor.cached = self._cursor.next_index, block
+            self._cursor.next_index += 1
+        return self._cursor.cached[1]
+
+    def _read_proven_block(self, index):
+        size = min(self.chunk_size, self.size - index * self.chunk_size)
+        block = _read_original_block(self.stream, size, self.deadline)
+        if hashlib.sha256(block).digest() != self.hashes[index]:
+            raise ValueError('original source range changed after verification')
+        return block
+
+    def range_digest(self, start, end):
+        self.require_active()
+        require_byte_range(start, end, self.size)
+        if start == 0 and end == self.size:
+            return self.digest
+        digest = hashlib.sha256()
+        for chunk in self.iter_chunks(start, end):
+            digest.update(chunk)
+        return digest.hexdigest()
+
+    def __getitem__(self, key):
+        self.require_active()
+        if isinstance(key, slice):
+            return self._slice(key)
+        index = operator.index(key)
+        index = index + self.size if index < 0 else index
+        if not 0 <= index < self.size:
+            raise IndexError('original range index out of bounds')
+        return self._block(index // self.chunk_size)[index % self.chunk_size]
+
+    def _slice(self, key):
+        start, end, step = key.indices(self.size)
+        if not range(start, end, step):
+            return b''
+        if step < 0:
+            start, end = end + 1, start + 1
+        return b''.join(self.iter_chunks(start, end))[::step]
+
+    def find(self, needle, start=0, end=None):
+        self.require_active()
+        needle = memoryview(needle).tobytes()
+        bounds = _original_search_bounds(self.size, start, end)
+        if bounds is None:
+            return -1
+        if len(needle) > bounds[1] - bounds[0]:
+            return -1
+        return _find_original_chunks(self.iter_chunks(*bounds), needle, bounds[0])
+
+
+def _verified_original_blocks(stream, size, expected, deadline, chunk_size):
+    _require_range_identity(expected, chunk_size)
+    if type(size) is not int or size < 0:
+        raise ValueError('invalid original source size')
+    digest, blocks = hashlib.sha256(), []
+    for start in range(0, size, chunk_size):
+        chunk = _read_original_block(stream, min(chunk_size, size - start), deadline)
+        digest.update(chunk)
+        blocks.append(hashlib.sha256(chunk).digest())
+    _require_original_eof(stream, deadline)
+    if digest.hexdigest() != expected:
+        raise ValueError('snapshot content digest mismatch')
+    return tuple(blocks)
+
+
+def _read_original_block(stream, size, deadline):
+    chunks = []
+    while size:
+        _check_deadline(deadline, 'original source')
+        chunk = stream.read(size)
+        _check_deadline(deadline, 'original source')
+        if not chunk:
+            raise ValueError('original source truncated during verification')
+        chunks.append(chunk)
+        size -= len(chunk)
+    return b''.join(chunks)
+
+
+def _require_original_eof(stream, deadline):
+    _check_deadline(deadline, 'original source')
+    extra = stream.read(1)
+    _check_deadline(deadline, 'original source')
+    if extra:
+        raise ValueError('original source extent changed during verification')
+
+
+def _original_search_bounds(size, start, end):
+    start = 0 if start is None else operator.index(start)
+    first, last, _ = slice(start, end).indices(size)
+    if start > size:
+        return None
+    if first > last:
+        return None
+    return first, last
+
+
+def _find_original_chunks(chunks, needle, start):
+    if not needle:
+        return start
+    tail, cursor = b'', start
+    for chunk in chunks:
+        window = tail + chunk
+        found = window.find(needle)
+        if found >= 0:
+            return cursor - len(tail) + found
+        tail = window[len(window) - min(len(window), len(needle) - 1):]
+        cursor += len(chunk)
+    return -1
+
+
+def _require_range_identity(digest, chunk_size):
+    if not isinstance(digest, str) or re.fullmatch(r'[0-9a-f]{64}', digest) is None:
+        raise ValueError('source identity must be a SHA-256 hex digest')
+    if type(chunk_size) is not int or chunk_size <= 0:
+        raise ValueError('source transfer size must be a positive integer')
+
+
+def require_byte_range(start, end, size):
+    if not _valid_original_bounds(start, end, size):
+        raise ValueError('invalid original source range')
+
+
+def _valid_original_bounds(start, end, size):
+    return type(start) is int and type(end) is int and 0 <= start <= end <= size
 
 

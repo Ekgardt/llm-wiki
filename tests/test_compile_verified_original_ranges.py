@@ -9,7 +9,7 @@ import compile_memory as compiler
 import evidence_resolver
 import pytest
 import reliable_memory
-from bounded_io import IO_CHUNK_BYTES
+from bounded_io import IO_CHUNK_BYTES, VerifiedByteRange
 
 from tests.test_compile_protected_dispatch import _archive_members
 from tests.test_compile_streamed_capture_validation import _packed
@@ -89,7 +89,7 @@ class _ObservedStream(io.BytesIO):
 def test_short_reads_and_backward_access_stay_bounded():
     raw = b'abcdef' * IO_CHUNK_BYTES
     with _ObservedStream(raw) as stream:
-        content = controller._VerifiedArchiveBytes(stream, len(raw), hashlib.sha256(raw).hexdigest(), None)
+        content = VerifiedByteRange(stream, len(raw), hashlib.sha256(raw).hexdigest(), None)
         assert content[-3:] == raw[-3:]
         assert content[:3] == raw[:3]
 
@@ -97,7 +97,7 @@ def test_short_reads_and_backward_access_stay_bounded():
 def test_reloaded_block_rejects_change_after_initial_verification():
     raw = b'a' * IO_CHUNK_BYTES + b'b' * IO_CHUNK_BYTES
     with io.BytesIO(raw) as stream:
-        content = controller._VerifiedArchiveBytes(stream, len(raw), hashlib.sha256(raw).hexdigest(), None)
+        content = VerifiedByteRange(stream, len(raw), hashlib.sha256(raw).hexdigest(), None)
         stream.seek(IO_CHUNK_BYTES)
         stream.write(b'!')
         stream.seek(0)
@@ -130,4 +130,4 @@ def test_expired_scope_never_returns_cached_bytes(monkeypatch):
 def test_original_extent_must_match_the_complete_stream(size):
     with io.BytesIO(b'abc') as stream:
         with pytest.raises(ValueError, match='original source'):
-            controller._VerifiedArchiveBytes(stream, size, hashlib.sha256(b'abc').hexdigest(), None)
+            VerifiedByteRange(stream, size, hashlib.sha256(b'abc').hexdigest(), None)

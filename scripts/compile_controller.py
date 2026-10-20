@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
-import operator
 import zipfile
 from collections import Counter
 from collections.abc import Callable, Sequence
@@ -22,7 +21,7 @@ from itertools import groupby
 from pathlib import Path
 
 import compile_progress as progress
-from bounded_io import IO_CHUNK_BYTES
+from bounded_io import IO_CHUNK_BYTES, VerifiedByteRange, require_byte_range
 from context_budget import TokenCount, TokenUsage
 from llm_client import BackendResponse, LLMResult, ProviderDescriptor
 from reliable_memory import (
@@ -848,30 +847,11 @@ def _validate_original_part(value, original, verified):
     if original is None:
         return
     start, end = value['byte_start'], value['byte_end']
-    _require_original_bounds(start, end, len(original))
-    actual = _original_range_digest(original, start, end)
+    require_byte_range(start, end, len(original))
+    actual = original.range_digest(start, end)
     if actual != value['sha256']:
         raise ValueError('snapshot part differs from original source range')
     verified.add(value['original_content'])
-
-
-def _require_original_bounds(start, end, size):
-    if not _valid_original_bounds(start, end, size):
-        raise ValueError('invalid original source range')
-
-
-def _valid_original_bounds(start, end, size):
-    return type(start) is int and type(end) is int and 0 <= start <= end <= size
-
-
-def _original_range_digest(original, start, end):
-    original._require_active()
-    if start == 0 and end == len(original):
-        return original.digest
-    digest = hashlib.sha256()
-    for chunk in original.iter_chunks(start, end):
-        digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _validate_capture_blob(reader, digest, verified, deadline):
@@ -2682,7 +2662,7 @@ class CompileInputArchive:
         name = 'blobs/' + digest
         size = self.archive.getinfo(name).file_size
         with self.archive.open(name) as stream:
-            yield _VerifiedArchiveBytes(stream, size, digest, deadline)
+            yield VerifiedByteRange(stream, size, digest, deadline, chunk_size=IO_CHUNK_BYTES)
 
     def json_blob(self, digest):
         data = self.blob(digest)
@@ -2747,147 +2727,6 @@ class CompileInputArchive:
         from compile_memory import CompileInputs
 
         return CompileInputs(**{group: tuple(self.records(group)) for group in _snapshot_types()})
-
-
-class _VerifiedArchiveBytes:
-    """Scope-owned ranges bound to a computed whole hash and block hashes."""
-
-    def __init__(self, stream, size, digest, deadline):
-        self.stream, self.size, self.digest, self.deadline = stream, size, digest, deadline
-        self.chunk_size = IO_CHUNK_BYTES
-        self.hashes = _verified_original_blocks(stream, size, digest, deadline, self.chunk_size)
-        self.cached, self.next_index = (-1, b''), 0
-        stream.seek(0)
-        operational_deadline_active(deadline)
-
-    def __len__(self):
-        return self.size
-
-    def _require_active(self):
-        operational_deadline_active(self.deadline)
-        if self.stream.closed:
-            raise ValueError('original range scope is closed')
-
-    def iter_chunks(self, start, end):
-        self._require_active()
-        _require_original_bounds(start, end, self.size)
-        while start < end:
-            index, offset = divmod(start, self.chunk_size)
-            block = self._block(index)
-            take = min(len(block) - offset, end - start)
-            yield block[offset:offset + take]
-            start += take
-
-    def _block(self, index):
-        self._require_active()
-        if self.cached[0] == index:
-            return self.cached[1]
-        return self._load_block(index)
-
-    def _load_block(self, index):
-        if index < self.next_index:
-            self.stream.seek(0)
-            self.next_index = 0
-        while self.next_index <= index:
-            block = self._read_proven_block(self.next_index)
-            self.cached = self.next_index, block
-            self.next_index += 1
-        return self.cached[1]
-
-    def _read_proven_block(self, index):
-        size = min(self.chunk_size, self.size - index * self.chunk_size)
-        block = _read_original_block(self.stream, size, self.deadline)
-        if hashlib.sha256(block).digest() != self.hashes[index]:
-            raise ValueError('original source range changed after verification')
-        return block
-
-    def __getitem__(self, key):
-        self._require_active()
-        if isinstance(key, slice):
-            return self._slice(key)
-        index = operator.index(key)
-        index = index + self.size if index < 0 else index
-        if not 0 <= index < self.size:
-            raise IndexError('original range index out of bounds')
-        return self._block(index // self.chunk_size)[index % self.chunk_size]
-
-    def _slice(self, key):
-        start, end, step = key.indices(self.size)
-        if not range(start, end, step):
-            return b''
-        if step < 0:
-            start, end = end + 1, start + 1
-        return b''.join(self.iter_chunks(start, end))[::step]
-
-    def find(self, needle, start=0, end=None):
-        self._require_active()
-        needle = memoryview(needle).tobytes()
-        bounds = _original_search_bounds(self.size, start, end)
-        if bounds is None:
-            return -1
-        if len(needle) > bounds[1] - bounds[0]:
-            return -1
-        return _find_original_chunks(self.iter_chunks(*bounds), needle, bounds[0])
-
-
-def _verified_original_blocks(stream, size, expected, deadline, chunk_size):
-    progress._require_digest(expected)
-    if type(size) is not int or size < 0:
-        raise ValueError('invalid original source size')
-    digest, blocks = hashlib.sha256(), []
-    for start in range(0, size, chunk_size):
-        chunk = _read_original_block(stream, min(chunk_size, size - start), deadline)
-        digest.update(chunk)
-        blocks.append(hashlib.sha256(chunk).digest())
-    _require_original_eof(stream, deadline)
-    if digest.hexdigest() != expected:
-        raise ValueError('snapshot content digest mismatch')
-    return tuple(blocks)
-
-
-def _read_original_block(stream, size, deadline):
-    chunks = []
-    while size:
-        operational_deadline_active(deadline)
-        chunk = stream.read(size)
-        operational_deadline_active(deadline)
-        if not chunk:
-            raise ValueError('original source truncated during verification')
-        chunks.append(chunk)
-        size -= len(chunk)
-    return b''.join(chunks)
-
-
-def _require_original_eof(stream, deadline):
-    operational_deadline_active(deadline)
-    extra = stream.read(1)
-    operational_deadline_active(deadline)
-    if extra:
-        raise ValueError('original source extent changed during verification')
-
-
-def _original_search_bounds(size, start, end):
-    start = 0 if start is None else operator.index(start)
-    first, last, _ = slice(start, end).indices(size)
-    if start > size:
-        return None
-    if first > last:
-        return None
-    return first, last
-
-
-def _find_original_chunks(chunks, needle, start):
-    if not needle:
-        return start
-    tail, cursor = b'', start
-    for chunk in chunks:
-        window = tail + chunk
-        found = window.find(needle)
-        if found >= 0:
-            return cursor - len(tail) + found
-        tail = window[len(window) - min(len(window), len(needle) - 1):]
-        cursor += len(chunk)
-    return -1
 
 
 @dataclass(frozen=True, eq=False)

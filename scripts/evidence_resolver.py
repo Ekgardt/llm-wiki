@@ -15,7 +15,7 @@ from datetime import date, datetime
 from itertools import chain, islice
 from pathlib import Path
 
-from bounded_io import IO_CHUNK_BYTES, read_stable_bytes
+from bounded_io import IO_CHUNK_BYTES, VerifiedByteRange, read_stable_bytes
 from reliable_memory import canonical_json_bytes, sha256_bytes, validate_schema
 
 # Bounded reads of evidence files; a file past its bound is refused by name, never
@@ -1455,17 +1455,15 @@ class EvidenceResolver:
     def resolve_bytes(
         self,
         reference: EvidenceRef | str,
-        content: bytes,
+        content: bytes | VerifiedByteRange,
         *,
         source_path: Path,
         location: str = "snapshot",
         reuse_immutable: bool = False,
     ) -> ResolvedEvidence:
-        """Apply hash/block/span checks; optionally reuse this resolver's raw byte proof."""
-        ref = EvidenceRef.parse(reference) if isinstance(reference, str) else reference
-        if not isinstance(ref, EvidenceRef) or not isinstance(content, bytes):
-            raise TypeError("reference and immutable content have invalid types")
-        if reuse_immutable:
+        """Resolve owned source evidence; range proofs always retain only metadata."""
+        ref = _owned_source_reference(reference, content)
+        if reuse_immutable or type(content) is VerifiedByteRange:
             return self._resolve_immutable_bytes(ref, content, Path(source_path), location)
         return self._resolve_uncached_bytes(ref, content, Path(source_path), location)
 
@@ -1484,19 +1482,15 @@ class EvidenceResolver:
                                    lines=_indexed_line_span(proof[3], ref.byte_start, ref.byte_end))
 
     def _immutable_byte_proof(self, content):
+        _require_owned_source(content)
         proof = self._immutable_sources.get(id(content))
         if proof is None or proof[0] is not content:
-            _require_utf8(content, "daily source is not UTF-8")
-            entries = tuple(daily_entries(content))
-            proof = (content, sha256_bytes(content), entries,
-                     tuple(match.start() for match in re.finditer(b"\n", content)),
-                     _entry_groups(entries), tuple(start for _block, start, _end in entries))
+            proof = _owned_source_proof(content)
             self._immutable_sources[id(content)] = proof
         return proof
 
     def _indexed_source_entries(self, content, entries):
-        if not isinstance(content, bytes):
-            raise TypeError("entry index requires immutable source bytes")
+        _require_owned_source(content)
         key = (id(content), id(entries))
         cached = self._immutable_entry_metadata.get(key)
         if cached is not None and cached[0] is content and cached[1] is entries:
@@ -1589,6 +1583,62 @@ class EvidenceResolver:
         return _resolved_byte_span(ref, content, source_path, location, selected, block, sha256_bytes(content))
 
 
+def _require_owned_source(content):
+    if isinstance(content, bytes):
+        return
+    if type(content) is not VerifiedByteRange:
+        raise TypeError("source requires immutable bytes or an owned verified range")
+    content.require_active()
+
+
+def _owned_source_reference(reference, content):
+    ref = EvidenceRef.parse(reference) if isinstance(reference, str) else reference
+    if not isinstance(ref, EvidenceRef):
+        raise TypeError("reference and immutable content have invalid types")
+    _require_owned_source(content)
+    return ref
+
+
+def _source_chunks(content):
+    if type(content) is VerifiedByteRange:
+        yield from content.iter_chunks(0, len(content))
+        return
+    for offset in range(0, len(content), IO_CHUNK_BYTES):
+        yield content[offset:offset + IO_CHUNK_BYTES]
+
+
+def _source_range_digest(content, start, end):
+    if type(content) is VerifiedByteRange:
+        return content.range_digest(start, end)
+    return hashlib.sha256(memoryview(content)[start:end]).hexdigest()
+
+
+def _owned_source_proof(content):
+    newlines = _owned_source_newlines(content)
+    entries = tuple(daily_entries(content))
+    digest = _source_range_digest(content, 0, len(content))
+    return (content, digest, entries, newlines, _entry_groups(entries),
+            tuple(start for _block, start, _end in entries))
+
+
+def _owned_source_newlines(content):
+    try:
+        return _utf8_source_newlines(content)
+    except UnicodeDecodeError as exc:
+        raise EvidenceResolutionError("daily source is not UTF-8") from exc
+
+
+def _utf8_source_newlines(content):
+    decoder = codecs.getincrementaldecoder('utf-8')(errors='strict')
+    newlines, offset = [], 0
+    for chunk in _source_chunks(content):
+        decoder.decode(chunk, final=False)
+        newlines.extend(offset + match.start() for match in re.finditer(b"\n", chunk))
+        offset += len(chunk)
+    decoder.decode(b'', final=True)
+    return tuple(newlines)
+
+
 def _indexed_entry_ids_at(proof, offset):
     index = bisect_right(proof[5], offset) - 1
     if index < 0:
@@ -1628,7 +1678,7 @@ def _resolved_byte_span(ref, content, source_path, location, selected, block, di
     line_start, line_end = lines or _line_span(content, ref.byte_start, ref.byte_end)
     return ResolvedEvidence(
         reference=ref, bytes=selected, sha256=sha256_bytes(selected), source_sha256=digest,
-        block_sha256=sha256_bytes(content[block_start:block_end]), byte_start=ref.byte_start,
+        block_sha256=_source_range_digest(content, block_start, block_end), byte_start=ref.byte_start,
         byte_end=ref.byte_end, line_start=line_start, line_end=line_end,
         location=location, source_path=source_path,
     )
