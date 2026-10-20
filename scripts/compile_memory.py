@@ -697,18 +697,24 @@ def _pending_daily_parts(inputs):
 
 
 def _native_part_units(parts, *, join=None):
-    units = []
+    return list(_iter_native_part_units(parts, join=join))
+
+
+def _iter_native_part_units(parts, *, join=None):
+    """Keep the current atomic unit and the first part of the next one."""
+    current = []
     predicate = join or _native_parts_join
     for part in parts:
-        _add_native_unit_part(units, part, predicate)
-    return units
+        if _native_unit_boundary(current, part, predicate):
+            yield current
+            current = []
+        current.append(part)
+    if current:
+        yield current
 
 
-def _add_native_unit_part(units, part, predicate):
-    if units and predicate(units[-1][-1], part):
-        units[-1].append(part)
-        return
-    units.append([part])
+def _native_unit_boundary(current, part, predicate):
+    return bool(current) and not predicate(current[-1], part)
 
 
 def _native_parts_join(left, right):
@@ -1194,11 +1200,19 @@ def pack_compile_batches(
 
 def _pack_compile_batches(inputs, *, model, token_adapters=None, budget=None,
                           planning_candidates=None, context_pending=False):
+    return tuple(iter_compile_batches(inputs, model=model, token_adapters=token_adapters,
+                                      budget=budget, planning_candidates=planning_candidates,
+                                      context_pending=context_pending))
+
+
+def iter_compile_batches(inputs, *, model, token_adapters=None, budget=None,
+                         planning_candidates=None, context_pending=False):
+    """Yield batches without retaining completed batches; errors arise on iteration."""
     budget = _validated_packing_budget(budget, model)
     measure = _batch_measure(inputs, model, token_adapters)
     _attach_required_context(measure, inputs, planning_candidates)
     ranking = _packing_context_ranking(inputs, context_pending)
-    return tuple(
+    yield from (
         _compile_batch(
             inputs, paths, budget, model, token_adapters,
             optional_paths=_packing_context_paths(inputs, paths, ranking, budget, measure),
@@ -1207,7 +1221,7 @@ def _pack_compile_batches(inputs, *, model, token_adapters=None, budget=None,
             planning_candidates=planning_candidates, context_pending=context_pending,
             required_paths=_required_context_paths(measure, paths),
         )
-        for paths in _group_dailies(inputs, budget, measure)
+        for paths in _iter_daily_groups(inputs, budget, measure)
     )
 
 
@@ -1885,30 +1899,29 @@ class _ByteContextSelection:
         self.frames += len(sources)
 
 
-def _group_dailies(
-    inputs: CompileInputs,
-    budget: ContextBudget,
-    measure: Callable[..., int],
-) -> list[set[str]]:
-    """Pack days into the largest groups the input budget allows, with verified adjacent parts retaining every physical byte."""
-    groups: list[set[str]] = []
+def _group_dailies(inputs: CompileInputs, budget: ContextBudget,
+                   measure: Callable[..., int]) -> list[set[str]]:
+    return list(_iter_daily_groups(inputs, budget, measure))
+
+
+def _iter_daily_groups(inputs, budget, measure):
+    """Yield maximal groups under the existing admission and physical-join rules."""
     current: set[str] = set()
     days: set[str] = set()
     current_parts = []
     source_bound = _measure_owns_inputs(measure, inputs)
     partitions = _measure_partitions(measure, source_bound)
-    for unit in _native_part_units(inputs.dailies):
+    for unit in _iter_native_part_units(inputs.dailies):
         _require_unit_fits(unit, budget, measure)
         if _starts_a_new_group(current, days, unit, budget, measure, current_parts=current_parts, partitions=partitions, source_bound=source_bound):
-            groups.append(current)
+            yield current
             current, days = set(), set()
             current_parts = []
         current_parts.extend(unit)
         current.update(part.part_key for part in unit)
         days.add(unit[0].logical_path)
     if current:
-        groups.append(current)
-    return groups
+        yield current
 
 
 def _starts_a_new_group(

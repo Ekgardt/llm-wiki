@@ -824,3 +824,46 @@ package consistency checks passed for both Python environments (65/67 packages).
 The 60 archive-sharing, protected-dispatch and streaming-capture tests passed on
 Python 3.12 and independently on Python 3.10. The installed autonomous compiler
 was still live (PID 2129006); it was neither stopped nor replaced by this change.
+
+### 2026-10-20 — incremental common batch algorithm
+
+Dependency inspection at b16bc790 (fresh graph, with unresolved edges supplemented
+by source reads) found three eager collectors: native atomic units, group sets,
+and completed batches. They now share iterator implementations; existing public
+and installed eager callers collect the same algorithm. The replaced native-unit
+accumulator helper has no remaining source/test references and was removed.
+Incremental batch iteration retains the current group and lookahead, while the
+existing measure and citation association still retain the input daily records.
+This is not yet whole-snapshot streaming or an installed controller switch.
+
+Rechecked independent primary sources on 2026-10-20:
+- https://docs.python.org/3/library/itertools.html — incremental consumption and
+  the difference between iterators and consumers that materialize their input.
+- https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-managing-large-messages.html
+  — references to retained large payloads; no AWS dependency is introduced.
+- https://github.com/restic/restic/blob/master/doc/design.rst — immutable storage
+  and content identity; this is not evidence that our recovery is qualified.
+
+The selected design reuses one grouping algorithm. A separate streaming planner
+would duplicate admission/atomicity rules; transparent byte proxies would conceal
+I/O and conflict with identity-bound partition proofs. No new numeric boundary,
+package, provider setting, service or runtime location is introduced. The iterator
+uses syntax and standard-library features available on supported project Python
+3.10/3.12 environments; no new Python 3.12 itertools API is required.
+
+Four initial tests failed before implementation. Final tests prove boundary-only
+lookahead, complete physical tool-line grouping, identical batch outputs with only
+one construction per next(), release of previous batch objects, and propagation
+of late construction errors. The eager API still raises that error before returning
+any batches. The new iterator must not simply replace the installed run loop:
+that would move planning failures after earlier paid calls without complete durable
+failure accounting. The global ambiguous-fragment citation index must also survive
+future per-day loading; rebuilding it from one selected subset would be incorrect.
+
+166 related tests passed on each Python version. After extracting the boundary
+predicate to satisfy measured CCN (the first version measured 6), 16 directly
+related tests passed again on each version. All 14 changed/new functions satisfy
+CCN <= 5, at most two ifs and nesting <= 2. Whole scripts/tests Ruff, diff checks,
+and 65/67-package consistency checks passed. Test output is retained in the private
+logs/step7-iter-batches-py{312,310}-20261020.txt files. No useful model-cycle,
+installation, backup/restore or point-7 completion is claimed.

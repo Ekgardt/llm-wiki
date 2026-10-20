@@ -1203,3 +1203,9 @@ Sequential daily reads share verified immutable blobs and parsed metadata within
 one consecutive physical day. The reader drops that scope before the next day;
 there is no corpus-wide body cache or numeric eviction threshold. Planning still
 materializes the resulting daily records until the streaming planner is integrated.
+
+The common batch planner exposes incremental atomic-unit, group and batch
+iteration. Existing eager callers collect that same iterator and retain their
+preflight error timing. Incremental consumers must handle iteration failures
+before dispatch or record them against complete durable work identity; the
+installed run loop is not switched by merely exposing this interface.
