@@ -2584,3 +2584,91 @@ Evidence: live logs `step7-receipt-lifetime-{red,py312,py310}-20261020.txt`
 and `step7-receipt-lifetime-complexity-20261020.json`.
 This candidate fix is not installed; full ingress, recovery and installation
 qualification remain outstanding as recorded above.
+
+### 2026-10-20 — retain planning observations for replay
+
+Source inspection finds that `_run_leased_compile` discovers/plans candidates
+before asking `admit_compile_capture` whether work is already retained. Only a
+planning digest is stored, so recovery cannot reconstruct the original planning
+observation when discovery fails or a remote catalog changes. A second, separate
+availability check in `_CompileAttempt.resolve` can still block partial answer
+replay; qualification must cover both boundaries, not just completed publication.
+
+Primary sources checked on 2026-10-20:
+- Temporal replay compares commands with retained history and resumes from saved
+  events: https://docs.temporal.io/workflow-execution
+- Microsoft Durable Task requires nondeterministic configuration/network inputs
+  to be recorded rather than reread inside replay:
+  https://learn.microsoft.com/en-us/azure/durable-task/common/durable-task-code-constraints
+- AWS retains original parameters alongside an idempotency token and refuses
+  changed intent: https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/
+
+Chosen direction within the approved snapshot/journal architecture: retain the
+request plus original planning observations in the existing immutable admission
+archive. Recover that archive before discovery. Reconstruct provider objects from
+local configuration and saved planning evidence, checking exact identity; never
+store endpoint credentials or raw environment/configuration content. Continue
+verifying current dependencies and DLP; persisted observations are not authority
+to invoke an obsolete executable or ignore a changed policy. Digest-only legacy
+admissions remain readable evidence, not permission to invent a replacement plan.
+No new database, directory, service, provider package or workload limit is needed.
+Alternatives rejected: repeat remote discovery (nondeterministic recovery), skip
+identity checks (could silently change work), or add another persistent planning
+store (duplicates the existing crash-safe capture and ownership boundary).
+
+Fresh graph generation `generation-18e02ba4cb991788-8cef79e3` matched d2cd6843
+for leased ingress/admission calls; partial graph (111899 unresolved) was
+supplemented by source inspection. Initial recovery regressions failed (7 cases,
+including two real worker paths failing on repeated discovery). After retaining
+planning, a separate fault at `save_compile_publication` reproduced the second
+boundary: three model answers were saved, but a subsequently unavailable probe
+made recovery fail before reading them (`step7-partial-probe-red-20261020.txt`).
+
+Provider readiness is another nondeterministic observation, so its boolean result
+must also be journaled in candidate order. Store it as a probe observation on the
+existing artifact-backed checkpoint chain, binding the preceding event and full
+candidate identity by digest. No external-call dispatch intent is needed for the
+read-only probe: an interrupted unrecorded probe may be repeated, while an actual
+model call retains the existing dispatch/answer/unknown-outcome contract. Replay
+uses recorded probe results; new work probes normally. This also preserves an
+originally unavailable first candidate when a fallback already produced answers.
+Skipping every probe or checking only for any saved answer was rejected: either
+could silently change fallback ordering or bypass an unrecorded availability step.
+
+The final probe record is one ready selection plus its preceding unavailable
+candidates, published together before any model dispatch. An all-unavailable
+pass records no selection and may recheck readiness next time; otherwise it would
+freeze a transient outage into the immutable work. If model resolution itself
+failed for every candidate, initial capture is refused before admission, allowing
+normal discovery retry. A saved ready selection preserves fallback ordering even
+if availability changes during recovery. Configured local-only transport checks
+still run; a saved observation never overrides runtime safety enforcement.
+
+No production limits were added. The existing artifact/schema reader continues to
+accept digest-only admission v1; execution requires retained planning rather than
+silently manufacturing it. Admission v2 is inside the same uncompressed ZIP64 and
+atomic root/snapshot transaction. Planning restoration uses only local configured
+candidates and stored Codex evidence, compares their exact serialized identity,
+and leaves request()/diagnostic identities digest-only. Fresh capture now inventories
+dependencies before storage and again when opening the saved execution, an added
+verification cost that remains part of the full-cycle qualification requirement.
+
+Qualification evidence: initial discovery regressions failed 7 cases; the separate
+partial-answer/outage reproduction failed after three saved responses. A broad
+intermediate regression pass succeeded in 215 cases on each Python 3.12 (338.56s)
+and 3.10 (441.10s). After refining all-unavailable retry semantics, the final 27
+focused cases passed; all 82 affected semantic/recovery/worker cases passed again
+on Python 3.12 (103.36s) and 3.10 (112.20s). The final tests cover crash after one
+saved answer (one original plus two remaining simulated calls, three total),
+publication interruption after all three answers (no additional calls), fallback
+ordering, unavailable-to-ready recovery, failed-resolution retry, orphan capture,
+changed dependencies, malformed planning, Codex evidence round trip, stale owners,
+invalid probes and uncommitted probe retry. One measured CCN6 helper was split;
+final lizard/AST verification covers all 56 changed/new functions with no failures.
+Whole scripts/tests Ruff and diff whitespace checks pass.
+Logs: `step7-retained-planning-{red,py312,py310,final-focused,final-py312,final-py310}-20261020.txt`,
+`step7-partial-probe-red-20261020.txt`, `step7-retained-planning-complexity-20261020.json`.
+The providers in these fault tests are simulated. Native Codex transport, full
+dependency/update closure, cross-origin source uncertainty, retention/doctor/backup,
+other ingress routes, diagnostics projection and safe installation remain open.
+This does not establish point 7 completion or installed behavior.

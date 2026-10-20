@@ -438,6 +438,7 @@ class CompileReplay:
         self.checkpoint = progress._snapshot_event(checkpoint)
         self.dependencies = dependencies
         self.delivery = delivery
+        self.probe_observations = []
 
     def __call__(self, descriptor, prompt, system_prompt, **options):
         result = run_candidate_call(
@@ -447,6 +448,88 @@ class CompileReplay:
         if _is_completed_result(result):
             self.checkpoint = _advance_replay(self.queue, self.lease, self.checkpoint)
         return result
+
+    def probe_candidate(self, descriptor, probe):
+        self.dependencies.verify()
+        self.checkpoint, available = _record_or_read_compile_probe(
+            self.queue, self.lease, self.checkpoint, descriptor, probe, self.probe_observations)
+        self.dependencies.verify()
+        return available
+
+
+def _record_or_read_compile_probe(queue, lease, checkpoint, descriptor, probe, observations):
+    queue.verify_compile_checkpoint_owner(lease, checkpoint)
+    saved = queue.get_compile_event(checkpoint.work_id, sequence=checkpoint.sequence + 1)
+    if saved is not None:
+        return _read_compile_probe(queue, lease, checkpoint, saved, descriptor, observations)
+    observation = _compile_probe_observation(descriptor, probe(descriptor))
+    observations.append(observation)
+    if not observation['available']:
+        return checkpoint, False
+    event = _compile_probe_event(checkpoint, lease, observations)
+    recorded = _record_or_read_compile_checkpoint(queue, lease, event)
+    observations.clear()
+    return recorded, True
+
+
+def _read_compile_probe(queue, lease, checkpoint, saved, descriptor, observations):
+    retained = _saved_probe_observations(saved)
+    expected = _compile_probe_event(checkpoint, lease, retained)
+    _matched_compile_checkpoint(queue, lease, saved, expected)
+    observation = _probe_observation_at(retained, len(observations))
+    if _compile_probe_observation(descriptor, observation['available']) != observation:
+        raise progress.ProgressConflict('retained provider probe candidate changed')
+    observations.append(observation)
+    if not observation['available']:
+        return checkpoint, False
+    observations.clear()
+    return saved, True
+
+
+def _probe_observation_at(observations, index):
+    if index >= len(observations):
+        raise progress.ProgressConflict('retained provider probe order changed')
+    return observations[index]
+
+
+def _saved_probe_observations(event):
+    observations = event.details.get('compile_probe', {}).get('observations')
+    if not isinstance(observations, list) or not observations:
+        raise progress.ProgressCorrupt('missing retained provider probes')
+    for observation in observations:
+        _require_probe_observation(observation)
+    _require_probe_selection(observations)
+    return observations
+
+
+def _require_probe_selection(observations):
+    if [item['available'] for item in observations] != [False] * (len(observations) - 1) + [True]:
+        raise progress.ProgressCorrupt('invalid retained provider probe selection')
+
+
+def _require_probe_observation(observation):
+    if not isinstance(observation, dict) or set(observation) != {'descriptor_digest', 'available'}:
+        raise progress.ProgressCorrupt('invalid retained provider probe fields')
+    available = observation['available']
+    if type(available) is not bool:
+        raise progress.ProgressCorrupt('invalid retained provider probe result')
+    progress._require_digest(observation['descriptor_digest'])
+
+
+def _compile_probe_observation(descriptor, available):
+    if type(available) is not bool:
+        raise ValueError('provider probe must return a boolean')
+    identity = {'provider': descriptor.canonical(), 'endpoint': descriptor._endpoint,
+                'resolution_failure': descriptor.resolution_failure}
+    return {'descriptor_digest': _compile_identity_digest(identity), 'available': available}
+
+
+def _compile_probe_event(checkpoint, lease, observations):
+    observation = {'schema': 'compile-provider-probe/v1',
+                   'checkpoint_digest': progress._event_digest(checkpoint),
+                   'observations': list(observations)}
+    return replace(checkpoint, task_id=lease.id, sequence=checkpoint.sequence + 1,
+                   details={'artifact': checkpoint.details['artifact'], 'compile_probe': observation})
 
 
 def _advance_replay(queue, lease, checkpoint):
@@ -544,6 +627,7 @@ class CompileCapturePreparation:
     dependencies: CompileDependencies
     request: dict
     compiled: object = None
+    execution: dict | None = None
 
 
 def admit_compile_capture(queue, lease, prepare, *, deadline=None):
@@ -596,9 +680,23 @@ def _write_admitted_capture(queue, lease, origin, prepare, deadline, output):
 
 
 def _capture_admission_binding(lease, origin, prepared):
-    return {'schema': 'compile-capture-admission/v1', 'origin_task_id': origin,
+    return {'schema': 'compile-capture-admission/v2', 'origin_task_id': origin,
             'input_hash': lease.input_hash, 'dependency_digest': prepared.dependencies.verify(),
-            'request_digest': _compile_identity_digest(prepared.request)}
+            'request_digest': _compile_identity_digest(prepared.request),
+            'request': prepared.request, 'execution': prepared.execution}
+
+
+def read_compile_execution(queue, lease, snapshot, *, deadline=None):
+    """Read execution inputs from the owned immutable admission, without discovery."""
+    _require_preflight_parent(queue, lease, snapshot)
+    with open_compile_inputs(queue, lease, snapshot, deadline=deadline) as reader:
+        admission = _capture_admission_for_owner(reader.manifest, lease, queue.compile_origin(lease))
+        if admission['schema'] != 'compile-capture-admission/v2' or admission['execution'] is None:
+            raise progress.ProgressConflict('retained compile work has no execution planning evidence')
+        result = admission['request'], admission['execution']
+    queue.verify_compile_checkpoint_owner(lease, snapshot)
+    operational_deadline_active(deadline)
+    return result
 
 
 def _read_admitted_capture_root(lease, origin, deadline, handle):
@@ -625,16 +723,25 @@ def _capture_admission_for_owner(manifest, lease, origin):
 
 def _require_capture_admission(admission):
     _require_capture_admission_fields(admission)
-    if admission['schema'] != 'compile-capture-admission/v1':
-        raise progress.ProgressCorrupt('unsupported capture admission schema')
     progress.root_work_id(admission['origin_task_id'])
     for name in ('input_hash', 'dependency_digest', 'request_digest'):
         progress._require_digest(admission[name])
+    if admission['schema'] == 'compile-capture-admission/v2':
+        _require_capture_execution(admission)
+
+
+def _require_capture_execution(admission):
+    if _compile_identity_digest(admission['request']) != admission['request_digest']:
+        raise progress.ProgressCorrupt('capture request digest changed')
+    if admission['execution'] is not None and not isinstance(admission['execution'], dict):
+        raise progress.ProgressCorrupt('invalid capture execution planning')
 
 
 def _require_capture_admission_fields(admission):
     fields = {'schema', 'origin_task_id', 'input_hash', 'dependency_digest', 'request_digest'}
-    if not isinstance(admission, dict) or set(admission) != fields:
+    versions = {'compile-capture-admission/v1': fields,
+                'compile-capture-admission/v2': fields | {'request', 'execution'}}
+    if not isinstance(admission, dict) or set(admission) != versions.get(admission.get('schema')):
         raise progress.ProgressCorrupt('invalid capture admission fields')
 
 

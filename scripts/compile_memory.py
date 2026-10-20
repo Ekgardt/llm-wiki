@@ -2704,7 +2704,7 @@ class _CompileAttempt:
         self.pending_review_operations = None
         self.review_corrections.clear()
         descriptor = replace(candidate, fallback_from=self.lineage)
-        if not probe_candidate(descriptor):
+        if not self._probe_candidate(descriptor):
             return self._record(
                 "probe", descriptor, descriptor.resolution_failure or "unavailable"
             )
@@ -2713,6 +2713,12 @@ class _CompileAttempt:
         if cached is not None:
             return cached
         return self._drafted_with_retries(descriptor, action)
+
+    def _probe_candidate(self, descriptor):
+        replay = getattr(self.call_runner, 'probe_candidate', None)
+        if replay is None:
+            return probe_candidate(descriptor)
+        return replay(descriptor, probe_candidate)
 
     def _drafted_with_retries(
         self, descriptor: object, action: object
@@ -8023,21 +8029,44 @@ def _run_leased_compile(queue, lease, args, *, deadline, cancelled, owner):
         admit_compile_capture,
         capture_compile_dependencies,
         execute_compile_work,
+        read_compile_execution,
     )
 
     _require_compile_active(deadline, cancelled)
     DROPPED_CLAIMS.clear()
     coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT, deadline=deadline)
-    planning = prepare_compile_planning(deadline=deadline)
-    request = {'schema': 'leased-compile-request/v1', 'planning': planning.request(),
-               'trigger': args.trigger, 'selection': 'all_pending_daily_logs'}
-    dependencies = capture_compile_dependencies(ROOT, request, deadline=deadline)
-    prepare = partial(_capture_for_leased_run, args, coordinator, dependencies, request, deadline)
+    prepare = partial(_prepare_leased_capture, args, coordinator, deadline)
     snapshot = admit_compile_capture(queue, lease, prepare, deadline=deadline)
+    request, retained = read_compile_execution(queue, lease, snapshot, deadline=deadline)
+    planning = restore_compile_planning(retained, deadline=deadline)
+    if request != _leased_compile_request(args, planning):
+        raise ValueError('retained compile planning disagrees with request')
+    dependencies = capture_compile_dependencies(ROOT, request, deadline=deadline)
     completed = execute_compile_work(queue, lease, snapshot, coordinator=coordinator,
         dependencies=dependencies, request=request, plan=planning.batches, trigger=args.trigger,
         owner=owner, deadline=deadline, cancelled=cancelled)
     return _finish_leased_compile(args, completed)
+
+
+def _leased_compile_request(args, planning):
+    return {'schema': 'leased-compile-request/v1', 'planning': planning.request(),
+            'trigger': args.trigger, 'selection': 'all_pending_daily_logs'}
+
+
+def _prepare_leased_capture(args, coordinator, deadline):
+    from compile_controller import capture_compile_dependencies
+
+    planning = prepare_compile_planning(deadline=deadline)
+    _require_resolved_run_planning(planning)
+    request = _leased_compile_request(args, planning)
+    dependencies = capture_compile_dependencies(ROOT, request, deadline=deadline)
+    prepared = _capture_for_leased_run(args, coordinator, dependencies, request, deadline)
+    return replace(prepared, execution=planning.retained())
+
+
+def _require_resolved_run_planning(planning):
+    if not any(item.resolution_failure is None for item in planning.candidates):
+        raise CompilePlanUnavailable('no provider has usable compile planning evidence')
 
 
 def _capture_for_leased_run(args, coordinator, dependencies, request, deadline):
@@ -8194,6 +8223,72 @@ class CompileRunPlanning:
                     'context_pending': True}
         return {'schema': 'compile-run-planning/v1',
                 'planning_digest': sha256_bytes(canonical_json_bytes(identity))}
+
+    def retained(self):
+        """Private archive evidence; endpoint/config/environment contents stay absent."""
+        return {'schema': 'compile-run-planning-state/v1', 'model': self.model,
+                'candidates': [_retained_planning_candidate(item) for item in self.candidates]}
+
+
+def _retained_planning_candidate(candidate):
+    value = _run_planning_candidate_identity(candidate)
+    value['endpoint_digest'] = sha256_bytes(canonical_json_bytes(value.pop('endpoint')))
+    basis = candidate._codex_basis
+    value['original_descriptor'] = None if basis is None else basis.original_descriptor.canonical()
+    return value
+
+
+def restore_compile_planning(document, *, deadline=float('inf')):
+    """Use saved observations and current local configuration; never probe providers."""
+    _require_compile_active(deadline, None)
+    try:
+        planning = _restore_run_planning(document)
+    except (KeyError, TypeError, ValueError, AttributeError) as error:
+        raise ValueError('invalid or changed retained compile planning') from error
+    _require_compile_active(deadline, None)
+    return planning
+
+
+def _restore_run_planning(document):
+    current = provider_candidates(forced_provider(), max_tokens=4000)
+    candidates = tuple(_restore_planning_candidate(saved, local)
+                       for saved, local in zip(document['candidates'], current, strict=True))
+    planning = CompileRunPlanning(document['model'], candidates)
+    _require_retained_planning_model(planning.model)
+    if planning.retained() != document:
+        raise ValueError('retained planning evidence changed')
+    return planning
+
+
+def _require_retained_planning_model(model):
+    if model is not None and (not isinstance(model, str) or not model.strip()):
+        raise ValueError('invalid retained planning model')
+
+
+def _restore_planning_candidate(saved, current):
+    original = saved['original_descriptor'] or saved['descriptor']
+    if current.canonical() != original:
+        raise ValueError('local planning configuration changed')
+    candidate = replace(current, model=saved['descriptor']['model'],
+                        _resolution_failure=saved['resolution_failure'])
+    basis = _restore_planning_basis(saved, current)
+    candidate = replace(candidate, _codex_basis=basis)
+    if _retained_planning_candidate(candidate) != saved:
+        raise ValueError('retained planning candidate changed')
+    return candidate
+
+
+def _restore_planning_basis(saved, original):
+    from llm_client import CodexPlanningBasis, _CodexExecutable
+
+    if saved['basis'] is None:
+        return None
+    executable = dict(saved['executable'])
+    executable['identity'] = tuple(executable['identity'])
+    fields = dict(saved['basis'])
+    fields['config_files'] = tuple(tuple(item) for item in fields['config_files'])
+    fields['mcp_server_names'] = tuple(fields['mcp_server_names'])
+    return CodexPlanningBasis(original, _CodexExecutable(**executable), **fields)
 
 
 def _run_planning_candidate_identity(candidate):

@@ -1345,9 +1345,28 @@ recovers the saved snapshot, and executes the whole work. It returns success
 only with completion proof; the parent worker retains heartbeat, child cleanup
 and queue settlement. Unknown handler versions refuse before compilation.
 Other task kinds and pre-adoption queues retain their handlers until migration.
+The admission archive now carries `compile-capture-admission/v2`: the original
+request and retained planning evidence accompany their digests. Recovery opens
+that owned snapshot before remote discovery. Local configuration reconstructs
+the candidate objects; saved Codex model/catalog/executable/configuration
+observations restore the original plan. Endpoints are represented by digests;
+raw configuration/environment content is absent. Current dependencies still
+must match. A wholly failed model-resolution pass admits no immutable plan.
+Older digest-only admissions remain readable evidence and cannot supply
+execution planning that they did not retain.
+
+The semantic replay cursor records a ready provider selection as
+`compile-provider-probe/v1`, including preceding unavailable candidates, before
+any model dispatch. It replays that same selection without reprobing. If every
+candidate is unavailable, no selection or model dispatch is recorded, so a later
+attempt may repeat the read-only probes. Interrupted observation publication may
+also repeat probes; unknown model outcomes retain the separate no-redispatch
+contract. Runtime transport safety checks, including local-only enforcement,
+remain active; this does not promise recovery across changed dependencies.
+
 This is an uninstalled worker integration: direct CLI/MCP/nightly ingress,
-per-batch diagnostic projection, discovery-independent recovery and full
-dependency/retention/installation qualification remain unfinished.
+per-batch diagnostic projection and full dependency/retention/installation
+qualification remain unfinished.
 
 Receipt discovery retains parsed bodies only for the current daily file, keyed
 by its logical path and existing file identity. Switching sources releases that
