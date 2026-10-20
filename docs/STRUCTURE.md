@@ -1490,12 +1490,14 @@ the eager caller's per-part proof registry. Receipt filtering retains the curren
 indivisible native/tool event and lookahead; completed companions remain when any
 part of that event is pending. Existing list-returning consumers collect the same
 iterator. Original daily bytes and entry/frame metadata still remain in memory:
-this removes all-part buffering, not the remaining whole-daily read or the
-archive reader's within-day blob cache.
+this removes all-part buffering, not the remaining whole-daily read.
 
-Sequential daily reads share verified immutable blobs and parsed metadata within
-one consecutive physical day. The reader drops that scope before the next day;
-there is no corpus-wide body cache or numeric eviction threshold. The eager
+Sequential daily reads reuse verified original bytes and parsed entry/frame
+metadata only while the following record names the same shared identities.
+Part bodies are read and verified without retaining them in the reader.
+Changing the original or metadata releases the superseded reuse scope, including
+different versions at the same logical path; the next day starts a fresh scope.
+There is no corpus-wide body cache or numeric eviction threshold. The eager
 compatibility view materializes daily records; iter_batches() consumes them
 sequentially through the shared planner.
 

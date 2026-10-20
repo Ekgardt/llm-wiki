@@ -1,7 +1,8 @@
 """Durable external-call boundary for the approved compile controller.
 
-Not yet activated by CLI/MCP/nightly. The shared client prepares protected calls;
-semantic callers still own complete work/dependency identity and publication.
+The candidate CLI/MCP/nightly paths use this controller. The shared client
+prepares protected calls; semantic callers own work identity and publication.
+Installation and full dependency/recovery qualification remain unfinished.
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ from contextlib import closing, contextmanager, nullcontext
 from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import datetime
-from functools import cache, partial
+from functools import partial
 from itertools import groupby
 from pathlib import Path
 
@@ -2629,10 +2630,25 @@ class CompileInputArchive:
 
 
 def _restore_archive_day(reader, records):
-    blob = cache(reader.blob)
-    json_blob = cache(reader.json_blob)
+    originals, metadata = {}, {}
     for value in records:
+        originals = _shared_record_blobs(value, ('original_content',), reader.blob, originals)
+        metadata = _shared_record_blobs(value, _ARCHIVE_JSON_FIELDS, reader.json_blob, metadata)
+        blob = partial(_read_shared_blob, reader.blob, originals)
+        json_blob = partial(_read_shared_blob, reader.json_blob, metadata)
         yield _restore_archive_value('dailies', value, blob, json_blob)
+
+
+def _shared_record_blobs(value, fields, read, previous):
+    """Keep only identities the current record names as shared fields."""
+    digests = {value[name] for name in fields if name in value}
+    return {digest: _read_shared_blob(read, previous, digest) for digest in digests}
+
+
+def _read_shared_blob(read, shared, digest):
+    if digest in shared:
+        return shared[digest]
+    return read(digest)
 
 
 def _restore_archive_value(group, value, blob, json_blob):

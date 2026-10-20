@@ -3226,3 +3226,52 @@ index generations, retaining its current and previous generations. Applying that
 plan succeeded; disk availability increased from approximately 2.0 to 4.4 GiB.
 No `run/` state or private knowledge was removed. Private checkpoint-page updates
 remain deferred because the live installed compiler has targeted that page.
+
+### 2026-10-20 — archive replay retains only shared record fields
+
+Inspection found `_restore_archive_day` wraps both readers in unbounded
+`functools.cache`. The bytes cache retains each distinct part body until the day
+ends, even after the consumer releases the corresponding DailySnapshot.
+
+Primary sources: [Python cache lifetime](https://docs.python.org/3.12/library/functools.html#functools.cache)
+(reviewed today), and the independently authored Arrow IPC and Java stream
+references reviewed above on this date. All distinguish retained state from
+incremental consumption; Python explicitly documents that cached results remain
+strongly referenced. No Arrow/Java runtime dependency is proposed.
+
+Choose field-driven reuse: retain only blob identities named by the current
+record's shared original-content and entry/frame fields. A following record
+reuses matching verified values and releases identities it no longer names.
+Read part content through the existing verified blob reader without memoizing
+it. This preserves reuse of a large original across its parts, canonical JSON
+checks, original/part hash checks and same-path different-original records.
+No cache count, byte threshold or source exclusion is introduced. Re-reading
+all shared fields for every part would waste I/O; a numeric LRU would add
+unjustified policy; retaining every digest recreates the defect. This removes
+archive accumulation of part bodies, while full original bytes and metadata
+still require the later streaming source-access work.
+
+Fresh pre-edit navigation used generation `generation-18e034c9184f4b78-cb3d3383`
+at ec2b68f2 for day restoration, field restoration and both verified readers.
+Partial graph coverage (112651 unresolved) was supplemented by source reads and
+all reader call sites. The lifetime regression failed before implementation
+(1 failed, 2 passed): a bytes-subclass lifetime observer on verified part bodies
+was never released while its day remained open. It does not instrument shared
+original bytes or change digest checks. After the fix, the focused archive,
+planning and required-context suite passed 33 cases. Additional coverage checks
+same-path A/B/A original versions: returning to A reads it again rather than
+keeping every historical version.
+
+Tradeoff: repeated identical part bodies may now be read again when they recur;
+shared original and entry/frame blobs retain reuse. Complete model-cycle cost
+has not yet been measured. Original bytes are still loaded whole, and
+`_restored_archive_record` still hashes that original for each part; neither
+remaining full-daily memory nor repeated-hash cost is claimed solved here.
+
+Final related qualification: all 153 tests passed on Python 3.12 (92.89s) and
+3.10 (101.65s), covering original sharing, streamed planning, corruption refusal,
+protected dispatch/recovery, context deltas and spawned foreground execution.
+Ruff and whitespace checks pass. Lizard plus AST measured all 13 changed/new
+functions with no violations. Logs: `step7-archive-parts-*20261020*` under the
+live vault's private logs. This remains an uninstalled candidate; the installed
+compiler PID2129006 was observed live and was neither stopped nor bypassed.
