@@ -3967,3 +3967,139 @@ on Python 3.12 (31.58s) and Python 3.10 (34.38s). All 37 changed functions
 pass Lizard/AST limits, Ruff and whitespace checks pass. These checks cover the
 shared reader, evidence ranges, archive proofs, durable/streaming capture and
 context refresh/batching; they do not qualify installation or the full product.
+
+
+Receipt-source transition, investigation dated 2026-10-20: the actual current
+_source_parts retained 8338828 traced bytes for a 3840000-byte synthetic daily
+(250 parts, whose bodies total another 3840000 bytes). The log is
+logs/step7-receipt-scan-baseline-20261020.json. This confirms both the full source
+and every part are retained. The normal capture already calls selector.matches
+with the captured part via _snapshot_compiled; it does NOT use _source_parts
+for each part. Earlier language above about capture's callback potentially
+loading a second whole daily was too broad. The whole-day paths remain in
+fallback digest lookup, saved-source recovery, diagnostic cleanup and selection.
+
+Using the Python descriptor/ownership, Go traversal and Restic change-detection
+sources reviewed above, the next internal change uses an explicit source scope
+and lazy part iteration for fallback lookup. Alternatives: a persistent open
+owner cache requires close propagation across every selector consumer and can
+hold stale live sources; metadata-only cache reuse cannot prove unchanged bytes
+when timestamps collide; a whole-byte cache preserves the measured retention.
+A fresh verified owner per fallback query is simpler and detects current content,
+at the cost of repeated full verification when fallback queries repeat a day.
+This tradeoff must be measured and reported; the normal captured-part path stays
+unchanged. No new paths, environment contracts, runtime root or dependency are
+proposed. Historical prefix and transaction-authority validation remain required,
+and final source validation must run even when any/all short-circuits.
+
+
+Fallback receipt lookup now owns an explicit source scope and iterates parts;
+digest lookup, saved-source recovery and committed-failure resolution evaluate
+inside that scope. Empty matches remain false, every matching occurrence must
+be covered, and final source validation runs before returning even after early
+any/all completion. The selector no longer keeps a whole-day body/list cache.
+Tests that inspect parts after scope exit explicitly materialize every original
+byte inside the test scope; authority checks and full descriptor comparisons
+remain. The previous cache-identity assertion is replaced by fresh-read/current
+content assertions because cache retention is intentionally removed, not because
+a mismatched result is accepted. The four new regressions first produced three
+failures (eager read and missing scoped ownership) and one pass (empty match).
+
+The first allocation measurement contradicted a peak-memory improvement:
+8870250 peak bytes and 2.29465s with tracing, despite only 276059 retained bytes.
+A profile showed daily_entries/_heading_starts dominated time, with 34660 owner
+checks and redundant fstat/lstat observations. The LF index retained one Python
+integer per newline. It now uses fixed-width offsets in immutable bytes, exposed
+as a read-only view. The regression requires all offsets unchanged, compact
+storage and refusal of mutation; it failed on the prior tuple. File ownership
+checks now reuse each stat observation within the check (one fstat, one lstat),
+while preserving each check, initial proof, per-block proof and final full hash.
+No time-based check cache or check suppression was added.
+
+Additional representation research on 2026-10-20:
+https://docs.python.org/3.12/library/array.html and
+https://docs.python.org/3.12/library/stdtypes.html#memoryview.cast describe native
+fixed-width arrays and read-only byte-backed views;
+https://arrow.apache.org/docs/format/Columnar.html describes contiguous fixed-width
+primitive layouts and their random access properties;
+https://numpy.org/doc/stable/reference/arrays.scalars.html documents fixed-width
+numeric scalars versus Python scalar types. Python's standard library is sufficient;
+adding Arrow/NumPy for this metadata would add an unnecessary runtime dependency.
+The 64-bit unsigned representation covers offsets addressable by supported
+32/64-bit Python file readers; it adds no user-configurable input ceiling.
+The native representation remains in-process only, not a new persisted format.
+
+After compact offsets/stat reuse, the same complete 3.84 MB / 250-part scan
+peaked at 3414484 traced bytes and retained 275517; traced duration was 1.39714s.
+Separate uninstrumented three-pair fresh-scan measurements gave median eager
+0.020827s versus scoped 0.384685s. All canonical part identities and counts match.
+This is a significant latency regression despite better memory retention and
+peak. It remains unresolved; do not claim the receipt transition qualified for
+installation or overall efficiency. The next optimization target is repeated
+per-heading range operations in the shared entry parser. Repeated old cache hits
+were not measured and would make the latency tradeoff larger. Private evidence:
+logs/step7-receipt-scope-measurement-20261020.json,
+logs/step7-receipt-scope-optimized-measurement-20261020.json,
+logs/step7-receipt-scope-paired-20261020.json.
+
+Current receipt-scope correctness qualification: 909 passed, one Windows-only
+skip on Python 3.12 (101.51s) and Python 3.10 (112.96s). All 31 changed
+functions pass measured Lizard/AST constraints. Ruff required one test import
+formatting correction, now applied. The candidate remains uncommitted pending
+the explicitly unresolved latency issue; correctness is not efficiency evidence.
+
+
+Entry-window optimization research, 2026-10-20, before implementation:
+Python 3.12 re (https://docs.python.org/3.12/library/re.html), Rust regex
+(https://docs.rs/regex/latest/regex/) and Perl's own regular-expression reference
+(https://perldoc.perl.org/perlre) distinguish buffer/line boundaries, anchors and
+engine semantics. Python's existing grammar and differential oracle remain
+normative; the other engines are alternatives, not interchangeable validators.
+GNU grep documentation fetches failed, so those were not used as evidence.
+Chosen approach: run the existing delimiter parser on bounded verified byte
+windows ending at a physical LF or real EOF. This avoids per-heading ownership
+calls without disabling any source check. If a physical line cannot fit the
+existing transfer window, fall back to the existing range parser for the entire
+source; discard accumulated window results, preserving all entries and errors.
+No line is rejected or truncated, no new engine/dependency is added, and the
+transfer size remains an I/O geometry, not an admissible-line-length limit.
+A bespoke streaming grammar or second regex implementation would duplicate
+validation; persistent metadata check caching would weaken ownership checks.
+The new cost regression reproduces per-heading owner calls independently of
+wall-clock time, alongside differential boundary/long-line tests.
+
+
+Window parsing passed 584 grammar/identifier tests before the next correction.
+The 3.84 MB / 250-part measurement improved from 0.384685s to 0.150379s median.
+Inspection then found that _iter_daily_parts sliced each part twice, once for
+content and again for hashing. Crossing a verified block boundary caused the
+second slice to rewind/re-verify preceding blocks. A dedicated regression first
+observed two reads per part. _daily_part_record now reads once and hashes that
+exact payload; canonical source/part identities remain unchanged.
+
+The final three-pair fresh-scan median is eager 0.017887s versus scoped 0.052530s.
+A separate allocation pair measured peak 8082802 versus 534299 bytes. Timing is
+uninstrumented except the separate allocation pair; all 250 part identities
+match across runs. The eager comparison uses the current helper with the same
+single-read correction, so this does not overstate the old implementation's
+cost. The scoped scan remains slower because it verifies a live source through
+exit and never reuses an entire day across queries. Full-cycle cost/quality
+qualification, particularly repeated recovery lookups and long-line fallback,
+remains open. Evidence: logs/step7-entry-window-final-paired-20261020.json.
+
+An additional ownership regression found that an empty closed range could skip
+the new window loop and return an empty result. The regression failed for empty
+input while nonempty input already refused. The parser now checks active scope
+before iteration, preserving closed/expired source behavior for every extent.
+This last guard was added after the broader test runs began; separate final
+window/evidence tests qualify it rather than calling those runs a full rerun.
+
+Final receipt/window qualification: 980 passed plus one Windows-only skip on
+Python 3.12 (98.48s) and Python 3.10 (110.11s), followed by all 100 final
+window/evidence tests on each version (0.75s / 0.64s) after the empty-owner
+guard. All 45 changed functions pass Lizard/AST limits; Ruff and whitespace
+checks pass. The built-in retirement command removed five obsolete code-index
+generations after a dry-run review, preserving current/previous generations and
+other checkouts, increasing free disk from 1.9 to 4.0 GiB. No run state or
+private knowledge was removed. Installed vault and real-cycle qualification
+remain unchanged and incomplete.

@@ -1530,8 +1530,22 @@ references fail. Cached blocks remain the original immutable captured bytes.
 Archive restoration now supplies these ranges to normal record access, required
 citation checks, preflight and batch planning. Source receipt-prefix checks use
 the same range hash proof. Live snapshot capture uses an owned file range,
-but receipt selection, eager compatibility and native-frame payload retention
+but daily preselection, eager compatibility and native-frame payload retention
 still have whole-body paths and are not claimed to be fully streaming.
+
+Fallback receipt lookup now opens a verified source scope and yields parts
+incrementally. Digest lookup, saved-source matching and committed-failure
+resolution must finish inside that scope; source closure validates the final
+hash before returning a result. The selector retains no whole-day body or part
+list between queries. Normal capture passes its existing part directly to the
+selector. Fresh fallback queries intentionally verify the current source again.
+Fresh verification costs more than the old whole-day cache; full-cycle cost
+qualification remains required. Entry parsing uses the same grammar on verified
+windows ending at LF or actual EOF. A line exceeding transfer geometry selects
+the complete range parser, never rejection or truncation. Part content is read
+once and the same bytes supply its digest, avoiding stream rewinds at block
+boundaries. These changes reduce the measured scan from 0.385s to 0.053s, versus
+0.018s for eager reading; this fixture is not installation qualification.
 
 Live file ranges compute the original digest and per-block proofs in one pass.
 Their descriptor uses the shared no-follow/regular-file admission checks and

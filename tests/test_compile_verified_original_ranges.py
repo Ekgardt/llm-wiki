@@ -136,6 +136,18 @@ def test_original_extent_must_match_the_complete_stream(size):
             VerifiedByteRange(stream, size, hashlib.sha256(b'abc').hexdigest(), None)
 
 
+def test_newline_index_has_compact_immutable_offset_storage():
+    raw = b'x\n' * 10000
+    with io.BytesIO(raw) as stream:
+        content = VerifiedByteRange(stream, len(raw), hashlib.sha256(raw).hexdigest())
+        offsets = content.newline_offsets()
+        assert tuple(offsets) == tuple(range(1, len(raw), 2))
+        assert offsets.nbytes == 8 * len(offsets)
+        assert offsets.readonly
+        with pytest.raises(TypeError):
+            offsets[0] = 0
+
+
 @pytest.mark.parametrize('method', ['find', 'rfind'])
 @pytest.mark.parametrize('start', [None, -100, -2, 0, 1, 7, 100])
 @pytest.mark.parametrize('end', [None, -100, -2, 0, 1, 7, 100])

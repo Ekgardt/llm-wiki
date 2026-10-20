@@ -271,8 +271,43 @@ def daily_entries(content: bytes) -> list[tuple[str, int, int]]:
 
 def _entry_starts(content: bytes) -> list[tuple[int, str | None]]:
     """Where each entry begins, with the id its own delimiter declares."""
+    if type(content) is VerifiedByteRange:
+        return _windowed_entry_starts(content)
+    return _direct_entry_starts(content)
+
+
+def _direct_entry_starts(content):
     return sorted(chain(_heading_starts(content), _operation_starts(content)),
                   key=lambda item: item[0])
+
+
+def _windowed_entry_starts(content):
+    content.require_active()
+    starts = []
+    for offset, window in _complete_entry_windows(content):
+        if window is None:
+            return _direct_entry_starts(content)
+        starts.extend((offset + start, declared) for start, declared in _direct_entry_starts(window))
+    return starts
+
+
+def _complete_entry_windows(content):
+    offset = 0
+    while offset < len(content):
+        end = min(len(content), offset + IO_CHUNK_BYTES)
+        window = content[offset:end]
+        stop = _complete_window_length(window, end == len(content))
+        if not stop:
+            yield offset, None
+            return
+        yield offset, window[:stop]
+        offset += stop
+
+
+def _complete_window_length(window, final):
+    if final:
+        return len(window)
+    return window.rfind(b'\n') + 1
 
 
 def _line_prefix_offsets(content, prefix):

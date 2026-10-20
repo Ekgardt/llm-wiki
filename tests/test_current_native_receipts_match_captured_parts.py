@@ -1,6 +1,7 @@
 """Part receipt selection and native atomic reconstruction have distinct roles."""
 import compile_memory as compiler
 
+from tests.test_compile_receipt_source_lifetime import _part_snapshots
 from tests.test_native_compile_companion_adopted import (
     _committed_companion,
     _pending_batch,
@@ -31,7 +32,7 @@ def test_committed_native_parts_match_without_selector_frames(tmp_path, monkeypa
     result = _apply_controlled_batch(batch, plan, coordinator, "b" * 64)
     assert result.state == "committed"
     selector = compiler._receipt_predicate(coordinator)
-    ordinary_parts = selector._source_parts(first.logical_path)
+    ordinary_parts = _part_snapshots(selector, first.logical_path)
     assert not _has_frames(ordinary_parts)
     assert _all_receipts(selector, _selected_parts(ordinary_parts, batch.inputs.dailies))
     captured = compiler.snapshot_compile_inputs([root / first.logical_path])

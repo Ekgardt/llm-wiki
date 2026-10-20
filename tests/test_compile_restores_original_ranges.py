@@ -226,16 +226,17 @@ def test_receipt_source_advance_releases_previous_byte_proof_before_read(tmp_pat
     path = tmp_path / logical
     path.parent.mkdir(parents=True)
     path.write_bytes(b'## [12:34:56] event\nNext source.\n')
-    read = compiler._read_daily_source
+    read = compiler._open_daily_source
     with _archive(inputs) as reader:
         part = reader.record('dailies', 0)
         reference = weakref.ref(part.original_content)
         assert selector._context_matches(compiler._v4_source_descriptor(part), part)
         del part
 
-        def observe(target):
+        def observe(target, **kwargs):
             assert reference() is None, 'previous original retained while reading next source'
-            return read(target)
+            return read(target, **kwargs)
 
-        monkeypatch.setattr(compiler, '_read_daily_source', observe)
-        assert selector._source_parts(logical)
+        monkeypatch.setattr(compiler, '_open_daily_source', observe)
+        with selector._source_parts(logical) as parts:
+            assert next(parts)

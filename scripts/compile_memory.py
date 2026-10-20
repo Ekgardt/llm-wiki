@@ -501,8 +501,8 @@ def _daily_read_budget():
     return min(MAX_DAILY_BYTES, setting_value("compile.max_total_source_bytes", ROOT))
 
 
-def _open_daily_source(path):
-    return open_stable_range(path, _daily_read_budget(), label="daily source")
+def _open_daily_source(path, *, deadline=None):
+    return open_stable_range(path, _daily_read_budget(), label="daily source", deadline=deadline)
 
 
 def _snapshot(path: Path, *, label: str = "compile source") -> SourceSnapshot:
@@ -661,22 +661,22 @@ def _iter_daily_parts(logical_path, content, compiled=None, *, native_frames=(),
     original_digest = immutable_source_digest(content)
     original_entries = tuple(daily_entries(content))
     parts = (
-        DailySnapshot(
-            logical_path,
-            content[start:end],
-            sha256_bytes(content[start:end]),
-            part_index=index,
-            part_count=len(bounds),
-            byte_start=start,
-            byte_end=end,
-            original_content=content,
-            original_sha256=original_digest,
-            original_entries=original_entries,
-            native_frames=native_frames,
-        )
-        for index, (start, end) in enumerate(bounds)
+        _daily_part_record(logical_path, content, bounds, index,
+                           original_digest, original_entries, native_frames)
+        for index in range(len(bounds))
     )
     yield from _iter_pending_with_native_context(parts, compiled)
+
+
+def _daily_part_record(logical, original, bounds, index, digest, entries, frames):
+    start, end = bounds[index]
+    payload = original[start:end]
+    return DailySnapshot(
+        logical, payload, sha256_bytes(payload),
+        part_index=index, part_count=len(bounds), byte_start=start, byte_end=end,
+        original_content=original, original_sha256=digest,
+        original_entries=entries, native_frames=frames,
+    )
 
 
 def _native_daily_frames(logical_path, content, vault):
@@ -7379,8 +7379,6 @@ class _ContextReceiptSelector:
         self.catalog: dict[tuple[str, str], list[tuple[Path, dict[str, object]]]] | None = None
         self.prefix_hashes: dict[tuple[str, int], str] = {}
         self.prefix_source = None
-        self.current_source: tuple[str, tuple] | None = None
-        self.current_parts: list[DailySnapshot] = []
         self.historical_receipts: dict[tuple[str, str], tuple | None] = {}
 
     def _active(self) -> None:
@@ -7410,27 +7408,26 @@ class _ContextReceiptSelector:
 
     def __call__(self, logical_path: str, digest: str) -> bool:
         self._active()
-        parts = self._source_parts(logical_path)
-        return self._matching_parts_are_compiled(parts, digest)
+        with self._source_parts(logical_path) as parts:
+            return self._matching_parts_are_compiled(parts, digest)
 
+    @contextmanager
     def _source_parts(self, logical_path):
         self._active()
-        path = self.vault / logical_path
-        identity = (logical_path, _daily_file_identity(path))
-        if self.current_source != identity:
-            self.current_source = None
-            self.current_parts = []
+        self.prefix_source = None
+        deadline = None if self.deadline == math.inf else self.deadline
+        try:
+            with _open_daily_source(self.vault / logical_path, deadline=deadline) as content:
+                yield _iter_daily_parts(logical_path, content)
+                self._active()
+        finally:
             self.prefix_source = None
-            self.current_parts = _daily_parts(logical_path, _read_daily_source(path))
-            self.current_source = identity
-        self._active()
-        return self.current_parts
 
     def matches_saved_source(self, source):
         self._active()
         _require_saved_context_source(source)
-        parts = self._source_parts(source["logical_path"])
-        return any(self._saved_source_matches_part(source, part) for part in parts)
+        with self._source_parts(source["logical_path"]) as parts:
+            return any(self._saved_source_matches_part(source, part) for part in parts)
 
     def _saved_source_matches_part(self, source, part):
         if part.sha256 != source["sha256"] or not self._context_matches(source, part):
@@ -7438,8 +7435,7 @@ class _ContextReceiptSelector:
         return self.matches(part)
 
     def _matching_parts_are_compiled(self, parts, digest):
-        matches = [part for part in parts if part.sha256 == digest]
-        return bool(matches) and all(self.matches(part) for part in matches)
+        return _all_present_parts(_parts_with_digest(parts, digest), self.matches)
 
     def matches(self, part: DailySnapshot) -> bool:
         return self.receipt(part) is not None
@@ -9016,14 +9012,23 @@ def _clear_recorded_source_failure(queue, source, inputs, compiled, failures, de
 
 
 def _failure_digest_resolved(source, inputs, compiled):
-    current = compiled._source_parts(source.logical_path)
-    matching = _parts_with_digest(current, source.sha256)
     committed = _committed_part_descriptors(inputs, source.logical_path)
-    return bool(matching) and all(_part_resolved_by_commit(part, committed, compiled) for part in matching)
+    resolved = partial(_part_resolved_by_commit, committed=committed, compiled=compiled)
+    with compiled._source_parts(source.logical_path) as current:
+        return _all_present_parts(_parts_with_digest(current, source.sha256), resolved)
 
 
 def _parts_with_digest(parts, digest):
-    return [part for part in parts if part.sha256 == digest]
+    return (part for part in parts if part.sha256 == digest)
+
+
+def _all_present_parts(parts, predicate):
+    found = False
+    for part in parts:
+        found = True
+        if not predicate(part):
+            return False
+    return found
 
 
 def _committed_part_descriptors(inputs, logical_path):

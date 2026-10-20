@@ -9,6 +9,7 @@ import os
 import re
 import stat
 import time
+from array import array
 from bisect import bisect_left
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -173,7 +174,7 @@ def _require_same_file_at_path(
     path: Path, identity: tuple[int, int, int, int], label: str
 ) -> None:
     current = path.lstat()
-    if path.is_symlink():
+    if stat.S_ISLNK(current.st_mode):
         raise PermissionError(f"{label} was replaced during read")
     if identity[:2] != (current.st_dev, current.st_ino):
         raise SourceChangedDuringRead(f"{label} was replaced during read")
@@ -249,9 +250,11 @@ def open_stable_range(path, max_bytes, *, label="file", deadline=None):
 
 
 def _require_live_source(descriptor, path, before, label):
-    _require_unchanged_after_read(descriptor, path, _file_identity(before), label)
-    if os.fstat(descriptor).st_ctime_ns != before.st_ctime_ns:
-        raise SourceChangedDuringRead(f"{label} metadata changed during read")
+    opened = os.fstat(descriptor)
+    expected = (*_file_identity(before), before.st_ctime_ns)
+    if (*_file_identity(opened), opened.st_ctime_ns) != expected:
+        raise SourceChangedDuringRead(f"{label} changed during read")
+    _require_same_file_at_path(path, _file_identity(before), label)
 
 
 def _require_final_source_content(source, label):
@@ -271,7 +274,7 @@ def _require_final_source_content(source, label):
 class _VerifiedRangeCursor:
     cached: tuple = (-1, b'')
     next_index: int = 0
-    newlines: tuple | None = None
+    newlines: memoryview | None = None
     utf8_valid: bool = False
 
 
@@ -374,7 +377,7 @@ class VerifiedByteRange:
     def newline_offsets(self, *, validate_utf8=False):
         self.require_active()
         if self._cursor.newlines is None:
-            self._cursor.newlines = tuple(_original_newlines(
+            self._cursor.newlines = _immutable_offsets(_original_newlines(
                 self.iter_chunks(0, self.size), validate_utf8))
             self._cursor.utf8_valid = validate_utf8
         if validate_utf8 and not self._cursor.utf8_valid:
@@ -393,6 +396,10 @@ class VerifiedByteRange:
         needle = memoryview(needle).tobytes()
         bounds = _original_search_bounds(self.size, start, end)
         return _search_original(self, needle, bounds, reverse=True)
+
+
+def _immutable_offsets(values):
+    return memoryview(array('Q', values).tobytes()).cast('Q')
 
 
 def _original_newlines(chunks, validate_utf8):
