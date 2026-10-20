@@ -537,7 +537,9 @@ def _daily_capture_records(path, compiled, partitions, budget):
     context = partitions or _CapturedPartitions()
     content = _read_daily_source(path)
     logical = _logical_path(path)
-    for part in context.daily(logical, content, compiled):
+    parts = (context.iter_daily(logical, content, compiled) if partitions is None
+             else context.daily(logical, content, compiled))
+    for part in parts:
         yield 'dailies', part
     source = SourceSnapshot(logical, content, sha256_bytes(content))
     budget.add(source)
@@ -627,10 +629,16 @@ def _daily_parts(
     bounds=None,
 ) -> list[DailySnapshot]:
     """This day as the one or more parts the compiler still has to take."""
+    return list(_iter_daily_parts(logical_path, content, compiled,
+                                 native_frames=native_frames, bounds=bounds))
+
+
+def _iter_daily_parts(logical_path, content, compiled=None, *, native_frames=(), bounds=None):
+    """Construct part bodies only as the consumer requests their atomic units."""
     bounds = _daily_part_bounds(content) if bounds is None else bounds
     original_digest = sha256_bytes(content)
     original_entries = tuple(daily_entries(content))
-    parts = [
+    parts = (
         DailySnapshot(
             logical_path,
             content[start:end],
@@ -645,8 +653,8 @@ def _daily_parts(
             native_frames=native_frames,
         )
         for index, (start, end) in enumerate(bounds)
-    ]
-    return _pending_with_native_context(parts, compiled)
+    )
+    yield from _iter_pending_with_native_context(parts, compiled)
 
 
 def _native_daily_frames(logical_path, content, vault):
@@ -676,16 +684,21 @@ def _verified_native_frame(path, content, start, head, block, vault):
 
 
 def _pending_with_native_context(parts, compiled):
+    return list(_iter_pending_with_native_context(parts, compiled))
+
+
+def _iter_pending_with_native_context(parts, compiled):
     if compiled is None:
-        return parts
-    marked = [replace(part, already_compiled=_snapshot_compiled(compiled, part)) for part in parts]
-    units = _native_part_units(marked)
-    return _pending_native_unit_parts(units)
+        yield from parts
+        return
+    marked = (replace(part, already_compiled=_snapshot_compiled(compiled, part)) for part in parts)
+    yield from _pending_native_unit_parts(_iter_native_part_units(marked))
 
 
 def _pending_native_unit_parts(units):
-    pending = [unit for unit in units if _native_unit_pending(unit)]
-    return [part for unit in pending for part in unit]
+    for unit in units:
+        if _native_unit_pending(unit):
+            yield from unit
 
 
 def _native_unit_pending(unit):
@@ -961,6 +974,9 @@ class _CapturedPartitions:
         self.bound_sources = None
 
     def daily(self, logical, content, compiled):
+        return self._remember_parts(list(self.iter_daily(logical, content, compiled)))
+
+    def iter_daily(self, logical, content, compiled):
         index = self.journal_indexes.for_content(content)
         observed = (_verified_native_frame(logical, content, start, head, block, ROOT)
                     for start, (head, block) in index.items())
@@ -969,8 +985,7 @@ class _CapturedPartitions:
         spans = tuple((frame.byte_start, frame.byte_end) for frame in frames)
         key = (id(content), sha256_bytes(content))
         self.partitions.sources[key] = (content, (bounds, spans))
-        parts = _daily_parts(logical, content, compiled, native_frames=frames, bounds=bounds)
-        return self._remember_parts(parts)
+        return _iter_daily_parts(logical, content, compiled, native_frames=frames, bounds=bounds)
 
     def _remember_parts(self, parts):
         self.parts.update((id(part), part) for part in parts)

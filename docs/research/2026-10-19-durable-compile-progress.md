@@ -3173,3 +3173,56 @@ all 52 changed/new functions against c0293e15: no complexity, if-count or nestin
 violations. These are Linux semantic-fixture qualifications, not an installed
 nightly run, Windows qualification, paid-provider quality result or completion
 of point 7.
+
+### 2026-10-20 — do not retain every daily part during source capture
+
+Source inspection found `_daily_capture_records` requests `_CapturedPartitions.daily`,
+which builds every `DailySnapshot` and holds them in both a list and the proof
+context. This duplicates the complete daily's bytes in part bodies before the
+first record is written. It also computes receipt disposition for all parts
+before emitting any. The full original daily and entry/frame metadata are a
+separate remaining materialization boundary; this step must not claim to remove it.
+
+Sources reviewed today: [Python iterator/grouping semantics](https://docs.python.org/3/library/itertools.html#itertools.groupby),
+[Arrow streaming versus collected tables](https://arrow.apache.org/docs/python/ipc.html),
+[Java stream stateful buffering](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/stream/package-summary.html).
+These independently distinguish incremental consumption from collecting and from
+operations requiring retained groups. Python implementation must stay compatible
+with 3.10; no recent `batched` API or Arrow/Java dependency is needed.
+
+Choose an iterator for daily part construction and receipt filtering, using the
+existing physical native/tool atomic-unit grouping. Only the current indivisible
+unit plus lookahead need be buffered by filtering. The existing list-returning
+API remains a wrapper for callers that explicitly need the complete collection.
+The streamed capture must not populate the eager caller's per-part proof registry.
+Rejected: lowering the daily byte cap loses valid input; dropping completed
+companions breaks native/tool evidence; replacing the immutable original with a
+live file read breaks retained-source identity. No numeric cache limit or format,
+path, dependency or runtime-root change is required. Full original bytes, parsed
+entry/frame metadata and a possibly large indivisible event still remain; their
+streaming requires the next source-access change, not an unsupported memory claim.
+
+Pre-edit builtin graph `generation-18e0343b80e59169-a9649953` matched
+5eb2c447; queried capture, part construction, filtering, partition context,
+atomic grouping and manifest writing. The graph was partial (112631 unresolved),
+so actual source and consumers supplemented it. Weak-reference regressions failed
+for both receipt-free and receipt-filtered capture before the fix (2 failed,
+1 passed). The same first part is now released while its original daily is still
+being consumed. Shared eager wrappers preserve existing part identity, ordering,
+receipt flags, source spans and atomic native/tool grouping.
+
+Validation: 40 focused tests passed first. Final extended suites passed all 264
+cases on Python 3.12 (66.16s) and 3.10 (71.50s), including streamed archive round
+trips, durable capture, citation context, native/tool completeness, continuation
+identity, transaction recovery and foreground worker execution. Ruff and diff
+checks pass; lizard plus AST measured 12 changed/new functions with no failures.
+Evidence: `logs/step7-daily-parts-*20261020*`. These checks establish part lifetime
+and retained contracts, not bounded whole-daily memory or real-provider efficiency.
+The within-day archive blob cache also still retains part bytes; its streaming
+replacement remains required alongside the original-daily read.
+
+The builtin repository-retention dry run identified three obsolete candidate
+index generations, retaining its current and previous generations. Applying that
+plan succeeded; disk availability increased from approximately 2.0 to 4.4 GiB.
+No `run/` state or private knowledge was removed. Private checkpoint-page updates
+remain deferred because the live installed compiler has targeted that page.

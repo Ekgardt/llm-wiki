@@ -1454,9 +1454,9 @@ also repeat probes; unknown model outcomes retain the separate no-redispatch
 contract. Runtime transport safety checks, including local-only enforcement,
 remain active; this does not promise recovery across changed dependencies.
 
-This is an uninstalled worker integration: direct CLI/MCP/nightly ingress,
-per-batch diagnostic projection and full dependency/retention/installation
-qualification remain unfinished.
+This is an uninstalled worker integration. CLI/MCP/nightly CLI ingress is wired
+in the candidate; per-batch diagnostic projection and full
+dependency/retention/installation qualification remain unfinished.
 
 Receipt discovery retains parsed bodies only for the current daily file, keyed
 by its logical path and existing file identity. Switching sources releases that
@@ -1484,6 +1484,14 @@ publishing the manifest so logical identity matches the ordinary snapshot. It
 returns the manifest digest only after successful archive closure. This format
 writer is not itself a queue admission or publication operation: the durable queue
 writer and complete-work binding must surround it before production routing.
+
+Streaming capture constructs daily part bodies on demand and does not populate
+the eager caller's per-part proof registry. Receipt filtering retains the current
+indivisible native/tool event and lookahead; completed companions remain when any
+part of that event is pending. Existing list-returning consumers collect the same
+iterator. Original daily bytes and entry/frame metadata still remain in memory:
+this removes all-part buffering, not the remaining whole-daily read or the
+archive reader's within-day blob cache.
 
 Sequential daily reads share verified immutable blobs and parsed metadata within
 one consecutive physical day. The reader drops that scope before the next day;
