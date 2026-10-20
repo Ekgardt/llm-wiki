@@ -15359,9 +15359,27 @@ def _work_one(
     return counts
 
 
+@dataclass(frozen=True)
+class LeaseProcessor:
+    """Opt in to worker-owned queue/lease/deadline arguments outside task payloads.
+
+    The callable receives (queue, lease, deadline, compatibility_task). It must be
+    spawn-picklable, as ordinary processors must be. The parent retains heartbeat
+    and child cleanup ownership; the child verifies authority at each transition.
+    """
+
+    process: Callable[..., bool | DeferredResult]
+
+
+def _bind_lease_processor(processor, queue, lease, deadline):
+    if isinstance(processor, LeaseProcessor):
+        return partial(processor.process, queue, lease, deadline)
+    return processor
+
+
 def _run_and_settle(
     queue: MemoryQueue,
-    processor: Callable[[dict], bool | DeferredResult],
+    processor: Callable[[dict], bool | DeferredResult] | LeaseProcessor,
     processor_runner: Callable[
         [Callable[[dict], bool | DeferredResult], dict[str, Any], float],
         bool | DeferredResult,
@@ -15378,6 +15396,7 @@ def _run_and_settle(
     retry_cap_seconds: int,
 ) -> None:
     """Run one claimed task under a heartbeat and settle whatever came back."""
+    processor = _bind_lease_processor(processor, queue, lease, deadline)
     heartbeat = _LeaseHeartbeat(
         queue,
         lease,
@@ -15586,7 +15605,7 @@ def _require_policy_this_queue_takes(
 
 
 def run_worker(
-    processor: Callable[[dict], bool | DeferredResult],
+    processor: Callable[[dict], bool | DeferredResult] | LeaseProcessor,
     *,
     max_tasks: int = DEFAULTS.worker_max_tasks,
     max_seconds: int = DEFAULTS.worker_max_seconds,
@@ -15608,6 +15627,7 @@ def run_worker(
     """Run a short-lived worker bounded by tasks, wall time, and idle time.
 
     No task is claimed with less than `min_claim_seconds` of the wall time left.
+    LeaseProcessor opts in to canonical ownership arguments bound after claim.
     """
     if max_tasks < 0 or max_seconds < 0 or idle_seconds < 0:
         raise ValueError("worker limits must be non-negative")

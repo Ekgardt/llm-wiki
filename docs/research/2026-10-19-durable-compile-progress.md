@@ -1886,3 +1886,38 @@ The worker handoff must preserve canonical ownership and original work identity,
 without adding an ambient lease environment variable or allowing arbitrary payloads
 to impersonate a lease. Repair children still refresh live context, so routing must
 also retain their identities and feedback rather than hide this gap behind a wrapper.
+
+### Worker lease handoff investigation (2026-10-20)
+
+Rechecked primary sources: Python multiprocessing documentation
+(https://docs.python.org/3/library/multiprocessing.html; current page describes 3.15,
+only longstanding spawn/pickle behavior is used), SQLite isolation
+(https://www.sqlite.org/isolation.html), AWS idempotent retry identity
+(https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/).
+The actual worker already owns child cleanup and lease heartbeats. Its processor
+receives a compatibility task dictionary that intentionally lacks lease tokens.
+Passing credentials inside user payload or new ambient environment variables is
+rejected. Reopening a new compile task in the child would lose original identity.
+Choose an explicit lease-aware processor adapter bound by the worker after claim,
+passing the existing queue handle, immutable lease and absolute deadline through
+its existing spawn argument channel. Ordinary processors keep their dictionary
+contract. The adopted queue handle carries paths/contracts, not an open SQLite
+connection; each transition opens and checks the active row and payload. No second
+heartbeat, process supervisor, runtime directory, persistence format or numeric
+limit is added. Parent settlement retains its current stale-fence handling when a
+controller has already blocked uncertain work. Qualification must exercise real
+spawn, saved-answer replay and stale/unknown outcomes, not only pickle round trips.
+This is an internal handoff for the approved common controller; connecting the
+compiler and complete-task accounting remain required before installation.
+
+Handoff evidence: four initial red tests failed because no lease-aware adapter
+existed. Real spawned-child tests now recover a stored answer without invoking its
+producer twice, reject a stale transferred token before invocation, preserve an
+unknown-outcome block across unblock/reclaim, and exercise parent settlement for
+both completion and a controller-created block. The provider is simulated; this
+is process/queue qualification, not useful real-model task evidence. Existing
+ordinary-worker CLI tests remain included. Both Python 3.12 and 3.10 related suites
+pass; all 10 changed/new functions meet measured complexity, whole scripts/tests
+Ruff and diff checks pass. Logs: `step7-worker-handoff-{red,green,py312,py310}-20261020.txt`
+and `step7-worker-handoff-complexity-20261020.json`. Qualification was on Linux;
+Windows/macOS runtime operation is not claimed from these results.

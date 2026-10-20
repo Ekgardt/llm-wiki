@@ -277,7 +277,14 @@ queue ownership and payload verification fence transitions; terminal queue resul
 are not reused as intermediate checkpoints. Markdown transaction receipts remain
 the authority for published work. Index refresh has a separate outcome.
 
-CLI, MCP, queue and nightly are to share the same transition controller. A stored
+CLI, MCP, queue and nightly are to share the same transition controller.
+The candidate worker supports an explicit `LeaseProcessor`: after claim, it binds
+the canonical queue handle, lease and caller deadline into the existing spawned
+processor. Tokens stay outside user payloads. The parent keeps heartbeat and child
+cleanup ownership; queue operations recheck the lease and payload in SQLite.
+Ordinary processors retain their compatibility task dictionary. The compile
+entrypoints are not yet connected to this opt-in handoff.
+A stored
 model answer survives process restart. An uncertain dispatched request whose
 answer cannot be recovered blocks automatic repeat expense until explicitly
 authorized; a restart or provider fallback alone is not authorization. Current
