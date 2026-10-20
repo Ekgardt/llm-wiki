@@ -8101,12 +8101,59 @@ def _run(
     return _finish_run(args, outcomes)
 
 
-def _pack_for_run(inputs, deadline):
+@dataclass(frozen=True)
+class CompileRunPlanning:
+    """One resolved candidate order shared by eager packing and saved preflight.
+
+    This is planned behavior, not a live dependency witness. The controller must
+    bind request() to admission and verify dependencies before using saved work.
+    """
+    model: str | None
+    candidates: tuple
+
+    def batches(self, reader, on_refused):
+        yield from reader.iter_batches(model=self.model, planning_candidates=self.candidates,
+                                       context_pending=True, on_refused=on_refused)
+
+    def request(self):
+        identity = {'model': self.model,
+                    'candidates': [_run_planning_candidate_identity(item) for item in self.candidates],
+                    'context_pending': True}
+        return {'schema': 'compile-run-planning/v1',
+                'planning_digest': sha256_bytes(canonical_json_bytes(identity))}
+
+
+def _run_planning_candidate_identity(candidate):
+    from llm_client import _prepared_basis_identity
+
+    return {'descriptor': candidate.canonical(), 'endpoint': candidate._endpoint,
+            'resolution_failure': candidate.resolution_failure,
+            'basis': _prepared_basis_identity(candidate._codex_basis),
+            'executable': _run_planning_executable_identity(candidate._codex_basis)}
+
+
+def _run_planning_executable_identity(basis):
+    from llm_client import _prepared_executable_identity
+
+    if basis is None:
+        return None
+    return _prepared_executable_identity(basis.executable)
+
+
+def prepare_compile_planning(*, deadline=float('inf')):
+    """Resolve the authoritative candidate chain once, before source planning."""
+    _require_compile_active(deadline, None)
     candidates = tuple(_planned_candidate(item, deadline)
                        for item in provider_candidates(forced_provider(), max_tokens=4000))
     model = next((item.model for item in candidates if probe_candidate(item)), None)
-    packable, refused = partition_packable(inputs, model=model, planning_candidates=candidates)
-    return _pack_compile_batches(packable, model=model, planning_candidates=candidates,
+    _require_compile_active(deadline, None)
+    return CompileRunPlanning(model, candidates)
+
+
+def _pack_for_run(inputs, deadline):
+    planning = prepare_compile_planning(deadline=deadline)
+    packable, refused = partition_packable(inputs, model=planning.model, planning_candidates=planning.candidates)
+    return _pack_compile_batches(packable, model=planning.model, planning_candidates=planning.candidates,
                                  context_pending=True), refused
 
 

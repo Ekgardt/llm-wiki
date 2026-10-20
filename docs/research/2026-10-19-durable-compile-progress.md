@@ -2358,3 +2358,61 @@ queried locally reported matching commits and returned resolver callers. Graph
 coverage remains partial (111597 unresolved edges); source inspection covered
 the tree, replay, proof, diagnostics and queue boundaries. This is an uninstalled
 candidate with simulated-provider qualification, not completion of point7.
+
+### Shared run planning preparation (2026-10-20, candidate implemented)
+
+The legacy _pack_for_run resolves/probes provider candidates itself, while durable
+preflight currently receives an arbitrary caller planner. Production routing
+needs one preparation function using the authoritative model selection already
+used by the compiler. A prepared value should own the ordered candidates and
+selected planning model, expose the existing archive iterator with pending
+context, and provide a digest-only request identity. Both eager compatibility
+packing and streamed preflight must use that same preparation.
+
+Primary sources checked2026-10-20: Python iterator protocol
+https://docs.python.org/3/library/stdtypes.html#iterator-types (lazy iteration);
+AWS https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/
+(request identity must preserve intent); SQLite
+https://www.sqlite.org/isolation.html (transaction isolation does not freeze
+external configuration). Therefore candidate/configuration identity is explicitly
+bound to the existing admitted-work request, not inferred from the queue lock.
+
+Reject separate CLI/MCP/nightly model selectors, rediscovery during each preflight
+replay, or persisting raw endpoints/configuration paths. Hash ordered canonical
+descriptors, endpoint, resolution status and the existing Codex planning evidence
+including executable identity. Reuse the provider's basis-identity encoder.
+This binds planned behavior; it is not a substitute for the live dependency
+witness or update fencing. Existing answer reservation and provider timeout
+policies are reused unchanged, not requalified by this refactor. No new limits,
+settings, paths, package or storage schema is introduced.
+
+Implementation: CompileRunPlanning owns model/candidates and supplies batches()
+and request(); prepare_compile_planning is now used by the existing _pack_for_run
+and by the streamed-controller qualification. Expired preparation refuses before
+discovery, and prepared replay performs no provider rediscovery. The controller
+rejects a changed planning identity before a model call.
+
+Testing found a shared serialization defect: Codex executable identity and
+configuration-file pairs are tuples. Both the new request and the existing
+protected-call digest fed those tuples to the strict canonical JSON encoder,
+which correctly refuses them. A separate red test reproduced the protected-call
+failure using actual CodexPlanningBasis/_PreparedCodex dataclasses. The common
+provider evidence encoder now emits JSON arrays; executable encoding is shared
+by protected calls and planning. No serializer rule was weakened. Configuration,
+executable, model, capacity, CLI-version, environment and candidate-order changes
+remain identity changes; raw private paths/endpoints are not in planning request.
+
+Qualification:13 initial new-planning failures; intermediate50 passed/5 failed
+per interpreter exposed the tuple defect, then the separate protected-call red
+case confirmed the common cause. Final related suites162 passed on Python3.12
+in50.58s and Python3.10 in56.27s. The strengthened capture-to-publication-to-queue
+test also passed on both (4.89s/5.12s), including changed-request refusal and saved
+work replay without another model call. It uses a simulated provider and fixture
+dependency witness, not a real-model or complete-environment qualification.
+All21 changed/new functions pass lizard/AST complexity; whole Ruff/diff pass.
+Logs: `logs/step7-shared-planning-*20261020*`. Fresh pre-edit graph
+generation-18e0294b2b045068-d9553015 matched0bf3d279; builtin graph showed the
+packing and protected-digest dependencies, supplemented with source inspection.
+
+Not installed. Production capture selection, full live dependency preparation,
+CLI/MCP/queue/nightly routing and the remaining point7 gates are still required.

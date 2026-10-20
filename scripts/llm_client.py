@@ -714,10 +714,16 @@ def _prepared_codex_identity(prepared):
     if prepared is None:
         return None
     return {
-        'executable': None if prepared.executable is None else asdict(prepared.executable),
+        'executable': _prepared_executable_identity(prepared.executable),
         'model': prepared.model, 'reasoning': prepared.reasoning,
         'payload': prepared.payload, 'basis': _prepared_basis_identity(prepared.basis),
     }
+
+
+def _prepared_executable_identity(executable):
+    if executable is None:
+        return None
+    return {**asdict(executable), 'identity': list(executable.identity)}
 
 
 def _prepared_basis_identity(basis):
@@ -726,7 +732,7 @@ def _prepared_basis_identity(basis):
     return {
         'model': basis.model, 'model_provider': basis.model_provider,
         'planning_window': basis.planning_window, 'catalog_sha256': basis.catalog_sha256,
-        'config_files': list(basis.config_files), 'environment_sha256': basis.environment_sha256,
+        'config_files': [list(item) for item in basis.config_files], 'environment_sha256': basis.environment_sha256,
         'cli_version': basis.cli_version, 'mcp_server_names': list(basis.mcp_server_names),
     }
 

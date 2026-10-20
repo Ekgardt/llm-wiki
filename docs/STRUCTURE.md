@@ -1314,6 +1314,17 @@ ownership and dependency errors. Capacity failures keep the retained partition
 path; unknown outcomes keep the delivery's explicit blocked state. This change
 does not authorize a new model attempt or retire unresolved source evidence.
 
+Run planning now has one compiler preparation path for eager packing and the
+candidate streamed controller. It owns the resolved candidate order and selected
+planning model, feeds the existing archive iterator, and supplies a digest-only
+request identity covering descriptors, endpoints, resolution status, Codex
+planning evidence and executable identity. Replay of that prepared plan does not
+rediscover providers. This request binding complements the live dependency
+witness; it does not establish complete environment closure. The shared
+protected-call identity encoder converts native tuple evidence to JSON arrays
+before canonical hashing, preserving configuration and executable identity
+without relaxing the canonical serializer.
+
 The archive's eager compatibility planning view keeps daily records materialized for existing partition
 proofs, while context source/target/vault collections retain verified record indices
 and logical paths. Selection filters metadata before reading bodies. Ranking stores
