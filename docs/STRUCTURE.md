@@ -1352,6 +1352,11 @@ refuses dry-run requests. In the uninstalled candidate, CLI, MCP and the nightly
 CLI invocation route mutating compiles through the shared supervised executor.
 Dry-run remains a nonpublishing preview. The foreground requires the adopted
 compile-journal schema; it does not fall back to legacy mutation on an older queue.
+Preview does not repair the source-state mirror, retire source failures, or
+record its refusals and errors as failures of real compilation. Failed previews
+still report failure and leave the last real completion outcome unchanged.
+This does not make legacy preview model calls durable: it still uses the existing
+plan cache, pending a separately agreed preview intent in the common controller.
 
 The adopted queue and its existing supervised worker accept an optional exact
 task ID. Selection keeps the same transaction, eligibility, payload checks and

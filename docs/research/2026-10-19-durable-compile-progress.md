@@ -5567,3 +5567,30 @@ the partial graph was supplemented with all three `_snapshot` production callers
 
 This is an uninstalled candidate correction. It does not resolve the pending
 durable-preview contract, private-vault backup/restore, or installed compiler.
+
+## 2026-10-20: preview does not overwrite real compile state
+
+Three isolated regressions failed before the correction: an empty dry-run entered
+source-state repair, a rejected proposal recorded a queue source failure, and a
+failed preview overwrote the last real run outcome. These are operational side
+effects, independent of the pending proposal to retain preview call progress.
+
+The existing preview now skips source mirror repair and stale-failure retirement.
+Its planning refusals, model-resolution failures and failed repair branches still
+print their errors and return failed outcomes, but do not record real source/run
+failures. Final failed preview does not move the real completion clock. Ordinary
+compilation retains its failure recording by default; the durable controller's
+callers do not opt out. This is an implementation correction to the existing
+nonpublishing preview, not approval or implementation of a durable preview task.
+
+The legacy preview still resolves models and uses the existing plan cache. It
+still lacks the new controller's unknown-call recovery. No claim of total
+filesystem immutability or completed preview integration is made. The separate
+preview-intent proposal awaits owner confirmation. No runtime root, database,
+service, setting, schema or numerical limit changes in this correction.
+
+Qualification: 156 related tests passed on Python 3.12 (50.05 s) and
+Python 3.10 (54.97 s). Lizard plus AST checks passed for all 18 changed
+functions; Ruff and diff checks passed. Tests cover preserved real failure
+recording as well as preview startup, resolution, refusal, repair-child and
+completion paths. This is candidate evidence, not installed-vault qualification.

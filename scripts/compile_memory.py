@@ -1299,11 +1299,11 @@ def partition_packable(
     return _partition_compile_units(inputs, budget, measure)
 
 
-def _refused_unit_outcome(day: CompileInputs, *, deadline: float = math.inf) -> BatchOutcome:
+def _refused_unit_outcome(day: CompileInputs, *, deadline: float = math.inf, record: bool = True) -> BatchOutcome:
     """A retained atomic unit fails alone, recorded like any failed batch."""
     path = day.dailies[0].logical_path
     refusal = ValueError(f"daily source exceeds compile input budget: {path}")
-    return BatchOutcome(_record_failed_batch(day, refusal, deadline=deadline))
+    return BatchOutcome(_record_failed_batch(day, refusal, deadline=deadline, record=record))
 
 
 def pack_compile_batches(
@@ -8425,8 +8425,7 @@ def _run(
     coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT, deadline=deadline)
     selection = _receipt_predicate(coordinator, deadline=deadline)
     dailies = select_dailies(args, state, coordinator=coordinator, deadline=deadline, selection=selection)
-    _repair_compile_mirror(coordinator, deadline=deadline, selection=selection)
-    _retire_stale_source_failures(coordinator.state_root, coordinator=coordinator, deadline=deadline, selection=selection)
+    _maintain_compile_source_state(args, coordinator, selection, deadline)
     _require_compile_active(deadline, cancelled)
     if not dailies:
         print("compile_memory: no changed daily logs; nothing to do.")
@@ -8441,10 +8440,11 @@ def _run(
         batches, refused = _pack_for_run(inputs, deadline)
     except Exception as exc:  # noqa: BLE001 - provider/cache boundary is fail-closed
         _require_compile_active(deadline, cancelled)
-        failed = BatchOutcome(_record_failed_batch(inputs, exc, deadline=deadline))
+        failed = BatchOutcome(_record_failed_batch(inputs, exc, deadline=deadline, record=not args.dry_run))
         return _finish_run(args, [failed])
 
-    outcomes: list[BatchOutcome] = [_refused_unit_outcome(day, deadline=deadline) for day in refused]
+    outcomes: list[BatchOutcome] = [_refused_unit_outcome(day, deadline=deadline, record=not args.dry_run)
+                                    for day in refused]
     for batch in batches:
         # A failed batch is recorded against its sources and the run goes on:
         # batches are independent snapshots, and stopping here held every later
@@ -8462,6 +8462,14 @@ def _run(
         )
     _require_compile_active(deadline, cancelled)
     return _finish_run(args, outcomes)
+
+
+def _maintain_compile_source_state(args, coordinator, selection, deadline):
+    if args.dry_run:
+        return
+    _repair_compile_mirror(coordinator, deadline=deadline, selection=selection)
+    _retire_stale_source_failures(coordinator.state_root, coordinator=coordinator,
+                                 deadline=deadline, selection=selection)
 
 
 @dataclass(frozen=True)
@@ -8610,12 +8618,18 @@ def _finish_run(args: argparse.Namespace, outcomes: Sequence[BatchOutcome]) -> i
     failed = [item for item in outcomes if item.status != 0]
     if failed:
         error = str(load_state().get("last_compile_error", "one or more compile batches failed"))
-        _mark_finished(args.trigger, "error", error, outcomes=outcomes)
+        _mark_failed_run_unless_dry(args, error, outcomes)
         print(f"compile_memory: {len(failed)} batch(es) failed; the rest: {_outcome_sentence(outcomes)}.")
         return 1
     _mark_ok_unless_dry(args, outcomes=outcomes)
     print(f"compile_memory: done: {_outcome_sentence(outcomes)}.")
     return 0
+
+
+def _mark_failed_run_unless_dry(args, error, outcomes):
+    if args.dry_run:
+        return
+    _mark_finished(args.trigger, 'error', error, outcomes=outcomes)
 
 
 def _announce_compile(args: argparse.Namespace, dailies: Sequence[Path]) -> None:
@@ -8631,10 +8645,13 @@ def _record_failed_batch(
     *,
     prefix: str = "",
     deadline: float = math.inf,
+    record: bool = True,
 ) -> int:
     """Record a batch failure without finishing or unlocking the active run."""
     error = f"{type(exc).__name__}: {exc}"
     print(f"compile_memory: FAILED — {prefix}{error}", flush=True)
+    if not record:
+        return 1
     _record_compile_source_failures(inputs, STATE_ROOT, error_code=type(exc).__name__, deadline=deadline)
     _record_batch_error(error, deadline=deadline)
     return 1
@@ -8665,7 +8682,7 @@ def _run_batch(
         raise
     except Exception as exc:  # noqa: BLE001 - provider/cache boundary is fail-closed
         _require_compile_active(deadline, cancelled)
-        return BatchOutcome(_record_failed_batch(batch.inputs, exc, deadline=deadline))
+        return BatchOutcome(_record_failed_batch(batch.inputs, exc, deadline=deadline, record=not args.dry_run))
 
     _require_compile_active(deadline, cancelled)
     if args.dry_run:
@@ -8701,7 +8718,7 @@ def _run_repairable_batch(batch, args, *, coordinator, deadline, cancelled, owne
         _require_compile_active(deadline, cancelled)
         children = _repartition_compile_repair(batch, error.feedback)
         if not children:
-            return [BatchOutcome(_record_failed_batch(batch.inputs, error, deadline=deadline))]
+            return [BatchOutcome(_record_failed_batch(batch.inputs, error, deadline=deadline, record=not args.dry_run))]
         print(f'compile_memory: {error}; retrying complete source partitions with every reviewed proposal.',
               flush=True)
         return _run_repair_children(children, args, options)
@@ -8721,7 +8738,8 @@ def _run_repair_child(child, feedback, args, options):
         _require_repair_context(child, refreshed)
     except Exception as error:  # noqa: BLE001 - a failed child cannot discard its independent sibling
         _require_compile_active(options['deadline'], options['cancelled'])
-        return [BatchOutcome(_record_failed_batch(child.inputs, error, deadline=options['deadline']))]
+        return [BatchOutcome(_record_failed_batch(child.inputs, error, deadline=options['deadline'],
+                                                  record=not args.dry_run))]
     return _run_repairable_batch(refreshed, args, critic_feedback=feedback, **options)
 
 
