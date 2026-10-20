@@ -4416,3 +4416,52 @@ still contains validation/input-budget errors. Neither that process nor its
 operational state was removed. Its lifetime is not proof of a dead owner and
 cannot authorize offline migration. Historical lost-capture and maintenance
 failures are not declared repaired by any of these checks.
+
+### Explicit repair-command migration entry — design 2026-10-20
+
+Reproduction: the existing repair CLI rejects `--upgrade-compile-progress
+--backup-image ...` as unknown arguments before touching any root. The approved
+migration is reachable only by importing its Python API. Add a mutually
+exclusive repair operation to the existing command, carrying the already approved
+external backup-image argument. Require `--apply`, the complete offline
+confirmation, and an image argument together; reject an image supplied to any
+other operation. Delegate exclusively to `upgrade_offline`, preserving its fence,
+preimage binding, resume semantics and refusal of live owners. Do not silently
+adopt legacy/fresh databases or choose a backup path. Success reports a validated
+upgraded admission, not encrypted recovery or permission to delete its preimage.
+Errors pass through the existing redacted CLI boundary.
+
+Primary sources checked on 2026-10-20:
+- SQLite rollback-journal atomic commits and hot-journal recovery:
+  https://www.sqlite.org/atomiccommit.html . Keep transactional migration in the
+  existing database; do not replace a database behind an open connection.
+- PostgreSQL restore handling and failure semantics:
+  https://www.postgresql.org/docs/current/backup-dump.html . A restore command
+  can fail independently of having a backup; checking the restoration outcome is
+  essential. This is comparative guidance, not a new PostgreSQL dependency.
+- Restic explicit snapshot restoration into a selected target:
+  https://restic.readthedocs.io/en/stable/050_restore.html . Keep backup identity
+  and restore validation separate from schema-upgrade success.
+
+Alternatives: automatic migration on queue admission cannot establish stopped
+old clients; copying/restoring a preimage over the active queue can lose newer
+work; another standalone command would duplicate the existing repair interface
+and error rendering. The thin explicit repair operation is the smallest supported
+entry to the approved migration. It adds no schema, environment variable, runtime
+location, package, numerical bound or new architecture. Shell/PowerShell installer
+orchestration and production recovery qualification remain separate next steps.
+
+Repair CLI implementation qualification: 41 CLI/adoption/offline-cutover tests
+passed on Python 3.12 in 25.40 seconds and Python 3.10 in 26.88 seconds. Actual
+CLI subprocesses proved successful migration, exact backup certification,
+idempotent repeat preserving subsequently enqueued work, refusal of a live
+registered owner despite explicit confirmation, refusal of a different recovery
+image, and successful resume of an interrupted intent with its bound image.
+Seven invalid flag combinations were rejected before creating roots. All nine
+changed/new functions passed Lizard/AST complexity gates; Ruff and diff checks
+passed. The pre-change repair CLI's eight baseline tests passed separately.
+The code index used for this change was generation
+`generation-18e0460729fb1300-ac48765c` at `837a3d7a`; `_repair_report` callers were
+confirmed in the partial graph and its CLI/report/migration dependencies inspected
+in source. No live-vault migration or model call was performed. Installer wiring
+and the other deployment/full-cycle gates remain open.

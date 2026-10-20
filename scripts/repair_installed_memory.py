@@ -33,15 +33,26 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="permit the selected resumable repair",
     )
-    result.add_argument(
+    operation = result.add_mutually_exclusive_group()
+    operation.add_argument(
         "--adopt-ownership-v3",
         action="store_true",
         help="perform the offline v3 adoption",
     )
+    operation.add_argument(
+        "--upgrade-compile-progress",
+        action="store_true",
+        help="upgrade or resume the offline compile journal migration",
+    )
+    result.add_argument(
+        "--backup-image",
+        type=Path,
+        help="external empty directory for a new migration, or its exact retained image for resume",
+    )
     result.add_argument(
         "--confirm-all-agents-stopped",
         action="store_true",
-        help="confirm every process using this vault is stopped for offline adoption",
+        help="confirm every process using this vault is stopped for the offline operation",
     )
     result.add_argument("--root", type=Path, default=None)
     result.add_argument("--state-root", type=Path, default=None)
@@ -56,13 +67,26 @@ def parser() -> argparse.ArgumentParser:
 
 _FLAG_RULES = (
     (lambda args: args.adopt_ownership_v3 and not args.apply, "--adopt-ownership-v3 requires --apply"),
+    (lambda args: args.upgrade_compile_progress and not args.apply, "--upgrade-compile-progress requires --apply"),
     (
-        lambda args: args.confirm_all_agents_stopped and not args.adopt_ownership_v3,
-        "--confirm-all-agents-stopped requires --adopt-ownership-v3",
+        lambda args: args.confirm_all_agents_stopped and not (args.adopt_ownership_v3 or args.upgrade_compile_progress),
+        "--confirm-all-agents-stopped requires an offline operation",
     ),
     (
         lambda args: args.adopt_ownership_v3 and not args.confirm_all_agents_stopped,
         "offline adoption requires --confirm-all-agents-stopped",
+    ),
+    (
+        lambda args: args.upgrade_compile_progress and not args.confirm_all_agents_stopped,
+        "offline migration requires --confirm-all-agents-stopped",
+    ),
+    (
+        lambda args: args.upgrade_compile_progress and args.backup_image is None,
+        "--upgrade-compile-progress requires --backup-image",
+    ),
+    (
+        lambda args: args.backup_image is not None and not args.upgrade_compile_progress,
+        "--backup-image requires --upgrade-compile-progress",
     ),
 )
 
@@ -115,6 +139,8 @@ def _repair_report(args, root_input: str) -> dict:
     state_root = _resolved_path(
         args.state_root or os.environ.get("LLM_WIKI_STATE_ROOT", root)
     )
+    if args.upgrade_compile_progress:
+        return _upgrade_compile_report(args, root, state_root)
     if args.apply:
         return repair_installed_vault(
             root=root,
@@ -123,6 +149,28 @@ def _repair_report(args, root_input: str) -> dict:
             confirm_all_agents_stopped=args.confirm_all_agents_stopped,
         )
     return inspect_installed_vault(root=root, state_root=state_root)
+
+
+def _upgrade_compile_report(args, root: Path, state_root: Path) -> dict:
+    from compile_progress_migration import upgrade_offline
+
+    record = upgrade_offline(
+        root=root,
+        state_root=state_root,
+        backup_image=args.backup_image,
+        confirm_all_agents_stopped=args.confirm_all_agents_stopped,
+    )
+    return {
+        "mode": "apply",
+        "overall_status": "ok",
+        "actions": [{"code": "compile_progress_upgraded"}],
+        "blockers": [],
+        "details": {
+            "adoption_state": "adopted",
+            "compile_progress": "upgraded",
+            "backup_manifest_sha256": record["backup_manifest_sha256"],
+        },
+    }
 
 
 def _report_status(report: dict) -> str:

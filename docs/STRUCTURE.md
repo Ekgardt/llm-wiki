@@ -266,7 +266,7 @@ compile work rather than inferring success from unrelated global timestamps.
 No database, daemon, dependency or runtime root is added. A queue schema/index
 migration, if needed, requires its own approved migration design.
 
-### Approved durable compile progress (2026-10-19; implementation pending)
+### Approved durable compile progress (2026-10-19; candidate not installed)
 
 The owner approved one append-only `compile_work_events` table in the existing
 queue database, with an explicit offline schema migration. The current stage is
@@ -277,13 +277,14 @@ queue ownership and payload verification fence transitions; terminal queue resul
 are not reused as intermediate checkpoints. Markdown transaction receipts remain
 the authority for published work. Index refresh has a separate outcome.
 
-CLI, MCP, queue and nightly are to share the same transition controller.
+The candidate connects CLI, MCP, queue and nightly to the same transition controller.
 The candidate worker supports an explicit `LeaseProcessor`: after claim, it binds
 the canonical queue handle, lease and caller deadline into the existing spawned
 processor. Tokens stay outside user payloads. The parent keeps heartbeat and child
 cleanup ownership; queue operations recheck the lease and payload in SQLite.
-Ordinary processors retain their compatibility task dictionary. The compile
-entrypoints are not yet connected to this opt-in handoff.
+Ordinary processors retain their compatibility task dictionary. Ordinary CLI and
+MCP compilation enqueue leased work; nightly invokes the same CLI. Dry runs do
+not enqueue work.
 A stored
 model answer survives process restart. An uncertain dispatched request whose
 answer cannot be recovered blocks automatic repeat expense until explicitly
@@ -308,9 +309,10 @@ share the queue write transaction with checkpoint artifact validation. This is
 reference safety, not completed event retirement or orphan collection. The isolated
 `compile_controller.py` additionally journals a model-call reservation before
 external dispatch, recovers validated answer artifacts and their usage, and blocks
-unknown outcomes through the existing queue. It does not yet replace entrypoints,
-semantic validation, correction-budget accounting or publication receipts. Migration deployment
-qualification, artifact retirement and the common transition controller remain pending; see
+unknown outcomes through the existing queue. The controller reuses semantic
+validation, journals correction progress and checks publication receipts, with
+retained work/source/dependency identity. Migration deployment qualification,
+complete artifact retirement and useful full-cycle evidence remain pending; see
 `docs/research/2026-10-19-durable-compile-progress.md` for verification scope.
 The candidate-only schema step atomically creates the journal and stamps queue
 user_version4, refusing the active queue and inode aliases. The development branch
@@ -345,6 +347,17 @@ backup is kept and a retry requires a fresh empty image directory. The retained
 image is owner-protected plaintext staging, not a claim of completed encrypted
 Restic recovery. Encrypted recovery/installation qualification remains required
 before deployment. No automatic migration is wired into startup or nightly.
+
+The existing repair CLI exposes the explicit operation:
+`repair_installed_memory.py --apply --upgrade-compile-progress --backup-image <absolute-directory> --confirm-all-agents-stopped`.
+It is mutually exclusive with initial ownership adoption. The image must be an
+external empty directory for a new upgrade, or the exact retained image for
+recovery. Confirmation never overrides a live or unknown registered owner.
+Success verifies the upgraded admission; it does not certify encrypted recovery
+or authorize preimage deletion. The shell/PowerShell installers do not yet
+orchestrate this operation. An isolated migrated fixture has passed backup and
+restore using real Restic 0.19.1, including exact Markdown and queued payload
+checks; the installed private vault has not passed this deployment qualification.
 
 ## External integration configuration preimages
 
@@ -1155,9 +1168,9 @@ The uninstalled compile-progress branch also connects its journal to the shared
 post-DLP, post-preparation dispatch boundary. Candidate results retain safe output,
 failure classification and usage. Indexed historical event reads let `CompileReplay`
 feed saved answers back through the existing `resolve_compile_plan` validators;
-unknown transport outcomes remain blocked. The semantic caller must still bind and
-retain complete work/source/dependency identity and supply this runner through all
-entrypoints. This optional integration does not activate queue schema 4 or replace
+unknown transport outcomes remain blocked. The candidate semantic caller binds and
+retains work/source/dependency identity and supplies this runner through the
+common leased entrypoints. This integration does not activate queue schema 4 or replace
 the installed controller; deployment and complete useful-cycle qualification remain
 pending. See `docs/research/2026-10-19-durable-compile-progress.md`.
 
