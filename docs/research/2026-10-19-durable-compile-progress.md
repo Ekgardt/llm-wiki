@@ -800,3 +800,27 @@ their applicability to streaming workloads remains part of the law-9 cutover aud
 Source capture can now stream, but `planning_inputs` still materializes all daily
 parts, and installed CLI/MCP/queue/nightly routing remains on the old controller.
 No installation or point-7 completion is claimed.
+
+### 2026-10-20 — physical-day read scope
+
+Reproduction: sequential archive reads recreated the whole original daily byte
+string for every partition. Two regression tests failed on the prior reader:
+parts did not share their original bytes, and reading the second part reread the
+physical source. The common sequential reader now scopes verified byte and parsed
+JSON reuse to consecutive records of one logical day. It drops its caches before
+advancing to another day. Random record access remains independent; no persistent
+cache, numeric capacity, package or runtime path was introduced. Digest validation
+and record restoration still use the common implementation. This follows the
+already researched iterator/local immutable artifact design; it does not change
+source grouping, native atomicity, citation ambiguity or provider admission.
+
+A paired synthetic read of one 1-MiB day split into 16 parts returned equal records:
+independent reads peaked at 17,839,111 traced Python bytes, sequential reads at
+1,131,081. This is a mechanism measurement, not installed RSS, useful compile
+quality, token cost or whole-corpus streaming qualification. The planning view
+still holds the restored daily records; its full streaming conversion remains open.
+The complexity checker accepted all ten changed/new functions. Ruff and installed
+package consistency checks passed for both Python environments (65/67 packages).
+The 60 archive-sharing, protected-dispatch and streaming-capture tests passed on
+Python 3.12 and independently on Python 3.10. The installed autonomous compiler
+was still live (PID 2129006); it was neither stopped nor replaced by this change.

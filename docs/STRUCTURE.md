@@ -1198,3 +1198,8 @@ publishing the manifest so logical identity matches the ordinary snapshot. It
 returns the manifest digest only after successful archive closure. This format
 writer is not itself a queue admission or publication operation: the durable queue
 writer and complete-work binding must surround it before production routing.
+
+Sequential daily reads share verified immutable blobs and parsed metadata within
+one consecutive physical day. The reader drops that scope before the next day;
+there is no corpus-wide body cache or numeric eviction threshold. Planning still
+materializes the resulting daily records until the streaming planner is integrated.

@@ -11,7 +11,8 @@ import zipfile
 from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, replace
-from functools import partial
+from functools import cache, partial
+from itertools import groupby
 
 import compile_progress as progress
 from context_budget import TokenCount, TokenUsage
@@ -646,15 +647,21 @@ class CompileInputArchive:
         return value
 
     def record(self, group, index):
-        value = self.record_metadata(group, index)
-        _archive_record_fields(value, _ARCHIVE_BYTES_FIELDS, self.blob)
-        _archive_record_fields(value, _ARCHIVE_JSON_FIELDS, self.json_blob)
-        kind = _snapshot_types()[group]
-        return _restored_archive_record(kind, value)
+        return _restore_archive_value(group, self.record_metadata(group, index),
+                                      self.blob, self.json_blob)
 
     def records(self, group):
+        if group == 'dailies':
+            yield from self.daily_records()
+            return
         for index in range(self.record_count(group)):
             yield self.record(group, index)
+
+    def daily_records(self):
+        metadata = (self.record_metadata('dailies', index)
+                    for index in range(self.record_count('dailies')))
+        for _, records in groupby(metadata, key=lambda value: value['logical_path']):
+            yield from _restore_archive_day(self, records)
 
     def planning_inputs(self):
         from compile_memory import CompileInputs
@@ -667,6 +674,19 @@ class CompileInputArchive:
         from compile_memory import CompileInputs
 
         return CompileInputs(**{group: tuple(self.records(group)) for group in _snapshot_types()})
+
+
+def _restore_archive_day(reader, records):
+    blob = cache(reader.blob)
+    json_blob = cache(reader.json_blob)
+    for value in records:
+        yield _restore_archive_value('dailies', value, blob, json_blob)
+
+
+def _restore_archive_value(group, value, blob, json_blob):
+    _archive_record_fields(value, _ARCHIVE_BYTES_FIELDS, blob)
+    _archive_record_fields(value, _ARCHIVE_JSON_FIELDS, json_blob)
+    return _restored_archive_record(_snapshot_types()[group], value)
 
 
 def _restored_archive_record(kind, value):
