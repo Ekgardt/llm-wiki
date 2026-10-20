@@ -46,8 +46,8 @@ def _materialized(batch):
 
 def _materialized_daily(part):
     if type(part.original_content) is VerifiedByteRange:
-        return replace(part, original_content=part.original_content[:])
-    return part
+        part = replace(part, original_content=part.original_content[:])
+    return replace(part, native_frames=tuple(part.native_frames))
 
 
 def _refuse_materialization(*args):

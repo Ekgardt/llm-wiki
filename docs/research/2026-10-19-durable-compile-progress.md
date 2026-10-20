@@ -4248,3 +4248,62 @@ Lizard/AST checks passed for 19 changed/new functions, as did Ruff and diff
 checks. Full archive JSON metadata restoration still eagerly materializes
 arrays; historical doctor's complete daily snapshot also remains eager.
 Neither full streaming nor installed point-7 completion is claimed.
+
+Archive metadata restoration design, 2026-10-20: `json_blob` currently calls
+`archive.read`, decodes the entire array, then `_restore_snapshot_daily` creates
+all native frames. Source inspection confirms its internal consumers are the
+two array-valued metadata fields. Reviewed primary JSON grammar
+(https://www.rfc-editor.org/rfc/rfc8259), Python's decoder and canonical encoding
+APIs (https://docs.python.org/3.12/library/json.html), and simdjson's documented
+on-demand traversal/lifetime approach
+(https://simdjson.org/api/2.0.0/md_doc_basics.html). The last is an older
+conceptual reference, not a current-version dependency recommendation.
+
+Use the existing verified archive range to retain only top-level element spans.
+A structural-token scan tracks nesting, quoted strings and escaping across
+transfer boundaries; stdlib JSON decoding and exact canonical re-encoding still
+validate every complete element before the array is admitted. Do not replace
+semantic JSON validation with the scanner. Native record construction must also
+validate every element before returning a lazy restored sequence. Explicit eager
+snapshot APIs must detach those sequences while their source remains open.
+Alternatives: `json.load` still materializes the whole value; repeated
+`raw_decode` retries can repeatedly parse a growing long element; the existing
+vector reader only supports scalar columns; a new C/C++ parser dependency adds
+packaging and compatibility work without removing the archive ownership need.
+The chosen internal representation changes no archive schema or runtime path,
+adds no record-size/count limit, and must retain full canonical/hash validation,
+closed-owner refusal and caller deadlines.
+
+Implemented the owned array view and lazy restored native sequence. Every array
+element is decoded and canonically compared at admission, every native record
+is constructed once for shape validation, and only spans survive. Positional
+native consumers reuse those verified spans without decoding unrelated
+payloads. Explicit `planning_inputs`/`materialize` detach native records while
+the archive is open. Slice/sequence access retains source ownership checks.
+
+Regression development exposed three comparisons using a test helper which
+materialized the original source but left the new metadata view attached to a
+closed archive. That helper now copies both fields; complete-value assertions
+and closed-owner refusal remain. The sharing assertion now requires zero
+whole-blob reads and exactly one stream open. The old lifetime observer injected
+a bytes subclass forbidden by strict immutable-source validation. It now counts
+references to actual bytes, outside pytest's assertion rewrite (which itself
+temporarily retains arguments); the sole-probe assertion still proves released
+part payloads. No production type check was weakened.
+
+The isolated 1,024,503-byte metadata measurement observed peak allocation
+5,937,795 bytes for eager decoding/canonical checking and 437,608 for the owned
+array, taking 8.76/15.26 ms respectively. These are stage-local measurements,
+not real-cycle token or latency evidence:
+`logs/step7-json-restore-measurement-20261020.json`. A reviewed native index
+retention plan retired four obsolete development generations, preserving current
+and previous and all other checkout generations, restoring free disk from
+2.3 to 4.0 GiB. No knowledge or run state was removed.
+
+Final qualification after the helper fixes: 216 tests passed on Python 3.12
+(88.89 s) and Python 3.10 (101.58 s), including archive/capture integrity,
+native payload lifetime, preflight replay, context refresh/deltas and original
+digest ownership. Every one of 40 changed/new functions passed Lizard/AST
+complexity gates; Ruff and diff checks passed. This does not complete historical
+doctor's eager source-work layout, inherited law-9 limits, dependency/recovery
+qualification, installation or the required real medium-model full cycle.

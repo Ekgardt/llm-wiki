@@ -421,9 +421,13 @@ def _native_frame_views(content, observed):
 
 
 def _native_frame_spans(frames):
+    from compile_controller import _RestoredNativeFrames
+
     if type(frames) is _NativeFrameViews:
         require_immutable_source(frames.content)
         return ((row[1], row[2]) for row in frames.coordinates)
+    if type(frames) is _RestoredNativeFrames:
+        return frames.spans()
     return ((frame.byte_start, frame.byte_end) for frame in frames)
 
 

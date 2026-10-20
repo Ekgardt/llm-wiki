@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import re
 import weakref
 import zipfile
 from collections import Counter
@@ -598,11 +599,21 @@ def _require_original_digest(value):
 
 
 def _restore_snapshot_daily(value):
+    value['original_entries'] = tuple(tuple(entry) for entry in value['original_entries'])
+    value['native_frames'] = _restored_native_frames(value['native_frames'])
+    return value
+
+
+def _native_frame_from_json(value):
     from compile_memory import NativeCompileFrame
 
-    value['original_entries'] = tuple(tuple(entry) for entry in value['original_entries'])
-    value['native_frames'] = tuple(NativeCompileFrame(**frame) for frame in value['native_frames'])
-    return value
+    return NativeCompileFrame(**value)
+
+
+def _restored_native_frames(values):
+    if type(values) is _ArchiveJsonArray:
+        return values.native_records()
+    return tuple(_native_frame_from_json(frame) for frame in values)
 
 
 def save_compile_inputs(queue, lease, checkpoint, inputs):
@@ -2340,6 +2351,137 @@ class _SnapshotJsonArray:
             raise ValueError('snapshot JSON metadata changed during serialization')
 
 
+_JSON_STRUCTURE = re.compile(rb'["\\{}\[\],]')
+
+
+class _JsonArrayStructure:
+    def __init__(self):
+        self.quoted, self.depth, self.escape = False, 0, -2
+
+    def boundary(self, token, position):
+        if self.quoted:
+            self._string_token(token, position)
+            return False
+        if token == 34:
+            self.quoted = True
+            return False
+        return self._container_token(token)
+
+    def _string_token(self, token, position):
+        if position == self.escape + 1:
+            self.escape = -2
+            return
+        if token == 92:
+            self.escape = position
+            return
+        self.quoted = token != 34
+
+    def _container_token(self, token):
+        self.depth += {91: 1, 123: 1, 93: -1, 125: -1}.get(token, 0)
+        if self.depth < 0:
+            raise progress.ProgressCorrupt('invalid snapshot metadata nesting')
+        return token == 44 and self.depth == 0
+
+    def finish(self):
+        if self.quoted or self.depth:
+            raise progress.ProgressCorrupt('unfinished snapshot metadata value')
+
+
+def _json_structure_tokens(source):
+    offset = 1
+    for chunk in source.iter_chunks(1, len(source) - 1):
+        for match in _JSON_STRUCTURE.finditer(chunk):
+            yield chunk[match.start()], offset + match.start()
+        offset += len(chunk)
+
+
+def _require_json_array_container(source):
+    if len(source) < 2 or source[:1] != b'[' or source[-1:] != b']':
+        raise progress.ProgressCorrupt('snapshot metadata must be a canonical array')
+
+
+def _json_array_spans(source):
+    _require_json_array_container(source)
+    state, start = _JsonArrayStructure(), 1
+    for token, position in _json_structure_tokens(source):
+        if state.boundary(token, position):
+            yield start, position
+            start = position + 1
+    state.finish()
+    yield from _last_json_array_span(start, len(source))
+
+
+def _last_json_array_span(start, size):
+    if size > 2:
+        yield start, size - 1
+
+
+class _ArchiveJsonArray(Sequence):
+    """Fully validated array with per-item payload reads from its owned range."""
+
+    def __init__(self, source):
+        source.require_active()
+        self.source = source
+        self.spans = tuple(_json_array_spans(source))
+        self.native_spans = None
+        for index in range(len(self.spans)):
+            self[index]
+
+    def __len__(self):
+        self.source.require_active()
+        return len(self.spans)
+
+    def __getitem__(self, index):
+        self.source.require_active()
+        if isinstance(index, slice):
+            return tuple(self[position] for position in range(len(self))[index])
+        start, end = self.spans[index]
+        data = self.source[start:end]
+        value = json.loads(data)
+        if _snapshot_json(value) != data:
+            raise progress.ProgressCorrupt('noncanonical snapshot metadata')
+        return value
+
+    def native_records(self):
+        if self.native_spans is None:
+            self.native_spans = tuple(_native_json_span(value) for value in self)
+        return _RestoredNativeFrames(self)
+
+    def __eq__(self, other):
+        return _archive_sequences_equal(self, other)
+
+
+class _RestoredNativeFrames(Sequence):
+    def __init__(self, values):
+        self.values = values
+
+    def __len__(self):
+        return len(self.values)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return tuple(self[position] for position in range(len(self))[index])
+        return _native_frame_from_json(self.values[index])
+
+    def __eq__(self, other):
+        return _archive_sequences_equal(self, other)
+
+    def spans(self):
+        self.values.source.require_active()
+        return iter(self.values.native_spans)
+
+
+def _native_json_span(value):
+    frame = _native_frame_from_json(value)
+    return frame.byte_start, frame.byte_end
+
+
+def _archive_sequences_equal(left, right):
+    if not isinstance(right, Sequence):
+        return NotImplemented
+    return len(left) == len(right) and all(a == b for a, b in zip(left, right))
+
+
 def _native_frame_json(frame):
     return _snapshot_json(asdict(frame))
 
@@ -2765,11 +2907,8 @@ class CompileInputArchive:
             yield source
 
     def json_blob(self, digest):
-        data = self.blob(digest)
-        value = json.loads(data)
-        if _snapshot_json(value) != data:
-            raise progress.ProgressCorrupt('noncanonical snapshot metadata')
-        return value
+        source = self.original_source(digest, logical_path="<snapshot-metadata>")
+        return _ArchiveJsonArray(source)
 
     def record(self, group, index):
         value = self.record_metadata(group, index)
@@ -2855,7 +2994,7 @@ def _eager_daily_records(records):
             content = original[:] if current is not original else content
             current = original
             record = replace(record, original_content=content)
-        yield record
+        yield replace(record, native_frames=tuple(record.native_frames))
 
 
 def _snapshot_content_chunks(content):
