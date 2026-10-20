@@ -761,7 +761,7 @@ class CompileInputArchive:
             yield from _restore_archive_day(self, records)
 
     def iter_batches(self, *, model, token_adapters=None, budget=None,
-                     planning_candidates=None, context_pending=False):
+                     planning_candidates=None, context_pending=False, on_refused=None):
         from compile_memory import iter_streamed_compile_batches
 
         required = self.required_context()
@@ -769,6 +769,7 @@ class CompileInputArchive:
             self.daily_records(), self.batch_context_inputs(), required,
             model=model, token_adapters=token_adapters, budget=budget,
             planning_candidates=planning_candidates, context_pending=context_pending,
+            on_refused=on_refused,
         )
 
     def batch_context_inputs(self):

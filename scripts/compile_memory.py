@@ -1154,15 +1154,25 @@ def _part_logical_paths(parts):
     return {part.logical_path for part in parts}
 
 
-def _partition_compile_units(inputs, budget, measure):
-    accepted = []
-    refused = []
-    for unit in _native_part_units(inputs.dailies):
+def _iter_admitted_compile_units(units, budget, prepare, on_refused):
+    """Report complete refused units before advancing; never retain their bodies."""
+    for unit in units:
+        inputs, measure = prepare(unit)
         if _unit_is_refused(unit, budget, measure):
-            refused.append(_inputs_with_parts(inputs, tuple(unit)))
+            on_refused(_inputs_with_parts(inputs, tuple(unit)))
+            del inputs, measure
             continue
-        accepted.extend(unit)
-    return _inputs_with_parts(inputs, tuple(accepted)), tuple(refused)
+        del inputs, measure
+        yield unit
+
+
+def _partition_compile_units(inputs, budget, measure):
+    refused = []
+    units = _iter_admitted_compile_units(
+        _native_part_units(inputs.dailies), budget, lambda _unit: (inputs, measure), refused.append,
+    )
+    accepted = tuple(part for unit in units for part in unit)
+    return _inputs_with_parts(inputs, accepted), tuple(refused)
 
 
 def partition_packable(
@@ -1231,14 +1241,17 @@ def _compile_measured_batch(inputs, paths, budget, model, adapters, measure, ran
 
 def iter_streamed_compile_batches(records, context_inputs, required_context, *, model,
                                   token_adapters=None, budget=None, planning_candidates=None,
-                                  context_pending=False):
+                                  context_pending=False, on_refused=None):
     """Plan current units against global context without retaining completed days."""
     budget = _validated_packing_budget(budget, model)
     ranking = _packing_context_ranking(context_inputs, context_pending)
     _report_required_context(required_context)
     prepare = partial(_stream_batch_measure, context_inputs, required_context,
                       model, token_adapters, planning_candidates)
-    for paths, measure in _iter_measured_groups(_iter_native_part_units(records), budget, prepare):
+    units = _iter_native_part_units(records)
+    if on_refused is not None:
+        units = _iter_admitted_compile_units(units, budget, prepare, on_refused)
+    for paths, measure in _iter_measured_groups(units, budget, prepare):
         yield _compile_measured_batch(measure.inputs, paths, budget, model, token_adapters,
                                       measure, ranking, planning_candidates, context_pending)
 

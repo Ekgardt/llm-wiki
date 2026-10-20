@@ -1277,3 +1277,52 @@ CCN/if/nesting checks; whole scripts/tests Ruff and diff checks pass. Logs:
 logs/step7-task-origin-py{312,310}-final-20261020.txt,
 logs/step7-task-origin-owner-py{312,310}-20261020.txt and
 logs/step7-task-origin-complexity-20261020.json.
+
+### 2026-10-20: streamed admission reports refused units independently
+
+The archive iterator previously stopped on the first oversized atomic unit, while
+`_pack_for_run`'s eager partition already retained independent admissible units.
+Four new regression cases failed before implementation (missing refusal interface).
+The common admission iterator now supplies complete refused daily units to a
+synchronous callback and continues admission. The archive keeps its global citation
+index, including refused sources; it never rebuilds that index from accepted sources.
+Without a callback the existing fail-on-oversize behavior remains. DLP, malformed
+source, and callback persistence errors propagate rather than becoming capacity
+refusals. No new capacity or retry limit is introduced; existing qualified-model
+capacity and mandatory-context measurement remain authoritative.
+
+Research checked on 2026-10-20:
+- Python's [iterator composition](https://docs.python.org/3.10/library/itertools.html)
+  supports lazy local stages without retaining the entire input. The page explicitly
+  marks Python 3.10 unsupported upstream; compatibility tests do not change that.
+- AWS [partial batch failure reporting](https://docs.aws.amazon.com/lambda/latest/dg/services-sqs-errorhandling.html)
+  separates failed records from successful ones to avoid repeating independent work.
+- Microsoft's [pipes and filters](https://learn.microsoft.com/en-us/azure/architecture/patterns/pipes-and-filters)
+  emphasizes explicit error policy, adequate context, and end-to-end checks.
+
+Chosen here: one local admission generator reused by eager and streamed planning.
+Rejected: aborting all independent work on one capacity refusal; materializing all
+refusals before returning batches; catching arbitrary errors and labelling them as
+oversize. Tradeoff: opted-in streamed admission measures a unit before the grouping
+stage rechecks it, as eager partition-then-pack already does. This is a local
+planning cost, not evidence of improved total LLM cost. No cloud dependency added.
+
+Tests exercise first/middle/last refusal, complete native atomic-unit refusal,
+all-refused input and released records, unchanged default refusal, protected-input
+failure, callback failure, and existing context/grouping behavior. Initial complexity
+measurement found CCN 7 in the native test; extracting its repeated daily-group
+projection brought all 13 changed/new functions within the laws.
+
+This remains an uninstalled controller primitive. It does not yet save a complete
+preflight plan or connect the journal controller to production CLI/MCP/nightly.
+The caller must durably record refusals and finish preflight before paid dispatch;
+merely iterating this API is not that guarantee. Cross-task unknown-outcome
+protection, full dependency closure, installation/restore and real-cycle evidence
+remain open. Live compiler PID 2129006 was confirmed running at this inspection;
+it was not restarted or bypassed.
+
+Validation: 113 related tests passed on Python 3.12 (10.54 s) and Python 3.10
+(11.64 s). Whole `scripts/` and `tests/` Ruff and diff checks passed. Evidence:
+`logs/step7-stream-admission-py{312,310}-20261020.txt`,
+`logs/step7-stream-admission-red-20261020.txt`, and
+`logs/step7-stream-admission-complexity-20261020.json` in the installed vault.
