@@ -5311,3 +5311,76 @@ not measure the full transaction. Evidence:
 `logs/step7-image-creation-memory-20261020.json`. Capture of before-bytes, actual
 apply/restore readers, live installation, encrypted real-vault restore, remaining
 limit review and useful paid-model full-cycle qualification remain unfinished.
+
+### Before-image capture ownership (2026-10-20, design before implementation)
+
+The current preparation path reads every existing target completely through
+`_descriptor_bytes`, even though image compression now streams. Parent-identity
+backfill uses the same capture path. Replace that private capture result with an
+owned verified range, consumed before its context exits. Preserve the existing
+POSIX parent descriptor and relative no-follow open, and the Windows held-parent
+handle. A generic path-based reader would weaken the existing authority boundary.
+Hash and compress the range incrementally; compare append prefixes blockwise.
+Recheck content, target identity and parent identity before returning staged work.
+Keep the existing byte readers for apply/undo callers until those are migrated.
+No public interface, runtime path, format, dependency or configured limit changes.
+
+Primary sources checked today:
+- https://docs.python.org/3.12/library/os.html — relative descriptor operations,
+  fstat and explicit descriptor ownership; platform support must be preserved.
+- https://go.dev/blog/osroot — checking a path then opening it has a traversal
+  race; descriptor-rooted operations retain authority through renames. This is
+  rationale for keeping the existing Python boundary, not adding Go.
+- https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew
+  — sharing modes and directory handles govern Windows lifetime. Keep the existing
+  Windows parent holder rather than claiming POSIX semantics apply there.
+
+Alternatives: eager bytes retain source-sized memory; a temporary plain copy adds
+another artifact and lifecycle; generic `open_stable_range(path)` loses the held
+parent's relative-open authority. Reusing `VerifiedByteRange` inside the existing
+capture scope avoids those costs. Tradeoff: an initial proof and final full read
+cost I/O; per-block hashes cost memory proportional to block count, not source
+bytes. After-images and apply/restore still have byte-oriented paths. Native
+Windows checks cannot be claimed from Linux-only qualification.
+
+Operational observation: PID 2129006 was still executing a new Codex child after
+its latest `FAILED` log line. Source inspection shows `_record_failed_batch`
+prints that line and deliberately continues independent batches; only
+`_finish_run` reports run completion. Do not infer a terminal process from that
+line or install while the owner is active.
+
+Implemented capture: both preparation and historical parent-identity backfill own
+ranges within `_capture_target`. The final full content check reuses the bounded
+original-size proof (plus its one-byte EOF check), so growth cannot turn it into an
+unbounded read. It preserves the range's cursor for subsequent consumers. The old
+relative eager reader had no callers outside capture and was removed; eager target
+reads still serve apply/undo and cannot yet be removed. The unsigned-parent test's
+capture fixture now yields inside the new ownership scope, retaining its original
+identity assertions.
+
+Before implementation, all four regression cases failed: replace, append and
+delete loaded complete before-bytes, and changing the source during image creation
+could still produce prepared work (later application had its own CAS check).
+New checks prove preparation rejects that mutation, a newly created formerly
+absent target, and a replaced POSIX parent. Successful replace/append/delete paths
+apply and undo to the exact original bytes. Range closure, final re-reading of
+cached content, and cursor preservation are covered. Existing target-size,
+symlink, pre-open replacement, recovery and image-integrity tests are retained.
+
+An isolated 4 MiB source capture/hash measured 4,201,030 traced peak bytes before
+and 144,915 after, with matching SHA-256. The input file was written before tracing;
+this is not a full transaction or compile benchmark. Evidence:
+`logs/step7-streamed-capture-memory-20261020.json`. Fresh index 20773e26 and graph
+queries are recorded in `logs/step7-streamed-capture-graph-20261020.json` and
+`logs/step7-streamed-capture-final-proof-graph-20261020.json`; graph incompleteness
+was supplemented by direct caller/source searches. Native Windows qualification,
+remaining byte-oriented apply/restore, limit review, real-vault restore,
+installation and the useful paid-model full cycle remain outstanding.
+
+Final qualification: 434 related tests passed on each of Python 3.12 (30.38 s)
+and Python 3.10 (32.16 s), with six platform-specific Windows checks skipped on
+Linux. Logs: `logs/step7-streamed-capture-py312-20261020.log` and
+`logs/step7-streamed-capture-py310-20261020.log`. All 32 changed functions satisfy
+CCN <= 5, at most two if statements and at most two nested control levels;
+`logs/step7-streamed-capture-complexity-20261020.json` records actual measurements.
+Ruff and diff checks pass. These results qualify this candidate slice only.

@@ -401,8 +401,9 @@ def test_prepare_persists_unsigned_64_bit_parent_identity(
     coordinator = MarkdownCoordinator(vault, state_root)
     parent_identity = (11853635609087352826, (1 << 63) + 7)
 
+    @contextlib.contextmanager
     def capture_with_unsigned_identity(path: Path, *, max_before_bytes: int | None = None):
-        return path.read_bytes(), parent_identity
+        yield path.read_bytes(), parent_identity
 
     monkeypatch.setattr(coordinator, "_capture_target", capture_with_unsigned_identity)
     monkeypatch.setattr(coordinator, "_parent_identity", lambda path: parent_identity)

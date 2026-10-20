@@ -2512,7 +2512,7 @@ def _require_matching_reservation(
     )
 
 
-def _require_capture_matches_kind(change: MarkdownChange, before: bytes | None) -> None:
+def _require_capture_matches_kind(change: MarkdownChange, before: bytes | VerifiedByteRange | None) -> None:
     if change.kind == "create" and before is not None:
         raise FileExistsError(change.path)
     if change.kind in {"replace", "delete"} and before is None:
@@ -2531,9 +2531,11 @@ def _require_change_precondition(
         )
 
 
-def _content_hash(content: bytes | None) -> str:
+def _content_hash(content: bytes | VerifiedByteRange | None) -> str:
     if content is None:
         return ABSENT
+    if isinstance(content, VerifiedByteRange):
+        return content.range_digest(0, len(content))
     return sha256_bytes(content)
 
 
@@ -2545,11 +2547,30 @@ def _run_plan_validators(plan: dict, validators: Sequence[Validator]) -> None:
             raise ValueError("transaction validator rejected the plan")
 
 
-def _is_append(before: bytes | None, after: bytes | None) -> bool:
+def _is_append(before: bytes | VerifiedByteRange | None, after: bytes | None) -> bool:
     """After-bytes that are the before-bytes plus something: what a capture writes."""
     if before is None or after is None:
         return False
-    return len(after) > len(before) and after.startswith(before)
+    return len(after) > len(before) and _matches_before_prefix(before, after)
+
+
+def _matches_before_prefix(before, after):
+    offset = 0
+    view = memoryview(after)
+    for chunk in _content_chunks(before):
+        if view[offset:offset + len(chunk)] != chunk:
+            return False
+        offset += len(chunk)
+    return True
+
+
+def _content_chunks(content):
+    if isinstance(content, VerifiedByteRange):
+        yield from content.iter_chunks(0, len(content))
+        return
+    view = memoryview(content)
+    for offset in range(0, len(view), IO_CHUNK_BYTES):
+        yield view[offset:offset + IO_CHUNK_BYTES]
 
 
 _PREFIX_STATE = frozenset({"sha256", "length"})
@@ -6002,8 +6023,8 @@ class MarkdownCoordinator:
         ).fetchall()
         for row in rows:
             target = self._target(row["path"])
-            content, identity = self._capture_target(target)
-            current_hash = ABSENT if content is None else sha256_bytes(content)
+            with self._capture_target(target) as (content, identity):
+                current_hash = _content_hash(content)
             expected_hashes = {row["after_hash"]} if row["applied"] else {
                 row["before_hash"],
                 row["after_hash"],
@@ -6263,27 +6284,27 @@ class MarkdownCoordinator:
         persisted_preconditions: Mapping[str, object],
     ) -> _StagedOperation:
         target = self._target(change.path)
-        before, parent_identity = self._capture_target(
+        with self._capture_target(
             target, max_before_bytes=change.max_before_bytes
-        )
-        _require_capture_matches_kind(change, before)
-        before_hash = _content_hash(before)
-        _require_change_precondition(change, before_hash, persisted_preconditions)
-        before_description, after_description = self._staged_states(
-            roots, position, before, change.content
-        )
-        return _StagedOperation(
-            MarkdownOperation(
-                change.kind, change.path, before_hash, _content_hash(change.content)
-            ),
-            parent_identity,
-            {
-                "kind": change.kind,
-                "path": change.path,
-                "before": before_description,
-                "after": after_description,
-            },
-        )
+        ) as (before, parent_identity):
+            _require_capture_matches_kind(change, before)
+            before_hash = _content_hash(before)
+            _require_change_precondition(change, before_hash, persisted_preconditions)
+            before_description, after_description = self._staged_states(
+                roots, position, before, change.content
+            )
+            return _StagedOperation(
+                MarkdownOperation(
+                    change.kind, change.path, before_hash, _content_hash(change.content)
+                ),
+                parent_identity,
+                {
+                    "kind": change.kind,
+                    "path": change.path,
+                    "before": before_description,
+                    "after": after_description,
+                },
+            )
 
     def _staged_operations(
         self,
@@ -9056,7 +9077,7 @@ class MarkdownCoordinator:
         return sha256_bytes(canonical_json_bytes(request))
 
     def _staged_states(
-        self, roots: _ArtifactRoots, position: int, before: bytes | None, after: bytes | None
+        self, roots: _ArtifactRoots, position: int, before: bytes | VerifiedByteRange | None, after: bytes | None
     ) -> tuple[object, object]:
         """Both images, or for an append only the added bytes and the before length.
 
@@ -9070,12 +9091,12 @@ class MarkdownCoordinator:
         return self._stage_append(roots.after, position, before, after)
 
     def _stage_append(
-        self, root: Path, position: int, before: bytes, after: bytes
+        self, root: Path, position: int, before: bytes | VerifiedByteRange, after: bytes
     ) -> tuple[object, object]:
         suffix = memoryview(after)[len(before) :]
         name = f"{position:06d}.bin"
         self._write_compressed_image(root / name, suffix)
-        before_state = {"sha256": sha256_bytes(before), "length": len(before)}
+        before_state = {"sha256": _content_hash(before), "length": len(before)}
         after_state = {
             "sha256": sha256_bytes(after),
             "base_length": len(before),
@@ -9084,12 +9105,12 @@ class MarkdownCoordinator:
         }
         return before_state, after_state
 
-    def _stage_state(self, root: Path, position: int, content: bytes | None) -> object:
+    def _stage_state(self, root: Path, position: int, content: bytes | VerifiedByteRange | None) -> object:
         if content is None:
             return ABSENT
         name = f"{position:06d}.bin"
         self._write_compressed_image(root / name, content)
-        return {"sha256": sha256_bytes(content), "artifact": f"{root.name}/{name}"}
+        return {"sha256": _content_hash(content), "artifact": f"{root.name}/{name}"}
 
     def _verify_plan_artifacts(self, plan: Mapping[str, object], artifact_root: Path) -> None:
         operations = plan["operations"]
@@ -9122,11 +9143,10 @@ class MarkdownCoordinator:
     def _write_compressed_image(self, path, content):
         import lzma
 
-        view = memoryview(content)
         with self._new_file_stream(path) as handle:
             with lzma.LZMAFile(handle, "wb", preset=IMAGE_COMPRESSION_PRESET) as encoded:
-                for offset in range(0, len(view), IO_CHUNK_BYTES):
-                    encoded.write(view[offset:offset + IO_CHUNK_BYTES])
+                for chunk in _content_chunks(content):
+                    encoded.write(chunk)
 
     @contextlib.contextmanager
     def _new_file_stream(self, path, *, owner_only=True):
@@ -9159,37 +9179,62 @@ class MarkdownCoordinator:
         except OSError as exc:
             raise _as_parent_boundary_failure(parent, exc) from exc
 
-    def _capture_target_on_windows(
-        self, target: Path, max_before_bytes: int | None
-    ) -> tuple[bytes | None, tuple[int, int]]:
+    def _capture_target_on_windows(self, target, max_before_bytes):
         with self._hold_windows_parent(target.parent):
-            before = self._parent_identity(target.parent)
-            content = self._read_bounded_target(target, max_before_bytes)
-            if self._parent_identity(target.parent) != before:
-                raise TargetBoundaryFailure(
-                    f"parent identity changed while reading {target}"
-                )
-            return content, before
+            identity = self._parent_identity(target.parent)
+            current = functools.partial(_lstat_or_none, target)
+            with self._capture_file_range(target, current, max_before_bytes) as source:
+                yield source, identity
+            self._require_parent_identity(target.parent, identity, str(target))
 
-    def _capture_target(
-        self, target: Path, *, max_before_bytes: int | None = None
-    ) -> tuple[bytes | None, tuple[int, int]]:
+    @contextlib.contextmanager
+    def _capture_target(self, target, *, max_before_bytes=None):
         if not _use_posix_dir_fd():
-            return self._capture_target_on_windows(target, max_before_bytes)
+            yield from self._capture_target_on_windows(target, max_before_bytes)
+            return
         descriptor = _open_parent_directory(target.parent)
         try:
-            metadata = os.fstat(descriptor)
-            identity = _stat_identity(metadata)
-            content = self._read_bounded_from_parent(
-                descriptor, target.name, max_before_bytes
-            )
-            if self._parent_identity(target.parent) != identity:
-                raise TargetBoundaryFailure(
-                    f"parent identity changed while reading {target}"
-                )
-            return content, identity
+            identity = _stat_identity(os.fstat(descriptor))
+            current = functools.partial(_stat_at_or_none, descriptor, target.name)
+            with self._capture_file_range(
+                target.name, current, max_before_bytes, dir_fd=descriptor
+            ) as source:
+                yield source, identity
+            self._require_parent_identity(target.parent, identity, str(target))
         finally:
             os.close(descriptor)
+
+    @contextlib.contextmanager
+    def _capture_file_range(self, name, current, max_bytes, *, dir_fd=None):
+        before = current()
+        if before is None:
+            yield None
+            if current() is not None:
+                raise ValueError(f"transaction target changed while reading: {name}")
+            return
+        self._validate_capture_metadata(before, Path(name), max_bytes)
+        descriptor = _open_capture_descriptor(name, name, dir_fd=dir_fd)
+        try:
+            with self._capture_descriptor_range(descriptor, before, name, current) as source:
+                yield source
+        finally:
+            os.close(descriptor)
+
+    @contextlib.contextmanager
+    def _capture_descriptor_range(self, descriptor, before, name, current):
+        if not self._same_capture_identity(before, os.fstat(descriptor)):
+            raise ValueError(f"transaction target changed before open: {name}")
+        check = functools.partial(self._require_capture_range_live,
+                                  descriptor, before, name, current)
+        check()
+        with os.fdopen(descriptor, 'rb', buffering=0, closefd=False) as stream:
+            source = VerifiedByteRange(stream, before.st_size, None, owner_check=check)
+            yield source
+            source.verify_content(label=f"transaction target {name}")
+
+    def _require_capture_range_live(self, descriptor, before, name, current):
+        self._require_unchanged_read(before, os.fstat(descriptor), name)
+        self._require_unchanged_read(before, current(), name)
 
     def _read_bounded_target(self, target: Path, max_bytes: int | None) -> bytes | None:
         before = _lstat_or_none(target)
@@ -9202,25 +9247,6 @@ class MarkdownCoordinator:
                 descriptor, before, target, max_bytes
             )
             self._require_unchanged_read(after, _lstat_or_none(target), target)
-            return content
-        finally:
-            os.close(descriptor)
-
-    def _read_bounded_from_parent(
-        self, parent_descriptor: int, name: str, max_bytes: int | None
-    ) -> bytes | None:
-        before = _stat_at_or_none(parent_descriptor, name)
-        if before is None:
-            return None
-        self._validate_capture_metadata(before, Path(name), max_bytes)
-        descriptor = _open_capture_descriptor(name, name, dir_fd=parent_descriptor)
-        try:
-            content, after = self._read_stable_descriptor(
-                descriptor, before, Path(name), max_bytes
-            )
-            self._require_unchanged_read(
-                after, _stat_at_or_none(parent_descriptor, name), name
-            )
             return content
         finally:
             os.close(descriptor)

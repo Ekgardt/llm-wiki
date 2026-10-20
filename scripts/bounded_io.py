@@ -244,7 +244,7 @@ def open_stable_range(path, max_bytes, *, label="file", deadline=None):
             check = partial(_require_live_source, descriptor, path, before, label)
             source = VerifiedByteRange(stream, before.st_size, None, deadline, owner_check=check)
             yield source
-            _require_final_source_content(source, label)
+            source.verify_content(label=label)
     finally:
         os.close(descriptor)
 
@@ -312,6 +312,15 @@ class VerifiedByteRange:
             raise ValueError('original range scope is closed')
         if self.owner_check is not None:
             self.owner_check()
+
+    def verify_content(self, *, label="original source"):
+        """Re-read the captured size and verify identity before releasing ownership."""
+        self.require_active()
+        position = self.stream.tell()
+        try:
+            _require_final_source_content(self, label)
+        finally:
+            self.stream.seek(position)
 
     def iter_chunks(self, start, end):
         self.require_active()

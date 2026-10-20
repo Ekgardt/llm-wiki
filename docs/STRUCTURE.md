@@ -1635,6 +1635,15 @@ the same range hash proof. Live snapshot capture uses an owned file range,
 but daily preselection, eager compatibility and native-frame payload retention
 still have whole-body paths and are not claimed to be fully streaming.
 
+Candidate transaction preparation also captures before-images as owned verified
+ranges. POSIX opens remain relative to a held parent descriptor; Windows retains
+its existing parent handle. Source hashes, append-prefix comparisons and compressed
+image writes consume blocks within that ownership scope. Final content and parent
+identity checks precede returning staged work, including absent-file checks for
+creates. Parent-identity migration uses the same capture scope. Image formats and
+undo contracts are unchanged; apply/undo readers and after-image inputs still
+materialize bytes. This candidate change is not proof of live installation.
+
 Fallback receipt lookup now opens a verified source scope and yields parts
 incrementally. Digest lookup, saved-source matching and committed-failure
 resolution must finish inside that scope; source closure validates the final
