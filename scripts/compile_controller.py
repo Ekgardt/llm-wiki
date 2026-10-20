@@ -279,22 +279,118 @@ def authorize_model_repeat(queue, lease, checkpoint, *, request_digest, authoriz
     dispatch = _dispatch_event(checkpoint, lease.id, request_digest)
     resumed = _repeat_checkpoint(checkpoint, lease.id, request_digest, authorization)
     current = queue.get_compile_event(checkpoint.work_id)
-    if current == resumed:
-        queue.verify_compile_artifact(current)
-        return current
+    recorded = _recorded_repeat(queue, lease, current, resumed)
+    if recorded is not None:
+        return recorded
     return _authorize_uncertain_call(queue, lease, dispatch, current, resumed)
+
+
+def _recorded_repeat(queue, lease, current, resumed):
+    if current is None or resumed is None:
+        return None
+    if replace(current, task_id=resumed.task_id) != resumed:
+        return None
+    queue.verify_compile_checkpoint_owner(lease, current)
+    queue.verify_compile_artifact(current)
+    return current
 
 
 def _authorize_uncertain_call(queue, lease, dispatch, current, resumed):
     _require_same_call(current, dispatch)
     if progress._event_digest(current) != resumed.details['repeat_authorization']['dispatch_digest']:
         raise progress.ProgressConflict('repeat authorization names another dispatch')
+    outcome, event = _resolve_or_authorize(queue, lease, dispatch, current, resumed)
+    if outcome == 'repeat_authorized':
+        return event
+    raise progress.ProgressConflict('a durable answer exists; resume it instead of repeating')
+
+
+def resolve_model_call(queue, lease, dispatch, *, authorization=None):
+    """Resolve one retained dispatch without transport or task settlement.
+
+    Return (outcome, retained_event). This internal API does not establish operator
+    consent: its entrypoint must supply explicit authorization and hold/renew the
+    canonical owner and task lease. Existing decisions survive delivery changes.
+    A recovered answer is a durable transport result, not a validated compile plan.
+    """
+    dispatch = progress._snapshot_event(dispatch)
+    checkpoint = _retained_dispatch_checkpoint(queue, lease, dispatch)
+    current = queue.get_compile_event(dispatch.work_id)
+    if current is None:
+        raise progress.ProgressCorrupt('retained dispatch has no current checkpoint')
+    queue.verify_compile_checkpoint_owner(lease, current)
+    resumed = _resolution_repeat(checkpoint, lease.id, dispatch, current, authorization)
+    recorded = _recorded_repeat(queue, lease, current, resumed)
+    if recorded is not None:
+        return 'repeat_authorized', recorded
+    return _resolve_or_authorize(queue, lease, dispatch, current, resumed)
+
+
+def _retained_dispatch_checkpoint(queue, lease, dispatch):
+    queue.verify_compile_checkpoint_owner(lease, dispatch)
+    retained = queue.get_compile_event(dispatch.work_id, sequence=dispatch.sequence)
+    if retained != dispatch:
+        raise progress.ProgressConflict('resolution does not name the retained dispatch')
+    checkpoint = _checkpoint_before_dispatch(queue, dispatch)
+    expected = _dispatch_event(checkpoint, dispatch.task_id,
+                               dispatch.details['model_call']['request_digest'])
+    if expected != dispatch:
+        raise progress.ProgressCorrupt('dispatch differs from its semantic checkpoint')
+    return checkpoint
+
+
+def _checkpoint_before_dispatch(queue, dispatch):
+    progress._require_model_phase(dispatch)
+    call = dispatch.details['model_call']
+    if call['phase'] != 'dispatch':
+        raise progress.ProgressConflict('resolution requires a dispatch event')
+    checkpoint = queue.get_compile_event(dispatch.work_id, sequence=call['checkpoint_sequence'])
+    if checkpoint is None:
+        raise progress.ProgressCorrupt('dispatch semantic checkpoint is absent')
+    _require_checkpoint(checkpoint)
+    return checkpoint
+
+
+def _resolution_repeat(checkpoint, task_id, dispatch, current, authorization):
+    request_digest = dispatch.details['model_call']['request_digest']
+    if authorization is None:
+        authorization = _retained_repeat_authorization(current, request_digest)
+    if authorization is None:
+        return None
+    resumed = _repeat_checkpoint(checkpoint, task_id, request_digest, authorization)
+    _require_resolution_consent(dispatch, resumed.details['repeat_authorization'])
+    return resumed
+
+
+def _retained_repeat_authorization(current, request_digest):
+    record = current.details.get('repeat_authorization')
+    if record is None:
+        return None
+    if record.get('request_digest') != request_digest:
+        raise progress.ProgressConflict('retained repeat belongs to another request')
+    return {name: record[name] for name in ('dispatch_digest', 'actor', 'reason')}
+
+
+def _require_resolution_consent(dispatch, authorization):
+    if authorization['dispatch_digest'] != progress._event_digest(dispatch):
+        raise progress.ProgressConflict('resolution consent names another dispatch')
+
+
+def _resolve_or_authorize(queue, lease, dispatch, current, resumed):
     try:
         _resume_call(queue, lease, dispatch, current)
     except ProviderOutcomeUnknown:
-        queue.record_compile_event(lease, resumed)
-        return resumed
-    raise progress.ProgressConflict('a durable answer exists; resume it instead of repeating')
+        return _resolve_unknown_call(queue, lease, dispatch, resumed)
+    answer = queue.get_compile_event(dispatch.work_id)
+    _require_same_call(answer, dispatch)
+    return 'answer_recovered', answer
+
+
+def _resolve_unknown_call(queue, lease, dispatch, resumed):
+    if resumed is None:
+        return 'outcome_unknown', dispatch
+    queue.record_compile_event(lease, resumed)
+    return 'repeat_authorized', resumed
 
 
 def _decoded_response(dispatch, value):

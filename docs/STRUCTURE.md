@@ -319,6 +319,15 @@ actor and reason. It first recovers an available answer, preserves history, and
 authorizes only the same request. Operator consent entrypoints remain unconnected;
 ordinary unblock/redrive never grants that authorization.
 
+The controller's `resolve_model_call` distinguishes a recovered response, retained
+repeat consent and an unresolved outcome. It verifies the original dispatch and
+semantic checkpoint, checks current task ownership and reuses the existing answer
+recovery path. An existing repeat decision remains the original immutable event
+when a redrive changes delivery ownership. The operation neither invokes a
+provider nor settles the queue task; operator ownership, heartbeat and settlement
+integration remain required. A recovered response is not proof of a valid compile
+plan or completed work.
+
 The candidate queue CLI exposes `memory_queue.py compile-progress <task-id>`.
 It reads the task's verified redrive lineage and latest checkpoints in one read
 transaction, returning work IDs, event digests and recorded model-call metadata.

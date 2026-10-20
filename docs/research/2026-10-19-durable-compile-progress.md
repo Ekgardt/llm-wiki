@@ -4844,3 +4844,78 @@ passed Lizard/AST complexity rules; Ruff and whitespace checks passed. Evidence:
 `logs/step7-operator-inspection-real-cli-py310-20261020.log`,
 `logs/step7-operator-inspection-complexity-20261020.json` and
 `logs/step7-operator-inspection-callees-20261020.json` in the installed private vault.
+
+### 2026-10-20: distinguish resolved calls from repeat consent (in progress)
+
+Inspection of the recovery dependencies found two cases the operator adapter
+must handle before it can safely settle a task. First, `authorize_model_repeat`
+recovers an orphan answer and deliberately reports a conflict instead of granting
+repeat consent. An operator recovery command must report that as recovered work.
+Second, its already-recorded repeat comparison includes the delivery task ID;
+after a redrive, the same decision is not recognized even though the source work
+and consent are unchanged. Existing lost-ack coverage reuses the old task lease
+and does not exercise this case.
+
+Extend the controller with an explicit resolution operation that identifies the
+retained dispatch, verifies its original semantic checkpoint, reuses saved
+answers, reports unresolved outcomes without authorizing expense, and grants a
+repeat only with the existing exact dispatch/actor/reason consent. Recognize the
+same retained decision across verified redrive ownership without rewriting its
+original event. No provider invocation, new journal schema or queue settlement
+belongs to this controller operation. Keep `authorize_model_repeat`'s existing
+refusal when an answer exists for callers explicitly requesting a repeat; share
+its validation and artifact recovery rather than creating a second answer store.
+
+The primary-source basis remains the dated Stripe/AWS/Temporal review above:
+operation identity survives delivery changes, lost acknowledgement does not prove
+failure, and saved results must be reconciled before repeating execution. The
+tradeoff is an additional verified journal lookup and artifact validation during
+operator recovery. A completed resolution does not yet establish that the queue
+was settled; that integration and its interruption tests remain required.
+
+The changed controller also rechecks the task family of a retained repeat event
+before accepting it under another delivery ID. A valid event digest alone does
+not establish that its task belongs to the current lease's lineage. The resolver
+returns the original retained event with its outcome, leaving settlement to the
+queue adapter; saved transport results are not asserted to be validated plans.
+
+During qualification, concurrent adopted-queue fixtures became disk-bound:
+process inspection showed `jbd2_log_wait_commit` / `submit_bio_wait` with continuing
+test progress. The installed compiler was also alive. These are observation of
+resource contention, not proof of a controller deadlock. Preserve the running
+tests and their results; future fixture-heavy qualification should avoid stacking
+additional parallel runs on the same filesystem. Do not change durability or
+arbitrarily raise product timeouts to make this environment appear faster.
+
+The redrive regression failed on the original controller with
+`compile call identity or progress changed`. The new resolver additionally covers
+saved responses, orphan-answer adoption despite offered repeat consent, unknown
+outcomes with no consent, immutable consent after lost acknowledgement/redrive,
+changed consent, forged dispatches, stale leases, corrupt answers and unrelated
+task families. It reuses the existing atomic unknown-dispatch claim.
+
+Two new forged-family tests initially failed before reaching that family check:
+the test corruption helper had dropped the immutable-event trigger without
+restoring it, so schema admission correctly raised `ProgressCorrupt`. Restore
+the exact canonical trigger after injecting corruption. The same correction
+strengthens the existing inspection tests for checkpoint digest and malformed
+call metadata: they now exercise the intended data validations instead of merely
+failing on the missing trigger. No product protection or assertion was weakened.
+
+The broad controller/protected-dispatch/delivery/source-overlap/queue-fencing/
+admission runs passed 167 tests on each Python version (3.12: 420.92 s;
+3.10: 618.36 s). Those runs began before the final retained-event ownership
+check. The later final-state runs initially reported 79 passed / 2 failed on each
+version due to the trigger-fixture issue above. After correcting the fixtures,
+the controller/source-overlap rerun passed 81 tests on Python 3.12 (41.87 s).
+The Python 3.10 final-state rerun also passed 81 tests (49.64 s). Fixture-heavy
+reruns are now sequential on this disk. All 29 changed/new functions passed
+Lizard/AST complexity checks; Ruff and whitespace checks passed.
+Evidence in the installed private vault:
+`logs/step7-call-resolution-{py312,py310}-20261020.log`,
+`logs/step7-call-resolution-final-{py312,py310}-20261020.log` (the fixture failures),
+`logs/step7-call-resolution-corrected-{py312,py310}-20261020.log`,
+`logs/step7-call-resolution-complexity-20261020.json` and
+`logs/step7-call-resolution-callees-20261020.json`.
+No installed task was claimed, unblocked or retried. The operator mutation
+entrypoint, heartbeat and crash-safe queue settlement are still unfinished.
