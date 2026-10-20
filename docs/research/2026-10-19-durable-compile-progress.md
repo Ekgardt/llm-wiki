@@ -5201,3 +5201,58 @@ Lizard/AST constraints; Ruff and diff checks pass. Fresh graph evidence at e5460
 is `logs/step7-streamed-archive-writer-graph-20261020.json`; the graph remains
 partial, and source/test inspection supplied the dynamic ownership and deletion
 paths. This candidate has not been installed into the live vault.
+
+### Transaction image verification — design 2026-10-20
+
+Graph and source inspection at 23ac5bc7 show that `_verify_stored_image` loads and
+fully decompresses each image only to hash its plaintext. Actual rollback/apply
+and repair consumers also use `_image_bytes` and still need their existing byte
+API; this change must not pretend those consumers are streamed.
+
+Primary sources reviewed today: Python 3.12 LZMAFile documentation
+(https://docs.python.org/3.12/library/lzma.html) describes owned file objects,
+bounded reads and concatenated streams; SQLite atomic-commit documentation
+(https://www.sqlite.org/atomiccommit.html) motivates retaining recovery integrity
+checks; Restic repository checks
+(https://restic.readthedocs.io/en/stable/045_working_with_repos.html) distinguish
+metadata checks from actual data verification. The selected local implementation
+hashes the complete decoded stream with the existing I/O chunk size, retaining
+plain historical files, XZ magic detection, concatenated streams and plaintext
+SHA-256. No format, package, runtime location or quota changes. A truncated stream
+must still fail with LZMAError, preserving the existing decompressor's failure
+category even where LZMAFile reports EOFError.
+
+Rejected: replacing verification with file length/metadata, checking compressed
+instead of plaintext bytes, changing image format during this refactor, or using
+hashlib.file_digest (not available on the supported Python 3.10 floor). Full
+capture/staging, undo/application and other byte-returning readers remain separate
+work. This is shared integrity verification, not a special case for archive delete.
+
+Implementation and qualification: `_verify_stored_image` now computes the same
+plaintext hash through `_image_digest` and bounded stream reads. Six new guards
+failed before the fix; all ten new tests pass, covering empty/plain/XZ/concatenated
+images, mismatched hashes and truncation. The existing `_image_bytes` remains for
+actual byte-consuming apply/rollback/repair paths identified in the graph, not as
+a second verification mode. No image migration or retained-data deletion occurs.
+
+The related transaction, recovery, abort, undo, append and archive suites passed
+266 tests on each of Python 3.12 and 3.10, with five Windows-only checks skipped on
+this Linux host. Logs: `logs/step7-image-verification-py312-20261020.log` and
+`logs/step7-image-verification-py310-20261020.log`. All nine changed functions pass
+Lizard/AST limits; Ruff and diff checks pass. Graph evidence at 23ac5bc7 is
+`logs/step7-image-verification-graph-20261020.json` (partial graph plus source reads).
+
+For a 16,777,215-byte plaintext encoded with the product's existing preset, traced
+peak allocation fell from 48,633,152 to 1,364,003 bytes; hashes matched. This measures
+verification only, excluding capture, staging and actual restore. Evidence:
+`logs/step7-image-verification-memory-20261020.json`. Full source/undo-image capture,
+other byte-returning readers and remaining limits are not completed by this change.
+
+Storage audit for actual-vault recovery found approximately 1.5 GiB knowledge,
+6.7 GiB operational state, 9.5 GiB caches and 4.2 GiB logs with 3.4 GiB free.
+The built-in memory-generation prune plan retained both active/fallback generations;
+the apparently orphaned new code generation was the live index build and was not
+deleted. The large historical cleanup archive contains test material and archived
+worktree/Git metadata, so it was inventoried rather than deleted without establishing
+recoverability. This audit has not provided enough space for a complete staged
+restore. No private data or operational state was removed.

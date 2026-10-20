@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from operational_ownership import OwnerLease
 
 import process_liveness
-from bounded_io import VerifiedByteRange, read_stable_bytes
+from bounded_io import IO_CHUNK_BYTES, VerifiedByteRange, read_stable_bytes
 from claim_tree_manifest import (
     snapshot_claim_tree,
     snapshot_guardrail_sources,
@@ -2413,6 +2413,29 @@ def _image_bytes(path: Path) -> bytes:
     return _decoded_image_bytes(path.read_bytes())
 
 
+def _image_digest(path: Path) -> str:
+    """Hash every decoded byte, preserving historical plain and XZ images."""
+    import lzma
+
+    try:
+        with path.open("rb") as raw:
+            prefix = raw.read(len(_LZMA_MAGIC))
+            raw.seek(0)
+            if prefix != _LZMA_MAGIC:
+                return _image_stream_digest(raw)
+            with lzma.LZMAFile(raw, "rb") as decoded:
+                return _image_stream_digest(decoded)
+    except EOFError as exc:
+        raise lzma.LZMAError(str(exc)) from exc
+
+
+def _image_stream_digest(stream):
+    digest = hashlib.sha256()
+    for chunk in iter(functools.partial(stream.read, IO_CHUNK_BYTES), b""):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _decoded_image_bytes(raw: bytes, *, max_bytes: int | None = None) -> bytes:
     """Decode the shared image format; optional budget bounds decoded evidence."""
     if not raw.startswith(_LZMA_MAGIC):
@@ -2560,7 +2583,7 @@ def _verify_stored_image(state: Mapping[str, object], state_name: str, artifact_
     key, digest = _stored_image_keys(state)
     relative = restricted_relative_path(str(state[key]), (state_name,))
     artifact = artifact_root.joinpath(*relative.parts)
-    if sha256_bytes(_image_bytes(artifact)) != state[digest]:
+    if _image_digest(artifact) != state[digest]:
         raise RuntimeError(f"transaction artifact hash mismatch: {relative}")
 
 
