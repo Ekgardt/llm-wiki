@@ -474,7 +474,11 @@ def _clock_prefix(characters):
 
 
 def _line_span(content: bytes, start: int, end: int) -> tuple[int, int]:
-    return content[:start].count(b"\n") + 1, content[: end - 1].count(b"\n") + 2
+    if type(content) is VerifiedByteRange:
+        prefix_start = slice(None, start).indices(len(content))[1]
+        prefix_end = slice(None, end - 1).indices(len(content))[1]
+        return _indexed_line_span(content.newline_offsets(), prefix_start, prefix_end + 1)
+    return content.count(b"\n", 0, start) + 1, content.count(b"\n", 0, end - 1) + 2
 
 
 def _coordinator_record_document(record: object) -> dict[str, object]:
@@ -974,9 +978,9 @@ def _require_archive_receipt_context(receipt, payload, start, end):
     if receipt["schema_version"] == "compile-receipt/v3":
         return
     source = receipt["source"]
-    prefix = memoryview(payload)[:source["original_byte_size"]]
+    prefix_end = min(len(payload), source["original_byte_size"])
     expected = (source["original_byte_size"], source["original_sha256"], source["byte_start"], source["byte_end"])
-    actual = (len(prefix), sha256_bytes(prefix), start, end)
+    actual = (prefix_end, _source_range_digest(payload, 0, prefix_end), start, end)
     if actual != expected:
         raise EvidenceResolutionError("archive compile receipt original context disagrees")
 

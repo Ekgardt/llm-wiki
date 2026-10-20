@@ -5016,3 +5016,72 @@ Local Lizard and AST analysis measured all 64 changed Python functions against
 The installed checkout remains unchanged. Real-vault encrypted backup/restore,
 installation, remaining limit/consumer review, legacy removal and a useful paid
 provider full-cycle measurement remain required before point 7 can close.
+
+### Remaining archive streaming boundary — investigation 2026-10-20
+
+The shared daily bound cannot be removed safely by changing its number. Static
+consumer inspection finds compile, archive writing/recovery, evidence resolution,
+doctor, corpus snapshots and fact keys. `MAX_COMPILE_PARTS` and archive manifest
+limits also derive from it. `validate_bag` returns a `ValidatedBag` containing the
+entire payload; `_validated_bags` accumulates every candidate's payload before
+filtering a month. Most archiver consumers use only the validated manifest, while
+citation resolution needs selected bytes. Neither may skip complete validation.
+
+Primary sources checked today before selecting the next implementation approach:
+- https://www.rfc-editor.org/rfc/rfc8493 — BagIt supports direct file access;
+  validity still requires completeness and matching checksums. Streaming does
+  not justify skipping unrelated manifest entries or historical receipt proofs.
+- https://docs.python.org/3.12/library/contextlib.html — explicit context-manager
+  lifetime and ExitStack cleanup fit owned descriptors and error propagation.
+- https://restic.readthedocs.io/en/stable/040_backup.html — backup change detection
+  distinguishes metadata changes and content; filesystem metadata alone must not
+  replace the repository's verified digest/identity proof.
+
+Selected direction within the existing layout: reuse `VerifiedByteRange` for
+payload validation under an explicit owner scope; retain the existing manifest,
+receipt, evidence and immutable-file checks. Metadata-only archive consumers
+must finish validation before releasing the descriptor. Citation consumers must
+resolve bytes inside that scope. Reject mmap (mutable view without these proofs),
+a second permanent payload copy (disk/ownership duplication), and a blanket cap
+increase (does not remove full-file allocations). No new runtime directory,
+archive format, environment variable, package or service is proposed. Existing
+byte-returning consumers require a coordinated migration, not a lazy object that
+silently reopens a path after validation.
+
+Reproduction against 6f16558e, before changing validators: an 8,388,632-byte
+verified range makes `_line_span` allocate a 16,793,573-byte traced peak through
+prefix slices. Its line result matches bytes, but it is not streaming. The v4
+receipt-context check raises TypeError at `memoryview(payload)` for that same
+range. Existing `_source_range_digest` already produces the correct digest
+without copying the full range. Evidence:
+`logs/step7-archive-range-reproduction-20261020.json`. This narrows the next
+changes to shared validation primitives and lifetime-aware consumers; it does
+not establish that archive streaming or law-9 limit removal is finished.
+
+The refreshed graph at 6f16558e (generation-18e04cc012f27876-c4fc79af)
+confirmed archive construction, evidence validation/resolution, citation checks
+and query rendering as line-span consumers, and both whole-day and split-part
+receipt checks as receipt-context consumers. Coverage is partial; source reads
+supplemented it. Evidence: `logs/step7-archive-primitives-graph-20261020.json`.
+
+The two common primitives now reuse existing range digest/newline-offset support.
+Byte-backed line counting uses count bounds without prefix copies; owned ranges
+use indexed offsets and preserve Python slice-bound semantics. Receipt context
+still compares original size, digest and exact part span; an oversized claimed
+parent is rejected rather than truncated into acceptance. Historical v3 receipts
+retain their existing proof contract. Nine added checks failed before the fix;
+additional boundary cases cover zero, negative and beyond-end line-span bounds.
+On the same 8-MiB fixture the line-span traced allocation peak fell from
+16,793,573 to 133,891 bytes, with identical line numbers; range receipt validation
+now passes. This is a primitive-level memory measurement, not whole-cycle memory
+or token performance. `logs/step7-archive-range-after-20261020.json` records it.
+The full BagIt payload reader still needs owner-scoped streaming integration.
+
+Primitive qualification: 100 archive/evidence/historical-receipt tests passed on
+Python 3.12 (27.34 s) and 3.10 (31.04 s), including tamper, links, receipt forgery,
+historical split rules and source resolution. Logs:
+`logs/step7-archive-primitives-py312-20261020.log` and
+`logs/step7-archive-primitives-py310-20261020.log`. All seven changed functions
+pass Lizard/AST complexity limits; Ruff and diff whitespace checks pass.
+No installed-vault change, daily-cap removal or complete archive-streaming claim
+is made by this prerequisite change.

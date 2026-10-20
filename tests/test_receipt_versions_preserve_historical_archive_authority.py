@@ -70,3 +70,57 @@ def test_one_archive_operation_discovers_its_receipts_only_once(archive_vault, m
     assert archiver.eligible(daily).eligible
     assert archiver.archive(daily.stem).bag_path.exists()
     assert discovered == [root / 'knowledge/daily/receipts']
+
+
+def _range_receipt(payload):
+    from reliable_memory import sha256_bytes
+
+    return {'schema_version': 'compile-receipt/v4', 'source': {
+        'original_byte_size': len(payload), 'original_sha256': sha256_bytes(payload),
+        'byte_start': 0, 'byte_end': len(payload)}}
+
+
+def test_streamed_receipt_context_does_not_materialize_payload(monkeypatch):
+    import io
+
+    from bounded_io import VerifiedByteRange
+
+    payload = b'# day\n## [evt-1] event\nA fact.\n'
+    source = VerifiedByteRange(io.BytesIO(payload), len(payload), None)
+    receipt = _range_receipt(payload)
+    monkeypatch.setattr(VerifiedByteRange, '__getitem__', _refuse_materialized_range)
+    _require_archive_receipt_context(receipt, source, 0, len(source))
+
+
+def _refuse_materialized_range(*args):
+    raise AssertionError('validation copied a source range')
+
+
+@pytest.mark.parametrize('field,value', [
+    ('original_sha256', '0' * 64), ('original_byte_size', 999999), ('byte_start', 1)])
+def test_streamed_receipt_context_preserves_forgery_checks(field, value):
+    import io
+
+    from bounded_io import VerifiedByteRange
+
+    payload = b'# day\n## [evt-1] event\nA fact.\n'
+    source = VerifiedByteRange(io.BytesIO(payload), len(payload), None)
+    receipt = _range_receipt(payload)
+    receipt['source'][field] = value
+    with pytest.raises(EvidenceResolutionError, match='original context'):
+        _require_archive_receipt_context(receipt, source, 0, len(source))
+
+
+@pytest.mark.parametrize('start,end', [
+    (0, 1), (2, 3), (3, 7), (0, 8), (7, 8), (0, 0), (-2, -1), (100, 100)])
+def test_streamed_line_span_uses_offsets_without_prefix_copies(monkeypatch, start, end):
+    import io
+
+    from bounded_io import VerifiedByteRange
+    from evidence_resolver import _line_span
+
+    payload = b'a\nb\nxyz\n'
+    source = VerifiedByteRange(io.BytesIO(payload), len(payload), None)
+    expected = _line_span(payload, start, end)
+    monkeypatch.setattr(VerifiedByteRange, '__getitem__', _refuse_materialized_range)
+    assert _line_span(source, start, end) == expected
