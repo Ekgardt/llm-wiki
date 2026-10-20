@@ -8010,9 +8010,79 @@ def run_leased_compile(queue, lease, *, deadline=float('inf'), cancelled=None, o
     _require_compile_active(deadline, cancelled)
     _require_leased_compile_queue(queue, lease)
     _require_capture_vault(queue)
-    args = argparse.Namespace(file=None, all=False, dry_run=False, trigger='auto', closed_days_only=False)
+    args = _leased_compile_args(lease)
     return _compile_under_lock(args, deadline=deadline, cancelled=cancelled, owner=owner,
                                execute=partial(_run_leased_compile, queue, lease))
+
+
+def _leased_compile_args(lease):
+    args = argparse.Namespace(file=None, all=False, dry_run=False, trigger='auto',
+                              closed_days_only=False, compile_request=None)
+    if 'compile_request' not in lease.payload:
+        return args  # Historical queue tasks meant all pending daily logs.
+    if set(lease.payload) != {'compile_request'}:
+        raise ValueError('compile request payload has unknown fields')
+    request = _validated_compile_request(lease.payload['compile_request'])
+    args.file = _compile_request_live_path(request['file'])
+    args.closed_days_only = request['closed_days_only']
+    args.trigger = request['trigger']
+    args.compile_request = request
+    return args
+
+
+def _validated_compile_request(document):
+    fields = {'schema', 'file', 'closed_days_only', 'trigger'}
+    if not isinstance(document, dict) or set(document) != fields:
+        raise ValueError('compile request has invalid fields')
+    if document['schema'] != 'compile-request/v1':
+        raise ValueError('compile request schema is unsupported')
+    _require_compile_request_options(document)
+    return dict(document)
+
+
+def _require_compile_request_options(document):
+    if not isinstance(document['trigger'], str) or document['trigger'] not in {'auto', 'manual'}:
+        raise ValueError('compile request trigger must be auto or manual')
+    if type(document['closed_days_only']) is not bool:
+        raise ValueError('compile request closed_days_only must be boolean')
+    _compile_request_file(document['file'])
+
+
+def _compile_request_file(value):
+    from memory_queue import _require_canonical_daily_id
+
+    if value is None:
+        return None
+    if not isinstance(value, str) or re.fullmatch(r'knowledge/daily/\d{4}-\d{2}-\d{2}\.md', value) is None:
+        raise ValueError('compile request file must name a canonical daily source')
+    try:
+        _require_canonical_daily_id(Path(value).stem)
+    except ValueError as error:
+        raise ValueError('compile request file has an invalid daily date') from error
+    return value
+
+
+def _compile_request_live_path(logical_path):
+    if logical_path is None:
+        return None
+    return str(ROOT / logical_path)
+
+
+def _compile_cli_file(value):
+    if value is None:
+        return None
+    path = Path(value).resolve()
+    _require_inside_daily_dir(path)
+    return _compile_request_file(path.relative_to(ROOT.resolve()).as_posix())
+
+
+def compile_task_payload(args):
+    """Encode source intent only; lock ownership and dry-run never enter this task."""
+    if getattr(args, 'dry_run', False):
+        raise ValueError('compile dry-run cannot become a mutating queue task')
+    request = {'schema': 'compile-request/v1', 'file': _compile_cli_file(args.file),
+               'closed_days_only': getattr(args, 'closed_days_only', False), 'trigger': args.trigger}
+    return {'compile_request': _validated_compile_request(request)}
 
 
 def _require_leased_compile_queue(queue, lease):
@@ -8049,6 +8119,10 @@ def _run_leased_compile(queue, lease, args, *, deadline, cancelled, owner):
 
 
 def _leased_compile_request(args, planning):
+    selection = getattr(args, 'compile_request', None)
+    if selection is not None:
+        return {'schema': 'leased-compile-request/v2', 'planning': planning.request(),
+                'trigger': args.trigger, 'selection': dict(selection)}
     return {'schema': 'leased-compile-request/v1', 'planning': planning.request(),
             'trigger': args.trigger, 'selection': 'all_pending_daily_logs'}
 

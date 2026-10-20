@@ -1224,6 +1224,22 @@ a changed value. This applies to heartbeat, protected compile transitions, resul
 publication and settlement. A mismatched caller is refused without changing a
 valid task; stored payload corruption still follows the existing demotion path.
 
+Candidate compile tasks can carry one `compile_request` with schema
+`compile-request/v1`, a canonical vault-relative daily `file` or null,
+`closed_days_only` and `trigger`. Fields and types are checked before the compile
+lock or provider discovery. Explicit files retain precedence over closed-day
+filtering. The controller binds these options in `leased-compile-request/v2`
+inside its existing snapshot admission. Recovery reads saved sources even if the
+live daily file has disappeared. New task encoding resolves the CLI path once;
+restoring that intent does not resolve or inspect the live file again.
+
+Historical tasks without `compile_request` keep their original all-pending/auto
+meaning and retained v1 request identity. This reader compatibility is needed
+until retained historical work is resolved; it does not permit new frontends to
+omit selection intent. The task encoder excludes ephemeral lock ownership and
+refuses dry-run requests. CLI/MCP/nightly routing to this encoder and parent-owned
+execution remains unfinished; the encoder alone does not activate that routing.
+
 The uninstalled refreshed-context format stores only complete changed context
 records and explicit removed paths in another self-contained ZIP64 artifact.
 It binds one complete source capture by manifest digest; it never follows delta

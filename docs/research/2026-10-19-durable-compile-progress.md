@@ -2832,3 +2832,40 @@ Historical tasks without this request retain their original all-pending/auto
 meaning; new requests must be bound into retained execution identity rather than
 silently recovered under historical defaults. The actual routing and tests are
 still unimplemented at this checkpoint. Do not claim this plan as completed code.
+
+### 2026-10-20 — source selection enters retained execution intent
+
+Generation `generation-18e02ff06f35ee33-e51b1a0c` matches 8da46356. Built-in
+callees for `run_leased_compile`, `_leased_compile_request`, `select_dailies`,
+`read_compile_execution` and `_require_canonical_daily_id` were inspected.
+Partial graph coverage was supplemented with source selection, snapshot admission,
+CLI parsing, nightly invocation and MCP entry code. The ingress research and
+alternatives above apply; no new runtime location or dependency is proposed.
+
+The original leased entry hardcoded file=None, closed_days_only=False and
+trigger=auto. Seventeen tests failed before correction, demonstrating ignored
+intent, invalid parameters reaching the lock, wrong capture scope and missing
+retained selection. The leased executor now validates a versioned request from
+the already fenced lease, maps it into existing source selectors and retains it
+as `leased-compile-request/v2`. The source path grammar and date validation are
+the existing canonical daily-source contract, not a new workload restriction.
+The request parser calls the queue's existing canonical-day validator lazily;
+it adds no package or module-initialization cycle.
+
+The encoder is ready for subsequent frontend routing. It excludes spawn-lock
+tokens and refuses dry-run rather than producing a mutating task from a preview.
+That dry-run omission was separately reproduced before adding its refusal.
+Existing tasks without the versioned request keep their exact v1 all-pending/auto
+identity, necessary for recovery of retained work. They are not silently assigned
+new caller options. Full frontend routing, targeted claiming and parent deadline/
+cancellation supervision remain open; this is not a claim of unified ingress.
+
+The first focused pass succeeded in 17 cases (13.40s), including actual source
+capture, explicit-file precedence and recovery after the selected live file was
+deleted, with no extra simulated provider call. Expanded regressions including
+the dry-run case passed all 94 cases on Python 3.12 (108.23s) and Python 3.10
+(142.65s). All 19 changed/new functions
+pass lizard/AST complexity checks; whole Ruff and whitespace checks pass.
+Evidence: `step7-request-selection-{red,dry-red,focused,py312,py310}-20261020.txt`
+and `step7-request-selection-complexity-20261020.json`.
+The real selected medium provider and installed behavior remain unqualified.
