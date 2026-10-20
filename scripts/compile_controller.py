@@ -459,17 +459,17 @@ def _advance_replay(queue, lease, checkpoint):
     following = replace(checkpoint, task_id=lease.id, sequence=answer.sequence + 1,
                         details={'artifact': checkpoint.details['artifact'],
                                  'replay': {'answer_digest': progress._event_digest(answer)}})
-    return _record_or_read_replay_checkpoint(queue, lease, following)
+    return _record_or_read_compile_checkpoint(queue, lease, following)
 
 
-def _record_or_read_replay_checkpoint(queue, lease, following):
+def _record_or_read_compile_checkpoint(queue, lease, following):
     recorded = queue.get_compile_event(following.work_id, sequence=following.sequence)
     if recorded is None:
         queue.record_compile_event(lease, following)
         return following
     queue.verify_compile_checkpoint_owner(lease, recorded)
     if replace(recorded, task_id=lease.id) != following:
-        raise progress.ProgressConflict('semantic replay checkpoint identity changed')
+        raise progress.ProgressConflict('compile checkpoint identity changed')
     return recorded
 
 
@@ -894,9 +894,13 @@ def begin_compile_batch(queue, lease, planned, *, dependencies, deadline=None):
     _require_recorded_batch_parent(queue, lease, planned, dependencies)
     _require_planned_batch_record(queue, planned, deadline)
     expected = _batch_admission_event(lease, planned, dependencies)
-    previous = queue.get_compile_event(planned.work_id, sequence=0)
     dependencies.verify()
     operational_deadline_active(deadline)
+    return _record_or_resume_batch_admission(queue, lease, expected)
+
+
+def _record_or_resume_batch_admission(queue, lease, expected):
+    previous = queue.get_compile_event(expected.work_id, sequence=0)
     if previous is not None:
         return _resume_batch_admission(queue, lease, previous, expected)
     queue.record_compile_event(lease, expected)
@@ -1023,33 +1027,31 @@ def execute_planned_compile_batch(queue, lease, planned, snapshot, *, coordinato
         delivery.require_owner(queue, lease)
     with open_prepared_compile_batch(queue, lease, planned, snapshot, dependencies=dependencies,
                                      capture=capture, deadline=deadline) as (batch, context):
-        _require_compile_active(compiler_deadline, cancelled)
-        publication = _resolve_compile_publication(queue, lease, context, batch,
-            coordinator=coordinator, dependencies=dependencies, delivery=delivery, deadline=deadline)
-        _require_compile_active(compiler_deadline, cancelled)
-        return execute_compile_publication(queue, lease, publication, batch, coordinator=coordinator,
-            dependencies=dependencies, trigger=trigger, owner=owner, deadline=deadline, cancelled=cancelled)
+        return _execute_context_compile_batch(queue, lease, context, batch, coordinator=coordinator,
+            dependencies=dependencies, trigger=trigger, owner=owner, deadline=deadline,
+            cancelled=cancelled, delivery=delivery, critic_feedback=())
 
 
 def _resolve_compile_publication(queue, lease, context, batch, *, coordinator, dependencies,
-                                 delivery, deadline):
+                                 delivery, deadline, critic_feedback=()):
     current = _publication_cursor(queue, context.work_id)
     if current.stage == 'publication_ready':
         return current
     if 'compile_repair' in current.details:
         return _raise_retained_compile_repair(queue, lease, current, context, batch, dependencies, deadline)
     return _resolve_new_compile_publication(queue, lease, context, batch, coordinator,
-                                            dependencies, delivery, deadline)
+                                            dependencies, delivery, deadline, critic_feedback)
 
 
-def _resolve_new_compile_publication(queue, lease, context, batch, coordinator, dependencies, delivery, deadline):
+def _resolve_new_compile_publication(queue, lease, context, batch, coordinator, dependencies,
+                                     delivery, deadline, critic_feedback):
     from compile_cache import CompileCache
     from compile_memory import _CompileRepairCapacityError, resolve_compile_plan
 
     replay = CompileReplay(queue, lease, context, dependencies=dependencies, delivery=delivery)
     try:
         resolved = resolve_compile_plan(batch.inputs, CompileCache(queue.state_root),
-                                       coordinator=coordinator, batch=batch, call_runner=replay)
+            coordinator=coordinator, batch=batch, call_runner=replay, critic_feedback=critic_feedback)
     except _CompileRepairCapacityError as failure:
         save_compile_repair(queue, lease, context, batch, failure, dependencies=dependencies, deadline=deadline)
         raise
@@ -1236,6 +1238,82 @@ def _require_recorded_repair(queue, lease, event):
     if queue.get_compile_event(event.work_id, sequence=event.sequence) != event:
         raise progress.ProgressConflict('repair requires a recorded decision')
     _existing_repair_checkpoint(event, event.details['compile_repair'])
+
+
+def _require_repair_child_record(child, document, parent_batch):
+    _require_repair_child(parent_batch, child.batch)
+    record = _repair_child_record(child.batch, child.feedback)
+    expected = _repair_child_identity(child.repair, child.batch, child.feedback, record)
+    if (child.work_id, child.entry_digest) != (expected.work_id, expected.entry_digest):
+        raise progress.ProgressConflict('repair child identity changed')
+    if record not in document['children']:
+        raise progress.ProgressConflict('repair child is absent from retained decision')
+
+
+def _repair_child_admission(lease, child, dependencies):
+    parent = child.repair
+    binding = {'schema': 'compile-repair-batch/v1', 'repair_work_id': parent.work_id,
+               'repair_sequence': parent.sequence, 'repair_digest': progress._event_digest(parent),
+               'entry_digest': child.entry_digest, 'dependency_digest': dependencies.digest}
+    source_digest = _compile_identity_digest(_preflight_source_records(child.batch.inputs))
+    return progress.CompileEvent(child.work_id, lease.id, 0, source_digest,
+                                 'pending', 'ready', {'compile_batch': binding})
+
+
+def _repair_child_context(lease, admission, parent_context):
+    binding = {'schema': 'compile-repair-context/v1',
+               'admission_digest': progress._event_digest(admission),
+               'parent_work_id': parent_context.work_id, 'parent_sequence': parent_context.sequence,
+               'parent_digest': progress._event_digest(parent_context)}
+    return replace(admission, task_id=lease.id, sequence=1, stage='snapshot_ready', details={
+        'compile_context': parent_context.details['compile_context'], 'repair_context': binding,
+        'artifact': parent_context.details['artifact']})
+
+
+def begin_compile_repair_batch(queue, lease, child, parent_context, parent_batch, *, dependencies, deadline=None):
+    """Bind child authority to the exact retained decision and inherited context."""
+    operational_deadline_active(deadline)
+    document, _children = _read_verified_compile_repair(queue, lease, child.repair,
+        parent_context, parent_batch, dependencies, deadline)
+    _require_repair_child_record(child, document, parent_batch)
+    expected = _repair_child_admission(lease, child, dependencies)
+    _check_batch_context_owner(queue, lease, child.repair, dependencies, deadline)
+    admitted = _record_or_resume_batch_admission(queue, lease, expected)
+    context = _repair_child_context(lease, admitted, parent_context)
+    saved = _record_or_read_compile_checkpoint(queue, lease, context)
+    _check_batch_context_owner(queue, lease, saved, dependencies, deadline)
+    return saved
+
+
+def execute_repair_compile_batch(queue, lease, child, parent_context, parent_batch, *, coordinator,
+                                 dependencies, trigger, owner=None, deadline=None, cancelled=None, delivery=None):
+    """Execute one admitted child while its caller owns the parent archive scope."""
+    from compile_memory import _require_compile_active
+
+    _require_publication_coordinator(queue, coordinator)
+    compiler_deadline = float('inf') if deadline is None else deadline
+    _require_compile_active(compiler_deadline, cancelled)
+    if delivery is not None:
+        delivery.require_owner(queue, lease)
+    context = begin_compile_repair_batch(queue, lease, child, parent_context, parent_batch,
+                                         dependencies=dependencies, deadline=deadline)
+    return _execute_context_compile_batch(queue, lease, context, child.batch, coordinator=coordinator,
+        dependencies=dependencies, trigger=trigger, owner=owner, deadline=deadline,
+        cancelled=cancelled, delivery=delivery, critic_feedback=child.feedback)
+
+
+def _execute_context_compile_batch(queue, lease, context, batch, *, coordinator, dependencies,
+                                   trigger, owner, deadline, cancelled, delivery, critic_feedback):
+    from compile_memory import _require_compile_active
+
+    compiler_deadline = float('inf') if deadline is None else deadline
+    _require_compile_active(compiler_deadline, cancelled)
+    publication = _resolve_compile_publication(queue, lease, context, batch,
+        coordinator=coordinator, dependencies=dependencies, delivery=delivery, deadline=deadline,
+        critic_feedback=critic_feedback)
+    _require_compile_active(compiler_deadline, cancelled)
+    return execute_compile_publication(queue, lease, publication, batch, coordinator=coordinator,
+        dependencies=dependencies, trigger=trigger, owner=owner, deadline=deadline, cancelled=cancelled)
 
 
 def _check_batch_context_owner(queue, lease, saved, dependencies, deadline):

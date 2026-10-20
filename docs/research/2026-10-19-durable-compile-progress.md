@@ -2010,3 +2010,41 @@ and diff checks pass. Logs: `step7-repair-checkpoint-{red,green,py312,py310}-202
 `step7-repair-checkpoint-complexity-20261020.json` in private vault logs.
 Child admission/execution and recursive outcome accounting remain explicitly open;
 this is neither a completed task nor installed runtime qualification.
+
+### Repair child admission and execution (2026-10-20)
+
+Reuse the recorded parent context artifact by reference, as semantic replay already
+does; do not create another context archive or reread mutable pages for a child.
+The child admission must verify the exact recorded repair, match the full child
+record/feedback, and compare inherited targets/vault context. Its sequence-zero
+admission binds repair event and child record, and its ready context checkpoint
+binds that admission plus the parent context while retaining the same immutable
+artifact. The original queue task and lease remain the authority; no child queue
+task is enqueued. Each later child call/publication uses its own work identity.
+
+Execute through the same semantic replay and publication path, passing the retained
+child feedback to resolve_compile_plan so its existing cache guard cannot accept
+an old uncorrected plan. Capacity failures in a child may save another repair
+decision; recursive scheduling/completion is separate. Before/after checks retain
+caller deadlines, cancellation and dependency/owner verification, with the already
+stated shared-client in-call deadline limitation. This follows the same current
+SQLite/AWS/Temporal references and approved journal/artifact architecture. Passing
+new ambient environment credentials or copying child snapshots was rejected for
+unnecessary contracts/storage. No new numeric bound or runtime path is added.
+
+Child execution qualification: initial seven red cases demonstrated missing
+admission/execution. The final eight include altered work identity, entry digest,
+feedback and target context, stale lease refusal, admission-before-context failure
+recovery, exact context-artifact reuse, and real semantic validation/publication
+with simulated provider responses. The inherited feedback is observed at the real
+resolver; accepted recovery refuses any resolution or live snapshot read and still
+succeeds. Root and child execution share one resolve/publication pipeline, and root
+admission/replay checkpoint matching were reused rather than copied.
+
+66 related tests pass on Python 3.12 (72.85s) and 3.10 (79.58s). All 26 changed/new
+functions meet measured CCN/if/nesting limits; whole scripts/tests Ruff and diff
+checks pass. One import-order finding was corrected. Evidence:
+`step7-repair-child-{red,green,py312,py310}-20261020.txt` and
+`step7-repair-child-complexity-20261020.json` in private vault logs.
+This completes individual child execution, not recursive tree scheduling, parent
+completion, whole-task settlement or installed CLI/MCP/nightly routing.

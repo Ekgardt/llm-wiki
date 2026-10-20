@@ -1246,8 +1246,13 @@ publication context. Child identities bind that recorded decision and their full
 record, including feedback. An uncertain dispatch cannot authorize a partition; a
 waiting repair cannot be used as an ordinary model-call checkpoint. Recovery reads
 the retained failure without resolving the parent again. No partition remains an
-explicit unresolved refusal. Child admission/execution, recursive completion and
-semantic reference auditing remain unfinished.
+explicit unresolved refusal. Child admission now verifies the exact retained
+decision, full child record/feedback and inherited publication context. Its initial
+event binds the repair decision; its ready checkpoint refers to the same immutable
+parent context artifact. It creates no queue task or copied context archive.
+The candidate child executor passes retained feedback into the shared semantic
+replay/publication path, so the existing correction cache guard remains effective.
+Recursive scheduling/completion and semantic reference auditing remain unfinished.
 
 The archive's eager compatibility planning view keeps daily records materialized for existing partition
 proofs, while context source/target/vault collections retain verified record indices
