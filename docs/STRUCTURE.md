@@ -1229,8 +1229,13 @@ Production entrypoint routing and whole-task finalization remain unfinished.
 The candidate prepared-batch scope now uses the saved context with the same
 semantic selection/identity checks as live refresh. Joining selected daily sources
 with archive context retains metadata positions, not all context bodies. The scope
-owns archive lifetimes across preparation and consumer work. Production execution,
-publication/receipts and repair-child routing still need integration before install.
+owns archive lifetimes across preparation and consumer work. The candidate planned
+batch executor now joins that scope to semantic answer replay, accepted-plan storage
+and receipt-confirmed publication. An already accepted intent bypasses resolution
+and the model cache. Repair-capacity and uncertain-call exceptions propagate to the
+delivery owner, and a caller's existing CompileDelivery can span independent work.
+The return confirms one batch only. Whole-task accounting, production entrypoints
+and repair-child routing still need integration before install.
 
 The archive's eager compatibility planning view keeps daily records materialized for existing partition
 proofs, while context source/target/vault collections retain verified record indices

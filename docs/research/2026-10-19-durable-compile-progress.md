@@ -1921,3 +1921,42 @@ pass; all 10 changed/new functions meet measured complexity, whole scripts/tests
 Ruff and diff checks pass. Logs: `step7-worker-handoff-{red,green,py312,py310}-20261020.txt`
 and `step7-worker-handoff-complexity-20261020.json`. Qualification was on Linux;
 Windows/macOS runtime operation is not claimed from these results.
+
+### Joining prepared batch resolution and publication (2026-10-20)
+
+Continue the approved controller with one planned-batch scope owning the saved
+archive lifetimes, semantic resolution/replay, accepted-plan persistence and
+receipt-confirmed publication. On resume, inspect the current event first: a
+recorded accepted publication (including its confirmed child) bypasses resolution
+and the model cache entirely. Before acceptance, replay existing answers through
+the real validators; an uncertain dispatch remains blocked. Reuse existing
+CompileDelivery when supplied so uncertainty does not prematurely release the
+lease of a caller processing independently proven batches. Do not treat this
+single-batch return as whole-task success, swallow repair-capacity exceptions,
+or substitute live context for the saved context.
+
+Sources and alternatives remain the current SQLite atomic commit, AWS retry
+identity and Temporal execution references checked above. Choose saved intent
+reconciliation over rerunning semantic resolution after acceptance: a cache is
+not the authority for an accepted publication. No new retry count, directory,
+schema, service or package is required. Whole-call process supervision still
+belongs to the worker; the shared LLM client currently has per-call ceilings,
+not a universal propagated cancellation/deadline contract. Transition cancellation
+and the parent worker's deadline must not be represented as that missing guarantee.
+The previous handoff private-note append encountered WriterAdmissionTimeout;
+tracked research/commit are retained, and private synchronization remains pending.
+
+Joined-batch qualification: seven initial red tests proved the missing execution
+path; the final eight cases cover accepted and committed recovery without semantic
+resolution, replay after draft-before-validation interruption, preserved repair
+exception identity, caller delivery reuse, cancellation/expiry before calls and
+unknown-outcome blocking across reclaim without repeat. Related suites pass 95
+cases on Python 3.12 (86.45s) and 3.10 (103.69s). All 16 changed/new functions meet
+measured complexity; whole scripts/tests Ruff and diff checks pass. Evidence:
+`step7-planned-execution-{red,green,py312,py310}-20261020.txt` and
+`step7-planned-execution-complexity-20261020.json` in private vault logs.
+The earlier worker-handoff private note/log retry succeeded through the normal
+writer gate and the publication-filtered index was rebuilt. This is still an
+uninstalled batch executor with a simulated model in tests. Whole delivery and
+repair-child execution, unknown-source overlap, dependency closure, all entrypoint
+routing, retention, backup/restore and useful real-model qualification remain open.

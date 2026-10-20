@@ -1006,6 +1006,46 @@ def open_prepared_compile_batch(queue, lease, planned, snapshot, *, dependencies
         yield ready, saved
 
 
+def execute_planned_compile_batch(queue, lease, planned, snapshot, *, coordinator, dependencies,
+                                  trigger, owner=None, deadline=None, cancelled=None, delivery=None,
+                                  capture=_capture_current_compile_context):
+    """Resolve and publish one retained batch; never settle its enclosing task.
+
+    Repair-capacity and unknown-outcome errors propagate to the delivery owner.
+    The worker remains responsible for whole-call process supervision.
+    """
+    from compile_memory import _require_compile_active
+
+    _require_publication_coordinator(queue, coordinator)
+    compiler_deadline = float('inf') if deadline is None else deadline
+    _require_compile_active(compiler_deadline, cancelled)
+    if delivery is not None:
+        delivery.require_owner(queue, lease)
+    with open_prepared_compile_batch(queue, lease, planned, snapshot, dependencies=dependencies,
+                                     capture=capture, deadline=deadline) as (batch, context):
+        _require_compile_active(compiler_deadline, cancelled)
+        publication = _resolve_compile_publication(queue, lease, context, batch,
+            coordinator=coordinator, dependencies=dependencies, delivery=delivery, deadline=deadline)
+        _require_compile_active(compiler_deadline, cancelled)
+        return execute_compile_publication(queue, lease, publication, batch, coordinator=coordinator,
+            dependencies=dependencies, trigger=trigger, owner=owner, deadline=deadline, cancelled=cancelled)
+
+
+def _resolve_compile_publication(queue, lease, context, batch, *, coordinator, dependencies,
+                                 delivery, deadline):
+    from compile_cache import CompileCache
+    from compile_memory import resolve_compile_plan
+
+    current = _publication_cursor(queue, context.work_id)
+    if current.stage == 'publication_ready':
+        return current
+    replay = CompileReplay(queue, lease, context, dependencies=dependencies, delivery=delivery)
+    resolved = resolve_compile_plan(batch.inputs, CompileCache(queue.state_root),
+                                   coordinator=coordinator, batch=batch, call_runner=replay)
+    return save_compile_publication(queue, lease, context, batch, resolved,
+                                    dependencies=dependencies, deadline=deadline)
+
+
 def _check_batch_context_owner(queue, lease, saved, dependencies, deadline):
     dependencies.verify()
     operational_deadline_active(deadline)
