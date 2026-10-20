@@ -704,8 +704,7 @@ class _PreflightWriter:
         return _blob_digest(data)
 
     def add(self, kind, inputs, details):
-        records = [_blob_digest(_snapshot_json(_archive_record_value(part, _blob_digest)))
-                   for part in inputs.dailies]
+        records = _preflight_source_records(inputs)
         self._consume(records)
         identity = self.write({'kind': kind, 'source_records': records, **details})
         self.counts[kind] += 1
@@ -758,6 +757,7 @@ class PlannedCompileBatch:
     preflight: progress.CompileEvent
     entry_digest: str
     work_id: str
+    entry_offset: int
 
 
 class _PreflightMatch:
@@ -803,9 +803,10 @@ def _consume_compile_preflight(reader, handle, saved, plan, on_refused, check, d
     writer.write({'kind': 'header', 'compile_preflight': saved.details['compile_preflight']})
     refused = partial(_consume_preflight_refusal, writer, check, on_refused)
     for batch in plan(reader, refused):
+        entry_offset = handle.tell()
         entry_digest = writer.add('batch', batch.inputs, _preflight_batch_details(batch))
         check()
-        yield _planned_compile_batch(batch, saved, entry_digest)
+        yield _planned_compile_batch(batch, saved, entry_digest, entry_offset)
     check()
     writer.complete()
     matcher.finish()
@@ -817,12 +818,95 @@ def _consume_preflight_refusal(writer, check, on_refused, inputs):
     on_refused(inputs)
 
 
-def _planned_compile_batch(batch, preflight, entry_digest):
+def _planned_compile_batch(batch, preflight, entry_digest, entry_offset):
     identity = {'schema': 'compile-planned-batch/v1',
                 'preflight_digest': progress._event_digest(preflight),
                 'entry_digest': entry_digest}
     return PlannedCompileBatch(batch, progress._snapshot_event(preflight), entry_digest,
-                               _compile_identity_digest(identity))
+                               _compile_identity_digest(identity), entry_offset)
+
+
+def _preflight_source_records(inputs):
+    return [_blob_digest(_snapshot_json(_archive_record_value(part, _blob_digest)))
+            for part in inputs.dailies]
+
+
+def _planned_batch_record(planned):
+    value = {'kind': 'batch', 'source_records': _preflight_source_records(planned.batch.inputs),
+             **_preflight_batch_details(planned.batch)}
+    data = _snapshot_json(value)
+    if _blob_digest(data) != planned.entry_digest:
+        raise progress.ProgressConflict('planned batch entry identity changed')
+    return data
+
+
+def _require_recorded_batch_parent(queue, lease, planned, dependencies):
+    parent = planned.preflight
+    queue.verify_compile_checkpoint_owner(lease, parent)
+    stored = queue.get_compile_event(parent.work_id, sequence=parent.sequence)
+    if stored != parent:
+        raise progress.ProgressConflict('batch requires the recorded preflight')
+    root = queue.get_compile_event(parent.work_id, sequence=0)
+    progress.validate_root_event(root, queue.compile_origin(lease))
+    _require_preflight_work_identity(root, parent)
+    if dependencies.verify() != parent.details['compile_preflight']['dependency_digest']:
+        raise progress.ProgressConflict('batch dependency identity changed')
+
+
+def _require_planned_batch_address(planned):
+    expected = _planned_compile_batch(planned.batch, planned.preflight,
+                                      planned.entry_digest, planned.entry_offset)
+    if expected.work_id != planned.work_id:
+        raise progress.ProgressConflict('planned batch work identity changed')
+    if type(planned.entry_offset) is not int or planned.entry_offset < 0:
+        raise progress.ProgressCorrupt('invalid preflight entry offset')
+
+
+def _require_planned_batch_record(queue, planned, deadline):
+    _require_planned_batch_address(planned)
+    data = _planned_batch_record(planned)
+    with queue.open_compile_artifact(planned.preflight, deadline=deadline) as handle:
+        handle.seek(planned.entry_offset)
+        if handle.read(len(data) + 1) != data + b'\n':
+            raise progress.ProgressCorrupt('planned batch is absent from retained preflight')
+
+
+def _batch_admission_event(lease, planned, dependencies):
+    parent = planned.preflight
+    details = {'schema': 'compile-batch/v1', 'preflight_work_id': parent.work_id,
+               'preflight_sequence': parent.sequence,
+               'preflight_digest': progress._event_digest(parent),
+               'entry_digest': planned.entry_digest, 'entry_offset': planned.entry_offset,
+               'dependency_digest': dependencies.digest}
+    sources = _compile_identity_digest(_preflight_source_records(planned.batch.inputs))
+    return progress.CompileEvent(planned.work_id, lease.id, 0, sources,
+                                 'pending', 'ready', {'compile_batch': details})
+
+
+def begin_compile_batch(queue, lease, planned, *, dependencies, deadline=None):
+    """Admit a retained plan entry before reading any mutable context.
+
+    This binds immutable daily records and the complete preflight. It does not
+    authorize model calls or certify that refreshed context has been saved.
+    """
+    operational_deadline_active(deadline)
+    _require_recorded_batch_parent(queue, lease, planned, dependencies)
+    _require_planned_batch_record(queue, planned, deadline)
+    expected = _batch_admission_event(lease, planned, dependencies)
+    previous = queue.get_compile_event(planned.work_id, sequence=0)
+    dependencies.verify()
+    operational_deadline_active(deadline)
+    if previous is not None:
+        return _resume_batch_admission(queue, lease, previous, expected)
+    queue.record_compile_event(lease, expected)
+    return expected
+
+
+def _resume_batch_admission(queue, lease, previous, expected):
+    queue.verify_compile_checkpoint_owner(lease, previous)
+    if replace(previous, task_id=lease.id) != expected:
+        raise progress.ProgressConflict('retained batch admission identity changed')
+    return previous
 
 
 def load_compile_inputs(queue, lease, checkpoint):

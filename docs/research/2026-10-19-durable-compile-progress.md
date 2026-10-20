@@ -1579,3 +1579,45 @@ Ruff and diff checks passed. Evidence in the installed vault:
 `logs/step7-context-delta-{red,green,expanded}-20261020.txt`,
 `logs/step7-context-delta-py{312,310}-20261020.txt`, and
 `logs/step7-context-delta-complexity-20261020.json`.
+
+### 2026-10-20 — durable batch admission from retained preflight
+
+`begin_compile_batch` now records pending work for the stable planned batch key
+before any mutable context capture. It proves the exact recorded parent, original
+queue lineage and root identity, current dependencies, planned bytes and address.
+An existing admission must match exactly (apart from the current redrive task ID)
+and is returned unchanged. No model call is permitted by this pending admission.
+
+Research checked 2026-10-20: [SQLite atomic commit](https://www.sqlite.org/atomiccommit.html)
+for journal publication under the existing transaction; [Temporal workflow execution](https://docs.temporal.io/workflow-execution)
+for retaining execution identity/history; [AWS idempotent retries](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/)
+for stable intent identity and refusing changed parameters. Existing SQLite and
+queue lease ownership remain the implementation; neither service is introduced.
+
+Alternatives: prepare mutable context before looking up work; trust an in-memory
+batch without proving its retained parent entry; decode the entire preflight for
+each admission. Instead the verified consumer exposes its entry byte offset.
+Admission seeks to and compares that exact canonical record. Source-record hashing
+is shared with the preflight writer, avoiding a second encoder. Offsets are
+nonnegative integers because they address bytes, not an operator limit. There is
+no new batch count or file-size ceiling. The existing artifact boundary still
+hashes the whole file on open: this avoids repeated semantic decoding, **not** all
+repeated I/O. End-to-end cost remains to be measured and this overhead cannot be
+claimed eliminated. Record size follows the actual planned batch metadata.
+
+Nine red tests preceded implementation. Tests include replay/redrive without
+mutable context capture, wrong work/entry/address, changed batch and dependency,
+lost owner, unrecorded parent, conflicting existing admission and dependency change
+during artifact verification. Existing successful full-preflight proofs are reused;
+this admission helper does not itself execute compilation or close point 7.
+
+Next, bind a refreshed context artifact to the admitted batch before paid calls,
+recover that artifact before any fresh capture, and connect the verified overlay
+to compiler replay and publication. Queue-level semantic admission constraints,
+retention/doctor/backup references, cross-origin uncertain work, all production
+entrypoints and full-cycle qualification remain required. Candidate uninstalled.
+
+Validation: 75 related tests pass on Python 3.12 (51.11s) and 3.10 (74.28s).
+All 23 changed/new functions pass lizard/AST complexity checks; whole scripts/tests
+Ruff and diff checks pass. Logs: `step7-batch-admission-{red,green,py312,py310}-20261020.txt`
+and `step7-batch-admission-complexity-20261020.json` in the installed vault logs.

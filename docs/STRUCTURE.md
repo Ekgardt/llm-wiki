@@ -1182,6 +1182,13 @@ unselected source bodies. ZIP directory metadata is held in memory; source bodie
 are not loaded by opening the container. Python's standard library supplies the
 container format; there is no new package, runtime path or operational database.
 
+The uninstalled batch controller admits a verified preflight entry into the same
+compile journal before reading mutable context. Its stable work key survives
+redrive; exact retained parent/entry bytes and dependencies are checked. A byte
+offset addresses the entry without decoding the whole plan again; the existing
+file boundary still verifies its complete digest. Pending admission alone grants
+no model call or publication, and refreshed-context binding remains required.
+
 The uninstalled refreshed-context format stores only complete changed context
 records and explicit removed paths in another self-contained ZIP64 artifact.
 It binds one complete source capture by manifest digest; it never follows delta
