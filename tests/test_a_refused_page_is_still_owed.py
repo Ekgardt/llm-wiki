@@ -8,6 +8,7 @@ pages it had already produced. On this vault that lost two notes on
 """
 
 import json
+import lzma
 import sqlite3
 import sys
 from pathlib import Path
@@ -15,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import repair_refused_page_creation as repair  # noqa: E402
-from markdown_transaction import _compressed_image  # noqa: E402
+from markdown_transaction import IMAGE_COMPRESSION_PRESET  # noqa: E402
 from reliable_memory import sha256_bytes  # noqa: E402
 
 PAGE = b"---\ntype: decision\n---\n\n# A page that was owed\n"
@@ -39,7 +40,7 @@ def _created(path: str, content: bytes, artifact: str) -> dict:
 def _with_image(directory: Path, artifact: str, content: bytes) -> None:
     target = directory / artifact
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(_compressed_image(content))
+    target.write_bytes(lzma.compress(content, preset=IMAGE_COMPRESSION_PRESET))
 
 
 def test_a_page_the_vault_does_not_have_is_owed(tmp_path):

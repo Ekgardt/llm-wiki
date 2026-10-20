@@ -5256,3 +5256,58 @@ deleted. The large historical cleanup archive contains test material and archive
 worktree/Git metadata, so it was inventoried rather than deleted without establishing
 recoverability. This audit has not provided enough space for a complete staged
 restore. No private data or operational state was removed.
+
+### Transaction image creation — design 2026-10-20
+
+The next source inspection found `_stage_state` and `_stage_append` building a
+complete compressed byte string before `_write_new_file`; the append path also
+copies the entire added suffix. Existing inputs are immutable bytes, so a memoryview
+can name the suffix without changing ownership. The selected implementation writes
+XZ incrementally into the same exclusive owner-only file, closes the compressor
+before flush/fsync, and preserves the existing plaintext descriptions and format.
+The raw new-file ownership/flush operation is shared by ordinary metadata writes
+and image writes. It adds no second file, path, schema, provider or package.
+
+The same day's Python LZMAFile and os.fsync documentation establishes borrowed-file
+ownership and compressor-close ordering; SQLite's atomic-commit ordering motivates
+preserving the durable-publication boundary, and Restic integrity documentation
+motivates retaining complete plaintext hash checks. Alternatives rejected: keeping
+both full compressed and source buffers; adding a temporary compressed file and
+copying it again; changing compression formats; or skipping final compressor output
+before fsync. `_compressed_image` will be retired from production once its writer
+callers migrate; historical test fixtures can use the standard-library encoder
+explicitly. Source capture and actual restore still return bytes and remain
+outstanding; this change removes compression/suffix copies rather than claiming
+the entire mutation pipeline is streamed.
+
+Implemented creation path: the exclusive raw-file scope is shared; image creation
+owns an LZMAFile inside it and closes the encoder before the outer flush/fsync.
+Append suffixes use a view of immutable after-bytes. The old production
+`_compressed_image` was removed after migrating both writer callers; historical
+fixture producers explicitly use the standard-library XZ encoder at the existing
+preset. Source search found no remaining import/call of the retired helper.
+
+Two new tests failed before the change because both full and append staging called
+the complete-buffer compressor. They now verify exact encoded bytes and plaintext
+hashes, including several I/O blocks. Further tests check that fsync sees a complete
+decodable footer and that an interrupted encoder leaves neither a published page
+nor prepared work or retained partial images. The existing failure cleanup owns
+that removal; no new recovery path was introduced.
+
+Qualification: 286 related tests passed on each of Python 3.12 and 3.10; five
+Windows-native checks remain skipped on Linux. After increasing the multiblock
+fixture, all four new creation tests were re-run successfully on 3.12; the 3.10
+full run includes that final fixture. Evidence:
+`logs/step7-image-creation-py312-20261020.log`,
+`logs/step7-image-creation-multichunk-py312-20261020.log`, and
+`logs/step7-image-creation-py310-20261020.log`. All 18 changed functions meet the
+Lizard/AST constraints; Ruff and diff checks pass. Fresh graph evidence at 62d68339
+is `logs/step7-image-creation-graph-20261020.json`, supplemented by source searches.
+
+For 4 MiB of incompressible input, traced compression/write peaks were 18,764,249
+bytes before and 9,188,367 after; both stored XZ files and plaintext hashes matched.
+The input was allocated before tracing; this isolates compression/write and does
+not measure the full transaction. Evidence:
+`logs/step7-image-creation-memory-20261020.json`. Capture of before-bytes, actual
+apply/restore readers, live installation, encrypted real-vault restore, remaining
+limit review and useful paid-model full-cycle qualification remain unfinished.

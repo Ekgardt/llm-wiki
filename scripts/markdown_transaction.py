@@ -2402,12 +2402,6 @@ _LZMA_MAGIC = b"\xfd7zXZ\x00"
 IMAGE_COMPRESSION_PRESET = 1
 
 
-def _compressed_image(content: bytes) -> bytes:
-    import lzma
-
-    return lzma.compress(content, preset=IMAGE_COMPRESSION_PRESET)
-
-
 def _image_bytes(path: Path) -> bytes:
     """One staged image as the bytes it stands for, compressed or not."""
     return _decoded_image_bytes(path.read_bytes())
@@ -9078,9 +9072,9 @@ class MarkdownCoordinator:
     def _stage_append(
         self, root: Path, position: int, before: bytes, after: bytes
     ) -> tuple[object, object]:
-        suffix = after[len(before) :]
+        suffix = memoryview(after)[len(before) :]
         name = f"{position:06d}.bin"
-        self._write_new_file(root / name, _compressed_image(suffix))
+        self._write_compressed_image(root / name, suffix)
         before_state = {"sha256": sha256_bytes(before), "length": len(before)}
         after_state = {
             "sha256": sha256_bytes(after),
@@ -9094,7 +9088,7 @@ class MarkdownCoordinator:
         if content is None:
             return ABSENT
         name = f"{position:06d}.bin"
-        self._write_new_file(root / name, _compressed_image(content))
+        self._write_compressed_image(root / name, content)
         return {"sha256": sha256_bytes(content), "artifact": f"{root.name}/{name}"}
 
     def _verify_plan_artifacts(self, plan: Mapping[str, object], artifact_root: Path) -> None:
@@ -9122,10 +9116,24 @@ class MarkdownCoordinator:
         _verify_stored_image(state, state_name, artifact_root)
 
     def _write_new_file(self, path: Path, content: bytes, *, owner_only: bool = True) -> None:
+        with self._new_file_stream(path, owner_only=owner_only) as handle:
+            handle.write(content)
+
+    def _write_compressed_image(self, path, content):
+        import lzma
+
+        view = memoryview(content)
+        with self._new_file_stream(path) as handle:
+            with lzma.LZMAFile(handle, "wb", preset=IMAGE_COMPRESSION_PRESET) as encoded:
+                for offset in range(0, len(view), IO_CHUNK_BYTES):
+                    encoded.write(view[offset:offset + IO_CHUNK_BYTES])
+
+    @contextlib.contextmanager
+    def _new_file_stream(self, path, *, owner_only=True):
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
         descriptor = os.open(path, flags, 0o600)
         with os.fdopen(descriptor, "wb") as handle:
-            handle.write(content)
+            yield handle
             handle.flush()
         if owner_only:
             if os.name != "nt":

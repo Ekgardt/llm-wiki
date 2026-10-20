@@ -1841,8 +1841,10 @@ def test_an_image_written_before_compression_is_still_readable(tmp_path: Path) -
 
 
 def test_a_compressed_image_reads_back_as_what_it_stands_for(tmp_path: Path) -> None:
+    import lzma
+
     packed = tmp_path / "000000.bin"
-    packed.write_bytes(markdown_transaction._compressed_image(b"journal line\n" * 500))
+    packed.write_bytes(lzma.compress(b"journal line\n" * 500, preset=markdown_transaction.IMAGE_COMPRESSION_PRESET))
 
     assert markdown_transaction._image_bytes(packed) == b"journal line\n" * 500
     assert packed.stat().st_size < 500 * len(b"journal line\n") // 10

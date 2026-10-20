@@ -11,13 +11,14 @@ is never replayed; a DLP refusal is a decision, not an accident.
 from __future__ import annotations
 
 import json
+import lzma
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import repair_refused_appends as repair  # noqa: E402
-from markdown_transaction import _compressed_image  # noqa: E402
+from markdown_transaction import IMAGE_COMPRESSION_PRESET  # noqa: E402
 from reliable_memory import sha256_bytes  # noqa: E402
 
 MARKER = "<!-- llm-wiki-operation:" + "a" * 64 + " -->"
@@ -30,8 +31,8 @@ def _transaction(directory: Path, before: bytes, after: bytes, kind: str = "repl
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "before").mkdir()
     (directory / "after").mkdir()
-    (directory / "before/000000.bin").write_bytes(_compressed_image(before))
-    (directory / "after/000000.bin").write_bytes(_compressed_image(after))
+    (directory / "before/000000.bin").write_bytes(lzma.compress(before, preset=IMAGE_COMPRESSION_PRESET))
+    (directory / "after/000000.bin").write_bytes(lzma.compress(after, preset=IMAGE_COMPRESSION_PRESET))
     operation = {
         "kind": kind,
         "path": "knowledge/daily/2026-09-05.md",
@@ -85,7 +86,7 @@ def test_a_create_is_left_to_the_other_repair(tmp_path):
 
 def test_an_image_that_no_longer_hashes_to_its_plan_is_refused(tmp_path):
     directory = _transaction(tmp_path / "txn-1", BEFORE, BEFORE + BLOCK)
-    (directory / "after/000000.bin").write_bytes(_compressed_image(BEFORE + b"tampered"))
+    (directory / "after/000000.bin").write_bytes(lzma.compress(BEFORE + b"tampered", preset=IMAGE_COMPRESSION_PRESET))
     vault = _vault(tmp_path, BEFORE)
 
     assert repair._owed_in(directory, IDENTITY, vault) == []

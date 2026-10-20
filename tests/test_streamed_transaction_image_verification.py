@@ -12,9 +12,9 @@ def _encoded(payload, format):
     if format == 'plain':
         return payload
     if format == 'xz':
-        return transaction._compressed_image(payload)
+        return lzma.compress(payload, preset=transaction.IMAGE_COMPRESSION_PRESET)
     middle = len(payload) // 2
-    return transaction._compressed_image(payload[:middle]) + transaction._compressed_image(payload[middle:])
+    return lzma.compress(payload[:middle], preset=transaction.IMAGE_COMPRESSION_PRESET) + lzma.compress(payload[middle:], preset=transaction.IMAGE_COMPRESSION_PRESET)
 
 
 def _image(root, raw):
@@ -47,7 +47,7 @@ def test_image_verification_still_refuses_wrong_plaintext_hash(tmp_path, format)
 
 def test_truncated_image_still_fails_with_decompression_error(tmp_path):
     payload = b'retained evidence' * 1000
-    _image(tmp_path, transaction._compressed_image(payload)[:-1])
+    _image(tmp_path, lzma.compress(payload, preset=transaction.IMAGE_COMPRESSION_PRESET)[:-1])
     state = {'artifact': 'before/000000.bin', 'sha256': sha256_bytes(payload)}
     with pytest.raises(lzma.LZMAError):
         transaction._verify_stored_image(state, 'before', tmp_path)
