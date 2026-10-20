@@ -36,7 +36,7 @@ import re
 import sys
 import time
 import weakref
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
@@ -506,71 +506,82 @@ def snapshot_compile_inputs(
     interrupted partway leaves receipts for the parts that committed, and those
     parts are not offered again.
     """
-    dailies: list[DailySnapshot] = []
-    sources: list[SourceSnapshot] = []
-    budget = _SourceBudget(sources)
+    groups = {'dailies': [], 'sources': [], 'targets': [], 'vault_files': []}
     partitions = _CapturedPartitions()
+    for group, record in iter_compile_records(paths, compiled=compiled, partitions=partitions):
+        groups[group].append(record)
+    groups['sources'].sort(key=lambda record: record.logical_path)
+    groups['targets'].sort(key=lambda record: record.logical_path)
+    return partitions.bind(CompileInputs(**{name: tuple(records) for name, records in groups.items()},
+                                          partition_context=partitions))
 
+
+def iter_compile_records(paths, *, compiled=None, partitions=None):
+    """Emit captured records without retaining completed source bodies.
+
+    A supplied partition context belongs to the eager caller. Otherwise each
+    daily's proof cache expires after its records have been consumed.
+    """
+    budget = _SourceBudget()
     for path in sorted(map(Path, paths), key=lambda item: item.as_posix()):
-        content = _read_daily_source(path)
-        logical = _logical_path(path)
-        dailies.extend(partitions.daily(logical, content, compiled))
-        budget.add(SourceSnapshot(logical, content, sha256_bytes(content)))
-    vault_files = _vault_file_snapshots(budget.add)
-    targets = _knowledge_targets(budget.add)
-    return partitions.bind(CompileInputs(
-        tuple(dailies),
-        tuple(sorted(sources, key=lambda item: item.logical_path)),
-        tuple(sorted(targets, key=lambda item: item.logical_path)),
-        tuple(vault_files),
-        partitions,
-    ))
+        yield from _daily_capture_records(path, compiled, partitions, budget)
+    for source in _vault_file_snapshots(budget.add):
+        yield 'sources', source
+        yield 'vault_files', source
+    for target in _knowledge_targets(budget.add):
+        yield 'sources', SourceSnapshot(target.logical_path, target.content, target.sha256)
+        yield 'targets', target
+
+
+def _daily_capture_records(path, compiled, partitions, budget):
+    context = partitions or _CapturedPartitions()
+    content = _read_daily_source(path)
+    logical = _logical_path(path)
+    for part in context.daily(logical, content, compiled):
+        yield 'dailies', part
+    source = SourceSnapshot(logical, content, sha256_bytes(content))
+    budget.add(source)
+    yield 'sources', source
 
 
 def _vault_file_snapshots(
     add_source: Callable[[SourceSnapshot], None],
-) -> list[SourceSnapshot]:
-    """Snapshot every vault file whole, whatever one prompt later has room for."""
-    snapshots: list[SourceSnapshot] = []
+) -> Iterable[SourceSnapshot]:
+    """Yield each complete vault file without retaining previous bodies."""
     for path in _vault_source_paths():
         if not path.exists():
             continue
         snapshot = _snapshot(path)
         add_source(snapshot)
-        snapshots.append(snapshot)
-    return snapshots
+        yield snapshot
 
 
 class _SourceBudget:
     """Accumulate compile sources under the count and byte ceilings."""
 
-    def __init__(self, sources: list[SourceSnapshot]) -> None:
-        self._sources = sources
+    def __init__(self) -> None:
+        self._source_count = 0
         self._total_bytes = 0
         self._max_sources = setting_value("compile.max_sources")
         self._max_total_bytes = setting_value("compile.max_total_source_bytes")
 
     def add(self, source: SourceSnapshot) -> None:
-        if len(self._sources) >= self._max_sources:
+        if self._source_count >= self._max_sources:
             raise ValueError(f"compile source count exceeds limit; {raise_hint('compile.max_sources')}")
         self._total_bytes += len(source.content)
         if self._total_bytes > self._max_total_bytes:
             raise ValueError(f"compile source bytes exceed limit; {raise_hint('compile.max_total_source_bytes')}")
-        self._sources.append(source)
+        self._source_count += 1
 
 
 def _knowledge_targets(
     add_source: Callable[[SourceSnapshot], None],
-) -> list[TargetSnapshot]:
-    """Snapshot each live knowledge page as both a source and a write target."""
-    targets: list[TargetSnapshot] = []
+) -> Iterable[TargetSnapshot]:
+    """Yield each live knowledge page's target after source admission."""
     for path in _live_knowledge_pages():
         source = _snapshot(path, label="knowledge page")
         add_source(source)
-        targets.append(
-            TargetSnapshot(source.logical_path, source.content, source.sha256)
-        )
-    return targets
+        yield TargetSnapshot(source.logical_path, source.content, source.sha256)
 
 
 def _live_note_paths(directory: Path) -> list[Path]:

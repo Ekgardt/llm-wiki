@@ -514,15 +514,34 @@ def _put_snapshot_json(put, value):
 
 
 def _archive_manifest(inputs, put, write_record):
-    records = {group: _archive_group(getattr(inputs, group), group, put, write_record)
+    records = {group: _write_record_metadata(group, _metadata_rows(getattr(inputs, group), put), write_record)
                for group in _snapshot_types()}
     return {'schema': _ARCHIVE_SCHEMA, 'records': records}
 
 
-def _archive_group(records, group, put, write_record):
+def _metadata_rows(records, put):
+    for record in records:
+        yield _record_metadata_row(record, put)
+
+
+def _record_metadata_row(record, put):
+    return record.logical_path, _snapshot_json(_archive_record_value(record, put))
+
+
+def _record_manifest(records, put, write_record, *, sort_groups=()):
+    metadata = {group: [] for group in _snapshot_types()}
+    for group, record in records:
+        metadata[group].append(_record_metadata_row(record, put))
+    for group in sort_groups:
+        metadata[group].sort(key=lambda entry: entry[0])
+    digests = {group: _write_record_metadata(group, rows, write_record)
+               for group, rows in metadata.items()}
+    return {'schema': _ARCHIVE_SCHEMA, 'records': digests}
+
+
+def _write_record_metadata(group, rows, write_record):
     digests = []
-    for index, record in enumerate(records):
-        data = _snapshot_json(_archive_record_value(record, put))
+    for index, (_, data) in enumerate(rows):
         digests.append(hashlib.sha256(data).hexdigest())
         write_record(_archive_record_name(group, index), data)
     return digests
@@ -569,6 +588,23 @@ def _write_archive_snapshot(inputs, expected, output):
         data = _snapshot_json(manifest)
         _require_snapshot_digest(data, expected)
         writer.write('manifest.json', data)
+
+
+def write_compile_capture(output, paths, *, compiled=None):
+    """Stream source capture; return identity only after a complete container.
+
+    The caller owns durable staging and queue/work admission. Partial output
+    after an exception must never be published as a ready snapshot.
+    """
+    from compile_memory import iter_compile_records
+
+    with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+        writer = _SnapshotArchiveWriter(archive)
+        manifest = _record_manifest(iter_compile_records(paths, compiled=compiled),
+                                    writer.put, writer.write, sort_groups=('sources', 'targets'))
+        data = _snapshot_json(manifest)
+        writer.write('manifest.json', data)
+    return hashlib.sha256(data).hexdigest()
 
 
 class CompileInputArchive:

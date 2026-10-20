@@ -1189,3 +1189,12 @@ word statistics and indices; byte sizing stores numeric frame sizes. Required
 citation association still scans every context page. The view is owned by the open
 archive context and must not escape it. Source capture and daily-part planning are
 not yet streaming; this is not installed entrypoint completion.
+
+The capture iterator emits one source's records at a time into the same snapshot
+container. The ordinary in-memory capture uses that iterator too and retains its
+existing partition-proof cache. The streamed writer retains record metadata and
+blob digests, not completed source bodies; source/target metadata is sorted before
+publishing the manifest so logical identity matches the ordinary snapshot. It
+returns the manifest digest only after successful archive closure. This format
+writer is not itself a queue admission or publication operation: the durable queue
+writer and complete-work binding must surround it before production routing.

@@ -741,3 +741,62 @@ metadata and lexical statistics still scale with corpus size. A first profiling
 invocation was stopped after identifying a wrong result-field name in the measuring
 script; it produced no claimed measurement. The corrected script and results are
 retained in /tmp/measure-compile-context-selection.py and logs/step7-context-selection-measurement.*.
+
+## Sequential capture into the same artifact (2026-10-20)
+
+Fresh graph/source inspection at 6c023f85 confirmed two retention causes before
+serialization: source/daily/target lists and the source-budget object's reference
+to the entire source list. The common capture implementation now emits tagged
+records one file at a time. The eager API collects this same iterator and supplies
+its original partition-proof owner, preserving current callers and the parsing
+reuse tests. Streamed capture uses a per-daily proof owner, releasing it after that
+file's records; the budget object stores counts and byte totals only. Existing
+vault/page selector helpers are generators, not competing collection algorithms.
+
+The streamed archive writer emits raw blobs as records arrive and retains only
+record metadata until the final manifest. It sorts source/target metadata by the
+existing logical-path rule, so the digest and recovered CompileInputs equal the
+eager snapshot. Metadata/digest bookkeeping still grows with record count; a single
+physical source and its partition proof still need memory. The preexisting writer
+for already-captured inputs retains its physical ZIP member order for deterministic
+retry compatibility. Neither writer changes the container schema or read contract.
+
+Rechecked primary sources on 2026-10-20: Python's zipfile documentation supports
+sequential writes and requires successful closure for a complete archive; AWS SQS
+and Restic support the already-approved reference/immutable-file design (links in
+previous sections). https://docs.python.org/3/library/zipfile.html
+A second full collection before serialization was rejected because it preserves the
+original retention defect. Re-reading sources for a second identity pass was
+rejected for this API because it introduces a new source-change window. Instead,
+`write_compile_capture` returns the manifest digest only after complete archive
+closure. It is a format/capture writer, not standalone queue admission: the existing
+durable producer owns temporary-file cleanup and publication, and complete work
+identity still must bind the returned manifest before installed entrypoint routing.
+There is no new directory, database, package, daemon or numeric limit.
+
+Five initial missing-API regressions failed before implementation. Checks now prove
+logical snapshot equality, output before reading the next daily, released completed
+daily source objects, fully receipted source handling, late source-error propagation,
+and no durable artifact or temporary residue after a late capture failure. Native
+container/projection, original bytes, symlink/size checks, publication transactions,
+required context and semantic replay remain in the related suite. One initial test
+incorrectly expected a fully receipted ordinary day to remain as an already-compiled
+part; the existing contract omits it from daily work while retaining its source, and
+the final test checks that contract. No receipt or admission rule was changed.
+
+Validation: 235 related tests passed on Python 3.12 and 235 on Python 3.10. After
+preserving the original pre-captured ZIP layout, the snapshot/protected-dispatch
+subset passed 58 tests on 3.12; all seven final streaming tests passed on 3.10.
+All 25 changed/new functions satisfy the mandated complexity bounds, and Ruff and
+both locked-environment dependency checks passed. No dependency was added.
+
+Paired capture+durable-write measurement on isolated fixed files (one MiB per note),
+including source capture allocations, returned identical logical digests:
+32 MiB: eager peak 34,703,549 bytes / 0.384 s; streaming 3,234,773 / 0.296 s.
+128 MiB: eager peak 135,443,699 bytes / 1.553 s; streaming 3,459,241 / 1.035 s.
+These are traced Python allocations, not RSS or nightly/token measurements. Settings
+were not raised for the experiment. The inherited admission limits are still enforced;
+their applicability to streaming workloads remains part of the law-9 cutover audit.
+Source capture can now stream, but `planning_inputs` still materializes all daily
+parts, and installed CLI/MCP/queue/nightly routing remains on the old controller.
+No installation or point-7 completion is claimed.
