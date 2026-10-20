@@ -7,6 +7,7 @@ Installation and full dependency/recovery qualification remain unfinished.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import zipfile
 from collections import Counter
@@ -20,6 +21,7 @@ from itertools import groupby
 from pathlib import Path
 
 import compile_progress as progress
+from bounded_io import IO_CHUNK_BYTES
 from context_budget import TokenCount, TokenUsage
 from llm_client import BackendResponse, LLMResult, ProviderDescriptor
 from reliable_memory import (
@@ -704,13 +706,13 @@ def read_compile_execution(queue, lease, snapshot, *, deadline=None):
 
 
 def _read_admitted_capture_root(lease, origin, deadline, handle):
+    operational_deadline_active(deadline)
     with zipfile.ZipFile(handle) as archive:
         _require_archive_members(archive)
         source_digest = hashlib.sha256(archive.read('manifest.json')).hexdigest()
         reader = CompileInputArchive(archive, source_digest)
         admission = _capture_admission_for_owner(reader.manifest, lease, origin)
-        for group in _snapshot_types():
-            _validate_capture_records(reader, group, deadline)
+        _validate_capture_reader(reader, deadline)
     details = progress.root_details(origin, source_digest, admission['dependency_digest'],
                                    admission['request_digest'])
     return progress.CompileEvent(progress.root_work_id(origin), lease.id, 0, source_digest,
@@ -787,16 +789,64 @@ def _require_capture_event_identity(checkpoint, saved):
 
 
 def _validate_capture_archive(expected, deadline, handle):
+    operational_deadline_active(deadline)
     with zipfile.ZipFile(handle) as archive:
         reader = CompileInputArchive(archive, expected)
-        for group in _snapshot_types():
-            _validate_capture_records(reader, group, deadline)
+        _validate_capture_reader(reader, deadline)
     operational_deadline_active(deadline)
 
 
-def _validate_capture_records(reader, group, deadline):
-    for _record in reader.records(group):
+def _validate_capture_reader(reader, deadline):
+    verified = set()
+    for group in _snapshot_types():
+        _validate_capture_records(reader, group, deadline, verified)
+    operational_deadline_active(deadline)
+
+
+def _validate_capture_records(reader, group, deadline, verified):
+    signature = inspect.signature(_snapshot_types()[group])
+    metadata = {}
+    for index in range(reader.record_count(group)):
         operational_deadline_active(deadline)
+        value = reader.record_metadata(group, index)
+        _validate_capture_record_bytes(reader, value, verified, deadline)
+        metadata = _shared_record_blobs(value, _ARCHIVE_JSON_FIELDS, reader.json_blob, metadata)
+        _validate_capture_record_shape(group, value, signature, metadata)
+
+
+def _validate_capture_record_bytes(reader, value, verified, deadline):
+    progress._require_digest(value['content'])
+    if value['content'] != value['sha256']:
+        raise ValueError('snapshot content digest mismatch')
+    _require_original_digest(value)
+    for name in _ARCHIVE_BYTES_FIELDS:
+        _validate_capture_blob(reader, value.get(name), verified, deadline)
+
+
+def _validate_capture_blob(reader, digest, verified, deadline):
+    if digest is None:
+        return
+    progress._require_digest(digest)
+    if digest not in verified:
+        reader.verify_blob(digest, deadline=deadline)
+        verified.add(digest)
+
+
+def _stream_snapshot_digest(stream, deadline):
+    digest = hashlib.sha256()
+    while True:
+        operational_deadline_active(deadline)
+        chunk = stream.read(IO_CHUNK_BYTES)
+        if not chunk:
+            return digest.hexdigest()
+        digest.update(chunk)
+
+
+def _validate_capture_record_shape(group, value, signature, metadata):
+    _archive_record_fields(value, _ARCHIVE_JSON_FIELDS, metadata.__getitem__)
+    if group == 'dailies':
+        value = _restore_snapshot_daily(value)
+    signature.bind(**value)
 
 
 def _write_checked_capture(paths, expected, compiled, output):
@@ -2563,6 +2613,16 @@ class CompileInputArchive:
         content = self.archive.read('blobs/' + digest)
         _require_snapshot_digest(content, digest)
         return content
+
+    def verify_blob(self, digest, *, deadline=None):
+        """Validate every byte through EOF without retaining the blob body."""
+        progress._require_digest(digest)
+        operational_deadline_active(deadline)
+        with self.archive.open('blobs/' + digest) as stream:
+            actual = _stream_snapshot_digest(stream, deadline)
+        if actual != digest:
+            raise ValueError('snapshot content digest mismatch')
+        operational_deadline_active(deadline)
 
     def json_blob(self, digest):
         data = self.blob(digest)

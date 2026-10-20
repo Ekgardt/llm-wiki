@@ -3324,3 +3324,69 @@ checks pass; lizard plus AST measured all 12 changed/new functions without
 violations. Evidence: `logs/step7-original-digest-*20261020*`. This code is still
 uninstalled. Full-original memory, dependency/update qualification, retention,
 restore/install/legacy cleanup and the real medium full cycle remain open.
+
+### 2026-10-20 — validate retained capture bodies without materializing them
+
+Source tracing found that both saved-capture validation and orphan admission
+iterate fully restored records, loading original daily bodies just to verify
+hashes. This is independent of the planner's still-unfinished original-range
+access. Replace this validation path with metadata validation plus complete
+streamed verification of every referenced byte blob. Do not instantiate fake
+snapshots or skip record structure/native-frame conversion.
+
+Primary sources reviewed today: Python 3.10 [ZIP member streams](https://docs.python.org/3.10/library/zipfile.html#zipfile.ZipFile.open)
+and [signature binding](https://docs.python.org/3.10/library/inspect.html#inspect.Signature.bind);
+independently, the Arrow IPC streaming and Git content-addressed object references
+reviewed earlier today. Streaming avoids collecting complete bodies; content
+addresses require verification of actual bytes, not filenames. Signature binding
+can check the existing dataclass constructor's accepted/required fields without
+allocating a content-bearing instance. Current snapshot dataclasses have no
+post-init validators; native-frame and entry metadata conversion must stay active.
+Python 3.10 is an inherited compatibility target, not a claim of upstream support.
+
+Use the existing IO_CHUNK_BYTES transfer buffer, not a new source-size limit.
+Check the caller deadline between reads and after validation. Keep only verified
+digest identities for this validation pass, and only current shared JSON metadata;
+never keep all blob bodies. Mark a digest verified only after EOF and a matching
+SHA-256. Both existing recovery entrypoints must use the same validator, and their
+queue ownership/admission checks remain outside it unchanged. Reject metadata
+whose content/original digest disagrees, malformed constructor fields/native
+frames, missing blobs and corruption at any position. Alternatives: eager restore
+retains the problem; hashing only ZIP bytes omits semantic record checks; trusting
+member names skips actual content verification. No new format, directory, runtime
+root or package is needed. JSON manifests and entry/frame metadata still load in
+memory; this is not completion of streaming compilation or a constant-total-memory
+claim.
+
+Fresh builtin graph `generation-18e035be3f7695e5-2edd1e36` matched 1ca1f466;
+queried both recovery validators and metadata conversion. Partial coverage
+(112710 unresolved) was supplemented by the actual queue artifact opening,
+whole-file digest and descriptor-identity guards. These outer guards are retained;
+this validator does not promise safety for arbitrarily mutable caller-owned
+archives or add a new filesystem isolation boundary.
+
+Initial regressions exposed whole-member reads and restored-record construction.
+A third initial failure was the test expecting only ValueError/TypeError for a
+missing path; the existing reader raises KeyError, which the rejection test now
+also accepts. Five original negative controls passed. An additional red test
+showed expired validation opened the ZIP before checking its deadline; both
+recovery entrypoints now check before opening. Deadline advancement after the
+first original-body chunk interrupts before reading the next one. Hash mismatch
+at the end of the original, missing/unknown fields and malformed native frames
+all still refuse recovery. The existing queue lease-loss and orphan-retention
+checks remain unchanged.
+
+Final related suites: 187 passed on Python 3.12 (197.41s), and 187 passed on
+3.10 (235.23s). Ruff/diff checks pass. Lizard plus AST measured all 24 changed/new
+functions without violations. Logs: `step7-stream-validation-*20261020*`.
+
+A separate three-pair comparison loaded the committed 1ca1f466 controller and
+candidate against the same retained ZIP containing an 8 MiB original. Input
+construction was outside tracing and released before measurement. Median peak
+additional Python allocations during validation fell from 8,406,686 to 149,957
+bytes; median measured validation time was 0.04116s versus 0.01417s. Full raw
+measurements and scope are in `logs/step7-stream-validation-memory-20261020.json`.
+This is a local tracemalloc/fixture result, not RSS, production throughput,
+real-provider tokens, useful output quality or completion of point7. Source
+capture, daily parsing, native-frame metadata and planning still need the
+coordinated original-range refactor. No installation was performed.

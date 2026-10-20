@@ -1394,6 +1394,17 @@ snapshot and a matching complete orphan is reported, never silently rewritten.
 Production routing must adopt this path before the independent root/capture
 helpers can be removed.
 
+Saved-snapshot and initial-orphan validation share a streaming body verifier.
+Each referenced byte blob is hashed through EOF using the existing I/O transfer
+buffer; only verified digest identities are retained for that pass. Record
+metadata must bind its content/original digests, satisfy the existing snapshot
+constructor's required/accepted fields, and pass native-frame/entry conversion.
+Validation does not construct full snapshot bodies. Expired deadlines refuse
+before archive opening and are checked between body reads. Current shared JSON
+metadata is reused; manifests and JSON metadata still load in memory. The outer
+queue artifact digest, descriptor identity and lease checks remain required,
+and later planning still has its own semantic source/evidence checks.
+
 The candidate tree executor also distinguishes exhausted plan resolution
 (`CompilePlanUnavailable`) from arbitrary runtime failures. It records that
 source's failure through the existing diagnostics before continuing independent
