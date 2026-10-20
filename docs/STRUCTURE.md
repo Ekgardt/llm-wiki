@@ -1202,11 +1202,18 @@ required before production routing. The candidate reader validates the complete
 restored context while keeping both archive lifetimes open.
 
 The candidate publication checkpoint saves accepted plan bytes, action key,
-provider budget and original timestamp before Markdown writes. It binds the saved
+provider budget and original timestamp before Markdown writes. Its publication
+action key binds the original model-request key plus the complete accepted plan;
+`request_action_key` keeps the original cache identity distinct. The uninstalled
+publication document/binding is v2; receipt schema remains v4. It binds the saved
 context, selected batch and dependencies; recovery reuses the recorded/orphan file.
-This is publication intent only. Source receipts and the Markdown transaction must
-still prove completion before terminal queue progress; quarantine is not success
-for unreceipted sources. Terminal integration remains unfinished.
+This is publication intent only. The candidate confirmation path verifies complete
+source and companion receipts plus the committed Markdown transaction under the
+existing writer gate, then records a batch's `published/completed` event. It checks
+vault/state/coordinator identity and revalidates prior completions on retry; a lost
+receipt is an error. No complete proof leaves intent pending. This does not finish
+the whole queue task, and quarantine is not success for unreceipted sources.
+Production execution and whole-task finalization remain unfinished.
 
 The candidate prepared-batch scope now uses the saved context with the same
 semantic selection/identity checks as live refresh. Joining selected daily sources

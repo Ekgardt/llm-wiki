@@ -1772,3 +1772,81 @@ pass on 3.12 (17.92s) and 3.10 (10.10s). All 27 changed/new functions pass lizar
 analysis, whole Ruff and diff checks pass. Evidence in installed-vault logs:
 `step7-publication-checkpoint-{red,green,expanded,redrive,corrupt,py312,py310,final-py310}-20261020.txt`
 and `step7-publication-checkpoint-complexity-20261020.json`.
+
+### 2026-10-20 — source-backed publication completion
+
+`confirm_compile_publication` reads the recorded accepted intent, checks batch,
+context and dependency binding, then verifies source receipts under the compiler's
+existing Markdown writer gate. The same gate covers appending completion to the
+queue journal. It requires the queue, compiler and coordinator to name the same
+vault/state/coordinator database. Receipt interpretation and transaction lookup
+are shared with `_ApplyPlan._existing_receipts`, not independently reimplemented.
+Compiled companion receipts must also remain authoritative.
+
+Only a complete receipt set tied to the accepted action and a committed Markdown
+transaction produces `published/completed`. No complete proof returns None and
+leaves the accepted intent pending. This confirms one batch, never the whole queue
+task. A previously recorded completion is revalidated: missing receipt or changed
+transaction/action authority is an error, not permission to replay paid work or
+delete history. Intent lookup can now follow its immediate completed successor
+back to the exact original publication event. Redrive retains those identities.
+
+Design continues the 2026-10-20 primary-source analysis of
+[SQLite atomic commit](https://www.sqlite.org/atomiccommit.html),
+[Temporal execution history](https://docs.temporal.io/workflow-execution), and
+[AWS retry identity](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/).
+Alternatives were trusting an apply-result state, trusting a queue completion
+forever, or adding another receipt ledger. A committed quarantine transaction is
+insufficient for source completion; authoritative source receipts plus shared
+transaction lookup and cooperating-writer fencing are the existing local contract.
+The databases remain separate; a crash between them is recovered by checking
+receipts, not described as an atomic cross-database commit. No new root/database,
+package or count/time/size limit is introduced. Coordinator identity enforcement
+follows the approved single-vault/adopted-runtime ownership contract.
+
+Six red feature tests preceded implementation. Another red test showed that a
+foreign-vault coordinator was not explicitly refused; identity checks now reject
+it before gate/receipt work. Nine tests cover no-receipt refusal, durable completion,
+commit-before-journal failure, receipt disappearance after completion, wrong accepted
+action, unrecorded intent, foreign coordinator, a committed transaction without
+receipts, and redrive. Real Markdown transactions are used; model replies remain
+simulated. No real-model or full production-cycle claim is made.
+
+Still required: production execution and whole-task finalization; explicit handling
+of quarantine/no-proof outcomes and repair children; queue semantic-reference and
+retention/doctor/backup integration; cross-origin unknown work; complete dependency/
+update support; inherited publication-attempt law-9 review; installation and legacy
+cleanup; useful selected-model full-cycle quality/token/time evidence. Candidate
+uninstalled. Completion checks depend on cooperating writer gates and ordinary local
+filesystem/database correctness; they are not enduring deletion permits.
+
+Further identity review reproduced a deeper defect before acceptance: the compiler's
+existing action key identifies a model request, not its accepted plan. Two distinct
+valid plans for one request could therefore satisfy the first completion check.
+The new red regression actually publishes different normalized body text with the
+same request identity and demonstrates the false confirmation.
+
+Publication now derives its own action key from the original request key and the
+complete accepted plan. The original request key remains explicitly stored as
+`request_action_key`; cache identity is unchanged. The uninstalled publication
+binding/document advances to v2 and replaces v1 outright. Its reader verifies the
+plan-bound key, while ordinary receipt schema remains v4. Existing v4 receipts are
+still readable; this candidate makes no claim that old request-only action keys
+prove a new accepted publication intent. The completion regression now rejects the
+other plan. Arbitrary same-user code that deliberately lies to the low-level apply
+API is not made a security boundary; production routing must apply the verified
+saved publication document, not caller-supplied unrelated bytes.
+
+The earlier `_ApplyPlan._existing_receipts` docstring overstated exact-plan proof.
+It now accurately describes source completion/transaction recovery. The new
+controller additionally compares the plan-bound publication action before recording
+its own completion. This strengthens identity without a second receipt format,
+parallel cache, new runtime path or numeric bound. Shared source completion still
+allows existing readers to recover historical completed sources.
+
+Final validation after the plan-identity correction: 142 related tests pass on
+Python 3.12 (50.32s) and 3.10 (54.79s). All 34 changed/new functions pass lizard/AST
+complexity, whole scripts/tests Ruff and diff checks pass. Evidence in installed
+vault logs: `step7-publication-completion-{red,green,owner-red,owner-green,expanded,plan-red,plan-green,final-py312,final-py310}-20261020.txt`
+and `step7-publication-completion-complexity-20261020.json`. Earlier 141-test runs
+preceded the request-versus-plan correction and are not final qualification.

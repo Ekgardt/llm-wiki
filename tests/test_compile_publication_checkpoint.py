@@ -52,7 +52,8 @@ def test_accepted_plan_is_saved_and_cache_hit_does_not_change_it(work, compiler_
         assert _save(work, ready, context, cached) == saved
         document = controller.read_compile_publication(work[0], work[1], saved)
         assert document['plan'] == resolved.plan
-        assert document['action_key'] == resolved.action_key
+        assert document['request_action_key'] == resolved.action_key
+        assert document['action_key'] != resolved.action_key
         assert len(calls) == 3
         assert not (work[0].vault / 'knowledge/notes/cedar-merge-order.md').exists()
 

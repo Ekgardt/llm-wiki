@@ -6602,22 +6602,11 @@ class _ApplyPlan:
         return self._commit()
 
     def _existing_receipts(self) -> CompileApplyResult | None:
-        """A complete set of receipts means this exact plan already committed."""
-        receipts = self._read_receipts()
-        if not receipts or any(item is None for item in receipts):
-            return None
-        operation_id, action_key = _receipt_authority(receipts)
-        transaction, sequence = _transaction_authority(self.coordinator, operation_id, deadline=self.deadline)
-        _clear_compile_source_failures(self.inputs, self.coordinator, deadline=self.deadline)
-        return CompileApplyResult(
-            transaction.id,
-            operation_id,
-            "committed",
-            (),
-            sequence,
-            transaction.updated_at,
-            action_key,
-        )
+        """Complete source receipts recover their authoritative committed transaction."""
+        result = _committed_receipt_result(self._read_receipts(), self.coordinator, self.deadline)
+        if result is not None:
+            _clear_compile_source_failures(self.inputs, self.coordinator, deadline=self.deadline)
+        return result
 
     def _read_receipts(self) -> list[dict[str, object] | None]:
         if self.batch is None:
@@ -6626,7 +6615,7 @@ class _ApplyPlan:
                 for digest in self.source_digests
             ]
         selection = _receipt_predicate(self.coordinator, deadline=self.deadline)
-        return [selection.receipt(part) for part in self.inputs.dailies if not part.already_compiled]
+        return _batch_pending_receipts(self.inputs, selection)
 
     def _commit_quarantine(self) -> CompileApplyResult:
         """A quarantined batch publishes candidates only, and no pages."""
@@ -7069,6 +7058,32 @@ def _operation_claims(planned: object) -> list[object]:
     if not isinstance(claims, list):
         return []
     return claims
+
+
+def _batch_pending_receipts(inputs, selection):
+    return [selection.receipt(part) for part in inputs.dailies if not part.already_compiled]
+
+
+def _committed_receipt_result(receipts, coordinator, deadline):
+    if not receipts or any(item is None for item in receipts):
+        return None
+    operation_id, action_key = _receipt_authority(receipts)
+    transaction, sequence = _transaction_authority(coordinator, operation_id, deadline=deadline)
+    return CompileApplyResult(transaction.id, operation_id, 'committed', (), sequence,
+                              transaction.updated_at, action_key)
+
+
+def compile_batch_completion(batch, coordinator, *, deadline=math.inf, cancelled=None):
+    """Verify source/companion receipts; caller owns the Markdown writer gate."""
+    _require_ready_compile_batch(batch)
+    _require_compile_active(deadline, cancelled)
+    selection = _receipt_predicate(coordinator, deadline=deadline)
+    companions = (part for part in batch.inputs.dailies if part.already_compiled)
+    for part in companions:
+        _companion_receipt_precondition(part, selection, coordinator, deadline=deadline)
+    result = _committed_receipt_result(_batch_pending_receipts(batch.inputs, selection), coordinator, deadline)
+    _require_compile_active(deadline, cancelled)
+    return result
 
 
 def _receipt_authority(receipts: Sequence[Mapping[str, object]]) -> tuple[str, str]:

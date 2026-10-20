@@ -1013,12 +1013,27 @@ def _check_batch_context_owner(queue, lease, saved, dependencies, deadline):
 
 
 def _publication_content(resolved):
-    return {'plan': resolved.plan, 'action_key': resolved.action_key,
+    return {'plan': resolved.plan, 'request_action_key': resolved.action_key,
+            'action_key': _publication_action_key(resolved.action_key, resolved.plan),
             'provider_budget': dict(resolved.provider_budget)}
 
 
+def _publication_action_key(request_action_key, plan):
+    progress._require_digest(request_action_key)
+    return _compile_identity_digest({'schema': 'compile-publication-action/v1',
+                                     'request_action_key': request_action_key, 'plan': plan})
+
+
+def _require_publication_action(content):
+    fields = {'plan', 'request_action_key', 'action_key', 'provider_budget'}
+    if not isinstance(content, dict) or set(content) != fields:
+        raise progress.ProgressCorrupt('invalid publication content fields')
+    if content['action_key'] != _publication_action_key(content['request_action_key'], content['plan']):
+        raise progress.ProgressCorrupt('publication action does not bind its accepted plan')
+
+
 def _publication_binding(context, batch, content, dependencies):
-    return {'schema': 'compile-publication/v1',
+    return {'schema': 'compile-publication/v2',
             'context_sequence': context.sequence,
             'context_digest': progress._event_digest(context),
             'batch_digest': _compile_identity_digest(_preflight_batch_details(batch)),
@@ -1045,7 +1060,7 @@ def _require_publication_dependencies(admission, dependencies):
 
 
 def _publication_checkpoint(queue, lease, context, binding):
-    latest = queue.get_compile_event(context.work_id)
+    latest = _publication_cursor(queue, context.work_id)
     queue.verify_compile_checkpoint_owner(lease, latest)
     if latest.stage == 'publication_ready':
         return _existing_publication_checkpoint(latest, binding)
@@ -1054,6 +1069,16 @@ def _publication_checkpoint(queue, lease, context, binding):
         raise progress.ProgressConflict('publication cursor lost its context artifact')
     return replace(context, task_id=lease.id, sequence=latest.sequence + 1,
                    stage='publication_ready', details={'publication': binding})
+
+
+def _publication_cursor(queue, work_id):
+    latest = queue.get_compile_event(work_id)
+    if latest.stage != 'published':
+        return latest
+    parent = queue.get_compile_event(work_id, sequence=latest.sequence - 1)
+    if latest.details['publication_completion']['publication_digest'] != progress._event_digest(parent):
+        raise progress.ProgressCorrupt('completed publication parent identity changed')
+    return parent
 
 
 def _existing_publication_checkpoint(latest, binding):
@@ -1086,7 +1111,7 @@ def _write_publication_document(event, content, dependencies, deadline, output):
 
     dependencies.verify()
     operational_deadline_active(deadline)
-    document = {'schema': 'compile-publication-document/v1',
+    document = {'schema': 'compile-publication-document/v2',
                 'binding': event.details['publication'], 'content': content, 'completed_at': _utc_now()}
     output.write(_snapshot_json(document))
     dependencies.verify()
@@ -1107,6 +1132,7 @@ def _decoded_publication_document(event, data):
     if not isinstance(document, dict) or set(document) != fields:
         raise progress.ProgressCorrupt('invalid publication document fields')
     _require_publication_document_binding(event, document)
+    _require_publication_action(document['content'])
     if _snapshot_json(document) != data:
         raise progress.ProgressCorrupt('noncanonical publication document')
     _require_publication_time(document['completed_at'])
@@ -1115,7 +1141,7 @@ def _decoded_publication_document(event, data):
 
 def _require_publication_document_binding(event, document):
     expected = event.details['publication']
-    if (document['schema'], document['binding']) != ('compile-publication-document/v1', expected):
+    if (document['schema'], document['binding']) != ('compile-publication-document/v2', expected):
         raise progress.ProgressCorrupt('publication document identity changed')
     if _compile_identity_digest(document['content']) != expected['content_digest']:
         raise progress.ProgressCorrupt('publication content identity changed')
@@ -1138,6 +1164,82 @@ def read_compile_publication(queue, lease, event, *, deadline=None):
     queue.verify_compile_checkpoint_owner(lease, event)
     operational_deadline_active(deadline)
     return {**document['content'], 'completed_at': document['completed_at']}
+
+
+def _require_publication_completion_inputs(queue, lease, publication, batch, document, dependencies):
+    binding = publication.details['publication']
+    context = queue.get_compile_event(publication.work_id, sequence=binding['context_sequence'])
+    _require_publication_context(queue, lease, context, batch, dependencies)
+    content = {key: document[key] for key in ('plan', 'request_action_key', 'action_key', 'provider_budget')}
+    if _publication_binding(context, batch, content, dependencies) != binding:
+        raise progress.ProgressConflict('publication completion input identity changed')
+
+
+def _require_publication_coordinator(queue, coordinator):
+    from compile_memory import ROOT
+
+    expected = (queue.vault, queue.vault, queue.state_root, queue.coordinator_path)
+    actual = (ROOT, coordinator.vault, coordinator.state_root, coordinator.database_path)
+    if None in expected:
+        raise progress.ProgressConflict('publication coordinator identity requires an adopted queue')
+    if tuple(Path(path).resolve(strict=True) for path in expected) != tuple(
+            Path(path).resolve(strict=True) for path in actual):
+        raise progress.ProgressConflict('publication coordinator identity differs from queue')
+
+
+def confirm_compile_publication(queue, lease, publication, batch, *, coordinator, dependencies,
+                                owner=None, deadline=None, cancelled=None):
+    """Journal source completion only after receipt/transaction proof under the writer gate.
+
+    None means no complete publication proof; it never finishes the whole queue task.
+    A prior completion is revalidated, rather than used as a deletion permit.
+    """
+    from compile_memory import _compile_writer_gate, compile_batch_completion
+
+    _require_publication_coordinator(queue, coordinator)
+    document = read_compile_publication(queue, lease, publication, deadline=deadline)
+    _require_publication_completion_inputs(queue, lease, publication, batch, document, dependencies)
+    compiler_deadline = float('inf') if deadline is None else deadline
+    with _compile_writer_gate(coordinator, owner, compiler_deadline, cancelled):
+        result = compile_batch_completion(batch, coordinator, deadline=compiler_deadline, cancelled=cancelled)
+        _check_batch_context_owner(queue, lease, publication, dependencies, deadline)
+        return _record_publication_completion(queue, lease, publication, document, result)
+
+
+def _publication_completion_event(lease, publication, result):
+    proof = {'schema': 'compile-publication-completion/v1',
+             'publication_digest': progress._event_digest(publication),
+             'transaction_id': result.transaction_id, 'operation_id': result.operation_id,
+             'commit_sequence': result.commit_sequence, 'committed_at': result.committed_at,
+             'action_key': result.action_key}
+    return replace(publication, task_id=lease.id, sequence=publication.sequence + 1,
+                   stage='published', outcome='completed', details={'publication_completion': proof})
+
+
+def _record_publication_completion(queue, lease, publication, document, result):
+    previous = queue.get_compile_event(publication.work_id, sequence=publication.sequence + 1)
+    if result is None:
+        return _missing_publication_receipts(previous)
+    if result.action_key != document['action_key']:
+        raise progress.ProgressConflict('receipts belong to another publication action')
+    expected = _publication_completion_event(lease, publication, result)
+    return _append_or_match_publication_completion(queue, lease, previous, expected)
+
+
+def _missing_publication_receipts(previous):
+    if previous is not None:
+        raise progress.ProgressCorrupt('recorded publication completion has no complete source receipts')
+    return None
+
+
+def _append_or_match_publication_completion(queue, lease, previous, expected):
+    if previous is None:
+        queue.record_compile_event(lease, expected)
+        return expected
+    queue.verify_compile_checkpoint_owner(lease, previous)
+    if replace(previous, task_id=lease.id) != expected:
+        raise progress.ProgressConflict('publication completion authority changed')
+    return previous
 
 
 def load_compile_inputs(queue, lease, checkpoint):
