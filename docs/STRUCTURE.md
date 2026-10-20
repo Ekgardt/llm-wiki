@@ -1258,8 +1258,16 @@ authority under one canonical Markdown writer gate. Parent completion binds the
 recorded repair and immediate child completion digests; it does not claim a shared
 transaction. Missing child evidence produces no new completion; invalid evidence
 after a recorded completion is an error. Confirmation never admits absent children
-or calls a model. Recursive execution scheduling, whole-task settlement and semantic
-reference auditing remain unfinished.
+or calls a model. The candidate tree executor now walks saved partitions with an
+explicit stack, admitting each child only when reached. It preserves the original
+archive scope and correction feedback. Capacity failures create or reuse retained
+partitions; indivisible failures leave completion absent. Unknown model outcomes
+allow disjoint source siblings to progress inside the same delivery, but block
+that delivery when it closes. They never authorize a repeat or parent completion.
+Other errors propagate immediately. Final completion revalidates the whole tree;
+the executor does not settle the queue task. The prepared-tree entry owns archive
+lifetimes and can participate in an existing delivery. Whole-task settlement,
+production routing and semantic reference auditing remain unfinished.
 
 The archive's eager compatibility planning view keeps daily records materialized for existing partition
 proofs, while context source/target/vault collections retain verified record indices

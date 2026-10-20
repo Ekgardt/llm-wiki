@@ -10,7 +10,7 @@ import json
 import zipfile
 from collections import Counter
 from collections.abc import Callable, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import datetime
@@ -1035,6 +1035,113 @@ def execute_planned_compile_batch(queue, lease, planned, snapshot, *, coordinato
         return _execute_context_compile_batch(queue, lease, context, batch, coordinator=coordinator,
             dependencies=dependencies, trigger=trigger, owner=owner, deadline=deadline,
             cancelled=cancelled, delivery=delivery, critic_feedback=())
+
+
+def execute_planned_compile_tree(queue, lease, planned, snapshot, *, coordinator, dependencies,
+                                 trigger, owner=None, deadline=None, cancelled=None, delivery=None,
+                                 capture=_capture_current_compile_context):
+    """Own the retained archive while executing a batch and its saved repairs."""
+    from compile_memory import _require_compile_active
+
+    _require_publication_coordinator(queue, coordinator)
+    _require_compile_active(float('inf') if deadline is None else deadline, cancelled)
+    if delivery is not None:
+        delivery.require_owner(queue, lease)
+    with open_prepared_compile_batch(queue, lease, planned, snapshot, dependencies=dependencies,
+                                     capture=capture, deadline=deadline) as (batch, context):
+        return execute_compile_tree(queue, lease, context, batch, coordinator=coordinator,
+            dependencies=dependencies, trigger=trigger, owner=owner, deadline=deadline,
+            cancelled=cancelled, delivery=delivery)
+
+
+def execute_compile_tree(queue, lease, context, batch, *, coordinator, dependencies, trigger,
+                         owner=None, deadline=None, cancelled=None, delivery=None):
+    """Execute disjoint retained source branches; incomplete work never proves success.
+
+    The caller owns the open archive. An owned delivery blocks on unknown calls
+    after independent siblings; a supplied delivery retains that obligation.
+    Capacity refusals with no partition return no completion, preserving evidence.
+    All other failures propagate. This does not settle the enclosing queue task.
+    """
+    _require_publication_coordinator(queue, coordinator)
+    scope = CompileDelivery(queue, lease) if delivery is None else nullcontext(delivery)
+    with scope as active:
+        active.require_owner(queue, lease)
+        return _CompileTreeExecution(queue, lease, coordinator, dependencies, trigger,
+            owner, deadline, cancelled, active).run(context, batch)
+
+
+@dataclass(frozen=True)
+class _CompileTreeFrame:
+    context: progress.CompileEvent
+    batch: object
+    feedback: tuple = ()
+    child: RepairCompileBatch | None = None
+
+
+@dataclass
+class _CompileTreeExecution:
+    queue: object
+    lease: object
+    coordinator: object
+    dependencies: object
+    trigger: str
+    owner: object
+    deadline: float | None
+    cancelled: object
+    delivery: CompileDelivery
+
+    def run(self, context, batch):
+        stack = [_CompileTreeFrame(context, batch)]
+        while stack:
+            self._check_active()
+            frame = self._admit(stack.pop())
+            self._visit(frame, stack)
+        return self._confirm(context, batch)
+
+    def _check_active(self):
+        from compile_memory import _require_compile_active
+
+        _require_compile_active(float('inf') if self.deadline is None else self.deadline, self.cancelled)
+
+    def _admit(self, frame):
+        if frame.child is None:
+            return frame
+        context = begin_compile_repair_batch(self.queue, self.lease, frame.child, frame.context, frame.batch,
+            dependencies=self.dependencies, deadline=self.deadline)
+        return _CompileTreeFrame(context, frame.child.batch, frame.child.feedback)
+
+    def _visit(self, frame, stack):
+        from compile_memory import _CompileRepairCapacityError
+
+        try:
+            _execute_context_compile_batch(self.queue, self.lease, frame.context, frame.batch,
+                coordinator=self.coordinator, dependencies=self.dependencies, trigger=self.trigger,
+                owner=self.owner, deadline=self.deadline, cancelled=self.cancelled,
+                delivery=self.delivery, critic_feedback=frame.feedback)
+        except _CompileRepairCapacityError:
+            self._expand(frame, stack)
+        except ProviderOutcomeUnknown:
+            # CompileDelivery retains uncertainty; final proof cannot complete this leaf.
+            return
+
+    def _expand(self, frame, stack):
+        repair = _compile_work_cursor(self.queue, frame.context.work_id)
+        children = read_compile_repair(self.queue, self.lease, repair, frame.context, frame.batch,
+            dependencies=self.dependencies, deadline=self.deadline)
+        for child in reversed(children):
+            stack.append(_CompileTreeFrame(frame.context, frame.batch, child=child))
+
+    def _confirm(self, context, batch):
+        self._check_active()
+        cursor = _compile_work_cursor(self.queue, context.work_id)
+        options = dict(coordinator=self.coordinator, dependencies=self.dependencies,
+                       owner=self.owner, deadline=self.deadline, cancelled=self.cancelled)
+        if 'compile_repair' in cursor.details:
+            return confirm_compile_repair(self.queue, self.lease, cursor, context, batch, **options)
+        if cursor.stage == 'publication_ready':
+            return confirm_compile_publication(self.queue, self.lease, cursor, batch, **options)
+        return None
 
 
 def _resolve_compile_publication(queue, lease, context, batch, *, coordinator, dependencies,

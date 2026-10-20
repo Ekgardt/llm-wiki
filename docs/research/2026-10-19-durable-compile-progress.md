@@ -2092,3 +2092,52 @@ Logs: `step7-repair-completion-{red,green,py312,py310}-20261020.txt`,
 `step7-repair-completion-complexity-20261020.json` in private vault logs.
 Recursive execution scheduling, independent-sibling failure accounting, whole-task
 settlement and installed routing remain open, as do the broader point-7 gates.
+
+### Iterative execution of retained repair trees (2026-10-20, implementation underway)
+
+Rechecked three independent primary sources today: SQLite isolation
+(https://www.sqlite.org/isolation.html), AWS retry identity
+(https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/),
+and Temporal execution history (https://docs.temporal.io/workflow-execution).
+Use their transaction visibility, exact-intent identity and durable-history
+principles within the approved local queue; no remote workflow service is added.
+The fresh builtin graph at 4bef75c8 identifies planned execution and publication
+calls; unresolved method edges are supplemented by source inspection.
+
+Execute the verified repair partition with an explicit stack under one delivery
+scope, preserving the original open archive and inherited feedback. A capacity
+failure already retained by the resolver expands its saved partition; an empty
+partition remains unresolved. An uncertain child may leave disjoint verified
+source siblings executable, but delivery exit still blocks the task and never
+redispatches that child. Owner/dependency/corruption/storage/deadline failures
+propagate immediately. Do not broadly catch semantic RuntimeError or invent a
+new retry policy. Only receipt revalidation of the whole tree proves completion.
+
+Alternatives: recursive traversal introduces Python's stack-depth boundary;
+stop-at-first-uncertain wastes independent source progress; blanket exception
+suppression conceals invalid authority. The explicit stack uses existing finite
+strictly smaller partitions, no depth/attempt bound or second partitioner.
+This is execution orchestration inside the previously approved controller,
+not new storage, environment, runtime placement or task-settlement authority.
+
+Qualification: seven initial red cases failed on the absent tree executor. The
+first implementation passed their assertions but the uncertain-outcome test kept
+an old archive ownership scope alive after blocking/reclaiming its task; teardown
+correctly rejected that stale lease. The test now uses the planned-tree entry,
+which owns each archive scope, and tests the real recovery boundary without
+weakening lease checks. Final cases cover new and retained partitions, nested
+repairs, saved-plan recovery without model calls, unknown-child sibling progress
+and repeat refusal across reclaim, indivisible refusal, caller-owned delivery,
+propagated storage/authority/semantic errors, and deadline/cancellation admission.
+
+Related suites passed 44 tests each (Python 3.12:69.83s; 3.10:75.87s). After adding
+explicit authority and semantic-error cases, all 11 tree tests passed on both
+(24.83s/26.61s). All 27 changed/new functions pass measured CCN/if/nesting limits;
+whole scripts/tests Ruff and diff checks pass. Installed package compatibility
+checks pass for both test interpreters (65/67 packages); no package, lock, runtime
+contract, model policy or numeric limit changed. This proves compatibility of the
+test environments, not upstream support or the unfinished full dependency witness.
+Evidence: step7-tree-execution-{red,green,py312,py310,final-py312,final-py310}-20261020.txt
+and step7-tree-execution-complexity-20261020.json in private vault logs.
+This candidate tree path is not yet installed or routed through production;
+whole-task preflight/refusal accounting and final settlement remain required.
