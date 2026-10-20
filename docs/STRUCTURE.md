@@ -1225,3 +1225,18 @@ lookahead; context collections remain archive-backed. Required citations are bui
 globally first, and optional ranking excludes every pending daily source even when
 that source is outside the current group. No installed dispatch boundary changes
 until complete durable preflight and per-source failure accounting are integrated.
+
+Durable streamed capture first computes the full logical snapshot digest with the
+common capture iterator, then writes through the queue's existing atomic artifact
+writer and requires the same digest before publication. A source change refuses
+the snapshot. A completed file whose event commit was interrupted is recovered
+only after its manifest and every referenced record/blob validate against that
+expected logical digest, under the existing owner/lease checks. No second staging
+layout, database or temporary snapshot copy is introduced. This binds source
+identity; complete work/dependency identity and installed routing remain separate
+requirements before dispatch.
+The queue's compile journal and artifact writers check the existing work's task
+family as well as the current lease. Only the original task or its explicit redrive
+lineage can append or recover progress. Capture requires the pending source identity
+before its first snapshot transition; source identity alone is not a complete work
+or dependency identity.

@@ -947,3 +947,69 @@ path uses less memory but more local planning time; this is not a claim of lower
 end-to-end latency or model cost. Measurements include archive opening and planning,
 exclude construction of the prepared archive, and ran alongside the existing live
 system. Raw results: logs/step7-stream-planner-final-measure-20261020.jsonl.
+
+### 2026-10-20 — durable streamed source capture and task-family fencing
+
+Fresh graph 92654f24 plus source inspection showed that the queue artifact name and
+checkpoint need the source identity before publication. compile_capture_digest()
+now computes that identity through the same capture/manifest iterator used by the
+writer, retaining metadata rather than bodies. save_compile_capture() writes the
+second pass through the existing atomic queue producer and requires the admitted
+logical digest before publication. Changed daily bytes or a new context page refuse
+publication; the existing producer removes its temporary file. Caller-supplied
+deadlines are checked during identity computation and by the existing writer.
+No new timeout, source ceiling, staging directory, database or package is added.
+
+A committed snapshot checkpoint is verified and reused. A complete artifact left
+between durable file publication and event commit is read through the queue's
+stable owner-only descriptor, then its expected manifest and every referenced
+record/blob are checked before event admission. This allows recovery without reading
+changed live sources. Corruption and lost task ownership refuse admission and keep
+the existing artifact as evidence. The expected-digest and format-validated recovery
+methods share orphan lookup/fencing; no second file-writing implementation exists.
+The first snapshot follows the pending event at sequence zero. This is a workflow
+transition, not a numeric processing limit. Complete work/dependency binding is still
+required from the semantic caller; a source digest is not described as that binding.
+
+The integration tests exposed an independent shared-boundary defect: a different
+compile task could append to a known work ID with a matching source digest. The
+reproduction succeeded before the fix. Journal append and artifact create/recovery
+now check the latest checkpoint's original/redrive task family under the existing
+lease transaction. The direct event, writer, expected-digest recovery and validated
+recovery boundaries all have regression coverage. Explicit redrive still reuses the
+original snapshot and saved model answers. This concerns the uninstalled v4 journal
+candidate, not evidence of a deployed v3 exploit.
+
+Research rechecked on 2026-10-20 for source/work identity and recovery:
+- https://bazel.build/remote/caching — action identity includes declared inputs and
+  execution parameters; content identity and action identity serve different roles.
+- https://nix.dev/manual/nix/2.35/store/derivation/ — derivations describe build inputs
+  and outputs; a data-file digest alone is not a derivation identity.
+- https://docs.temporal.io/workflow-execution — durable history and replay motivate
+  preserving prior execution evidence; this does not make an external model
+  deterministic or grant provider-side exactly-once execution.
+
+Chosen tradeoff: two checked local passes avoid a new staging lifetime and an extra
+snapshot copy. It can refuse when sources change between passes and spends an extra
+local read; it never silently accepts a new snapshot under the old identity. Blindly
+recapturing on resume was rejected because it loses the original context. An
+unvalidated orphan was rejected because a pathname or ZIP directory alone does not
+prove source bytes. No Bazel, Nix or Temporal runtime dependency is introduced.
+
+Five initial missing-API tests failed before implementation. The full streamed
+capture -> archive planning -> semantic validation -> durable-call replay test now
+runs alongside its eager counterpart. After interruption following the saved draft,
+the test provider is called three times total: one draft, operation review and source
+completeness review. This is an isolated provider fixture with an explicit test
+dependency identity, not paid-model, complete-identity or installed-cycle evidence.
+A corruption test initially expected ProgressCorrupt; the shared snapshot validator
+raises the existing exact ValueError('snapshot content digest mismatch'), and the
+final test checks that refusal plus unchanged pending progress and retained evidence.
+
+Final related suites: 193 tests passed on Python 3.12 (131.75 s) and 193 on Python
+3.10 (196.22 s). All 42 changed/new functions passed actual CCN/if/nesting checks;
+whole scripts/tests Ruff, diff checks and both package consistency checks passed
+(65/67 packages). Logs: logs/step7-durable-capture-py{312,310}-20261020.txt and
+logs/step7-durable-capture-complexity-20261020.json. Installed routing is unchanged;
+work/dependency identity construction, durable full preflight and entrypoint routing,
+backup/restore, installation, retirement and a useful real full cycle remain open.

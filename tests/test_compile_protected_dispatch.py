@@ -205,8 +205,9 @@ def compiler_case(work, monkeypatch):
     return compiler, _inputs(root), state
 
 
+@pytest.mark.parametrize('snapshot_mode', ['eager', 'streamed'])
 def test_real_compile_validation_resumes_saved_draft_without_new_draft_call(
-    work, compiler_case, monkeypatch,
+    work, compiler_case, monkeypatch, snapshot_mode,
 ):
     import json
 
@@ -220,7 +221,7 @@ def test_real_compile_validation_resumes_saved_draft_without_new_draft_call(
     )
 
     compiler, inputs, state = compiler_case
-    work = _captured_work(work, inputs)
+    work = _replay_capture(work, inputs, snapshot_mode)
     provider = _provider()
     queue, _, _ = work
     coordinator = active_markdown_coordinator(queue.vault, state)
@@ -240,7 +241,7 @@ def test_real_compile_validation_resumes_saved_draft_without_new_draft_call(
 
     monkeypatch.setitem(client._BACKENDS, 'fake', backend)
     with controller.open_compile_inputs(*work) as snapshot:
-        inputs = snapshot.planning_inputs()
+        inputs = _replay_inputs(snapshot, snapshot_mode)
         with monkeypatch.context() as patch:
             patch.setattr(compiler._CompileAttempt, '_planned', interrupted)
             with pytest.raises(SystemExit):
@@ -250,7 +251,7 @@ def test_real_compile_validation_resumes_saved_draft_without_new_draft_call(
                 )
     with controller.open_compile_inputs(*work) as snapshot:
         result = compiler.resolve_compile_plan(
-            snapshot.planning_inputs(), CompileCache(state), coordinator=coordinator,
+            _replay_inputs(snapshot, snapshot_mode), CompileCache(state), coordinator=coordinator,
             call_runner=controller.CompileReplay(*work, dependency_digest='f' * 64),
         )
     assert result.plan['operations'][0]['path'] == 'knowledge/notes/cedar-merge-order.md'
@@ -797,3 +798,26 @@ def test_archive_byte_size_cache_keeps_no_decoded_context(compiler_case, work, m
         first_count = len(observed)
         assert measure._context_size(path) > 0
         assert len(observed) == first_count
+
+
+def _replay_capture(work, inputs, mode):
+    if mode == 'eager':
+        return _captured_work(work, inputs)
+    import compile_progress
+
+    queue, lease, _ = work
+    paths = sorted({queue.vault / part.logical_path for part in inputs.dailies})
+    event = compile_progress.CompileEvent('7' * 64, lease.id, 0,
+                                          controller.compile_capture_digest(paths), 'pending', 'ready', {})
+    queue.record_compile_event(lease, event)
+    saved = controller.save_compile_capture(queue, lease,
+                                            replace(event, sequence=1, stage='snapshot_ready'), paths)
+    return queue, lease, saved
+
+
+def _replay_inputs(snapshot, mode):
+    if mode == 'eager':
+        return snapshot.planning_inputs()
+    batches = tuple(snapshot.iter_batches(model=None))
+    assert len(batches) == 1
+    return batches[0].inputs

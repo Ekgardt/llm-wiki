@@ -7424,6 +7424,18 @@ _V3_WORK_CLAIMABLE = """state='ready' AND attempts < ? AND available_at <= ?
     )"""
 
 
+def _require_compile_task_family(database, row, checkpoint):
+    family = _redrive_ancestors(database, row['id']) | {row['id']}
+    if row['kind'] != 'compile' or checkpoint.task_id not in family:
+        raise compile_progress.ProgressConflict('compile checkpoint belongs to another task family')
+
+
+def _require_compile_work_family(database, row, event):
+    previous = compile_progress.latest_event(database, event.work_id)
+    if previous is not None:
+        _require_compile_task_family(database, row, previous)
+
+
 class _QueueV3CandidateReader:
     """The queue-v3 backend: an unpublished candidate, or the adopted database.
 
@@ -11852,9 +11864,7 @@ class _QueueV3CandidateReader:
 
     @staticmethod
     def _require_compile_checkpoint_owner(database, row, now, *, checkpoint) -> None:
-        family = _redrive_ancestors(database, row["id"]) | {row["id"]}
-        if row["kind"] != "compile" or checkpoint.task_id not in family:
-            raise compile_progress.ProgressConflict("compile checkpoint belongs to another task family")
+        _require_compile_task_family(database, row, checkpoint)
 
     def record_compile_event(self, lease: QueueLease, event) -> None:
         """Use the same ownership and payload fence as terminal results."""
@@ -11872,6 +11882,7 @@ class _QueueV3CandidateReader:
 
         if row["kind"] != "compile":
             raise ProgressConflict("only compile tasks may append compile progress")
+        _require_compile_work_family(database, row, event)
         if "artifact" in event.details:
             self.verify_compile_artifact(event)
         self._require_lease_row(database, lease, _utc_now())
@@ -11964,22 +11975,37 @@ class _QueueV3CandidateReader:
     def recover_compile_artifact_stream(self, lease, event, *, expected_digest, deadline=None):
         """Adopt a complete orphan only when it matches the expected snapshot."""
         compile_progress._require_digest(expected_digest)
+        saved = self._compile_orphan_event(lease, event, deadline)
+        if saved is None:
+            return None
+        if saved.details['artifact']['sha256'] != expected_digest:
+            raise compile_progress.ProgressCorrupt('compile artifact digest mismatch')
+        self.record_compile_event(lease, saved)
+        return saved
+
+    def recover_compile_artifact_validated(self, lease, event, *, validate, deadline=None):
+        """Adopt only after a caller proves the complete format's expected identity."""
+        saved = self._compile_orphan_event(lease, event, deadline)
+        if saved is None:
+            return None
+        with self.open_compile_artifact(saved, deadline=deadline) as handle:
+            validate(handle)
+        self.record_compile_event(lease, saved)
+        return saved
+
+    def _compile_orphan_event(self, lease, event, deadline):
         event = compile_progress._snapshot_event(event)
         self._with_verified_lease(
             lease, partial(self._verify_compile_artifact_owner, event=event)
         )
         name = sha256_bytes(self._compile_artifact_operation(event).encode('utf-8'))
-        saved = replace(event, details={**event.details, 'artifact': {
-            'reference': f'run/queue-results/{name}.result', 'sha256': expected_digest}})
+        relative = f'run/queue-results/{name}.result'
         try:
-            digest, _ = _digest_stable_owner_file(
-                self.state_root / saved.details['artifact']['reference'], deadline=deadline)
+            digest, _ = _digest_stable_owner_file(self.state_root / relative, deadline=deadline)
         except FileNotFoundError:
             return None
-        if digest != expected_digest:
-            raise compile_progress.ProgressCorrupt('compile artifact digest mismatch')
-        self.record_compile_event(lease, saved)
-        return saved
+        return replace(event, details={**event.details, 'artifact': {
+            'reference': relative, 'sha256': digest}})
 
     @staticmethod
     def _verify_compile_artifact_owner(database, row, now, *, event) -> None:
@@ -11987,6 +12013,7 @@ class _QueueV3CandidateReader:
 
         if row["kind"] != "compile" or row["id"] != event.task_id:
             raise ProgressConflict("compile artifact does not belong to this task")
+        _require_compile_work_family(database, row, event)
 
     def read_compile_artifact(self, event) -> bytes:
         from compile_progress import ProgressCorrupt, artifact_identity

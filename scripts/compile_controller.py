@@ -17,7 +17,7 @@ from itertools import groupby
 import compile_progress as progress
 from context_budget import TokenCount, TokenUsage
 from llm_client import BackendResponse, LLMResult, ProviderDescriptor
-from reliable_memory import canonical_json_bytes
+from reliable_memory import canonical_json_bytes, operational_deadline_active
 
 _COMPLETED_REFUSALS = frozenset({'empty_response', 'dlp_output_blocked', 'dlp_scan_error'})
 
@@ -455,6 +455,78 @@ def save_compile_inputs(queue, lease, checkpoint, inputs):
     return queue.save_compile_artifact_writer(lease, checkpoint, producer)
 
 
+def save_compile_capture(queue, lease, checkpoint, paths, *, compiled=None, deadline=None):
+    """Save or recover the exact admitted source snapshot without materializing it."""
+    checkpoint = _unbound_capture_checkpoint(checkpoint)
+    _require_capture_parent(queue, lease, checkpoint)
+    saved = _recorded_capture(queue, lease, checkpoint, deadline)
+    if saved is not None:
+        return saved
+    validate = partial(_validate_capture_archive, checkpoint.source_digest, deadline)
+    recovered = queue.recover_compile_artifact_validated(
+        lease, checkpoint, validate=validate, deadline=deadline)
+    if recovered is not None:
+        return recovered
+    producer = partial(_write_checked_capture, paths, checkpoint.source_digest, compiled)
+    return queue.save_compile_artifact_writer(lease, checkpoint, producer, deadline=deadline)
+
+
+def _unbound_capture_checkpoint(checkpoint):
+    checkpoint = progress._snapshot_event(checkpoint)
+    _require_input_checkpoint(checkpoint)
+    if checkpoint.sequence != 1 or 'artifact' in checkpoint.details:
+        raise progress.ProgressConflict('capture requires the first unbound snapshot checkpoint')
+    return checkpoint
+
+
+def _require_capture_parent(queue, lease, checkpoint):
+    parent = queue.get_compile_event(checkpoint.work_id, sequence=0)
+    if parent is None:
+        raise progress.ProgressConflict('capture requires durable pending work')
+    queue.verify_compile_checkpoint_owner(lease, parent)
+    if parent.stage != 'pending' or parent.source_digest != checkpoint.source_digest:
+        raise progress.ProgressConflict('capture source identity differs from pending work')
+
+
+def _recorded_capture(queue, lease, checkpoint, deadline):
+    saved = queue.get_compile_event(checkpoint.work_id, sequence=checkpoint.sequence)
+    if saved is None:
+        return None
+    queue.verify_compile_checkpoint_owner(lease, checkpoint)
+    queue.verify_compile_checkpoint_owner(lease, saved)
+    _require_capture_event_identity(checkpoint, saved)
+    with queue.open_compile_artifact(saved, deadline=deadline) as handle:
+        _validate_capture_archive(checkpoint.source_digest, deadline, handle)
+    queue.verify_compile_checkpoint_owner(lease, saved)
+    return saved
+
+
+def _require_capture_event_identity(checkpoint, saved):
+    details = dict(saved.details)
+    details.pop('artifact', None)
+    if replace(saved, task_id=checkpoint.task_id, details=details) != checkpoint:
+        raise progress.ProgressConflict('capture checkpoint identity changed')
+
+
+def _validate_capture_archive(expected, deadline, handle):
+    with zipfile.ZipFile(handle) as archive:
+        reader = CompileInputArchive(archive, expected)
+        for group in _snapshot_types():
+            _validate_capture_records(reader, group, deadline)
+    operational_deadline_active(deadline)
+
+
+def _validate_capture_records(reader, group, deadline):
+    for _record in reader.records(group):
+        operational_deadline_active(deadline)
+
+
+def _write_checked_capture(paths, expected, compiled, output):
+    actual = write_compile_capture(output, paths, compiled=compiled)
+    if actual != expected:
+        raise ValueError('captured snapshot digest changed before publication')
+
+
 @contextmanager
 def open_compile_inputs(queue, lease, checkpoint):
     """Own a verified snapshot reader; callers load only the records they need."""
@@ -591,18 +663,37 @@ def _write_archive_snapshot(inputs, expected, output):
         writer.write('manifest.json', data)
 
 
+def compile_capture_digest(paths, *, compiled=None, deadline=None):
+    """Compute the source identity without retaining captured source bodies."""
+    operational_deadline_active(deadline)
+    put = partial(_deadline_blob_digest, deadline)
+    manifest = _capture_manifest(paths, compiled, put, _discard_record)
+    result = hashlib.sha256(_snapshot_json(manifest)).hexdigest()
+    operational_deadline_active(deadline)
+    return result
+
+
+def _deadline_blob_digest(deadline, content):
+    operational_deadline_active(deadline)
+    return _blob_digest(content)
+
+
+def _capture_manifest(paths, compiled, put, write):
+    from compile_memory import iter_compile_records
+
+    return _record_manifest(iter_compile_records(paths, compiled=compiled), put, write,
+                            sort_groups=('sources', 'targets'))
+
+
 def write_compile_capture(output, paths, *, compiled=None):
     """Stream source capture; return identity only after a complete container.
 
     The caller owns durable staging and queue/work admission. Partial output
     after an exception must never be published as a ready snapshot.
     """
-    from compile_memory import iter_compile_records
-
     with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
         writer = _SnapshotArchiveWriter(archive)
-        manifest = _record_manifest(iter_compile_records(paths, compiled=compiled),
-                                    writer.put, writer.write, sort_groups=('sources', 'targets'))
+        manifest = _capture_manifest(paths, compiled, writer.put, writer.write)
         data = _snapshot_json(manifest)
         writer.write('manifest.json', data)
     return hashlib.sha256(data).hexdigest()
