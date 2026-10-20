@@ -1616,6 +1616,13 @@ returns the manifest digest only after successful archive closure. This format
 writer is not itself a queue admission or publication operation: the durable queue
 writer and complete-work binding must surround it before production routing.
 
+Knowledge-note capture uses the shared `MAX_KNOWLEDGE_PAGE_BYTES` boundary
+that also governs compiled after-images. It must not apply the smaller vault
+metadata input bound to an otherwise supported note. Capture preserves the
+whole note and its digest, including through retained archive validation and
+reopening. This alignment does not establish a measured justification for all
+remaining size limits; that review remains separate.
+
 Streaming capture constructs daily part bodies on demand and does not populate
 the eager caller's per-part proof registry. Receipt filtering retains the current
 indivisible native/tool event and lookahead; completed companions remain when any

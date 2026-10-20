@@ -5545,3 +5545,25 @@ inventory (251 files), confirmed in
 queries in their matching logs. The installed vault, existing active owners and
 live compiler were not changed. Real-vault backup/restore, remaining limit review,
 safe rollout, and useful model full-cycle qualification still prevent closure.
+
+## 2026-10-20: compile capture reads supported knowledge pages
+
+The note publication boundary accepts `MAX_KNOWLEDGE_PAGE_BYTES` (8 MiB),
+but `_knowledge_targets` passed every note to the generic metadata snapshot
+reader's 4 MiB bound. Thus the compiler could produce a note it could not read
+on its next run. The earlier one-page-reader alignment explicitly excluded
+compile input as another source family, but this caller reads the same note.
+Two regressions reproduced refusal at 4 MiB + 1 and at exactly 8 MiB before
+the correction; an oversized-note refusal already passed.
+
+Note capture now supplies the existing shared page bound to the stable snapshot
+reader. Vault metadata retains its separate existing contract. This repairs a
+reader/writer inconsistency; it introduces no new number or setting and does not
+claim the numerical basis of every existing limit is justified. Actual archive
+write, validation, reopen and full restored-note content/digest are checked at
+both supported sizes, and a note above the page contract remains refused before
+any partial capture record is emitted. Graph evidence was current at 3bca936d;
+the partial graph was supplemented with all three `_snapshot` production callers.
+
+This is an uninstalled candidate correction. It does not resolve the pending
+durable-preview contract, private-vault backup/restore, or installed compiler.

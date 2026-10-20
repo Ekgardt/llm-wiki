@@ -172,7 +172,8 @@ COMPILE_RECEIPT_V3_SCHEMA = Path(__file__).with_name("schemas") / "compile-recei
 COMPILE_RECEIPT_V4_SCHEMA = Path(__file__).with_name("schemas") / "compile-receipt-v4.json"
 COMPILER_VERSION = "2.1.0"
 NORMALIZATION_VERSION = "normalize-v6"
-# Generic compile context pages; numerical basis remains under audit.
+# Vault metadata input; numerical basis remains under audit. Knowledge notes
+# use MAX_KNOWLEDGE_PAGE_BYTES, shared with their publication boundary.
 # Daily readers use the existing archive contract and total compile budget.
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
 MAX_PROVIDER_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -573,8 +574,10 @@ def _enter_optional_daily_source(owner, path, deadline):
         return None
 
 
-def _snapshot(path: Path, *, label: str = "compile source") -> SourceSnapshot:
-    content = read_stable_bytes(path, MAX_SOURCE_BYTES, label=label)
+def _snapshot(path: Path, *, label: str = "compile source", maximum: int | None = None) -> SourceSnapshot:
+    if maximum is None:
+        maximum = MAX_SOURCE_BYTES
+    content = read_stable_bytes(path, maximum, label=label)
     return SourceSnapshot(_logical_path(path), content, sha256_bytes(content))
 
 
@@ -671,7 +674,7 @@ def _knowledge_targets(
 ) -> Iterable[TargetSnapshot]:
     """Yield each live knowledge page's target after source admission."""
     for path in _live_knowledge_pages():
-        source = _snapshot(path, label="knowledge page")
+        source = _snapshot(path, label="knowledge page", maximum=MAX_KNOWLEDGE_PAGE_BYTES)
         add_source(source)
         yield TargetSnapshot(source.logical_path, source.content, source.sha256)
 
