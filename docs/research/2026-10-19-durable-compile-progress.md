@@ -1397,3 +1397,69 @@ lizard and AST law-5 measurement; whole scripts/tests Ruff and diff checks passe
 Evidence: `logs/step7-preflight-{red,root-red}-20261020.txt`,
 `logs/step7-preflight-py{312,310}-20261020.txt`, and
 `logs/step7-preflight-complexity-20261020.json` in the installed vault.
+
+### 2026-10-20: uncertainty belongs to the call; delivery blocking happens at exit
+
+Inspection found `run_model_call` immediately called `queue.fail` for any unknown
+provider outcome. That released the only delivery lease and prevented independent
+work in the same delivery, contrary to the installed compiler's independent-batch
+contract. Five new scope tests failed before the scope existed.
+
+`CompileDelivery` now owns the lifetime of one active queue lease across calls.
+Every call uses the same existing immutable reservation/replay path, DLP boundary,
+request digest and ownership checks. An unknown outcome is re-raised and remembered;
+its dispatch remains in the journal. A caller may catch that error to process
+independent work, but leaving the scope blocks the task and raises if the caller
+otherwise tried to return normally. Normal completion leaves the lease active for
+semantic validation/publication; an answer is not a receipt. This scope retains the
+fact of any observed uncertainty conservatively through its exit; explicit operator
+resolution is a separate delivery, not an automatic recovery allowance.
+
+The default `run_model_call` wraps one call in that same scope, preserving immediate
+blocking for existing single-call consumers. `run_candidate_call` and `CompileReplay`
+can carry an explicit active scope; there is no boolean skip-block flag. A closed
+or previously entered scope cannot be reopened to forget uncertainty. Every call in a new scope
+revalidates the current queue lease. Merely opening an empty scope grants nothing;
+an additional origin lookup on entry was removed as redundant with the mandatory
+per-call fence. Calls cannot borrow another owner, token,
+payload or request identity. A genuine heartbeat-renewed copy of the same lease is
+accepted; expiry is verified by the existing database fence rather than comparing
+old and renewed timestamps. No new database, task kind, owner registry or dependency
+is introduced. The caller still renews its lease.
+
+Research checked 2026-10-20:
+- AWS [partial batch responses](https://docs.aws.amazon.com/lambda/latest/dg/services-sqs-errorhandling.html)
+  distinguishes independent failed records from successful ones; ordering-sensitive
+  work must not blindly continue. The scope does not prove semantic independence.
+- Temporal [activity execution](https://docs.temporal.io/activity-execution)
+  separates activity execution from its durable completion evidence. Retain the
+  existing prohibition on automatic resend after uncertain transport.
+- Microsoft [pipes and filters](https://learn.microsoft.com/en-us/azure/architecture/patterns/pipes-and-filters)
+  calls for explicit error propagation, sufficient context and idempotency.
+
+Alternatives: block the whole task immediately; add a flag suppressing queue
+blocking; create separate child queue tasks and a new cross-task artifact grant.
+The scoped lifetime keeps the existing queue and immutable call safety while
+ensuring final failure cannot be swallowed. It does not establish independent
+source selection: the forthcoming preflight consumer must do that. Separate child
+queue tasks are unnecessary for this local sequential delivery and would add
+ownership/retention obligations.
+
+Tests cover independent success after uncertainty, no uncertain resend in the same
+scope or after redelivery, replay of the independent saved answer, no success at
+scope exit, active-lifetime and owner fences, lost ownership, heartbeat renewal,
+and the real protected-client/replay path with redaction and token usage. No new
+work/attempt/time/size limit is added. Existing call and queue limits are unchanged,
+not thereby declared law-9-qualified. Production entrypoints remain uninstalled;
+this is a delivery boundary, not completed batch orchestration or point 7.
+
+Validation: the expanded scope/call/replay/origin/preflight/dependency set passed
+150 tests on Python 3.12 (555.73 s) and Python 3.10 (617.58 s). After removing the
+redundant origin lookup at scope entry, all 95 directly affected delivery, call and
+protected-replay tests passed again on 3.12 (89.16 s) and 3.10 (99.00 s). These are
+validation timings under changing disk load, not a controlled performance comparison.
+All 24 changed/new functions pass lizard+AST law-5 checks, whole scripts/tests Ruff
+and diff checks pass. Evidence: `logs/step7-delivery-scope-{red,green,focused}-20261020.txt`,
+`logs/step7-delivery-scope-py{312,310}-20261020.txt`,
+`logs/step7-delivery-scope-final-py{312,310}-20261020.txt`, and
+`logs/step7-delivery-scope-complexity-20261020.json` in the installed vault.

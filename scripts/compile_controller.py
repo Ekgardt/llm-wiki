@@ -139,21 +139,73 @@ def _invoke_and_save(queue, lease, dispatch, invoke):
     return response
 
 
-def run_model_call(queue, lease, checkpoint, *, request_digest, invoke):
-    """Reserve once, or recover an answer; never silently repeat uncertain cost.
+class CompileDelivery:
+    """Keep a delivery lease through independent work; finalize uncertainty once.
 
-    `invoke` must use the existing DLP-protected transport. A successful response
-    is still only an answer, not a validated plan or a publication receipt.
+    Calls still reserve immutable work identities before transport. Catching an
+    unknown outcome inside this scope cannot authorize its repeat or turn the
+    delivery into success. Publication/normal task completion remain the caller's
+    responsibility, as does renewing the existing queue lease.
     """
-    checkpoint = progress._snapshot_event(checkpoint)
-    _require_checkpoint(checkpoint)
-    queue.verify_compile_checkpoint_owner(lease, checkpoint)
-    dispatch = _dispatch_event(checkpoint, lease.id, request_digest)
-    try:
-        return _run_reserved_call(queue, lease, checkpoint, dispatch, invoke)
-    except ProviderOutcomeUnknown:
-        _block_unknown_call(queue, lease)
-        raise
+
+    def __init__(self, queue, lease):
+        self.queue = queue
+        self.lease = lease
+        self._entered = False
+        self._active = False
+        self._unknown = False
+
+    def __enter__(self):
+        if self._entered:
+            raise progress.ProgressConflict('compile delivery already entered')
+        self._entered = True
+        self._active = True
+        return self
+
+    def __exit__(self, exception_type, exception, traceback):
+        self._active = False
+        if not self._unknown:
+            return False
+        _block_unknown_call(self.queue, self.lease)
+        if exception_type is None:
+            raise ProviderOutcomeUnknown('provider_outcome_unknown: delivery retains an uncertain call')
+        return False
+
+    def require_owner(self, queue, lease):
+        self._require_active()
+        same_lease = replace(lease, expires_at=self.lease.expires_at) == self.lease
+        if queue is not self.queue or not same_lease:
+            raise progress.ProgressConflict('compile delivery belongs to another owner')
+
+    def _require_active(self):
+        if not self._active:
+            raise progress.ProgressConflict('compile delivery is not active')
+
+    def run(self, checkpoint, *, request_digest, invoke):
+        self._require_active()
+        checkpoint = progress._snapshot_event(checkpoint)
+        _require_checkpoint(checkpoint)
+        self.queue.verify_compile_checkpoint_owner(self.lease, checkpoint)
+        dispatch = _dispatch_event(checkpoint, self.lease.id, request_digest)
+        try:
+            return _run_reserved_call(self.queue, self.lease, checkpoint, dispatch, invoke)
+        except ProviderOutcomeUnknown:
+            self._unknown = True
+            raise
+
+
+def run_model_call(queue, lease, checkpoint, *, request_digest, invoke, delivery=None):
+    """Reserve/recover within a delivery, never silently repeat uncertain cost.
+
+    `invoke` must use the existing DLP-protected transport. Without an explicit
+    active scope this call is its own delivery and blocks the queue immediately
+    on uncertainty, preserving the single-call contract.
+    """
+    if delivery is not None:
+        delivery.require_owner(queue, lease)
+        return delivery.run(checkpoint, request_digest=request_digest, invoke=invoke)
+    with CompileDelivery(queue, lease) as owned:
+        return owned.run(checkpoint, request_digest=request_digest, invoke=invoke)
 
 
 def _block_unknown_call(queue, lease):
@@ -314,7 +366,7 @@ def _count_from_document(value):
 
 
 def run_candidate_call(queue, lease, checkpoint, *, dependencies, descriptor,
-                       prompt, system_prompt, **options):
+                       prompt, system_prompt, delivery=None, **options):
     """Use the shared DLP/preparation path, journaling only external invocation.
 
     The semantic caller still owns the complete work/dependency identity. The
@@ -323,20 +375,20 @@ def run_candidate_call(queue, lease, checkpoint, *, dependencies, descriptor,
     from llm_client import call_candidate
 
     dependencies.verify()
-    dispatch = partial(_journal_candidate, queue, lease, checkpoint, dependencies, descriptor)
+    dispatch = partial(_journal_candidate, queue, lease, checkpoint, dependencies, descriptor, delivery)
     result = call_candidate(descriptor, prompt, system_prompt, dispatch=dispatch, **options)
     dependencies.verify()
     return result
 
 
-def _journal_candidate(queue, lease, checkpoint, dependencies, descriptor, prepared):
+def _journal_candidate(queue, lease, checkpoint, dependencies, descriptor, delivery, prepared):
     from reliable_memory import sha256_bytes
 
     request = sha256_bytes(canonical_json_bytes({
         'protected_request': prepared.request_digest, 'dependencies': dependencies.verify(),
     }))
     result = run_model_call(queue, lease, checkpoint, request_digest=request,
-                           invoke=partial(_invoke_candidate, prepared, descriptor))
+                           invoke=partial(_invoke_candidate, prepared, descriptor), delivery=delivery)
     _require_candidate_identity(result, descriptor)
     return result
 
@@ -376,18 +428,19 @@ class CompileReplay:
     Its caller supplies a verified snapshot checkpoint and a live dependency witness.
     """
 
-    def __init__(self, queue, lease, checkpoint, *, dependencies):
+    def __init__(self, queue, lease, checkpoint, *, dependencies, delivery=None):
         dependencies.verify()
         _require_checkpoint(checkpoint)
         self.queue = queue
         self.lease = lease
         self.checkpoint = progress._snapshot_event(checkpoint)
         self.dependencies = dependencies
+        self.delivery = delivery
 
     def __call__(self, descriptor, prompt, system_prompt, **options):
         result = run_candidate_call(
             self.queue, self.lease, self.checkpoint, dependencies=self.dependencies,
-            descriptor=descriptor, prompt=prompt, system_prompt=system_prompt, **options,
+            descriptor=descriptor, prompt=prompt, system_prompt=system_prompt, delivery=self.delivery, **options,
         )
         if _is_completed_result(result):
             self.checkpoint = _advance_replay(self.queue, self.lease, self.checkpoint)
