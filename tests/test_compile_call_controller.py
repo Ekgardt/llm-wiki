@@ -577,3 +577,134 @@ def test_operator_claim_cannot_take_another_task_family(work):
         )
     assert queue.get(other_id).state == 'blocked'
     assert queue.get(old.id).state == 'blocked'
+
+
+def _inspect_cli(queue, task_id, monkeypatch, capsys):
+    import json
+    import sys
+
+    monkeypatch.setattr(memory_queue, 'active_memory_queue', lambda *args: queue)
+    monkeypatch.setattr(sys, 'argv', ['memory_queue.py', 'compile-progress', task_id])
+    code = memory_queue._cli()
+    return code, json.loads(capsys.readouterr().out)
+
+
+def test_operator_inspection_shows_dispatch_without_mutation(work, monkeypatch, capsys):
+    queue, old, dispatch = _blocked_unknown(work)
+    before = queue.db_path.read_bytes()
+    code, result = _inspect_cli(queue, old.id, monkeypatch, capsys)
+    assert code == 0
+    assert result['state'] == 'blocked'
+    assert result['answer_artifacts_checked'] is False
+    assert result['history_audited'] is False
+    assert result['works'][0]['event_digest'] == progress._event_digest(dispatch)
+    assert result['works'][0]['model_call']['request_digest'] == 'e' * 64
+    assert queue.db_path.read_bytes() == before
+    assert queue.get_compile_event(dispatch.work_id) == dispatch
+
+
+def test_operator_inspection_never_prints_source_or_answer(work, monkeypatch, capsys):
+    import json
+
+    _run(work, _answer)
+    queue, lease, _ = work
+    code, result = _inspect_cli(queue, lease.id, monkeypatch, capsys)
+    assert code == 0
+    assert result['works'][0]['model_call']['phase'] == 'answer'
+    output = json.dumps(result)
+    assert 'verified input snapshot' not in output
+    assert 'queue-results' not in output
+    assert 'artifact' not in result['works'][0]
+    assert 'text' not in result['works'][0]['model_call']
+
+
+def test_operator_inspection_includes_parent_work_after_redrive(work, monkeypatch, capsys):
+    queue, lease, checkpoint = work
+    _run(work, _answer)
+    queue.fail(lease, memory_queue.QueueFailure('worker_failed', permanent=True))
+    child = queue.redrive(lease.id)
+    code, result = _inspect_cli(queue, child, monkeypatch, capsys)
+    assert code == 0
+    assert result['task_id'] == child
+    assert [item['work_id'] for item in result['works']] == [checkpoint.work_id]
+    assert result['works'][0]['task_id'] == lease.id
+
+
+def test_operator_inspection_refuses_corrupt_checkpoint(work, monkeypatch, capsys):
+    queue, old, dispatch = _blocked_unknown(work)
+    with queue.connection() as database:
+        database.execute('DROP TRIGGER compile_work_events_no_update')
+        database.execute('UPDATE compile_work_events SET event_digest=? WHERE sequence=?',
+                         ('0' * 64, dispatch.sequence))
+    code, result = _inspect_cli(queue, old.id, monkeypatch, capsys)
+    assert code == 2
+    assert result == {'codes': ['compile_progress_corrupt']}
+
+
+def test_operator_inspection_refuses_corrupt_payload_without_quarantining(work, monkeypatch, capsys):
+    queue, lease, _ = work
+    with queue.connection() as database:
+        database.execute('UPDATE tasks SET payload_blob=? WHERE id=?',
+                         (b'{"private":"never print this"}', lease.id))
+    before = queue.db_path.read_bytes()
+    code, result = _inspect_cli(queue, lease.id, monkeypatch, capsys)
+    assert code == 2
+    assert result == {'codes': ['redrive_lineage_payload_mismatch']}
+    assert queue.db_path.read_bytes() == before
+
+
+@pytest.mark.parametrize('field,value', [('request_digest', 'private prompt'), ('phase', 'private text')])
+def test_operator_inspection_does_not_export_malformed_call_fields(work, monkeypatch, capsys, field, value):
+    import json
+
+    queue, old, dispatch = _blocked_unknown(work)
+    bad = replace(dispatch, details={'model_call': {**dispatch.details['model_call'], field: value}})
+    with queue.connection() as database:
+        database.execute('DROP TRIGGER compile_work_events_no_update')
+        database.execute(
+            'UPDATE compile_work_events SET details_json=?,event_digest=? WHERE work_id=? AND sequence=?',
+            (json.dumps(bad.details), progress._event_digest(bad), bad.work_id, bad.sequence))
+    code, result = _inspect_cli(queue, old.id, monkeypatch, capsys)
+    assert code == 2
+    assert result == {'codes': ['compile_progress_corrupt']}
+
+
+def test_operator_inspection_does_not_recover_orphan_answer(work, monkeypatch, capsys):
+    queue, lease, checkpoint = work
+    original = queue.record_compile_event
+
+    def interrupt_answer(owned, event):
+        if event.details.get('model_call', {}).get('phase') == 'answer':
+            raise SystemExit()
+        return original(owned, event)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(queue, 'record_compile_event', interrupt_answer)
+        with pytest.raises(SystemExit):
+            _run(work, _answer)
+    dispatch = queue.get_compile_event(checkpoint.work_id)
+    code, result = _inspect_cli(queue, lease.id, monkeypatch, capsys)
+    assert code == 0
+    assert result['answer_artifacts_checked'] is False
+    assert result['works'][0]['model_call']['phase'] == 'dispatch'
+    assert queue.get_compile_event(checkpoint.work_id) == dispatch
+    assert _run(work, _must_not_call) == _answer()
+
+
+def test_operator_inspection_real_cli_uses_adopted_journal(work, upgraded):
+    import json
+    import os
+    import subprocess
+    import sys
+
+    queue, lease, dispatch = _blocked_unknown(work)
+    root, state, _ = upgraded
+    environment = {**os.environ, 'LLM_WIKI_ROOT': str(root), 'LLM_WIKI_STATE_ROOT': str(state)}
+    before = queue.db_path.read_bytes()
+    result = subprocess.run(
+        [sys.executable, memory_queue.__file__, 'compile-progress', lease.id],
+        env=environment, capture_output=True, text=True, check=True,
+    )
+    report = json.loads(result.stdout)
+    assert report['works'][0]['event_digest'] == progress._event_digest(dispatch)
+    assert queue.db_path.read_bytes() == before

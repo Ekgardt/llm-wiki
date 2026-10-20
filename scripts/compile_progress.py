@@ -169,6 +169,38 @@ def latest_event(database: sqlite3.Connection, work_id: str) -> CompileEvent | N
     return _verified_event(row)
 
 
+def operator_summary(event: CompileEvent) -> dict[str, Any]:
+    """Export checkpoint metadata, never arbitrary details or artifact contents."""
+    return {
+        'work_id': event.work_id, 'task_id': event.task_id,
+        'sequence': event.sequence, 'stage': event.stage, 'outcome': event.outcome,
+        'event_digest': _event_digest(event),
+        'model_call': _operator_model_call(event),
+        'has_repeat_record': 'repeat_authorization' in event.details,
+    }
+
+
+def _operator_model_call(event):
+    if 'model_call' not in event.details:
+        return None
+    try:
+        _require_model_phase(event)
+        return _operator_call_fields(event.details['model_call'])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ProgressCorrupt('invalid retained model call metadata') from error
+
+
+def _operator_call_fields(call):
+    _require_digest(call['request_digest'])
+    _require_digest(call['checkpoint_digest'])
+    _require_sequence(call['checkpoint_sequence'])
+    if call['schema'] != 'compile-model-call/v1':
+        raise ProgressCorrupt('unsupported retained model call')
+    return {name: call[name] for name in (
+        'phase', 'request_digest', 'checkpoint_sequence', 'checkpoint_digest',
+    )}
+
+
 def event_at(database: sqlite3.Connection, work_id: str, sequence: int) -> CompileEvent | None:
     """Read one verified historical event for deterministic replay, without a scan."""
     _require_digest(work_id)

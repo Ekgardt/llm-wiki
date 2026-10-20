@@ -7525,6 +7525,38 @@ def _require_compile_work_family(database, row, event):
         _require_compile_task_family(database, row, previous)
 
 
+def _compile_operator_progress(database, task_id):
+    row = database.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
+    if row is None:
+        raise KeyError(task_id)
+    origin = _compile_lineage_origin(database, row)
+    works = database.execute(
+        """WITH RECURSIVE family(id,redrive_of) AS (
+             SELECT id,redrive_of FROM tasks WHERE id=?
+             UNION ALL SELECT t.id,t.redrive_of FROM tasks t
+             JOIN family f ON t.id=f.redrive_of
+           )
+           SELECT DISTINCT e.work_id FROM compile_work_events e
+           JOIN family f ON e.task_id=f.id ORDER BY e.work_id""", (task_id,),
+    ).fetchall()
+    return {
+        'schema': 'compile-operator-progress/v1', 'task_id': task_id,
+        'state': row['state'], 'answer_artifacts_checked': False,
+        'history_audited': False,
+        'works': [_compile_operator_work(database, item['work_id'], origin) for item in works],
+    }
+
+
+def _compile_operator_work(database, work_id, origin):
+    event = compile_progress.latest_event(database, work_id)
+    if event is None:
+        raise compile_progress.ProgressCorrupt('compile work has no checkpoint')
+    row = _required_redrive_row(database, event.task_id)
+    if _compile_lineage_origin(database, row) != origin:
+        raise compile_progress.ProgressCorrupt('compile work changed task family')
+    return compile_progress.operator_summary(event)
+
+
 def _require_compile_root_work(database, row, event):
     if event.sequence != 0 or 'compile_work' not in event.details:
         return
@@ -12037,6 +12069,13 @@ class _QueueV3CandidateReader:
                 return event_at(database, work_id, sequence)
             return latest_event(database, work_id)
 
+    def inspect_compile_progress(self, task_id: str):
+        """Read one consistent lineage/checkpoint snapshot without recovering work."""
+        _require_task_identifier(task_id)
+        with closing(self._connect()) as database:
+            database.execute('BEGIN')
+            return _compile_operator_progress(database, task_id)
+
     def verify_compile_checkpoint_owner(self, lease: QueueLease, checkpoint) -> None:
         """Reuse the lease/payload fence and immutable redrive lineage."""
         self._with_verified_lease(
@@ -16145,6 +16184,8 @@ def _manual_lease_processor(queue, lease, deadline, task, *, lock_token=None, ow
 # Order matters: the first matching entry wins, so the narrower exception
 # classes come before the broader ones they inherit from.
 _CLI_ERROR_CODES: tuple[tuple[type[BaseException] | tuple[type[BaseException], ...], str], ...] = (
+    (compile_progress.ProgressCorrupt, "compile_progress_corrupt"),
+    (compile_progress.ProgressConflict, "compile_progress_conflict"),
     (KeyError, "task_not_found"),
     (PermissionError, "permission_denied"),
     (sqlite3.Error, "sqlite_error"),
@@ -16214,6 +16255,7 @@ def _build_cli_parser() -> _RedactedArgumentParser:
         choices=[
             "list",
             "status",
+            "compile-progress",
             "work",
             "cancel",
             "redrive",
@@ -16261,6 +16303,13 @@ def _cli_list(_args, _parser) -> int:
 
 def _cli_status(_args, _parser) -> int:
     print(json.dumps(_operator_status(), sort_keys=True))
+    return 0
+
+
+def _cli_compile_progress(args, _parser) -> int:
+    task_id = _require_cli_task_id(args)
+    queue = active_memory_queue(_vault_root(), _state_root())
+    print(json.dumps(queue.inspect_compile_progress(task_id), sort_keys=True))
     return 0
 
 
@@ -16452,6 +16501,7 @@ def _cli_restore(args, _parser) -> int:
 _CLI_COMMANDS = {
     "list": _cli_list,
     "status": _cli_status,
+    "compile-progress": _cli_compile_progress,
     "work": _cli_work,
     "quarantine-corrupt": _cli_quarantine_corrupt,
     "purge-corrupt": _cli_purge_corrupt,

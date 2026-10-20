@@ -319,6 +319,16 @@ actor and reason. It first recovers an available answer, preserves history, and
 authorizes only the same request. Operator consent entrypoints remain unconnected;
 ordinary unblock/redrive never grants that authorization.
 
+The candidate queue CLI exposes `memory_queue.py compile-progress <task-id>`.
+It reads the task's verified redrive lineage and latest checkpoints in one read
+transaction, returning work IDs, event digests and recorded model-call metadata.
+It does not print source text, model answers or arbitrary journal details, and
+does not unblock work or authorize a repeat. `answer_artifacts_checked: false`
+and `history_audited: false` distinguish this view from answer recovery and a full
+history audit. In particular, recorded dispatch without recorded answer does not
+prove that no orphan answer exists. Corrupt lineage/checkpoints produce a failure,
+not a partial success. The command requires the adopted compile journal.
+
 No new database, daemon, runtime root, MCP tool or package dependency is authorized.
 Migration must reject old clients, preserve retained evidence, and run only under
 the existing maintenance fence after qualification on an isolated copy. The

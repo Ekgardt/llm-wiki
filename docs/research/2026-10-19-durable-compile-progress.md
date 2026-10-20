@@ -4778,3 +4778,69 @@ space rose from 1.7 to 3.5 GiB. No operational `run/` or knowledge was deleted.
 The installed compiler PID 2129006 remains alive; this is not permission to
 replace its runtime or evidence that its full cycle succeeded. Private knowledge
 updates remain deferred while that compiler owns its snapshot.
+
+### 2026-10-20: operator inspection before recovery (in progress)
+
+`memory_queue.py compile-progress <task-id>` currently returns
+`invalid_arguments`. The owner can list a blocked queue task but has no supported
+CLI view of its compile work identities and exact dispatch digests. That prevents
+informed use of the existing repeat-consent contract. Add a read-only view to the
+existing queue CLI, using one SQLite read transaction and the verified redrive
+lineage. The same Stripe/AWS/Temporal sources above support keeping operation
+identity and retained outcomes visible before retry decisions.
+
+The view will return only task state and verified checkpoint metadata, including
+the exact event digest, request digest and recorded model-call phase. It must
+not print payloads, source text, model responses, actor names, reasons, file
+paths or arbitrary journal details. An event that records dispatch is not proof
+that the provider failed or that no orphan answer exists. State this qualification
+in the response. Do not inspect or recover answer files during a status command.
+Reject corrupt payload lineage or corrupt checkpoint records instead of returning
+apparently healthy partial status. Avoid a separate database or status cache;
+the journal is already the authority for recorded execution. No new quota is
+introduced. Full retained-history auditing remains the doctor's responsibility.
+
+SQLite's current [transaction documentation](https://www.sqlite.org/lang_transaction.html)
+and [isolation documentation](https://www.sqlite.org/isolation.html), checked on
+2026-10-20, support the explicit read transaction used here: task state, lineage
+and checkpoints must come from the same database view. A sequence of independent
+autocommit reads could mix observations. The transaction closes before the CLI
+prints; no network or artifact-file reads hold it open. The rollback-journal
+contract is preserved. Its cost is a read lock while metadata is checked.
+
+The implementation now exposes that command through the existing CLI parser and
+redacted error boundary. It validates current checkpoint hashes, call metadata
+and payload identity throughout the redrive lineage. The JSON indicates both
+`answer_artifacts_checked: false` and `history_audited: false`. This is operational
+inspection, not a claim of full history certification or completed recovery.
+
+Recovery integration still required after inspection:
+- Hold the canonical queue-operator owner and both owner/task heartbeats.
+- Resolve the exact dispatch identified by the inspection; recover a persisted
+  answer before considering explicit repeat consent. The current internal
+  `authorize_model_repeat` may recover an orphan answer and then raise a conflict
+  because a repeat is unnecessary; the operator adapter must recognize recovery
+  rather than misreporting failure or buying a new answer.
+- Handle a command stopping after the answer/repeat event was committed but
+  before queue settlement. `claim_uncertain_compile` currently accepts only the
+  still-latest dispatch, so it is not yet the whole idempotent recovery operation.
+- Preserve original unknown-cost history, task attempts and source fences. Normal
+  worker claim increments attempts; administrative recovery must not quietly
+  consume or reset the execution budget on settlement.
+- Print recovery/authorization/remaining-unknown as distinct outcomes; never
+  invoke a provider or publish Markdown inside the operator decision command.
+The installed compiler remains unchanged, and private knowledge-log updates are
+still deferred while its live snapshot owns the tree.
+
+Qualification: the two initial CLI regressions failed before implementation
+(`invalid_arguments`). Controller, source-overlap, admission, journal and queue
+CLI suites passed 160 tests on Python 3.12 (159.63 s) and 160 on Python 3.10
+(174.66 s). A separate real-subprocess CLI/adopted-journal test passed on both
+versions (1.59 s / 2.77 s). Tests cover immutable status reads, redrive ancestry,
+corrupt payload/checkpoint refusal, malformed metadata redaction and an orphan
+answer left untouched until actual recovery. Eighteen changed/new functions
+passed Lizard/AST complexity rules; Ruff and whitespace checks passed. Evidence:
+`logs/step7-operator-inspection-{py312,py310}-20261020.log`,
+`logs/step7-operator-inspection-real-cli-py310-20261020.log`,
+`logs/step7-operator-inspection-complexity-20261020.json` and
+`logs/step7-operator-inspection-callees-20261020.json` in the installed private vault.
