@@ -147,3 +147,46 @@ def test_explicit_small_record_budget_is_preserved(tmp_path):
     path = _artifact(tmp_path)
     with pytest.raises(PermissionError):
         repair._artifact_record(path, tmp_path, 1)
+
+
+@pytest.mark.parametrize('mode', [0o444, 0o644, 0o600])
+def test_regular_dependency_fingerprint_accepts_readable_code(tmp_path, mode):
+    path = _artifact(tmp_path, b'implementation')
+    path.chmod(mode)
+    digest, identity = reliable.fingerprint_regular_file(path, tmp_path)
+    assert digest == hashlib.sha256(b'implementation').hexdigest()
+    assert identity.size == len(b'implementation')
+
+
+def test_dependency_rewrite_is_not_hidden_by_same_size_and_mtime(tmp_path, monkeypatch):
+    path = _artifact(tmp_path)
+    original_read = os.read
+    pending = [b'modified']
+
+    def rewrite_after_read(descriptor, count):
+        data = original_read(descriptor, count)
+        if pending:
+            _rewrite_preserving_mtime(path, pending.pop())
+        return data
+
+    monkeypatch.setattr(os, 'read', rewrite_after_read)
+    with pytest.raises(PermissionError, match='changed'):
+        reliable.fingerprint_regular_file(path, tmp_path)
+
+
+def test_dependency_fingerprint_refuses_symlink_and_escape(tmp_path):
+    path = _artifact(tmp_path)
+    link = tmp_path / 'link'
+    link.symlink_to(path)
+    other = tmp_path / 'other'
+    other.mkdir()
+    with pytest.raises(PermissionError):
+        reliable.fingerprint_regular_file(link, tmp_path)
+    with pytest.raises(PermissionError):
+        reliable.fingerprint_regular_file(path, other)
+
+
+def test_dependency_fingerprint_preserves_caller_deadline(tmp_path):
+    path = _artifact(tmp_path)
+    with pytest.raises(TimeoutError):
+        reliable.fingerprint_regular_file(path, tmp_path, deadline=time.monotonic() - 1)

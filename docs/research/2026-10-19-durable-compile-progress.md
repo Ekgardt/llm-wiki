@@ -1013,3 +1013,39 @@ whole scripts/tests Ruff, diff checks and both package consistency checks passed
 logs/step7-durable-capture-complexity-20261020.json. Installed routing is unchanged;
 work/dependency identity construction, durable full preflight and entrypoint routing,
 backup/restore, installation, retirement and a useful real full cycle remain open.
+
+### 2026-10-20: stable dependency-file fingerprint prerequisite
+
+The installed-package inventory investigation confirmed that names/versions and
+RECORD hashes alone are insufficient witnesses for actual installed bytes. The
+current Python 3.12 environment exposes 65 distributions with file inventories;
+this does not establish a complete execution dependency closure. The Python
+stdlib metadata API can return no inventory and supports non-filesystem metadata,
+so the eventual builder must account for these cases explicitly.
+
+Primary references rechecked today: Python's
+https://docs.python.org/3/library/importlib.metadata.html (the API used here must
+remain compatible with 3.10), https://bazel.build/remote/caching and
+https://nix.dev/manual/nix/2.35/store/derivation/. Content hashing is chosen over
+version-only identity; the existing two-pass stable-file reader is reused instead
+of implementing a second hashing path. No runtime dependency is added.
+
+`fingerprint_regular_file` now provides that existing streaming consistency check
+for ordinary readable code/dependency files. `fingerprint_runtime_file` delegates
+to it with mandatory owner-only permissions, preserving the migration contract.
+The regular-file primitive refuses leaf symlinks and containment escapes; a future
+inventory builder must resolve legitimate package symlinks and verify resolution,
+not mistake this low-level no-follow contract for a ban on such installations.
+It accepts arbitrary file sizes unless its caller supplies a budget, obeys caller
+deadlines and refuses concurrent content/metadata/path changes. This witness does
+not lock arbitrary external writers or make hashing a live SQLite file safe.
+
+Six new feature tests failed before implementation. All 19 fingerprint tests then
+passed on Python 3.12 and 3.10, including original runtime permissions, deadlines,
+short reads, growth/replacement and same-size/mtime mutation. Related reliable
+memory and migration tests passed on both Python versions (114 passed, 3 skipped
+each). Seven
+changed/new functions passed measured CCN/if/nesting checks; whole scripts/tests
+Ruff passed. The dependency/work manifest builder, entrypoint adoption and all
+previously listed installation/full-cycle requirements remain open. This shared
+primitive alone does not qualify dependency-complete replay.

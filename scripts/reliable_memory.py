@@ -1210,10 +1210,26 @@ def fingerprint_runtime_file(
     A second hash detects rewrites hidden by coarse/restored timestamps. This
     consistency witness cannot replace exclusion of noncooperating writers.
     """
+    return fingerprint_regular_file(
+        path, state_root, owner_only=True, max_bytes=max_bytes, deadline=deadline,
+    )
+
+
+def fingerprint_regular_file(
+    path: Path, root: Path, *, owner_only: bool = False,
+    max_bytes: int | None = None, deadline=None,
+) -> tuple[str, RuntimeFileIdentity]:
+    """Fingerprint stable regular bytes without following a leaf symlink.
+
+    Code and installed dependencies may be publicly readable. Runtime callers
+    retain their owner-only requirement through fingerprint_runtime_file.
+    This is the same two-pass consistency witness, not a writer exclusion lock;
+    the offline-file restriction of fingerprint_runtime_file also applies here.
+    """
     operational_deadline_active(deadline)
     path = Path(path)
     expected = _validated_runtime_metadata(
-        path, state_root, max_bytes=max_bytes, owner_only=True,
+        path, root, max_bytes=max_bytes, owner_only=owner_only,
     )
     identity = _runtime_identity_from_metadata(path, expected)
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
