@@ -1035,9 +1035,14 @@ or nonzero active state remains fail-closed.
   bags individually, retaining selected evidence rather than a month's payloads.
   Terminal capture proofs keep the range open through incremental append-hash
   checks. Historical part discovery hashes candidates incrementally, then returns
-  the matching part's bytes. Archive writing and remaining byte/member ceilings
-  still need qualification; this reader change does not establish full streaming
-  of every archive operation or completion of the installed migration.
+  the matching part's bytes. The candidate archive writer also checks eligibility
+  through owned ranges, consumes compile parts lazily, and copies payloads and
+  quarantine files in chunks. Its source scope must exit successfully inside the
+  hidden-build cleanup boundary before publication. Existing fsync, source fences,
+  post-publication validation and transactional source deletion remain.
+  Transaction undo-image allocation, historical selected-part allocation and
+  remaining byte/member ceilings still need review; this does not establish full
+  streaming of every archive operation or completion of the installed migration.
 - `knowledge/raw/` — immutable sources. Gitignored (personal). One subtree is
   writable by the runtime: `knowledge/raw/sessions/<date>/<session>.md`, the
   session records of the 2026-08-23 retention decision. It is the only part of

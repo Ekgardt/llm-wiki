@@ -12,20 +12,23 @@ import sys
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from bounded_io import read_stable_bytes  # noqa: E402
+from bounded_io import immutable_source_digest, open_stable_range, read_stable_bytes  # noqa: E402
 from evidence_resolver import (  # noqa: E402
     MAX_DAILY_BYTES,
-    EvidenceRef,
     EvidenceResolutionError,
-    EvidenceResolver,
     _line_span,
+    _owned_source_newlines,
     _regular_directory,
+    _require_payload_evidence,
+    _source_chunks,
+    _source_range_digest,
     bounded_directory_entries,
     compile_authority_attestation,
     daily_entries,
@@ -291,21 +294,20 @@ class DailyArchiver:
         binding = self._receipt_binding_reason(receipt, logical_path, digest)
         return [] if binding is None else [binding]
 
-    def _evidence_reasons(self, source: Path, content: bytes, digest: str) -> list[str]:
+    def _evidence_reasons(self, content) -> list[str]:
         """Every evidence block in the daily must still resolve before it moves."""
         try:
-            self._resolve_all_blocks(source, content, digest)
+            self._resolve_all_blocks(content)
         except (OSError, ValueError, EvidenceResolutionError):
             return ["unresolved_evidence"]
         return []
 
-    def _resolve_all_blocks(self, source: Path, content: bytes, digest: str) -> None:
-        blocks = daily_entries(content)
+    def _resolve_all_blocks(self, content) -> None:
+        _owned_source_newlines(content)
+        blocks = self._evidence_entries(content)
         if not blocks:
             raise EvidenceResolutionError("daily has no evidence blocks")
-        resolver = EvidenceResolver(self.vault, state_root=self.state_root)
-        for block_id, start, end in blocks:
-            resolver.resolve(EvidenceRef(source.stem, digest, block_id, start, end))
+        _require_payload_evidence({"evidence": blocks}, content)
 
     def _writer_reason(self, ignore_current_writer: bool) -> list[str]:
         if ignore_current_writer or not self._writer_active():
@@ -382,13 +384,29 @@ class DailyArchiver:
         source = self._validated_source(source)
         if DATE_RE.fullmatch(source.stem) is None:
             return Eligibility(False, ("invalid_daily_id",))
-        try:
-            daily_date = date.fromisoformat(source.stem)
-            content = read_stable_bytes(source, MAX_DAILY_BYTES, label="daily archive source")
-        except (OSError, ValueError) as exc:
-            return Eligibility(False, (f"source:{exc}",))
+        with ExitStack() as owner:
+            try:
+                daily_date = date.fromisoformat(source.stem)
+                content = owner.enter_context(self._open_archive_source(source))
+            except (OSError, ValueError) as exc:
+                return Eligibility(False, (f"source:{exc}",))
+            return self._eligible_content(source, content, daily_date, hot_days,
+                                          transaction_retention_days, ignore_current_writer,
+                                          skip_queue_database_checks)
 
-        digest = sha256_bytes(content)
+    def _open_archive_source(self, source):
+        deadline = None if self.deadline == float("inf") else self.deadline
+        return open_stable_range(source, MAX_DAILY_BYTES, label="daily archive source",
+                                 deadline=deadline)
+
+    def _source_digest(self, source):
+        with self._open_archive_source(source) as content:
+            return immutable_source_digest(content)
+
+    def _eligible_content(self, source, content, daily_date, hot_days,
+                          transaction_retention_days, ignore_current_writer,
+                          skip_queue_database_checks):
+        digest = immutable_source_digest(content)
         logical_path = f"knowledge/daily/{source.name}"
         parts, receipt_reasons = self._part_receipts(logical_path, content)
         blocking_tasks, queue_reasons = self._queue_reasons(
@@ -400,7 +418,7 @@ class DailyArchiver:
         reasons = [
             *self._retention_reasons(daily_date, hot_days),
             *receipt_reasons,
-            *self._evidence_reasons(source, content, digest),
+            *self._evidence_reasons(content),
             *queue_reasons,
             *self._retained_reasons(source, digest, parts, transaction_retention_days),
             *self._writer_reason(ignore_current_writer),
@@ -417,12 +435,12 @@ class DailyArchiver:
         self, logical_path: str, content: bytes
     ) -> tuple[tuple[CompiledPart, ...], list[str]]:
         """Every compile part of the day with its receipt, and what any part lacks."""
-        from compile_memory import _daily_parts
+        from compile_memory import _iter_daily_parts
 
         selection = self._context_receipt_selection()
         parts: list[CompiledPart] = []
         reasons: list[str] = []
-        for part in _daily_parts(logical_path, content):
+        for part in _iter_daily_parts(logical_path, content):
             receipt, part_reasons = self._context_part_receipt(selection, part)
             parts.append(CompiledPart(part.byte_start, part.byte_end, part.sha256, receipt))
             reasons.extend(part_reasons)
@@ -568,26 +586,24 @@ class DailyArchiver:
     ) -> ArchiveReceipt:
         source = self.daily_root / f"{daily_id}.md"
         self.coordinator.recover()
-        source_bytes = read_stable_bytes(
-            source, MAX_DAILY_BYTES, label="daily archive source"
-        )
+        source_digest = self._source_digest(source)
         self._recover_hidden_builds()
         reused = self._recover_daily(
             daily_id,
-            sha256_bytes(source_bytes),
+            source_digest,
             hot_days=hot_days,
             transaction_retention_days=transaction_retention_days,
         )
         if reused is not None:
             return reused
-        eligibility, content = self._archive_preflight(
+        eligibility, source = self._archive_preflight(
             source,
             hot_days=hot_days,
             transaction_retention_days=transaction_retention_days,
         )
         receipt = self._archive_under_fence(
             daily_id,
-            content,
+            source,
             eligibility,
             hot_days=hot_days,
             transaction_retention_days=transaction_retention_days,
@@ -601,8 +617,8 @@ class DailyArchiver:
         *,
         hot_days: int,
         transaction_retention_days: int,
-    ) -> tuple[Eligibility, bytes]:
-        """Prove the daily is eligible and still byte-identical before any write."""
+    ) -> tuple[Eligibility, Path]:
+        """Prove eligibility; build verifies the same source before publication."""
         eligibility = self._eligible(
             source,
             hot_days=hot_days,
@@ -613,10 +629,7 @@ class DailyArchiver:
             raise ValueError(
                 "daily is not archive eligible: " + ", ".join(eligibility.reasons)
             )
-        content = read_stable_bytes(source, MAX_DAILY_BYTES, label="daily archive source")
-        if sha256_bytes(content) != eligibility.source_sha256:
-            raise RuntimeError("daily source changed during archive preflight")
-        return eligibility, content
+        return eligibility, source
 
     def _release_source_fence(self, queue: MemoryQueue, fence: SourceFence) -> None:
         had_error = sys.exc_info()[0] is not None
@@ -631,7 +644,7 @@ class DailyArchiver:
     def _archive_under_fence(
         self,
         daily_id: str,
-        content: bytes,
+        source: Path,
         eligibility: Eligibility,
         *,
         hot_days: int,
@@ -648,7 +661,7 @@ class DailyArchiver:
                 queue,
                 fence,
                 daily_id,
-                content,
+                source,
                 eligibility,
                 hot_days=hot_days,
                 transaction_retention_days=transaction_retention_days,
@@ -662,7 +675,7 @@ class DailyArchiver:
         queue: MemoryQueue,
         fence: SourceFence,
         daily_id: str,
-        content: bytes,
+        source: Path,
         eligibility: Eligibility,
         *,
         hot_days: int,
@@ -681,7 +694,7 @@ class DailyArchiver:
                     queue,
                     heartbeat,
                     daily_id,
-                    content,
+                    source,
                     eligibility,
                     hot_days=hot_days,
                     transaction_retention_days=transaction_retention_days,
@@ -711,14 +724,14 @@ class DailyArchiver:
         queue: MemoryQueue,
         heartbeat: object,
         daily_id: str,
-        content: bytes,
+        source: Path,
         eligibility: Eligibility,
         *,
         hot_days: int,
         transaction_retention_days: int,
     ) -> Path:
         final_bag, publish_build = self._build_bag(
-            daily_id, content, eligibility, hot_days=hot_days
+            daily_id, source, eligibility, hot_days=hot_days
         )
         published = False
         try:
@@ -782,8 +795,7 @@ class DailyArchiver:
 
     def _flat_still_matches(self, daily_id: str, digest: str) -> bool:
         flat = self.daily_root / f"{daily_id}.md"
-        flat_bytes = read_stable_bytes(flat, MAX_DAILY_BYTES, label="daily duplicate")
-        return sha256_bytes(flat_bytes) == digest
+        return self._source_digest(flat) == digest
 
     def _recovered_keeper_still_matches(
         self, keeper: object, daily_id: str, digest: str
@@ -857,7 +869,7 @@ class DailyArchiver:
     def _build_bag(
         self,
         daily_id: str,
-        content: bytes,
+        source: Path,
         eligibility: Eligibility,
         *,
         hot_days: int,
@@ -865,12 +877,18 @@ class DailyArchiver:
         month = self.archive_root / daily_id[:7]
         before = self._month_entry_names(month)
         try:
-            return self._build_bag_contents(
-                daily_id, content, eligibility, hot_days=hot_days
-            )
+            with self._open_archive_source(source) as content:
+                self._require_build_source(content, eligibility)
+                return self._build_bag_contents(
+                    daily_id, content, eligibility, hot_days=hot_days)
         except BaseException:
             self._remove_new_builds(month, before)
             raise
+
+    @staticmethod
+    def _require_build_source(content, eligibility):
+        if immutable_source_digest(content) != eligibility.source_sha256:
+            raise RuntimeError("daily source changed during archive preflight")
 
     def _ensure_month_directory(self, daily_id: str) -> Path:
         month = self.archive_root / daily_id[:7]
@@ -904,7 +922,7 @@ class DailyArchiver:
             "final_bag_name": final_bag.name,
             "logical_daily_id": daily_id,
             "schema_version": "archive-build-intent/v1",
-            "source_hash": sha256_bytes(content),
+            "source_hash": immutable_source_digest(content),
         }
         (publish_build / "build-intent.json").write_bytes(canonical_json_bytes(intent))
         return publish_build
@@ -918,8 +936,8 @@ class DailyArchiver:
         _set_owner_only(data, 0o700)
         fsync_directory(publish_build)
         payload_name = f"data/{daily_id}.md"
-        (publish_build / payload_name).write_bytes(content)
-        digest = sha256_bytes(content)
+        self._write_source_payload(publish_build / payload_name, content)
+        digest = immutable_source_digest(content)
         bag_info = (
             f"Bagging-Date: {now.date().isoformat()}\n"
             f"Payload-Oxum: {len(content)}.1\n"
@@ -933,6 +951,12 @@ class DailyArchiver:
             f"{digest}  {payload_name}\n".encode()
         )
         return digest
+
+    @staticmethod
+    def _write_source_payload(target, content):
+        with target.open("xb") as output:
+            for chunk in _source_chunks(content):
+                output.write(chunk)
 
     def _committed_compile_transaction(self, receipt: dict[str, object]) -> object:
         transaction = self.coordinator._record_for_operation_id(
@@ -1001,7 +1025,7 @@ class DailyArchiver:
                 "byte_end": end,
                 "line_start": _line_span(content, start, end)[0],
                 "line_end": _line_span(content, start, end)[1],
-                "sha256": sha256_bytes(content[start:end]),
+                "sha256": _source_range_digest(content, start, end),
             }
             for block_id, start, end in daily_entries(content)
         ]
@@ -1518,8 +1542,7 @@ class DailyArchiver:
         flat = self.daily_root / f"{daily_id}.md"
         if not flat.exists():
             return []
-        flat_bytes = read_stable_bytes(flat, MAX_DAILY_BYTES, label="daily duplicate")
-        if sha256_bytes(flat_bytes) != digest:
+        if self._source_digest(flat) != digest:
             return self._quarantine_all(paths, daily_id, digest, deadline, cancelled)
         keeper = paths[0]
         for duplicate in paths[1:]:
@@ -1831,11 +1854,9 @@ class DailyArchiver:
     @staticmethod
     def _copy_files(source: Path, staging: Path, files: list[Path]) -> None:
         for file in files:
-            data = read_stable_bytes(
-                file, MAX_DAILY_BYTES, label="archive quarantine copy"
-            )
             target = staging / file.relative_to(source)
-            target.write_bytes(data)
+            with open_stable_range(file, MAX_DAILY_BYTES, label="archive quarantine copy") as data:
+                DailyArchiver._write_source_payload(target, data)
             _harden_owner_only(target, 0o600)
             fsync_file(target)
 

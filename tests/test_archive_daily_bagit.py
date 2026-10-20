@@ -664,7 +664,7 @@ def test_hidden_build_has_canonical_intent_and_recovery_resumes_it(
     archiver = _archiver(root, state_root)
     eligibility = archiver.eligible(daily, hot_days=90)
     final, hidden = archiver._build_bag(
-        daily.stem, daily.read_bytes(), eligibility, hot_days=90
+        daily.stem, daily, eligibility, hot_days=90
     )
     intent_path = hidden / "build-intent.json"
     intent = json.loads(intent_path.read_bytes())

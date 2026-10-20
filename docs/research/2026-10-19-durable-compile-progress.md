@@ -5136,3 +5136,68 @@ at fcd19e40 is `logs/step7-streamed-bag-graph-20261020.json`; its partial covera
 supplemented by source searches, which identified the breadcrumb consumer.
 The real vault remains on the prior installed code; these are candidate results,
 not encrypted private-vault recovery, installation or useful paid-model proof.
+
+### Streaming archive construction — design 2026-10-20
+
+Fresh primary-source review: Python 3.12 `os.fsync` documentation
+(https://docs.python.org/3.12/library/os.html#os.fsync), SQLite's rollback-mode
+atomic-commit ordering (https://www.sqlite.org/atomiccommit.html), and BagIt
+validity/completeness (https://www.rfc-editor.org/rfc/rfc8493). They support keeping
+existing flush, verification and publication order; SQLite is an ordering analogy,
+not proof that arbitrary multi-file operations are atomic.
+
+Source inspection found whole-file reads in eligibility, preflight, recovery hash
+comparison and quarantine copy, whole-file payload writes, per-block re-reading
+through `EvidenceResolver.resolve`, and eager `_daily_parts` list construction.
+The chosen change reuses owned ranges and the existing archive validator's evidence
+checks, consumes compile parts lazily, hashes source comparisons incrementally,
+and copies payload/quarantine files in chunks. Existing source/writer fences,
+canonical owners, receipt authority, build intents, fsync, sealing, publication,
+post-publication validation and transactionally protected deletion remain.
+
+Critical lifetime rule: the source range must close successfully before archive
+publication and before the source's intentional deletion. Holding a source range
+through deletion would invalidate its path identity by design. The build's existing
+try/cleanup boundary must surround range exit so a changed source cannot leave an
+apparently successful hidden build. Publication receives the completed sealed bag,
+not a live source reader. Rejected alternatives: final verification after source
+deletion; ignoring the path-change error; extra persistent staging copies; or
+raising the daily cap while retaining whole-file allocations. No new archive format,
+runtime path, env contract, service, package or numeric limit is proposed.
+
+Implemented writer path: eligibility holds one verified range and uses lazy
+`_iter_daily_parts`; evidence metadata uses the same complete payload checks as
+archive validation, including UTF-8 and duplicate-ID rejection. Recovery compares
+owned source digests instead of retaining complete bytes. The hidden-build cleanup
+scope surrounds source range exit, and the payload/quarantine writers copy chunks.
+`_build_bag` now takes the live source path, verifies its captured digest against
+eligibility, and closes it before returning the sealed build. The one direct test
+caller now passes that same path; intent/recovery assertions are unchanged.
+
+Two regressions failed before implementation: an ordinary archive hit a forbidden
+whole-source read; a source changed at the end of `_build_bag_contents` left a
+published bag before the later source check stopped deletion. Both now pass.
+The latter test specifically changes the source before its owned build scope exits;
+it does not claim to prevent arbitrary external edits after that scope. Existing
+writer/source fences and final transactional digest preconditions still protect
+cooperating writers and source removal. Further tests assert every source range is
+closed before publication and quarantine copies retain exact bytes.
+
+An isolated 4,194,304-byte input measurement compared the same payload/tag writer
+with eager and owned inputs. Traced peak allocation was 8,397,545 versus 208,855
+bytes; both produced the same full output digest and size. This excludes complete
+archive-cycle cost and transaction undo images. Evidence:
+`logs/step7-streamed-writer-memory-20261020.json`. Transactional deletion still
+uses a retained before-image and its current daily byte bound. Historical selected
+part materialization, other daily readers and archive metadata/member caps remain
+outstanding; no general cap removal or installed-runtime success is claimed.
+
+Qualification: 155 related tests passed on each of Python 3.12 and Python 3.10,
+covering publication killpoints, source-fence takeover, recovery/quarantine,
+historical receipts/parts, captured-journal terminal proofs and source sharing.
+Logs: `logs/step7-streamed-writer-py312-20261020.log` and
+`logs/step7-streamed-writer-py310-20261020.log`. All 31 changed functions pass
+Lizard/AST constraints; Ruff and diff checks pass. Fresh graph evidence at e5460a72
+is `logs/step7-streamed-archive-writer-graph-20261020.json`; the graph remains
+partial, and source/test inspection supplied the dynamic ownership and deletion
+paths. This candidate has not been installed into the live vault.
