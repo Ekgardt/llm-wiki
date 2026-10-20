@@ -12,6 +12,7 @@ from collections import Counter
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
+from dataclasses import field as dataclass_field
 from datetime import datetime
 from functools import cache, partial
 from itertools import groupby
@@ -467,6 +468,10 @@ def _record_or_read_compile_checkpoint(queue, lease, following):
     if recorded is None:
         queue.record_compile_event(lease, following)
         return following
+    return _matched_compile_checkpoint(queue, lease, recorded, following)
+
+
+def _matched_compile_checkpoint(queue, lease, recorded, following):
     queue.verify_compile_checkpoint_owner(lease, recorded)
     if replace(recorded, task_id=lease.id) != following:
         raise progress.ProgressConflict('compile checkpoint identity changed')
@@ -1034,7 +1039,7 @@ def execute_planned_compile_batch(queue, lease, planned, snapshot, *, coordinato
 
 def _resolve_compile_publication(queue, lease, context, batch, *, coordinator, dependencies,
                                  delivery, deadline, critic_feedback=()):
-    current = _publication_cursor(queue, context.work_id)
+    current = _compile_work_cursor(queue, context.work_id)
     if current.stage == 'publication_ready':
         return current
     if 'compile_repair' in current.details:
@@ -1101,7 +1106,7 @@ def _repair_binding(context, batch, failure, dependencies):
 
 
 def _repair_checkpoint(queue, lease, context, binding):
-    latest = queue.get_compile_event(context.work_id)
+    latest = _compile_work_cursor(queue, context.work_id)
     queue.verify_compile_checkpoint_owner(lease, latest)
     if 'compile_repair' in latest.details:
         return _existing_repair_checkpoint(latest, binding)
@@ -1370,7 +1375,7 @@ def _require_publication_dependencies(admission, dependencies):
 
 
 def _publication_checkpoint(queue, lease, context, binding):
-    latest = _publication_cursor(queue, context.work_id)
+    latest = _compile_work_cursor(queue, context.work_id)
     queue.verify_compile_checkpoint_owner(lease, latest)
     if latest.stage == 'publication_ready':
         return _existing_publication_checkpoint(latest, binding)
@@ -1381,14 +1386,31 @@ def _publication_checkpoint(queue, lease, context, binding):
                    stage='publication_ready', details={'publication': binding})
 
 
-def _publication_cursor(queue, work_id):
+def _compile_work_cursor(queue, work_id):
     latest = queue.get_compile_event(work_id)
+    if latest is None:
+        raise progress.ProgressConflict('compile work is not recorded')
     if latest.stage != 'published':
         return latest
-    parent = queue.get_compile_event(work_id, sequence=latest.sequence - 1)
-    if latest.details['publication_completion']['publication_digest'] != progress._event_digest(parent):
-        raise progress.ProgressCorrupt('completed publication parent identity changed')
+    return _completed_compile_parent(queue, latest)
+
+
+def _completed_compile_parent(queue, latest):
+    parent = queue.get_compile_event(latest.work_id, sequence=latest.sequence - 1)
+    if parent is None or _completion_parent_digest(latest) != progress._event_digest(parent):
+        raise progress.ProgressCorrupt('completed compile parent identity changed')
     return parent
+
+
+def _completion_parent_digest(event):
+    fields = {'publication_completion': 'publication_digest', 'repair_completion': 'repair_digest'}
+    if len(event.details) != 1:
+        raise progress.ProgressCorrupt('invalid compile completion fields')
+    kind = next(iter(event.details))
+    try:
+        return event.details[kind][fields[kind]]
+    except (KeyError, TypeError) as error:
+        raise progress.ProgressCorrupt('invalid compile completion parent') from error
 
 
 def _existing_publication_checkpoint(latest, binding):
@@ -1504,16 +1526,24 @@ def confirm_compile_publication(queue, lease, publication, batch, *, coordinator
     None means no complete publication proof; it never finishes the whole queue task.
     A prior completion is revalidated, rather than used as a deletion permit.
     """
-    from compile_memory import _compile_writer_gate, compile_batch_completion
+    from compile_memory import _compile_writer_gate
 
     _require_publication_coordinator(queue, coordinator)
+    compiler_deadline = float('inf') if deadline is None else deadline
+    with _compile_writer_gate(coordinator, owner, compiler_deadline, cancelled):
+        return _confirm_publication_under_gate(queue, lease, publication, batch,
+                                                coordinator, dependencies, deadline, cancelled)
+
+
+def _confirm_publication_under_gate(queue, lease, publication, batch, coordinator, dependencies, deadline, cancelled):
+    from compile_memory import compile_batch_completion
+
     document = read_compile_publication(queue, lease, publication, deadline=deadline)
     _require_publication_completion_inputs(queue, lease, publication, batch, document, dependencies)
     compiler_deadline = float('inf') if deadline is None else deadline
-    with _compile_writer_gate(coordinator, owner, compiler_deadline, cancelled):
-        result = compile_batch_completion(batch, coordinator, deadline=compiler_deadline, cancelled=cancelled)
-        _check_batch_context_owner(queue, lease, publication, dependencies, deadline)
-        return _record_publication_completion(queue, lease, publication, document, result)
+    result = compile_batch_completion(batch, coordinator, deadline=compiler_deadline, cancelled=cancelled)
+    _check_batch_context_owner(queue, lease, publication, dependencies, deadline)
+    return _record_publication_completion(queue, lease, publication, document, result)
 
 
 def execute_compile_publication(queue, lease, publication, batch, *, coordinator, dependencies,
@@ -1562,7 +1592,7 @@ def _record_publication_completion(queue, lease, publication, document, result):
     if result.action_key != document['action_key']:
         raise progress.ProgressConflict('receipts belong to another publication action')
     expected = _publication_completion_event(lease, publication, result)
-    return _append_or_match_publication_completion(queue, lease, previous, expected)
+    return _append_or_match_compile_completion(queue, lease, previous, expected)
 
 
 def _missing_publication_receipts(previous):
@@ -1571,14 +1601,127 @@ def _missing_publication_receipts(previous):
     return None
 
 
-def _append_or_match_publication_completion(queue, lease, previous, expected):
+def _append_or_match_compile_completion(queue, lease, previous, expected):
     if previous is None:
         queue.record_compile_event(lease, expected)
         return expected
     queue.verify_compile_checkpoint_owner(lease, previous)
     if replace(previous, task_id=lease.id) != expected:
-        raise progress.ProgressConflict('publication completion authority changed')
+        raise progress.ProgressConflict('compile completion authority changed')
     return previous
+
+
+def _read_repair_child_context(queue, lease, child, parent_context, dependencies, deadline):
+    admitted = queue.get_compile_event(child.work_id, sequence=0)
+    if admitted is None:
+        return None
+    _resume_batch_admission(queue, lease, admitted, _repair_child_admission(lease, child, dependencies))
+    saved = queue.get_compile_event(child.work_id, sequence=1)
+    if saved is None:
+        return None
+    expected = _repair_child_context(lease, admitted, parent_context)
+    _matched_compile_checkpoint(queue, lease, saved, expected)
+    queue.verify_compile_artifact(saved, deadline=deadline)
+    return saved
+
+
+@dataclass(frozen=True)
+class _RepairProofFrame:
+    repair: progress.CompileEvent
+    context: progress.CompileEvent
+    batch: object
+    children: tuple | None = None
+
+
+@dataclass
+class _RepairProof:
+    queue: object
+    lease: object
+    coordinator: object
+    dependencies: object
+    deadline: float | None
+    cancelled: object
+    results: dict = dataclass_field(default_factory=dict)
+
+    def run(self, repair, context, batch):
+        stack = [_RepairProofFrame(repair, context, batch)]
+        while stack:
+            self._check_active()
+            frame = stack.pop()
+            if frame.children is None:
+                self._expand(frame, stack)
+                continue
+            self._finish(frame)
+        return self.results[repair.work_id]
+
+    def _expand(self, frame, stack):
+        children = read_compile_repair(self.queue, self.lease, frame.repair, frame.context, frame.batch,
+                                       dependencies=self.dependencies, deadline=self.deadline)
+        stack.append(replace(frame, children=children))
+        for child in children:
+            self._visit_child(frame, child, stack)
+
+    def _visit_child(self, parent, child, stack):
+        context = _read_repair_child_context(self.queue, self.lease, child, parent.context,
+                                             self.dependencies, self.deadline)
+        if context is None:
+            self.results[child.work_id] = None
+            return
+        cursor = _compile_work_cursor(self.queue, child.work_id)
+        if 'compile_repair' in cursor.details:
+            stack.append(_RepairProofFrame(cursor, context, child.batch))
+            return
+        self.results[child.work_id] = self._leaf(cursor, child.batch)
+
+    def _leaf(self, cursor, batch):
+        if cursor.stage != 'publication_ready':
+            return None
+        return _confirm_publication_under_gate(self.queue, self.lease, cursor, batch,
+            self.coordinator, self.dependencies, self.deadline, self.cancelled)
+
+    def _finish(self, frame):
+        self._check_active()
+        _check_batch_context_owner(self.queue, self.lease, frame.repair, self.dependencies, self.deadline)
+        children = tuple(self.results[child.work_id] for child in frame.children)
+        self.results[frame.repair.work_id] = _record_repair_completion(self.queue, self.lease, frame.repair, children)
+
+    def _check_active(self):
+        from compile_memory import _require_compile_active
+
+        _require_compile_active(float('inf') if self.deadline is None else self.deadline, self.cancelled)
+
+
+def _record_repair_completion(queue, lease, repair, children):
+    previous = queue.get_compile_event(repair.work_id, sequence=repair.sequence + 1)
+    if not children or any(child is None for child in children):
+        return _missing_repair_completion(previous)
+    expected = _repair_completion_event(lease, repair, children)
+    return _append_or_match_compile_completion(queue, lease, previous, expected)
+
+
+def _missing_repair_completion(previous):
+    if previous is not None:
+        raise progress.ProgressCorrupt('recorded repair completion has incomplete source receipts')
+    return None
+
+
+def _repair_completion_event(lease, repair, children):
+    proof = {'schema': 'compile-repair-completion/v1', 'repair_digest': progress._event_digest(repair),
+             'children': [{'work_id': child.work_id, 'sequence': child.sequence,
+                           'event_digest': progress._event_digest(child)} for child in children]}
+    return replace(repair, task_id=lease.id, sequence=repair.sequence + 1,
+                   stage='published', outcome='completed', details={'repair_completion': proof})
+
+
+def confirm_compile_repair(queue, lease, repair, context, batch, *, coordinator, dependencies,
+                           owner=None, deadline=None, cancelled=None):
+    """Prove every descendant receipt in one cooperating-writer snapshot; never run work."""
+    from compile_memory import _compile_writer_gate
+
+    _require_publication_coordinator(queue, coordinator)
+    compiler_deadline = float('inf') if deadline is None else deadline
+    with _compile_writer_gate(coordinator, owner, compiler_deadline, cancelled):
+        return _RepairProof(queue, lease, coordinator, dependencies, deadline, cancelled).run(repair, context, batch)
 
 
 def load_compile_inputs(queue, lease, checkpoint):

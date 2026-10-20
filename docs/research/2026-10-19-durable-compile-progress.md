@@ -2048,3 +2048,47 @@ checks pass. One import-order finding was corrected. Evidence:
 `step7-repair-child-complexity-20261020.json` in private vault logs.
 This completes individual child execution, not recursive tree scheduling, parent
 completion, whole-task settlement or installed CLI/MCP/nightly routing.
+
+### Receipt-backed repair-tree completion (2026-10-20)
+
+A split parent cannot use compile_batch_completion directly: its children have
+different accepted-plan keys and committed transactions. Reuse the existing leaf
+receipt/transaction validator under one canonical Markdown writer gate, and record
+a composite parent completion binding the exact retained repair decision and all
+immediate child completion event digests. Do not invent a shared transaction or
+trust a previously stored child success without revalidating its receipts.
+An iterative post-order proof walk handles nested repairs while the original saved
+context stays open. Strictly smaller complete child work already enforces finite
+partition progress; no recursion-depth, work-count or retry limit is introduced.
+
+Primary-source basis remains current SQLite atomic commit/isolation, AWS retry
+identity and Temporal execution/history references checked above. Per-child gates
+could observe mutually inconsistent source states between confirmations. Holding
+the existing cooperating-writer gate across the proof avoids that gap; it is not
+an OS snapshot or protection against noncooperating editors. Confirming absent
+children must not create admission or run models. Missing evidence yields no new
+completion, and missing evidence for an already recorded completion is corruption.
+The queue task is not completed by this proof; whole-delivery accounting and
+execution scheduling remain separate required work. No new persistence root,
+service, table, package, stage enum or numeric bound is needed.
+
+Composite qualification: five initial red cases demonstrated the missing proof.
+The final cases cover absent/incomplete children without admission, exact child
+binding, nested proof, missing receipts after success, journal-failure recovery,
+one writer-gate scope and deadline refusal. Additional inspection reproduced a
+completed-repair reuse defect: save_compile_repair read the completion itself
+instead of its original decision. The common completed-work cursor now resolves
+both publication and repair parents, preserving exact prior decision identity.
+The dedicated reuse regression failed before that correction.
+
+Expanded suites passed 66 cases per Python version (3.12: 74.86s; 3.10: 82.38s).
+After the reuse correction, all 36 directly related cases passed on each version
+(3.12: 176.67s; 3.10: 197.39s). These timings are test-run evidence, not production
+latency qualification. All 37 changed/new functions meet measured complexity;
+whole scripts/tests Ruff and diff checks pass. The dataclass field import was
+aliased to avoid shadowing the existing authorization-field loop.
+Logs: `step7-repair-completion-{red,green,py312,py310}-20261020.txt`,
+`step7-repair-completion-reuse-{red,py312,py310}-20261020.txt` and
+`step7-repair-completion-complexity-20261020.json` in private vault logs.
+Recursive execution scheduling, independent-sibling failure accounting, whole-task
+settlement and installed routing remain open, as do the broader point-7 gates.

@@ -1252,7 +1252,14 @@ event binds the repair decision; its ready checkpoint refers to the same immutab
 parent context artifact. It creates no queue task or copied context archive.
 The candidate child executor passes retained feedback into the shared semantic
 replay/publication path, so the existing correction cache guard remains effective.
-Recursive scheduling/completion and semantic reference auditing remain unfinished.
+The candidate composite confirmation walks nested repairs in post-order using an
+explicit stack, rechecking all leaf source/companion receipts and transaction
+authority under one canonical Markdown writer gate. Parent completion binds the
+recorded repair and immediate child completion digests; it does not claim a shared
+transaction. Missing child evidence produces no new completion; invalid evidence
+after a recorded completion is an error. Confirmation never admits absent children
+or calls a model. Recursive execution scheduling, whole-task settlement and semantic
+reference auditing remain unfinished.
 
 The archive's eager compatibility planning view keeps daily records materialized for existing partition
 proofs, while context source/target/vault collections retain verified record indices
