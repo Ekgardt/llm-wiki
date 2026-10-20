@@ -16007,14 +16007,14 @@ def _uses_compile_journal(queue):
     return getattr(contract, 'user_version', None) == compile_progress.QUEUE_SCHEMA_VERSION
 
 
-def _manual_lease_processor(queue, lease, deadline, task):
+def _manual_lease_processor(queue, lease, deadline, task, *, lock_token=None):
     if lease.kind != 'compile' or not _uses_compile_journal(queue):
         return _manual_processor(task)
     if task != _compat_task(lease):
         raise LeaseFenceError('compatibility payload differs from compile lease')
     from compile_memory import run_leased_compile
 
-    return run_leased_compile(queue, lease, deadline=deadline) == 0
+    return run_leased_compile(queue, lease, deadline=deadline, lock_token=lock_token) == 0
 
 
 # Order matters: the first matching entry wins, so the narrower exception

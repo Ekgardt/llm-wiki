@@ -8003,7 +8003,9 @@ def _compile_under_lock(
         _release_compile_lock(lock_token)
 
 
-def run_leased_compile(queue, lease, *, deadline=float('inf'), cancelled=None, owner=None):
+def run_leased_compile(
+    queue, lease, *, deadline=float('inf'), cancelled=None, owner=None, lock_token=None
+):
     """Execute an adopted compile task; the worker parent still owns settlement."""
     from compile_controller import _require_capture_vault
 
@@ -8011,6 +8013,7 @@ def run_leased_compile(queue, lease, *, deadline=float('inf'), cancelled=None, o
     _require_leased_compile_queue(queue, lease)
     _require_capture_vault(queue)
     args = _leased_compile_args(lease)
+    args.lock_token = lock_token  # Ephemeral parent authority, never retained user intent.
     return _compile_under_lock(args, deadline=deadline, cancelled=cancelled, owner=owner,
                                execute=partial(_run_leased_compile, queue, lease))
 

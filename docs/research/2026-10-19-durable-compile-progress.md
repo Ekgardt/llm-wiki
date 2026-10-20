@@ -2926,3 +2926,57 @@ Evidence: `step7-target-claim-{red,py312,py310}-20261020.txt`,
 Caller deadlines/cancellation and ephemeral compile-lock handoff remain ingress
 work. These fake-provider tests do not qualify installed behavior or medium-model
 quality, token cost, recovery cost or completion of point 7.
+
+
+### 2026-10-20 — ephemeral compile-lock handoff through supervised execution
+
+Before foreground routing, the existing leased entry must accept the compile
+lock already held by its parent. Reacquiring it without the token refuses the
+child; releasing it before dispatch opens an unnecessary competing-writer
+window. Persisting the token in task payloads would mix execution ownership with
+retained user intent and leave stale ownership on recovery. Select the existing
+spawn-token contract instead: pass the token as a spawn-picklable processor
+argument, then through the leased entry into the existing lock acquisition.
+The child must leave the parent's lock intact after success or failure; wrong
+or absent tokens must not authorize an unrelated child. No new lock, database,
+runtime path, environment variable or durable request field is introduced.
+
+Primary sources rechecked 2026-10-20:
+- Python multiprocessing documents explicit spawn arguments and parent-owned
+  process lifecycle: https://docs.python.org/3/library/multiprocessing.html
+- MCP cancellation specifies stopping requested work and releasing resources;
+  it does not prove a remote model never executed:
+  https://modelcontextprotocol.io/specification/2025-06-18/basic/utilities/cancellation
+- AWS distinguishes caller intent from retries and late outcomes:
+  https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/
+
+These sources support the ownership/intent separation; they do not establish
+this implementation's correctness. Existing explicit spawn remains in use,
+without adopting newer Python-only APIs. A subprocess regression must exercise
+correct and wrong ownership tokens and retained parent ownership. Cancellation
+propagation is a separate remaining integration requirement, not implied by a
+successful token handoff.
+
+
+Built-in navigation used `generation-18e031785b314715-af55e8ad`, fresh at
+`89ad6437`, for the leased entry, queue processor, lock acquisition and child
+fixture. Partial graph results were supplemented by source inspection. The
+three new subprocess scenarios failed before implementation with the worker's
+processor-exception envelope because the handoff keyword was unsupported. After
+adding the ephemeral parameter to the two existing functions, all three passed:
+correct token executes and permits parent settlement, missing/wrong token calls
+no model, and every scenario preserves the parent's exact lock record. The
+task payload contains no token. Related regression suites passed 55 tests on
+Python 3.12 (50.45s) and Python 3.10 (55.64s); all six changed/new functions pass
+complexity checks. Whole Ruff and whitespace checks pass. Evidence:
+`step7-parent-lock-{red,focused,py312,py310}-20261020.txt` and
+`step7-parent-lock-complexity-20261020.json` in private logs.
+
+The running legacy compiler still owns its lock; it was neither stopped nor
+replaced. Its log reports target snapshot conflicts on the private development
+checkpoint page, which the agent was also appending to during compilation.
+Further checkpoint-page writes are deferred until that process is terminal to
+avoid more competing edits. Read-only findings are retained separately in
+`logs/step7-live-compile-conflict-20261020.json`; input-budget and validation
+failures are also present, so page contention does not explain all failures.
+The exact contribution of each append to each failed batch was not traced.

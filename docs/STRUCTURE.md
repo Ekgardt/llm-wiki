@@ -1246,7 +1246,11 @@ lease acquisition; an unavailable target never falls through to unrelated work.
 The worker retains parent heartbeats, child supervision, result adoption and
 whole-work settlement. Ordinary workers keep their existing ordering. This
 internal capability is qualified with a spawned compile child, but frontends
-still need routing and compile-lock ownership handoff before activation.
+still need routing and cancellation propagation before activation. The leased
+entry accepts ephemeral compile-lock authority through its processor argument,
+using the existing spawn-token check. This token is never retained in the task
+payload or source-selection identity; a borrowing child does not release its
+parent's lock.
 
 The uninstalled refreshed-context format stores only complete changed context
 records and explicit removed paths in another self-contained ZIP64 artifact.
