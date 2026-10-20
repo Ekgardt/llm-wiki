@@ -1621,3 +1621,53 @@ Validation: 75 related tests pass on Python 3.12 (51.11s) and 3.10 (74.28s).
 All 23 changed/new functions pass lizard/AST complexity checks; whole scripts/tests
 Ruff and diff checks pass. Logs: `step7-batch-admission-{red,green,py312,py310}-20261020.txt`
 and `step7-batch-admission-complexity-20261020.json` in the installed vault logs.
+
+### 2026-10-20 — retained batch context and orphan recovery
+
+`save_compile_batch_context` joins the admitted batch, recorded original snapshot,
+shared delta writer and existing queue artifact publication/recovery boundary.
+It checks the recorded or orphan context before invoking the current-context
+producer. The default producer is the compiler's `iter_compile_records(())`, not
+a second capture implementation. A ready context event references the original
+snapshot event and admission digest. The archive itself carries the hash of this
+binding, so an orphan from another batch cannot be adopted under a new filename.
+`open_compile_batch_context` validates the complete restored context and checks
+owner/dependencies before exposing the lazy view under both open archive lifetimes.
+Dailies remain in the original plan, not duplicated in the context artifact.
+
+Design uses the same current primary-source research (2026-10-20):
+[SQLite atomic commit](https://www.sqlite.org/atomiccommit.html),
+[AWS retry identity](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/),
+and [Temporal execution history](https://docs.temporal.io/workflow-execution).
+The local choice remains one journal plus existing immutable files; no upstream
+service/library is imported. Alternatives were recapturing on retry, trusting only
+a filename, or copying the complete global snapshot per batch. Binding inside the
+archive plus exact original references prevents those identity/cost problems.
+
+The uninstalled delta format advances to v2 and replaces v1 outright, adding the
+binding field. Format-only use may be explicitly unbound (null); durable batch
+use requires the expected digest. No v1 runtime or migration compatibility is
+claimed. The previously preflight-specific artifact recovery helper is shared
+rather than duplicated. There are no new runtime paths, databases or size limits.
+
+Eight feature tests were red first. A further red regression demonstrated that a
+SourceSnapshot supplied in the targets group could publish an unreadable archive;
+the writer now checks record type and declared source digest before publication.
+Other tests cover committed/orphan restart without capture, partial source failure,
+foreign batch files, changed dependencies and source base, redrive, corrupted
+orphan preservation, actual default compiler capture, and owner loss. This guards
+local data and recovery, not provider invocation or Markdown publication yet.
+
+The restored view still needs semantic batch refresh/selection against these saved
+bytes and model replay/publication/receipts wiring. Queue-level semantic reference
+constraints, retention/doctor/backup traversal, cross-origin uncertain work, full
+dependency/update handling, production entrypoints, installation/legacy cleanup,
+and useful complete-cycle quality/tokens/time evidence remain open. Candidate
+uninstalled; no point-7 completion claim. Complete artifact hashing and full-context
+validation still incur local reads; full-cycle measurement must include them.
+
+Validation: 86 related tests pass on Python 3.12 (66.68s) and 3.10 (75.16s),
+including the real compiler capture iterator. All 43 changed/new functions pass
+lizard/AST checks, whole scripts/tests Ruff and diff pass. Installed-vault evidence:
+`logs/step7-batch-context-{red,type-red,green,expanded,py312,py310}-20261020.txt`
+and `logs/step7-batch-context-complexity-20261020.json`.

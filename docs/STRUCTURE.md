@@ -1187,15 +1187,19 @@ compile journal before reading mutable context. Its stable work key survives
 redrive; exact retained parent/entry bytes and dependencies are checked. A byte
 offset addresses the entry without decoding the whole plan again; the existing
 file boundary still verifies its complete digest. Pending admission alone grants
-no model call or publication, and refreshed-context binding remains required.
+no model call or publication. Its saved context binding is described below.
 
 The uninstalled refreshed-context format stores only complete changed context
 records and explicit removed paths in another self-contained ZIP64 artifact.
 It binds one complete source capture by manifest digest; it never follows delta
 chains or external blob references. An open-reader overlay restores all context
-collections, including unselected publication targets. Both files must be owned
-and retained by the same durable work before production use. The format helpers
-alone do not provide queue publication or per-batch recovery integration.
+collections, including unselected publication targets. The candidate batch controller now saves/replays this delta through the existing
+queue artifact boundary. Archive binding identifies its original admission and
+source snapshot, including when recovering an orphan before reading live context.
+Both files must remain owned and retained by the same durable work; queue-level
+semantic reference enforcement and retention/doctor/backup traversal are still
+required before production routing. The candidate reader validates the complete
+restored context while keeping both archive lifetimes open.
 
 The archive's eager compatibility planning view keeps daily records materialized for existing partition
 proofs, while context source/target/vault collections retain verified record indices

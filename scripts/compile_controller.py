@@ -614,7 +614,7 @@ def save_compile_preflight(queue, lease, snapshot, *, dependencies, request, pla
     with open_compile_inputs(queue, lease, snapshot, deadline=deadline) as reader:
         produce = partial(_write_compile_preflight, reader, event.details, dependencies, plan, deadline)
         validate = partial(_validate_compile_preflight, produce, deadline)
-        return _save_preflight_artifact(queue, lease, event, produce, validate, deadline)
+        return _save_verified_compile_artifact(queue, lease, event, produce, validate, deadline)
 
 
 def _require_preflight_parent(queue, lease, snapshot):
@@ -647,10 +647,10 @@ def _preflight_event(lease, snapshot, dependencies, request):
                    stage='pending', outcome='ready', details={'compile_preflight': binding})
 
 
-def _save_preflight_artifact(queue, lease, event, produce, validate, deadline):
+def _save_verified_compile_artifact(queue, lease, event, produce, validate, deadline):
     saved = queue.get_compile_event(event.work_id, sequence=event.sequence)
     if saved is not None:
-        _verify_saved_preflight(queue, lease, event, saved, validate, deadline)
+        _verify_saved_compile_artifact(queue, lease, event, saved, validate, deadline)
         return saved
     recovered = queue.recover_compile_artifact_validated(lease, event, validate=validate, deadline=deadline)
     if recovered is not None:
@@ -658,7 +658,7 @@ def _save_preflight_artifact(queue, lease, event, produce, validate, deadline):
     return queue.save_compile_artifact_writer(lease, event, produce, deadline=deadline)
 
 
-def _verify_saved_preflight(queue, lease, event, saved, validate, deadline):
+def _verify_saved_compile_artifact(queue, lease, event, saved, validate, deadline):
     queue.verify_compile_checkpoint_owner(lease, saved)
     details = dict(saved.details)
     details.pop('artifact', None)
@@ -909,6 +909,92 @@ def _resume_batch_admission(queue, lease, previous, expected):
     return previous
 
 
+def _batch_context_event(queue, lease, planned, snapshot, dependencies, deadline):
+    admission = begin_compile_batch(queue, lease, planned, dependencies=dependencies, deadline=deadline)
+    _require_preflight_parent(queue, lease, snapshot)
+    if planned.preflight.details['compile_preflight']['snapshot_digest'] != progress._event_digest(snapshot):
+        raise progress.ProgressConflict('batch context source snapshot changed')
+    binding = {'schema': 'compile-batch-context/v1',
+               'admission_digest': progress._event_digest(admission),
+               'snapshot_work_id': snapshot.work_id, 'snapshot_sequence': snapshot.sequence,
+               'snapshot_digest': progress._event_digest(snapshot)}
+    return replace(admission, task_id=lease.id, sequence=1, stage='snapshot_ready',
+                   details={'compile_context': binding})
+
+
+def _context_event_binding(event):
+    return _compile_identity_digest(event.details['compile_context'])
+
+
+def _capture_current_compile_context():
+    from compile_memory import iter_compile_records
+
+    return iter_compile_records(())
+
+
+def save_compile_batch_context(queue, lease, planned, snapshot, *, dependencies,
+                               capture=_capture_current_compile_context, deadline=None):
+    """Recover exact context before invoking the live capture producer."""
+    event = _batch_context_event(queue, lease, planned, snapshot, dependencies, deadline)
+    with open_compile_inputs(queue, lease, snapshot, deadline=deadline) as base:
+        binding = _context_event_binding(event)
+        produce = partial(_write_batch_context, base, binding, dependencies, capture, deadline)
+        validate = partial(_validate_batch_context, base, binding, dependencies, deadline)
+        saved = _save_verified_compile_artifact(queue, lease, event, produce, validate, deadline)
+    dependencies.verify()
+    queue.verify_compile_checkpoint_owner(lease, saved)
+    return saved
+
+
+def _write_batch_context(base, binding, dependencies, capture, deadline, output):
+    dependencies.verify()
+    write_compile_context_delta(output, base, capture(), binding=binding, deadline=deadline)
+    dependencies.verify()
+
+
+def _read_bound_batch_context(archive, base, binding):
+    manifest_digest = _blob_digest(archive.read('manifest.json'))
+    return read_compile_context_delta(archive, manifest_digest, base, binding=binding)
+
+
+def _validate_context_view(view, deadline):
+    for group in _CONTEXT_GROUPS:
+        for _record in getattr(view, group):
+            operational_deadline_active(deadline)
+
+
+def _validate_batch_context(base, binding, dependencies, deadline, handle):
+    with zipfile.ZipFile(handle) as archive:
+        view = _read_bound_batch_context(archive, base, binding)
+        _validate_context_view(view, deadline)
+    dependencies.verify()
+    operational_deadline_active(deadline)
+
+
+@contextmanager
+def open_compile_batch_context(queue, lease, planned, snapshot, saved, *, dependencies, deadline=None):
+    """Yield the full saved context under both archive lifetimes and owner checks."""
+    expected = _batch_context_event(queue, lease, planned, snapshot, dependencies, deadline)
+    recorded = queue.get_compile_event(expected.work_id, sequence=expected.sequence)
+    if recorded != saved:
+        raise progress.ProgressConflict('batch context requires the recorded checkpoint')
+    _require_capture_event_identity(expected, saved)
+    with open_compile_inputs(queue, lease, snapshot, deadline=deadline) as base:
+        with queue.open_compile_artifact(saved, deadline=deadline) as handle:
+            with zipfile.ZipFile(handle) as archive:
+                view = _read_bound_batch_context(archive, base, _context_event_binding(expected))
+                _validate_context_view(view, deadline)
+                _check_batch_context_owner(queue, lease, saved, dependencies, deadline)
+                yield view
+                _check_batch_context_owner(queue, lease, saved, dependencies, deadline)
+
+
+def _check_batch_context_owner(queue, lease, saved, dependencies, deadline):
+    dependencies.verify()
+    operational_deadline_active(deadline)
+    queue.verify_compile_checkpoint_owner(lease, saved)
+
+
 def load_compile_inputs(queue, lease, checkpoint):
     """Explicit eager compatibility for callers that require a complete value."""
     with open_compile_inputs(queue, lease, checkpoint) as snapshot:
@@ -1036,7 +1122,7 @@ def _write_archive_snapshot(inputs, expected, output):
 
 
 _CONTEXT_GROUPS = ('sources', 'targets', 'vault_files')
-_CONTEXT_DELTA_SCHEMA = 'compile-context-delta/v1'
+_CONTEXT_DELTA_SCHEMA = 'compile-context-delta/v2'
 
 
 def _require_complete_context_base(base):
@@ -1063,8 +1149,14 @@ def _context_record_digests(reader, group):
     return {path: reader.manifest['records'][group][index] for path, index in indexed.items()}
 
 
+def _require_context_record_type(group, record):
+    if type(record) is not _snapshot_types()[group]:
+        raise ValueError('invalid context record type for group')
+
+
 class _ContextDeltaWriter:
-    def __init__(self, base, archive):
+    def __init__(self, base, archive, binding):
+        self.binding = binding
         self.base_digest = base.digest
         self.previous = {group: _context_record_digests(base, group) for group in _CONTEXT_GROUPS}
         self.seen = {group: set() for group in _CONTEXT_GROUPS}
@@ -1073,6 +1165,8 @@ class _ContextDeltaWriter:
 
     def capture(self, group, record):
         old = self._consume_path(group, record.logical_path)
+        _require_context_record_type(group, record)
+        _require_snapshot_digest(record.content, record.sha256)
         path, data = _record_metadata_row(record, _blob_digest)
         if _blob_digest(data) == old:
             return
@@ -1091,13 +1185,13 @@ class _ContextDeltaWriter:
                    for group, rows in self.rows.items()}
         removed = {group: sorted(paths) for group, paths in self.previous.items()}
         manifest = {'schema': _CONTEXT_DELTA_SCHEMA, 'base_digest': self.base_digest,
-                    'records': records, 'removed': removed}
+                    'records': records, 'removed': removed, 'binding': self.binding}
         data = _snapshot_json(manifest)
         self.writer.write('manifest.json', data)
         return _blob_digest(data)
 
 
-def write_compile_context_delta(output, base, records, *, deadline=None):
+def write_compile_context_delta(output, base, records, *, binding=None, deadline=None):
     """Write self-contained changed context records against the complete capture.
 
     Unchanged bodies stay in that capture. No blob in this archive references
@@ -1105,9 +1199,10 @@ def write_compile_context_delta(output, base, records, *, deadline=None):
     queue publication boundary must own both references before production use.
     """
     _require_complete_context_base(base)
+    _require_context_binding(binding)
     operational_deadline_active(deadline)
     with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
-        writer = _ContextDeltaWriter(base, archive)
+        writer = _ContextDeltaWriter(base, archive, binding)
         for group, record in records:
             operational_deadline_active(deadline)
             writer.capture(group, record)
@@ -1117,13 +1212,19 @@ def write_compile_context_delta(output, base, records, *, deadline=None):
 
 
 def _decoded_context_delta(data):
-    fields = {'schema', 'base_digest', 'records', 'removed'}
+    fields = {'schema', 'base_digest', 'records', 'removed', 'binding'}
     value = _decoded_snapshot_manifest(data, _CONTEXT_DELTA_SCHEMA, fields)
     progress._require_digest(value['base_digest'])
+    _require_context_binding(value['binding'])
     _require_removed_context(value['removed'])
     if value['records']['dailies']:
         raise progress.ProgressCorrupt('context delta contains daily records')
     return value
+
+
+def _require_context_binding(binding):
+    if binding is not None:
+        progress._require_digest(binding)
 
 
 def _require_removed_context(removed):
@@ -1140,13 +1241,13 @@ def _require_removed_context_paths(paths):
         raise progress.ProgressCorrupt('removed context paths must be unique and sorted')
 
 
-def read_compile_context_delta(archive, expected, base):
+def read_compile_context_delta(archive, expected, base, *, binding=None):
     """Return a lazy complete context while both caller-owned archives stay open."""
     from compile_memory import CompileInputs
 
     _require_complete_context_base(base)
     delta = CompileInputArchive(archive, expected, manifest_decoder=_decoded_context_delta)
-    if delta.manifest['base_digest'] != base.digest:
+    if (delta.manifest['base_digest'], delta.manifest['binding']) != (base.digest, binding):
         raise progress.ProgressConflict('context delta base identity changed')
     groups = {group: _overlay_context_records(base, delta, group) for group in _CONTEXT_GROUPS}
     return CompileInputs((), **groups)
