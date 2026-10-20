@@ -5594,3 +5594,29 @@ Python 3.10 (54.97 s). Lizard plus AST checks passed for all 18 changed
 functions; Ruff and diff checks passed. Tests cover preserved real failure
 recording as well as preview startup, resolution, refusal, repair-child and
 completion paths. This is candidate evidence, not installed-vault qualification.
+
+## 2026-10-20: quote-bearing parts disambiguate repeated timestamps
+
+Investigation of installed compile failures reproduced a candidate defect without
+model calls: two selected daily parts could each declare the same timestamp,
+while only one contained the requested quote. `_bound_part` counted both because
+the single-entry reader did not check quote membership. This falsely rejected
+otherwise unique evidence before the final byte-offset check.
+
+Each candidate block now passes the existing unique-quote check before entering
+the candidate set. Repeated quotes within a block, duplicate matching blocks and
+absent quotes remain refused. Physical byte-span, source digest, selected coverage
+and DLP checks remain in the existing downstream binding path. No limits,
+configuration, dependency or architecture contract changes are introduced.
+
+Two regression cases failed before the fix; three refusal cases passed before
+and after. The wider suite initially caught a changed diagnostic for a quote
+outside the cited timestamp. The diagnostic retains its immutable-snapshot
+context; the existing test was not weakened. This reproduction explains a class
+of observed errors; it does not establish that every installed failure has this
+cause or address the separate source-completeness critique failures.
+
+Qualification: 209 related tests passed on Python 3.10 (22.62 s) and
+Python 3.12 (20.44 s). Lizard and AST checks passed for all four changed
+functions; Ruff and diff checks passed. Candidate only; no installed cycle
+or private-vault recovery qualification is claimed.

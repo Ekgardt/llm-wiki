@@ -4813,13 +4813,15 @@ def _bound_part(
     for unit in _native_part_units(ordered, join=_tool_parts_join):
         try:
             block, marker_at = _evidence_unit_block(unit, timestamp, quote_bytes)
+            _sole_quote_offset(block, quote_bytes)
         except ValueError:
             continue
         bound.append((unit[0], block, marker_at))
     if len(bound) != 1:
         raise ValueError(
             "compile evidence timestamp block is ambiguous or missing: "
-            f"timestamp {timestamp!r} bound in {len(bound)} of {len(sources)} part(s)"
+            f"timestamp {timestamp!r} bound in {len(bound)} of {len(sources)} part(s) "
+            "of the immutable snapshot"
         )
     return bound[0]
 
