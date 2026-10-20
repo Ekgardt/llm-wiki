@@ -1722,3 +1722,53 @@ All 27 changed/new functions pass lizard/AST law-5 analysis. Whole scripts/tests
 Ruff and diff checks pass. Evidence: installed-vault
 `logs/step7-saved-refresh-{red,green,semantic,py312,py310}-20261020.txt`
 and `logs/step7-saved-refresh-complexity-20261020.json`.
+
+### 2026-10-20 — accepted publication checkpoint before Markdown writes
+
+`save_compile_publication` persists the accepted plan, action key, provider budget
+and original publication timestamp under the existing queue artifact boundary.
+Its journal binding includes recorded context, exact selected batch metadata and
+source identity, effective dependencies and accepted content digest. An unresolved
+model dispatch cannot become publication. Existing/orphan plans are validated
+before producing a new document or timestamp. An actual compiler cache hit may
+reuse the same accepted content; its transient cache-hit flag is not work identity.
+The reader requires the exact recorded publication event and verified artifact.
+
+Research checked 2026-10-20: [SQLite atomic commit](https://www.sqlite.org/atomiccommit.html),
+[Temporal workflow execution](https://docs.temporal.io/workflow-execution), and
+[AWS idempotent retry contracts](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/).
+Their relevant distinction is durable intent versus completed effect: queue history
+and Markdown publication are different commits. Alternatives were treating model
+acceptance as publication, regenerating the timestamp/plan after interruption, or
+adding a second publication journal/database. Existing files and compile events
+preserve intent; source receipts and the existing Markdown transaction remain
+completion authority. No package, runtime layout, automatic repeat or new numeric
+limit is added. The JSON publication document occupies one accepted batch's plan
+in memory, not a whole source archive; no inherited small-result byte ceiling is
+introduced on this writer path.
+
+Four red tests preceded implementation. Seven checkpoint tests now cover original
+orphan timestamp, changed plan rejection, actual cache reuse and redrive, recorded
+reader identity, refusal to skip an unfinished dispatch, and real local Markdown
+publication repeated from the saved document. The latter returns the same committed
+transaction/sequence through receipts; page bytes and mtime stay unchanged, and
+only the original three simulated model calls occurred. This is filesystem and
+semantic regression evidence, not a real selected-model evaluation.
+
+The queue event intentionally remains `publication_ready`: it is accepted intent,
+not proof that sources completed. Source receipt completeness, authoritative
+transaction lookup, terminal result journaling and quarantine outcomes still need
+wiring. A committed quarantine transaction is not enough to mark source work done.
+The installed `COMPILE_PUBLICATION_ATTEMPTS = 4` remains an inherited limit requiring
+law-9 review; its old comment assumes a model-call window although current claim
+assessment no longer calls evaluators. This investigation does not qualify that
+limit or silently approve it. All earlier production/repair, reference-retention,
+backup/doctor, dependency/update, cross-origin uncertainty, install/legacy and useful
+real-cycle obligations remain open. Candidate uninstalled.
+
+Validation: 107 related tests pass on Python 3.12 (73.54s) and 3.10 (87.25s).
+The final expanded 9 checkpoint tests, including damaged orphan content/time,
+pass on 3.12 (17.92s) and 3.10 (10.10s). All 27 changed/new functions pass lizard/AST
+analysis, whole Ruff and diff checks pass. Evidence in installed-vault logs:
+`step7-publication-checkpoint-{red,green,expanded,redrive,corrupt,py312,py310,final-py310}-20261020.txt`
+and `step7-publication-checkpoint-complexity-20261020.json`.

@@ -12,6 +12,7 @@ from collections import Counter
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime
 from functools import cache, partial
 from itertools import groupby
 from pathlib import Path
@@ -1009,6 +1010,134 @@ def _check_batch_context_owner(queue, lease, saved, dependencies, deadline):
     dependencies.verify()
     operational_deadline_active(deadline)
     queue.verify_compile_checkpoint_owner(lease, saved)
+
+
+def _publication_content(resolved):
+    return {'plan': resolved.plan, 'action_key': resolved.action_key,
+            'provider_budget': dict(resolved.provider_budget)}
+
+
+def _publication_binding(context, batch, content, dependencies):
+    return {'schema': 'compile-publication/v1',
+            'context_sequence': context.sequence,
+            'context_digest': progress._event_digest(context),
+            'batch_digest': _compile_identity_digest(_preflight_batch_details(batch)),
+            'content_digest': _compile_identity_digest(content),
+            'dependency_digest': dependencies.digest}
+
+
+def _require_publication_context(queue, lease, context, batch, dependencies):
+    _require_checkpoint(context)
+    queue.verify_compile_checkpoint_owner(lease, context)
+    recorded = queue.get_compile_event(context.work_id, sequence=context.sequence)
+    if recorded != context or 'compile_context' not in context.details:
+        raise progress.ProgressConflict('publication requires recorded batch context')
+    sources = _compile_identity_digest(_preflight_source_records(batch.inputs))
+    if sources != context.source_digest:
+        raise progress.ProgressConflict('publication daily source identity changed')
+    admission = queue.get_compile_event(context.work_id, sequence=0)
+    _require_publication_dependencies(admission, dependencies)
+
+
+def _require_publication_dependencies(admission, dependencies):
+    if dependencies.verify() != admission.details['compile_batch']['dependency_digest']:
+        raise progress.ProgressConflict('publication dependency identity changed')
+
+
+def _publication_checkpoint(queue, lease, context, binding):
+    latest = queue.get_compile_event(context.work_id)
+    queue.verify_compile_checkpoint_owner(lease, latest)
+    if latest.stage == 'publication_ready':
+        return _existing_publication_checkpoint(latest, binding)
+    _require_checkpoint(latest)
+    if latest.details['artifact'] != context.details['artifact']:
+        raise progress.ProgressConflict('publication cursor lost its context artifact')
+    return replace(context, task_id=lease.id, sequence=latest.sequence + 1,
+                   stage='publication_ready', details={'publication': binding})
+
+
+def _existing_publication_checkpoint(latest, binding):
+    if latest.outcome != 'ready' or latest.details.get('publication') != binding:
+        raise progress.ProgressConflict('publication checkpoint identity changed')
+    details = dict(latest.details)
+    details.pop('artifact', None)
+    return replace(latest, details=details)
+
+
+def save_compile_publication(queue, lease, context, batch, resolved, *, dependencies, deadline=None):
+    """Retain an accepted plan before Markdown writes; this is not a commit receipt."""
+    from compile_memory import _require_apply_arguments
+
+    operational_deadline_active(deadline)
+    _require_publication_context(queue, lease, context, batch, dependencies)
+    _require_apply_arguments(resolved.plan, batch.inputs, resolved.action_key, batch, resolved.provider_budget)
+    content = json.loads(_snapshot_json(_publication_content(resolved)))
+    binding = _publication_binding(context, batch, content, dependencies)
+    event = _publication_checkpoint(queue, lease, context, binding)
+    produce = partial(_write_publication_document, event, content, dependencies, deadline)
+    validate = partial(_validate_publication_document, event, dependencies, deadline)
+    saved = _save_verified_compile_artifact(queue, lease, event, produce, validate, deadline)
+    _check_batch_context_owner(queue, lease, saved, dependencies, deadline)
+    return saved
+
+
+def _write_publication_document(event, content, dependencies, deadline, output):
+    from compile_memory import _utc_now
+
+    dependencies.verify()
+    operational_deadline_active(deadline)
+    document = {'schema': 'compile-publication-document/v1',
+                'binding': event.details['publication'], 'content': content, 'completed_at': _utc_now()}
+    output.write(_snapshot_json(document))
+    dependencies.verify()
+    operational_deadline_active(deadline)
+
+
+def _require_publication_time(value):
+    if not isinstance(value, str):
+        raise progress.ProgressCorrupt('invalid publication timestamp')
+    parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    if parsed.isoformat().replace('+00:00', 'Z') != value or not value.endswith('Z'):
+        raise progress.ProgressCorrupt('invalid publication timestamp')
+
+
+def _decoded_publication_document(event, data):
+    document = json.loads(data)
+    fields = {'schema', 'binding', 'content', 'completed_at'}
+    if not isinstance(document, dict) or set(document) != fields:
+        raise progress.ProgressCorrupt('invalid publication document fields')
+    _require_publication_document_binding(event, document)
+    if _snapshot_json(document) != data:
+        raise progress.ProgressCorrupt('noncanonical publication document')
+    _require_publication_time(document['completed_at'])
+    return document
+
+
+def _require_publication_document_binding(event, document):
+    expected = event.details['publication']
+    if (document['schema'], document['binding']) != ('compile-publication-document/v1', expected):
+        raise progress.ProgressCorrupt('publication document identity changed')
+    if _compile_identity_digest(document['content']) != expected['content_digest']:
+        raise progress.ProgressCorrupt('publication content identity changed')
+
+
+def _validate_publication_document(event, dependencies, deadline, handle):
+    _decoded_publication_document(event, handle.read())
+    dependencies.verify()
+    operational_deadline_active(deadline)
+
+
+def read_compile_publication(queue, lease, event, *, deadline=None):
+    """Read a verified intent; callers still require source/transaction receipts."""
+    queue.verify_compile_checkpoint_owner(lease, event)
+    recorded = queue.get_compile_event(event.work_id, sequence=event.sequence)
+    if recorded != event or (event.stage, event.outcome) != ('publication_ready', 'ready'):
+        raise progress.ProgressConflict('publication requires a recorded publication checkpoint')
+    with queue.open_compile_artifact(event, deadline=deadline) as handle:
+        document = _decoded_publication_document(event, handle.read())
+    queue.verify_compile_checkpoint_owner(lease, event)
+    operational_deadline_active(deadline)
+    return {**document['content'], 'completed_at': document['completed_at']}
 
 
 def load_compile_inputs(queue, lease, checkpoint):

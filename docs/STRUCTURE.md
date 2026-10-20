@@ -1201,6 +1201,13 @@ semantic reference enforcement and retention/doctor/backup traversal are still
 required before production routing. The candidate reader validates the complete
 restored context while keeping both archive lifetimes open.
 
+The candidate publication checkpoint saves accepted plan bytes, action key,
+provider budget and original timestamp before Markdown writes. It binds the saved
+context, selected batch and dependencies; recovery reuses the recorded/orphan file.
+This is publication intent only. Source receipts and the Markdown transaction must
+still prove completion before terminal queue progress; quarantine is not success
+for unreceipted sources. Terminal integration remains unfinished.
+
 The candidate prepared-batch scope now uses the saved context with the same
 semantic selection/identity checks as live refresh. Joining selected daily sources
 with archive context retains metadata positions, not all context bodies. The scope
