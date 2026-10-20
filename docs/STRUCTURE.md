@@ -1182,6 +1182,14 @@ unselected source bodies. ZIP directory metadata is held in memory; source bodie
 are not loaded by opening the container. Python's standard library supplies the
 container format; there is no new package, runtime path or operational database.
 
+The uninstalled refreshed-context format stores only complete changed context
+records and explicit removed paths in another self-contained ZIP64 artifact.
+It binds one complete source capture by manifest digest; it never follows delta
+chains or external blob references. An open-reader overlay restores all context
+collections, including unselected publication targets. Both files must be owned
+and retained by the same durable work before production use. The format helpers
+alone do not provide queue publication or per-batch recovery integration.
+
 The archive's eager compatibility planning view keeps daily records materialized for existing partition
 proofs, while context source/target/vault collections retain verified record indices
 and logical paths. Selection filters metadata before reading bodies. Ranking stores

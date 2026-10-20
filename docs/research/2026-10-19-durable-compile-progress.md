@@ -1533,3 +1533,49 @@ publication/receipts, cross-origin uncertain work, full dependency/update handli
 CLI/MCP/queue/nightly routing, retention/doctor, backup/restore and real full-cycle
 quality/token/time evidence remain open. This is verified batch consumption,
 not a finished production workflow or closure of point 7.
+
+### 2026-10-20 — complete refreshed context without repeated whole captures
+
+The compiler's target collection cannot be narrowed to selected prompt pages:
+`_existing_slugs_by_key`, `_require_current_compile_targets` and `_ApplyPlan` use
+all saved targets for resolution, publication preconditions and preimages. A new
+batch therefore needs a complete refreshed view, not a prompt-only snapshot.
+
+Research checked 2026-10-20: [Restic repository design](https://restic.readthedocs.io/en/stable/100_references.html)
+(immutable hash-addressed data and snapshots), [Git objects](https://git-scm.com/book/en/v2/Git-Internals-Git-Objects)
+(content reuse), and [Python ZIP archives](https://docs.python.org/3.10/library/zipfile.html)
+(stream/file access and ZIP64). These inform the design; no Git/Restic runtime
+compilation dependency is added. Python 3.10 remains compatibility-only, not a
+claim of upstream support.
+
+Alternatives: copy the complete archive for every batch; discard unselected
+context; build a recursively referenced blob store. The first wastes disk, the
+second breaks publication checks, and the third introduces extra lifetime and
+recovery complexity. Within the approved existing queue-result artifact layout,
+a context delta stores complete changed records plus explicit removed paths.
+It names one complete base by logical manifest digest. It never follows another
+delta. Changed record blobs are self-contained. A lazy overlay supplies the full
+sources, targets and vault-files collections; immutable dailies remain in the
+original capture. Changed prompt projections count even when source bytes match.
+
+The no-chain condition follows the approved nonrecursive artifact contract, not
+an arbitrary retry or size limit. No count/body-size cutoff is added. Metadata
+indices and ZIP directory still occupy memory; computing the delta reads current
+context bodies and base record metadata. This does not claim constant memory or
+eliminate context scanning. Both archive lifetimes belong to the caller.
+
+Seven tests failed before implementation. Expanded tests cover exact additions,
+changes/removals, no duplicate unchanged bodies, lazy reads, deterministic bytes,
+wrong base, malformed/contradictory removal lists, corrupted changed bodies,
+projection-only changes, duplicate paths and rejection as a complete capture.
+The format helper is not yet queue publication: both archive references must be
+bound to the same work ownership, recovery, retention and backup checks before
+production routing. Durable per-batch admission and all previously listed
+full-workflow requirements remain open. This candidate is uninstalled.
+
+Validation: 100 related tests passed on Python 3.12 (44.27 s) and 3.10 (50.20 s).
+All 42 changed/new functions passed lizard/AST complexity; whole scripts/tests
+Ruff and diff checks passed. Evidence in the installed vault:
+`logs/step7-context-delta-{red,green,expanded}-20261020.txt`,
+`logs/step7-context-delta-py{312,310}-20261020.txt`, and
+`logs/step7-context-delta-complexity-20261020.json`.
