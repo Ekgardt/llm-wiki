@@ -1213,7 +1213,11 @@ existing writer gate, then records a batch's `published/completed` event. It che
 vault/state/coordinator identity and revalidates prior completions on retry; a lost
 receipt is an error. No complete proof leaves intent pending. This does not finish
 the whole queue task, and quarantine is not success for unreceipted sources.
-Production execution and whole-task finalization remain unfinished.
+The candidate execution helper reconciles receipts first, applies only the verified
+saved document when incomplete, then reconciles again. It rechecks queue ownership,
+dependencies and cancellation inside the existing apply admission checks. A recovered
+completion skips apply; an apply return alone cannot establish source completion.
+Production entrypoint routing and whole-task finalization remain unfinished.
 
 The candidate prepared-batch scope now uses the saved context with the same
 semantic selection/identity checks as live refresh. Joining selected daily sources

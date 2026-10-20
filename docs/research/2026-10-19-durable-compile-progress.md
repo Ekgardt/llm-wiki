@@ -1850,3 +1850,39 @@ complexity, whole scripts/tests Ruff and diff checks pass. Evidence in installed
 vault logs: `step7-publication-completion-{red,green,owner-red,owner-green,expanded,plan-red,plan-green,final-py312,final-py310}-20261020.txt`
 and `step7-publication-completion-complexity-20261020.json`. Earlier 141-test runs
 preceded the request-versus-plan correction and are not final qualification.
+
+### Saved publication execution (2026-10-20)
+
+Current primary-source recheck: [SQLite atomic commit](https://www.sqlite.org/atomiccommit.html),
+[AWS retry identity](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/),
+and [Temporal durable execution](https://docs.temporal.io/workflow-execution).
+The existing Markdown transaction and queue journal are separate commits. Choose
+receipt reconciliation before execution and after publication, rather than treating
+an apply return value as durable completion or adding a distributed transaction.
+This implements the approved journal/artifact design without new paths, dependencies,
+limits or runtime contracts. The saved document supplies plan, plan-bound action key,
+provider budget and timestamp; callers cannot substitute a freshly resolved plan.
+A recovered committed publication skips apply entirely. No complete source receipts
+means no completion, including quarantine transactions. Errors retain the intent.
+The existing writer gate remains the mutation boundary; execution checks queue owner,
+dependency identity and caller cancellation through the apply cancellation callback.
+This does not make CLI/MCP/queue routing complete or replace the still-pending repair,
+unknown-source overlap, dependency-closure and installation qualifications.
+
+Execution qualification: four red tests first proved the absent execution path.
+Final related suite: 138 passes on each Python 3.12 and 3.10; whole scripts/tests
+Ruff, diff check and measured complexity of all 14 new functions pass. The first
+expanded 3.12 run had two test-cleanup failures: admission fault injection outlived
+its intended scope and failed the outer archive-owner exit check. Restricting the
+fault patch to the attempted execution preserves that check; the final run passes.
+Logs: `step7-publication-execution-{red,green,py312,py310,final-py312}-20261020.txt`
+and `step7-publication-execution-complexity-20261020.json` in private vault logs.
+
+Next integration evidence: the active worker's `_compat_task` drops lease authority,
+then `_manual_compile_task` invokes a fresh subprocess without task identity.
+MCP `_trigger_compile` calls `run_pending_compile`; nightly invokes the CLI.
+Thus connecting only CLI would still lose the existing queue task's authority.
+The worker handoff must preserve canonical ownership and original work identity,
+without adding an ambient lease environment variable or allowing arbitrary payloads
+to impersonate a lease. Repair children still refresh live context, so routing must
+also retain their identities and feedback rather than hide this gap behind a wrapper.

@@ -1206,6 +1206,35 @@ def confirm_compile_publication(queue, lease, publication, batch, *, coordinator
         return _record_publication_completion(queue, lease, publication, document, result)
 
 
+def execute_compile_publication(queue, lease, publication, batch, *, coordinator, dependencies,
+                                trigger, owner=None, deadline=None, cancelled=None):
+    """Publish the recorded intent, recovering committed receipts before any write.
+
+    Returns the verified completion event or None when publication has not produced
+    complete source receipts. Neither outcome finishes the enclosing queue task.
+    """
+    from compile_memory import apply_compile_plan
+
+    confirm = partial(confirm_compile_publication, queue, lease, publication, batch,
+                      coordinator=coordinator, dependencies=dependencies, owner=owner,
+                      deadline=deadline, cancelled=cancelled)
+    completed = confirm()
+    if completed is not None:
+        return completed
+    document = read_compile_publication(queue, lease, publication, deadline=deadline)
+    active = partial(_publication_cancelled, queue, lease, publication, dependencies, deadline, cancelled)
+    apply_compile_plan(batch.inputs, document['plan'], action_key=document['action_key'],
+                       trigger=trigger, coordinator=coordinator, batch=batch,
+                       provider_budget=document['provider_budget'], completed_at=document['completed_at'],
+                       owner=owner, deadline=float('inf') if deadline is None else deadline, cancelled=active)
+    return confirm()
+
+
+def _publication_cancelled(queue, lease, publication, dependencies, deadline, cancelled):
+    _check_batch_context_owner(queue, lease, publication, dependencies, deadline)
+    return cancelled is not None and cancelled()
+
+
 def _publication_completion_event(lease, publication, result):
     proof = {'schema': 'compile-publication-completion/v1',
              'publication_digest': progress._event_digest(publication),
