@@ -7501,6 +7501,15 @@ def _require_complete_compile_attestation(database, row):
         raise CompileCompletionError('compile_work_incomplete')
 
 
+def _require_initial_capture_root(root, lease, origin):
+    expected = (lease.id, 0, 'pending', 'ready')
+    if (root.task_id, root.sequence, root.stage, root.outcome) != expected:
+        raise compile_progress.ProgressConflict('initial capture root identity changed')
+    if set(root.details) != {'compile_work'}:
+        raise compile_progress.ProgressConflict('initial capture requires a whole-work root')
+    compile_progress.validate_root_event(root, origin)
+
+
 class _QueueV3CandidateReader:
     """The queue-v3 backend: an unpublished candidate, or the adopted database.
 
@@ -11992,6 +12001,44 @@ class _QueueV3CandidateReader:
         self.record_compile_event(lease, saved)
         return saved
 
+    def publish_initial_compile_capture(self, lease, *, producer, decode_root, deadline=None):
+        """Publish root and snapshot together after durable, validated capture bytes.
+
+        A complete orphan is decoded before considering a fresh producer. The
+        decoder must verify the source format and bind the original payload.
+        """
+        origin = self.compile_origin(lease)
+        work_id = compile_progress.root_work_id(origin)
+        relative = 'run/queue-results/' + sha256_bytes(f'compile:{work_id}:1'.encode()) + '.result'
+        digest = self._initial_compile_capture_file(relative, producer, deadline)
+        with self._open_compile_artifact_bytes(relative, digest, deadline) as handle:
+            root = compile_progress._snapshot_event(decode_root(handle))
+        _require_initial_capture_root(root, lease, origin)
+        snapshot = replace(root, sequence=1, stage='snapshot_ready', details={
+            'artifact': {'reference': relative, 'sha256': digest}})
+        self._with_verified_lease(lease, partial(self._append_initial_compile_capture,
+            root=root, snapshot=snapshot, lease=lease, deadline=deadline))
+        return snapshot
+
+    def _initial_compile_capture_file(self, relative, producer, deadline):
+        path = self.state_root / relative
+        try:
+            digest, _size = _digest_stable_owner_file(path, deadline=deadline)
+            return digest
+        except FileNotFoundError:
+            self.results_dir.mkdir(parents=True, exist_ok=True)
+            _harden_owner_only(self.results_dir, 0o700)
+            return _write_durable_producer(path, producer, deadline=deadline)
+
+    def _append_initial_compile_capture(self, database, row, now, *, root, snapshot, lease, deadline):
+        operational_deadline_active(deadline)
+        _require_initial_capture_root(root, lease, _compile_lineage_origin(database, row))
+        if compile_progress.event_at(database, root.work_id, 0) is not None:
+            raise compile_progress.ProgressConflict('initial capture work is already recorded')
+        self._append_compile_event(database, row, now, event=root, lease=lease)
+        self._append_compile_event(database, row, now, event=snapshot, lease=lease)
+        operational_deadline_active(deadline)
+
     def verify_compile_artifact(self, event, *, deadline=None) -> int:
         """Verify retained bytes in bounded memory; return the physical size."""
         relative, expected = compile_progress.artifact_identity(event)
@@ -12009,6 +12056,11 @@ class _QueueV3CandidateReader:
     def open_compile_artifact(self, event, *, deadline=None):
         """A verified seekable file; the descriptor stays owned by this context."""
         relative, expected = compile_progress.artifact_identity(event)
+        with self._open_compile_artifact_bytes(relative, expected, deadline) as handle:
+            yield handle
+
+    @contextmanager
+    def _open_compile_artifact_bytes(self, relative, expected, deadline):
         path = self.state_root / relative
         before = path.lstat()
         _check_owner_file_metadata(path, before, before.st_size)

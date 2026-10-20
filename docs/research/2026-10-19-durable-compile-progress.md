@@ -2252,3 +2252,53 @@ Fresh queries plus source inspection covered settlement and publication dependen
 Candidate enforcement is not installed; capture/dependency preparation and production
 routing, semantic audit/retirement, recovery qualification and other point7 gates
 remain open. No native Windows/macOS or useful real-model cycle claim is made.
+
+### Atomic initial capture admission (2026-10-20, candidate implemented)
+
+The existing root-before-capture helpers expose a recovery gap: if the root's
+source digest commits and the process stops before writing its snapshot, changed
+live sources cannot recreate the admitted bytes. No model has run, but the job is
+stranded. The production admission path should first durably publish the complete
+streamed archive and then append root0 and snapshot1 together in the same queue
+transaction. The already durable queue task remains the intent before capture.
+A complete orphan archive must carry original task/payload/dependency/request
+binding so recovery can adopt it without reselecting changed live sources.
+
+Primary sources rechecked2026-10-20: SQLite atomic commit
+https://www.sqlite.org/atomiccommit.html (rollback transaction atomicity and fsync
+assumptions), Python3.10 zipfile
+https://docs.python.org/3.10/library/zipfile.html (stored ZIP64/unseekable writing,
+not a claim of current upstream3.10 support), AWS idempotent retry intent
+https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/.
+Use existing queue-results immutable publication and fenced queue transaction;
+there is no new path, database, service, package, runtime root or numeric cap.
+The initial archive adds a versioned admission manifest binding. Its digest
+identifies that exact admitted snapshot; individual source hashes remain unchanged.
+Ordinary stored input archives remain readable. The original approved one-journal
+and streaming-artifact decisions authorize this implementation within their layout.
+
+Rejected alternatives: retain live bytes in memory until both events finish;
+recapture current sources under an old digest; reset an immutable original root;
+add a second staging database. Orphan adoption validates every retained record and
+the original lineage/payload binding, then atomically publishes both events. A
+partially registered older root is never silently overwritten; only an existing
+matching complete snapshot/orphan can repair it. Runtime routing and replacement
+of the old independent-admission helpers remain required before installation.
+
+Qualification: the initial seven regressions failed before implementation and
+passed afterward. The full-flow test then exposed that context-delta validation
+accepted only complete archive v1; accepting complete v2 bases fixed that shared
+validator without permitting delta chains. A separate fault test proved a
+compressed orphan manifest was read before rejecting compression; the common
+archive-member check now precedes that read. All failed logs are retained.
+
+Final related tests (atomic admission, streaming capture, context delta, streamed
+archive batches and queue completion): 67 passed on Python3.12 in37.07s and
+67 on Python3.10 in41.42s. The full-flow case uses a simulated provider with real
+semantic validation, publication receipts and queue settlement; it is not a real
+model qualification. Local lizard/AST checks passed all38 changed/new functions;
+whole scripts/tests Ruff and diff whitespace checks passed. Logs:
+`logs/step7-atomic-capture-final-py312-20261020.txt`,
+`logs/step7-atomic-capture-final-py310-20261020.txt`,
+`logs/step7-atomic-capture-complexity-20261020.json`.
+This candidate is not installed and does not finish point7.

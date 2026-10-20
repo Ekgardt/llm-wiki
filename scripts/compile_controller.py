@@ -537,6 +537,107 @@ def save_compile_capture(queue, lease, checkpoint, paths, *, compiled=None, dead
     return queue.save_compile_artifact_writer(lease, checkpoint, producer, deadline=deadline)
 
 
+@dataclass(frozen=True)
+class CompileCapturePreparation:
+    """Fresh local selection; consumed only when no retained capture exists."""
+    paths: object
+    dependencies: CompileDependencies
+    request: dict
+    compiled: object = None
+
+
+def admit_compile_capture(queue, lease, prepare, *, deadline=None):
+    """Capture once, then atomically admit root and snapshot; never call a model."""
+    operational_deadline_active(deadline)
+    origin = queue.compile_origin(lease)
+    root = queue.get_compile_event(progress.root_work_id(origin), sequence=0)
+    if root is not None:
+        return _resume_admitted_capture(queue, lease, root, origin, deadline)
+    producer = partial(_write_admitted_capture, queue, lease, origin, prepare, deadline)
+    decoder = partial(_read_admitted_capture_root, lease, origin, deadline)
+    return queue.publish_initial_compile_capture(lease, producer=producer,
+                                                 decode_root=decoder, deadline=deadline)
+
+
+def _resume_admitted_capture(queue, lease, root, origin, deadline):
+    progress.validate_root_event(root, origin)
+    queue.verify_compile_checkpoint_owner(lease, root)
+    checkpoint = replace(root, task_id=lease.id, sequence=1, stage='snapshot_ready', details={})
+    saved = _recorded_capture(queue, lease, checkpoint, deadline)
+    if saved is not None:
+        return saved
+    validate = partial(_validate_capture_archive, checkpoint.source_digest, deadline)
+    recovered = queue.recover_compile_artifact_validated(lease, checkpoint, validate=validate, deadline=deadline)
+    if recovered is None:
+        raise progress.ProgressConflict('retained compile work has no recoverable source snapshot')
+    return recovered
+
+
+def _require_capture_vault(queue):
+    from compile_memory import ROOT, STATE_ROOT
+
+    expected = tuple(Path(path).resolve(strict=True) for path in (queue.vault, queue.state_root))
+    actual = (Path(ROOT).resolve(strict=True), Path(STATE_ROOT).resolve(strict=True))
+    if actual != expected:
+        raise progress.ProgressConflict('capture vault identity differs from queue')
+
+
+def _write_admitted_capture(queue, lease, origin, prepare, deadline, output):
+    _require_capture_vault(queue)
+    operational_deadline_active(deadline)
+    prepared = prepare()
+    binding = _capture_admission_binding(lease, origin, prepared)
+    with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+        writer = _SnapshotArchiveWriter(archive)
+        manifest = _capture_manifest(prepared.paths, prepared.compiled, writer.put, writer.write)
+        prepared.dependencies.verify()
+        manifest.update(schema=_ADMITTED_ARCHIVE_SCHEMA, admission=binding)
+        writer.write('manifest.json', _snapshot_json(manifest))
+
+
+def _capture_admission_binding(lease, origin, prepared):
+    return {'schema': 'compile-capture-admission/v1', 'origin_task_id': origin,
+            'input_hash': lease.input_hash, 'dependency_digest': prepared.dependencies.verify(),
+            'request_digest': _compile_identity_digest(prepared.request)}
+
+
+def _read_admitted_capture_root(lease, origin, deadline, handle):
+    with zipfile.ZipFile(handle) as archive:
+        _require_archive_members(archive)
+        source_digest = hashlib.sha256(archive.read('manifest.json')).hexdigest()
+        reader = CompileInputArchive(archive, source_digest)
+        admission = _capture_admission_for_owner(reader.manifest, lease, origin)
+        for group in _snapshot_types():
+            _validate_capture_records(reader, group, deadline)
+    details = progress.root_details(origin, source_digest, admission['dependency_digest'],
+                                   admission['request_digest'])
+    return progress.CompileEvent(progress.root_work_id(origin), lease.id, 0, source_digest,
+                                 'pending', 'ready', {'compile_work': details})
+
+
+def _capture_admission_for_owner(manifest, lease, origin):
+    admission = manifest.get('admission')
+    _require_capture_admission(admission)
+    if (admission['origin_task_id'], admission['input_hash']) != (origin, lease.input_hash):
+        raise progress.ProgressConflict('capture admission task or payload changed')
+    return admission
+
+
+def _require_capture_admission(admission):
+    _require_capture_admission_fields(admission)
+    if admission['schema'] != 'compile-capture-admission/v1':
+        raise progress.ProgressCorrupt('unsupported capture admission schema')
+    progress.root_work_id(admission['origin_task_id'])
+    for name in ('input_hash', 'dependency_digest', 'request_digest'):
+        progress._require_digest(admission[name])
+
+
+def _require_capture_admission_fields(admission):
+    fields = {'schema', 'origin_task_id', 'input_hash', 'dependency_digest', 'request_digest'}
+    if not isinstance(admission, dict) or set(admission) != fields:
+        raise progress.ProgressCorrupt('invalid capture admission fields')
+
+
 def _unbound_capture_checkpoint(checkpoint):
     checkpoint = progress._snapshot_event(checkpoint)
     _require_input_checkpoint(checkpoint)
@@ -1974,6 +2075,7 @@ def _require_input_checkpoint(checkpoint):
 
 
 _ARCHIVE_SCHEMA = 'compile-input-archive/v1'
+_ADMITTED_ARCHIVE_SCHEMA = 'compile-input-archive/v2'
 _ARCHIVE_BYTES_FIELDS = ('content', 'original_content', 'prompt_content')
 _ARCHIVE_JSON_FIELDS = ('original_entries', 'native_frames')
 
@@ -2091,7 +2193,7 @@ _CONTEXT_DELTA_SCHEMA = 'compile-context-delta/v2'
 
 
 def _require_complete_context_base(base):
-    if base.manifest['schema'] != _ARCHIVE_SCHEMA:
+    if base.manifest['schema'] not in {_ARCHIVE_SCHEMA, _ADMITTED_ARCHIVE_SCHEMA}:
         raise progress.ProgressConflict('context delta requires a complete base snapshot')
 
 
@@ -2417,6 +2519,13 @@ def _restored_archive_record(kind, value):
 
 
 def _decoded_archive_manifest(data):
+    value = json.loads(data)
+    if not isinstance(value, dict):
+        raise progress.ProgressCorrupt('invalid snapshot archive manifest')
+    if value.get('schema') == _ADMITTED_ARCHIVE_SCHEMA:
+        decoded = _decoded_snapshot_manifest(data, _ADMITTED_ARCHIVE_SCHEMA, {'schema', 'records', 'admission'})
+        _require_capture_admission(decoded['admission'])
+        return decoded
     return _decoded_snapshot_manifest(data, _ARCHIVE_SCHEMA, {'schema', 'records'})
 
 

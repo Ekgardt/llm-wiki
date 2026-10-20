@@ -1286,9 +1286,23 @@ response without proof blocks with `compile_work_incomplete` and capability
 `compile_completion`; malformed proof reports `compile_completion_corrupt`.
 Other task kinds and the pre-adoption schema3 retain their result contracts.
 The existing parent worker handles this refusal without counting success or
-automatically retrying an invalid success response. Initial capture/dependency
-preparation, production entrypoint routing and semantic reference auditing remain
-unfinished.
+automatically retrying an invalid success response. Production dependency
+preparation, entrypoint routing and semantic reference auditing remain unfinished.
+
+The candidate initial admission captures an immutable archive before recording
+either root0 or snapshot1, then appends both in one verified-lease transaction.
+The durable queue task is the intent before capture. Its stored ZIP64 v2 manifest
+binds original task lineage, payload, dependencies and request; its manifest
+digest identifies the admitted snapshot. Source bytes are captured in one live
+iteration, then retained bytes are reread for validation. A complete orphan is
+validated and adopted before considering live source selection. This avoids a
+root with a digest that changed live sources cannot reproduce after interruption.
+Dependency changes during capture, an expired deadline, lost ownership or invalid
+archive prevent admission. Compressed archives are refused before manifest reads.
+Existing v1 archives remain readable. A previously admitted root lacking both its
+snapshot and a matching complete orphan is reported, never silently rewritten.
+Production routing must adopt this path before the independent root/capture
+helpers can be removed.
 
 The archive's eager compatibility planning view keeps daily records materialized for existing partition
 proofs, while context source/target/vault collections retain verified record indices
@@ -1334,7 +1348,7 @@ globally first, and optional ranking excludes every pending daily source even wh
 that source is outside the current group. No installed dispatch boundary changes
 until complete durable preflight and per-source failure accounting are integrated.
 
-Durable streamed capture first computes the full logical snapshot digest with the
+The retained independent capture helper first computes the full logical snapshot digest with the
 common capture iterator, then writes through the queue's existing atomic artifact
 writer and requires the same digest before publication. A source change refuses
 the snapshot. A completed file whose event commit was interrupted is recovered
