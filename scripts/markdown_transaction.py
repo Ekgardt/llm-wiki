@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from operational_ownership import OwnerLease
 
 import process_liveness
-from bounded_io import read_stable_bytes
+from bounded_io import VerifiedByteRange, read_stable_bytes
 from claim_tree_manifest import (
     snapshot_claim_tree,
     snapshot_guardrail_sources,
@@ -4432,11 +4432,19 @@ def committed_append_content_matches(record: TransactionRecord, relative: str, b
 def _committed_block_matches(operation: MarkdownOperation, block: bytes, content: bytes) -> bool:
     digest, hashed = hashlib.sha256(), 0
     for position in _block_offsets(content, block):
-        digest.update(content[hashed:position])
+        _update_append_prefix(digest, content, hashed, position)
         hashed = position
         if _append_prefix_hashes_match(operation, position, digest, block):
             return True
     return False
+
+
+def _update_append_prefix(digest, content, start, end):
+    if type(content) is VerifiedByteRange:
+        for chunk in content.iter_chunks(start, end):
+            digest.update(chunk)
+        return
+    digest.update(memoryview(content)[start:end])
 
 
 def _pruned_append_or_advance(coordinator, record, relative: str, block: bytes) -> _AppendAttemptResult:

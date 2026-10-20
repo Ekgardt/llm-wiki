@@ -1,6 +1,7 @@
 """Verify destinations before handler-2 completion or cleanup can be accepted."""
 from __future__ import annotations
 
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 import breadcrumb_decision
@@ -78,30 +79,37 @@ def _transaction(queue, disposition, indexed):
     return transaction
 
 
-def _journal_content(queue, relative: str) -> bytes:
+@contextmanager
+def _journal_content(queue, relative: str):
     target = queue.vault / relative
     target.resolve().relative_to(queue.vault.resolve(strict=True))
-    try:
-        return read_stable_bytes(target, MAX_KNOWLEDGE_TARGET_BYTES, label="breadcrumb journal proof")
-    except FileNotFoundError:
-        return _archived_journal(queue, target.stem)
+    with ExitStack() as owner:
+        try:
+            content = read_stable_bytes(target, MAX_KNOWLEDGE_TARGET_BYTES, label="breadcrumb journal proof")
+        except FileNotFoundError:
+            content = owner.enter_context(_archived_journal(queue, target.stem))
+        yield content
 
 
-def _archived_journal(queue, day: str) -> bytes:
-    from evidence_resolver import EvidenceResolver
+@contextmanager
+def _archived_journal(queue, day: str):
+    from evidence_resolver import EvidenceResolver, open_validated_bag
 
     resolver = EvidenceResolver(queue.vault, state_root=queue.state_root)
     bags = resolver._validated_bags(resolver.archive_root / day[:7])
     matches = [bag for bag in bags if bag.manifest["logical_daily_id"] == day]
     _equal(len(matches), 1)
-    return matches[0].payload
+    with open_validated_bag(matches[0].path, coordinator=resolver._archive_coordinator(),
+                            vault=queue.vault) as (bag, payload):
+        _equal(bag.manifest, matches[0].manifest)
+        yield payload
 
 
 def _journal(queue, plan: dict, transaction) -> None:
-    content = _journal_content(queue, plan["path"])
-    _equal(committed_append_content_matches(
-        transaction, plan["path"], plan["block"].encode("utf-8"), content,
-    ), True)
+    with _journal_content(queue, plan["path"]) as content:
+        _equal(committed_append_content_matches(
+            transaction, plan["path"], plan["block"].encode("utf-8"), content,
+        ), True)
 
 
 def require_journal_transaction(queue, binding, plan: dict, transaction) -> None:

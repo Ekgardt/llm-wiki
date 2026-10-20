@@ -9,7 +9,7 @@ from archive_daily import DailyArchiver
 from evidence_resolver import (
     EvidenceResolutionError,
     _require_archive_receipt_context,
-    validate_bag,
+    open_validated_bag,
 )
 
 from tests.test_archive_daily_bagit import _archiver
@@ -38,8 +38,10 @@ def test_actual_historical_v3_and_new_v4_bags_both_validate(archive_vault, tmp_p
     root, state, daily = archive_vault
     old = _restore_v3_bag(tmp_path / 'historical-v3')
     new = _archiver(root, state).archive(daily.stem).bag_path
-    assert validate_bag(old).payload
-    assert validate_bag(new).payload
+    with open_validated_bag(old) as (old_bag, old_payload):
+        assert old_payload[:len(old_payload)] == old_bag.payload_path.read_bytes()
+    with open_validated_bag(new) as (new_bag, new_payload):
+        assert new_payload[:len(new_payload)] == new_bag.payload_path.read_bytes()
     assert _receipt(old)['schema_version'] == 'compile-receipt/v3'
     assert _receipt(new)['schema_version'] == 'compile-receipt/v4'
 
@@ -48,11 +50,11 @@ def test_actual_historical_v3_and_new_v4_bags_both_validate(archive_vault, tmp_p
 def test_v4_archive_context_proof_rejects_forged_parent_or_span(archive_vault, field, value):
     root, state, daily = archive_vault
     archived = _archiver(root, state).archive(daily.stem).bag_path
-    validated = validate_bag(archived)
     receipt = _receipt(archived)
     receipt['source'][field] = value
     with pytest.raises(EvidenceResolutionError, match='original context'):
-        _require_archive_receipt_context(receipt, validated.payload, 0, len(validated.payload))
+        with open_validated_bag(archived) as (_bag, payload):
+            _require_archive_receipt_context(receipt, payload, 0, len(payload))
 
 
 def test_one_archive_operation_discovers_its_receipts_only_once(archive_vault, monkeypatch):

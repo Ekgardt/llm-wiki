@@ -5085,3 +5085,54 @@ historical split rules and source resolution. Logs:
 pass Lizard/AST complexity limits; Ruff and diff whitespace checks pass.
 No installed-vault change, daily-cap removal or complete archive-streaming claim
 is made by this prerequisite change.
+
+Archive integration scope, 2026-10-20: source inspection also found
+`breadcrumb_terminal._archived_journal`, which consumes the resolver's validated
+bag list and then the whole selected payload. This is a terminal capture proof,
+so it cannot be omitted from consumer migration. The chosen internal API returns
+validated metadata from `validate_bag`; payload access is inside an explicit
+`open_validated_bag` context using the same validator. No filesystem path, archive
+schema, runtime location or environment contract changes. Metadata-only callers
+keep their validation call. Citation matching validates bags one at a time,
+retaining resolved selected evidence instead of a month's source bytes. The
+breadcrumb proof holds its selected range open through append-hash validation;
+that shared append proof must hash ranges incrementally. A returned range may
+not escape its descriptor scope. Tests must include historical v3/v4 receipts,
+split-part citations, changed payload on exit, owner closure, archive ambiguity,
+and terminal capture replay. The archive writer's eager input reads and inherited
+size/member ceilings remain separate outstanding work until migrated and measured.
+
+The integration is implemented in the candidate. `ValidatedBag` no longer owns
+payload bytes, and the eager validator path was replaced by one owned range
+validator. All archiver metadata checks use it unchanged. The evidence resolver
+opens and validates each candidate independently, resolves the selected citation
+inside that scope, and keeps only the resolved evidence after successful exit.
+Breadcrumb terminal verification reopens its selected validated bag, confirms the
+same manifest, and holds the payload open through append-prefix hash proof. That
+shared proof now updates its digest from verified chunks, preserving before/after
+hash matching and refusing forged history. No full source is retained by the
+metadata list. A matching historical compile part still returns its bytes; its
+candidate search now hashes incrementally instead of copying each candidate.
+Archive writing and this final selected-part allocation remain to review before
+claiming all archive operations are streamed or removing their inherited caps.
+
+Four new integration tests failed on fcd19e40 before implementation (the eager
+payload read and missing owned-scope API). Another regression reproduced a full
+historical candidate copy, then passed after incremental hashing. New tests cover
+clean-close invalidation, source mutation before exit, consumer failure cleanup,
+metadata-only validation, citation reads and append-proof forgery. Existing
+v3/v4 fixture assertions now access payloads through the explicit context, retaining
+exact-byte assertions. The changed internal API is intentionally migrated rather
+than retaining an eager compatibility mode.
+
+Qualification: the final related suite passed 163 tests on each of Python 3.12
+and Python 3.10. It includes archive publication/tamper/recovery, old split-rule
+citations, breadcrumb archived-journal replay and generic host envelopes, pruned
+append history, and authored citations. Logs:
+`logs/step7-streamed-bag-final-py312-20261020.log` and
+`logs/step7-streamed-bag-final-py310-20261020.log`. Lizard/AST measured all 34 changed
+functions within the mandatory limits; Ruff and diff checks pass. Graph evidence
+at fcd19e40 is `logs/step7-streamed-bag-graph-20261020.json`; its partial coverage was
+supplemented by source searches, which identified the breadcrumb consumer.
+The real vault remains on the prior installed code; these are candidate results,
+not encrypted private-vault recovery, installation or useful paid-model proof.

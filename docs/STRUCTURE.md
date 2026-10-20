@@ -1028,6 +1028,16 @@ or nonzero active state remains fail-closed.
   `compile-receipt-<n>.md` per part, all in the tag manifest. A page quoting one
   part resolves from the bag by that part's digest. See
   `docs/research/2026-09-26-a-split-day-is-archived-with-every-part.md`.
+  Candidate streaming reader: `validate_bag` verifies the complete payload and
+  returns metadata after closing its descriptor. `open_validated_bag` exposes an
+  owned verified range only inside its context; results are provisional until
+  final source verification succeeds on exit. Archive citation resolution scans
+  bags individually, retaining selected evidence rather than a month's payloads.
+  Terminal capture proofs keep the range open through incremental append-hash
+  checks. Historical part discovery hashes candidates incrementally, then returns
+  the matching part's bytes. Archive writing and remaining byte/member ceilings
+  still need qualification; this reader change does not establish full streaming
+  of every archive operation or completion of the installed migration.
 - `knowledge/raw/` — immutable sources. Gitignored (personal). One subtree is
   writable by the runtime: `knowledge/raw/sessions/<date>/<session>.md`, the
   session records of the 2026-08-23 retention decision. It is the only part of

@@ -15,7 +15,7 @@ from datetime import date, datetime
 from itertools import chain, islice
 from pathlib import Path
 
-from bounded_io import IO_CHUNK_BYTES, VerifiedByteRange, read_stable_bytes
+from bounded_io import IO_CHUNK_BYTES, VerifiedByteRange, open_stable_range, read_stable_bytes
 from reliable_memory import canonical_json_bytes, sha256_bytes, validate_schema
 
 # Bounded reads of evidence files; a file past its bound is refused by name, never
@@ -154,7 +154,6 @@ class ValidatedBag:
     path: Path
     manifest: dict[str, object]
     payload_path: Path
-    payload: bytes
 
 
 def _regular_directory(path: Path, *, label: str) -> None:
@@ -726,10 +725,21 @@ def validate_bag(
     vault: Path | None = None,
     allow_build_intent: bool = False,
 ) -> ValidatedBag:
-    """Validate a complete, sealed BagIt daily package without following links."""
+    """Validate the complete bag and return metadata after closing its payload."""
+    with open_validated_bag(path, coordinator=coordinator, vault=vault,
+                            allow_build_intent=allow_build_intent) as (bag, _payload):
+        return bag
+
+
+@contextlib.contextmanager
+def open_validated_bag(
+    path: Path, *, coordinator=None, vault=None, allow_build_intent=False,
+):
+    """Own validated payload ranges; results remain provisional until clean exit."""
     path = Path(path)
     try:
-        return _validated_bag(path, coordinator, vault, allow_build_intent)
+        with contextlib.ExitStack() as owner:
+            yield _validated_bag(path, coordinator, vault, allow_build_intent, owner)
     except EvidenceResolutionError:
         raise
     except (OSError, ValueError, TypeError, KeyError, UnicodeDecodeError) as exc:
@@ -749,8 +759,8 @@ _BAG_MEMBERS = frozenset(
 
 
 def _validated_bag(
-    path: Path, coordinator: object | None, vault: Path | None, allow_build_intent: bool
-) -> ValidatedBag:
+    path: Path, coordinator: object | None, vault: Path | None, allow_build_intent: bool, owner
+):
     """The checks in the order they were written; each one refuses on its own."""
     expected = _expected_bag_members(allow_build_intent)
     members = _bag_members(path, expected)
@@ -758,7 +768,7 @@ def _validated_bag(
     manifest = _bag_manifest(path)
     daily_id = _bag_daily_id(manifest)
     payload_name = f"data/{daily_id}.md"
-    payload = _bag_payload(path, daily_id, payload_name, manifest)
+    payload = _bag_payload(path, daily_id, payload_name, manifest, owner)
     receipts, receipt_names = _bag_receipts(path, manifest, daily_id, payload, coordinator, vault, expected)
     _require_bag_members(members, expected)
     _require_manifest_operations(manifest, receipts)
@@ -766,7 +776,7 @@ def _validated_bag(
     _require_bag_info(path, payload, daily_id)
     _require_payload_evidence(manifest, payload)
     _require_bag_immutable(path, payload_name, expected)
-    return ValidatedBag(path, manifest, path / payload_name, payload)
+    return ValidatedBag(path, manifest, path / payload_name), payload
 
 
 def _expected_bag_members(allow_build_intent: bool) -> set[str]:
@@ -820,16 +830,15 @@ def _bag_daily_id(manifest: Mapping[str, object]) -> str:
 
 
 def _bag_payload(
-    path: Path, daily_id: str, payload_name: str, manifest: Mapping[str, object]
-) -> bytes:
+    path: Path, daily_id: str, payload_name: str, manifest: Mapping[str, object], owner
+):
     entries = bounded_directory_entries(
         path / "data", 1, label="archive payload directory"
     )
     if len(entries) != 1 or entries[0].name != f"{daily_id}.md":
         raise EvidenceResolutionError("archive payload members are not canonical")
-    payload = read_stable_bytes(
-        path / payload_name, MAX_DAILY_BYTES, label="archive payload"
-    )
+    payload = owner.enter_context(open_stable_range(
+        path / payload_name, MAX_DAILY_BYTES, label="archive payload"))
     _require_payload_hash(path, payload_name, payload, manifest)
     return payload
 
@@ -843,7 +852,7 @@ def _require_payload_hash(
         ),
         label="payload manifest",
     )
-    payload_hash = sha256_bytes(payload)
+    payload_hash = _source_range_digest(payload, 0, len(payload))
     if hashes != {payload_name: payload_hash} or any(
         manifest[field] != payload_hash for field in ("source_hash", "payload_hash")
     ):
@@ -862,7 +871,7 @@ def _bag_receipts(
     """Each receipt the bag stands on, and the embedded receipt files it carries."""
     if manifest["schema_version"] == "archive-manifest/v2":
         return _part_receipts(path, manifest, daily_id, payload, coordinator, expected)
-    payload_hash = sha256_bytes(payload)
+    payload_hash = _source_range_digest(payload, 0, len(payload))
     receipt_path, self_contained = _bag_receipt_path(
         path, manifest, daily_id, payload_hash, coordinator, vault, expected
     )
@@ -914,7 +923,7 @@ def _require_recorded_parts(spans: list[tuple[int, int]], payload: bytes) -> Non
 def _part_receipt(
     path: Path, part: Mapping[str, object], daily_id: str, payload: bytes, coordinator: object | None
 ) -> dict[str, object] | None:
-    digest = sha256_bytes(payload[part["byte_start"] : part["byte_end"]])
+    digest = _source_range_digest(payload, part["byte_start"], part["byte_end"])
     receipt_ref = part["compile_receipt_ref"]
     _require_receipt_reference(receipt_ref, daily_id, digest)
     view = {"compile_receipt_ref": receipt_ref, "compile_authority": part["compile_authority"]}
@@ -1175,7 +1184,7 @@ def _require_evidence_entry(
     if span is None or span != (evidence["byte_start"], evidence["byte_end"]):
         raise EvidenceResolutionError("archive evidence block span mismatch")
     start, end = span
-    if evidence["sha256"] != sha256_bytes(payload[start:end]) or (
+    if evidence["sha256"] != _source_range_digest(payload, start, end) or (
         evidence["line_start"],
         evidence["line_end"],
     ) != _line_span(payload, start, end):
@@ -1354,11 +1363,16 @@ def _slice_from(content: bytes, start: int, digest: str, boundaries: list[int]) 
     running = hashlib.sha256()
     cursor = start
     for boundary in islice(boundaries, bisect_right(boundaries, start), None):
-        running.update(content[cursor:boundary])
+        _update_source_digest(running, content, cursor, boundary)
         cursor = boundary
         if running.hexdigest() == digest:
             return content[start:boundary]
     return None
+
+
+def _update_source_digest(digest, content, start, end):
+    for chunk in _entry_byte_chunks(content, start, end):
+        digest.update(chunk)
 
 
 def compile_part_slice(content: bytes, digest: str) -> bytes | None:
@@ -1568,19 +1582,24 @@ class EvidenceResolver:
         if len(matches) != 1:
             reason = "not found" if not matches else "ambiguous"
             raise EvidenceResolutionError(f"archive evidence source is {reason}")
-        bag = matches[0]
-        source = _referenced_source(bag, ref)
-        assert source is not None
-        return self._slice(ref, source, bag.payload_path, "archive")
+        return matches[0]
 
-    def _archive_matches(self, month: Path, ref: EvidenceRef) -> list[ValidatedBag]:
+    def _archive_matches(self, month: Path, ref: EvidenceRef) -> list[ResolvedEvidence]:
         """Every sealed bag in the month that carries the day this reference names."""
         try:
-            return [bag for bag in self._validated_bags(month) if _bag_matches(bag, ref)]
+            return list(self._resolved_archive_candidates(month, ref))
         except EvidenceResolutionError:
             raise
         except (OSError, ValueError) as exc:
             raise EvidenceResolutionError(f"invalid archive boundary: {exc}") from exc
+
+    def _resolved_archive_candidates(self, month, ref):
+        coordinator = self._archive_coordinator()
+        for candidate in self._bag_candidates(month):
+            with open_validated_bag(candidate, coordinator=coordinator, vault=self.vault) as (bag, payload):
+                result = _resolve_bag_evidence(bag, payload, ref)
+            if result is not None:
+                yield result
 
     def _validated_bags(self, month: Path) -> list[ValidatedBag]:
         coordinator = self._archive_coordinator()
@@ -1616,10 +1635,11 @@ class EvidenceResolver:
     def _slice(
         ref: EvidenceRef, content: bytes, source_path: Path, location: str
     ) -> ResolvedEvidence:
-        _require_utf8(content, "daily source is not UTF-8")
+        _owned_source_newlines(content)
         selected = _checked_evidence_span(ref, content)
         block = _sole_block_span(content, ref)
-        return _resolved_byte_span(ref, content, source_path, location, selected, block, sha256_bytes(content))
+        return _resolved_byte_span(ref, content, source_path, location, selected, block,
+                                   _source_range_digest(content, 0, len(content)))
 
 
 def _require_owned_source(content):
@@ -1846,19 +1866,20 @@ def _span_inside(ref: EvidenceRef, start: int, end: int) -> bool:
     return start <= ref.byte_start and ref.byte_end <= end
 
 
-def _bag_matches(bag: ValidatedBag, ref: EvidenceRef) -> bool:
+def _resolve_bag_evidence(bag, payload, ref):
     if bag.manifest["logical_daily_id"] != ref.daily_id:
-        return False
-    if _referenced_source(bag, ref) is None:
+        return None
+    source = _referenced_source(bag, payload, ref)
+    if source is None:
         raise EvidenceResolutionError("archive daily source hash mismatch")
-    return True
+    return EvidenceResolver._slice(ref, source, bag.payload_path, "archive")
 
 
-def _referenced_source(bag: ValidatedBag, ref: EvidenceRef) -> bytes | None:
+def _referenced_source(bag, payload, ref):
     """The whole day, or the compile part a page quoted from (audit 2026-09-26 B-1)."""
-    if sha256_bytes(bag.payload) == ref.source_sha256:
-        return bag.payload
-    return _slice_at(bag.payload, _recorded_part_starts(bag.manifest), ref.source_sha256)
+    if _source_range_digest(payload, 0, len(payload)) == ref.source_sha256:
+        return payload
+    return _slice_at(payload, _recorded_part_starts(bag.manifest), ref.source_sha256)
 
 
 def _recorded_part_starts(manifest: Mapping[str, object]) -> list[int]:
