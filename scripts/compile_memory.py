@@ -7967,11 +7967,13 @@ def _compile_under_lock(
     deadline: float = float("inf"),
     cancelled: Callable[[], bool] | None = None,
     owner: OwnerLease | None = None,
+    execute=None,
 ) -> int:
-    """The one guarded way into `_run`: lock, start stamp, call ceiling, release.
+    """Guard both compile executors: lock, start stamp, call ceiling, release.
 
     The command line and the in-process entry (the MCP `compile` tool) both come
-    through here. The in-process one used to call `_run` bare: it ran beside a
+    through here; the leased worker supplies its durable executor. The in-process
+    entry used to call `_run` bare: it ran beside a
     spawned compile, drafted under the 90s default, and its finish stamp
     overwrote the status of the compile still running.
     Research: docs/research/2026-09-17-every-compile-takes-the-compile-lock.md
@@ -7984,12 +7986,81 @@ def _compile_under_lock(
     _mark_started_unless_dry(args)
     try:
         with _receipt_discovery_scope(), call_ceiling(setting_value("provider.draft_ceiling_seconds")):
-            return _run(args, deadline=deadline, cancelled=cancelled, owner=owner)
+            runner = _run if execute is None else execute
+            return runner(args, deadline=deadline, cancelled=cancelled, owner=owner)
     except BaseException as e:  # noqa: BLE001
         _mark_error_unless_dry(args, e)
         raise
     finally:
         _release_compile_lock(lock_token)
+
+
+def run_leased_compile(queue, lease, *, deadline=float('inf'), cancelled=None, owner=None):
+    """Execute an adopted compile task; the worker parent still owns settlement."""
+    from compile_controller import _require_capture_vault
+
+    _require_compile_active(deadline, cancelled)
+    _require_leased_compile_queue(queue, lease)
+    _require_capture_vault(queue)
+    args = argparse.Namespace(file=None, all=False, dry_run=False, trigger='auto', closed_days_only=False)
+    return _compile_under_lock(args, deadline=deadline, cancelled=cancelled, owner=owner,
+                               execute=partial(_run_leased_compile, queue, lease))
+
+
+def _require_leased_compile_queue(queue, lease):
+    from compile_progress import QUEUE_SCHEMA_VERSION
+
+    version = getattr(getattr(queue, 'expected_contract', None), 'user_version', None)
+    if (lease.kind, lease.handler_version, version) != ('compile', 1, QUEUE_SCHEMA_VERSION):
+        raise ValueError('leased compile requires compile handler version 1 in the adopted compile journal')
+    queue.compile_origin(lease)
+
+
+def _run_leased_compile(queue, lease, args, *, deadline, cancelled, owner):
+    from compile_controller import (
+        admit_compile_capture,
+        capture_compile_dependencies,
+        execute_compile_work,
+    )
+
+    _require_compile_active(deadline, cancelled)
+    DROPPED_CLAIMS.clear()
+    coordinator = active_or_legacy_coordinator(ROOT, STATE_ROOT, deadline=deadline)
+    planning = prepare_compile_planning(deadline=deadline)
+    request = {'schema': 'leased-compile-request/v1', 'planning': planning.request(),
+               'trigger': args.trigger, 'selection': 'all_pending_daily_logs'}
+    dependencies = capture_compile_dependencies(ROOT, request, deadline=deadline)
+    prepare = partial(_capture_for_leased_run, args, coordinator, dependencies, request, deadline)
+    snapshot = admit_compile_capture(queue, lease, prepare, deadline=deadline)
+    completed = execute_compile_work(queue, lease, snapshot, coordinator=coordinator,
+        dependencies=dependencies, request=request, plan=planning.batches, trigger=args.trigger,
+        owner=owner, deadline=deadline, cancelled=cancelled)
+    return _finish_leased_compile(args, completed)
+
+
+def _capture_for_leased_run(args, coordinator, dependencies, request, deadline):
+    from compile_controller import CompileCapturePreparation
+
+    selection = _receipt_predicate(coordinator, deadline=deadline)
+    paths = select_dailies(args, {}, coordinator=coordinator, deadline=deadline, selection=selection)
+    _repair_compile_mirror(coordinator, deadline=deadline, selection=selection)
+    _retire_stale_source_failures(coordinator.state_root, coordinator=coordinator,
+                                 deadline=deadline, selection=selection)
+    if paths:
+        build_index_bytes(ROOT)
+    return CompileCapturePreparation(paths, dependencies, request, compiled=selection)
+
+
+def _finish_leased_compile(args, completed):
+    if completed is None:
+        error = str(load_state().get('last_compile_error', 'compile work has unresolved sources'))
+        _mark_finished(args.trigger, 'error', error)
+        return 1
+    count = completed.details['work_completion']['batch_count']
+    outcomes = (BatchOutcome(0, 'published'),) if count else ()
+    _mark_finished(args.trigger, 'ok', outcomes=outcomes)
+    print(f'compile_memory: verified completion of {count} source group(s).')
+    return 0
 
 
 SPAWNED_LOCK = "spawned"

@@ -2481,3 +2481,63 @@ inventory dependencies; partial graph coverage was supplemented by source.
 
 Not installed or routed as a default worker yet. Full dependency closure and
 the remaining routing, recovery, installation and real-cycle gates remain open.
+
+### Leased queue compiler integration (2026-10-20, candidate implemented)
+
+The default queue worker still runs legacy compile_memory.py in a nested
+subprocess without passing its lease. On queue schema4 that path cannot produce
+the required lineage-bound work proof, even if it publishes Markdown. Connect
+schema4 compile tasks through the existing LeaseProcessor handoff to a compiler
+entry that uses the shared compile lock, receipt scope and call ceiling, prepared
+run planning, composed dependency witness, atomic source admission and whole-work
+execution. The existing parent owns heartbeat, child deadline/cleanup and final
+settlement. Other kinds and pre-adoption queues retain their current handler
+until qualified migration removes that compatibility requirement.
+
+Primary sources checked2026-10-20: Python multiprocessing
+https://docs.python.org/3/library/multiprocessing.html (spawn/importable callables
+and explicit resource lifetime); SQLite
+https://www.sqlite.org/atomiccommit.html (retain existing transactional progress);
+AWS https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/
+(retain original task intent across retries). This implements the approved
+one-journal controller inside the existing worker; no new process owner, daemon,
+queue, path, environment variable or numeric bound is introduced.
+
+Reject nested unowned compile subprocesses for schema4, treating exit status
+alone as completion, or admitting live sources again when a retained snapshot
+exists. Retain current selection/receipt maintenance on fresh capture only.
+Preparation still revalidates current planning/dependencies on recovery; provider
+discovery availability and benign inherited-environment changes can presently
+prevent replay. That limitation and full loaded-code/CLI/OS dependency closure
+must be addressed/qualified before installation. Per-batch diagnostic projection,
+direct CLI/MCP/nightly queue ingress, broader semantic retention, full source
+memory behavior and real-cycle qualification remain open; one integrated worker
+is not point7 completion.
+
+Implementation: queue CLI chooses LeaseProcessor(_manual_lease_processor).
+Schema4 compile tasks enter run_leased_compile and the shared
+_compile_under_lock executor boundary. Canonical lease/vault checks precede
+compile start. The shared planner and dependency factory feed atomic capture
+and execute_compile_work; retained snapshots bypass source selection/maintenance.
+Verified group count determines the run outcome, without claiming a page count.
+The child returns status; publication/acknowledgement remains in the parent.
+
+Nine initial red tests preceded implementation. The first9 then passed in7.79s.
+Expanded related suites48 passed per3.12/3.10 (43.65s/47.35s), including actual
+spawned execution, replay and parent heartbeat/settlement. A further red test
+showed handler version2 was silently executed as version1; admission now
+requires the implemented compile handler v1 and refuses unknown semantics.
+This is a format contract, not a workload limit; extend it only with an
+implemented/qualified handler. Final13 focused cases passed per interpreter
+(15.46s/16.73s), including empty work, version refusal and unchanged-payload
+authority. Combined50 distinct related cases per interpreter. Simulated provider
+and fixture product/package/Python inventories are used in worker integration;
+real receipts, transactions, source selection, configuration witness, locks,
+spawn, heartbeat and queue completion are exercised. This is not full dependency
+or real-model qualification.
+
+All27 changed/new functions pass measured complexity; whole Ruff/diff checks
+pass. Evidence: `logs/step7-leased-entry-*20261020*`. Pre-edit builtin graph
+generation-18e02a5adf040abb-f143e13f matched8009079b and showed both lock and
+worker entry dependencies; source inspection supplemented its partial coverage.
+The installed compiler PID2129006 remained live and was not interrupted.

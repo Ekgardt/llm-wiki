@@ -15961,6 +15961,21 @@ def _manual_processor(task: dict[str, Any]) -> bool | DeferredResult:
     return handler(task, task.get("payload", {}))
 
 
+def _uses_compile_journal(queue):
+    contract = getattr(queue, 'expected_contract', None)
+    return getattr(contract, 'user_version', None) == compile_progress.QUEUE_SCHEMA_VERSION
+
+
+def _manual_lease_processor(queue, lease, deadline, task):
+    if lease.kind != 'compile' or not _uses_compile_journal(queue):
+        return _manual_processor(task)
+    if task != _compat_task(lease):
+        raise LeaseFenceError('compatibility payload differs from compile lease')
+    from compile_memory import run_leased_compile
+
+    return run_leased_compile(queue, lease, deadline=deadline) == 0
+
+
 # Order matters: the first matching entry wins, so the narrower exception
 # classes come before the broader ones they inherit from.
 _CLI_ERROR_CODES: tuple[tuple[type[BaseException] | tuple[type[BaseException], ...], str], ...] = (
@@ -16095,7 +16110,7 @@ def _cli_work(args, parser) -> int:
     except ValueError as exc:
         parser.error(str(exc))
     summary = run_worker(
-        _manual_processor,
+        LeaseProcessor(_manual_lease_processor),
         max_tasks=args.max_tasks,
         max_seconds=args.max_seconds,
         idle_seconds=args.idle_seconds,

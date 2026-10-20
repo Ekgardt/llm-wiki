@@ -1337,6 +1337,18 @@ prove loaded-code/OS-library closure or replace update fencing. Measured candida
 capture/verification cost was 4.1s/2.82s on the current Python3.12 test environment;
 full-cycle cost remains a qualification requirement.
 
+The candidate queue CLI now uses the lease-aware processor. Schema4 compile
+handler v1 enters `run_leased_compile` under the same compile lock, receipt scope
+and call ceiling as the legacy entry. It prepares planning/dependencies, performs
+fresh source/receipt maintenance only when initial capture is needed, admits or
+recovers the saved snapshot, and executes the whole work. It returns success
+only with completion proof; the parent worker retains heartbeat, child cleanup
+and queue settlement. Unknown handler versions refuse before compilation.
+Other task kinds and pre-adoption queues retain their handlers until migration.
+This is an uninstalled worker integration: direct CLI/MCP/nightly ingress,
+per-batch diagnostic projection, discovery-independent recovery and full
+dependency/retention/installation qualification remain unfinished.
+
 The archive's eager compatibility planning view keeps daily records materialized for existing partition
 proofs, while context source/target/vault collections retain verified record indices
 and logical paths. Selection filters metadata before reading bodies. Ranking stores
