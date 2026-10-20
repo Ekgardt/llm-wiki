@@ -21,8 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 REPLACED = {
     "index.max_pages": 2_000,
     "index.max_total_bytes": 32 * 1024 * 1024,
-    "compile.max_sources": 2_000,
-    "compile.max_total_source_bytes": 32 * 1024 * 1024,
+    "compile.max_sources": 0,
+    "compile.max_total_source_bytes": 0,
     "compile.validation_retries": 2,
     "corpus.max_files": 50_000,
     "corpus.max_total_bytes": 64 * 1024 * 1024,

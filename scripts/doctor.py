@@ -6144,7 +6144,8 @@ def _overridden_settings(values: dict) -> dict:
 
 def _near_ceilings(root: Path, values: dict) -> dict:
     sizes = _vault_sizes(root)
-    uses = {name: _ceiling_use(name, values[name].value, sizes) for name in _CEILING_SCOPES}
+    uses = {name: _ceiling_use(name, values[name].value, sizes)
+            for name in _CEILING_SCOPES if values[name].value > 0}
     return {name: use for name, use in uses.items() if use["share"] >= CEILING_WARNING_SHARE}
 
 

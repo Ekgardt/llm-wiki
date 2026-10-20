@@ -549,7 +549,10 @@ def _read_daily_source(path: Path) -> bytes:
 
 
 def _daily_read_budget():
-    return min(MAX_DAILY_BYTES, setting_value("compile.max_total_source_bytes", ROOT))
+    quota = setting_value("compile.max_total_source_bytes", ROOT)
+    if quota == 0:
+        return MAX_DAILY_BYTES
+    return min(MAX_DAILY_BYTES, quota)
 
 
 def _open_daily_source(path, *, deadline=None):
@@ -646,19 +649,19 @@ def _vault_file_snapshots(
 
 
 class _SourceBudget:
-    """Accumulate compile sources under the count and byte ceilings."""
+    """Enforce explicit aggregate quotas; zero leaves that quota disabled."""
 
     def __init__(self) -> None:
         self._source_count = 0
         self._total_bytes = 0
-        self._max_sources = setting_value("compile.max_sources")
-        self._max_total_bytes = setting_value("compile.max_total_source_bytes")
+        self._max_sources = setting_value("compile.max_sources", ROOT)
+        self._max_total_bytes = setting_value("compile.max_total_source_bytes", ROOT)
 
     def add(self, source: SourceSnapshot) -> None:
-        if self._source_count >= self._max_sources:
+        if self._max_sources and self._source_count >= self._max_sources:
             raise ValueError(f"compile source count exceeds limit; {raise_hint('compile.max_sources')}")
         self._total_bytes += len(source.content)
-        if self._total_bytes > self._max_total_bytes:
+        if self._max_total_bytes and self._total_bytes > self._max_total_bytes:
             raise ValueError(f"compile source bytes exceed limit; {raise_hint('compile.max_total_source_bytes')}")
         self._source_count += 1
 

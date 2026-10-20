@@ -4522,3 +4522,72 @@ Evidence logs use `step7-installer-migration-*-20261020` under private `logs/`.
 This wires the supported explicit operation into both installers; it does not
 constitute an actual full installation, full-vault encrypted recovery, removal
 of migration compatibility, or the required useful medium-model full cycle.
+
+### Law-9 aggregate compile quotas — 2026-10-20
+
+Reproduction on a temporary empty settings root: `_SourceBudget` refuses source
+2001 even when each source is one byte; it separately refuses the 33rd 1-MiB
+source while previous source bodies are released. The defaults are 2000 sources
+and 32 MiB, with the explicit registry rationale that the whole input is held in
+memory and the values predate measurement. The streamed production ingress no
+longer justifies these aggregate cutoffs on that basis. Evidence:
+`logs/step7-source-budget-reproduction-20261020.json`.
+
+Primary contracts reviewed on 2026-10-20:
+- Python iterators yield one element at a time, but converting an iterator to a
+  collection materializes its input:
+  https://docs.python.org/3.12/howto/functional.html#iterators .
+- Node.js's stream/backpressure documentation distinguishes bounded buffering
+  from accepting a total input size; ignoring consumption can exhaust memory:
+  https://nodejs.org/learn/modules/backpressuring-in-streams . No Node dependency
+  is introduced; this is an independent resource-management comparison.
+- SQLite distinguishes implementation limits and explicitly adjustable limits:
+  https://www.sqlite.org/limits.html . Removing an unrelated source-count cutoff
+  does not remove SQLite's real constraints or the queue's integrity checks.
+
+Under the owner's instruction to remove unjustified limitations, use the existing
+numeric compile settings as optional aggregate admission quotas: default 0 means
+no aggregate quota, a positive value retains the explicit operator-selected
+count/byte limit. Preserve existing names and environment/file precedence; do not
+silently ignore a positive configured quota. State the disk/work-volume purpose
+and review conditions, instead of claiming a nonexistent measured memory bound.
+Doctor must omit disabled quotas from near-ceiling division while still reporting
+explicit overrides. Daily reading must distinguish no aggregate quota from a
+zero-byte source allowance. Bind both budget settings to the compilation root.
+No new environment name, runtime location, package or arbitrary ceiling is added.
+
+Alternatives: raising defaults merely moves the same unsupported cutoff; treating
+source volume as simultaneous heap use is incorrect for streaming; removing
+operator quotas would discard explicit local policy. The remaining per-source
+4-MiB, daily 16-MiB, archive-member, output and model-input limits require their
+own consumer/contract analysis. In particular BagIt resolution still returns a
+whole payload and derives its receipt-member bound from the daily bound; this
+step must not advertise unrestricted daily/archive processing. Eager compatibility
+callers likewise remain outside the streamed-memory claim.
+
+Aggregate-quota qualification: 182 source/settings/health/hardening/transaction
+tests passed on Python 3.12 (26.43 s) and Python 3.10 (27.37 s). Regression tests
+consume the actual `iter_compile_records` path with 2001 separate source files
+and with 33 one-MiB files; both now finish with unchanged source digests. Positive
+operator count/byte quotas still refuse the next source, settings remain bound
+to the compilation root, negative values fail, environment zero overrides a
+positive file quota, daily reads with zero aggregate quota still read their
+contents, and doctor skips disabled divisions without hiding configured values.
+The registry-default assertion was updated to the intended zero semantics;
+explicit-limit enforcement tests remain active.
+
+A warm isolated capture of 33 x 1,048,576-byte files (34,603,008 bytes) used
+3,179,448 peak traced
+Python allocation bytes, 1,055,064 retained bytes (including the last record)
+and 0.0589 seconds. This measures only source capture, not total process RSS,
+archive restoration, downstream index or a complete model cycle. Evidence:
+`logs/step7-source-quotas-memory-20261020.json`.
+
+All eleven changed/new functions passed Lizard/AST gates; Ruff and diff checks
+passed. The partial graph at `59dff0d6` returned no resolved class callers for
+`_SourceBudget`; direct source inspection found its `iter_compile_records` caller
+and the settings/daily/doctor consumers. The installed private settings currently
+choose positive quotas (4384 sources and 176307105 bytes); they were not changed
+and their necessity is not established by this candidate default change. The
+per-file/archive and downstream index gates remain open. No live installation,
+private-source rewrite or paid model call was performed.

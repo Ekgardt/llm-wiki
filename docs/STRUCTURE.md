@@ -183,7 +183,7 @@ Limits that depend on the vault and the machine are declared once in
 `scripts/settings.py`, each with its default, unit, lower bound and reason, and are
 read only through `settings.setting_value`. An optional `llm-wiki.toml` at the vault
 root overrides them; it is gitignored and absent by default, so a vault without it
-runs on the defaults, which are the constants the registry replaced. Precedence is
+runs on the declared registry defaults. Precedence is
 default < file < `LLM_WIKI_<SECTION>_<KEY>`. An unknown section or key, a non-integer
 or a value below its bound stops the caller naming the key and its source; nothing
 falls back silently. `doctor` has a `settings` check: it lists every value that
@@ -193,6 +193,16 @@ of a vault-size ceiling. The first registered limits are the vault-size ceilings
 refusal at one names the setting that raises it. Decision and sources:
 `docs/research/2026-09-27-every-limit-states-its-reason.md`; inventory:
 `docs/LIMITS-2026-09-27.md`.
+
+In the uninstalled compile-progress candidate (2026-10-20),
+`compile.max_sources` and `compile.max_total_source_bytes` are optional aggregate
+admission quotas, default 0 (disabled). Positive file/environment values remain
+enforced and negative values are invalid. These quotas control admitted work
+volume or disk/cost policy, not peak memory of the streaming capture. Doctor
+reports configured overrides but does not compute a near-ceiling share for a
+disabled quota. Zero does not disable separate per-file, archive, model-input,
+output, downstream index or ownership checks; their law-9 qualification is
+independent. Existing positive private-vault settings are not rewritten.
 
 The approved 2026-10-18 compile correction setting is `compile.validation_retries`
 (`LLM_WIKI_COMPILE_VALIDATION_RETRIES` for one run), default 2, minimum 0, no

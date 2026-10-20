@@ -16,7 +16,8 @@ The separate [llm] section is validated by model_selection and is authoritative
 for model selection; it is not a numeric limit or an environment projection. An unknown section or key, a
 value that is not an integer, or one below its bound stops the caller with the
 key's name and its source; a limit never falls back silently. With no file and no
-variable every value is its default, exactly the constant it replaced. See
+variable every value is its registry default. Compile aggregate quotas accept
+zero to disable the quota; positive values remain explicit operator policy. See
 `docs/research/2026-09-27-every-limit-states-its-reason.md`.
 """
 
@@ -116,8 +117,14 @@ REGISTRY: tuple[Setting, ...] = (
             "raise after measuring parser memory when catalogs grow; not an entitlement limit"),
     Setting("index", "max_pages", 2_000, "pages", "knowledge/index.md is rebuilt from every note; " + _HELD_IN_MEMORY),
     Setting("index", "max_total_bytes", 32 * MIB, "bytes", "the notes the index is rebuilt from; " + _HELD_IN_MEMORY),
-    Setting("compile", "max_sources", 2_000, "sources", "daily logs and notes one compile reads; " + _HELD_IN_MEMORY),
-    Setting("compile", "max_total_source_bytes", 32 * MIB, "bytes", "the sources one compile reads; " + _HELD_IN_MEMORY),
+    Setting("compile", "max_sources", 0, "sources",
+            "optional operator quota on total admitted work; 0 disables it; streamed "
+            "bodies do not justify an aggregate memory ceiling; choose/review a positive "
+            "quota against measured work volume, disk and full-cycle cost", lower=0),
+    Setting("compile", "max_total_source_bytes", 0, "bytes",
+            "optional operator quota on total admitted source bytes; 0 disables it; "
+            "streamed bodies do not justify an aggregate memory ceiling; choose/review "
+            "a positive quota against disk capacity and full-cycle cost", lower=0),
     Setting("compile", "validation_retries", 2, "correcting passes per provider",
             "cost/quality choice: initial attempt plus format and semantic corrections; "
             "not a measured optimum; reassess complete-cycle facts, tokens and latency "
