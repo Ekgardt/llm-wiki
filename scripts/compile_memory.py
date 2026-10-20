@@ -54,6 +54,7 @@ from bounded_io import (  # noqa: E402
     MAX_KNOWLEDGE_PAGE_BYTES,
     VerifiedByteRange,
     immutable_source_digest,
+    open_stable_range,
     read_stable_bytes,
     require_immutable_source,
     same_immutable_source,
@@ -493,8 +494,15 @@ def _logical_path(path: Path) -> str:
 
 def _read_daily_source(path: Path) -> bytes:
     """Use the existing daily evidence contract within the total source budget."""
-    budget = min(MAX_DAILY_BYTES, setting_value("compile.max_total_source_bytes", ROOT))
-    return read_stable_bytes(path, budget, label="daily source")
+    return read_stable_bytes(path, _daily_read_budget(), label="daily source")
+
+
+def _daily_read_budget():
+    return min(MAX_DAILY_BYTES, setting_value("compile.max_total_source_bytes", ROOT))
+
+
+def _open_daily_source(path):
+    return open_stable_range(path, _daily_read_budget(), label="daily source")
 
 
 def _snapshot(path: Path, *, label: str = "compile source") -> SourceSnapshot:
@@ -541,14 +549,21 @@ def iter_compile_records(paths, *, compiled=None, partitions=None):
 
 
 def _daily_capture_records(path, compiled, partitions, budget):
+    if partitions is not None:
+        yield from _daily_source_records(path, _read_daily_source(path), compiled, partitions, budget)
+        return
+    with _open_daily_source(path) as content:
+        yield from _daily_source_records(path, content, compiled, partitions, budget)
+
+
+def _daily_source_records(path, content, compiled, partitions, budget):
     context = partitions or _CapturedPartitions()
-    content = _read_daily_source(path)
     logical = _logical_path(path)
     parts = (context.iter_daily(logical, content, compiled) if partitions is None
              else context.daily(logical, content, compiled))
     for part in parts:
         yield 'dailies', part
-    source = SourceSnapshot(logical, content, sha256_bytes(content))
+    source = SourceSnapshot(logical, content, immutable_source_digest(content))
     budget.add(source)
     yield 'sources', source
 

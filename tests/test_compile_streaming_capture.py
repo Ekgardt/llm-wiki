@@ -29,6 +29,61 @@ def test_stream_capture_matches_existing_complete_snapshot(vault):
         assert controller.CompileInputArchive(archive, digest).materialize() == expected
 
 
+def test_stream_capture_does_not_materialize_live_daily(vault, monkeypatch):
+    root, _ = vault
+    path = _daily(root)
+    expected = compiler.snapshot_compile_inputs([path])
+
+    def refuse(path):
+        raise AssertionError('whole live daily materialized')
+
+    monkeypatch.setattr(compiler, '_read_daily_source', refuse)
+    output = io.BytesIO()
+    digest = controller.write_compile_capture(output, [path])
+    assert digest == controller.compile_inputs_digest(expected)
+    with zipfile.ZipFile(output) as archive:
+        assert controller.CompileInputArchive(archive, digest).materialize() == expected
+
+
+def test_stream_capture_cannot_publish_after_source_changes_at_exit(vault, monkeypatch):
+    from bounded_io import SourceChangedDuringRead
+
+    root, _ = vault
+    path = _daily(root)
+    records = compiler._daily_source_records
+
+    def changed_after_records(path, *args):
+        yield from records(path, *args)
+        path.write_bytes(b'changed after records were emitted')
+
+    monkeypatch.setattr(compiler, '_daily_source_records', changed_after_records)
+    output = io.BytesIO()
+    with pytest.raises(SourceChangedDuringRead):
+        controller.write_compile_capture(output, [path])
+    with zipfile.ZipFile(output) as archive:
+        assert 'manifest.json' not in archive.namelist()
+
+
+def test_stream_capture_closes_live_source_when_blob_writer_fails(vault, monkeypatch):
+    from bounded_io import VerifiedByteRange
+
+    path = _daily(vault[0])
+    observed = []
+    put = controller._SnapshotArchiveWriter.put
+
+    def failed_write(writer, content):
+        if type(content) is VerifiedByteRange:
+            observed.append(content)
+            raise OSError('blob write failed')
+        return put(writer, content)
+
+    monkeypatch.setattr(controller._SnapshotArchiveWriter, 'put', failed_write)
+    with pytest.raises(OSError, match='blob write failed') as failure:
+        controller.write_compile_capture(io.BytesIO(), [path])
+    assert failure.traceback
+    assert observed[0].stream.closed
+
+
 def test_stream_capture_releases_completed_source_records(vault):
     root, _ = vault
     paths = [_daily(root, name) for name in ('2026-10-01', '2026-10-02')]
@@ -45,14 +100,14 @@ def test_stream_capture_writes_before_reading_next_daily(vault, monkeypatch):
     root, _ = vault
     paths = [_daily(root, name) for name in ('2026-10-01', '2026-10-02')]
     output = io.BytesIO()
-    original = compiler._read_daily_source
+    original = compiler._open_daily_source
 
     def read(path):
         if path == paths[1]:
             assert output.tell() > 0
         return original(path)
 
-    monkeypatch.setattr(compiler, '_read_daily_source', read)
+    monkeypatch.setattr(compiler, '_open_daily_source', read)
     digest = controller.write_compile_capture(output, paths)
     assert len(digest) == hashlib.sha256().digest_size * 2
 

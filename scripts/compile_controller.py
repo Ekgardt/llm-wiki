@@ -587,9 +587,7 @@ def _snapshot_types():
 
 
 def _require_snapshot_digest(content, digest):
-    import hashlib
-
-    if hashlib.sha256(content).hexdigest() != digest:
+    if immutable_source_digest(content) != digest:
         raise ValueError('snapshot content digest mismatch')
 
 
@@ -2606,8 +2604,8 @@ def _deadline_blob_digest(deadline, content):
 def _capture_manifest(paths, compiled, put, write):
     from compile_memory import iter_compile_records
 
-    return _record_manifest(iter_compile_records(paths, compiled=compiled), put, write,
-                            sort_groups=('sources', 'targets'))
+    with closing(iter_compile_records(paths, compiled=compiled)) as records:
+        return _record_manifest(records, put, write, sort_groups=('sources', 'targets'))
 
 
 def write_compile_capture(output, paths, *, compiled=None):

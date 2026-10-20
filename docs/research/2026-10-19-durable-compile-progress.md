@@ -3859,3 +3859,111 @@ emitted canonical record and part count agrees; fixture construction is outside
 measurement, timing is separate from allocation tracing, and these are not RSS,
 model-token, quality, installation or real full-cycle results. No provider calls
 were made. Live capture and native-frame payload streaming remain unfinished.
+
+
+Live-source transition investigation (2026-10-20, not yet implemented): direct
+measurement of _read_daily_source returned full bytes and allocated 2,133,378
+peak bytes for a 1 MiB file and 8,397,332 for a 4 MiB file. The fixture used real
+regular-file reads; no provider calls. Evidence is retained privately in
+logs/step7-live-read-baseline-20261020.json. The common reader joins its chunk
+list, so both the list contents and final bytes coexist. A streaming archive
+writer alone cannot fix this upstream allocation.
+
+Consumers requiring a coordinated transition are _daily_capture_records,
+_ContextReceiptSelector._source_parts, _readable_daily and its receipt-owner
+scanner, _explicit_daily, _daily_already_compiled, and _whole_daily_digest.
+The selector additionally retains all selected part bodies for its current day.
+SourceSnapshot records currently reach _require_snapshot_digest, which still
+requires the buffer protocol; accepting a range only in original_content is
+therefore insufficient for live source capture. Eager snapshot_compile_inputs
+must preserve its explicit byte-owning contract without returning expired views.
+Native frames still retain all payloads, independently of the original buffer.
+
+Sources reviewed before choosing the transition, on 2026-10-20:
+- Python 3.12 os documentation: https://docs.python.org/3.12/library/os.html
+  describes descriptor-based fstat and platform-specific open flags. Use the
+  supported floor's interfaces; do not infer portable guarantees from 3.15 docs.
+- Go's primary traversal analysis: https://go.dev/blog/osroot identifies the
+  check-then-open race and explains descriptor-relative traversal and platform
+  differences. Existing Python identity/no-follow checks must remain; a path
+  precheck alone is not an immutable source guarantee.
+- Restic backup/change detection: https://restic.readthedocs.io/en/stable/040_backup.html
+  explains why Unix ctime matters when mtime can be restored and documents the
+  different Windows metadata contract. Metadata alone is not a content proof.
+
+Alternatives under evaluation: mmap retains a mutable external file view;
+a second temporary complete copy increases disk requirements and needs ownership
+and cleanup; the existing verified block range can reuse an owned descriptor
+and computed hashes without retaining the source body. The last option fits the
+approved streaming layout but requires admission, before/after identity checks,
+per-block proof, final validation before publication, explicit close and error
+propagation. No new runtime path or dependency is proposed. The current 16 MiB
+constant and configurable 32 MiB total/2000-source limits remain inherited;
+settings still justify them by whole-memory retention. Removing that retention
+requires re-evaluating these justifications, not silently retaining or removing
+the caps. No claim of law-9 completion is made here.
+
+The refreshed built-in graph at c5677485 (generation-18e03fb1dfc94cb9-665c7901)
+confirmed the six compiler consumers and identified the dynamic seventh caller,
+maybe_compile._daily_receipted. Its source was inspected directly; it also reads
+the complete daily before checking receipts. Graph coverage remains partial
+(113363 unresolved edges), so it is not evidence of exhaustive dependencies.
+
+Three new source-record range regressions failed first at the buffer-only
+snapshot digest check: canonical complete archive identity/roundtrip, wrong
+claimed digest and closed owner. That shared check now delegates to the existing
+immutable_source_digest used by original-source verification. Exact bytes are
+hashed; exact verified ranges require an active owner and carry a digest computed
+from the initial complete source pass. It does not accept arbitrary objects with
+a digest attribute. This removes a prerequisite blocker for live capture but
+does not itself switch live daily reads or resolve all inherited limits.
+
+Source-record qualification: 60 tests passed on Python 3.12 (33.87s) and
+Python 3.10 (37.33s), including durable streaming capture, eager/stream
+identity, context refresh and batch context. Four changed functions pass
+Lizard/AST limits; Ruff passes. This small shared-check change remains part of
+the uninstalled live-source transition, not completion of streaming capture.
+
+
+Live snapshot capture implementation (2026-10-20, still uninstalled):
+open_stable_range shares file admission with read_stable_bytes and owns an
+unbuffered descriptor. VerifiedByteRange accepts an explicit absent expected
+hash only to compute its immutable digest and per-block hashes from every byte
+through EOF; provided expected hashes are still checked. This is a computed
+proof, not trust in metadata or a caller-supplied digest property. The streamed
+capture path now uses that owner; the explicit eager snapshot API retains bytes.
+
+Initial mutation tests exposed a real metadata-resolution issue: an equal-size
+rewrite sometimes leaves both observed mtime and ctime unchanged. Re-reading
+an uncached block detected changed content, but a cached immutable block could
+still return captured bytes. Successful owner exit now re-hashes the complete
+unbuffered stream against the initial digest before allowing manifest publication.
+A deterministic regression freezes fstat metadata and changes same-size content;
+exit still refuses it. This intentionally costs another full sequential pass.
+It retains the existing cooperating-writer model, not an adversarial filesystem
+snapshot guarantee. No sleep, arbitrary retry, truncation or new cap was added.
+
+A failing ZIP blob writer also reproduced an ownership leak: the retained
+exception traceback kept the suspended capture iterator and its file alive.
+_capture_manifest now explicitly closes its generator on every exit. The new
+regression holds the exception traceback and source reference and requires the
+descriptor to be closed. A separate mutation-at-source-exit regression requires
+failure and absence of manifest.json even after source records were emitted.
+
+Actual reader measurements, including initial proof, consumption of all chunks
+and final complete hash, are retained in logs/step7-live-range-measurement-20261020.json.
+Peak traced allocations were 235149 bytes for 1 MiB and 209063 for 4 MiB,
+versus the prior whole-byte reader's 2133378 and 8397332 bytes. These are synthetic
+reader allocations, not full compilation/RSS/model-token evidence. Traced times
+were 0.01060s / 0.02245s; timing is instrumented and not a comparative latency
+benchmark. Source metadata still scales with blocks. Receipt selection and its
+current-day part list, native-frame payloads, explicit daily selection, mirrors
+and maybe_compile retain whole-byte paths; actual compile with a receipt callback
+can still allocate a whole daily separately. The inherited 16 MiB daily and
+configurable corpus ceilings remain pending coordinated consumer migration.
+
+Final live-capture qualification: 261 passed and one Windows-only test skipped
+on Python 3.12 (31.58s) and Python 3.10 (34.38s). All 37 changed functions
+pass Lizard/AST limits, Ruff and whitespace checks pass. These checks cover the
+shared reader, evidence ranges, archive proofs, durable/streaming capture and
+context refresh/batching; they do not qualify installation or the full product.

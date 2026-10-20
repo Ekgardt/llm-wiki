@@ -1529,8 +1529,20 @@ contract. Closed owners, changed reloaded blocks, bad UTF-8, and mismatched
 references fail. Cached blocks remain the original immutable captured bytes.
 Archive restoration now supplies these ranges to normal record access, required
 citation checks, preflight and batch planning. Source receipt-prefix checks use
-the same range hash proof. Live daily capture and native-frame payload retention
+the same range hash proof. Live snapshot capture uses an owned file range,
+but receipt selection, eager compatibility and native-frame payload retention
 still have whole-body paths and are not claimed to be fully streaming.
+
+Live file ranges compute the original digest and per-block proofs in one pass.
+Their descriptor uses the shared no-follow/regular-file admission checks and
+unbuffered reads. Each use checks the descriptor/path identity and metadata.
+On successful scope exit, a fresh full hash verifies the source again before
+the capture can publish its manifest: rapid equal-size rewrites can leave
+timestamps unchanged. Caller errors close the descriptor without publishing.
+This preserves the existing cooperating-writer fence and does not provide
+an OS filesystem snapshot against hostile concurrent writers. No new runtime
+directory, package, or numeric cap is introduced. Existing daily/total-source
+ceilings remain pending the law-9 audit.
 
 The native journal lookup is a read-only mapping of body offsets to source
 heads and physical spans. It retains the source reference and metadata, not

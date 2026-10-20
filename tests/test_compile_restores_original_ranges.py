@@ -19,6 +19,35 @@ def _inputs():
                                                                 compiler.sha256_bytes(raw)),), ())
 
 
+def test_source_record_range_preserves_complete_archive_identity():
+    inputs = _inputs()
+    expected = compiler.CompileInputs((), inputs.sources, ())
+    with _archive(inputs) as reader:
+        original = next(reader.daily_records()).original_content
+        source = replace(inputs.sources[0], content=original)
+        ranged = compiler.CompileInputs((), (source,), ())
+        assert controller.compile_inputs_digest(ranged) == controller.compile_inputs_digest(expected)
+        with _archive(ranged) as restored:
+            assert restored.materialize() == expected
+
+
+def test_source_record_range_rejects_wrong_declared_digest():
+    with _archive(_inputs()) as reader:
+        original = next(reader.daily_records()).original_content
+        source = compiler.SourceSnapshot('knowledge/daily/test.md', original, '0' * 64)
+        with pytest.raises(ValueError, match='digest mismatch'):
+            controller._archive_record_value(source, controller._blob_digest)
+
+
+def test_source_record_range_rejects_closed_original():
+    with _archive(_inputs()) as reader:
+        original = next(reader.daily_records()).original_content
+        source = compiler.SourceSnapshot('knowledge/daily/test.md', original, original.digest)
+        reader.close()
+        with pytest.raises(ValueError, match='closed'):
+            controller._archive_record_value(source, controller._blob_digest)
+
+
 def test_actual_archive_batches_do_not_read_whole_originals(monkeypatch):
     inputs = _inputs()
     expected = compiler.pack_compile_batches(inputs, model=None)

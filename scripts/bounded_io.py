@@ -11,7 +11,9 @@ import stat
 import time
 from bisect import bisect_left
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 # The ceiling for one Markdown page under `knowledge/`, declared once: every
@@ -201,9 +203,19 @@ def read_stable_bytes(
     label: str = "file",
     deadline: float | None = None,
 ) -> bytes:
-    _require_byte_limit(max_bytes)
     deadline = _validated_deadline(deadline)
     path = Path(path)
+    descriptor, before = _open_source_descriptor(path, max_bytes, label, deadline)
+    try:
+        return _read_open_descriptor(
+            descriptor, path, _file_identity(before), max_bytes, label, deadline
+        )
+    finally:
+        os.close(descriptor)
+
+
+def _open_source_descriptor(path, max_bytes, label, deadline):
+    _require_byte_limit(max_bytes)
     _require_safe_ancestors(path, label, deadline)
     _check_deadline(deadline, label)
     before = path.lstat()
@@ -212,13 +224,45 @@ def read_stable_bytes(
         raise ValueError(f"{label} exceeds {max_bytes} bytes")
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     _check_deadline(deadline, label)
-    descriptor = os.open(path, flags)
+    return os.open(path, flags), before
+
+
+@contextmanager
+def open_stable_range(path, max_bytes, *, label="file", deadline=None):
+    """Compute one owned source proof, checking live identity through exit.
+
+    The caller must finish consuming records before leaving this scope and must
+    not publish an artifact until the scope exits successfully.
+    """
+    deadline = _validated_deadline(deadline)
+    path = Path(path)
+    descriptor, before = _open_source_descriptor(path, max_bytes, label, deadline)
     try:
-        return _read_open_descriptor(
-            descriptor, path, _file_identity(before), max_bytes, label, deadline
-        )
+        _require_opened_identity(descriptor, _file_identity(before), label)
+        with os.fdopen(descriptor, 'rb', buffering=0, closefd=False) as stream:
+            check = partial(_require_live_source, descriptor, path, before, label)
+            source = VerifiedByteRange(stream, before.st_size, None, deadline, owner_check=check)
+            yield source
+            _require_final_source_content(source, label)
     finally:
         os.close(descriptor)
+
+
+def _require_live_source(descriptor, path, before, label):
+    _require_unchanged_after_read(descriptor, path, _file_identity(before), label)
+    if os.fstat(descriptor).st_ctime_ns != before.st_ctime_ns:
+        raise SourceChangedDuringRead(f"{label} metadata changed during read")
+
+
+def _require_final_source_content(source, label):
+    source.require_active()
+    source.stream.seek(0)
+    try:
+        _verified_original_blocks(source.stream, source.size, source.digest,
+                                  source.deadline, source.chunk_size)
+    except ValueError as exc:
+        raise SourceChangedDuringRead(f"{label} content changed during read") from exc
+    source.require_active()
 
 
 
@@ -241,7 +285,7 @@ class VerifiedByteRange:
 
     stream: object = field(repr=False)
     size: int
-    digest: str
+    digest: str | None
     deadline: float | None = None
     chunk_size: int = IO_CHUNK_BYTES
     owner_check: Callable | None = field(default=None, repr=False)
@@ -249,8 +293,9 @@ class VerifiedByteRange:
     _cursor: _VerifiedRangeCursor = field(default_factory=_VerifiedRangeCursor, init=False, repr=False)
 
     def __post_init__(self):
-        hashes = _verified_original_blocks(self.stream, self.size, self.digest,
-                                            self.deadline, self.chunk_size)
+        digest, hashes = _verified_original_blocks(self.stream, self.size, self.digest,
+                                                   self.deadline, self.chunk_size)
+        object.__setattr__(self, 'digest', digest)
         object.__setattr__(self, 'hashes', hashes)
         self.stream.seek(0)
         self.require_active()
@@ -401,15 +446,24 @@ def _verified_original_blocks(stream, size, expected, deadline, chunk_size):
     _require_range_identity(expected, chunk_size)
     if type(size) is not int or size < 0:
         raise ValueError('invalid original source size')
+    digest, blocks = _original_block_proof(stream, size, deadline, chunk_size)
+    _require_expected_source_digest(expected, digest)
+    return digest, blocks
+
+
+def _original_block_proof(stream, size, deadline, chunk_size):
     digest, blocks = hashlib.sha256(), []
     for start in range(0, size, chunk_size):
         chunk = _read_original_block(stream, min(chunk_size, size - start), deadline)
         digest.update(chunk)
         blocks.append(hashlib.sha256(chunk).digest())
     _require_original_eof(stream, deadline)
-    if digest.hexdigest() != expected:
+    return digest.hexdigest(), tuple(blocks)
+
+
+def _require_expected_source_digest(expected, actual):
+    if expected is not None and actual != expected:
         raise ValueError('snapshot content digest mismatch')
-    return tuple(blocks)
 
 
 def _read_original_block(stream, size, deadline):
@@ -472,10 +526,15 @@ def _last_original_match(chunks, needle, start):
 
 
 def _require_range_identity(digest, chunk_size):
-    if not isinstance(digest, str) or re.fullmatch(r'[0-9a-f]{64}', digest) is None:
-        raise ValueError('source identity must be a SHA-256 hex digest')
+    if digest is not None:
+        _require_source_digest(digest)
     if type(chunk_size) is not int or chunk_size <= 0:
         raise ValueError('source transfer size must be a positive integer')
+
+
+def _require_source_digest(digest):
+    if not isinstance(digest, str) or re.fullmatch(r'[0-9a-f]{64}', digest) is None:
+        raise ValueError('source identity must be a SHA-256 hex digest')
 
 
 def require_byte_range(start, end, size):
