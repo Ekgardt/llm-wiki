@@ -1049,3 +1049,64 @@ changed/new functions passed measured CCN/if/nesting checks; whole scripts/tests
 Ruff passed. The dependency/work manifest builder, entrypoint adoption and all
 previously listed installation/full-cycle requirements remain open. This shared
 primitive alone does not qualify dependency-complete replay.
+
+### 2026-10-20: explicit dependency manifests and origin-scoped work identity
+
+The candidate now builds canonical file/configuration manifests using the shared
+stable reader, and work identities binding original queue task, source digest,
+dependency digest and invocation parameters. Redrive callers must retain the
+original task identity; independent tasks with identical sources must not collide.
+A controller test uses actual helper-file bytes: an unchanged dependency replays
+one saved answer, while changed bytes (without a version bump) refuse reuse and
+cause no additional provider call. This test uses a fake provider, not paid-model
+or installed-entrypoint qualification.
+
+The product inventory traverses scripts (including schemas/data), pyproject.toml
+and uv.lock. The package inventory hashes actual files from importlib.metadata,
+not RECORD's stated digests; package versions and ordered sys.path are also bound.
+Named file additions/removals, configuration changes and symlink retargeting change
+the identity. Legitimate directory symlinks are followed; directory cycles are
+refused because there is no finite tree traversal, not because of an arbitrary
+count/depth cap. Cached bytecode is omitted only when its corresponding source
+exists; source-less bytecode remains inventoried. This assumes normal Python
+cache derivation and does not certify a hostile/modified bytecode cache.
+
+Configuration values and resolved locations are hashed before being returned;
+these hashes are identity witnesses, not encryption for low-entropy secrets.
+No manifest includes plaintext configuration values or file bodies. File content
+streams with caller deadlines and no added size cap. Missing package inventories
+and editable packages with unenumerated external source trees refuse qualification
+explicitly; they are not silently treated as fully covered. Supporting editable
+packages requires an explicit complete source inventory, not an arbitrary allowlist.
+Zip/custom metadata providers are not yet qualified by this filesystem builder.
+
+Design basis (rechecked 2026-10-20): Python importlib.metadata's file-inventory
+contract, Bazel's input-bound action caching and Nix's derivation identity, linked
+above. Alternatives rejected: version-only/hash-from-RECORD identity (misses
+changed installed bytes), source-digest-only work IDs (collides between independent
+tasks), and persisting configuration values (unneeded disclosure). Conservative
+whole-product/all-distribution inventories can invalidate work after unrelated
+updates; narrower closure needs evidence of complete imports/resource dependencies.
+
+Local measurement: two product passes over 250 files / 8,829,214 bytes agreed in
+0.160 s; two installed-package passes over 8,772 files / 172,014,387 bytes agreed in
+6.329 s. These are local measurements, not full task performance or a safe polling
+interval. Logs: logs/step7-{product,package}-identity-measurement-20261020.json.
+Eleven initial identity tests, three product-inventory tests and three package
+inventory tests failed before their implementations. The final 18 focused tests
+pass on both Python versions. All 35 changed/new functions pass measured complexity;
+whole scripts/tests Ruff and diff checks pass.
+
+Still incomplete: the execution environment must account for interpreter/stdlib,
+external binaries and loaded code versus files changed after process startup;
+complete effective runtime configuration/DLP/provider identity must be composed
+with these components. Traversal is not a filesystem snapshot: admission must
+re-inventory and refuse changes. These APIs do not yet wire the production entry
+points, prove complete dependency closure, or solve durable full-batch preflight.
+All previously recorded installation, recovery and real-cycle gates remain open.
+
+Related dispatch/call/capture suites completed: 114 tests passed on Python 3.12
+(159.79 s) and Python 3.10 (203.61 s), before the final package-specific additions;
+the final 18 identity tests were then separately verified on each version (7.40 /
+9.10 s). Logs: logs/step7-dependency-identity-py{312,310}-20261020.txt. No full-suite,
+Windows/macOS, complete dependency closure or real paid-model claim is made.
