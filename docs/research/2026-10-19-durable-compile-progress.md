@@ -2869,3 +2869,60 @@ pass lizard/AST complexity checks; whole Ruff and whitespace checks pass.
 Evidence: `step7-request-selection-{red,dry-red,focused,py312,py310}-20261020.txt`
 and `step7-request-selection-complexity-20261020.json`.
 The real selected medium provider and installed behavior remain unqualified.
+
+### 2026-10-20 — selecting a foreground task without bypassing queue admission
+
+The existing adopted claim path chooses the highest-priority eligible task.
+A foreground compile must be able to choose its own enqueued task, while keeping
+the same live-owner, payload, capture-link, source-fence, availability and attempt
+checks. Processing arbitrary queued tasks until the desired one appears changes
+the caller's requested work; constructing a lease directly bypasses admission.
+A separate foreground queue or database would duplicate authority.
+
+The selected design adds an optional task ID to the existing adopted `claim`
+path and appends a parameterized primary-key predicate to the shared eligibility
+query, inside the same BEGIN IMMEDIATE transaction. The ordinary worker order
+is unchanged when no ID is supplied. Missing/ineligible targets return no lease;
+they never fall through to unrelated work. Corrupt targets still follow normal
+demotion; valid unrelated tasks remain ready. This is an input selector, not a
+new runtime component or a bypass/retry capability.
+
+Research basis checked on 2026-10-20 is the SQLite transaction, AWS idempotent
+intent and Python process-ownership documentation cited in the ingress section
+above. The same existing claim/lease/worker mechanisms remain authoritative.
+Use the existing task-ID validator: its 1..256 UTF-8-byte constraint matches
+the current `tasks.id` SQL CHECK, rather than introducing a new arbitrary limit.
+The existing queue attempt/lease policies remain and still need the complete
+point-7 law-9 audit; this change does not claim to finish that audit. Targeted
+worker supervision and frontend routing must follow before ingress is complete.
+
+The worker supervision step below is now qualified; frontend routing remains open.
+
+
+The existing `_work_one` now forwards the optional selector through
+`_claim_when_reachable`; all parent heartbeat, child supervision, retained-result
+adoption and whole-work proof checks are reused. The option is omitted entirely
+for ordinary calls, preserving legacy/custom claim interfaces. A spawned real
+compile processor with a fake semantic backend publishes and settles its chosen
+task while a higher-priority unrelated task remains untouched. A canceled target
+starts no processor. No frontend calls this new route yet.
+
+Before implementation, targeted claim tests reproduced 17 failures and targeted
+worker tests reproduced three failures from the missing selector interfaces.
+Final claim/related checks passed 129 tests on Python 3.12 (111.59s) and Python
+3.10 (160.10s). Separate worker/related checks passed 24 tests on Python 3.12
+(22.93s) and Python 3.10 (24.34s), after worker forwarding was added. These are
+separate runs, not one full-suite result. All 26 changed/new functions passed
+lizard/AST complexity checks. Whole Ruff and whitespace checks passed.
+
+Built-in navigation used generation `generation-18e030951782eaed-7494588d`
+at base `1f165b3a`; partial graph results were supplemented by source inspection.
+SQLite EXPLAIN QUERY PLAN on the candidate schema confirms target selection uses
+`sqlite_autoindex_tasks_1 (id=?)`; it is not a full-cycle performance measurement.
+Evidence: `step7-target-claim-{red,py312,py310}-20261020.txt`,
+`step7-target-worker-{red,py312,py310}-20261020.txt`,
+`step7-target-claim-complexity-20261020.json` and
+`step7-target-claim-query-plan-20261020.json` under the private vault logs.
+Caller deadlines/cancellation and ephemeral compile-lock handoff remain ingress
+work. These fake-provider tests do not qualify installed behavior or medium-model
+quality, token cost, recovery cost or completion of point 7.

@@ -7474,6 +7474,13 @@ _V3_WORK_CLAIMABLE = """state='ready' AND attempts < ? AND available_at <= ?
     )"""
 
 
+def _claim_task_filter(task_id):
+    if task_id is None:
+        return '', ()
+    _require_task_identifier(task_id)
+    return ' AND tasks.id=?', (task_id,)
+
+
 def _require_compile_task_family(database, row, checkpoint):
     family = _redrive_ancestors(database, row['id']) | {row['id']}
     if row['kind'] != 'compile' or checkpoint.task_id not in family:
@@ -11606,15 +11613,17 @@ class _QueueV3CandidateReader:
         *,
         lease_seconds: int = DEFAULTS.queue_lease_seconds,
         max_attempts: int = DEFAULTS.queue_max_attempts,
+        task_id: str | None = None,
     ) -> QueueLease | None:
         _check_claim_arguments(owner, lease_seconds, max_attempts)
+        task_filter = _claim_task_filter(task_id)
         now = _utc_now()
         with closing(
             self._connect()
         ) as database, begin_immediate(database):
             self._delete_stale_source_fences(database)
             self._recover_expired_in(database, now)
-            claimable = self._next_claimable_task(database, now, max_attempts)
+            claimable = self._next_claimable_task(database, now, max_attempts, task_filter)
             if claimable is None:
                 return None
             row, validation = claimable
@@ -11646,15 +11655,16 @@ class _QueueV3CandidateReader:
         )
 
     def _next_claimable_task(
-        self, database: sqlite3.Connection, now: datetime, max_attempts: int
+        self, database: sqlite3.Connection, now: datetime, max_attempts: int, task_filter
     ) -> tuple[sqlite3.Row, PayloadValidation] | None:
         """The next ready task with a readable payload and attempts to spare."""
         _register_source_reference(database)
+        predicate, target_parameters = task_filter
         while True:
             row = database.execute(
-                f"""SELECT * FROM tasks WHERE {_V3_WORK_CLAIMABLE}
+                f"""SELECT * FROM tasks WHERE {_V3_WORK_CLAIMABLE}{predicate}
                    ORDER BY priority DESC, available_at, created_at, id LIMIT 1""",
-                (max_attempts, _timestamp(now)),
+                (max_attempts, _timestamp(now), *target_parameters),
             ).fetchone()
             if row is None:
                 return None
@@ -15163,6 +15173,13 @@ def _is_busy_database(error: sqlite3.OperationalError) -> bool:
     return busy_database(error)
 
 
+def _worker_claim_options(lease_seconds, max_attempts, task_id):
+    options = {'lease_seconds': lease_seconds, 'max_attempts': max_attempts}
+    if task_id is not None:
+        options['task_id'] = task_id
+    return options
+
+
 def _claim_when_reachable(
     queue: MemoryQueue,
     *,
@@ -15171,15 +15188,17 @@ def _claim_when_reachable(
     max_attempts: int,
     deadline: float,
     monotonic: Callable[[], float],
+    task_id: str | None = None,
 ) -> QueueLease | None:
     """A busy database means "try again shortly", not a dead worker.
 
     Another worker holding the write lock used to surface as an unhandled
     `database is locked` out of the worker loop, which ended the run.
     """
+    options = _worker_claim_options(lease_seconds, max_attempts, task_id)
     while True:
         try:
-            return queue.claim(owner, lease_seconds=lease_seconds, max_attempts=max_attempts)
+            return queue.claim(owner, **options)
         except sqlite3.OperationalError as error:
             # Only a busy database is "nothing to claim yet". A disk I/O error or
             # a missing table is a failure the operator has to see, not an idle queue.
@@ -15439,6 +15458,7 @@ def _work_one(
     max_attempts: int,
     retry_base_seconds: int,
     retry_cap_seconds: int,
+    task_id: str | None = None,
 ) -> dict[str, int]:
     counts = {"ok": 0, "failed": 0, "dead": 0, "skipped": 0, "halted": 0}
     lease = _claim_when_reachable(
@@ -15448,6 +15468,7 @@ def _work_one(
         max_attempts=max_attempts,
         deadline=deadline,
         monotonic=monotonic,
+        task_id=task_id,
     )
     if lease is None:
         return counts
