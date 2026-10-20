@@ -354,8 +354,14 @@ It is mutually exclusive with initial ownership adoption. The image must be an
 external empty directory for a new upgrade, or the exact retained image for
 recovery. Confirmation never overrides a live or unknown registered owner.
 Success verifies the upgraded admission; it does not certify encrypted recovery
-or authorize preimage deletion. The shell/PowerShell installers do not yet
-orchestrate this operation. An isolated migrated fixture has passed backup and
+or authorize preimage deletion. The shell/PowerShell installers invoke the same
+operation with `--compile-backup-image <absolute-directory>` /
+`-CompileBackupImage <absolute-directory>` plus their explicit stopped-agent
+confirmation. Validated inspection exposes `details.compile_progress` as
+`upgrade-required` or `upgraded`; invalid/incomplete admission exposes neither.
+An upgraded installation needs no image. An installation requiring migration
+without the explicit inputs reports a warning, including after fresh v3 adoption.
+No image directory is chosen or deleted automatically. An isolated migrated fixture has passed backup and
 restore using real Restic 0.19.1, including exact Markdown and queued payload
 checks; the installed private vault has not passed this deployment qualification.
 

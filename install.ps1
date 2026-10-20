@@ -25,6 +25,7 @@
 param(
     [switch]$ProtectPush,
     [switch]$ConfirmAllAgentsStopped,
+    [string]$CompileBackupImage = "",
     # Replace a Codex 'llm-wiki' MCP entry this product did not write, keeping a preimage.
     [switch]$ReplaceCodexMcp,
     # The operator takes over a file changed outside the installer as it is now;
@@ -34,6 +35,10 @@ param(
     # a console. See docs/research/2026-09-29-the-installer-asks-which-model.md.
     [string]$Model = ""
 )
+
+if ($CompileBackupImage -and -not $ConfirmAllAgentsStopped) {
+    throw "-CompileBackupImage requires -ConfirmAllAgentsStopped"
+}
 
 $ErrorActionPreference = "Stop"
 $UvVersion = "0.12.3"
@@ -354,6 +359,7 @@ if ($scriptDirectory -and (Test-Path -LiteralPath (Join-Path $scriptDirectory "p
     )
     if ($ProtectPush) { $reexecArguments += "-ProtectPush" }
     if ($ConfirmAllAgentsStopped) { $reexecArguments += "-ConfirmAllAgentsStopped" }
+    if ($CompileBackupImage) { $reexecArguments += @("-CompileBackupImage", $CompileBackupImage) }
     if ($ReplaceCodexMcp) { $reexecArguments += "-ReplaceCodexMcp" }
     foreach ($resourceId in $Adopt) { $reexecArguments += @("-Adopt", $resourceId) }
     if ($Model) { $reexecArguments += @("-Model", $Model) }
@@ -771,6 +777,36 @@ if ($adoptionPlan -eq "adopted") {
     Warn ((uv run --locked --no-sync python "$VAULT_ROOT\scripts\repair_installed_memory.py" --check --summary 2>$null) | Out-String).Trim()
     Warn "  details: uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json"
 }
+
+function Get-CompileProgressState {
+    $report = uv run --locked --no-sync python (Join-Path $VAULT_ROOT "scripts/repair_installed_memory.py") --check --json 2>$null
+    try { return [string](($report | Out-String | ConvertFrom-Json).details.compile_progress) } catch { return "unknown" }
+}
+function Invoke-CompileProgressMigration {
+    $migrationLog = Join-Path $STATE_ROOT "logs/install-compile-migration.log"
+    uv run --locked --no-sync python (Join-Path $VAULT_ROOT "scripts/repair_installed_memory.py") --apply --upgrade-compile-progress --backup-image $CompileBackupImage --confirm-all-agents-stopped *> $migrationLog
+    if ($LASTEXITCODE -eq 0) {
+        Ok "Compile journal upgraded; retain its backup image"
+        return
+    }
+    $script:syncWarning = $true
+    Warn "Compile migration did not complete; retain the image and resume with the same arguments."
+    Warn "  the report is in $migrationLog"
+}
+function Invoke-CompileProgressUpgrade {
+    if ((Get-CompileProgressState) -eq "upgraded") {
+        Ok "Compile journal is ready"
+        return
+    }
+    if (-not $CompileBackupImage -or -not $ConfirmAllAgentsStopped) {
+        $script:syncWarning = $true
+        Warn "Compilation needs an offline journal upgrade. Stop agents, then rerun with -ConfirmAllAgentsStopped -CompileBackupImage <absolute-external-directory>."
+        Warn "Use an empty directory for a new migration, or its exact retained image to resume."
+        return
+    }
+    Invoke-CompileProgressMigration
+}
+Invoke-CompileProgressUpgrade
 
 # --- 8a. Pinned model weights ------------------------------------
 # The read path loads weights local-only. Every pinned model whose runtime is

@@ -39,6 +39,8 @@ SCHEDULER_MODE=native
 EXPECT_SCHEDULER_VALUE=0
 EXPECT_ADOPT_VALUE=0
 EXPECT_MODEL_VALUE=0
+EXPECT_COMPILE_BACKUP_VALUE=0
+COMPILE_BACKUP_IMAGE=""
 # `--model <name>`: the memory model, checked with one short call; without it the
 # installer asks on a terminal (docs/research/2026-09-29-the-installer-asks-which-model.md).
 MODEL_ARGS=()
@@ -57,6 +59,11 @@ fail()  { echo -e "${RED}[FAIL]${NC} $1"; exit 1; }
 # See docs/research/2026-09-17-the-installer-runs-on-the-bash-macos-ships.md.
 
 for argument in "$@"; do
+  if [[ "$EXPECT_COMPILE_BACKUP_VALUE" -eq 1 ]]; then
+    COMPILE_BACKUP_IMAGE="$argument"
+    EXPECT_COMPILE_BACKUP_VALUE=0
+    continue
+  fi
   if [[ "$EXPECT_SCHEDULER_VALUE" -eq 1 ]]; then
     SCHEDULER_MODE="$argument"
     EXPECT_SCHEDULER_VALUE=0
@@ -82,12 +89,18 @@ for argument in "$@"; do
     --adopt=*) ADOPT_ARGS+=(--adopt "${argument#--adopt=}") ;;
     --model) EXPECT_MODEL_VALUE=1 ;;
     --model=*) MODEL_ARGS=(--model "${argument#--model=}") ;;
+    --compile-backup-image) EXPECT_COMPILE_BACKUP_VALUE=1 ;;
+    --compile-backup-image=*) COMPILE_BACKUP_IMAGE="${argument#--compile-backup-image=}" ;;
     *) fail "Unknown installer argument: $argument" ;;
   esac
 done
 [[ "$EXPECT_SCHEDULER_VALUE" -eq 0 ]] || fail "--scheduler requires native or cron"
 [[ "$EXPECT_ADOPT_VALUE" -eq 0 ]] || fail "--adopt requires a resource id"
 [[ "$EXPECT_MODEL_VALUE" -eq 0 ]] || fail "--model requires a model name"
+[[ "$EXPECT_COMPILE_BACKUP_VALUE" -eq 0 ]] || fail "--compile-backup-image requires an external image directory"
+if [[ -n "$COMPILE_BACKUP_IMAGE" && "$AGENTS_STOPPED" -ne 1 ]]; then
+  fail "--compile-backup-image requires --confirm-all-agents-stopped"
+fi
 case "$SCHEDULER_MODE" in
   native|cron) ;;
   *) fail "--scheduler requires native or cron" ;;
@@ -829,6 +842,35 @@ case "$(adoption_plan "$ADOPTION_STATE" "$AGENTS_STOPPED")" in
     adoption_tail
     ;;
 esac
+
+compile_progress_state_of() {
+  local report
+  report="$(uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --check --json 2>>"$ADOPTION_ERR" || true)"
+  printf '%s' "$report" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("details", {}).get("compile_progress", "unknown"))' 2>>"$ADOPTION_ERR" || echo unknown
+}
+apply_compile_progress_upgrade() {
+  if uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --apply --upgrade-compile-progress --backup-image "$COMPILE_BACKUP_IMAGE" --confirm-all-agents-stopped >>"$ADOPTION_ERR" 2>&1; then
+    ok "Compile journal upgraded; retain its backup image"
+    return
+  fi
+  SYNC_WARNING=1
+  warn "Compile migration did not complete; retain the image and resume with the same arguments."
+  adoption_tail
+}
+upgrade_compile_progress() {
+  if [[ "$(compile_progress_state_of)" == upgraded ]]; then
+    ok "Compile journal is ready"
+    return
+  fi
+  if [[ -z "$COMPILE_BACKUP_IMAGE" || "$AGENTS_STOPPED" -ne 1 ]]; then
+    SYNC_WARNING=1
+    warn "Compilation needs an offline journal upgrade. Stop agents, then rerun with --confirm-all-agents-stopped --compile-backup-image <absolute-external-directory>."
+    warn "Use an empty directory for a new migration, or its exact retained image to resume."
+    return
+  fi
+  apply_compile_progress_upgrade
+}
+upgrade_compile_progress
 
 # ─── 8a. Pinned model weights ──────────────────────────────────────
 # The read path loads weights local-only. Every pinned model whose runtime is

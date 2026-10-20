@@ -2721,9 +2721,14 @@ def _inspect_adopted(
         adoption=adoption,
         operation_artifacts=operation_artifacts,
     )
-    return _report(
+    report = _report(
         mode="check", status="ok", state="adopted", blockers=[], artifacts=artifacts
     )
+    report["details"]["compile_progress"] = {
+        "reliability-v3-adoption/v1": "upgrade-required",
+        "reliability-v3-adoption/v2": "upgraded",
+    }[adoption["schema_version"]]
+    return report
 
 
 def repair_installed_vault(

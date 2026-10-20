@@ -4465,3 +4465,60 @@ The code index used for this change was generation
 confirmed in the partial graph and its CLI/report/migration dependencies inspected
 in source. No live-vault migration or model call was performed. Installer wiring
 and the other deployment/full-cycle gates remain open.
+
+Installer integration design, 2026-10-20: read-only inspection currently reports
+both adopted queue versions only as `adopted`, so installers cannot distinguish
+an old queue from an upgraded one. Expose `details.compile_progress` only after
+complete admission validation, deriving `upgrade-required`/`upgraded` from the
+validated adoption envelope. Do not infer readiness merely from an event table
+or a raw PRAGMA. Preserve the original adoption status and report contract.
+
+Add an explicit backup-image argument to both installers, carried unchanged
+through remote-bootstrap reexecution. Already-upgraded installations need no
+image. All other cases either invoke the existing repair operation with an
+explicit image and offline confirmation, or report that compilation still needs
+migration. A supplied image without confirmation is rejected before installation
+side effects. Neither installer chooses a staging path, silently grants offline
+confirmation, copies SQL, or adds automatic startup/nightly migration. A failed
+attempt remains a warning with its retained diagnostic report, consistent with
+existing resumable adoption. Fresh v3 adoption remains independently supported;
+the subsequent compile migration has the same explicit gate as an existing vault.
+
+The previously reviewed SQLite atomicity, PostgreSQL restore-failure and Restic
+explicit-target contracts above also govern this thin orchestration. This extends
+the approved migration's supported invocation, not its storage architecture.
+Alternatives rejected: duplicate migration code in shell/PowerShell; assuming
+`adopted` means the compile journal exists; automatic selection/deletion of a
+backup location. The tradeoff is an explicit offline step for a new queue as
+well as an existing one, until initial adoption itself can establish the complete
+new contract without weakening old-client exclusion. No arbitrary limit is added.
+
+Installer integration qualification: 81 tests passed on Python 3.12 (18.94 s),
+then 39 additional bootstrap/warning/invalid-readiness tests (8.34 s); Python
+3.10 passed 52 integration/adoption/CLI tests (16.11 s) and the additional
+invalid-readiness regression (0.83 s). Bash and native PowerShell each executed
+their extracted installer functions against a real adopted fixture and the
+production repair CLI, reaching validated upgraded admission. Scenario tests
+covered already-ready/no-image, missing image, missing confirmation, valid
+migration, unknown inspection followed by explicit recovery, and migration
+failure. Paths containing spaces arrived as a single unchanged argument. Invalid
+queue version never produced the readiness field. The complete installer rejects
+an image supplied without offline confirmation before filesystem side effects.
+Windows remote-bootstrap argument preservation has a source assertion alongside
+the general bootstrap suite; the Windows operating system itself was not tested.
+
+Actual AST measurements of the three new Bash functions: CCN 3/2/4, nesting
+0/1/1, if counts 0/1/2. The three PowerShell functions: CCN 2/2/4, nesting 0/1/1,
+if counts 0/1/2, no elseif chains or complex ternaries. All ten changed/new Python
+functions passed Lizard/AST gates. Ruff, Bash syntax and diff checks passed.
+PowerShell 7.6.7 was a temporary validation tool downloaded from the official
+PowerShell release API; the linux-x64 archive matched release SHA256
+`6896f9e3a6b0a354bf470835a96da76d2f801cd50dcf047ad7c4563bf93bf431`.
+It is not a new product dependency. The built-in callers view for
+`_inspect_adopted` used generation `generation-18e0466408cd3a5c-fc6dfb9f` at
+`edd4e309`, supplemented by direct shell/PowerShell and admission source reads.
+Evidence logs use `step7-installer-migration-*-20261020` under private `logs/`.
+
+This wires the supported explicit operation into both installers; it does not
+constitute an actual full installation, full-vault encrypted recovery, removal
+of migration compatibility, or the required useful medium-model full cycle.
