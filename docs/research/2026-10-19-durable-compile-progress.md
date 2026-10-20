@@ -2141,3 +2141,48 @@ Evidence: step7-tree-execution-{red,green,py312,py310,final-py312,final-py310}-2
 and step7-tree-execution-complexity-20261020.json in private vault logs.
 This candidate tree path is not yet installed or routed through production;
 whole-task preflight/refusal accounting and final settlement remain required.
+
+### Whole-preflight completion (2026-10-20, implementation underway)
+
+Rechecked SQLite isolation, AWS retry identity and Temporal execution/history
+primary sources linked above on 2026-10-20. Apply their stable intent/history and
+consistent-read principles to the approved local journal. Completing the last
+executed batch is insufficient: refused sources and earlier missing receipts must
+also prevent whole-work success. Confirm the complete retained preflight under
+one existing canonical Markdown writer gate, rechecking every admitted root tree.
+Proof reads existing child contexts only; it must never admit missing children,
+capture live context or call a model. An empty source manifest may complete, but
+an all-refused or partly refused plan may not.
+
+A compact completion event binds the exact preflight and an ordered streaming
+hash of all receipt-validated root completion records plus the batch count. Full
+root identities remain derivable from the retained preflight; leaf proofs remain
+in the existing journal. This avoids a size-growing metadata list or another
+artifact format. Counters alone, independently timed per-root confirmations and
+a new aggregate database were rejected: respectively incomplete authority, mixed
+writer snapshots and unnecessary storage duplication. Prior completion is always
+revalidated; missing evidence after completion is an error. No new numeric bound,
+runtime path, external dependency, stage or schema migration is introduced.
+Queue settlement remains the existing worker parent's responsibility; it may use
+this proof only after the controller finishes the complete delivery scope.
+
+Fresh graph before code changes: generation-18e026640b733863-835a7fdb at11b6d4e5.
+Builtin callees for iter_compile_preflight and confirm_compile_repair were fresh
+but partial; source inspection supplied unresolved queue/owner/method edges.
+Eight initial red cases reproduced missing aggregate execution/proof. Final
+coverage includes absent admissions, one completed root, all-root completion,
+partial and total preflight refusal, truly empty sources, lost final event recovery,
+missing receipts after success, one writer gate, cancellation and unknown-first-root
+progress/repeat refusal across redelivery. The existing streamed preflight consumer
+is shared by execution and proof rather than adding another plan parser. Optional
+refusal notifications do not remove retained refusal evidence or permit success.
+
+All63 related tests passed on Python3.12 (99.40s) and3.10 (109.14s). All37 changed/new
+functions pass measured CCN/if/nesting limits; whole scripts/tests Ruff and diff
+checks pass. Package compatibility checks65/67 pass, with no package/lock changes.
+These are regression-environment measurements, not real useful-cycle latency or
+cost qualification. Logs: step7-work-completion-{red,green,py312,py310}-20261020.txt
+and step7-work-completion-complexity-20261020.json in private vault logs.
+Not installed. Queue-parent settlement integration and CLI/MCP/nightly routing,
+full dependency closure, consent/repeat surfaces, semantic reference retention,
+backup/restore, installation/legacy removal and real-model qualification remain.

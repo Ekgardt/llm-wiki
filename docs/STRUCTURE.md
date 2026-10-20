@@ -1266,8 +1266,18 @@ allow disjoint source siblings to progress inside the same delivery, but block
 that delivery when it closes. They never authorize a repeat or parent completion.
 Other errors propagate immediately. Final completion revalidates the whole tree;
 the executor does not settle the queue task. The prepared-tree entry owns archive
-lifetimes and can participate in an existing delivery. Whole-task settlement,
-production routing and semantic reference auditing remain unfinished.
+lifetimes and can participate in an existing delivery.
+The candidate whole-work executor now consumes every verified preflight entry
+inside one delivery and asks for full-work proof afterwards. Refusals remain
+durable in the preflight even when there is no notification callback; they prevent
+completion. The proof walks all root trees under one canonical writer gate using
+only existing saved child contexts. Missing work is not admitted. A compact
+`work_completion` event binds the exact preflight, batch count and ordered hash of
+all revalidated root completion records. A truly empty source manifest may
+complete; an all-refused manifest cannot. Previous completion is revalidated, and
+lost evidence is an error. This proof does not settle the queue task: the worker
+parent still owns that transition after the entire delivery exits. Production
+routing, worker integration and semantic reference auditing remain unfinished.
 
 The archive's eager compatibility planning view keeps daily records materialized for existing partition
 proofs, while context source/target/vault collections retain verified record indices
