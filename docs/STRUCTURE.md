@@ -204,6 +204,16 @@ disabled quota. Zero does not disable separate per-file, archive, model-input,
 output, downstream index or ownership checks; their law-9 qualification is
 independent. Existing positive private-vault settings are not rewritten.
 
+The candidate index renderer also reads each source body once, overlays pending
+transaction after-images without changing the caller's base mapping, and retains
+only extracted navigation entries for ordering. Original and resulting page sets
+are both checked against any explicit `index.max_pages` /
+`index.max_total_bytes` quota; both now default to 0 (disabled). Private sources
+remain subject to input checks and are excluded before their text is decoded
+into public index entries. Per-page/output limits remain in force. This renderer
+does not make the standalone `_rebuild_plan` streaming: that caller still obtains
+a content-bearing claim-tree snapshot, a separate remaining memory boundary.
+
 The approved 2026-10-18 compile correction setting is `compile.validation_retries`
 (`LLM_WIKI_COMPILE_VALIDATION_RETRIES` for one run), default 2, minimum 0, no
 additional upper ceiling. It counts correcting passes after the initial

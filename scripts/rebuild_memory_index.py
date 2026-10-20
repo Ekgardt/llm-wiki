@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -85,67 +85,82 @@ def build_index_bytes(
 ) -> bytes:
     """Render the index from disk plus unpublished transaction after-images."""
     root = Path(root)
-    virtual = _virtual_pages(root, base)
-    _require_within_limits(virtual, root)
-    _apply_pending(virtual, pending)
-    _require_within_limits(virtual, root)
+    virtual = _limited_pages(_virtual_pages(root, base, pending), root)
     return _render_index(_index_buckets(_published_only(root, virtual)))
 
 
 def _virtual_pages(
-    root: Path, base: Mapping[str, bytes] | None
-) -> dict[str, bytes]:
+    root: Path, base: Mapping[str, bytes] | None,
+    pending: Mapping[str, bytes | None] | None,
+) -> Iterable[tuple[str, bytes]]:
+    remaining = dict(pending or {})
+    _validate_pending(remaining)
+    for relative, content in _limited_pages(_source_pages(root, base), root):
+        selected = remaining.pop(relative, content)
+        if selected is not None:
+            yield relative, selected
+    yield from _pending_additions(remaining)
+
+
+def _pending_additions(remaining: Mapping[str, bytes | None]) -> Iterable[tuple[str, bytes]]:
+    return ((relative, content) for relative, content in remaining.items() if content is not None)
+
+
+def _source_pages(root: Path, base: Mapping[str, bytes] | None) -> Iterable[tuple[str, bytes]]:
     if base is not None:
-        return dict(base)
+        yield from base.items()
+        return
     notes = root / "knowledge" / "notes"
-    if not notes.exists():
-        return {}
-    return {
-        path.relative_to(root).as_posix(): read_stable_bytes(
+    for path in notes.rglob("*.md"):
+        yield path.relative_to(root).as_posix(), read_stable_bytes(
             path, MAX_PAGE_BYTES, label="knowledge index source"
         )
-        for path in notes.rglob("*.md")
-    }
 
 
-def _require_within_limits(virtual: Mapping[str, bytes], root: Path) -> None:
-    """The index.max_pages and index.max_total_bytes ceilings of `settings`."""
-    if len(virtual) > setting_value("index.max_pages", root):
-        raise IndexCapacityError(f"knowledge index page count exceeds limit; {raise_hint('index.max_pages')}")
-    if sum(len(content) for content in virtual.values()) > setting_value("index.max_total_bytes", root):
-        raise IndexCapacityError(f"knowledge index source bytes exceed limit; {raise_hint('index.max_total_bytes')}")
-
-
-def _apply_pending(
-    virtual: dict[str, bytes], pending: Mapping[str, bytes | None] | None
-) -> None:
-    for relative, content in (pending or {}).items():
+def _validate_pending(pending: Mapping[str, bytes | None]) -> None:
+    for relative, content in pending.items():
         if not relative.startswith("knowledge/notes/"):
             raise ValueError("pending index path is outside knowledge notes")
-        _apply_one_pending(virtual, relative, content)
+        if content is not None and len(content) > MAX_PAGE_BYTES:
+            raise ValueError("pending index page exceeds limit")
 
 
-def _apply_one_pending(
-    virtual: dict[str, bytes], relative: str, content: bytes | None
-) -> None:
-    if content is None:
-        virtual.pop(relative, None)
-        return
-    if len(content) > MAX_PAGE_BYTES:
-        raise ValueError("pending index page exceeds limit")
-    virtual[relative] = content
+class _IndexBudget:
+    """Optional operator quotas, counted without retaining page bodies."""
+
+    def __init__(self, root: Path) -> None:
+        self.count = 0
+        self.total_bytes = 0
+        self.max_pages = setting_value("index.max_pages", root)
+        self.max_bytes = setting_value("index.max_total_bytes", root)
+
+    def add(self, content: bytes) -> None:
+        self.count += 1
+        self.total_bytes += len(content)
+        if self.max_pages and self.count > self.max_pages:
+            raise IndexCapacityError(f"knowledge index page count exceeds limit; {raise_hint('index.max_pages')}")
+        if self.max_bytes and self.total_bytes > self.max_bytes:
+            raise IndexCapacityError(f"knowledge index source bytes exceed limit; {raise_hint('index.max_total_bytes')}")
 
 
-def _published_only(root: Path, virtual: dict[str, bytes]) -> dict[str, bytes]:
+def _limited_pages(pages: Iterable[tuple[str, bytes]], root: Path) -> Iterable[tuple[str, bytes]]:
+    budget = _IndexBudget(root)
+    for relative, content in pages:
+        budget.add(content)
+        yield relative, content
+
+
+def _published_only(root: Path, virtual: Iterable[tuple[str, bytes]]) -> Iterable[tuple[str, bytes]]:
     """Drop the pages this repository does not publish.
 
     The vault and the public source are one directory and `knowledge/index.md`
     is tracked, so a private page's title reaching the index would put it in a
     public file.
     """
-    named, _hidden = published_paths(root, sorted(virtual))
-    keep = set(named)
-    return {path: content for path, content in virtual.items() if path in keep}
+    denials, allowed = _publication_rules(root)
+    for relative, content in virtual:
+        if _is_public_path(relative, denials, allowed):
+            yield relative, content
 
 
 def published_paths(root: Path, paths: Sequence[str]) -> tuple[list[str], int]:
@@ -213,18 +228,22 @@ def _gitignore_lines(root: Path) -> set[str]:
     return {line.strip() for line in text.splitlines() if line.strip()}
 
 
-def _index_buckets(virtual: Mapping[str, bytes]) -> dict[str, list[tuple[str, str]]]:
+def _index_buckets(virtual: Iterable[tuple[str, bytes]]) -> dict[str, list[tuple[str, str]]]:
     buckets: dict[str, list[tuple[str, str]]] = {
         name: [] for name in TYPE_SECTIONS.values()
     }
     buckets["Other"] = []
-    for relative, raw in sorted(virtual.items()):
-        entry = _index_entry(relative, raw)
-        if entry is None:
-            continue
+    for _relative, entry in sorted(_index_entries(virtual)):
         section, link, summary = entry
         buckets[section].append((link, summary))
     return buckets
+
+
+def _index_entries(virtual: Iterable[tuple[str, bytes]]):
+    for relative, raw in virtual:
+        entry = _index_entry(relative, raw)
+        if entry is not None:
+            yield relative, entry
 
 
 def _index_entry(relative: str, raw: bytes) -> tuple[str, str, str] | None:

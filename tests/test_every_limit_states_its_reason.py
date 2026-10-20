@@ -19,8 +19,8 @@ from corpus_snapshot import collect_corpus
 ROOT = Path(__file__).resolve().parents[1]
 # Registry defaults. Corpus/extraction share the existing discovery entry budget.
 REPLACED = {
-    "index.max_pages": 2_000,
-    "index.max_total_bytes": 32 * 1024 * 1024,
+    "index.max_pages": 0,
+    "index.max_total_bytes": 0,
     "compile.max_sources": 0,
     "compile.max_total_source_bytes": 0,
     "compile.validation_retries": 2,
@@ -146,7 +146,7 @@ def test_a_variable_beats_the_file(tmp_path: Path) -> None:
         ("[index]\nmax_page = 5\n", "index.max_page"),
         ("[indexes]\nmax_pages = 5\n", "[indexes]"),
         ("[index]\nmax_pages = true\n", "index.max_pages"),
-        ("[index]\nmax_pages = 0\n", "index.max_pages"),
+        ("[index]\nmax_pages = -1\n", "index.max_pages"),
         ("[index]\nmax_pages = '5'\n", "index.max_pages"),
         ("[index\n", "not valid TOML"),
     ],

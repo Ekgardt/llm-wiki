@@ -16,7 +16,7 @@ The separate [llm] section is validated by model_selection and is authoritative
 for model selection; it is not a numeric limit or an environment projection. An unknown section or key, a
 value that is not an integer, or one below its bound stops the caller with the
 key's name and its source; a limit never falls back silently. With no file and no
-variable every value is its registry default. Compile aggregate quotas accept
+variable every value is its registry default. Compile/index aggregate quotas accept
 zero to disable the quota; positive values remain explicit operator policy. See
 `docs/research/2026-09-27-every-limit-states-its-reason.md`.
 """
@@ -115,8 +115,13 @@ REGISTRY: tuple[Setting, ...] = (
             "provider metadata admission budget: 561046-byte Codex catalog parsed at "
             "2182523-byte peak on 2026-10-19; roughly twice current catalog input; "
             "raise after measuring parser memory when catalogs grow; not an entitlement limit"),
-    Setting("index", "max_pages", 2_000, "pages", "knowledge/index.md is rebuilt from every note; " + _HELD_IN_MEMORY),
-    Setting("index", "max_total_bytes", 32 * MIB, "bytes", "the notes the index is rebuilt from; " + _HELD_IN_MEMORY),
+    Setting("index", "max_pages", 0, "pages",
+            "optional operator quota on index source volume; 0 disables it; rendering "
+            "streams bodies and retains navigation metadata; review positive quotas "
+            "against measured work volume and metadata memory", lower=0),
+    Setting("index", "max_total_bytes", 0, "bytes",
+            "optional operator quota on index input bytes; 0 disables it; rendering "
+            "streams bodies; review positive quotas against measured I/O and latency", lower=0),
     Setting("compile", "max_sources", 0, "sources",
             "optional operator quota on total admitted work; 0 disables it; streamed "
             "bodies do not justify an aggregate memory ceiling; choose/review a positive "

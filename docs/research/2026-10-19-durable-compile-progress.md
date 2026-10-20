@@ -4591,3 +4591,63 @@ choose positive quotas (4384 sources and 176307105 bytes); they were not changed
 and their necessity is not established by this candidate default change. The
 per-file/archive and downstream index gates remain open. No live installation,
 private-source rewrite or paid model call was performed.
+
+### Index publication consumes one source body at a time — design 2026-10-20
+
+`build_index_bytes` still materializes every note body in `_virtual_pages`, then
+copies references through publication filtering and sorts `(path, body)` items.
+A warm 16-page input of 16,778,128 bytes produced a 1,189-byte index but used
+17,838,718 peak traced Python allocation bytes (0.1055 s). This is a remaining
+whole-corpus payload materialization in the compiler's publication path.
+
+The current Python iterator, Node.js backpressure and SQLite limit contracts
+reviewed above support a one-pass overlay pipeline. Read each base page once,
+count it against the original quota, select its pending after-image or deletion,
+then count the resulting virtual page against the final quota. Process additions
+after the original stream. Check all pending paths and individual sizes before
+rendering. Keep the original and resulting quota checks, private-page filtering,
+retired-page exclusions, UTF-8 behavior and deterministic metadata ordering.
+Collect only extracted index entries for ordering/rendering; never collect source
+bodies to sort them. Existing supplied base mappings stay owned by their caller.
+
+Alternatives: a lazy mutable mapping would repeat file reads and require extra
+identity checks between passes; caching its reads recreates the payload problem;
+filtering private pages before input admission would change existing validation
+and quota semantics. A one-pass source/overlay/filter/metadata pipeline preserves
+read-once bodies without adding an ownership lifetime or runtime schema. The
+settings registry's index aggregate defaults can then use the same optional-zero
+quota semantics as compile capture, with positive operator policies preserved.
+Per-page/output bounds and claim-tree snapshot consumers remain separate gates;
+standalone rebuild's `_rebuild_plan` still requests a content-bearing claim-tree
+snapshot and is not made streaming by changing only this renderer.
+
+Index-stream qualification: 181 index/publication/settings/transaction tests
+passed on Python 3.12 in 47.83 seconds and Python 3.10 in 51.60 seconds. The
+initial run had 177 passes and three test expectation failures: the new link
+counter also counted the footer's prose path (corrected to count actual wiki-link
+bullets), and the old settings test expected zero to be invalid (its invalid
+boundary is now -1; explicit zero acceptance/doctor coverage was added). No
+positive-quota, private-page, mutation or transaction protection was removed.
+The new memory regression distinguishes retaining all sixteen page bodies from
+holding a few transient pages; the old implementation's measured peak exceeded
+its half-corpus threshold. Caller base/pending mappings remain unchanged, source
+reads occur once, and deletions cannot bypass the original-input quota.
+
+The same warm input of 16,778,128 bytes now produced the same 1,189-byte output
+with 3,161,920 peak traced allocation bytes in 0.1060 seconds, versus 17,838,718
+bytes / 0.1055 seconds before. These are renderer-only observations, not total
+RSS or standalone snapshot/transaction/model-cycle measurements. Executing the
+previous committed renderer alongside the new one with explicit permissive
+quotas also produced byte-identical output for ordinary and pending-add/delete
+cases with a private non-UTF-8 source correctly excluded. Evidence:
+`logs/step7-index-stream-{before,after,parity}-20261020.json`.
+
+All twenty changed/new functions passed Lizard/AST gates; Ruff and diff checks
+passed. The first complexity check found `_virtual_pages` at CCN 6; extracting
+the pending-addition filter reduced it below the required ceiling. The fresh
+partial graph for `build_index_bytes` was at `722e9fd6`, generation
+`generation-18e0474f09db2365-a89b4232`; source inspection supplemented its callers
+and confirmed no other use of the replaced private eager helpers. Those helpers
+were removed from the candidate. Standalone claim-tree materialization,
+per-source/daily/archive/output limits, actual-vault recovery/installation and
+full useful-cycle qualification remain open.
