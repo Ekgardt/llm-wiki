@@ -699,14 +699,17 @@ class _PreflightWriter:
 
     def write(self, value):
         operational_deadline_active(self.deadline)
-        self.output.write(_snapshot_json(value) + b'\n')
+        data = _snapshot_json(value)
+        self.output.write(data + b'\n')
+        return _blob_digest(data)
 
     def add(self, kind, inputs, details):
         records = [_blob_digest(_snapshot_json(_archive_record_value(part, _blob_digest)))
                    for part in inputs.dailies]
         self._consume(records)
-        self.write({'kind': kind, 'source_records': records, **details})
+        identity = self.write({'kind': kind, 'source_records': records, **details})
         self.counts[kind] += 1
+        return identity
 
     def _consume(self, records):
         if not records:
@@ -741,6 +744,85 @@ def _write_compile_preflight(reader, binding, dependencies, plan, deadline, outp
         writer.add('batch', batch.inputs, _preflight_batch_details(batch))
     dependencies.verify()
     writer.complete()
+
+
+@dataclass(frozen=True)
+class PlannedCompileBatch:
+    """Verified planning identity, not admission for model calls or publication.
+
+    The batch borrows lazy records from the iterator's open archive. Access those
+    records while the iterator is open; ordinary consumers process one batch at
+    a time to avoid retaining completed source bodies.
+    """
+    batch: object
+    preflight: progress.CompileEvent
+    entry_digest: str
+    work_id: str
+
+
+class _PreflightMatch:
+    def __init__(self, handle):
+        self.handle = handle
+
+    def write(self, content):
+        if self.handle.read(len(content)) != content:
+            raise progress.ProgressCorrupt('preflight replay record changed')
+        return len(content)
+
+    def finish(self):
+        if self.handle.read(1):
+            raise progress.ProgressCorrupt('preflight replay has trailing records')
+
+
+def iter_compile_preflight(queue, lease, snapshot, *, dependencies, request, plan,
+                           on_refused, deadline=None):
+    """Yield verified batches only after a complete preflight is durable.
+
+    Reuse the existing writer as an exact-byte comparator instead of maintaining
+    a second plan decoder. Refusal callbacks run only during checked consumption,
+    not while saving/validating the complete preflight. Close on early exit.
+    """
+    saved = save_compile_preflight(queue, lease, snapshot, dependencies=dependencies,
+        request=request, plan=plan, deadline=deadline)
+    check = partial(_check_preflight_consumer, queue, lease, saved, dependencies, deadline)
+    with open_compile_inputs(queue, lease, snapshot, deadline=deadline) as reader:
+        with queue.open_compile_artifact(saved, deadline=deadline) as handle:
+            yield from _consume_compile_preflight(reader, handle, saved, plan, on_refused, check, deadline)
+
+
+def _check_preflight_consumer(queue, lease, saved, dependencies, deadline):
+    operational_deadline_active(deadline)
+    dependencies.verify()
+    queue.verify_compile_checkpoint_owner(lease, saved)
+    operational_deadline_active(deadline)
+
+
+def _consume_compile_preflight(reader, handle, saved, plan, on_refused, check, deadline):
+    matcher = _PreflightMatch(handle)
+    writer = _PreflightWriter(reader, matcher, deadline)
+    writer.write({'kind': 'header', 'compile_preflight': saved.details['compile_preflight']})
+    refused = partial(_consume_preflight_refusal, writer, check, on_refused)
+    for batch in plan(reader, refused):
+        entry_digest = writer.add('batch', batch.inputs, _preflight_batch_details(batch))
+        check()
+        yield _planned_compile_batch(batch, saved, entry_digest)
+    check()
+    writer.complete()
+    matcher.finish()
+
+
+def _consume_preflight_refusal(writer, check, on_refused, inputs):
+    writer.refused(inputs)
+    check()
+    on_refused(inputs)
+
+
+def _planned_compile_batch(batch, preflight, entry_digest):
+    identity = {'schema': 'compile-planned-batch/v1',
+                'preflight_digest': progress._event_digest(preflight),
+                'entry_digest': entry_digest}
+    return PlannedCompileBatch(batch, progress._snapshot_event(preflight), entry_digest,
+                               _compile_identity_digest(identity))
 
 
 def load_compile_inputs(queue, lease, checkpoint):

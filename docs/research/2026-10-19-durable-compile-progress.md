@@ -1463,3 +1463,73 @@ and diff checks pass. Evidence: `logs/step7-delivery-scope-{red,green,focused}-2
 `logs/step7-delivery-scope-py{312,310}-20261020.txt`,
 `logs/step7-delivery-scope-final-py{312,310}-20261020.txt`, and
 `logs/step7-delivery-scope-complexity-20261020.json` in the installed vault.
+
+### 2026-10-20: consume only the retained complete preflight
+
+`iter_compile_preflight` now saves or verifies the complete plan before exposing
+any batch. It then rebuilds batches from the immutable source archive using the
+existing planner and compares each canonical metadata record byte-for-byte with
+the retained artifact. The same `_PreflightWriter` produces and verifies records;
+there is no second semantic decoder. Source coverage, refusal ordering, completion
+counts and EOF are checked. This correctly rebuilds joined/projected native sources
+whose prompt-content hashes need not identify standalone blobs in the capture ZIP.
+
+Each yielded `PlannedCompileBatch` carries the batch, the saved preflight event,
+the exact entry digest, and a work ID derived from the preflight-event digest plus
+entry digest. IDs survive original-task redrive. They are scoped to that original
+work, not a cross-origin overlap detector and not authorization to call a model.
+The upcoming per-batch journal admission still must recover retained work before
+refreshing mutable context or dispatching. No per-batch copy of the entire capture
+archive is created here.
+
+Refusal callbacks run only in checked consumption, after complete durable preflight;
+initial planning and recovery validation have no caller refusal side effects.
+Callbacks must preserve their own idempotency (the existing source-failure store is
+the intended consumer). A callback failure propagates and leaves the plan intact.
+The owner, dependencies and caller deadline are checked before each exposed batch
+or refusal and at completion. This repeats dependency inventory per unit; that is
+an explicit current local cost and remains to be measured in the complete cycle.
+No source-count, artifact-size, batch-count or new time ceiling is added.
+
+The generator owns its open archive and artifact descriptors; callers must close
+it on early exit. Batch targets and vault records remain lazy and are usable while
+the iterator is open. Advancing does not retain previous source bodies on behalf
+of the caller. Already exposed metadata is not final execution or publication
+progress, and a later consumer error must not be reported as overall success.
+
+Research checked 2026-10-20:
+- Python [contextlib](https://docs.python.org/3.10/library/contextlib.html): generator
+  resource cleanup on exceptions/explicit closing, and error propagation. Python
+  3.10 compatibility remains separate from upstream support (the page marks EOL).
+- [SQLite atomic commit](https://www.sqlite.org/atomiccommit.html): a complete
+  durable artifact and its journal publication remain separate controlled steps.
+- [Temporal workflow execution](https://docs.temporal.io/workflow-execution): replay
+  durable execution history with stable identity instead of buying effects again.
+
+Alternatives: yield from initial planning before complete coverage; parse retained
+metadata into a second independent batch implementation; directly resolve every
+projected hash as an archive blob; duplicate whole source archives per batch.
+Reusing the planner plus exact record comparison keeps physical-source proof and
+avoids those parallel implementations. It pays an extra local planning pass rather
+than claiming the saved preflight alone already executes work.
+
+Seven new feature tests failed before the consumer existed. A later regression
+proved returned mutable event details could change subsequent batch identities;
+returning a deep event snapshot via the existing canonical snapshot helper fixes
+that alias. Fourteen consumer tests cover complete-before-yield, stable replay and
+redrive, late planner mutation, owner/dependency changes, refusal durability and
+callback failure, no full materialization, released source records, deterministic
+resource closing, native projection and returned-event isolation.
+
+Validation: 95 related tests passed on Python 3.12 (44.14 s) and Python 3.10
+(48.37 s); all 35 changed/new functions pass lizard/AST law-5 checks, whole scripts/
+tests Ruff and diff checks pass. Evidence in the installed vault:
+`logs/step7-preflight-consumer-{red,alias-red,green}-20261020.txt`,
+`logs/step7-preflight-consumer-py{312,310}-20261020.txt`, and
+`logs/step7-preflight-consumer-complexity-20261020.json`.
+
+Still uninstalled. Per-batch admission and exact refreshed-context recovery,
+publication/receipts, cross-origin uncertain work, full dependency/update handling,
+CLI/MCP/queue/nightly routing, retention/doctor, backup/restore and real full-cycle
+quality/token/time evidence remain open. This is verified batch consumption,
+not a finished production workflow or closure of point 7.
