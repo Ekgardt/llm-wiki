@@ -4359,3 +4359,60 @@ was separately observed alive with a Codex medium child; its log contains both
 published batches and validation/input-budget failures. It was not interrupted.
 This remains an uninstalled candidate; full dependency/upgrade, law-9, recovery,
 installation and real-cycle evidence are still required for point 7.
+
+### Point 7 integration reconciliation — 2026-10-20
+
+Candidate `640c2619` and installed `e95f6a4a` are different releases. The
+candidate's ordinary CLI and MCP requests reach the leased controller through
+`_compile_under_lock`; queue workers use `run_leased_compile`, and nightly calls
+the same CLI. Dry runs intentionally do not enqueue work. This routing is
+implemented, not an outstanding design task. Its installation is outstanding.
+
+Controller/dependency/answer-recovery/retention/origin/admission tests passed:
+117 on Python 3.12 in 59.23 seconds. Inventory/foreground/cutover/migration tests
+passed: 71 on Python 3.12 in 68.90 seconds. The combined 188 tests passed on
+Python 3.10 in 290.87 seconds. These are bounded test scenarios, not evidence of
+a completed useful full-vault model cycle. Package compatibility checks passed
+for the 65-package Python 3.12 and 67-package Python 3.10 test environments.
+
+Using the installed interpreter against candidate source, real execution
+identity collection completed in 37.57 seconds: 250 product files, 30,547
+package files and 632 Python files, plus configuration identity. This establishes
+that the actual inventory can be collected in this environment; it does not
+measure full-cycle overhead, guarantee every provider update, or claim closure
+over operating-system libraries. Evidence:
+`logs/step7-real-dependency-inventory-20261020.json`.
+
+The refreshed built-in graph matches candidate `640c2619`. Its callers view for
+`upgrade_offline`, supplemented by direct installer/repair source searches,
+shows only test callers. The graph is partial, so absence from it alone is not
+the finding. The existing shell/PowerShell installers and repair command do not
+invoke compile-progress migration. Integration into the supported upgrade path
+is therefore a concrete remaining requirement.
+
+A real Restic experiment qualified the existing migration/backup/restore APIs
+on an isolated adopted vault. Restic 0.19.1 was downloaded from its official
+release and its compressed Linux amd64 artifact checked against the release's
+SHA256SUMS (`f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c`).
+Source: https://github.com/restic/restic/releases/tag/v0.19.1.
+A generated local password file had mode 0600; no credentials or private vault
+content were included in the public evidence. The experiment enqueued work,
+performed offline migration with a retained preimage, created an encrypted
+snapshot of the migrated fixture, and restored the receipt-bound snapshot to
+an empty separate directory through the production API. Manifest validation
+accepted 14 entries and two databases. Markdown bytes and the retained queue
+payload matched exactly after restoration. The sequence took 6.24 seconds.
+Evidence: `logs/step7-real-restic-cutover-20261020.json`. This was a small fixture
+with a real external binary, not a backup of the installed private vault, a
+restore publication into a running installation, or crash qualification for
+Restic itself. The isolated evidence and password remain outside the vault.
+
+Remaining gates: supported installer cutover; actual private-vault recovery and
+safe installation under exclusive ownership; inherited source/body limits and
+their law-9 basis; useful medium-model full-cycle quality/tokens/time/recovery;
+then qualified removal of replaced compatibility code and documentation/index
+sync. The installed compiler was observed alive for over 17 hours and its log
+still contains validation/input-budget errors. Neither that process nor its
+operational state was removed. Its lifetime is not proof of a dead owner and
+cannot authorize offline migration. Historical lost-capture and maintenance
+failures are not declared repaired by any of these checks.
