@@ -1,6 +1,7 @@
 """Bounded, no-follow, stable reads for compile-time authoritative files."""
 from __future__ import annotations
 
+import codecs
 import hashlib
 import math
 import operator
@@ -8,6 +9,8 @@ import os
 import re
 import stat
 import time
+from bisect import bisect_left
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -224,6 +227,8 @@ def read_stable_bytes(
 class _VerifiedRangeCursor:
     cached: tuple = (-1, b'')
     next_index: int = 0
+    newlines: tuple | None = None
+    utf8_valid: bool = False
 
 
 @dataclass(frozen=True, eq=False)
@@ -239,6 +244,7 @@ class VerifiedByteRange:
     digest: str
     deadline: float | None = None
     chunk_size: int = IO_CHUNK_BYTES
+    owner_check: Callable | None = field(default=None, repr=False)
     hashes: tuple = field(init=False, repr=False)
     _cursor: _VerifiedRangeCursor = field(default_factory=_VerifiedRangeCursor, init=False, repr=False)
 
@@ -256,6 +262,8 @@ class VerifiedByteRange:
         _check_deadline(self.deadline, 'original source')
         if self.stream.closed:
             raise ValueError('original range scope is closed')
+        if self.owner_check is not None:
+            self.owner_check()
 
     def iter_chunks(self, start, end):
         self.require_active()
@@ -318,15 +326,75 @@ class VerifiedByteRange:
             start, end = end + 1, start + 1
         return b''.join(self.iter_chunks(start, end))[::step]
 
+    def newline_offsets(self, *, validate_utf8=False):
+        self.require_active()
+        if self._cursor.newlines is None:
+            self._cursor.newlines = tuple(_original_newlines(
+                self.iter_chunks(0, self.size), validate_utf8))
+            self._cursor.utf8_valid = validate_utf8
+        if validate_utf8 and not self._cursor.utf8_valid:
+            _validate_original_utf8(self.iter_chunks(0, self.size))
+            self._cursor.utf8_valid = True
+        return self._cursor.newlines
+
     def find(self, needle, start=0, end=None):
         self.require_active()
         needle = memoryview(needle).tobytes()
         bounds = _original_search_bounds(self.size, start, end)
-        if bounds is None:
-            return -1
-        if len(needle) > bounds[1] - bounds[0]:
-            return -1
-        return _find_original_chunks(self.iter_chunks(*bounds), needle, bounds[0])
+        return _search_original(self, needle, bounds, reverse=False)
+
+    def rfind(self, needle, start=0, end=None):
+        self.require_active()
+        needle = memoryview(needle).tobytes()
+        bounds = _original_search_bounds(self.size, start, end)
+        return _search_original(self, needle, bounds, reverse=True)
+
+
+def _original_newlines(chunks, validate_utf8):
+    decoder = codecs.getincrementaldecoder('utf-8')(errors='strict') if validate_utf8 else None
+    return _decoded_newline_positions(chunks, decoder)
+
+
+def _decoded_newline_positions(chunks, decoder):
+    offset = 0
+    for chunk in chunks:
+        if decoder is not None:
+            decoder.decode(chunk, final=False)
+        yield from (offset + match.start() for match in re.finditer(b"\n", chunk))
+        offset += len(chunk)
+    if decoder is not None:
+        decoder.decode(b'', final=True)
+
+
+def _validate_original_utf8(chunks):
+    decoder = codecs.getincrementaldecoder('utf-8')(errors='strict')
+    for chunk in chunks:
+        decoder.decode(chunk, final=False)
+    decoder.decode(b'', final=True)
+
+
+def _search_original(content, needle, bounds, *, reverse):
+    if bounds is None:
+        return -1
+    if needle == b'\n':
+        return _search_newline(content.newline_offsets(), bounds, reverse)
+    return _search_original_bytes(content, needle, bounds, reverse)
+
+
+def _search_newline(offsets, bounds, reverse):
+    first, last = (bisect_left(offsets, bound) for bound in bounds)
+    if first == last:
+        return -1
+    return offsets[last - 1] if reverse else offsets[first]
+
+
+def _search_original_bytes(content, needle, bounds, reverse):
+    if len(needle) > bounds[1] - bounds[0]:
+        return -1
+    if not needle:
+        return bounds[1] if reverse else bounds[0]
+    search = _last_original_match if reverse else _find_original_chunks
+    return search(content.iter_chunks(*bounds), needle, bounds[0])
 
 
 def _verified_original_blocks(stream, size, expected, deadline, chunk_size):
@@ -375,18 +443,32 @@ def _original_search_bounds(size, start, end):
     return first, last
 
 
-def _find_original_chunks(chunks, needle, start):
-    if not needle:
-        return start
+def _original_search_windows(chunks, needle, start):
     tail, cursor = b'', start
     for chunk in chunks:
         window = tail + chunk
-        found = window.find(needle)
-        if found >= 0:
-            return cursor - len(tail) + found
+        yield cursor - len(tail), window
         tail = window[len(window) - min(len(window), len(needle) - 1):]
         cursor += len(chunk)
+
+
+def _find_original_chunks(chunks, needle, start):
+    if not needle:
+        return start
+    for offset, window in _original_search_windows(chunks, needle, start):
+        found = window.find(needle)
+        if found >= 0:
+            return offset + found
     return -1
+
+
+def _last_original_match(chunks, needle, start):
+    result = -1
+    for offset, window in _original_search_windows(chunks, needle, start):
+        found = window.rfind(needle)
+        if found >= 0:
+            result = offset + found
+    return result
 
 
 def _require_range_identity(digest, chunk_size):
@@ -405,3 +487,28 @@ def _valid_original_bounds(start, end, size):
     return type(start) is int and type(end) is int and 0 <= start <= end <= size
 
 
+
+
+def require_immutable_source(content):
+    if type(content) is bytes:
+        return
+    if type(content) is not VerifiedByteRange:
+        raise ValueError('source requires immutable bytes or an owned verified range')
+    content.require_active()
+
+
+def immutable_source_digest(content):
+    require_immutable_source(content)
+    if type(content) is VerifiedByteRange:
+        return content.digest
+    return hashlib.sha256(content).hexdigest()
+
+
+def same_immutable_source(left, right):
+    require_immutable_source(left)
+    require_immutable_source(right)
+    if left is right:
+        return True
+    if type(left) is bytes and type(right) is bytes:
+        return left == right
+    return len(left) == len(right) and immutable_source_digest(left) == immutable_source_digest(right)

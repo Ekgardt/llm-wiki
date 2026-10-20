@@ -1,12 +1,13 @@
 """Original digest reuse must not allow forged per-record identities."""
 from dataclasses import asdict
 
+import bounded_io
 import compile_controller as controller
 import compile_memory as compiler
 import pytest
 
 from tests.test_compile_daily_part_lifetime import _long_day
-from tests.test_compile_streamed_archive_batches import _archive
+from tests.test_compile_streamed_archive_batches import _archive, _materialized_daily
 from tests.test_compile_transactions import vault as vault
 
 
@@ -14,16 +15,16 @@ def test_replay_hashes_shared_original_once_for_record_validation(vault, monkeyp
     inputs = compiler.snapshot_compile_inputs([_long_day(vault[0])])
     original = inputs.dailies[0].original_content
     hashed = []
-    digest = controller._blob_digest
+    digest = bounded_io._verified_original_blocks
 
-    def observed(content):
-        if content == original:
-            hashed.append(len(content))
-        return digest(content)
+    def observed(stream, size, expected, deadline, chunk_size):
+        if expected == compiler.sha256_bytes(original):
+            hashed.append(size)
+        return digest(stream, size, expected, deadline, chunk_size)
 
     with _archive(inputs) as reader:
-        monkeypatch.setattr(controller, '_blob_digest', observed)
-        assert tuple(reader.daily_records()) == inputs.dailies
+        monkeypatch.setattr(bounded_io, '_verified_original_blocks', observed)
+        assert tuple(_materialized_daily(part) for part in reader.daily_records()) == inputs.dailies
     assert hashed == [len(original)]
 
 

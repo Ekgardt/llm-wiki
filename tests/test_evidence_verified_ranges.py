@@ -24,12 +24,16 @@ def test_verified_range_resolves_identical_physical_evidence(tmp_path, reuse):
                                       reuse_immutable=reuse) == expected
 
 
+@pytest.mark.parametrize('prime_lines', [False, True])
 @pytest.mark.parametrize('suffix', [b'\xff', b'\xe2\x82'])
-def test_entire_verified_source_must_be_utf8_even_outside_citation(tmp_path, suffix):
+def test_entire_verified_source_must_be_utf8_even_outside_citation(tmp_path, suffix, prime_lines):
     raw = b'## [12:34:56] event\nFact\n' + b'x' * IO_CHUNK_BYTES + suffix
     resolver = evidence.EvidenceResolver(tmp_path)
-    with _original(raw) as content, pytest.raises(evidence.EvidenceResolutionError, match='UTF-8'):
-        resolver.resolve_bytes(_packet(raw), content, source_path=tmp_path / 'day.md', reuse_immutable=True)
+    with _original(raw) as content:
+        if prime_lines:
+            assert content.find(b'\n') == raw.find(b'\n')
+        with pytest.raises(evidence.EvidenceResolutionError, match='UTF-8'):
+            resolver.resolve_bytes(_packet(raw), content, source_path=tmp_path / 'day.md', reuse_immutable=True)
 
 
 def test_cached_range_proof_never_outlives_its_owner(tmp_path):
@@ -131,7 +135,7 @@ def test_modified_stream_cannot_borrow_cached_evidence_proof(tmp_path):
             resolver.resolve_bytes(_packet(raw), content, source_path=tmp_path)
 
 
-@pytest.mark.parametrize('field', ['size', 'digest', 'hashes', 'chunk_size', 'deadline', 'stream'])
+@pytest.mark.parametrize('field', ['size', 'digest', 'hashes', 'chunk_size', 'deadline', 'stream', 'owner_check'])
 def test_verified_source_identity_cannot_be_reassigned(field):
     from dataclasses import FrozenInstanceError
 

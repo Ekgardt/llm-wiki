@@ -150,7 +150,9 @@ def test_refusal_effects_happen_only_after_the_complete_plan_is_durable(work, co
         saved = work[0].get_compile_event(snapshot.work_id)
         assert 'compile_preflight' in saved.details
         assert work[0].read_compile_artifact(saved).endswith(b'"kind":"complete"}\n')
-        observed.append(unit.dailies)
+        from tests.test_compile_streamed_archive_batches import _materialized_daily
+
+        observed.append(tuple(_materialized_daily(part) for part in unit.dailies))
 
     assert list(_consume(work, snapshot, on_refused=refused)) == []
     assert observed == [inputs.dailies]

@@ -38,6 +38,7 @@ def test_original_range_indexing_matches_bytes(key):
         assert content[key] == raw[key]
 
 
+@pytest.mark.parametrize('method', ['find', 'rfind'])
 @pytest.mark.parametrize('needle,start,end', [
     (b'', 0, None), (b'', 100, None), (b'', -100, 2),
     (b'', 4, 2), (b'', 9, None), (b'', 3, -100),
@@ -45,10 +46,10 @@ def test_original_range_indexing_matches_bytes(key):
     (b'ab', 0, -2), (b'no', 0, None), (b'ab', None, None),
     (b'abcdefghij', 0, None),
 ])
-def test_original_range_search_matches_bytes(needle, start, end):
+def test_original_range_search_matches_bytes(method, needle, start, end):
     raw = b'abcabcaba'
     with _original(raw) as content:
-        assert content.find(needle, start, end) == raw.find(needle, start, end)
+        assert getattr(content, method)(needle, start, end) == getattr(raw, method)(needle, start, end)
 
 
 def test_search_crosses_proven_block_boundaries(monkeypatch):
@@ -57,6 +58,7 @@ def test_search_crosses_proven_block_boundaries(monkeypatch):
     with _original(raw) as content:
         assert content.find(b'needle') == raw.find(b'needle')
         assert content.find(b'prefix-needle') == 0
+        assert content.rfind(b'needle') == raw.rfind(b'needle')
         assert content[4:16] == raw[4:16]
 
 
@@ -107,7 +109,8 @@ def test_reloaded_block_rejects_change_after_initial_verification():
 
 @pytest.mark.parametrize('read', [
     lambda content: content[0], lambda content: content[:0],
-    lambda content: content.find(b''), lambda content: list(content.iter_chunks(0, 1)),
+    lambda content: content.find(b''), lambda content: content.rfind(b''),
+    lambda content: list(content.iter_chunks(0, 1)),
 ])
 def test_closed_scope_never_returns_even_cached_bytes(read):
     with _original(b'abc') as content:
@@ -131,3 +134,12 @@ def test_original_extent_must_match_the_complete_stream(size):
     with io.BytesIO(b'abc') as stream:
         with pytest.raises(ValueError, match='original source'):
             VerifiedByteRange(stream, size, hashlib.sha256(b'abc').hexdigest(), None)
+
+
+@pytest.mark.parametrize('method', ['find', 'rfind'])
+@pytest.mark.parametrize('start', [None, -100, -2, 0, 1, 7, 100])
+@pytest.mark.parametrize('end', [None, -100, -2, 0, 1, 7, 100])
+def test_indexed_newline_search_keeps_bytes_bounds(method, start, end):
+    raw = b'a\nb\r\n\nz'
+    with _original(raw) as source:
+        assert getattr(source, method)(b'\n', start, end) == getattr(raw, method)(b'\n', start, end)

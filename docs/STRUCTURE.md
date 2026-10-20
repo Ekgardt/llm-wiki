@@ -1520,12 +1520,17 @@ this exact type or the existing immutable bytes contract, never an arbitrary
 object claiming a digest. It checks range ownership/deadline even when reusing
 entry metadata. Full-source UTF-8 validation and physical newline indexing are
 incremental; complete cited-block hashes use verified ranges without copying
-the block. The requested citation still materializes for the existing result
+the block. Each verified source lazily owns one immutable physical LF-position
+index shared with the resolver. LF searches use binary search instead of
+rescanning every source prefix per quoted row. Raw line indexing does not mark
+UTF-8 valid: full strict decoding is required separately before evidence reuse.
+The metadata scales with line count, and remains subject to source lifetime. The requested citation still materializes for the existing result
 contract. Closed owners, changed reloaded blocks, bad UTF-8, and mismatched
 references fail. Cached blocks remain the original immutable captured bytes.
-Live daily capture, archive restoration and native-frame retention have not yet
-all adopted this shared source; their remaining whole-body paths are not claimed
-to be streaming.
+Archive restoration now supplies these ranges to normal record access, required
+citation checks, preflight and batch planning. Source receipt-prefix checks use
+the same range hash proof. Live daily capture and native-frame payload retention
+still have whole-body paths and are not claimed to be fully streaming.
 
 The native journal lookup is a read-only mapping of body offsets to source
 heads and physical spans. It retains the source reference and metadata, not
@@ -1548,19 +1553,24 @@ remain EOF, LF or CRLF; Unicode content-line semantics do not widen delimiter
 matching. Heading ID validation decodes through the complete ID incrementally,
 including after a grammar rejection, preserving strict UTF-8 error priority.
 
-Sequential daily reads reuse verified original bytes and parsed entry/frame
-metadata only while the following record names the same shared identities.
-Part bodies are read and verified without retaining them in the reader.
-Changing the original or metadata releases the superseded reuse scope, including
-different versions at the same logical path; the next day starts a fresh scope.
-The shared original's computed digest is reused only for the identical immutable
-bytes object. Each record still checks its declared original digest; a changed
-object creates a new computed proof, and ordinary restoration without one hashes
-the original directly. Neither serialized metadata nor a caller-supplied digest
-can stand in for this proof. Blob and individual part validation remain active.
-There is no corpus-wide body cache or numeric eviction threshold. The eager
-compatibility view materializes daily records; iter_batches() consumes them
-sequentially through the shared planner.
+Sequential daily reads restore original sources as verified ranges. The reader
+holds a weak registry keyed by logical path and digest; live parts keep their
+source alive across day/batch lookahead, and a released source closes its member
+stream. The reader closes all remaining live ranges before its queue-owned
+artifact context exits. Reads also check the ZIP owner, because an open ZIP
+member can otherwise outlive it. Metadata reuse remains scoped to the current
+original_entries/native_frames identities; part bodies are read and verified
+without accumulating in the reader. Selected part content stays bytes even when
+its digest equals the full original digest. Each record checks its declared
+original identity, and part/receipt checks retain canonical range provenance.
+No arbitrary object with a digest can supply this proof. Byte inputs retain
+their computed exact-object proof; verified ranges reuse their frozen computed
+identity and check their live scope. There is no corpus-wide body cache or
+numeric eviction threshold. Canonical record serialization reads dataclass fields
+without deep-copying range owners, and ZIP writes stream known-size originals.
+Explicit eager compatibility views materialize complete bytes; normal
+iter_batches() feeds ranges through the shared planner. Native frame metadata
+still includes complete encoded/text payloads and needs further migration.
 
 The common batch planner exposes incremental atomic-unit, group and batch
 iteration. Existing eager callers collect that same iterator and retain their

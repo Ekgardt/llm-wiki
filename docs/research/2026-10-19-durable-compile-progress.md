@@ -3736,3 +3736,126 @@ body allocations are removed from the range evidence path without dropping
 proofs, content or references. These measurements are not RSS, ZIP end-to-end
 compile latency, model quality or token cost; full-cycle qualification remains
 required. Raw measurements: logs/step7-evidence-ranges-measurement-20261020.json.
+
+### 2026-10-20 — retained daily originals enter the actual archive planner as ranges
+
+The fresh graph generation-18e03c95b895cc99-559c642a matches 1e663f7f;
+113176 unresolved edges require supplementary source inspection. Read the actual
+preflight writer/consumer, batch/context/repair ownership, original-part identity
+checks, archive serializer, tool-line boundaries, and evidence resolver. Three
+new regressions first failed: normal batch planning reads the entire original,
+there is no reader-level close for retained originals, and completed day objects
+are bytes rather than releasable verified views.
+
+Sources reviewed on this date: [Python weakref ownership/finalizers](https://docs.python.org/3/library/weakref.html#finalizer-objects),
+[Python ZIP member lifetimes](https://docs.python.org/3/library/zipfile.html#zipfile.ZipFile.open),
+[RFC 3629](https://www.rfc-editor.org/rfc/rfc3629), and
+[Restic content-addressed design](https://restic.readthedocs.io/en/stable/100_references.html).
+The Python pages are one independent authority, not two. Weak values avoid a
+reader retaining every completed source. Finalizer callbacks must not retain
+the referent. An open ZIP member can outlive the ZIP object, so stream.closed
+alone does not enforce the archive owner's scope. UTF-8 bytes/offsets and
+verified content hashes remain authoritative throughout the change.
+
+Each archive reader owns a weak registry keyed by logical path plus original
+digest. Parts keep their verified original alive across batch lookahead; a
+reader close closes every live source, and queue-owned open_compile_inputs
+closes that reader before releasing the artifact context. Released sources close
+their streams; finalization is fallback cleanup, not a replacement for the
+explicit production close. Source reads also check that their ZIP owner remains
+open. No daemon, runtime path, persistent format, model call or package is added.
+
+Alternatives: closing on day advancement invalidates lookahead/current batches;
+retaining every strong original view retains all ZIP read buffers; reopening per
+slice repeats full-source verification; trusting declared digests permits forged
+source interfaces. Keep the one existing verified source implementation and
+its canonical byte/frame/entry evidence checks. Whole-source equality uses exact
+immutable ownership or computed hash plus extent, never a duck-typed digest.
+The original-source range and selected part bytes are distinct fields even when
+their content hashes coincide. A first integration run exposed this aliasing:
+the former shared blob map put a range into the part's bytes field. Restore now
+uses source proof only for original_content and reads the selected part bytes
+separately. This corrects the representation boundary instead of weakening the
+part buffer contract.
+
+Canonical record metadata is now assembled from dataclass fields rather than
+recursively copying the entire original view. Frame JSON remains canonical and
+retained as before; its streaming migration is still open. ZIP writes can stream
+a verified source with its known extent while preserving record/manifest identity.
+Explicit eager compatibility methods still produce complete bytes; ordinary
+archive records, preflight, context verification and batching use ranges.
+Tests that compare representations normalize ranges back to bytes only inside
+the test's live owner scope, comparing all original fields and contents. New
+production-path tests forbid whole-original archive.read and separately compare
+complete preflight source records and batch manifests with the eager baseline.
+
+The next integration run identified the receipt selector's remaining buffer-only
+prefix hash (memoryview). It now uses the shared evidence range hash and checks
+source scope before reusing a prefix proof. Regression coverage includes full
+and historical-prefix identity, changed declared hash and a cached proof after
+reader close. Core tree execution and complete-work recovery then passed 30
+related tests, including recovery without another model call. These are test
+fixtures, not the required real subscribed-model full-cycle qualification.
+
+Expanded qualification on Python 3.12 and 3.10 each passed 969 tests and skipped
+one Windows-only reparse-point test. Each run had one remaining representation
+comparison failure in a refusal observer: the test retained range-bearing records
+past the owner's scope and compared them with eager bytes. The observer now
+copies and compares every original byte while its scope is open, preserving its
+assertions that complete durable preflight precedes refusal effects. The entire
+14-test consumer file subsequently passed on both versions (32.58s / 34.66s).
+Broad-run durations were 164.98s / 227.35s. No production code changed after those
+broad runs began; this final correction was test observation only. Together these
+runs qualify 970 distinct tests on each version. Linux qualification does not
+claim Windows execution. Ruff and whitespace checks pass; all 74 written/changed
+functions pass measured Lizard and AST complexity limits without exclusions.
+
+The first large-source benchmark was deliberately interrupted with SIGINT after
+several minutes of active CPU work to inspect its Python stack; it was not
+restarted because of an observation timeout. No live compiler or provider call
+was involved. The stack identified source-choice row checks calling line_bounds
+and range.rfind, which rescanned and rehashed the entire preceding source for
+each row. An independent byte-count regression reproduced the quadratic work
+and failed before the fix: initial verification, newline indexing, and monotonic
+row reads must fit three complete source passes, regardless of row count.
+
+VerifiedByteRange now computes a lazy immutable LF-offset index once per owned
+source. Forward/backward LF searches use binary search; other byte searches keep
+the generic streaming algorithm. LF is the compiler's existing physical-line
+delimiter, not a content-dependent special case. EvidenceResolver reuses this
+same index, and full UTF-8 validation is separately tracked: a raw newline search
+does not certify text, and later validation still rejects malformed bytes or an
+incomplete UTF-8 suffix. All cache accesses check source scope. The index is
+metadata proportional to line count, with no cap or content truncation; its
+memory/time cost must be included in measurement. No source-body cache is added.
+Earlier 969/14-test results above predate this measured performance correction;
+final qualification below must cover it before the change is accepted.
+
+
+Final range-reader qualification (2026-10-20): 1071 tests passed on each of
+Python 3.12 and 3.10 (330.58s / 379.06s), with one Windows-only test skipped.
+Subsequent adversarial receipt tests exposed a cached-prefix identity defect:
+a different source claiming the previous digest could borrow its prefix proof.
+Both bytes and range reproductions failed before the correction. The selector
+now verifies the actual immutable source digest and binds its cached identity
+to that exact source. Related receipt, tree and completion tests passed on both
+versions (53 tests, 57.51s / 62.64s). A further weak-reference reproduction showed
+that this proof retained the preceding original while the next source was read.
+Source advancement now releases the prefix owner before reading the next source.
+All 18 range-restoration and receipt-lifetime tests then passed on Python 3.12
+and 3.10 (1.40s / 2.79s). The 1071-test runs preceded these final localized fixes;
+they are not represented as full-suite reruns of the final state. All 94 changed
+functions pass Lizard/AST limits, and Ruff passes without exclusions.
+
+Completed paired measurements are in the private runtime log
+logs/step7-range-restore-measurement-20261020.json. Three-run medians:
+restoring an 8 MiB source in 513 parts changed from 3.461882s and 8,880,282
+peak traced bytes to 0.094207s and 519,816 bytes. Actual planning of a 512 KiB
+source in 33 parts changed from 1.709264s and 4,979,300 peak bytes to 2.638847s
+and 3,524,079 bytes. Planning is slower despite lower peak allocations; this
+remains a performance tradeoff requiring full-cycle assessment. The previous
+controller uses the same current planner to isolate archive restoration. Every
+emitted canonical record and part count agrees; fixture construction is outside
+measurement, timing is separate from allocation tracing, and these are not RSS,
+model-token, quality, installation or real full-cycle results. No provider calls
+were made. Live capture and native-frame payload streaming remain unfinished.

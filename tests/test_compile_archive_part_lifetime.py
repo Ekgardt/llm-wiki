@@ -6,7 +6,7 @@ import compile_memory as compiler
 import pytest
 
 from tests.test_compile_daily_part_lifetime import _long_day
-from tests.test_compile_streamed_archive_batches import _archive
+from tests.test_compile_streamed_archive_batches import _archive, _materialized_daily
 from tests.test_compile_transactions import vault as vault
 
 
@@ -57,10 +57,11 @@ def test_archive_reuses_verified_original_and_metadata(vault, monkeypatch):
 
         monkeypatch.setattr(reader.archive, 'read', observed)
         metadata = reader.record_metadata('dailies', 0)
-        assert tuple(reader.daily_records()) == inputs.dailies
+        assert tuple(_materialized_daily(part) for part in reader.daily_records()) == inputs.dailies
         shared = {metadata[field] for field in (
-            'original_content', 'original_entries', 'native_frames')}
+            'original_entries', 'native_frames')}
         assert all(reads['blobs/' + digest] == 1 for digest in shared)
+        assert reads['blobs/' + metadata['original_content']] == 0
 
 
 def test_archive_still_rejects_corrupt_later_part(vault, monkeypatch):
@@ -76,7 +77,7 @@ def test_archive_still_rejects_corrupt_later_part(vault, monkeypatch):
 
         monkeypatch.setattr(reader.archive, 'read', corrupted)
         records = reader.daily_records()
-        assert next(records) == inputs.dailies[0]
+        assert _materialized_daily(next(records)) == inputs.dailies[0]
         with pytest.raises(ValueError, match='snapshot content digest mismatch'):
             tuple(records)
 
@@ -89,13 +90,13 @@ def test_same_path_new_original_releases_previous_reuse_scope(vault, monkeypatch
     inputs = replace(first, dailies=first.dailies + second.dailies + first.dailies)
     with _archive(inputs) as reader:
         counts = Counter()
-        read = reader.blob
+        read = reader.archive.open
 
-        def observed(digest):
-            counts[digest] += 1
-            return read(digest)
+        def observed(name, *args, **kwargs):
+            counts[name] += 1
+            return read(name, *args, **kwargs)
 
-        monkeypatch.setattr(reader, 'blob', observed)
-        assert tuple(reader.daily_records()) == inputs.dailies
-        assert counts[first.dailies[0].original_sha256] == 2
-        assert counts[second.dailies[0].original_sha256] == 1
+        monkeypatch.setattr(reader.archive, 'open', observed)
+        assert tuple(_materialized_daily(part) for part in reader.daily_records()) == inputs.dailies
+        assert counts['blobs/' + first.dailies[0].original_sha256] == 2
+        assert counts['blobs/' + second.dailies[0].original_sha256] == 1

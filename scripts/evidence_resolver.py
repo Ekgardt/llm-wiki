@@ -1623,6 +1623,8 @@ def _owned_source_proof(content):
 
 def _owned_source_newlines(content):
     try:
+        if type(content) is VerifiedByteRange:
+            return content.newline_offsets(validate_utf8=True)
         return _utf8_source_newlines(content)
     except UnicodeDecodeError as exc:
         raise EvidenceResolutionError("daily source is not UTF-8") from exc

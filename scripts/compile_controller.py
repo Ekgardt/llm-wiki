@@ -9,11 +9,12 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import weakref
 import zipfile
 from collections import Counter
 from collections.abc import Callable, Sequence
 from contextlib import ExitStack, closing, contextmanager, nullcontext
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from dataclasses import field as dataclass_field
 from datetime import datetime
 from functools import partial
@@ -21,7 +22,12 @@ from itertools import groupby
 from pathlib import Path
 
 import compile_progress as progress
-from bounded_io import IO_CHUNK_BYTES, VerifiedByteRange, require_byte_range
+from bounded_io import (
+    IO_CHUNK_BYTES,
+    VerifiedByteRange,
+    immutable_source_digest,
+    require_byte_range,
+)
 from context_budget import TokenCount, TokenUsage
 from llm_client import BackendResponse, LLMResult, ProviderDescriptor
 from reliable_memory import (
@@ -893,7 +899,8 @@ def open_compile_inputs(queue, lease, checkpoint, *, deadline=None):
     queue.verify_compile_checkpoint_owner(lease, checkpoint)
     with queue.open_compile_artifact(checkpoint, deadline=deadline) as handle:
         with zipfile.ZipFile(handle) as archive:
-            yield CompileInputArchive(archive, checkpoint.source_digest)
+            with closing(CompileInputArchive(archive, checkpoint.source_digest, deadline=deadline)) as reader:
+                yield reader
 
 
 def save_compile_preflight(queue, lease, snapshot, *, dependencies, request, plan, deadline=None):
@@ -2303,14 +2310,16 @@ def _snapshot_json(value):
 def _blob_digest(content):
     if content is None:
         return None
-    if type(content) is not bytes:
-        raise ValueError('snapshot content must be bytes')
-    return hashlib.sha256(content).hexdigest()
+    if type(content) not in (bytes, VerifiedByteRange):
+        raise ValueError('snapshot content must be bytes or a verified range')
+    return immutable_source_digest(content)
 
 
 def _archive_record_value(record, put):
     _require_snapshot_digest(record.content, record.sha256)
-    value = asdict(record)
+    value = {item.name: getattr(record, item.name) for item in fields(record)}
+    if 'native_frames' in value:
+        value['native_frames'] = tuple(asdict(frame) for frame in value['native_frames'])
     _archive_record_fields(value, _ARCHIVE_BYTES_FIELDS, put)
     _require_original_digest(value)
     _archive_record_fields(value, _ARCHIVE_JSON_FIELDS, partial(_put_snapshot_json, put))
@@ -2392,7 +2401,10 @@ class _SnapshotArchiveWriter:
         # A fixed ZIP epoch makes retries byte-identical; it is not source time.
         info = zipfile.ZipInfo(name)
         info.compress_type = zipfile.ZIP_STORED
-        self.archive.writestr(info, data)
+        info.file_size = len(data)
+        with self.archive.open(info, 'w') as output:
+            for chunk in _snapshot_content_chunks(data):
+                output.write(chunk)
 
 
 def _write_archive_snapshot(inputs, expected, output):
@@ -2615,7 +2627,7 @@ def write_compile_capture(output, paths, *, compiled=None):
 class CompileInputArchive:
     """Context-owned record reader; opening keeps metadata, not source bodies."""
 
-    def __init__(self, archive, expected, *, manifest_decoder=None):
+    def __init__(self, archive, expected, *, manifest_decoder=None, deadline=None):
         self.archive = archive
         _require_archive_members(archive)
         data = archive.read('manifest.json')
@@ -2624,11 +2636,48 @@ class CompileInputArchive:
         self.manifest = decoder(data)
         _require_archive_records(archive, self.manifest)
         self.digest = expected
+        self.deadline = deadline
+        self._originals = weakref.WeakValueDictionary()
+        self._originals_closer = weakref.finalize(self, _close_original_sources, self._originals)
+
+    def close(self):
+        self._originals_closer()
+
+    def original_source(self, digest, *, logical_path):
+        if digest is None:
+            return None
+        self._require_open()
+        key = logical_path, digest
+        source = self._originals.get(key)
+        if source is None:
+            source = self._open_original_source(digest)
+            self._originals[key] = source
+        source.require_active()
+        return source
+
+    def _require_open(self):
+        operational_deadline_active(self.deadline)
+        if not self._originals_closer.alive or self.archive.fp is None:
+            raise ValueError('source archive reader is closed')
+
+    def _open_original_source(self, digest):
+        progress._require_digest(digest)
+        name = 'blobs/' + digest
+        stream = self.archive.open(name)
+        try:
+            source = VerifiedByteRange(stream, self.archive.getinfo(name).file_size, digest, self.deadline,
+                chunk_size=IO_CHUNK_BYTES, owner_check=partial(_require_original_archive_open, self.archive, stream, self._originals_closer))
+        except BaseException:
+            stream.close()
+            raise
+        weakref.finalize(source, stream.close)
+        return source
 
     def record_count(self, group):
         return len(self.manifest['records'][group])
 
     def record_metadata(self, group, index):
+        self._require_open()
         expected = self.manifest['records'][group][index]
         data = self.archive.read(_archive_record_name(group, index))
         _require_snapshot_digest(data, expected)
@@ -2638,6 +2687,7 @@ class CompileInputArchive:
         return value
 
     def blob(self, digest):
+        self._require_open()
         if digest is None:
             return None
         progress._require_digest(digest)
@@ -2647,6 +2697,7 @@ class CompileInputArchive:
 
     def verify_blob(self, digest, *, deadline=None):
         """Validate every byte through EOF without retaining the blob body."""
+        self._require_open()
         progress._require_digest(digest)
         operational_deadline_active(deadline)
         with self.archive.open('blobs/' + digest) as stream:
@@ -2657,12 +2708,16 @@ class CompileInputArchive:
 
     @contextmanager
     def original_range(self, digest, *, deadline=None):
+        self._require_open()
         progress._require_digest(digest)
         operational_deadline_active(deadline)
         name = 'blobs/' + digest
         size = self.archive.getinfo(name).file_size
         with self.archive.open(name) as stream:
-            yield VerifiedByteRange(stream, size, digest, deadline, chunk_size=IO_CHUNK_BYTES)
+            source = VerifiedByteRange(stream, size, digest, deadline, chunk_size=IO_CHUNK_BYTES,
+                owner_check=partial(_require_original_archive_open, self.archive, stream, self._originals_closer))
+            self._originals[(None, id(source))] = source
+            yield source
 
     def json_blob(self, digest):
         data = self.blob(digest)
@@ -2672,8 +2727,11 @@ class CompileInputArchive:
         return value
 
     def record(self, group, index):
-        return _restore_archive_value(group, self.record_metadata(group, index),
-                                      self.blob, self.json_blob)
+        value = self.record_metadata(group, index)
+        if group == 'dailies':
+            with closing(_restore_archive_day(self, (value,))) as records:
+                return next(records)
+        return _restore_archive_value(group, value, self.blob, self.json_blob)
 
     def records(self, group):
         if group == 'dailies':
@@ -2719,21 +2777,54 @@ class CompileInputArchive:
     def planning_inputs(self):
         from compile_memory import CompileInputs
 
-        return CompileInputs(tuple(self.records('dailies')),
+        return CompileInputs(tuple(_eager_daily_records(self.daily_records())),
                              ArchiveRecords(self, 'sources'), ArchiveRecords(self, 'targets'),
                              ArchiveRecords(self, 'vault_files'))
 
     def materialize(self):
         from compile_memory import CompileInputs
 
-        return CompileInputs(**{group: tuple(self.records(group)) for group in _snapshot_types()})
+        return CompileInputs(tuple(_eager_daily_records(self.daily_records())),
+                             **{group: tuple(self.records(group)) for group in _CONTEXT_GROUPS})
+
+
+def _require_original_archive_open(archive, stream, owner):
+    if archive.fp is None or not owner.alive:
+        stream.close()
+        raise ValueError('source archive is closed')
+
+
+def _close_original_sources(sources):
+    with ExitStack() as owners:
+        for source in tuple(sources.values()):
+            owners.callback(source.stream.close)
+        sources.clear()
+
+
+def _eager_daily_records(records):
+    """Explicit eager API only; normal planning keeps its verified ranges."""
+    current, content = None, None
+    for record in records:
+        original = record.original_content
+        if type(original) is VerifiedByteRange:
+            content = original[:] if current is not original else content
+            current = original
+            record = replace(record, original_content=content)
+        yield record
+
+
+def _snapshot_content_chunks(content):
+    if type(content) is VerifiedByteRange:
+        yield from content.iter_chunks(0, len(content))
+        return
+    yield content
 
 
 @dataclass(frozen=True, eq=False)
 class _OriginalDigestProof:
-    """A computed digest tied to a strongly held, exact immutable bytes object."""
+    """Computed identity bound to one immutable bytes object or verified range."""
 
-    content: bytes | None = dataclass_field(repr=False)
+    content: bytes | VerifiedByteRange | None = dataclass_field(repr=False)
     digest: str | None = dataclass_field(init=False)
 
     def __post_init__(self):
@@ -2747,6 +2838,12 @@ def _reuse_original_proof(previous, content):
 
 
 def _proven_original_digest(content, proof):
+    if type(content) is VerifiedByteRange:
+        return immutable_source_digest(content)
+    return _proven_byte_original_digest(content, proof)
+
+
+def _proven_byte_original_digest(content, proof):
     if proof is None:
         return _blob_digest(content)
     if type(proof) is not _OriginalDigestProof or proof.content is not content:
@@ -2758,10 +2855,11 @@ def _restore_archive_day(reader, records):
     originals, metadata = {}, {}
     proof = None
     for value in records:
-        originals = _shared_record_blobs(value, ('original_content',), reader.blob, originals)
+        read_original = partial(reader.original_source, logical_path=value['logical_path'])
+        originals = _shared_record_blobs(value, ('original_content',), read_original, originals)
         metadata = _shared_record_blobs(value, _ARCHIVE_JSON_FIELDS, reader.json_blob, metadata)
         proof = _reuse_original_proof(proof, originals.get(value.get('original_content')))
-        blob = partial(_read_shared_blob, reader.blob, originals)
+        blob = reader.blob
         json_blob = partial(_read_shared_blob, reader.json_blob, metadata)
         yield _restore_archive_value('dailies', value, blob, json_blob, original_proof=proof)
 
@@ -2779,9 +2877,18 @@ def _read_shared_blob(read, shared, digest):
 
 
 def _restore_archive_value(group, value, blob, json_blob, *, original_proof=None):
-    _archive_record_fields(value, _ARCHIVE_BYTES_FIELDS, blob)
+    restore_blob = partial(_restore_record_blob, blob, original_proof)
+    for name in _ARCHIVE_BYTES_FIELDS:
+        if name in value:
+            value[name] = restore_blob(name, value[name])
     _archive_record_fields(value, _ARCHIVE_JSON_FIELDS, json_blob)
     return _restored_archive_record(_snapshot_types()[group], value, original_proof=original_proof)
+
+
+def _restore_record_blob(read, proof, name, digest):
+    if name == 'original_content' and proof is not None:
+        return proof.content
+    return read(digest)
 
 
 def _restored_archive_record(kind, value, *, original_proof=None):

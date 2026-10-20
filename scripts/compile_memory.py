@@ -28,7 +28,6 @@ Pages, the in-process index, log entry, and receipts commit in one recoverable t
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import os
@@ -51,7 +50,14 @@ from typing import TYPE_CHECKING
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import maybe_compile  # noqa: E402
 import process_liveness  # noqa: E402
-from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
+from bounded_io import (  # noqa: E402
+    MAX_KNOWLEDGE_PAGE_BYTES,
+    VerifiedByteRange,
+    immutable_source_digest,
+    read_stable_bytes,
+    require_immutable_source,
+    same_immutable_source,
+)
 from claim_tree_manifest import snapshot_claim_tree, snapshot_claim_tree_with_content  # noqa: E402
 from claims import (  # noqa: E402
     LEDGER_SCHEMA,
@@ -90,6 +96,7 @@ from evidence_resolver import (  # noqa: E402
     EvidenceRef,
     EvidenceResolver,
     _daily_part_bounds,
+    _source_range_digest,
     daily_entries,
     evidence_candidates,
     extract_evidence_references,
@@ -385,7 +392,7 @@ class DailySnapshot:
     part_count: int = 1
     byte_start: int = 0
     byte_end: int = 0
-    original_content: bytes | None = None
+    original_content: bytes | VerifiedByteRange | None = None
     original_sha256: str = ""
     original_entries: tuple[tuple[str, int, int], ...] = ()
     native_frames: tuple[NativeCompileFrame, ...] = ()
@@ -636,7 +643,7 @@ def _daily_parts(
 def _iter_daily_parts(logical_path, content, compiled=None, *, native_frames=(), bounds=None):
     """Construct part bodies only as the consumer requests their atomic units."""
     bounds = _daily_part_bounds(content) if bounds is None else bounds
-    original_digest = sha256_bytes(content)
+    original_digest = immutable_source_digest(content)
     original_entries = tuple(daily_entries(content))
     parts = (
         DailySnapshot(
@@ -740,7 +747,7 @@ def _native_parts_join(left, right):
 def _captured_tool_cut(part, offset):
     """A pure immutable-source boundary test, never a native-user authority."""
     original = part.original_content
-    if type(original) is not bytes or not 0 < offset < len(original):
+    if type(original) not in (bytes, VerifiedByteRange) or not 0 < offset < len(original):
         return False
     if original[offset - 1:offset] == b"\n":
         return False
@@ -877,9 +884,8 @@ def _require_native_unit(parts, *, partitions=None):
 
 def _partition_for_join(first, *, journal_indexes=None):
     original = first.original_content
-    if type(original) is not bytes:
-        raise ValueError("two parts of one day require immutable original bytes")
-    if sha256_bytes(original) != first.original_sha256:
+    require_immutable_source(original)
+    if immutable_source_digest(original) != first.original_sha256:
         raise ValueError("canonical original source digest does not match")
     return _daily_part_bounds(original), _native_partition_ranges(first, journal_indexes)
 
@@ -916,7 +922,7 @@ def _overlapping_partition_spans(spans, first, last):
 def _require_join_identity(part, first):
     if part.logical_path != first.logical_path or part.original_sha256 != first.original_sha256:
         raise ValueError("joined daily parts name different physical sources")
-    if type(part.original_content) is not bytes or part.original_content != first.original_content:
+    if not same_immutable_source(part.original_content, first.original_content):
         raise ValueError("joined daily parts contain different original bytes")
 
 
@@ -955,6 +961,7 @@ class _DailyPartitionProofs:
         self.journal_indexes = journal_indexes
 
     def for_part(self, part):
+        require_immutable_source(part.original_content)
         key = (id(part.original_content), part.original_sha256)
         if key not in self.sources:
             self.sources[key] = (part.original_content, _partition_for_join(part, journal_indexes=self.journal_indexes))
@@ -983,7 +990,7 @@ class _CapturedPartitions:
         frames = tuple(frame for frame in observed if frame is not None)
         bounds = _daily_part_bounds(content)
         spans = tuple((frame.byte_start, frame.byte_end) for frame in frames)
-        key = (id(content), sha256_bytes(content))
+        key = (id(content), immutable_source_digest(content))
         self.partitions.sources[key] = (content, (bounds, spans))
         return _iter_daily_parts(logical, content, compiled, native_frames=frames, bounds=bounds)
 
@@ -1080,11 +1087,12 @@ class _NativeJournalIndexes:
     """Pure parsing for one owned layout; strong refs prevent identity reuse."""
 
     def __init__(self):
-        self.sources: dict[int, tuple[bytes, Mapping]] = {}
+        self.sources: dict[int, tuple[bytes | VerifiedByteRange, Mapping]] = {}
 
     def for_content(self, content):
-        if type(content) is not bytes:
+        if type(content) not in (bytes, VerifiedByteRange):
             return _parse_native_journal(content)
+        require_immutable_source(content)
         key = id(content)
         if key not in self.sources:
             self.sources[key] = (content, _parse_native_journal(content))
@@ -5375,8 +5383,13 @@ def _quote_bearing(
     return [
         (start, end)
         for start, end in matched
-        if content.count(quote_bytes, start, end) == 1
+        if _single_quote_in_range(content, quote_bytes, start, end)
     ]
+
+
+def _single_quote_in_range(content, quote, start, end):
+    found = content.find(quote, start, end)
+    return found >= 0 and content.find(quote, found + len(quote), end) < 0
 
 
 def _evidence_block(
@@ -5765,7 +5778,7 @@ def _standalone_snapshot_bounds(part):
 
 
 def _require_snapshot_source_hashes(part, physical):
-    if sha256_bytes(physical.content) != physical.sha256 or sha256_bytes(part.content) != part.sha256:
+    if immutable_source_digest(physical.content) != physical.sha256 or sha256_bytes(part.content) != part.sha256:
         raise ValueError("compile source context digest disagrees")
 
 
@@ -7350,6 +7363,7 @@ class _ContextReceiptSelector:
         self.deadline = deadline
         self.catalog: dict[tuple[str, str], list[tuple[Path, dict[str, object]]]] | None = None
         self.prefix_hashes: dict[tuple[str, int], str] = {}
+        self.prefix_source = None
         self.current_source: tuple[str, tuple] | None = None
         self.current_parts: list[DailySnapshot] = []
         self.historical_receipts: dict[tuple[str, str], tuple | None] = {}
@@ -7391,6 +7405,7 @@ class _ContextReceiptSelector:
         if self.current_source != identity:
             self.current_source = None
             self.current_parts = []
+            self.prefix_source = None
             self.current_parts = _daily_parts(logical_path, _read_daily_source(path))
             self.current_source = identity
         self._active()
@@ -7449,13 +7464,25 @@ class _ContextReceiptSelector:
 
     def _context_matches(self, source, part):
         physical = _physical_source(part)
+        require_immutable_source(physical.content)
         size = source["original_byte_size"]
-        if size > len(physical.content) or (source["byte_start"], source["byte_end"]) != _snapshot_absolute_bounds(part):
+        if not self._context_source_matches(source, part, physical):
             return False
         key = (physical.sha256, size)
         if key not in self.prefix_hashes:
-            self.prefix_hashes[key] = hashlib.sha256(memoryview(physical.content)[:size]).hexdigest()
+            self.prefix_hashes[key] = _source_range_digest(physical.content, 0, size)
         return self.prefix_hashes[key] == source["original_sha256"]
+
+
+    def _context_source_matches(self, source, part, physical):
+        within = source['original_byte_size'] <= len(physical.content)
+        same_bounds = (source['byte_start'], source['byte_end']) == _snapshot_absolute_bounds(part)
+        return within and same_bounds and self._physical_digest(physical.content) == physical.sha256
+
+    def _physical_digest(self, content):
+        if self.prefix_source is None or self.prefix_source[0] is not content:
+            self.prefix_source = content, immutable_source_digest(content)
+        return self.prefix_source[1]
 
 
 

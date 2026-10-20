@@ -8,6 +8,7 @@ from dataclasses import replace
 import compile_controller as controller
 import compile_memory as compiler
 import pytest
+from bounded_io import VerifiedByteRange
 
 from tests.test_compile_groups_complete_sources_by_qualified_capacity import (
     MODEL,
@@ -37,9 +38,16 @@ def _archive(inputs):
 
 def _materialized(batch):
     inputs = batch.inputs
-    return replace(batch, inputs=replace(inputs, sources=tuple(inputs.sources),
+    return replace(batch, inputs=replace(inputs, dailies=tuple(_materialized_daily(part) for part in inputs.dailies),
+                                         sources=tuple(inputs.sources),
                                          targets=tuple(inputs.targets),
                                          vault_files=tuple(inputs.vault_files)))
+
+
+def _materialized_daily(part):
+    if type(part.original_content) is VerifiedByteRange:
+        return replace(part, original_content=part.original_content[:])
+    return part
 
 
 def _refuse_materialization(*args):
@@ -159,8 +167,8 @@ def test_streamed_refusal_keeps_independent_parts(vault, monkeypatch, position):
         monkeypatch.setattr(archive, 'materialize', _refuse_materialization)
         monkeypatch.setattr(archive, 'planning_inputs', _refuse_materialization)
         batches = tuple(archive.iter_batches(model=None, on_refused=refused.append))
-        assert tuple(part for batch in batches for part in batch.inputs.dailies) == accepted.dailies
-        assert tuple(item.dailies for item in refused) == ((refused_part,),)
+        assert tuple(_materialized_daily(part) for batch in batches for part in batch.inputs.dailies) == accepted.dailies
+        assert _daily_groups(refused) == ((refused_part,),)
         assert note.read_bytes() in [source.content for source in refused[0].sources]
 
 
@@ -222,10 +230,10 @@ def test_streamed_refusal_preserves_complete_native_unit(tmp_path, monkeypatch):
     with _archive(inputs) as archive:
         batches = tuple(archive.iter_batches(model=MODEL, planning_candidates=candidates,
                                             on_refused=refused.append))
-        assert tuple(part for batch in batches for part in batch.inputs.dailies) == accepted.dailies
+        assert tuple(_materialized_daily(part) for batch in batches for part in batch.inputs.dailies) == accepted.dailies
         assert _daily_groups(refused) == _daily_groups(expected)
         assert tuple(unit) in _daily_groups(refused)
 
 
 def _daily_groups(inputs):
-    return tuple(item.dailies for item in inputs)
+    return tuple(tuple(_materialized_daily(part) for part in item.dailies) for item in inputs)
