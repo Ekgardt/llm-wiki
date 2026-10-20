@@ -4307,3 +4307,55 @@ digest ownership. Every one of 40 changed/new functions passed Lizard/AST
 complexity gates; Ruff and diff checks passed. This does not complete historical
 doctor's eager source-work layout, inherited law-9 limits, dependency/recovery
 qualification, installation or the required real medium-model full cycle.
+
+Historical doctor source-work design, 2026-10-20: the remaining eager path is
+`_CurrentHistoricalSourceWork._capture`, which retains whole daily bytes plus
+all part bodies and rereads whole files in `_recheck_sources`. Its sole
+production entry is `verified`; three tests directly use the private capture
+helper. Retain the exact-current-work and unique-containment semantics while
+scoping all original ranges to one proof and caching only replayable layout
+metadata. Selected witness units may retain their own atomic payloads; unrelated
+day parts must be released as iteration advances.
+
+Reviewed primary deterministic resource-lifetime contracts:
+https://docs.python.org/3.12/library/contextlib.html#contextlib.ExitStack,
+https://doc.rust-lang.org/std/ops/trait.Drop.html, and
+https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines#Rr-raii.
+Use explicit Python scopes, not garbage-collection timing. The existing
+`open_stable_range` rehashes its original descriptor on normal scope exit,
+before a successful verification result can escape, and closes on exceptions.
+This can replace the eager second full-file buffer while preserving final
+content verification. Pure native parsing remains reusable within the proof;
+permanent evidence and receipt/output authority remain freshly checked.
+Alternatives: keeping complete tuples preserves the memory problem; reopening
+for each requested unit repeats proof work; weak references or finalizers alone
+cannot make validation failure part of the returned verdict. No runtime path,
+schema, worker, dependency or new numeric ceiling is introduced.
+
+The pre-change regression demonstrated a real final-witness gap: changing a
+daily after the last witness check still returned `True`. The owned proof scope
+now rejects that mutation during final descriptor validation and closes every
+source even when validation raises. Capture outside an active proof scope is
+refused. Selected units, as well as full layouts, retain coordinates only;
+an initial size/hash index avoids rescanning all part payloads per historical
+source request. Candidate units still undergo the complete descriptor,
+unique-containment, receipt and permanent-evidence checks. Source mutation is
+now refused on the first affected access; the existing mixed-version regression
+requires this earlier refusal instead of waiting for a second capture.
+
+The isolated 1,025,598-byte/64-part experiment, with dependencies imported
+before tracing both cases, observed retained allocations 2,229,349 bytes for the
+eager layout and 139,865 for the owned layout plus unit index. Peaks were
+2,231,453/1,225,126 bytes, preparation 11.08/42.88 ms. A separate cold observation
+includes module-import costs and is retained rather than silently discarded.
+Neither measurement includes a complete doctor/model cycle:
+`logs/step7-historical-ranges-warm-measurement-20261020.json` and
+`logs/step7-historical-ranges-measurement-20261020.json`.
+
+Final qualification: 127 historical/source/quarantine/receipt-authority tests
+passed on Python 3.12 (76.04 s) and Python 3.10 (85.44 s). All 29 changed/new
+functions passed Lizard/AST gates, Ruff and diff checks. The installed compiler
+was separately observed alive with a Codex medium child; its log contains both
+published batches and validation/input-budget failures. It was not interrupted.
+This remains an uninstalled candidate; full dependency/upgrade, law-9, recovery,
+installation and real-cycle evidence are still required for point 7.

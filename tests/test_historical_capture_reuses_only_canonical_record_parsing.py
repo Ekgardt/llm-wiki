@@ -10,6 +10,7 @@ from reliable_memory import canonical_json_bytes
 
 from tests.test_breadcrumb_evidence import _source
 from tests.test_breadcrumb_protocol import _encoded
+from tests.test_compile_streamed_archive_batches import _materialized_daily
 from tests.test_doctor_current_v4_exact_historical_work import native_work as native_work
 from tests.test_doctor_exact_legacy_source_outcome import _reader
 
@@ -22,15 +23,20 @@ def test_repeated_capture_validates_each_exact_record_only_once(native_work, mon
     monkeypatch.setattr(reliability, "validate_schema_object", validation)
     monkeypatch.setattr(evidence, "_read_source_document", reads)
     with _reader(history) as (_database, reader):
-        first = doctor._CurrentHistoricalSourceWork(reader, history[4])._capture(logical)
+        first = _captured_parts(reader, history[4], logical)
         first_reads = reads.call_count
-        second = doctor._CurrentHistoricalSourceWork(reader, history[4])._capture(logical)
+        second = _captured_parts(reader, history[4], logical)
     assert first == second
     assert reads.call_count == 2 * first_reads
     assert validation.call_count > 0
     distinct = {(canonical_json_bytes(call.args[0]), canonical_json_bytes(call.args[1]))
                 for call in validation.call_args_list}
     assert validation.call_count == len(distinct)
+
+
+def _captured_parts(reader, previous, logical):
+    with doctor._CurrentHistoricalSourceWork(reader, previous) as work:
+        return tuple(_materialized_daily(part) for part in work._capture(logical))
 
 
 def test_cached_record_returns_fresh_mutable_values():

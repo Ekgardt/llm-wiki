@@ -409,7 +409,7 @@ def test_mixed_physical_versions_between_source_captures_are_refused(exact_work,
 
     monkeypatch.setattr(doctor._CurrentHistoricalSourceWork, "_capture", capture_then_change)
     assert not _resolves(history)
-    assert len(captures) == 2
+    assert captures == [parts[0].logical_path]
 
 
 def test_same_digest_at_a_different_current_path_is_unresolved(exact_work):

@@ -54,8 +54,8 @@ def test_separate_proofs_capture_separate_layouts(exact_work, monkeypatch):
 def test_layout_reuse_still_honors_expired_deadline(exact_work):
     history, parts = _published_units(exact_work)
     with _reader(history) as (_database, reader):
-        work = doctor._CurrentHistoricalSourceWork(reader, history[4])
-        work._capture(parts[0].logical_path)
-        reader.deadline = time.monotonic() - 1
-        with pytest.raises(TimeoutError):
+        with doctor._CurrentHistoricalSourceWork(reader, history[4]) as work:
             work._capture(parts[0].logical_path)
+            reader.deadline = time.monotonic() - 1
+            with pytest.raises(TimeoutError):
+                work._capture(parts[0].logical_path)

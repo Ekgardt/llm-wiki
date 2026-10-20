@@ -1875,6 +1875,70 @@ def _historical_compile_identity(database, identifier):
     return identity
 
 
+class _HistoricalDailyLayout:
+    """Replay part payloads from one proof-owned immutable source."""
+
+    def __init__(self, logical, source, frames):
+        from bounded_io import immutable_source_digest
+        from compile_memory import _daily_part_bounds, daily_entries
+
+        self.logical, self.source, self.frames = logical, source, frames
+        self.bounds = _daily_part_bounds(source)
+        self.entries = tuple(daily_entries(source))
+        self.digest = immutable_source_digest(source)
+        self.unit_index = None
+
+    def __iter__(self):
+        self.source.require_active()
+        for index in range(len(self.bounds)):
+            yield self.part(index)
+
+    def part(self, index):
+        from compile_memory import _daily_part_record
+
+        return _daily_part_record(self.logical, self.source, self.bounds, index,
+                                  self.digest, self.entries, self.frames)
+
+    def matching_units(self, source):
+        self.source.require_active()
+        if self.unit_index is None:
+            self.unit_index = _historical_unit_index(self)
+        key = source["byte_size"], source["sha256"]
+        return (_HistoricalUnit(self, indexes) for indexes in self.unit_index.get(key, ()))
+
+
+class _HistoricalUnit(Sequence):
+    def __init__(self, layout, indexes):
+        self.layout, self.indexes = layout, indexes
+
+    def __len__(self):
+        self.layout.source.require_active()
+        return len(self.indexes)
+
+    def __getitem__(self, index):
+        self.layout.source.require_active()
+        if isinstance(index, slice):
+            return _HistoricalUnit(self.layout, self.indexes[index])
+        return self.layout.part(self.indexes[index])
+
+
+def _historical_unit_index(layout):
+    from compile_memory import _native_part_units
+
+    index = {}
+    for unit in _native_part_units(layout):
+        key = _historical_unit_key(unit)
+        index.setdefault(key, []).append(tuple(part.part_index for part in unit))
+    return index
+
+
+def _historical_unit_key(unit):
+    digest = hashlib.sha256()
+    for part in unit:
+        digest.update(part.content)
+    return sum(len(part.content) for part in unit), digest.hexdigest()
+
+
 class _CurrentHistoricalSourceWork:
     """Exact new source work, without granting historical offset authority."""
 
@@ -1885,8 +1949,30 @@ class _CurrentHistoricalSourceWork:
         self.layouts = {}
         self.units = []
         self.selector = reader._cached_selection()
+        self.owner = None
+
+    def __enter__(self):
+        self.reader._require_active()
+        if self.owner is not None:
+            raise ValueError("historical proof already owns an active scope")
+        self.owner = contextlib.ExitStack()
+        return self
+
+    def __exit__(self, *exception):
+        try:
+            return self.owner.__exit__(*exception)
+        finally:
+            self.owner = None
+            self.selector.prefix_source = None
+            self.captured.clear()
+            self.layouts.clear()
+            self.units.clear()
 
     def verified(self):
+        with self:
+            return self._verify_current_work()
+
+    def _verify_current_work(self):
         for source in self.previous["batch_manifest"]:
             self.units.append(self._matching_unit(source))
         descriptors = self._descriptors()
@@ -1906,25 +1992,28 @@ class _CurrentHistoricalSourceWork:
         return bool(witnesses) and all(self._witness(record) for record in witnesses)
 
     def _capture(self, logical):
-        from compile_memory import _daily_parts, _native_daily_frames
+        from compile_memory import _native_daily_frames
 
         self.reader._require_active()
+        self._require_source_scope()
         if logical in self.layouts:
             return self.layouts[logical]
-        raw = read_stable_bytes(self.reader.vault_root / logical, MAX_DAILY_BYTES, label="daily source")
+        raw = self.owner.enter_context(self.reader._open_daily(logical))
         with self.reader._breadcrumb_record_parsing():
             frames = _native_daily_frames(logical, raw, self.reader.vault_root)
-            parts = _daily_parts(logical, raw, native_frames=frames)
+            layout = _HistoricalDailyLayout(logical, raw, frames)
         self.reader._require_active()
         self.captured[logical] = raw
-        self.layouts[logical] = tuple(parts)
+        self.layouts[logical] = layout
         return self.layouts[logical]
 
-    def _matching_unit(self, source):
-        from compile_memory import _native_part_units
+    def _require_source_scope(self):
+        if self.owner is None:
+            raise ValueError("historical capture requires an active source scope")
 
-        parts = self._capture(source["logical_path"])
-        matches = [unit for unit in _native_part_units(parts) if self._unit_matches(unit, source)]
+    def _matching_unit(self, source):
+        layout = self._capture(source["logical_path"])
+        matches = [unit for unit in layout.matching_units(source) if self._unit_matches(unit, source)]
         if len(matches) != 1:
             raise ValueError("historical source lacks one complete current source unit")
         return matches[0]
@@ -1978,11 +2067,9 @@ class _CurrentHistoricalSourceWork:
     def _recheck_sources(self):
         from compile_memory import _native_unit_source
 
-        for logical, expected in self.captured.items():
+        for source in self.captured.values():
             self.reader._require_active()
-            current = read_stable_bytes(self.reader.vault_root / logical, MAX_DAILY_BYTES, label="daily source")
-            if current != expected:
-                raise ValueError("current source changed during historical work proof")
+            source.require_active()
         for unit in self.units:
             self.reader._require_active()
             _native_unit_source(unit)
