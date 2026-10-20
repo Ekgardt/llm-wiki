@@ -85,7 +85,8 @@ def test_a_failed_batch_keeps_ownership_until_later_batches_finish(vault, monkey
 
     monkeypatch.setattr(compile_memory, "resolve_compile_plan", resolve)
     result = compile_memory._compile_under_lock(
-        Namespace(file=None, all=False, dry_run=False, trigger="manual")
+        Namespace(file=None, all=False, dry_run=False, trigger="manual"),
+        execute=compile_memory._run,
     )
 
     assert observations == [("live", "running"), (False, False)]

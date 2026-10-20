@@ -95,7 +95,10 @@ def test_failed_compile_does_not_mark_hash(isolated_compile_state, monkeypatch):
     hashes_before = dict(state_before.get("compiled_daily_hashes", {}))
 
     try:
-        exit_code = compile_memory.main()
+        # This fixture exercises the retained legacy batch executor explicitly.
+        # Adopted foreground failure is covered by test_compile_foreground_queue.
+        exit_code = compile_memory._compile_under_lock(
+            compile_memory.parse_args(), execute=compile_memory._run)
     except SystemExit as e:
         exit_code = e.code if isinstance(e.code, int) else 1
 

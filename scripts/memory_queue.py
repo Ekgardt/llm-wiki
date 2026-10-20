@@ -3238,6 +3238,19 @@ def _v3_dedupe_match(
     raise QueueOperationError("dedupe_conflict")
 
 
+def _unfinished_compile_request(database, payload_bytes, input_hash):
+    existing = database.execute(
+        """SELECT id, kind, handler_version, payload_blob, input_hash FROM tasks
+           WHERE kind='compile' AND handler_version=1
+             AND state IN ('ready','leased','blocked','dead')
+             AND (input_hash=? OR payload_blob=?)
+             AND NOT EXISTS (SELECT 1 FROM tasks AS child WHERE child.redrive_of=tasks.id)
+           ORDER BY created_at, id LIMIT 1""", (input_hash, payload_bytes)).fetchone()
+    if existing is None:
+        return None
+    return _v3_dedupe_match(existing, 'compile', 1, payload_bytes, input_hash)
+
+
 def _legacy_dedupe_match(
     existing: sqlite3.Row,
     kind: str,
@@ -8066,6 +8079,34 @@ class _QueueV3CandidateReader:
             self._insert_source_links(database, task_id, normalized_links)
         return task_id
 
+    def claim_compile_request(self, payload, *, owner,
+                              lease_seconds=DEFAULTS.queue_lease_seconds,
+                              max_attempts=DEFAULTS.queue_max_attempts,
+                              deadline=float('inf'), cancelled=None):
+        """Select/create and claim one intent atomically, without a steal window."""
+        _require_active(deadline, cancelled)
+        _check_claim_arguments(owner, lease_seconds, max_attempts)
+        payload_bytes, input_hash = _validated_payload_bytes(payload)
+        with closing(self._connect(deadline=deadline)) as database, begin_immediate(database):
+            task_id = self._compile_request_in(database, payload_bytes, input_hash)
+            _require_active(deadline, cancelled)
+            lease = self._claim_in(database, owner=owner, lease_seconds=lease_seconds,
+                                   max_attempts=max_attempts, task_filter=_claim_task_filter(task_id))
+            _require_active(deadline, cancelled)
+            return task_id, lease
+
+    def _compile_request_in(self, database, payload_bytes, input_hash):
+        self._delete_stale_source_fences(database)
+        self._assert_payload_not_fenced(database, payload_bytes.decode('utf-8'))
+        existing = _unfinished_compile_request(database, payload_bytes, input_hash)
+        if existing is not None:
+            return existing
+        task_id = uuid.uuid4().hex
+        now = _utc_now()
+        self._insert_task_row(database, task_id, 'compile', 1, payload_bytes,
+                              input_hash, None, 0, now, now)
+        return task_id
+
     def ready_capture_intents_without_task(
         self, limit: int, *, after: tuple[str, str] | None = None,
     ) -> list[dict[str, object]]:
@@ -11617,28 +11658,23 @@ class _QueueV3CandidateReader:
     ) -> QueueLease | None:
         _check_claim_arguments(owner, lease_seconds, max_attempts)
         task_filter = _claim_task_filter(task_id)
+        with closing(self._connect()) as database, begin_immediate(database):
+            return self._claim_in(database, owner=owner, lease_seconds=lease_seconds,
+                                  max_attempts=max_attempts, task_filter=task_filter)
+
+    def _claim_in(self, database, *, owner, lease_seconds, max_attempts, task_filter):
         now = _utc_now()
-        with closing(
-            self._connect()
-        ) as database, begin_immediate(database):
-            self._delete_stale_source_fences(database)
-            self._recover_expired_in(database, now)
-            claimable = self._next_claimable_task(database, now, max_attempts, task_filter)
-            if claimable is None:
-                return None
-            row, validation = claimable
-            token = sha256_bytes(os.urandom(32))
-            expires_at = now + timedelta(seconds=lease_seconds)
-            if not _take_task_lease(
-                database,
-                row,
-                owner=owner,
-                token=token,
-                now=now,
-                expires_at=expires_at,
-                max_attempts=max_attempts,
-            ):
-                return None
+        self._delete_stale_source_fences(database)
+        self._recover_expired_in(database, now)
+        claimable = self._next_claimable_task(database, now, max_attempts, task_filter)
+        if claimable is None:
+            return None
+        row, validation = claimable
+        token = sha256_bytes(os.urandom(32))
+        expires_at = now + timedelta(seconds=lease_seconds)
+        if not _take_task_lease(database, row, owner=owner, token=token, now=now,
+                               expires_at=expires_at, max_attempts=max_attempts):
+            return None
         return QueueLease(
             id=str(row["id"]),
             kind=str(row["kind"]),
@@ -14564,6 +14600,8 @@ def _processor_child_entry(
     task: dict[str, Any],
 ) -> None:
     try:
+        # Results use sender, never stdout (which may carry the parent's MCP).
+        os.dup2(2, 1)
         if os.name != "nt":
             os.setsid()
         _send_processor_frame(sender, _processor_result_frame(processor, task))
@@ -15488,7 +15526,6 @@ def _work_one(
     task_id: str | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, int]:
-    counts = {"ok": 0, "failed": 0, "dead": 0, "skipped": 0, "halted": 0}
     lease = _claim_when_reachable(
         queue,
         owner=owner,
@@ -15499,6 +15536,18 @@ def _work_one(
         task_id=task_id,
         cancelled=cancelled,
     )
+    return _work_claimed(queue, processor, processor_runner, lease,
+        deadline=deadline, monotonic=monotonic, lease_seconds=lease_seconds,
+        heartbeat_seconds=heartbeat_seconds, max_attempts=max_attempts,
+        retry_base_seconds=retry_base_seconds, retry_cap_seconds=retry_cap_seconds,
+        cancelled=cancelled)
+
+
+def _work_claimed(queue, processor, processor_runner, lease, *, deadline, monotonic,
+                  lease_seconds, heartbeat_seconds, max_attempts, retry_base_seconds,
+                  retry_cap_seconds, cancelled=None):
+    """Supervise and settle a lease issued by the same canonical claim path."""
+    counts = {"ok": 0, "failed": 0, "dead": 0, "skipped": 0, "halted": 0}
     if lease is None:
         return counts
     if _adopted_counts(queue, lease, counts):
@@ -16041,14 +16090,14 @@ def _uses_compile_journal(queue):
     return getattr(contract, 'user_version', None) == compile_progress.QUEUE_SCHEMA_VERSION
 
 
-def _manual_lease_processor(queue, lease, deadline, task, *, lock_token=None):
+def _manual_lease_processor(queue, lease, deadline, task, *, lock_token=None, owner=None):
     if lease.kind != 'compile' or not _uses_compile_journal(queue):
         return _manual_processor(task)
     if task != _compat_task(lease):
         raise LeaseFenceError('compatibility payload differs from compile lease')
     from compile_memory import run_leased_compile
 
-    return run_leased_compile(queue, lease, deadline=deadline, lock_token=lock_token) == 0
+    return run_leased_compile(queue, lease, deadline=deadline, lock_token=lock_token, owner=owner) == 0
 
 
 # Order matters: the first matching entry wins, so the narrower exception

@@ -3049,3 +3049,127 @@ The callback check surrounds claim attempts; it does not interrupt a SQLite
 statement already executing inside the queue's existing busy-timeout contract.
 Full dependency/update fencing, limits qualification and frontend routing remain
 open, as do installation, encrypted restore and the real medium-model full cycle.
+
+
+### 2026-10-20 — resume the same unfinished foreground request
+
+Connecting a foreground call by always enqueuing a new task would abandon the
+original durable work identity on every retry. A permanent dedupe key derived
+only from selection would instead keep returning a completed task forever,
+preventing compilation of later source edits. A source digest in the caller's
+request would require recapturing inputs before the durable controller restores
+its saved capture, and would turn an edit during recovery into a different job.
+
+Choose an atomic lookup-or-create in the existing adopted queue transaction:
+for the same compile handler and canonical payload, select the oldest unfinished
+leaf of a redrive lineage. Ready, leased, blocked and dead work remain the same
+request; the foreground does not unblock, redrive or reset its attempt count.
+Succeeded and canceled leaves permit a later request. Explicit redrive children
+replace their dead ancestors for selection. Completed results/receipts and the
+cross-work unknown-source gate remain authoritative when new work is created.
+Matching checks both payload bytes and their stored digest; hash-only or bytes-
+only corruption of a matching task refuses rather than silently replacing it.
+The same source fence, canonical payload validation and task-row insertion remain
+in use. No new table, index, directory, schema or persistent pointer is added.
+
+This restores saved work, not a guarantee that a resumed capture contains source
+edits made after it was admitted. Fresh pending sources still require subsequent
+work; frontend status must describe that distinction. The query may examine
+unfinished rows, so full-scale cost qualification remains open. Source rationale
+is the SQLite transaction and AWS retry-intent documentation already checked on
+2026-10-20, plus Python's parent-owned execution contract; caller cancellation
+and deadline use the existing queue mutation guard. Built-in graph generation
+`generation-18e032760b096a15-93f9911a` is fresh at `c0293e15`; partial graph results
+for enqueue, dedupe, row insertion and redrive were supplemented by source.
+
+
+The ingress connection retains `_compile_under_lock` for all callers. Its default
+mutating executor becomes the queued foreground executor; dry-run keeps the
+existing nonpublishing preview and leased children supply their explicit durable
+executor. This avoids recursion and keeps CLI/MCP/nightly on the same selection.
+A foreground request requires the adopted compile-journal schema before enqueue.
+It projects a queue-worker owner through the existing registry and renews that
+owner plus queue projection with the existing owner-heartbeat context using the
+queue's renewal method. The owner and compile-lock token are passed ephemerally
+to the leased child; publication projects the same verified owner into its writer
+gate. Caller cancellation and owner loss stop supervised execution, and cleanup
+releases only ownership acquired by this caller. No new runtime actor type or
+marker is introduced. The registered queue-worker covers the foreground
+execution; the existing compile.pid remains the shared compile exclusion lock.
+
+Completion is read from the task after supervised settlement. A blocked, leased,
+ready or dead task must not be reported completed merely because no child ran.
+The task ID and retained state are reported for follow-up. CLI generation refresh
+keeps its existing behavior, including previously committed batches on failure.
+This connection must be proven with a spawned semantic-fixture compiler and the
+real adopted registry, then qualified with the actual medium provider later.
+
+
+Qualification exposed a race in the initial separate enqueue/claim connection:
+a competing worker could acquire the new foreground task before its parent,
+then refuse the parent's compile lock and spend an attempt. The dedicated
+regression reproduced this before the correction. Final admission selects or
+creates the request and invokes the ordinary `_claim_in` in one BEGIN IMMEDIATE
+transaction. `claim` and `claim_compile_request` share that implementation,
+including payload, source/capture fences, expiry recovery, attempt policy and
+lease CAS. The worker's existing post-claim supervision was extracted unchanged
+into `_work_claimed`, shared by ordinary and atomic foreground claims. The
+uninstalled enqueue-only prototype was removed; no parallel admission path is
+retained. Concurrent identical requests produce one task and exactly one lease.
+Cancellation during admission rolls back both new task and claim.
+
+The new foreground tests reproduced five failures through the legacy executor,
+while dry-run already passed. Three initial entrypoint integrations then passed
+with real subprocesses, canonical queue/coordinator owners and a fake semantic
+backend. Extended coverage verifies later work buys no additional model calls
+for already receipted sources (three calls on the first task, zero on the next),
+retains a supplied owner after publication, refuses an older queue schema, and
+never marks source hashes compiled for invalid model output. The source of the
+nightly call was inspected: `scheduled_nightly._compile_step` invokes the same CLI.
+This is routing evidence, not a successful real nightly pass.
+
+Four older boundary tests initially failed because they intercepted `_run` as
+the default or used unadopted fixtures. The lock/ceiling and owner-forwarding
+unit tests now intercept the queued executor; the legacy batch failure/continued
+batch tests explicitly select their retained legacy executor. Their original
+failure, hash, log, lock and source-failure assertions remain. New adopted
+foreground failure tests cover the default path, rather than treating schema
+refusal as proof of model-failure handling. Legacy execution remains only for
+preview and explicit retained tests during this uninstalled migration; removal
+still requires qualified installation and the law-8 usage audit.
+
+### 2026-10-20 — isolate worker diagnostics from MCP transport
+
+The foreground MCP regression reproduced non-protocol text on stdout
+(`logs/step7-foreground-stdout-red-20261020.txt`, one failure). The worker
+returns its outcome over a dedicated multiprocessing pipe; stdout is not its
+result channel. Parent success reporting and inherited child descriptors were
+still directed to the protocol channel.
+
+Primary sources reviewed today: [MCP stdio contract](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports),
+[Python 3.12 os.dup2](https://docs.python.org/3.12/library/os.html#os.dup2),
+and [Linux dup(2)](https://man7.org/linux/man-pages/man2/dup.2.html).
+MCP reserves stdout for protocol messages and permits stderr diagnostics.
+Descriptor duplication changes the child's destination without changing the
+parent's descriptor and covers inherited native writes, unlike Python-only
+stream redirection. Choose child-only fd 1 → fd 2 before executing the handler,
+and explicit stderr for the parent's completion diagnostic. Global parent
+redirection would race with MCP writers; suppressing output would lose evidence;
+patching each handler would leave native/subprocess output uncovered.
+No new limit, dependency, path or persistence contract is introduced. Linux
+regressions cover Python/native/inherited subprocess output; Windows behavior
+remains to be qualified on Windows. Failure to redirect prevents handler entry.
+
+Validation: before the output-channel fix, the extended queue/compiler/MCP suite
+passed 774 tests with two native-Windows skips on each of Python 3.12 (364.78 s)
+and 3.10 (403.65 s). After the fix, the foreground/request-resumption/targeted-worker/
+cancellation/child-tree suite passed 43 tests on each (43.29 s and 46.93 s).
+The original MCP stdout regression now passes; the spawned-worker regression
+also covers Python print, direct fd writes, descendant output and unchanged
+parent stdout. An initial new test harness called `_work_one` without its required
+arguments; that harness was corrected to exercise `_run_processor_child` directly
+before these final runs. Ruff and whitespace checks pass. Lizard plus AST checked
+all 52 changed/new functions against c0293e15: no complexity, if-count or nesting
+violations. These are Linux semantic-fixture qualifications, not an installed
+nightly run, Windows qualification, paid-provider quality result or completion
+of point 7.

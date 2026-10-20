@@ -1858,7 +1858,7 @@ def test_run_pending_compile_propagates_supplied_owner(monkeypatch):
         captured.update(kwargs)
         return 0
 
-    monkeypatch.setattr(compile_memory, "_run", run)
+    monkeypatch.setattr(compile_memory, "_run_queued_compile", run)
 
     assert compile_memory.run_pending_compile(owner=owner) == 0
     assert captured["owner"] is owner

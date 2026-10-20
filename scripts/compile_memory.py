@@ -7994,13 +7994,78 @@ def _compile_under_lock(
     _mark_started_unless_dry(args)
     try:
         with _receipt_discovery_scope(), call_ceiling(setting_value("provider.draft_ceiling_seconds")):
-            runner = _run if execute is None else execute
+            runner = _default_compile_executor(args) if execute is None else execute
             return runner(args, deadline=deadline, cancelled=cancelled, owner=owner)
     except BaseException as e:  # noqa: BLE001
         _mark_error_unless_dry(args, e)
         raise
     finally:
         _release_compile_lock(lock_token)
+
+
+def _default_compile_executor(args):
+    return _run if getattr(args, 'dry_run', False) else _run_queued_compile
+
+
+def _run_queued_compile(args, *, deadline, cancelled, owner):
+    from memory_queue import _uses_compile_journal, active_memory_queue
+
+    _require_compile_active(deadline, cancelled)
+    queue = active_memory_queue(ROOT, STATE_ROOT, deadline=deadline)
+    if not _uses_compile_journal(queue):
+        raise ValueError('foreground compile requires adopted compile journal')
+    payload = compile_task_payload(args)
+    with queue.queue_owner(role='queue-worker', scope='compile', parent=owner) as execution_owner:
+        return _owned_foreground_compile(queue, args, payload, execution_owner,
+                                         deadline=deadline, cancelled=cancelled)
+
+
+def _foreground_stopped(cancelled, lost):
+    return lost.is_set() or (cancelled is not None and cancelled())
+
+
+def _foreground_processor(lock_token, owner):
+    from memory_queue import LeaseProcessor, _manual_lease_processor
+
+    return LeaseProcessor(partial(_manual_lease_processor, lock_token=lock_token, owner=owner))
+
+
+def _owned_foreground_compile(queue, args, payload, owner, *, deadline, cancelled):
+    import threading
+    from types import SimpleNamespace
+
+    from operational_ownership import heartbeat_owner
+
+    lost = threading.Event()
+    stopped = partial(_foreground_stopped, cancelled, lost)
+    renewer = SimpleNamespace(heartbeat=queue.heartbeat_queue_owner)
+    with heartbeat_owner(owner, registry=renewer, lost=lost):
+        task_id, lease = queue.claim_compile_request(payload, owner=f'compile-{os.getpid()}',
+                                                     deadline=deadline, cancelled=stopped)
+        processor = _foreground_processor(maybe_compile.lock_owner_token(), owner)
+        task = _execute_foreground_task(queue, task_id, lease, processor, deadline, stopped)
+        return _foreground_compile_result(args, task)
+
+
+def _execute_foreground_task(queue, task_id, lease, processor, deadline, cancelled):
+    from memory_queue import DEFAULTS, _run_processor_child, _work_claimed
+
+    _work_claimed(queue, processor, _run_processor_child, lease,
+        deadline=deadline, monotonic=time.monotonic, cancelled=cancelled,
+        lease_seconds=DEFAULTS.queue_lease_seconds, heartbeat_seconds=DEFAULTS.queue_heartbeat_seconds,
+        max_attempts=DEFAULTS.queue_max_attempts, retry_base_seconds=DEFAULTS.retry_base_seconds,
+        retry_cap_seconds=DEFAULTS.retry_cap_seconds)
+    return queue.get(task_id)
+
+
+def _foreground_compile_result(args, task):
+    if task.state == 'succeeded':
+        print(f'compile_memory: queue task {task.id} completed.', file=sys.stderr)
+        return 0
+    reason = f'queue task {task.id}: {task.state} ({task.blocked_capability or task.error_code or "not_claimable"})'
+    _mark_finished(args.trigger, 'error', reason)
+    print(f'compile_memory: {reason}', file=sys.stderr)
+    return 1
 
 
 def run_leased_compile(

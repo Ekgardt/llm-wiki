@@ -34,7 +34,7 @@ seen = []
 def observed(args, **bounds):
     seen.extend([llm_client._timeout_s(), maybe_compile._lock_state()[0], memory_state.load_state()["last_compile_status"]])
     return 0
-compile_memory._run = observed
+compile_memory._run_queued_compile = observed
 code = compile_memory.run_pending_compile()
 print(json.dumps([code, *seen, maybe_compile._lock_state()[0]]))
 """

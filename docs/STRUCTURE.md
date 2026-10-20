@@ -1226,8 +1226,9 @@ valid task; stored payload corruption still follows the existing demotion path.
 
 Candidate compile tasks can carry one `compile_request` with schema
 `compile-request/v1`, a canonical vault-relative daily `file` or null,
-`closed_days_only` and `trigger`. Fields and types are checked before the compile
-lock or provider discovery. Explicit files retain precedence over closed-day
+`closed_days_only` and `trigger`. Leased task fields and types are checked before
+the child compile lock or provider discovery; foreground encoding is checked
+before queue admission. Explicit files retain precedence over closed-day
 filtering. The controller binds these options in `leased-compile-request/v2`
 inside its existing snapshot admission. Recovery reads saved sources even if the
 live daily file has disappeared. New task encoding resolves the CLI path once;
@@ -1237,16 +1238,17 @@ Historical tasks without `compile_request` keep their original all-pending/auto
 meaning and retained v1 request identity. This reader compatibility is needed
 until retained historical work is resolved; it does not permit new frontends to
 omit selection intent. The task encoder excludes ephemeral lock ownership and
-refuses dry-run requests. CLI/MCP/nightly routing to this encoder and parent-owned
-execution remains unfinished; the encoder alone does not activate that routing.
+refuses dry-run requests. In the uninstalled candidate, CLI, MCP and the nightly's
+CLI invocation route mutating compiles through the shared supervised executor.
+Dry-run remains a nonpublishing preview. The foreground requires the adopted
+compile-journal schema; it does not fall back to legacy mutation on an older queue.
 
 The adopted queue and its existing supervised worker accept an optional exact
 task ID. Selection keeps the same transaction, eligibility, payload checks and
 lease acquisition; an unavailable target never falls through to unrelated work.
 The worker retains parent heartbeats, child supervision, result adoption and
 whole-work settlement. Ordinary workers keep their existing ordering. This
-internal capability is qualified with a spawned compile child, but frontends
-still need routing and cancellation propagation before activation. The leased
+internal capability is qualified with a spawned compile child. The leased
 entry accepts ephemeral compile-lock authority through its processor argument,
 using the existing spawn-token check. This token is never retained in the task
 payload or source-selection identity; a borrowing child does not release its
@@ -1260,8 +1262,29 @@ A canceled running task is blocked with `caller_cancelled`, so automatic workers
 do not restart it. Explicit unblock does not clear a retained unknown model call:
 the compile controller still requires resolution or repeat consent. Completed
 answers already in hand retain normal validation and cleanup. Custom injected
-synchronous runners retain responsibility for their own interruption. This does
-not yet connect the CLI/MCP/nightly compile entrypoints to the candidate worker.
+synchronous runners retain responsibility for their own interruption.
+
+Foreground request admission selects the oldest unfinished leaf with identical
+compile-handler/payload identity, or creates a task when no such leaf exists.
+It claims that task in the same SQLite transaction through the ordinary claim
+implementation: no other worker can steal a newly admitted foreground task
+between enqueue and claim. Blocked, dead or leased tasks do not become new work
+and do not have attempts reset. Explicit redrive selects the replacement leaf;
+succeeded/canceled leaves allow a new request. Payload/digest mismatch refuses
+reuse. A resumed capture retains its original sources; subsequent source edits
+remain separate pending work. There is no permanent selection-only dedupe key.
+
+The parent projects a queue-worker owner in the existing canonical registry,
+renews that owner and its queue projection, and passes verified owner authority
+to the child for publication. Supplied parent ownership is preserved. The shared
+worker supervises both ordinary claims and atomic foreground claims, including
+retained-result adoption and whole-work settlement. Foreground success requires
+the task's succeeded state; other retained states report the task ID and reason.
+Worker results travel over the existing dedicated pipe; the child redirects its
+stdout descriptor to stderr before entering the handler, preserving MCP stdout
+for protocol messages. Parent completion diagnostics also use stderr.
+Installation, full dependency/limit qualification, semantic retention/backup and
+the real medium-provider full cycle remain required before product completion.
 
 The uninstalled refreshed-context format stores only complete changed context
 records and explicit removed paths in another self-contained ZIP64 artifact.

@@ -127,13 +127,15 @@ def test_queue_cli_selects_lease_aware_default_processor(monkeypatch):
     assert observed[0].process is memory_queue._manual_lease_processor
 
 
-def _configured_worker(queue, lease, deadline, task):
+def _configured_worker(queue, lease, deadline, task, *, backend=None, **options):
     """Child-side fixture adapters; ownership, compiler and settlement stay real."""
     with pytest.MonkeyPatch.context() as patch:
         _components(patch, queue.vault)
         patch.setattr(compiler, 'provider_candidates', lambda *args, **kwargs: [_provider()])
         calls = _semantic_backend(patch)
-        result = memory_queue._manual_lease_processor(queue, lease, deadline, task)
+        if backend is not None:
+            patch.setitem(llm_client._BACKENDS, 'fake', backend)
+        result = memory_queue._manual_lease_processor(queue, lease, deadline, task, **options)
         with (queue.state_root / 'leased-call-counts').open('a') as handle:
             handle.write(str(len(calls)) + '\n')
         return result
