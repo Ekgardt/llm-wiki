@@ -2754,3 +2754,81 @@ all 179 distinct cases on each version, without claiming either original broad
 run was green. Final Ruff, whitespace and all 48 function complexity checks pass.
 The implementation remains a candidate: no installed-vault behavior or real-model
 full-cycle cost is established by these simulated-provider regression cases.
+
+### 2026-10-20 — ingress ownership and immutable request binding
+
+Built-in generation `generation-18e02f3467fc4db9-18e6eb45` matches 82bbb83f.
+Graph callees for `_with_verified_lease`, `compile_origin`, `_require_leased_row`
+and `_validated_payload_bytes` were inspected; partial coverage was supplemented
+with the transition callers, serializer and lease/queue source.
+
+Before connecting CLI/MCP/nightly to the leased executor, source inspection found
+that `_with_verified_lease` validates the stored payload and live owner/token but
+does not compare the lease object's kind, handler version, input hash and payload
+with that stored task. A compatibility dictionary compared with the same lease
+object cannot detect a changed lease object. Selection options must not be read
+from such an unchecked object.
+
+Primary research checked on 2026-10-20:
+- SQLite's single-writer transactions support checking ownership and input
+  identity in the existing transaction: https://www.sqlite.org/lang_transaction.html
+- AWS recommends binding idempotent intent to request identity and treating
+  changed parameters separately:
+  https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/
+- Python documents fresh-interpreter spawn and serialization requirements;
+  existing parent-owned worker supervision should be reused:
+  https://docs.python.org/3/library/multiprocessing.html
+  and https://docs.python.org/3.10/library/multiprocessing.html .
+  The latter is now labelled unsupported upstream. Compatibility testing on
+  3.10 is not a claim of upstream security support; changing the product's
+  supported Python floor is outside this change.
+- MCP cancellation is cooperative and can race completion; it is not proof
+  that a remote model did no work:
+  https://modelcontextprotocol.io/specification/2025-06-18/basic/utilities/cancellation .
+- Additional review of canonical hash comparisons:
+  https://www.rfc-editor.org/rfc/rfc8785 . This is a design reference for stable
+  representations, not a claim that the project's restricted canonical JSON
+  implements JCS. Existing NFC normalization and refusal of floats stay intact;
+  replacing that persisted identity contract would require a separate migration.
+
+The chosen immediate correction is one immutable-input check at the existing
+verified-lease transaction boundary, after stored-payload validation. This
+preserves corruption demotion and prevents changed in-memory task input from
+authorizing protected transitions. Compare kind, handler version and input hash,
+then recompute the payload hash with the existing canonical serializer. Do not
+add a second request store, lock, table, service or package. Reject a mismatched
+caller without modifying a valid stored task, so its legitimate owner can
+continue. Alternatives rejected: trusting the lease's hash without recomputing
+its payload, validating only the compatibility dictionary, or adding compiler-only
+checks while result publication and heartbeat remain permissive.
+
+The remaining ingress work must bind file/closed-day/trigger selection, preserve
+spawned-lock ownership, supervise cancellation/deadlines through the existing
+parent worker and keep dry-run semantics explicit. None of those requirements
+is considered complete merely by strengthening the lease boundary.
+
+Reproduction before the correction: 22 failures and one passing canonical-order
+control in `step7-lease-input-red-20261020.txt`, plus a failing compile-entry
+test in `step7-lease-input-compile-red-20261020.txt`. The entry test confirms
+that a forged lease reached the compile-lock runner before correction.
+The initial focused pass succeeded in 37 cases (22.31s). Additional cases cover
+redaction-equivalent changed secrets and stored-corruption demotion. The canonical
+comparison does not call the ingress redactor again. Broad checks passed all 142
+cases on Python 3.12 (270.20s) and Python 3.10 (362.13s), recorded in
+`step7-lease-input-py{312,310}-20261020.txt`.
+All 11 changed/new functions pass lizard/AST checks; whole Ruff and diff checks
+pass. No new resource limit or external dependency is introduced.
+
+Next ingress contract to implement under the already approved common-controller
+scope: a versioned `compile_request` inside the existing task payload binds a
+vault-relative daily file (or all pending sources), `closed_days_only` and
+`trigger`. Validate explicit field types and unknown fields, preserving the
+current rule that an explicit file takes precedence over the closed-day filter.
+The spawn lock token is ephemeral ownership, not persisted request intent.
+Resolve a CLI-supplied path once when forming intent; on recovery, validate the
+logical path without rereading or requiring the saved source to remain live.
+Fresh capture still performs the existing containment and source checks.
+Historical tasks without this request retain their original all-pending/auto
+meaning; new requests must be bound into retained execution identity rather than
+silently recovered under historical defaults. The actual routing and tests are
+still unimplemented at this checkpoint. Do not claim this plan as completed code.

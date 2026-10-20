@@ -5520,6 +5520,16 @@ def _require_leased_row(
     return row
 
 
+def _require_lease_input(row: sqlite3.Row, lease: QueueLease) -> None:
+    """Bind caller input to the stored intent, without redacting it a second time."""
+    actual = [lease.kind, lease.handler_version, lease.input_hash]
+    expected = [row["kind"], row["handler_version"], row["input_hash"]]
+    if canonical_json_bytes(actual) != canonical_json_bytes(expected):
+        raise LeaseFenceError("lease input identity differs from stored task")
+    if sha256_bytes(canonical_json_bytes(dict(lease.payload))) != row["input_hash"]:
+        raise LeaseFenceError("lease input payload differs from stored task")
+
+
 # What the v3 `source_failures.error_code` CHECK stores: bytes, not characters.
 MAX_SOURCE_FAILURE_CODE_BYTES = 64
 
@@ -11908,6 +11918,7 @@ class _QueueV3CandidateReader:
                 is not None
             )
             if verified:
+                _require_lease_input(row, lease)
                 result = action(database, row, now)
         if not verified:
             self._raise_payload_mismatch()

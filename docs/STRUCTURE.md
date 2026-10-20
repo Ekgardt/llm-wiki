@@ -1217,6 +1217,13 @@ candidate queue only; it does not recover unjournaled legacy calls or provide
 semantic deduplication of copied sources. The metadata scan is linear in retained
 work count; archive/retention and full-cycle cost qualification remain required.
 
+The verified-lease boundary also compares the caller's kind, handler version and
+input hash with the stored task, then hashes the caller's canonical payload.
+The payload is not redacted again during this comparison: redaction could conceal
+a changed value. This applies to heartbeat, protected compile transitions, result
+publication and settlement. A mismatched caller is refused without changing a
+valid task; stored payload corruption still follows the existing demotion path.
+
 The uninstalled refreshed-context format stores only complete changed context
 records and explicit removed paths in another self-contained ZIP64 artifact.
 It binds one complete source capture by manifest digest; it never follows delta

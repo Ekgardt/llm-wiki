@@ -185,3 +185,14 @@ def test_empty_pending_sources_still_prove_completion_without_model_calls(work, 
     assert memory_state.load_state()['last_compile_outcome'] == 'nothing'
     work[0].publish_result(work[1], operation_id=work[1].id, result=b'empty complete')
     assert work[0].acknowledge(work[1]).state == 'succeeded'
+
+
+def test_changed_lease_input_is_refused_before_compile_lock(work, runtime, monkeypatch):
+    observed = []
+    monkeypatch.setattr(compiler, '_compile_under_lock', lambda *args, **kwargs: observed.append(True))
+    changed = replace(work[1], payload={'compile_request': {'file': 'another-day'}})
+    with pytest.raises(memory_queue.LeaseFenceError, match='input'):
+        _run((work[0], changed, work[2]))
+    assert observed == []
+    assert runtime == []
+    assert work[0].get(work[1].id).state == 'leased'
