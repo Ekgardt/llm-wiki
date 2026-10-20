@@ -338,3 +338,65 @@ def validate_root_event(event, origin):
                             details['dependency_digest'], details['request_digest'])
     if details != expected:
         raise ProgressCorrupt('compile root semantic identity changed')
+
+
+def completed_work(database, origin):
+    """Read the compiler's immutable whole-work attestation, not live receipts."""
+    root = event_at(database, root_work_id(origin), 0)
+    if root is None:
+        return None
+    _require_initial(root)
+    validate_root_event(root, origin)
+    latest = latest_event(database, root.work_id)
+    if (latest.stage, latest.outcome) != ('published', 'completed'):
+        return None
+    proof = _work_completion_proof(latest)
+    parent = event_at(database, root.work_id, latest.sequence - 1)
+    _require_completion_preflight(database, root, parent, proof)
+    return latest
+
+
+def _work_completion_proof(event):
+    if set(event.details) != {'work_completion'}:
+        raise ProgressCorrupt('compile root has no whole-work completion proof')
+    proof = event.details['work_completion']
+    fields = {'schema', 'preflight_digest', 'batch_count', 'children_digest'}
+    if not isinstance(proof, dict) or set(proof) != fields:
+        raise ProgressCorrupt('invalid whole-work completion fields')
+    _require_work_completion_values(proof)
+    return proof
+
+
+def _require_work_completion_values(proof):
+    if proof['schema'] != 'compile-work-completion/v1':
+        raise ProgressCorrupt('unsupported whole-work completion schema')
+    _require_sequence(proof['batch_count'])
+    for name in ('preflight_digest', 'children_digest'):
+        _require_digest(proof[name])
+
+
+def _require_completion_preflight(database, root, parent, proof):
+    if parent is None or (parent.sequence, parent.stage, parent.outcome) != (2, 'pending', 'ready'):
+        raise ProgressCorrupt('whole-work completion has no retained preflight')
+    if _event_digest(parent) != proof['preflight_digest'] or parent.source_digest != root.source_digest:
+        raise ProgressCorrupt('whole-work completion preflight identity changed')
+    snapshot = event_at(database, root.work_id, 1)
+    _require_completion_snapshot(snapshot, root)
+    expected = {'schema': 'compile-preflight/v1', 'snapshot_digest': _event_digest(snapshot),
+                'dependency_digest': root.details['compile_work']['dependency_digest'],
+                'request_digest': root.details['compile_work']['request_digest']}
+    _require_completion_preflight_binding(parent, expected)
+
+
+def _require_completion_snapshot(snapshot, root):
+    if snapshot is None:
+        raise ProgressCorrupt('whole-work completion has no retained snapshot')
+    if (snapshot.stage, snapshot.outcome, snapshot.source_digest) != ('snapshot_ready', 'ready', root.source_digest):
+        raise ProgressCorrupt('whole-work completion snapshot identity changed')
+    artifact_identity(snapshot)
+
+
+def _require_completion_preflight_binding(parent, expected):
+    if set(parent.details) != {'compile_preflight', 'artifact'} or parent.details['compile_preflight'] != expected:
+        raise ProgressCorrupt('whole-work completion binding changed')
+    artifact_identity(parent)

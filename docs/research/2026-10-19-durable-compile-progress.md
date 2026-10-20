@@ -2186,3 +2186,69 @@ and step7-work-completion-complexity-20261020.json in private vault logs.
 Not installed. Queue-parent settlement integration and CLI/MCP/nightly routing,
 full dependency closure, consent/repeat surfaces, semantic reference retention,
 backup/restore, installation/legacy removal and real-model qualification remain.
+
+### Queue settlement requires compile completion (2026-10-20, implementation underway)
+
+Inspection found that the worker still accepts a truthy scalar from a compile
+processor and can publish/acknowledge it without whole-work proof. The existing
+spawned handoff test even confirms success after one saved answer. That was valid
+for generic handoff, not for complete compilation. Enforce the approved durable
+compiler boundary at publication and acknowledgement in queue schema4. Schema3
+retains its historical contract until offline adoption; other task kinds retain
+their result contract. No optional flag or hidden bypass is introduced.
+
+Require the original lineage's root completion and its exact retained preflight
+binding inside the same verified-lease SQLite transaction. This checks the durable
+compiler's completion attestation, not a new live filesystem snapshot; the compiler
+already revalidates all receipts under one writer gate before attesting. Refusal
+must occur before storing result bytes and again when binding or acknowledging,
+so an alternate caller cannot bypass it. Parent settlement preserves the refusal
+as an explicit blocked task rather than counting success or spending retry attempts
+on an invalid success response. Missing and malformed completion are distinct.
+
+Primary-source rationale is the current SQLite isolation/atomic-write contract,
+AWS exact request-intent validation and Temporal execution completion/history
+references checked on2026-10-20 above. A callback-only assertion leaves direct
+publication/acknowledgement paths open. Re-running compiler planning from inside
+a queue write transaction reverses ownership ordering and duplicates proof work;
+use the immutable attestation instead. No database, runtime path, schema migration,
+package or new numeric limit is added. This enforces settlement; initial capture,
+dependency preparation and all entrypoint routing remain separate unfinished work.
+
+Schema3 result handling is retained because the installed vault and explicit
+pre-upgrade migration/restore readers still require that contract. Remove it from
+normal runtime admission only after installer cutover and all production entrypoints
+use schema4, with offline migration/restore compatibility still verified. This is
+an explicit unfinished legacy condition, not completion of law8.
+
+Initial regression run: eight cases failed because missing, partial or malformed
+attestations were accepted; two full-work success controls passed. After the guard,
+27 related cases passed and two older expectations failed: transport-only success
+and the schema4 generic-lifecycle fixture. They now require compile refusal and
+separately exercise ordinary query settlement; full actual compile success and
+spawned parent settlement have dedicated positive controls. Added concurrent
+progress advancement between result storage/binding and before acknowledgement.
+
+Final qualification: broad queue/CLI/race/progress suites yielded321 passed,
+1 native-Windows skip and2 retention-fixture failures per interpreter
+(3.12:237.65s;3.10:298.45s). The retained-success fixture now creates real empty-work
+completion instead of bypassing compiler proof; its temporary compiler ROOT/state
+must match the queue, and the ownership guard caught the first incomplete fixture
+setup. The expired-lease regression injected into obsolete read_compile_artifact;
+it now expires the lease at the actual streaming verify_compile_artifact boundary,
+keeping its original refusal/no-commit assertions. No production guard was relaxed.
+All9 retention cases then passed on3.12/3.10 (7.81s/8.74s), closing both failures.
+The unchanged implementation is thus covered by323 passing cases across the broad
+and corrected targeted runs, plus the explicitly unqualified Windows check.
+
+All34 changed/new functions pass measured CCN/if/nesting limits; whole scripts/tests
+Ruff, diff and package compatibility65/67 checks pass. No package/lock changes.
+Evidence: step7-queue-completion-{red,green,py312,py310}-20261020.txt,
+step7-queue-retention-{final,verified}-{py312,py310}-20261020.txt and
+step7-queue-completion-complexity-20261020.json. The failed interim logs remain.
+Fresh graph before code: generation-18e026eceefa2e36-3ecfa566 at6f339d2a; initial
+queries while refresh was live were stale and were not used as permission to edit.
+Fresh queries plus source inspection covered settlement and publication dependencies.
+Candidate enforcement is not installed; capture/dependency preparation and production
+routing, semantic audit/retirement, recovery qualification and other point7 gates
+remain open. No native Windows/macOS or useful real-model cycle claim is made.

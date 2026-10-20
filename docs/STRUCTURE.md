@@ -1276,8 +1276,19 @@ only existing saved child contexts. Missing work is not admitted. A compact
 all revalidated root completion records. A truly empty source manifest may
 complete; an all-refused manifest cannot. Previous completion is revalidated, and
 lost evidence is an error. This proof does not settle the queue task: the worker
-parent still owns that transition after the entire delivery exits. Production
-routing, worker integration and semantic reference auditing remain unfinished.
+parent still owns that transition after the entire delivery exits. Queue schema4
+now requires the original lineage's whole-work attestation before writing final
+result bytes, again when binding those bytes, and when acknowledging a compile
+task. It validates the attestation's shape, source identity and exact retained
+snapshot/preflight binding in the verified-lease transaction. This is validation
+of a durable past completion, not another live receipt snapshot. A truthy processor
+response without proof blocks with `compile_work_incomplete` and capability
+`compile_completion`; malformed proof reports `compile_completion_corrupt`.
+Other task kinds and the pre-adoption schema3 retain their result contracts.
+The existing parent worker handles this refusal without counting success or
+automatically retrying an invalid success response. Initial capture/dependency
+preparation, production entrypoint routing and semantic reference auditing remain
+unfinished.
 
 The archive's eager compatibility planning view keeps daily records materialized for existing partition
 proofs, while context source/target/vault collections retain verified record indices

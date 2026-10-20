@@ -2368,6 +2368,10 @@ class QueueOperationError(RuntimeError):
         return (self.__class__, (self.code, self.detail))
 
 
+class CompileCompletionError(QueueOperationError):
+    """A new-schema compile task lacks a valid whole-work attestation."""
+
+
 @dataclass(frozen=True)
 class PayloadValidation:
     raw: bytes
@@ -7479,6 +7483,24 @@ def _require_compile_root_work(database, row, event):
     compile_progress.validate_root_event(event, origin)
 
 
+def _completed_compile_attestation(database, row):
+    completed = compile_progress.completed_work(database, _compile_lineage_origin(database, row))
+    if completed is not None:
+        _require_compile_task_family(database, row, completed)
+    return completed
+
+
+def _require_complete_compile_attestation(database, row):
+    try:
+        completed = _completed_compile_attestation(database, row)
+    except QueueOperationError as error:
+        raise CompileCompletionError(error.code) from error
+    except (ValueError, TypeError, KeyError) as error:
+        raise CompileCompletionError('compile_completion_corrupt') from error
+    if completed is None:
+        raise CompileCompletionError('compile_work_incomplete')
+
+
 class _QueueV3CandidateReader:
     """The queue-v3 backend: an unpublished candidate, or the adopted database.
 
@@ -12100,6 +12122,7 @@ class _QueueV3CandidateReader:
         digest: str,
     ) -> None:
         """Point the leased task at the result bytes already written."""
+        self._require_compile_completion(database, row, now)
         self._require_publication_is_new(row, operation_id, relative, digest)
         changed = database.execute(
             """UPDATE tasks SET result_reference=?,result_sha256=?,
@@ -12114,7 +12137,7 @@ class _QueueV3CandidateReader:
         self, lease: QueueLease, *, operation_id: str, result: bytes
     ) -> str:
         _check_result_request(operation_id, result)
-        self._with_verified_lease(lease, _proved_lease_only)
+        self._with_verified_lease(lease, self._require_compile_completion)
         relative, digest = self._store_result_bytes(operation_id, result)
         self._with_verified_lease(
             lease,
@@ -12127,6 +12150,11 @@ class _QueueV3CandidateReader:
             ),
         )
         return relative
+
+    def _require_compile_completion(self, database, row, now):
+        if row['kind'] != 'compile' or self.expected_contract.user_version != compile_progress.QUEUE_SCHEMA_VERSION:
+            return
+        _require_complete_compile_attestation(database, row)
 
     def _result_is_intact(self, row: sqlite3.Row) -> bool:
         """Whether the task's recorded result still hashes to what it claims."""
@@ -12145,6 +12173,7 @@ class _QueueV3CandidateReader:
         lease: QueueLease,
     ) -> None:
         """Close the leased attempt, recording whether its result survived."""
+        self._require_compile_completion(database, row, now)
         state, error_code, outcome = _ACKNOWLEDGED_OUTCOMES[self._result_is_intact(row)]
         _record_acknowledged_attempt(
             database, row, now, lease=lease, outcome=outcome, error_code=error_code
@@ -15255,10 +15284,20 @@ def _settle_processor_outcome(
     if failure is not None:
         _settle_worker_failure(queue, lease, result, failure, counts, bounds)
         return
-    queue.publish_result(
-        lease, operation_id=lease.id, result=_published_result_data(result.outcome)
-    )
-    _count_terminal(counts, queue.acknowledge(lease))
+    _settle_successful_processor(queue, lease, result, counts, bounds)
+
+
+def _settle_successful_processor(queue, lease, result, counts, bounds):
+    try:
+        queue.publish_result(
+            lease, operation_id=lease.id, result=_published_result_data(result.outcome),
+        )
+        task = queue.acknowledge(lease)
+    except CompileCompletionError as error:
+        failure = QueueFailure(error.code, blocked_capability='compile_completion')
+        _fail_lease(queue, lease, failure, counts, **bounds)
+        return
+    _count_terminal(counts, task)
 
 
 def _purge_operation_rows(

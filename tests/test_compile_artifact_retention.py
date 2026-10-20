@@ -138,7 +138,9 @@ def test_task_reference_remains_protected_without_compile_events(queue):
 
 
 @pytest.mark.parametrize('terminal', ['cancelled', 'succeeded'])
-def test_retained_compile_history_does_not_block_unrelated_task_purge(queue, tmp_path, terminal):
+def test_retained_compile_history_does_not_block_unrelated_task_purge(queue, tmp_path, terminal, monkeypatch):
+    monkeypatch.setattr('compile_memory.ROOT', queue.vault)
+    monkeypatch.setattr('compile_memory.STATE_ROOT', queue.state_root)
     owner, query_id, event = _shared_answer(queue)
     queue.record_compile_event(owner, event)
     _finish_compile(queue, owner, terminal)
@@ -156,20 +158,38 @@ def _finish_compile(queue, owner, terminal):
     if terminal == 'cancelled':
         queue.cancel(owner.id)
         return
+    _complete_empty_compile(queue, owner)
     queue.publish_result(owner, operation_id='compile-final', result=b'final')
     queue.acknowledge(owner)
 
 
+def _complete_empty_compile(queue, owner):
+    import compile_controller as controller
+    from compile_memory import CompileInputs
+    from markdown_transaction import active_markdown_coordinator
+
+    inputs = CompileInputs((), (), ())
+    dependencies = controller.CompileDependencies.capture(lambda: {'retention_test': True})
+    root = controller.begin_compile_work(queue, owner,
+        lambda: (controller.compile_inputs_digest(inputs), dependencies.digest, {}))
+    snapshot = controller.save_compile_inputs(queue, owner,
+        replace(root, sequence=1, stage='snapshot_ready', details={}), inputs)
+    completed = controller.confirm_compile_work(queue, owner, snapshot,
+        coordinator=active_markdown_coordinator(queue.vault, queue.state_root),
+        dependencies=dependencies, request={}, plan=lambda reader, refused: iter(()))
+    assert completed.stage == 'published'
+
+
 def test_slow_artifact_validation_cannot_commit_after_lease_expiry(queue, monkeypatch):
     owner, _, event = _shared_answer(queue)
-    original = queue.read_compile_artifact
+    original = queue.verify_compile_artifact
 
-    def read_past_expiry(value):
-        data = original(value)
+    def verify_past_expiry(value, **kwargs):
+        size = original(value, **kwargs)
         monkeypatch.setattr(memory_queue, '_utc_now', lambda: owner.expires_at + timedelta(seconds=1))
-        return data
+        return size
 
-    monkeypatch.setattr(queue, 'read_compile_artifact', read_past_expiry)
+    monkeypatch.setattr(queue, 'verify_compile_artifact', verify_past_expiry)
     with pytest.raises(memory_queue.LeaseFenceError):
         queue.record_compile_event(owner, event)
     assert queue.get_compile_event(event.work_id) is None

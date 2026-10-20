@@ -69,6 +69,11 @@ def test_normal_queue_lifecycle_uses_version_four(upgraded):
         'c' * 64, lease.id, 0, 'd' * 64, 'pending', 'ready', {},
     ), b'answer')
     assert queue.read_compile_artifact(saved) == b'answer'
+    with pytest.raises(memory_queue.QueueOperationError, match='compile_work_incomplete'):
+        queue.publish_result(lease, operation_id='migration-test-result', result=b'final')
+    queue.cancel(lease.id)
+    queue.enqueue('query', 1, {'query': 'migration lifecycle'})
+    lease = queue.claim('migration-test')
     queue.publish_result(lease, operation_id='migration-test-result', result=b'final')
     assert queue.acknowledge(lease).state == 'succeeded'
 

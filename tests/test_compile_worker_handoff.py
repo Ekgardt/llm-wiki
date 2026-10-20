@@ -68,9 +68,9 @@ def test_unknown_child_outcome_survives_unblock_without_repeat(work):
 
 @pytest.mark.parametrize('mode, state, ok, failed, capability', [
     ('unknown', 'blocked', 0, 1, 'provider_outcome_unknown'),
-    ('answer', 'succeeded', 1, 0, None),
+    ('answer', 'blocked', 0, 1, 'compile_completion'),
 ])
-def test_worker_settlement_respects_controller_outcome(work, mode, state, ok, failed, capability):
+def test_worker_settlement_requires_full_compile_beyond_transport_success(work, mode, state, ok, failed, capability):
     queue, lease, _ = work
     counts = {'ok': 0, 'failed': 0, 'dead': 0, 'skipped': 0, 'halted': 0}
     memory_queue._run_and_settle(queue,
