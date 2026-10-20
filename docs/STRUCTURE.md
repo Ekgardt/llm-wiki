@@ -1497,6 +1497,11 @@ metadata only while the following record names the same shared identities.
 Part bodies are read and verified without retaining them in the reader.
 Changing the original or metadata releases the superseded reuse scope, including
 different versions at the same logical path; the next day starts a fresh scope.
+The shared original's computed digest is reused only for the identical immutable
+bytes object. Each record still checks its declared original digest; a changed
+object creates a new computed proof, and ordinary restoration without one hashes
+the original directly. Neither serialized metadata nor a caller-supplied digest
+can stand in for this proof. Blob and individual part validation remain active.
 There is no corpus-wide body cache or numeric eviction threshold. The eager
 compatibility view materializes daily records; iter_batches() consumes them
 sequentially through the shared planner.

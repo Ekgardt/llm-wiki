@@ -86,8 +86,8 @@ def test_archive_planner_releases_finished_daily_sources(monkeypatch, count):
     references = []
     restore = controller._restored_archive_record
 
-    def observe(kind, value):
-        record = restore(kind, value)
+    def observe(kind, value, **verification):
+        record = restore(kind, value, **verification)
         if kind is compiler.DailySnapshot:
             references.append((record.logical_path, weakref.ref(record)))
         return record

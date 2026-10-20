@@ -3275,3 +3275,52 @@ Ruff and whitespace checks pass. Lizard plus AST measured all 13 changed/new
 functions with no violations. Logs: `step7-archive-parts-*20261020*` under the
 live vault's private logs. This remains an uninstalled candidate; the installed
 compiler PID2129006 was observed live and was neither stopped nor bypassed.
+
+### 2026-10-20 — reuse an original digest only for the same immutable bytes
+
+The restored daily validator hashes `original_content` for every part although
+archive blob loading already validates it and consecutive parts share the same
+immutable bytes object. For N parts this adds N complete-original hash scans.
+The per-record declared original hash must nevertheless be checked every time.
+
+Primary sources reviewed today: [Python frozen dataclasses](https://docs.python.org/3.12/library/dataclasses.html#frozen-instances),
+[Git content-addressed objects](https://git-scm.com/book/en/v2/Git-Internals-Git-Objects),
+[Nix content addressing](https://nix.dev/manual/nix/2.24/store/store-object/content-address).
+The Git/Nix references motivate content-derived identity rather than trusting
+names; they are not implementation dependencies or claims that their formats
+match ours. Python documents frozen fields as emulated immutability, not a
+sandbox against hostile Python code. Existing exact-bytes checks exclude
+mutable buffers from a reused digest.
+
+Choose an internal frozen digest proof constructed from the actual original
+bytes, with its digest computed rather than supplied by a caller. Reuse it only
+for that identical bytes object; check each record's declared original hash
+against it. A changed original creates a new proof and releases the previous
+one. Ordinary restoration without a proof still hashes the supplied bytes.
+Reject proof-shaped arbitrary objects and proofs for other byte objects. No
+serialized boolean, unchecked digest, process-global memoization, new persistent
+format, dependency or numeric cache limit is introduced. Always rehashing is
+correct but repeats a linear scan for every part; trusting the manifest string
+alone would not establish actual content identity. The archive's own blob hash
+check remains, so a newly loaded original is still hashed there and once for
+this scoped proof. Full original loading remains a separate unfinished task.
+
+Pre-edit builtin navigation: `generation-18e0354fac46341e-503996c9` matched
+9ca91ca1; queried day restoration, record validation, original-digest comparison
+and the affected lifetime-observer test. Partial graph coverage (112686
+unresolved) was supplemented by exact callers. The red regression counted 16
+complete-original hashes in record validation for a 16-part daily, instead of
+one. After the fix that counter is one; the separate archive blob verification
+still hashes the newly loaded original as before. This is a measured hashing
+work reduction, not a full-cycle latency/token result.
+
+Focused proof/archive/planning tests passed all 30 cases. Final related suites
+passed all 158 cases on Python 3.12 (94.50s) and 3.10 (104.39s), including changed
+record digests, changed bytes, proof-shaped arbitrary objects, mutable buffers,
+late blob corruption, shared-source release, protected dispatch/recovery and
+foreground execution. The lifetime test observer now forwards the verifier's
+keyword argument; all its original release assertions remain. Ruff and diff
+checks pass; lizard plus AST measured all 12 changed/new functions without
+violations. Evidence: `logs/step7-original-digest-*20261020*`. This code is still
+uninstalled. Full-original memory, dependency/update qualification, retention,
+restore/install/legacy cleanup and the real medium full cycle remain open.

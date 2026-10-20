@@ -2629,14 +2629,41 @@ class CompileInputArchive:
         return CompileInputs(**{group: tuple(self.records(group)) for group in _snapshot_types()})
 
 
+@dataclass(frozen=True, eq=False)
+class _OriginalDigestProof:
+    """A computed digest tied to a strongly held, exact immutable bytes object."""
+
+    content: bytes | None = dataclass_field(repr=False)
+    digest: str | None = dataclass_field(init=False)
+
+    def __post_init__(self):
+        object.__setattr__(self, 'digest', _blob_digest(self.content))
+
+
+def _reuse_original_proof(previous, content):
+    if type(previous) is _OriginalDigestProof and previous.content is content:
+        return previous
+    return _OriginalDigestProof(content)
+
+
+def _proven_original_digest(content, proof):
+    if proof is None:
+        return _blob_digest(content)
+    if type(proof) is not _OriginalDigestProof or proof.content is not content:
+        raise ValueError('original digest proof does not own these bytes')
+    return proof.digest
+
+
 def _restore_archive_day(reader, records):
     originals, metadata = {}, {}
+    proof = None
     for value in records:
         originals = _shared_record_blobs(value, ('original_content',), reader.blob, originals)
         metadata = _shared_record_blobs(value, _ARCHIVE_JSON_FIELDS, reader.json_blob, metadata)
+        proof = _reuse_original_proof(proof, originals.get(value.get('original_content')))
         blob = partial(_read_shared_blob, reader.blob, originals)
         json_blob = partial(_read_shared_blob, reader.json_blob, metadata)
-        yield _restore_archive_value('dailies', value, blob, json_blob)
+        yield _restore_archive_value('dailies', value, blob, json_blob, original_proof=proof)
 
 
 def _shared_record_blobs(value, fields, read, previous):
@@ -2651,17 +2678,18 @@ def _read_shared_blob(read, shared, digest):
     return read(digest)
 
 
-def _restore_archive_value(group, value, blob, json_blob):
+def _restore_archive_value(group, value, blob, json_blob, *, original_proof=None):
     _archive_record_fields(value, _ARCHIVE_BYTES_FIELDS, blob)
     _archive_record_fields(value, _ARCHIVE_JSON_FIELDS, json_blob)
-    return _restored_archive_record(_snapshot_types()[group], value)
+    return _restored_archive_record(_snapshot_types()[group], value, original_proof=original_proof)
 
 
-def _restored_archive_record(kind, value):
+def _restored_archive_record(kind, value, *, original_proof=None):
     from compile_memory import DailySnapshot
 
     if kind is DailySnapshot:
-        _require_original_digest({**value, 'original_content': _blob_digest(value['original_content'])})
+        digest = _proven_original_digest(value['original_content'], original_proof)
+        _require_original_digest({**value, 'original_content': digest})
         value = _restore_snapshot_daily(value)
     result = kind(**value)
     _require_snapshot_digest(result.content, result.sha256)
