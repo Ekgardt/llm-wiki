@@ -91,3 +91,11 @@ def test_a_failed_delete_carries_the_kept_error(loaded):
         markdown_transaction._delete_windows_handle(7)
 
     assert refused.value.errno == SHARING_VIOLATION
+
+
+def test_transaction_aliases_share_native_types_and_loader_cache():
+    from llm_wiki import windows_native
+
+    for name in ('_WindowsFileInformation', '_WindowsDispositionInformation',
+                 '_WINDOWS_KERNEL32_PROTOTYPES', '_windows_kernel32'):
+        assert getattr(markdown_transaction, name) is getattr(windows_native, name)

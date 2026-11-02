@@ -24,7 +24,6 @@ import time
 import unicodedata
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -45,6 +44,18 @@ from iso_time import utc_text
 from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from llm_wiki.formats.schema import validate_schema
 from llm_wiki.reliability_defaults import DEFAULTS
+from llm_wiki.windows_native import (
+    _WINDOWS_KERNEL32_PROTOTYPES as _WINDOWS_KERNEL32_PROTOTYPES,
+)
+from llm_wiki.windows_native import (
+    _windows_kernel32 as _windows_kernel32,
+)
+from llm_wiki.windows_native import (
+    _WindowsDispositionInformation as _WindowsDispositionInformation,
+)
+from llm_wiki.windows_native import (
+    _WindowsFileInformation as _WindowsFileInformation,
+)
 from model_dlp import DLPContentBlocked, DLPPolicyError, require_safe_publication
 from reliable_memory import (
     MigrationStatement,
@@ -5182,70 +5193,6 @@ def _harden_owner_only(path: Path, mode: int) -> None:
         _harden_windows_acl(path)
     else:
         _set_owner_only(path, mode)
-
-
-class _WindowsFileInformation(ctypes.Structure):
-    _fields_ = [
-        ("file_attributes", wintypes.DWORD),
-        ("creation_time", wintypes.FILETIME),
-        ("last_access_time", wintypes.FILETIME),
-        ("last_write_time", wintypes.FILETIME),
-        ("volume_serial_number", wintypes.DWORD),
-        ("file_size_high", wintypes.DWORD),
-        ("file_size_low", wintypes.DWORD),
-        ("number_of_links", wintypes.DWORD),
-        ("file_index_high", wintypes.DWORD),
-        ("file_index_low", wintypes.DWORD),
-    ]
-
-
-class _WindowsDispositionInformation(ctypes.Structure):
-    _fields_ = [("delete_file", wintypes.BOOL)]
-
-
-_WINDOWS_KERNEL32_PROTOTYPES = (
-    (
-        "CreateFileW",
-        wintypes.HANDLE,
-        (
-            wintypes.LPCWSTR,
-            wintypes.DWORD,
-            wintypes.DWORD,
-            wintypes.LPVOID,
-            wintypes.DWORD,
-            wintypes.DWORD,
-            wintypes.HANDLE,
-        ),
-    ),
-    ("CloseHandle", wintypes.BOOL, (wintypes.HANDLE,)),
-    (
-        "GetFileInformationByHandle",
-        wintypes.BOOL,
-        (wintypes.HANDLE, ctypes.POINTER(_WindowsFileInformation)),
-    ),
-    (
-        "SetFileInformationByHandle",
-        wintypes.BOOL,
-        (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD),
-    ),
-    ("GetConsoleOutputCP", wintypes.UINT, ()),
-)
-
-
-@functools.lru_cache(maxsize=1)
-def _windows_kernel32():
-    """kernel32 with its last error kept by ctypes and every handle at full width.
-
-    `ctypes.windll` keeps no last error and returns a C int, so a sharing
-    violation read as 0 and an invalid 64-bit handle went unnoticed. See
-    `docs/research/2026-09-17-windows-names-and-windows-errors-are-read-as-they-are-written.md`.
-    """
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    for name, restype, argtypes in _WINDOWS_KERNEL32_PROTOTYPES:
-        function = getattr(kernel32, name)
-        function.restype = restype
-        function.argtypes = argtypes
-    return kernel32
 
 
 def _require_windows_directory_identity(handle: int, path: Path) -> None:
