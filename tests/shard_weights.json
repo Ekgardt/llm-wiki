@@ -412,7 +412,7 @@
   "test_bootstrap_publication.py": 9.09,
   "test_both_installers_read_the_claude_file_alike.py": 2.69,
   "test_both_recovery_passes_look_past_a_bad_head.py": 14.66,
-  "test_bounded_io.py": 0.03,
+  "test_bounded_io.py": 0.28,
   "test_breadcrumb_adoption.py": 38.98,
   "test_breadcrumb_archive_compatibility.py": 67.87,
   "test_breadcrumb_archived_journal.py": 55.02,

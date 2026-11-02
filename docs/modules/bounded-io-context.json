@@ -1,0 +1,26 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/research/2026-11-02-formats-module-pilot.md",
+    "docs/research/2026-11-02-module-boundaries-validation.md",
+    "docs/research/2026-11-02-module-boundaries-and-token-budget.md",
+    ".gitattributes",
+    "scripts/bounded_io.py",
+    "tests/test_bounded_io.py",
+    "tests/test_stable_source_ranges.py",
+    "docs/modules/bounded-io.md",
+    "docs/modules/bounded-io-context.json",
+    "docs/research/2026-09-10-one-page-ceiling-for-every-reader-of-knowledge.md",
+    "docs/research/2026-09-23-one-limit-one-place.md",
+    "docs/research/2026-09-17-five-failures-only-the-other-systems-showed.md"
+  ]
+}

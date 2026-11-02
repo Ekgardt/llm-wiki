@@ -1830,3 +1830,19 @@ contract live in `docs/modules/queue-contracts-context.json` and
 source, tests, data and necessary instructions/contracts. Process/queue integration
 remains additional qualification. No database, runtime, limit or command changes.
 Private approval: `knowledge/notes/queue-contracts-decision-20261102.md`.
+
+## Existing renewal and bounded-input boundaries (qualified 2026-11-02)
+
+`scripts/lease_renewal.py` owns cooperative renewal scheduling and SQLite
+contention classification. Its callers retain acquisition, fenced writes,
+thread ownership and loss handling. The source and imports remain in place;
+`tests/test_a_busy_database_is_not_a_lost_lease.py` is its own test file.
+See `docs/modules/lease-renewal.md` and `lease-renewal-context.json`.
+
+`scripts/bounded_io.py` owns stable byte reads, verified source ranges and their
+existing shared byte limits. It does not own publication, transactions or ACL
+writes. Its own tests remain `tests/test_bounded_io.py` and
+`tests/test_stable_source_ranges.py`; see `docs/modules/bounded-io.md` and
+`bounded-io-context.json`. Both modules use only stdlib. Their manifests count
+complete maintenance packets under 100,000 o200k_base tokens. Related integration
+tests remain with their existing owners. No runtime or source-path changes occur.

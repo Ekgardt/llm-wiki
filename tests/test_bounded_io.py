@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import ast
+import io
+import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
+import tiktoken
 
 
 def test_parent_swap_to_outside_target_is_rejected_before_bytes_return(
@@ -170,3 +175,104 @@ def test_system_symlink_requires_root_owner_and_root_owned_parent(
 
     monkeypatch.setattr(bounded_io.Path, "stat", lambda _self: open_directory)
     assert bounded_io._system_symlink(link) is False
+
+
+@pytest.mark.parametrize('selection', [
+    slice(None), slice(2, 11), slice(-8, -1), slice(None, None, -1),
+    slice(12, 1, -3), slice(1, 14, 3), slice(99, None), slice(8, 2),
+])
+def test_verified_range_slices_match_bytes_across_blocks(selection):
+    import bounded_io
+
+    raw = b'one\ntwo\nthree\nfour'
+    with io.BytesIO(raw) as stream:
+        source = bounded_io.VerifiedByteRange(stream, len(raw), None, chunk_size=4)
+        assert source[selection] == raw[selection]
+
+
+@pytest.mark.parametrize('needle', [b'', b'\n', b'two', b'e\nt', b'absent'])
+@pytest.mark.parametrize('start,end', [(0, None), (2, 14), (-8, -1), (99, None)])
+def test_verified_range_search_matches_bytes(needle, start, end):
+    import bounded_io
+
+    raw = b'one\ntwo\nthree\nfour'
+    with io.BytesIO(raw) as stream:
+        source = bounded_io.VerifiedByteRange(stream, len(raw), None, chunk_size=4)
+        assert source.find(needle, start, end) == raw.find(needle, start, end)
+        assert source.rfind(needle, start, end) == raw.rfind(needle, start, end)
+
+
+def test_verified_range_checks_reloaded_bytes_and_final_content():
+    import bounded_io
+
+    with io.BytesIO(b'abcdefgh') as stream:
+        source = bounded_io.VerifiedByteRange(stream, 8, None, chunk_size=4)
+        assert source[:4] == b'abcd'
+        position = stream.tell()
+        stream.seek(4)
+        stream.write(b'evil')
+        stream.seek(position)
+        with pytest.raises(ValueError, match='changed after verification'):
+            source[4:]
+        with pytest.raises(bounded_io.SourceChangedDuringRead):
+            source.verify_content()
+
+
+def test_verified_newline_index_is_immutable_and_utf8_is_checked():
+    import bounded_io
+
+    with io.BytesIO(b'a\nb\n\xff') as stream:
+        source = bounded_io.VerifiedByteRange(stream, 5, None, chunk_size=2)
+        offsets = source.newline_offsets()
+        assert list(offsets) == [1, 3]
+        assert offsets.readonly
+        with pytest.raises(UnicodeDecodeError):
+            source.newline_offsets(validate_utf8=True)
+
+
+_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _import_roots(node):
+    if isinstance(node, ast.Import):
+        return {alias.name.split('.')[0] for alias in node.names}
+    if isinstance(node, ast.ImportFrom):
+        return {('.' * node.level + (node.module or '')).split('.')[0]}
+    return set()
+
+
+def _nonstdlib_imports(source):
+    roots = set().union(*(_import_roots(node) for node in ast.walk(ast.parse(source))))
+    return roots - sys.stdlib_module_names
+
+
+def test_bounded_io_has_no_executor_dependencies():
+    source = (_ROOT / 'scripts/bounded_io.py').read_text(encoding='utf-8')
+    assert not _nonstdlib_imports(source)
+
+
+@pytest.mark.parametrize('source', [
+    'import compile_memory', 'from markdown_transaction import MarkdownCoordinator',
+    'def read():\n import reliable_memory as runtime', 'from memory_state import *',
+    'from . import local', 'from .os import read',
+])
+def test_boundary_rejects_executor_and_relative_imports(source):
+    assert _nonstdlib_imports(source)
+
+
+def test_boundary_accepts_standard_library():
+    assert not _nonstdlib_imports('import os as system\nfrom pathlib import Path')
+
+
+def test_complete_bounded_io_context_fits_user_ceiling():
+    manifest = json.loads((_ROOT / 'docs/modules/bounded-io-context.json').read_text())
+    paths = manifest['files']
+    assert {'scripts/bounded_io.py', 'tests/test_bounded_io.py', 'tests/test_stable_source_ranges.py',
+            'docs/modules/bounded-io.md', 'docs/modules/bounded-io-context.json'} <= set(paths)
+    assert len(paths) == len(set(paths))
+    assert manifest['max_tokens'] == 100_000
+    encoder = tiktoken.get_encoding(manifest['encoding'])
+    counts = {name: len(encoder.encode((_ROOT / name).read_text(encoding='utf-8'),
+              disallowed_special=())) for name in paths}
+    print(f'bounded-io context: {sum(counts.values())} tokens; {len(paths)} files')
+    assert sum(counts.values()) <= manifest['max_tokens'], counts
