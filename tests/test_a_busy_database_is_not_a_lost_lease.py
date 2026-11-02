@@ -8,16 +8,21 @@ late. Research: `docs/research/2026-09-14-a-busy-database-is-not-a-lost-lease.md
 """
 from __future__ import annotations
 
+import ast
+import json
 import sqlite3
 import sys
 import threading
 from pathlib import Path
 
+import pytest
+import tiktoken
+
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from lease_renewal import renew_until_stopped  # noqa: E402
+from lease_renewal import busy_database, renew_until_stopped  # noqa: E402
 
 
 class _Clock:
@@ -167,3 +172,108 @@ def test_a_read_only_database_is_not_retried_as_a_busy_lease():
     clock = _Clock(stop_after=60.0)
     assert _run(clock, _Renewal(clock, [caught.value, None])) is caught.value
     assert clock.waits == [10.0]
+
+
+@pytest.mark.parametrize('message, expected', [
+    ('database is locked', True),
+    ('DATABASE IS LOCKED', True),
+    ('database table is locked: tasks', True),
+    ('database schema is locked: main', True),
+    ('no such table: locked', False),
+    ('no such table: busy', False),
+    ('disk I/O error', False),
+    ('attempt to write a readonly database', False),
+])
+def test_legacy_busy_classification_is_exact(message, expected):
+    assert busy_database(sqlite3.OperationalError(message)) is expected
+
+
+@pytest.mark.parametrize('code, expected', [(5, True), (6, True), (261, True), (262, True), (10, False)])
+def test_primary_error_code_overrides_misleading_message(code, expected):
+    error = sqlite3.OperationalError('database is locked')
+    error.sqlite_errorcode = code
+    assert busy_database(error) is expected
+
+
+@pytest.mark.parametrize('error', [ValueError('database is locked'), PermissionError('denied')])
+def test_non_sqlite_errors_are_not_contention(error):
+    assert not busy_database(error)
+
+
+def test_real_contention_and_python310_text_fallback(tmp_path):
+    from contextlib import closing
+
+    path = tmp_path / 'lease.sqlite3'
+    with closing(sqlite3.connect(path, timeout=0)) as first, closing(sqlite3.connect(path, timeout=0)) as second:
+        first.execute('BEGIN IMMEDIATE')
+        with pytest.raises(sqlite3.OperationalError) as caught:
+            second.execute('BEGIN IMMEDIATE')
+    assert busy_database(caught.value)
+    assert busy_database(sqlite3.OperationalError(str(caught.value)))
+
+
+def test_already_stopped_loop_does_not_renew():
+    clock = _Clock(stop_after=60)
+    renewal = _Renewal(clock, [RuntimeError('must not be called')])
+    stop = threading.Event()
+    stop.set()
+    assert renew_until_stopped(renewal, interval=10, lease_seconds=30, attempt_seconds=5,
+                              held_since=0, stop=stop, monotonic=clock.monotonic) is None
+    assert len(renewal.outcomes) == 1
+
+
+def test_process_control_exception_is_not_converted_to_lease_failure():
+    clock = _Clock(stop_after=60)
+    with pytest.raises(KeyboardInterrupt):
+        _run(clock, _Renewal(clock, [KeyboardInterrupt()]))
+
+
+_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _import_roots(node):
+    if isinstance(node, ast.Import):
+        return {alias.name.split('.')[0] for alias in node.names}
+    if isinstance(node, ast.ImportFrom):
+        return {('.' * node.level + (node.module or '')).split('.')[0]}
+    return set()
+
+
+def _nonstdlib_imports(source):
+    roots = set().union(*(_import_roots(node) for node in ast.walk(ast.parse(source))))
+    return roots - sys.stdlib_module_names
+
+
+def test_renewal_has_no_executor_dependencies():
+    source = (_ROOT / 'scripts/lease_renewal.py').read_text(encoding='utf-8')
+    assert not _nonstdlib_imports(source)
+
+
+@pytest.mark.parametrize('source', [
+    'import memory_queue',
+    'from markdown_transaction import MarkdownCoordinator',
+    'def renew():\n import doctor as executor',
+    'from operational_ownership import *',
+    'from . import local',
+    'from .sqlite3 import connect',
+])
+def test_boundary_detects_executor_and_relative_imports(source):
+    assert _nonstdlib_imports(source)
+
+
+def test_boundary_accepts_standard_library():
+    assert not _nonstdlib_imports('import sqlite3 as database\nfrom threading import Event')
+
+
+def test_complete_lease_renewal_context_fits_user_ceiling():
+    manifest = json.loads((_ROOT / 'docs/modules/lease-renewal-context.json').read_text())
+    paths = manifest['files']
+    assert {'scripts/lease_renewal.py', 'tests/test_a_busy_database_is_not_a_lost_lease.py',
+            'docs/modules/lease-renewal.md', 'docs/modules/lease-renewal-context.json'} <= set(paths)
+    assert len(paths) == len(set(paths))
+    assert manifest['max_tokens'] == 100_000
+    encoder = tiktoken.get_encoding(manifest['encoding'])
+    counts = {name: len(encoder.encode((_ROOT / name).read_text(encoding='utf-8'),
+              disallowed_special=())) for name in paths}
+    print(f'lease-renewal context: {sum(counts.values())} tokens; {len(paths)} files')
+    assert sum(counts.values()) <= manifest['max_tokens'], counts

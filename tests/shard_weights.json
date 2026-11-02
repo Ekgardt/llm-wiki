@@ -22,7 +22,7 @@
   "test_a_broad_handler_carries_its_cause.py": 4.05,
   "test_a_build_in_flight_is_not_an_orphan.py": 0.56,
   "test_a_busy_append_repeats_its_attempt.py": 3.46,
-  "test_a_busy_database_is_not_a_lost_lease.py": 0.01,
+  "test_a_busy_database_is_not_a_lost_lease.py": 0.27,
   "test_a_busy_release_is_retried_until_it_lands.py": 6.17,
   "test_a_capacity_refusal_does_not_corrupt_a_generation.py": 9.53,
   "test_a_capture_keeps_its_claim_while_it_asks.py": 11.65,
