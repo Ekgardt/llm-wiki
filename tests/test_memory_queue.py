@@ -2219,3 +2219,13 @@ def test_unusual_numeric_retry_after_settles_legacy_failure(tmp_path, clock, ret
     assert task.lease_token is None
     assert task.attempt_history[-1].outcome == 'failed'
     assert (task.available_at - task.updated_at).total_seconds() >= minimum
+
+
+def test_queue_timing_aliases_keep_the_original_call_surface():
+    from llm_wiki import queue_timing
+
+    from tests.modules.queue_timing.test_boundary import NAMES
+
+    for name in NAMES:
+        assert getattr(memory_queue, name) is getattr(queue_timing, name)
+    assert memory_queue._utc_now.__module__ == 'memory_queue'

@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import argparse
-import email.utils
 import hashlib
 import io
 import json
-import math
 import multiprocessing
 import os
 import random
@@ -116,6 +114,18 @@ from llm_wiki.queue_schema import (
 from llm_wiki.queue_schema import (
     _QUEUE_V3_TRIGGER_SQL as _QUEUE_V3_TRIGGER_SQL,
 )
+from llm_wiki.queue_timing import _as_utc as _as_utc
+from llm_wiki.queue_timing import _bounded_retry_number as _bounded_retry_number
+from llm_wiki.queue_timing import _bounded_retry_until as _bounded_retry_until
+from llm_wiki.queue_timing import _no_retry_after as _no_retry_after
+from llm_wiki.queue_timing import _parse_timestamp as _parse_timestamp
+from llm_wiki.queue_timing import _retry_after_deadline as _retry_after_deadline
+from llm_wiki.queue_timing import _retry_after_from_text as _retry_after_from_text
+from llm_wiki.queue_timing import _retry_after_number as _retry_after_number
+from llm_wiki.queue_timing import _retry_after_seconds as _retry_after_seconds
+from llm_wiki.queue_timing import _retry_after_text as _retry_after_text
+from llm_wiki.queue_timing import _retry_available_at as _retry_available_at
+from llm_wiki.queue_timing import _timestamp as _timestamp
 from llm_wiki.reliability_defaults import DEFAULTS
 from reliable_memory import (
     MAX_CAPTURE_DECISION_BYTES,
@@ -145,9 +155,6 @@ TASK_FENCE_SECONDS = 120
 _STATES = ("ready", "leased", "blocked", "succeeded", "dead", "cancelled")
 _TERMINAL_STATES = ("succeeded", "dead", "cancelled")
 _PERMANENT_CODES = {"invalid_input", "unsupported_version"}
-# A provider's retry-after is honoured up to a week, the one bound on that reading
-# (docs/research/2026-09-17-the-adopted-queue-waits-as-long-as-it-was-told.md).
-_MAX_RETRY_AFTER_SECONDS = 7 * 24 * 60 * 60
 _MAX_EXPORT_METADATA_BYTES = 64 * 1024 * 1024
 # Ceiling on a task's configured attempts and on its attempt history. basis unknown — value predates measurement; review when a task reaches it in normal operation.
 _MAX_RUNTIME_ATTEMPTS = 100
@@ -1901,20 +1908,6 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
-
-
-def _timestamp(value: datetime) -> str:
-    return _as_utc(value).isoformat(timespec="microseconds")
-
-
-def _parse_timestamp(value: str | None) -> datetime | None:
-    return _as_utc(datetime.fromisoformat(value)) if value is not None else None
-
-
 def _require_task_kind(kind: object) -> None:
     if not isinstance(kind, str) or not kind:
         raise ValueError("kind must be a non-empty bounded string")
@@ -3458,70 +3451,6 @@ def _stable_result_digest(path: Path) -> str | None:
     return None if data is None else sha256_bytes(data)
 
 
-def _no_retry_after(_value: object, _now: datetime) -> float | None:
-    """A bool is not a delay, however int-like Python thinks it is."""
-    return None
-
-
-def _retry_after_number(value: object, _now: datetime) -> float | None:
-    # Bound Python's arbitrary-size integers before converting to a machine float.
-    if isinstance(value, int):
-        value = max(-1, min(value, _MAX_RETRY_AFTER_SECONDS))
-    return _bounded_retry_number(float(value))  # type: ignore[arg-type]
-
-
-def _retry_after_deadline(value: object, now: datetime) -> float | None:
-    return _bounded_retry_until(value, now)  # type: ignore[arg-type]
-
-
-def _retry_after_text(value: object, now: datetime) -> float | None:
-    return _retry_after_from_text(str(value), now)
-
-
-# Read in order: bool before int, because bool is an int.
-_RETRY_AFTER_READERS = (
-    (bool, _no_retry_after),
-    ((int, float), _retry_after_number),
-    (datetime, _retry_after_deadline),
-    (str, _retry_after_text),
-)
-
-
-def _bounded_retry_number(value: float) -> float | None:
-    """A retry delay in seconds, within its bound; a bad number is no delay."""
-    if not math.isfinite(value) or value < 0:
-        return None
-    return min(value, float(_MAX_RETRY_AFTER_SECONDS))
-
-
-def _bounded_retry_until(value: datetime, now: datetime) -> float:
-    """The wait until a moment, never negative and never past the bound."""
-    seconds = max(0.0, (_as_utc(value) - now).total_seconds())
-    return min(seconds, float(_MAX_RETRY_AFTER_SECONDS))
-
-
-def _retry_after_from_text(value: str, now: datetime) -> float | None:
-    """A Retry-After header: either a count of seconds or an HTTP date."""
-    stripped = value.strip()
-    try:
-        if stripped.isdigit():
-            return _bounded_retry_number(float(stripped))
-        parsed = email.utils.parsedate_to_datetime(stripped)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return _bounded_retry_until(parsed, now)
-
-
-def _retry_after_seconds(
-    value: float | datetime | str | None, now: datetime
-) -> float | None:
-    """The wait a failure states, in seconds; None when it states none."""
-    for kind, read in _RETRY_AFTER_READERS:
-        if isinstance(value, kind):
-            return read(value, now)
-    return None
-
-
 def _validated_listed_states(states: tuple[str, ...] | None) -> tuple[str, ...]:
     """The states to list; every one of them has to be a real queue state."""
     listed = states or _STATES
@@ -3700,30 +3629,6 @@ def _apply_failure_state(
     ).rowcount
     if changed != 1:
         raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
-
-
-_RETRY_RANDOM = random.SystemRandom()
-
-
-def _retry_available_at(
-    state: str,
-    attempts: int,
-    now: datetime,
-    retry_after: float | datetime | str | None = None,
-) -> datetime:
-    """A task going back to ready waits a full-jitter backoff, as the legacy queue's do.
-
-    A wait the failure states — a provider's Retry-After — is a floor under the
-    backoff, so the task comes back at the later of the two. See
-    `docs/research/2026-09-14-the-small-integrity-gaps.md` and
-    `docs/research/2026-09-17-the-adopted-queue-waits-as-long-as-it-was-told.md`.
-    """
-    if state != "ready":
-        return now
-    ceiling = min(DEFAULTS.retry_cap_seconds, DEFAULTS.retry_base_seconds * (2 ** max(0, attempts - 1)))
-    stated = _retry_after_seconds(retry_after, now)
-    delay = max(_RETRY_RANDOM.uniform(0, ceiling), stated or 0.0)
-    return now + timedelta(seconds=delay)
 
 
 def _failure_is_terminal(
@@ -13400,7 +13305,6 @@ def restore(
         deadline=deadline,
         cancelled=cancelled,
     )
-
 
 
 def _run_processor_inline(

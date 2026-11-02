@@ -1,6 +1,6 @@
 # Queue timing: нормализация времени и расчёт повторной попытки
 
-Дата: 2026-11-02. Статус: подготовлено к согласованию. Candidate: 1a1f50b4.
+Дата: 2026-11-02. Статус: явно согласовано пользователем. Исследование: 1a1f50b4; перенос: после исправления 2ea7fa24.
 
 ## Предлагаемый перенос
 
@@ -101,8 +101,8 @@ logs/queue-retry-numeric-red.txt (6 failed, 7 passed, 112 deselected).
 
 Регрессии проверяют общий parser и обе реализации очереди: task выходит из leased
 в ready, снимает lease token, сохраняет failed attempt и соблюдает срок повторения.
-Проектный тест независимого следующего capture включён. Структурный перенос
-queue_timing всё ещё ожидает согласия; его AST baseline должен быть взят после
+Проектный тест независимого следующего capture включён. На момент отдельного исправления структурный перенос
+queue_timing ожидал согласия; его AST baseline должен быть взят после
 этого отдельного исправления, а не притворяться совпавшим с неисправной версией.
 
 
@@ -110,3 +110,31 @@ queue_timing всё ещё ожидает согласия; его AST baseline 
 Python 3.10: 136 passed, 3,43с. Ruff чист. Evidence:
 logs/queue-retry-numeric-related.txt/.xml; logs/queue-retry-numeric-python310.txt.
 Это не полный suite, native Windows/macOS и не live rollout.
+
+
+## Согласованный перенос
+
+Получено явное «Да, реализовать эту границу»; private decision и STRUCTURE
+записаны до кода. Индекс 2ea7fa24 актуализирован до переноса. Сохранены AST всех
+12 функций и трёх констант, остаток queue AST совпал после исключения imports.
+Boundary guard сначала упал на прежних определениях, после переноса прошёл.
+Единственная подмена _RETRY_RANDOM перенесена к владельцу, _utc_now остался
+в memory_queue. Старые function names проверяются на identity aliases.
+
+48 own tests прошли: UTC/offset/microseconds/None, сохранённые и исправленные
+Retry-After cases, детерминированные крайние точки jitter и cap, stated floor,
+non-ready без RNG и isolated interpreter без executor/storage imports.
+Первоначальный полный пакет:72065 o200k_base токенов/26 файлов.
+Evidence: logs/queue-timing-preservation.json; logs/queue-timing-boundary-red.txt;
+logs/queue-timing-own.txt; logs/queue-timing-related.txt/.xml;
+logs/queue-timing-python310.txt; logs/queue-timing-final-budget.txt.
+
+
+Квалификация переноса: 301 passed, 64,19с (own, queue, migration, corruption,
+retry/capture, global complexity/shape, structure и CI); Python 3.10:
+182 passed, 3,82с (own, queue, adopted retry и failed capture).
+Ruff и git diff --check прошли. AST функций совпал и после форматирования imports.
+Все 12 полных пакетов ниже 100000; memory_queue.py теперь 119996 токенов.
+Финальный бюджет и CI weights проверены отдельно. Дубли определений удалены;
+старые function names нужны compatibility surface, RNG alias не сохраняется.
+Live installation, полный regression suite и native платформы не квалифицировались.

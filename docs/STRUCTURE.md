@@ -1924,3 +1924,15 @@ schema version or runtime path. Own tests live in `tests/modules/queue_schema`;
 `docs/modules/queue-schema-context.json` measures the complete maintenance packet
 against the existing 100,000-token limit. Approval:
 `knowledge/notes/queue-schema-boundary-decision-20261102.md`.
+
+## Queue timing values (approved 2026-11-02)
+
+`scripts/llm_wiki/queue_timing.py` owns the existing UTC conversion and timestamp
+format/parsing functions, Retry-After readers and adopted retry delay calculation.
+It depends only on stdlib and reliability_defaults. The queue keeps _utc_now,
+SQL and state transitions; the legacy queue keeps its configurable retry policy.
+Function compatibility names are identical aliases. RNG tests patch the new owner.
+The existing seven-day Retry-After bound, defaults, full jitter and time semantics
+remain unchanged. Own tests and the complete ≤100,000-token context manifest live
+under `tests/modules/queue_timing` and `docs/modules/queue-timing*` respectively.
+Approval: `knowledge/notes/queue-timing-boundary-decision-20261102.md`.

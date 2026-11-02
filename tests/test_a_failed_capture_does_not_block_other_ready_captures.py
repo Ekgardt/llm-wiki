@@ -9,6 +9,7 @@ import integration_adapter
 import markdown_transaction
 import memory_queue
 import pytest
+from llm_wiki import queue_timing
 from reliable_memory import DEFAULTS
 
 from tests.test_capture_terminal import (
@@ -36,7 +37,7 @@ def test_adapter_continues_after_a_committed_retry(tmp_path, monkeypatch):
     # This scenario holds the failed task until its retry time; no real clock race.
     monkeypatch.setattr(memory_queue, "_utc_now", Mock(return_value=memory_queue._utc_now()))
     monkeypatch.setattr(
-        memory_queue, "_RETRY_RANDOM",
+        queue_timing, "_RETRY_RANDOM",
         Mock(uniform=Mock(return_value=DEFAULTS.retry_base_seconds)),
     )
     monkeypatch.setattr(capture_diagnostics, "record_capture_failure", diagnostic)
