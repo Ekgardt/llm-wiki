@@ -569,3 +569,14 @@ def test_a_tampered_export_restores_nothing(tmp_path: Path) -> None:
 
     assert raised.value.code == "restore_verification_failed"
     assert queue.list_tasks() == []
+
+
+def test_extracted_sql_definitions_and_schema_fingerprints_are_compatible():
+    from llm_wiki import queue_schema
+
+    baseline = json.loads((Path(__file__).parent /
+        'modules/queue_schema/fixtures/baseline.json').read_text())
+    for name in baseline['counts']:
+        assert getattr(memory_queue, name) is getattr(queue_schema, name)
+    assert memory_queue.QUEUE_V3_SCHEMA_SHA256 == baseline['queue_schema_sha256']
+    assert memory_queue.QUEUE_COMPILE_SCHEMA_SHA256 == baseline['compile_schema_sha256']
