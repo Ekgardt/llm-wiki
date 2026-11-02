@@ -613,7 +613,7 @@
   "test_compile_worker_handoff.py": 3.73,
   "test_conflict_resolution_stand.py": 0.24,
   "test_consolidation_stand.py": 0.06,
-  "test_context_budget.py": 0.04,
+  "test_context_budget.py": 0.31,
   "test_context_compiler.py": 0.72,
   "test_context_noise.py": 2.29,
   "test_context_packing.py": 0.02,

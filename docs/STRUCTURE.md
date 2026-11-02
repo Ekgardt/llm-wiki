@@ -1789,3 +1789,15 @@ qualification are separate; the working branch is not installed by this decision
 
 Research: `docs/research/2026-11-02-module-boundaries-validation.md`.
 Private decision: `knowledge/notes/isolated-formats-module-decision-20261102.md`.
+
+
+## Existing context-budget boundary (qualified 2026-11-02)
+
+`scripts/context_budget.py` already owns token-accounting values and deterministic
+complete-item packing, with only standard-library imports. It remains at that
+path with its existing public API and no new compatibility layer. Owned tests
+remain `tests/test_context_budget.py` and `tests/test_context_packing.py`.
+`docs/modules/context-budget.md` and its context manifest record this existing
+boundary and enforce the 100,000-token maintenance ceiling. Consumer integration
+suites keep their owners and are additional context for cross-module changes.
+No runtime, provider, limit, source path or installation behavior changes.
