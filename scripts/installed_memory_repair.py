@@ -23,9 +23,9 @@ from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from llm_wiki.formats.queue_payload import validate_payload_blob
 from llm_wiki.formats.schema import validate_schema
 from llm_wiki.reliability_defaults import DEFAULTS
+from llm_wiki.sqlite_contracts import OperationalDatabaseContract
 from reliable_memory import (
     OPERATIONAL_SCAN_BATCH_ROWS,
-    OperationalDatabaseContract,
     capture_operational_database_identity,
     capture_runtime_file_identity,
     durable_publish_file,

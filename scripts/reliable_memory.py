@@ -17,7 +17,7 @@ import subprocess
 import time
 import warnings
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
@@ -39,6 +39,14 @@ from llm_wiki.formats.schema import (
 )
 from llm_wiki.reliability_defaults import DEFAULTS as DEFAULTS
 from llm_wiki.reliability_defaults import ReliableMemoryDefaults as ReliableMemoryDefaults
+from llm_wiki.sqlite_contracts import MigrationStatement as MigrationStatement
+from llm_wiki.sqlite_contracts import OperationalDatabaseContract as OperationalDatabaseContract
+from llm_wiki.sqlite_contracts import (
+    OperationalDatabaseContractError as OperationalDatabaseContractError,
+)
+from llm_wiki.sqlite_contracts import _require_migration_text as _require_migration_text
+from llm_wiki.sqlite_contracts import _require_positive_int as _require_positive_int
+from llm_wiki.sqlite_contracts import quote_sqlite_identifier as quote_sqlite_identifier
 
 # The one bound on a capture decision file, for the writer and every reader. The
 # indexer read it with 64 KiB while the writer allowed 1 MiB, so a verbose classifier
@@ -50,21 +58,10 @@ from llm_wiki.reliability_defaults import ReliableMemoryDefaults as ReliableMemo
 MAX_CAPTURE_DECISION_BYTES = 1024 * 1024
 
 
-def quote_sqlite_identifier(name: str) -> str:
-    """Encode one exact SQLite identifier, including its embedded quotes."""
-    return '"' + name.replace('"', '""') + '"'
 
 
-def _require_positive_int(name: str, value: object) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise ValueError(f"{name} must be a positive integer")
 
 
-def _require_migration_text(name: object, sql: object) -> None:
-    if not isinstance(name, str) or not name:
-        raise ValueError("migration statement name must be non-empty")
-    if not isinstance(sql, str) or not sql.strip():
-        raise ValueError("migration statement SQL must be non-empty")
 
 
 class UnsafeStateRoot(ValueError):
@@ -77,33 +74,10 @@ class MetadataDurabilityUnavailable(OSError):
     code = "metadata_durability_unavailable"
 
 
-class OperationalDatabaseContractError(sqlite3.DatabaseError):
-    """Raised when an operational database or migration violates its contract."""
-
-    code = "operational_database_contract_mismatch"
 
 
-@dataclass(frozen=True)
-class OperationalDatabaseContract:
-    application_id: int
-    user_version: int = 3
-
-    def __post_init__(self) -> None:
-        _require_positive_int("application_id", self.application_id)
-        _require_positive_int("user_version", self.user_version)
 
 
-@dataclass(frozen=True)
-class MigrationStatement:
-    name: str
-    sql: str
-    completed: Callable[[sqlite3.Connection], bool] = field(compare=False, repr=False)
-    parameters: Sequence[object] = ()
-
-    def __post_init__(self) -> None:
-        _require_migration_text(self.name, self.sql)
-        if not callable(self.completed):
-            raise TypeError("migration statement completed invariant must be callable")
 
 
 @dataclass(frozen=True)

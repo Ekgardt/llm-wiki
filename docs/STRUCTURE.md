@@ -1966,3 +1966,10 @@ identity collection, daily-source validation, and generic source-link validation
 Migration refusal construction and SQL remain in memory_queue. Existing static
 method entry points are identical function aliases; no second implementation.
 Daily-only failure identities and general task source links retain distinct rules.
+
+`llm_wiki.sqlite_contracts` owns the existing operational database contract,
+migration statement and contract error types, their value validators, and exact
+SQLite identifier quoting. It imports only stdlib. reliable_memory retains all
+connection, filesystem, pragma and migration execution behavior, with direct
+aliases for the old names. Class pickle names remain reliable_memory for existing
+serialized callers. Consumers import values directly from sqlite_contracts.

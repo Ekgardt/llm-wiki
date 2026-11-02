@@ -41,6 +41,12 @@ from iso_time import utc_text
 from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from llm_wiki.formats.schema import validate_schema
 from llm_wiki.reliability_defaults import DEFAULTS
+from llm_wiki.sqlite_contracts import (
+    MigrationStatement,
+    OperationalDatabaseContract,
+    OperationalDatabaseContractError,
+    quote_sqlite_identifier,
+)
 from llm_wiki.windows_acl import _acl_entry_lines as _acl_entry_lines
 from llm_wiki.windows_acl import _acl_failure as _acl_failure
 from llm_wiki.windows_acl import _acl_line_names_owner as _acl_line_names_owner
@@ -75,9 +81,6 @@ from llm_wiki.windows_native import (
 )
 from model_dlp import DLPContentBlocked, DLPPolicyError, require_safe_publication
 from reliable_memory import (
-    MigrationStatement,
-    OperationalDatabaseContract,
-    OperationalDatabaseContractError,
     _set_owner_only,
     begin_immediate,
     configure_operational_deadline,
@@ -88,7 +91,6 @@ from reliable_memory import (
     open_readonly_operational_db,
     operational_deadline_active,
     publish_runtime_file,
-    quote_sqlite_identifier,
     read_runtime_bytes,
     refresh_operational_deadline,
     restricted_relative_path,
