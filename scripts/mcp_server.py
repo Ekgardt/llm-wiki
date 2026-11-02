@@ -3976,7 +3976,8 @@ def _redrive_error_code(error) -> str:
 
 
 def _doctor_queue_redrive(context: dict) -> dict:
-    from memory_queue import QueueOperationError, active_or_legacy_memory_queue
+    from llm_wiki.queue_contracts import QueueOperationError
+    from memory_queue import active_or_legacy_memory_queue
 
     queue = active_or_legacy_memory_queue(
         context["root"], context["state_root"], deadline=context["deadline"]

@@ -5610,7 +5610,7 @@ class MarkdownCoordinator:
     def project_capture_binding(
         self, binding: object, *, intent_fence: IntentFence
     ) -> None:
-        from memory_queue import CaptureTaskBinding
+        from llm_wiki.queue_contracts import CaptureTaskBinding
 
         if not isinstance(binding, CaptureTaskBinding) or binding.seal_digest is None:
             raise ValueError("capture binding must be sealed")

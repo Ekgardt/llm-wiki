@@ -35,6 +35,7 @@ from evidence_resolver import (  # noqa: E402
     validate_bag,
 )
 from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes  # noqa: E402
+from llm_wiki.queue_contracts import QueueOperationError, SourceFence
 from markdown_transaction import (  # noqa: E402
     MarkdownChange,
     _acl_lines_naming,
@@ -44,12 +45,7 @@ from markdown_transaction import (  # noqa: E402
     _windows_acl_identity,
     active_or_legacy_coordinator,
 )
-from memory_queue import (  # noqa: E402
-    MemoryQueue,
-    QueueOperationError,
-    SourceFence,
-    active_or_legacy_memory_queue,
-)
+from memory_queue import MemoryQueue, active_or_legacy_memory_queue
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
 from reliable_memory import (  # noqa: E402
     DEFAULTS,

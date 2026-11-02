@@ -1,0 +1,31 @@
+{
+  "commit": "fec3fbaf",
+  "protocol": 4,
+  "names": [
+    "LeaseFenceError",
+    "ResultConflictError",
+    "QueueOperationError",
+    "CompileCompletionError",
+    "MigrationBusy",
+    "QueueFailure",
+    "DeferredResult",
+    "AttemptRecord",
+    "QueueTask",
+    "QueueLease",
+    "CaptureTaskBinding",
+    "SemanticDecision",
+    "CorruptExportProgress",
+    "CorruptPurgeProgress",
+    "SourceFence",
+    "WorkerSummary",
+    "PurgeReceipt",
+    "DeadCaptureRedrive",
+    "RestoreReceipt",
+    "LeaseProcessor"
+  ],
+  "class_blob_sha256": "14ada4282d3c692c522c90a76e2aa2d62fba6c51a28c5bc93b3ad624b7a476e3",
+  "value_blob_sha256": "9d72fda2db2648fc6cc054f624c1c839a9204b364fd85a7877a46203b68e0621",
+  "old_round_trips_passed": true,
+  "classes_base64": "gASVzQEAAAAAAABdlCiMDG1lbW9yeV9xdWV1ZZSMD0xlYXNlRmVuY2VFcnJvcpSTlGgBjBNSZXN1bHRDb25mbGljdEVycm9ylJOUaAGME1F1ZXVlT3BlcmF0aW9uRXJyb3KUk5RoAYwWQ29tcGlsZUNvbXBsZXRpb25FcnJvcpSTlGgBjA1NaWdyYXRpb25CdXN5lJOUaAGMDFF1ZXVlRmFpbHVyZZSTlGgBjA5EZWZlcnJlZFJlc3VsdJSTlGgBjA1BdHRlbXB0UmVjb3JklJOUaAGMCVF1ZXVlVGFza5STlGgBjApRdWV1ZUxlYXNllJOUaAGMEkNhcHR1cmVUYXNrQmluZGluZ5STlGgBjBBTZW1hbnRpY0RlY2lzaW9ulJOUaAGMFUNvcnJ1cHRFeHBvcnRQcm9ncmVzc5STlGgBjBRDb3JydXB0UHVyZ2VQcm9ncmVzc5STlGgBjAtTb3VyY2VGZW5jZZSTlGgBjA1Xb3JrZXJTdW1tYXJ5lJOUaAGMDFB1cmdlUmVjZWlwdJSTlGgBjBJEZWFkQ2FwdHVyZVJlZHJpdmWUk5RoAYwOUmVzdG9yZVJlY2VpcHSUk5RoAYwOTGVhc2VQcm9jZXNzb3KUk5RlLg==",
+  "values_base64": "gASVfwEAAAAAAABdlCiMDG1lbW9yeV9xdWV1ZZSMDFF1ZXVlRmFpbHVyZZSTlCmBlH2UKIwKZXJyb3JfY29kZZSMCXRlbXBvcmFyeZSMCXBlcm1hbmVudJSJjBJibG9ja2VkX2NhcGFiaWxpdHmUTowLcmV0cnlfYWZ0ZXKUR0AMAAAAAAAAdWJoAYwORGVmZXJyZWRSZXN1bHSUk5QpgZR9lIwEZGF0YZRDCGNvbXBsZXRllHNiaAGME1F1ZXVlT3BlcmF0aW9uRXJyb3KUk5SMCGJhc2VsaW5llIwGZGV0YWlslIaUUpRoAYwWQ29tcGlsZUNvbXBsZXRpb25FcnJvcpSTlIwKaW5jb21wbGV0ZZRoE4aUUpRoAYwNV29ya2VyU3VtbWFyeZSTlCmBlH2UKIwJcHJvY2Vzc2VklEsCjAlzdWNjZWVkZWSUSwGMBmZhaWxlZJRLAYwEZGVhZJRLAIwHc2tpcHBlZJRLAIwScmVtYWluaW5nX2VsaWdpYmxllEsDdWJlLg=="
+}

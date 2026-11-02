@@ -1814,3 +1814,19 @@ worker execution and migrations remain in the queue. The complete formats packet
 includes the new source and tests; its existing 100,000-token gate applies.
 See `docs/research/2026-11-02-queue-payload-boundary.md`; private approval:
 `knowledge/notes/queue-payload-formats-decision-20261102.md`.
+
+
+## Queue type contract (approved 2026-11-02)
+
+`scripts/llm_wiki/queue_contracts.py` owns the 20 existing public queue record,
+result and error types listed in `docs/research/2026-11-02-queue-contracts-boundary.md`.
+It imports only the standard library. `memory_queue` re-exports the same objects;
+their stable `__module__ = "memory_queue"` preserves public pickle names. Import
+and construction are isolated, but pickle can resolve that public facade.
+`TaskFence` and `QueueRetryPolicy` retain their existing ownership dependencies.
+Own tests live in `tests/modules/queue_contracts/`; the full context manifest and
+contract live in `docs/modules/queue-contracts-context.json` and
+`docs/modules/queue-contracts.md`. The 100,000-token ceiling includes all owned
+source, tests, data and necessary instructions/contracts. Process/queue integration
+remains additional qualification. No database, runtime, limit or command changes.
+Private approval: `knowledge/notes/queue-contracts-decision-20261102.md`.

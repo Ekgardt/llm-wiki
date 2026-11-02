@@ -1529,7 +1529,8 @@ def _capture_queue_failure(error: BaseException) -> object:
     the comment that used to stand here claimed. The code is the one
     `processor_error_code` names, so a dead task says why (audit C3, 2026-09-23).
     """
-    from memory_queue import QueueFailure, processor_error_code
+    from llm_wiki.queue_contracts import QueueFailure
+    from memory_queue import processor_error_code
 
     if isinstance(error, CaptureProviderUnavailable):
         return QueueFailure("provider_unavailable", retry_after=PROVIDER_RETRY_SECONDS)

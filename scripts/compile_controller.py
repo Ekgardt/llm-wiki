@@ -218,7 +218,7 @@ def run_model_call(queue, lease, checkpoint, *, request_digest, invoke, delivery
 
 
 def _block_unknown_call(queue, lease):
-    from memory_queue import QueueFailure
+    from llm_wiki.queue_contracts import QueueFailure
 
     queue.fail(lease, QueueFailure('provider_outcome_unknown',
                                   blocked_capability='provider_outcome_unknown'))

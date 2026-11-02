@@ -7755,7 +7755,8 @@ def _foreground_stopped(cancelled, lost):
 
 
 def _foreground_processor(lock_token, owner):
-    from memory_queue import LeaseProcessor, _manual_lease_processor
+    from llm_wiki.queue_contracts import LeaseProcessor
+    from memory_queue import _manual_lease_processor
 
     return LeaseProcessor(partial(_manual_lease_processor, lock_token=lock_token, owner=owner))
 

@@ -527,3 +527,12 @@ public helper imports may expose the same objects; duplicated implementations
 and private parser imports from the compiler are forbidden. The complete owned
 context including instructions and test data must be at most 100,000 tokens.
 See `docs/STRUCTURE.md` and the 2026-11-02 modularity validation study.
+
+**Queue data contracts (2026-11-02):** `scripts/llm_wiki/queue_contracts.py` owns
+20 public queue records and errors. Consumers import types directly from that
+module; operations remain in `memory_queue`. The old public names are identical
+objects, and `__module__ = "memory_queue"` preserves existing pickle names.
+Import and construction need only stdlib; serialization may load the old facade.
+Own tests and complete maintenance context are declared in
+`docs/modules/queue-contracts-context.json` and must remain <=100,000 tokens.
+See `docs/modules/queue-contracts.md` for integration scope and qualification.
