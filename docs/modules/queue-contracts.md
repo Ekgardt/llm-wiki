@@ -13,6 +13,14 @@ facade; isolated serialization is not promised. Do not load untrusted pickle dat
 These aliases remain necessary until the existing serialization contract is
 explicitly migrated and all active consumers support that migration.
 
+An error constructed from this owner can exist before memory_queue is imported.
+Consumers must not use the presence of that executor in sys.modules as a type
+test. Capture diagnostics now checks QueueOperationError directly from its owner:
+intent_fence_lost stays deferred, while other failures remain losses. The loaded
+facade's alias is still the same class. Regression coverage lives in
+tests/test_capture_diagnostics.py and checks the trail and counters with the
+executor absent; the old loaded-executor scenario remains covered as well.
+
 ## Own maintenance context
 
 `queue-contracts-context.json` enumerates the source, instructions, architecture,

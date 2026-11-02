@@ -107,10 +107,10 @@ CONTENTION_QUEUE_CODES = frozenset({"intent_fence_lost"})
 
 
 def _queue_contention(error: BaseException) -> bool:
-    """Read the loaded queue module only: an error of its type cannot exist without it."""
-    queue_module = sys.modules.get("memory_queue")
-    error_type = getattr(queue_module, "QueueOperationError", None)
-    if error_type is None or not isinstance(error, error_type):
+    """Recognize the owned error type even when no queue executor was loaded."""
+    from llm_wiki.queue_contracts import QueueOperationError
+
+    if not isinstance(error, QueueOperationError):
         return False
     return error.code in CONTENTION_QUEUE_CODES
 

@@ -72,6 +72,38 @@ def test_clean_state_produces_no_session_line(diagnostics):
     assert module.capture_failure_totals({"capture_failures": "broken"}) == {}
 
 
+@pytest.mark.parametrize('code, expected', [
+    ('intent_fence_lost', 'deferred'),
+    ('capture_link_insert_failed', 'lost'),
+])
+def test_queue_contract_error_is_classified_without_loaded_executor(
+    diagnostics, monkeypatch, code, expected,
+):
+    import sys
+
+    from llm_wiki.queue_contracts import QueueOperationError
+
+    module, state = diagnostics
+    monkeypatch.delitem(sys.modules, 'memory_queue', raising=False)
+    error = QueueOperationError(code)
+    module.record_capture_failure('user_prompt_append', code, error=error)
+
+    entry = json.loads(module.FAILURE_LOG.read_text(encoding='utf-8'))
+    assert entry['outcome'] == expected
+    assert module.capture_failure_totals(state).get('user_prompt_append', 0) == int(expected == 'lost')
+    assert module.capture_deferred_totals(state).get('user_prompt_append', 0) == int(expected == 'deferred')
+    assert module._queue_contention(error) is (expected == 'deferred')
+    assert 'memory_queue' not in sys.modules
+
+
+def test_queue_contention_does_not_accept_an_untyped_code():
+    import capture_diagnostics
+
+    error = RuntimeError('intent_fence_lost')
+    error.code = 'intent_fence_lost'
+    assert capture_diagnostics._queue_contention(error) is False
+
+
 @pytest.mark.parametrize("hook_name", ["user_prompt_capture", "post_tool_capture"])
 def test_closed_hook_input_is_reported_as_a_loss(hook_name, diagnostics, monkeypatch):
     import importlib
