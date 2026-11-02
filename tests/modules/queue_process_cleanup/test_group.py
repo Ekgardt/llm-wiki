@@ -18,16 +18,9 @@ fails, which is why
 from __future__ import annotations
 
 import signal
-import sys
-from pathlib import Path
 
+import llm_wiki.queue_process_cleanup as cleanup
 import pytest
-
-SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
-
-import memory_queue  # noqa: E402
 
 # Every test here passes `platform_name="posix"` to exercise the POSIX branch,
 # and that branch names `signal.SIGKILL` while building its call — before the
@@ -68,27 +61,27 @@ def _raising(error: BaseException):
 def test_an_already_dead_group_keeps_the_tree_verified(monkeypatch) -> None:
     """SIGTERM won the race; the SIGKILL finding nothing is the good outcome."""
     monkeypatch.setattr(
-        memory_queue, "_kill_process_group", _raising(ProcessLookupError())
+        cleanup, "_kill_process_group", _raising(ProcessLookupError())
     )
     process = _LiveProcess()
 
-    assert memory_queue._hard_kill_group(process, "posix", True) is True
+    assert cleanup._hard_kill_group(process, "posix", True) is True
     assert process.joined == [0.2]
 
 
 def test_a_refused_signal_still_fails_closed(monkeypatch) -> None:
     """EPERM says the group may still be there, and that is not verified."""
     monkeypatch.setattr(
-        memory_queue, "_kill_process_group", _raising(PermissionError())
+        cleanup, "_kill_process_group", _raising(PermissionError())
     )
 
-    assert memory_queue._hard_kill_group(_LiveProcess(), "posix", True) is False
+    assert cleanup._hard_kill_group(_LiveProcess(), "posix", True) is False
 
 
 def test_a_delivered_signal_keeps_the_tree_verified(monkeypatch) -> None:
-    monkeypatch.setattr(memory_queue, "_kill_process_group", lambda pid, sig: None)
+    monkeypatch.setattr(cleanup, "_kill_process_group", lambda pid, sig: None)
 
-    assert memory_queue._hard_kill_group(_LiveProcess(), "posix", True) is True
+    assert cleanup._hard_kill_group(_LiveProcess(), "posix", True) is True
 
 
 @pytest.mark.parametrize(
@@ -100,16 +93,16 @@ def test_the_branch_is_skipped_where_it_does_not_apply(
 ) -> None:
     """Windows owns its tree elsewhere, and an unverified tree stays unverified."""
     monkeypatch.setattr(
-        memory_queue, "_kill_process_group", _raising(AssertionError("called"))
+        cleanup, "_kill_process_group", _raising(AssertionError("called"))
     )
 
     assert (
-        memory_queue._hard_kill_group(_LiveProcess(), platform_name, tree_verified)
+        cleanup._hard_kill_group(_LiveProcess(), platform_name, tree_verified)
         is tree_verified
     )
 
 
 def test_a_verified_cleanup_of_a_verified_tree_is_not_a_failure() -> None:
     """The verdict this feeds: both halves true means the worker reports nothing."""
-    assert memory_queue._cleanup_failed(True, "posix", True) is False
-    assert memory_queue._cleanup_failed(True, "posix", False) is True
+    assert cleanup._cleanup_failed(True, "posix", True) is False
+    assert cleanup._cleanup_failed(True, "posix", False) is True

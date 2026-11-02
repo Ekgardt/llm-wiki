@@ -1,0 +1,32 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/research/2026-11-02-formats-module-pilot.md",
+    "docs/research/2026-11-02-module-boundaries-validation.md",
+    "docs/research/2026-11-02-module-boundaries-and-token-budget.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "scripts/llm_wiki/queue_contracts.py",
+    "docs/modules/queue-contracts.md",
+    "scripts/llm_wiki/queue_process_cleanup.py",
+    "scripts/process_liveness.py",
+    "docs/modules/process-liveness.md",
+    "docs/modules/queue-process-cleanup.md",
+    "docs/modules/queue-process-cleanup-context.json",
+    "docs/research/2026-11-02-queue-process-cleanup-boundary.md",
+    "docs/research/2026-09-18-a-childs-tree-is-read-when-it-is-killed.md"
+  ],
+  "directories": [
+    "tests/modules/queue_process_cleanup"
+  ]
+}

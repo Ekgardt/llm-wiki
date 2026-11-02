@@ -6,6 +6,11 @@ comparison. Its production bytes and public interfaces are unchanged. Queue
 cleanup now calls its existing `pid_alive` directly instead of passing through
 `memory_state._is_pid_alive`.
 
+The later approved queue cleanup extraction moves that queue-specific adapter
+to `llm_wiki.queue_process_cleanup`; memory_queue keeps an identical imported
+object for its existing consumers. The common process_liveness implementation
+and its invalid-input policy remain unchanged.
+
 ## Responsibility and safety contract
 
 `process_state` answers alive, dead or unknown for a local PID. `pid_alive` maps
