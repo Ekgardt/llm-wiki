@@ -24,6 +24,7 @@
     "docs/research/2026-11-02-formats-module-pilot.md",
     "docs/research/2026-11-02-module-boundaries-validation.md",
     "docs/research/2026-11-02-module-boundaries-and-token-budget.md",
-    ".gitattributes"
+    ".gitattributes",
+    "docs/research/2026-11-02-queue-payload-boundary.md"
   ]
 }

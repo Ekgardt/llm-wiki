@@ -5,7 +5,7 @@ repository-wide modularization or evidence of a reduction in real task tokens.
 
 `llm_wiki.formats` owns canonical JSON bytes and SHA-256, the existing closed
 JSON-schema validator, source descriptors, and compile receipt v2/v3/v4 syntax and
-identity. It uses the Python standard library only. It does not import the
+identity, plus canonical queue payload validation. It uses the Python standard library only. It does not import the
 compiler, cache, queue, transaction engine, configuration, or model client.
 Schema files remain at `scripts/schemas/`; wire formats and digest algorithms do
 not change. A valid receipt is not proof of committed publication. The compiler
@@ -29,6 +29,12 @@ retirement of that public contract. Compiler-internal
 helpers imported from formats are also the same objects, not forwarding wrappers.
 Private helpers are implementation details; consumers of parsing use its owning
 module. Parser instrumentation patches the namespace where the caller looks up the parser.
+
+The `queue_payload` component owns `PayloadValidation`, `validate_payload_blob`
+and their existing byte, depth, string and container limits. Digest-only inspection
+remains distinct from JSON parsing. Queue database state, transitions, leases and
+repair decisions remain with their existing owners. `memory_queue` re-exports the
+same two public objects for compatibility; internal consumers import the owner.
 
 ## Context and qualification
 

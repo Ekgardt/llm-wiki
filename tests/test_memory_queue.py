@@ -2110,3 +2110,10 @@ def test_deferred_compile_failure_retries_then_dies(
         (second.failed, dead.state, dead.error_code),
         len(compile_calls),
     ) == ((1, "ready"), (1, "dead", "processor_failed"), 2)
+
+
+def test_payload_format_public_reexports_are_the_same_objects():
+    from llm_wiki.formats.queue_payload import PayloadValidation, validate_payload_blob
+
+    assert memory_queue.PayloadValidation is PayloadValidation
+    assert memory_queue.validate_payload_blob is validate_payload_blob

@@ -20,6 +20,7 @@ import memory_queue
 from bounded_io import read_stable_bytes
 from install_control import validate_install_state
 from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
+from llm_wiki.formats.queue_payload import validate_payload_blob
 from llm_wiki.formats.schema import validate_schema
 from reliable_memory import (
     DEFAULTS,
@@ -1384,7 +1385,7 @@ def _queue_task_blockers(
 
 def _validate_queue_task(row: sqlite3.Row) -> None:
     _require_task_id(row["id"])
-    validation = memory_queue.validate_payload_blob(
+    validation = validate_payload_blob(
         bytes(row["payload_blob"]), row["input_hash"], parse=True
     )
     if validation.code is None:

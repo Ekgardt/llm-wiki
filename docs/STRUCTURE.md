@@ -1801,3 +1801,16 @@ remain `tests/test_context_budget.py` and `tests/test_context_packing.py`.
 boundary and enforce the 100,000-token maintenance ceiling. Consumer integration
 suites keep their owners and are additional context for cross-module changes.
 No runtime, provider, limit, source path or installation behavior changes.
+
+
+## Queue payload format (approved 2026-11-02)
+
+`llm_wiki.formats.queue_payload` owns `PayloadValidation`, `validate_payload_blob`,
+their pure JSON/hash helpers and the existing four payload limits. It uses only
+the standard library and `formats.canonical`. `memory_queue` re-exports its two
+public objects unchanged for compatibility and imports its payload byte ceiling.
+Repair reads the validator from its owner. SQLite, task transitions, ownership,
+worker execution and migrations remain in the queue. The complete formats packet
+includes the new source and tests; its existing 100,000-token gate applies.
+See `docs/research/2026-11-02-queue-payload-boundary.md`; private approval:
+`knowledge/notes/queue-payload-formats-decision-20261102.md`.

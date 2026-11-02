@@ -56,7 +56,8 @@ class OnlyFormats(importlib.abc.MetaPathFinder):
 
 sys.meta_path.insert(0, OnlyFormats())
 sys.path.insert(0, sys.argv[1])
-from llm_wiki.formats import canonical, schema, source, receipts
+from llm_wiki.formats import canonical, schema, source, receipts, queue_payload
+assert queue_payload.validate_payload_blob(b'{}', canonical.sha256_bytes(b'{}'), parse=True).payload == {}
 assert canonical.canonical_json_bytes({"x": 1}) == b'{"x":1}'
 schema.validate_schema_object({"x": 1}, {"type": "object"})
 assert source.SourceDescriptor("knowledge/daily/a.md", 0, "a" * 64).canonical()
@@ -103,6 +104,7 @@ def _import_roots(node):
 
 
 _LEGACY_FORMAT_EXPORTS = {
+    'memory_queue': frozenset({'PayloadValidation', 'validate_payload_blob'}),
     'reliable_memory': frozenset({
         'canonical_json_bytes', 'sha256_bytes', 'validate_schema',
         'validate_schema_object', 'SchemaValidationError',
