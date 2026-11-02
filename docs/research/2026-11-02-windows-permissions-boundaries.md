@@ -128,3 +128,33 @@ logs/windows-native-related.txt/.xml; logs/windows-native-final-budget.txt.
 Native binding expanded:325passed,8skipped,58,85с; включает transaction/recovery,
 reliable memory, Unicode readers, global CCN/shape, structure и CI policy.
 Ruff и diff checks чисты. Пропуски — не доказательство native платформы.
+
+## Второй шаг: ACL owner
+
+22 функции перенесены из transaction/queue; их AST совпадает после удаления
+обратных imports. Остальные тела transaction, queue, archive, compile_cache,
+evidence_resolver и LSP совпали без imports. В reliable_memory сравнение
+дополнительно нормализует ровно два согласованных перенаправления Windows-only
+вызовов: hardening и boolean verification; strict verifier меняет только import.
+
+Boundary guard сначала поймал прежние определения и обратные imports базового IO.
+После переноса owner зависит только от stdlib/windows_native, runtime IO не
+импортирует queue/transaction. Старые function aliases проверены по identity;
+подмены внутренних ACL вызовов перенесены к owner, внешние dispatch не менялись.
+Самостоятельный non-ASCII test остаётся на прежнем пути (его fixture используется
+integration tests), импортирует owner и входит в полный пакет ACL.
+
+Первый selected набор:48passed/1skipped. Expanded:637passed/11skipped,69,75с,
+включая transaction/recovery, queue/migration, reliable memory, archives, cache,
+evidence resolver, global CCN/shape, structure и CI. Python3.10 selected:
+119passed/4skipped,2,28с. Добавленные direct runtime bridge tests отдельно:
+19passed/1skipped; их CCN/shape проверены отдельно после добавления.
+LSP ACL/owner selection:1passed/2skipped/254deselected; это не весь LSP suite.
+Windows native validation не проводилась. Skip не является успехом платформы.
+
+Evidence: logs/windows-acl-preservation.json; logs/windows-acl-boundary-red.txt;
+logs/windows-acl-own.txt; logs/windows-acl-related.txt/.xml;
+logs/windows-acl-python310.txt; logs/windows-acl-runtime-bridge.txt/.xml;
+logs/windows-acl-lsp.txt; logs/windows-acl-final-budget.txt.
+Ни live ACL, ни runtime layout/schema, ни POSIX policy не изменялись.
+Полный regression suite, public CI и live rollout не заявлены.

@@ -59,12 +59,12 @@ def test_initial_permission_failure_cannot_publish_an_artifact(tmp_path, monkeyp
 
 
 def test_windows_postpublication_check_reads_the_owner_acl_and_propagates_a_refusal(tmp_path, monkeypatch):
-    import markdown_transaction
+    from llm_wiki import windows_acl
 
     destination = _destination(tmp_path)
     verify = Mock(side_effect=PermissionError('owner-only ACL changed'))
     monkeypatch.setattr(reliable_memory, 'os', SimpleNamespace(name='nt'))
-    monkeypatch.setattr(markdown_transaction, '_verify_windows_owner_acl', verify)
+    monkeypatch.setattr(windows_acl, '_verify_windows_owner_acl', verify)
 
     with pytest.raises(PermissionError, match='owner-only ACL changed'):
         reliable_memory._verify_published_runtime_permissions(destination, 0o600)
@@ -96,20 +96,20 @@ def test_windows_published_artifact_is_owner_only_without_a_second_permission_wr
 
 
 def _readonly_acl(monkeypatch, listing):
-    import markdown_transaction
+    from llm_wiki import windows_acl
 
     _icacls_writing(monkeypatch, listing, 'cp866')
-    reader = Mock(wraps=markdown_transaction._run_acl_command)
-    monkeypatch.setattr(markdown_transaction, '_run_acl_command', reader)
+    reader = Mock(wraps=windows_acl._run_acl_command)
+    monkeypatch.setattr(windows_acl, '_run_acl_command', reader)
     return reader
 
 
 def test_readonly_acl_verification_uses_the_same_exact_owner_policy_without_granting(tmp_path, monkeypatch):
-    import markdown_transaction
+    from llm_wiki import windows_acl
 
     reader = _readonly_acl(monkeypatch, f'artifact {OWNER}:(F)\n')
 
-    markdown_transaction._verify_windows_owner_acl(tmp_path / 'artifact')
+    windows_acl._verify_windows_owner_acl(tmp_path / 'artifact')
 
     reader.assert_called_once_with(['icacls', str(tmp_path / 'artifact')])
 
@@ -121,23 +121,23 @@ def test_readonly_acl_verification_uses_the_same_exact_owner_policy_without_gran
     f'artifact {OWNER}:(F)\n         {OWNER}:(R)\n',
 ], ids=['inherited-grant', 'incomplete-rights', 'another-reader', 'multiple-owner-entries'])
 def test_readonly_acl_verification_refuses_every_previously_forbidden_acl(tmp_path, monkeypatch, listing):
-    import markdown_transaction
+    from llm_wiki import windows_acl
 
     reader = _readonly_acl(monkeypatch, listing)
 
     with pytest.raises(PermissionError, match='owner-only ACL'):
-        markdown_transaction._verify_windows_owner_acl(tmp_path / 'artifact')
+        windows_acl._verify_windows_owner_acl(tmp_path / 'artifact')
     reader.assert_called_once_with(['icacls', str(tmp_path / 'artifact')])
 
 
 @pytest.mark.parametrize('principal', [OWNER + '-backup', 'other-' + OWNER])
 def test_readonly_acl_cannot_confuse_a_similar_foreign_principal_with_the_owner(tmp_path, monkeypatch, principal):
-    import markdown_transaction
+    from llm_wiki import windows_acl
 
     _readonly_acl(monkeypatch, f'artifact {principal}:(F)\n')
 
     with pytest.raises(PermissionError, match='owner-only ACL'):
-        markdown_transaction._verify_windows_owner_acl(tmp_path / 'artifact')
+        windows_acl._verify_windows_owner_acl(tmp_path / 'artifact')
 
 
 @pytest.mark.parametrize('principal', [OWNER + '-backup', 'other-' + OWNER])
@@ -145,3 +145,37 @@ def test_queue_acl_cannot_confuse_a_similar_foreign_principal_with_the_owner(pri
     import memory_queue
 
     assert not memory_queue._acl_is_owner_only([f'artifact {principal}:(F)'], OWNER)
+
+
+def test_windows_initial_permissions_call_the_acl_owner_directly(tmp_path, monkeypatch):
+    from llm_wiki import windows_acl
+
+    harden = Mock()
+    monkeypatch.setattr(reliable_memory, 'os', SimpleNamespace(name='nt'))
+    monkeypatch.setattr(windows_acl, '_harden_windows_acl', harden)
+    reliable_memory._harden_runtime_owner_only(tmp_path / 'artifact', 0o600)
+    harden.assert_called_once_with(tmp_path / 'artifact')
+
+
+def test_windows_runtime_reader_refuses_the_acl_owners_negative_answer(tmp_path, monkeypatch):
+    from llm_wiki import windows_acl
+
+    verify = Mock(return_value=False)
+    monkeypatch.setattr(windows_acl, '_is_owner_only_windows', verify)
+    with pytest.raises(PermissionError, match='runtime file must be owner-only'):
+        reliable_memory._require_windows_owner_only(tmp_path / 'artifact')
+    verify.assert_called_once_with(tmp_path / 'artifact')
+
+
+def test_windows_acl_compatibility_names_are_identical():
+    import markdown_transaction
+    import memory_queue
+    from llm_wiki import windows_acl
+
+    queue_names = {'_windows_acl_lines', '_acl_owner_lines', '_acl_is_owner_only', '_is_owner_only_windows'}
+    from tests.modules.windows_acl.test_boundary import NAMES
+
+    for name in NAMES - queue_names:
+        assert getattr(markdown_transaction, name) is getattr(windows_acl, name)
+    for name in queue_names:
+        assert getattr(memory_queue, name) is getattr(windows_acl, name)

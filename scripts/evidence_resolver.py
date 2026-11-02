@@ -189,7 +189,7 @@ def _archive_path_is_read_only(path: Path) -> bool:
 
 
 def _windows_path_is_read_only(path: Path) -> bool:
-    from markdown_transaction import (
+    from llm_wiki.windows_acl import (  # noqa: E402
         _acl_output_text,
         _run_acl_command,
         _windows_acl_identity,

@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import codecs
 import contextlib
 import copy
 import ctypes
 import errno
 import functools
-import getpass
 import hashlib
 import json
 import math
@@ -17,7 +15,6 @@ import os
 import re
 import sqlite3
 import stat
-import subprocess
 import sys
 import threading
 import time
@@ -44,6 +41,26 @@ from iso_time import utc_text
 from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from llm_wiki.formats.schema import validate_schema
 from llm_wiki.reliability_defaults import DEFAULTS
+from llm_wiki.windows_acl import _acl_entry_lines as _acl_entry_lines
+from llm_wiki.windows_acl import _acl_failure as _acl_failure
+from llm_wiki.windows_acl import _acl_line_names_owner as _acl_line_names_owner
+from llm_wiki.windows_acl import _acl_lines_naming as _acl_lines_naming
+from llm_wiki.windows_acl import _acl_output_encodings as _acl_output_encodings
+from llm_wiki.windows_acl import _acl_output_text as _acl_output_text
+from llm_wiki.windows_acl import _acl_permission as _acl_permission
+from llm_wiki.windows_acl import _apply_windows_acl as _apply_windows_acl
+from llm_wiki.windows_acl import _console_code_page as _console_code_page
+from llm_wiki.windows_acl import _harden_windows_acl as _harden_windows_acl
+from llm_wiki.windows_acl import _names_identity as _names_identity
+from llm_wiki.windows_acl import _read_windows_acl as _read_windows_acl
+from llm_wiki.windows_acl import (
+    _require_verified_windows_owner_acl as _require_verified_windows_owner_acl,
+)
+from llm_wiki.windows_acl import _run_acl_command as _run_acl_command
+from llm_wiki.windows_acl import _verified_owner_acl_line as _verified_owner_acl_line
+from llm_wiki.windows_acl import _verify_no_other_acl as _verify_no_other_acl
+from llm_wiki.windows_acl import _verify_windows_owner_acl as _verify_windows_owner_acl
+from llm_wiki.windows_acl import _windows_acl_identity as _windows_acl_identity
 from llm_wiki.windows_native import (
     _WINDOWS_KERNEL32_PROTOTYPES as _WINDOWS_KERNEL32_PROTOTYPES,
 )
@@ -774,7 +791,6 @@ _PRUNABLE_TRANSACTION_IDS = 'SELECT id FROM "transaction" WHERE ' + _PRUNABLE_TR
 # Re-checked per row at delete time, so a row that became referenced since the
 # candidates were read is kept.
 _PRUNE_ONE_TRANSACTION = 'DELETE FROM "transaction" WHERE id = ? AND ' + _PRUNABLE_TRANSACTION
-
 
 
 def _kept_family_patterns() -> tuple[str, ...]:
@@ -5034,158 +5050,6 @@ def _is_reparse_point(path: Path) -> bool:
 
 def _use_posix_dir_fd() -> bool:
     return os.name == "posix"
-
-
-def _windows_acl_identity() -> str:
-    username = os.environ.get("USERNAME") or getpass.getuser()
-    domain = os.environ.get("USERDOMAIN")
-    return f"{domain}\\{username}" if domain else username
-
-
-def _run_acl_command(command: list[str]) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(
-        command,
-        check=False,
-        capture_output=True,
-        timeout=5,
-    )
-
-
-def _acl_permission(path: Path, identity: str) -> str:
-    if path.is_dir():
-        return f"{identity}:(OI)(CI)(F)"
-    return f"{identity}:(F)"
-
-
-def _acl_failure(path: Path, changed: subprocess.CompletedProcess[bytes]) -> None:
-    detail = _acl_output_text(changed.stderr).strip()
-    if not detail:
-        detail = "icacls failed"
-    raise PermissionError(f"could not apply owner-only ACL to {path}: {detail}")
-
-
-def _apply_windows_acl(
-    path: Path, permission: str
-) -> subprocess.CompletedProcess[bytes]:
-    try:
-        changed = _run_acl_command(
-            [
-                "icacls",
-                str(path),
-                "/inheritance:r",
-                "/remove:g",
-                "*S-1-5-18",
-                "*S-1-5-32-544",
-                "*S-1-5-32-545",
-                "*S-1-5-11",
-                "*S-1-3-0",
-                "*S-1-3-4",
-                "/grant:r",
-                permission,
-            ]
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise PermissionError(f"could not apply owner-only ACL to {path}: {exc}") from exc
-    if changed.returncode != 0:
-        _acl_failure(path, changed)
-    return _read_windows_acl(path)
-
-
-def _read_windows_acl(path: Path) -> subprocess.CompletedProcess[bytes]:
-    try:
-        verified = _run_acl_command(["icacls", str(path)])
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise PermissionError(f"could not verify owner-only ACL on {path}: {exc}") from exc
-    if verified.returncode != 0:
-        _acl_failure(path, verified)
-    return verified
-
-
-def _verified_owner_acl_line(
-    path: Path, owner_lines: list[str]
-) -> str:
-    if len(owner_lines) != 1:
-        raise PermissionError(f"owner-only ACL verification failed for {path}")
-    owner = owner_lines[0]
-    if "(F)" not in owner or "(I)" in owner:
-        raise PermissionError(f"owner-only ACL verification failed for {path}")
-    return owner
-
-
-def _verify_no_other_acl(path: Path, acl_lines: list[str], identity: str) -> None:
-    for line in acl_lines:
-        if not _acl_line_names_owner(line, identity):
-            raise PermissionError(f"owner-only ACL verification failed for {path}")
-
-
-def _harden_windows_acl(path: Path) -> None:
-    identity = _windows_acl_identity()
-    permission = _acl_permission(path, identity)
-    verified = _apply_windows_acl(path, permission)
-    _require_verified_windows_owner_acl(path, verified, identity)
-
-
-def _verify_windows_owner_acl(path: Path) -> None:
-    """Read and enforce the same explicit owner-only ACL used by initial hardening."""
-    _require_verified_windows_owner_acl(path, _read_windows_acl(path), _windows_acl_identity())
-
-
-def _require_verified_windows_owner_acl(path, verified, identity):
-    acl_lines = _acl_lines_naming(verified.stdout, identity)
-    owner_lines = [line for line in acl_lines if _acl_line_names_owner(line, identity)]
-    _verified_owner_acl_line(path, owner_lines)
-    _verify_no_other_acl(path, acl_lines, identity)
-
-
-def _console_code_page() -> tuple[str, ...]:
-    """The console's output code page as a codec, when there is a console and a codec."""
-    name = f"cp{_windows_kernel32().GetConsoleOutputCP()}"
-    try:
-        codecs.lookup(name)
-    except LookupError:
-        return ()
-    return (name,)
-
-
-def _acl_output_encodings() -> tuple[str, ...]:
-    """The code pages `icacls` may have written its pipe in, most likely first.
-
-    No API reports which one it used, and a user name need not be ASCII. See
-    `docs/research/2026-09-17-windows-names-and-windows-errors-are-read-as-they-are-written.md`.
-    """
-    if sys.platform != "win32":  # the `oem` and `mbcs` codecs exist on Windows only
-        return ("utf-8",)
-    return tuple(dict.fromkeys((*_console_code_page(), "oem", "mbcs")))
-
-
-def _acl_output_text(value: bytes | str | None, encoding: str | None = None) -> str:
-    if isinstance(value, bytes):
-        return value.decode(encoding or _acl_output_encodings()[0], errors="replace")
-    return value or ""
-
-
-def _acl_entry_lines(output: str) -> list[str]:
-    return [line.strip() for line in output.splitlines() if ":(" in line]
-
-
-def _acl_line_names_owner(line: str, identity: str) -> bool:
-    """Match the complete ACE principal, following an optional icacls path prefix."""
-    pattern = r"(?:^|\s)" + re.escape(identity.casefold()) + r":\("
-    return re.search(pattern, line.casefold()) is not None
-
-
-def _names_identity(acl_lines: list[str], identity: str) -> bool:
-    return any(_acl_line_names_owner(line, identity) for line in acl_lines)
-
-
-def _acl_lines_naming(stdout: bytes | str | None, identity: str) -> list[str]:
-    """The ACL entries, read under the first code page in which the owner is named."""
-    readings = [
-        _acl_entry_lines(_acl_output_text(stdout, encoding))
-        for encoding in _acl_output_encodings()
-    ]
-    named = [lines for lines in readings if _names_identity(lines, identity)]
-    return (named or readings)[0]
 
 
 def _harden_owner_only(path: Path, mode: int) -> None:

@@ -468,9 +468,9 @@ def _set_owner_only(path: Path, mode: int) -> bool:
 
 def _harden_runtime_owner_only(path: Path, mode: int) -> None:
     if os.name == "nt":
-        from memory_queue import _harden_owner_only
+        from llm_wiki.windows_acl import _harden_windows_acl
 
-        _harden_owner_only(Path(path), mode)
+        _harden_windows_acl(Path(path))
         return
     _set_owner_only(Path(path), mode)
 
@@ -778,9 +778,9 @@ def _require_nonnegative_file_budget(max_bytes: int | None) -> None:
 
 
 def _require_windows_owner_only(path: Path) -> None:
-    from memory_queue import _is_owner_only
+    from llm_wiki.windows_acl import _is_owner_only_windows
 
-    if not _is_owner_only(path):
+    if not _is_owner_only_windows(path):
         raise PermissionError("runtime file must be owner-only")
 
 
@@ -1488,7 +1488,7 @@ def publish_runtime_file(
 def _verify_published_runtime_permissions(path: Path, mode: int) -> None:
     """Same-parent publication preserves permissions; any drift must remain a refusal."""
     if os.name == "nt":
-        from markdown_transaction import _verify_windows_owner_acl
+        from llm_wiki.windows_acl import _verify_windows_owner_acl  # noqa: E402
 
         _verify_windows_owner_acl(path)
         return

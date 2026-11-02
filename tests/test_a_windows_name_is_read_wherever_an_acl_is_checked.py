@@ -17,8 +17,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import archive_daily  # noqa: E402
-import markdown_transaction  # noqa: E402
 import memory_queue  # noqa: E402
+from llm_wiki import windows_acl
 
 OWNER = "PC\\Оператор"
 CODE_PAGE = "cp866"
@@ -31,11 +31,11 @@ def _icacls_writing(monkeypatch, listing: str) -> None:
         output = listing.encode(CODE_PAGE) if len(command) == 2 else b""
         return subprocess.CompletedProcess(command, 0, output, b"")
 
-    monkeypatch.setattr(markdown_transaction, "_windows_acl_identity", lambda: OWNER)
-    monkeypatch.setattr(markdown_transaction, "_run_acl_command", run)
+    monkeypatch.setattr(windows_acl, "_windows_acl_identity", lambda: OWNER)
+    monkeypatch.setattr(windows_acl, "_run_acl_command", run)
     monkeypatch.setattr(archive_daily, "_run_acl_command", run)
     monkeypatch.setattr(
-        markdown_transaction,
+        windows_acl,
         "_acl_output_encodings",
         lambda: ("cp437", CODE_PAGE),
         raising=False,

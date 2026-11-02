@@ -127,6 +127,10 @@ from llm_wiki.queue_timing import _retry_after_text as _retry_after_text
 from llm_wiki.queue_timing import _retry_available_at as _retry_available_at
 from llm_wiki.queue_timing import _timestamp as _timestamp
 from llm_wiki.reliability_defaults import DEFAULTS
+from llm_wiki.windows_acl import _acl_is_owner_only as _acl_is_owner_only
+from llm_wiki.windows_acl import _acl_owner_lines as _acl_owner_lines
+from llm_wiki.windows_acl import _is_owner_only_windows as _is_owner_only_windows
+from llm_wiki.windows_acl import _windows_acl_lines as _windows_acl_lines
 from reliable_memory import (
     MAX_CAPTURE_DECISION_BYTES,
     MigrationStatement,
@@ -2368,56 +2372,12 @@ def _blocked_purge(task_id: str, code: str) -> CorruptPurgeProgress:
 
 def _harden_owner_only(path: Path, mode: int) -> None:
     if os.name == "nt":
-        from markdown_transaction import _harden_windows_acl
+        from llm_wiki.windows_acl import _harden_windows_acl  # noqa: E402
 
         _harden_windows_acl(path)
         return
     if not _set_owner_only(path, mode):
         raise PermissionError(f"could not apply owner-only permissions to {path}")
-
-
-def _windows_acl_lines(path: Path, identity: str) -> list[str] | None:
-    """The access control entries icacls reports, or None when it refuses.
-
-    Read under the code page in which `identity` is named: the wrong one drops
-    the letters of a name that is not ASCII, and an owner-only file then reads
-    as somebody else's. Research:
-    docs/research/2026-09-17-the-last-three-windows-readers-of-a-name-and-a-handle.md
-    """
-    from markdown_transaction import _acl_lines_naming, _run_acl_command
-
-    try:
-        verified = _run_acl_command(["icacls", str(path)])
-    except Exception:  # noqa: BLE001 - validation is fail-closed
-        return None
-    if verified.returncode != 0:
-        return None
-    return _acl_lines_naming(verified.stdout, identity)
-
-
-def _acl_owner_lines(acl_lines: list[str], folded: str) -> list[str]:
-    from markdown_transaction import _acl_line_names_owner
-
-    return [line for line in acl_lines if _acl_line_names_owner(line, folded)]
-
-
-def _acl_is_owner_only(acl_lines: list[str], identity: str) -> bool:
-    """One full-control entry for us, and nothing else at all."""
-    folded = identity.casefold()
-    owner_lines = _acl_owner_lines(acl_lines, folded)
-    if len(owner_lines) != 1 or "(F)" not in owner_lines[0]:
-        return False
-    return len(owner_lines) == len(acl_lines)
-
-
-def _is_owner_only_windows(path: Path) -> bool:
-    from markdown_transaction import _windows_acl_identity
-
-    identity = _windows_acl_identity()
-    acl_lines = _windows_acl_lines(path, identity)
-    if acl_lines is None:
-        return False
-    return _acl_is_owner_only(acl_lines, identity)
 
 
 def _is_owner_only_posix(path: Path) -> bool:

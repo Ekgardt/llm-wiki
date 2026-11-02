@@ -23,7 +23,7 @@ from llm_wiki.formats.source import (
 from llm_wiki.formats.source import (
     _validate_logical_path as _validate_logical_path,
 )
-from markdown_transaction import (
+from llm_wiki.windows_acl import (  # noqa: E402
     _acl_output_text,
     _run_acl_command,
     _windows_acl_identity,

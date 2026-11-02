@@ -30,7 +30,7 @@ from typing import BinaryIO, NamedTuple, TypeVar
 
 import lsp_process_tree as _lsp_process_tree
 import windows_workspace as _windows_workspace
-from compile_cache import _acl_output_text, _acl_principal, _windows_acl_identity
+from compile_cache import _acl_principal  # noqa: E402
 from interruption import (
     interruption_in_chain as _interruption_in_chain,
 )
@@ -38,6 +38,7 @@ from interruption import (
     raise_collected_errors as _raise_cleanup_failures,
 )
 from interruption import walk_exception_chain
+from llm_wiki.windows_acl import _acl_output_text, _windows_acl_identity  # noqa: E402
 from lsp_protocol import (
     CancellationToken,
     LspProtocol,

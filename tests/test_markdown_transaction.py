@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import markdown_transaction
 import pytest
+from llm_wiki import windows_acl
 from markdown_transaction import MarkdownChange, MarkdownCoordinator
 from reliable_memory import canonical_json_bytes, sha256_bytes
 
@@ -1559,8 +1560,8 @@ def test_windows_acl_hardening_verifies_owner_only_success(tmp_path: Path, monke
             return subprocess.CompletedProcess(command, 0, "", "")
         return subprocess.CompletedProcess(command, 0, "artifact DOMAIN\\user:(F)\n", "")
 
-    monkeypatch.setattr(markdown_transaction, "_windows_acl_identity", lambda: "DOMAIN\\user")
-    monkeypatch.setattr(markdown_transaction, "_run_acl_command", successful)
+    monkeypatch.setattr(windows_acl, "_windows_acl_identity", lambda: "DOMAIN\\user")
+    monkeypatch.setattr(windows_acl, "_run_acl_command", successful)
     markdown_transaction._harden_windows_acl(path)
     hardening = calls[0]
     # The groups every Windows install grants by default, removed by SID.
@@ -1584,7 +1585,7 @@ def test_windows_acl_hardening_failure_is_not_silently_accepted(tmp_path: Path, 
     path = tmp_path / "artifact"
     path.write_bytes(b"artifact")
     denied = subprocess.CompletedProcess(["icacls"], 5, "", "access denied")
-    monkeypatch.setattr(markdown_transaction, "_run_acl_command", lambda command: denied)
+    monkeypatch.setattr(windows_acl, "_run_acl_command", lambda command: denied)
     with pytest.raises(PermissionError, match="owner-only ACL"):
         markdown_transaction._harden_windows_acl(path)
 
@@ -1594,7 +1595,7 @@ def test_windows_acl_failure_aborts_transaction_preparation(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
     denied = subprocess.CompletedProcess(["icacls"], 5, b"", b"access denied")
-    monkeypatch.setattr(markdown_transaction, "_run_acl_command", lambda command: denied)
+    monkeypatch.setattr(windows_acl, "_run_acl_command", lambda command: denied)
     coordinator = MarkdownCoordinator(vault, state_root)
     with pytest.raises(PermissionError, match="owner-only ACL"):
         coordinator.prepare(
