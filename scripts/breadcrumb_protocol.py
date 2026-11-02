@@ -13,13 +13,9 @@ from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
+from llm_wiki.formats.schema import SchemaValidationError, validate_schema
 from memory_state import MAX_CAPTURE_INTENT_BYTES
-from reliable_memory import (
-    SchemaValidationError,
-    canonical_json_bytes,
-    sha256_bytes,
-    validate_schema,
-)
 
 SCHEMAS = Path(__file__).with_name("schemas")
 MANIFEST_VERSION = "capture-intent/v2"
@@ -83,7 +79,7 @@ def _schema_object(raw, schema):
 
 
 def _canonical_record(data, schema, raw_schema):
-    from reliable_memory import validate_schema_object
+    from llm_wiki.formats.schema import validate_schema_object
 
     value = json.loads(data.decode("utf-8", errors="strict"))
     if not isinstance(value, dict):

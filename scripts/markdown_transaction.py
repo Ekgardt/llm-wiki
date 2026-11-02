@@ -42,6 +42,8 @@ from claim_tree_manifest import (
     validate_guardrail_source_manifest,
 )
 from iso_time import utc_text
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
+from llm_wiki.formats.schema import validate_schema
 from model_dlp import DLPContentBlocked, DLPPolicyError, require_safe_publication
 from reliable_memory import (
     DEFAULTS,
@@ -50,7 +52,6 @@ from reliable_memory import (
     OperationalDatabaseContractError,
     _set_owner_only,
     begin_immediate,
-    canonical_json_bytes,
     configure_operational_deadline,
     durable_publish_file,
     fsync_directory,
@@ -64,8 +65,6 @@ from reliable_memory import (
     refresh_operational_deadline,
     restricted_relative_path,
     run_resumable_migration,
-    sha256_bytes,
-    validate_schema,
     validate_state_root,
 )
 from transaction_lineage import quarantine_witnesses, resolved_quarantines

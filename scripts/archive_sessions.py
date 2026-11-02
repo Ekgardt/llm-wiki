@@ -29,9 +29,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
+from llm_wiki.formats.canonical import sha256_bytes  # noqa: E402
 from markdown_transaction import ABSENT, mutate_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT  # noqa: E402
-from reliable_memory import DEFAULTS, sha256_bytes  # noqa: E402
+from reliable_memory import DEFAULTS  # noqa: E402
 
 # How long a record stays in the active tree: the same ninety days the archive
 # contract already gives every other hot artifact. The observability write-ups

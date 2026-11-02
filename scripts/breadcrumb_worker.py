@@ -10,7 +10,7 @@ import breadcrumb_evidence
 import breadcrumb_storage
 import breadcrumb_terminal
 import flush_memory
-from reliable_memory import sha256_bytes
+from llm_wiki.formats.canonical import sha256_bytes
 
 
 def _receipt(queue, coordinator, lease, active, fences, bundle):

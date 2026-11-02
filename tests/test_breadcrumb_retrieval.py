@@ -69,7 +69,7 @@ def test_corpus_follow_validates_each_immutable_record_once(tmp_path, monkeypatc
     from unittest.mock import Mock
 
     import breadcrumb_protocol as protocol
-    import reliable_memory as reliability
+    from llm_wiki.formats import schema
     from reliable_memory import canonical_json_bytes
 
     _disk_source(tmp_path, b'complete source')
@@ -77,9 +77,9 @@ def test_corpus_follow_validates_each_immutable_record_once(tmp_path, monkeypatc
     observations = []
 
     def observe(discovery, head):
-        validation = Mock(wraps=reliability.validate_schema_object)
+        validation = Mock(wraps=schema.validate_schema_object)
         with monkeypatch.context() as local:
-            local.setattr(reliability, 'validate_schema_object', validation)
+            local.setattr(schema, 'validate_schema_object', validation)
             follow(discovery, head)
         distinct = {(canonical_json_bytes(call.args[0]), canonical_json_bytes(call.args[1]))
                     for call in validation.call_args_list}

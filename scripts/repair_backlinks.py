@@ -31,9 +31,9 @@ from lint_memory import (  # noqa: E402
     backlink_target_is_mutable,
     missing_backlink_pairs,
 )
+from llm_wiki.formats.canonical import sha256_bytes  # noqa: E402
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT  # noqa: E402
-from reliable_memory import sha256_bytes  # noqa: E402
 from vault_editorial import EDITORIAL_NAMES  # noqa: E402
 
 # One page is never large enough to justify an unbounded read.

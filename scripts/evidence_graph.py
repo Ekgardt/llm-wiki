@@ -24,7 +24,8 @@ from graph_storable import (  # noqa: F401 - the writer's rules, shared with its
     storable_metadata,
 )
 from graph_storable import valid_graph_text as _valid_text
-from reliable_memory import canonical_json_bytes, validate_runtime_file
+from llm_wiki.formats.canonical import canonical_json_bytes
+from reliable_memory import validate_runtime_file
 from repository_scope import RepositoryScope
 
 GRAPH_SCHEMA_VERSION = "evidence-graph/v2"

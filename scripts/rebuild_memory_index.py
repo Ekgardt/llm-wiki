@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
 from claim_tree_manifest import ClaimTreeChanged, snapshot_claim_tree  # noqa: E402
+from llm_wiki.formats.canonical import sha256_bytes  # noqa: E402
 from markdown_transaction import (  # noqa: E402
     ABSENT,
     TransactionDriftError,
@@ -22,7 +23,6 @@ from markdown_transaction import (  # noqa: E402
 )
 from memory_state import ROOT  # noqa: E402
 from page_status import is_retired  # noqa: E402
-from reliable_memory import sha256_bytes  # noqa: E402
 from settings import raise_hint, setting_value  # noqa: E402
 
 memory = ROOT / "knowledge"

@@ -28,8 +28,8 @@ except ImportError:  # pragma: no cover - Windows has no fcntl module
 
 from bounded_io import IO_CHUNK_BYTES
 from corpus_snapshot import always_pruned_directory_name
+from llm_wiki.formats.canonical import canonical_json_bytes
 from lsp_profiles import navigable_suffixes, profile_configuration_names
-from reliable_memory import canonical_json_bytes
 from repository_scope import RepositoryScope, sanitized_git_environment
 
 # Which files belong in a checkout's freshness record. Read from the managed

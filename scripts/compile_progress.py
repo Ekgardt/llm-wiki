@@ -236,7 +236,7 @@ def _require_scope_sources(sources):
 
 
 def _require_scope_source(source):
-    from compile_cache import SourceDescriptor
+    from llm_wiki.formats.source import SourceDescriptor
 
     fields = {'logical_path', 'byte_start', 'byte_end', 'sha256'}
     if not isinstance(source, dict) or set(source) != fields:

@@ -29,6 +29,7 @@ from pathlib import Path, PureWindowsPath
 import pyright_profile as _profile
 import windows_workspace as _windows_workspace
 from bounded_io import IO_CHUNK_BYTES
+from llm_wiki.formats.canonical import canonical_json_bytes
 from lsp_paths import managed_pyright_root
 from operational_ownership import process_start_identity as _process_start_identity
 from pinned_download import (
@@ -42,12 +43,7 @@ from pinned_download import (
 )
 from pinned_download import open_pinned_url as _open_pinned_url
 from process_liveness import recorded_process_state
-from reliable_memory import (
-    _initialize_probe_directory,
-    _set_owner_only,
-    _sqlite_lock_probe,
-    canonical_json_bytes,
-)
+from reliable_memory import _initialize_probe_directory, _set_owner_only, _sqlite_lock_probe
 
 # `_open_pinned_url` is the shared opener -- no proxy table, no redirect
 # handler -- imported under this module's own private name because that is the

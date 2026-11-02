@@ -1037,7 +1037,7 @@ def _retrieval_trace(
     an empty result names the generation it searched; rows alone are the path
     for callers that predate the sink.
     """
-    from reliable_memory import validate_schema
+    from llm_wiki.formats.schema import validate_schema
 
     trace = _selected_retrieval_trace(query, results, reported)
     validate_schema(trace, RETRIEVAL_TRACE_SCHEMA)

@@ -16,7 +16,8 @@ from itertools import chain, islice
 from pathlib import Path
 
 from bounded_io import IO_CHUNK_BYTES, VerifiedByteRange, open_stable_range, read_stable_bytes
-from reliable_memory import canonical_json_bytes, sha256_bytes, validate_schema
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
+from llm_wiki.formats.schema import validate_schema
 
 # Bounded reads of evidence files; a file past its bound is refused by name, never
 # cut, so a citation or an archive check fails rather than reading a partial file.

@@ -14,19 +14,18 @@ import compile_progress
 import installed_memory_repair as repair
 import memory_queue
 import private_vault_backup as backup
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from reliable_memory import (
     DEFAULTS,
     OperationalDatabaseContractError,
     RuntimeFileIdentity,
     _require_runtime_parent_containment,
     begin_immediate,
-    canonical_json_bytes,
     capture_runtime_file_identity,
     open_operational_db,
     operational_deadline_active,
     publish_runtime_file,
     read_runtime_bytes,
-    sha256_bytes,
     validate_operational_db_file,
 )
 

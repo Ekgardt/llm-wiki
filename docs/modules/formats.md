@@ -23,8 +23,9 @@ and evidence resolver still verify transaction authority separately.
 
 No second implementation remains in the original files. Existing public names in
 `reliable_memory`, `compile_cache`, and `compile_memory` re-export the same objects:
-current consumers depend on those imports. They can be removed only after all
-consumers migrate and compatibility is explicitly retired. Compiler-internal
+production consumers now import the formats owner directly. These public re-exports
+remain for external compatibility and identity tests; removal requires an explicit
+retirement of that public contract. Compiler-internal
 helpers imported from formats are also the same objects, not forwarding wrappers.
 Private helpers are implementation details; consumers of parsing use its owning
 module. Parser instrumentation patches the namespace where the caller looks up the parser.
@@ -54,7 +55,9 @@ those components; this packet does not claim that every end-to-end task fits int
 100,000 tokens. The full regression suite and static checks qualify the extraction.
 
 Boundary tests reproduce the original compiler-parser coupling and prevent its
-return. Fresh-process import tests forbid execution dependencies; static imports
+return. The guard also rejects internal imports of moved primitives through the
+three compatibility modules, including aliases, local imports and star imports.
+Fresh-process import tests forbid execution dependencies; static imports
 must be standard-library or relative within the module. CI shard discovery includes
 nested module tests and records their measured cost. Golden records preserve
 syntax and identities while integration tests retain publication authority checks.

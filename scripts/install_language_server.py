@@ -45,6 +45,7 @@ from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 
 from bounded_io import IO_CHUNK_BYTES, read_stable_bytes
 from go_source_build import SourceBuildError
+from llm_wiki.formats.canonical import canonical_json_bytes
 from lsp_identity import (
     INSTALL_MANIFEST_NAME,
     ManifestError,
@@ -69,7 +70,6 @@ from pinned_download import (
     download_pinned,
     retry_transient,
 )
-from reliable_memory import canonical_json_bytes
 
 # One budget for the whole install, not one per socket. The Rust profile pulls
 # about 160 MB across five archives and unpacks past a gigabyte; the Go profile

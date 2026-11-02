@@ -16,14 +16,10 @@ from pathlib import Path
 
 import breadcrumb_protocol as protocol
 from bounded_io import _check_deadline
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from memory_state import MAX_CAPTURE_INTENT_BYTES
 from model_dlp import require_safe_publication
-from reliable_memory import (
-    canonical_json_bytes,
-    publish_runtime_file,
-    read_runtime_bytes,
-    sha256_bytes,
-)
+from reliable_memory import publish_runtime_file, read_runtime_bytes
 from secret_redact import describe_error
 
 # A distinct handler dispatch version; existing session captures keep version 1.

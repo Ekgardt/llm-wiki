@@ -283,7 +283,8 @@ def _capture_intent_reference(
 
 
 def _decode_capture_intent(data: bytes) -> dict[str, object]:
-    from reliable_memory import canonical_json_bytes, validate_schema
+    from llm_wiki.formats.canonical import canonical_json_bytes
+    from llm_wiki.formats.schema import validate_schema
 
     try:
         record = json.loads(data.decode("utf-8", errors="strict"))
@@ -298,7 +299,7 @@ def _decode_capture_intent(data: bytes) -> dict[str, object]:
 
 
 def _require_capture_intent_identity(record: Mapping[str, object]) -> None:
-    from reliable_memory import canonical_json_bytes, sha256_bytes
+    from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 
     source = {field: record[field] for field in _CAPTURE_SOURCE_FIELDS}
     chunk_sha256 = sha256_bytes(canonical_json_bytes(record["evidence"]))
@@ -329,7 +330,8 @@ def _require_capture_intent_identity(record: Mapping[str, object]) -> None:
 def _read_capture_intent(
     queue: object, lease: object, active: object
 ) -> dict[str, object]:
-    from reliable_memory import read_runtime_bytes, sha256_bytes
+    from llm_wiki.formats.canonical import sha256_bytes
+    from reliable_memory import read_runtime_bytes
 
     intent_id, intent_path, intent_sha256 = _capture_intent_reference(lease, active)
     data = read_runtime_bytes(
@@ -664,7 +666,7 @@ def _capture_operation_plan(
     *,
     dated: bool = True,
 ) -> list[dict[str, object]]:
-    from reliable_memory import sha256_bytes
+    from llm_wiki.formats.canonical import sha256_bytes
 
     if tier == "ok":
         return []
@@ -724,7 +726,9 @@ def _capture_decision_bytes(
     chosen_at: datetime | None,
 ) -> bytes:
     from llm_client import LLMResult
-    from reliable_memory import MAX_CAPTURE_DECISION_BYTES, canonical_json_bytes, validate_schema
+    from llm_wiki.formats.canonical import canonical_json_bytes
+    from llm_wiki.formats.schema import validate_schema
+    from reliable_memory import MAX_CAPTURE_DECISION_BYTES
 
     if not isinstance(result, LLMResult):
         raise TypeError("capture decision requires an LLM result")
@@ -778,7 +782,7 @@ def _ensure_capture_results_directory(queue: object) -> None:
 
 
 def _capture_decision_relative_path(intent_id: str) -> str:
-    from reliable_memory import canonical_json_bytes, sha256_bytes
+    from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 
     key = sha256_bytes(
         canonical_json_bytes({"intent_id": intent_id, "stage": "flush"})
@@ -796,7 +800,8 @@ def _index_capture_decision(
     owner: object,
     encoded: bytes,
 ) -> object:
-    from reliable_memory import publish_runtime_file, sha256_bytes
+    from llm_wiki.formats.canonical import sha256_bytes
+    from reliable_memory import publish_runtime_file
 
     relative = _capture_decision_relative_path(active.intent_id)
     publish_runtime_file(
@@ -820,7 +825,8 @@ def _index_capture_decision(
 
 
 def _decode_capture_decision(data: bytes) -> dict[str, object]:
-    from reliable_memory import canonical_json_bytes, validate_schema
+    from llm_wiki.formats.canonical import canonical_json_bytes
+    from llm_wiki.formats.schema import validate_schema
 
     try:
         decision = json.loads(data.decode("utf-8", errors="strict"))
@@ -995,7 +1001,7 @@ def _publish_capture_decision(
 def _capture_terminal_bytes(
     active: object, decision: object, disposition: Mapping[str, object]
 ) -> bytes:
-    from reliable_memory import canonical_json_bytes
+    from llm_wiki.formats.canonical import canonical_json_bytes
 
     terminal = {
         "schema_version": "capture-terminal/v1",
@@ -1031,7 +1037,8 @@ def _publish_capture_terminal(
     decision: object,
     disposition: Mapping[str, object],
 ) -> object:
-    from reliable_memory import publish_runtime_file, sha256_bytes
+    from llm_wiki.formats.canonical import sha256_bytes
+    from reliable_memory import publish_runtime_file
 
     encoded = _capture_terminal_bytes(active, decision, disposition)
     relative = f"run/queue-results/capture-{active.intent_id}.json"

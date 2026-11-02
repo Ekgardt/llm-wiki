@@ -31,11 +31,8 @@ from bounded_io import (
 )
 from context_budget import TokenCount, TokenUsage
 from llm_client import BackendResponse, LLMResult, ProviderDescriptor
-from reliable_memory import (
-    canonical_json_bytes,
-    fingerprint_regular_file,
-    operational_deadline_active,
-)
+from llm_wiki.formats.canonical import canonical_json_bytes
+from reliable_memory import fingerprint_regular_file, operational_deadline_active
 
 _COMPLETED_REFUSALS = frozenset({'empty_response', 'dlp_output_blocked', 'dlp_scan_error'})
 
@@ -493,7 +490,7 @@ def run_candidate_call(queue, lease, checkpoint, *, dependencies, descriptor,
 
 
 def _journal_candidate(queue, lease, checkpoint, dependencies, descriptor, delivery, prepared):
-    from reliable_memory import sha256_bytes
+    from llm_wiki.formats.canonical import sha256_bytes
 
     request = sha256_bytes(canonical_json_bytes({
         'protected_request': prepared.request_digest, 'dependencies': dependencies.verify(),

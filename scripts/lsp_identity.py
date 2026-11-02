@@ -29,6 +29,7 @@ import json
 from pathlib import Path
 
 from bounded_io import read_stable_bytes
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from lsp_server_profile import LanguageServerProfile, is_sha256, thaw_profile_value
 from pyright_profile import (
     MAX_INSTALL_MANIFEST_BYTES,
@@ -38,7 +39,6 @@ from pyright_profile import (
     _probe_node,
     _validated_deadline,
 )
-from reliable_memory import canonical_json_bytes, sha256_bytes
 from repository_scope import RepositoryScope
 
 INSTALL_MANIFEST_NAME = "install-manifest.json"

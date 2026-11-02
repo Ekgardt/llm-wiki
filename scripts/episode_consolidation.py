@@ -129,7 +129,7 @@ def record_set_digest(vault: Path, day: str) -> str:
     arrives after the day was closed — a session that ended after midnight, an
     imported history — makes the day pending again instead of being never read.
     """
-    from reliable_memory import sha256_bytes
+    from llm_wiki.formats.canonical import sha256_bytes
 
     names = "\n".join(path.name for path in session_records(vault, day))
     return sha256_bytes(names.encode("utf-8"))
@@ -335,7 +335,7 @@ def render_block(day: str, lessons: list[Lesson], moment: datetime) -> str:
 
 
 def _operation_id(day: str, lessons: list[Lesson]) -> str:
-    from reliable_memory import sha256_bytes
+    from llm_wiki.formats.canonical import sha256_bytes
 
     payload = json.dumps(
         [[item.kind, item.text, item.quote, item.trigger] for item in lessons],
@@ -475,7 +475,7 @@ def _save_progress(day: str, progress: _Progress) -> None:
 
 def _batch_key(vault: Path, day: str, batch: list[Path]) -> str:
     """A batch's identity: its vault, its day and the bytes of every record in it."""
-    from reliable_memory import sha256_bytes
+    from llm_wiki.formats.canonical import sha256_bytes
 
     parts = [str(Path(vault).resolve()), day]
     parts.extend(f"{path.name}:{sha256_bytes(path.read_bytes())}" for path in batch)

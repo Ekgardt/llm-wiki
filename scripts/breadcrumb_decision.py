@@ -11,7 +11,8 @@ from pathlib import PurePosixPath
 
 import breadcrumb_evidence as evidence
 import breadcrumb_protocol as protocol
-from reliable_memory import MAX_CAPTURE_DECISION_BYTES, canonical_json_bytes, sha256_bytes
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
+from reliable_memory import MAX_CAPTURE_DECISION_BYTES
 
 VERSION = "breadcrumb-decision/v1"
 

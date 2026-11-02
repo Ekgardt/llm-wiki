@@ -13,7 +13,8 @@ from typing import NamedTuple
 from codex_hook_identity import OUR_CODEX_COMMANDS, OUR_CODEX_SCRIPTS
 from install_control import InstallControlError, ManagedResource, file_resource
 from integration_config_backup import publish_configuration
-from reliable_memory import canonical_json_bytes, fsync_directory
+from llm_wiki.formats.canonical import canonical_json_bytes
+from reliable_memory import fsync_directory
 
 # A host settings file read and rewritten whole; 2 MiB is the writer's bound, shared with
 # installer_config and doctor (docs/research/2026-09-23-one-limit-one-place.md).

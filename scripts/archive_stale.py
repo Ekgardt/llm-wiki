@@ -32,6 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
+from llm_wiki.formats.canonical import sha256_bytes  # noqa: E402
 from markdown_transaction import (  # noqa: E402
     ABSENT,
     MAX_KNOWLEDGE_TARGET_BYTES,
@@ -45,7 +46,6 @@ from okf_types import (  # noqa: E402
     TYPE_AGE_DAYS,
 )
 from page_status import is_retired, normalized_status  # noqa: E402
-from reliable_memory import sha256_bytes  # noqa: E402
 
 KNOWLEDGE = ROOT / "knowledge" / "notes"
 # Stay inside knowledge zone (three-zone layout forbids root archive/).

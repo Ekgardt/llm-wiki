@@ -20,8 +20,8 @@ from knowledge_extractor import (
     _require_optional_record_budget,
     source_ceiling,
 )
+from llm_wiki.formats.canonical import canonical_json_bytes
 from project_journal import parse_journal_events
-from reliable_memory import canonical_json_bytes
 from settings import raise_hint
 
 EXTRACTOR_VERSION = "project-extractor/v1"

@@ -52,15 +52,11 @@ from corpus_snapshot import (  # noqa: E402
     validate_live_snapshot,
 )
 from generation_catalog import GenerationCatalog  # noqa: E402
+from llm_wiki.formats.canonical import canonical_json_bytes  # noqa: E402
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
 from page_status import current_status_sql, is_retired  # noqa: E402
 from provenance import substance_weight, trust_weight  # noqa: E402
-from reliable_memory import (  # noqa: E402
-    canonical_json_bytes,
-    fsync_directory,
-    fsync_file,
-    validate_runtime_file,
-)
+from reliable_memory import fsync_directory, fsync_file, validate_runtime_file  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 from settings import raise_hint, setting_value  # noqa: E402
 

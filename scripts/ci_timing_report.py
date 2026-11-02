@@ -16,7 +16,7 @@ from typing import Any
 
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import parse as parse_xml
-from reliable_memory import validate_schema
+from llm_wiki.formats.schema import validate_schema
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_PATH = ROOT / "benchmark" / "ci-timeout-evidence-v1.schema.json"

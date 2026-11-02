@@ -35,12 +35,12 @@ from llm_client import (
     probe_candidate,
     provider_candidates,
 )
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from markdown_transaction import (
     MarkdownChange,
     MarkdownCoordinator,
     active_or_legacy_coordinator,
 )
-from reliable_memory import canonical_json_bytes, sha256_bytes
 
 AUTHORITY = {"inferred": 0, "ai-derived": 1, "web": 2, "user": 3}
 FUNCTIONAL_RELATIONS = frozenset(

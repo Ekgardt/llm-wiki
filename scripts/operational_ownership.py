@@ -21,18 +21,17 @@ from typing import Literal, cast
 import markdown_transaction
 import process_liveness
 from iso_time import utc_text
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from process_liveness import _is_plain_int, _platform_system
 from reliable_memory import (
     DEFAULTS,
     OperationalDatabaseContract,
     RuntimeFileIdentity,
     begin_immediate,
-    canonical_json_bytes,
     capture_runtime_file_identity,
     open_operational_db,
     read_runtime_bytes,
     restricted_relative_path,
-    sha256_bytes,
 )
 
 OwnerRole = Literal[

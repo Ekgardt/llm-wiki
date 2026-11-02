@@ -27,7 +27,9 @@ from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path, PurePosixPath
 
-from reliable_memory import canonical_json_bytes, fsync_directory, validate_schema
+from llm_wiki.formats.canonical import canonical_json_bytes
+from llm_wiki.formats.schema import validate_schema
+from reliable_memory import fsync_directory
 
 # One install-control record (`run/install/*.json`); a session record allows 8 MiB.
 MAX_RECORD_BYTES = 1024 * 1024

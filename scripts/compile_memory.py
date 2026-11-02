@@ -80,8 +80,6 @@ from compile_cache import (  # noqa: E402
     CompileActionDescriptor,
     CompileCache,
     CompileCallDescriptor,
-    SourceDescriptor,
-    SourceOccurrenceBounds,
 )
 from context_budget import ContextBudget, TokenCounter  # noqa: E402
 from context_budget import count_tokens as count_tokens  # noqa: E402
@@ -118,6 +116,7 @@ from llm_client import (  # noqa: E402
     resolve_codex_planning_basis,
     worst_case_call_seconds,
 )
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes  # noqa: E402
 from llm_wiki.formats.receipts import (  # noqa: E402
     COMPILE_RECEIPT_SCHEMA as COMPILE_RECEIPT_SCHEMA,
 )
@@ -164,6 +163,8 @@ from llm_wiki.formats.receipts import (  # noqa: E402
     receipt_source_fields as _receipt_source_fields,
 )
 from llm_wiki.formats.schema import validate_rule as _validate_rule  # noqa: E402
+from llm_wiki.formats.schema import validate_schema  # noqa: E402
+from llm_wiki.formats.source import SourceDescriptor, SourceOccurrenceBounds  # noqa: E402
 from markdown_transaction import (  # noqa: E402
     MarkdownChange,
     MarkdownCoordinator,
@@ -186,11 +187,6 @@ from rebuild_memory_index import (  # noqa: E402
     MAX_INDEX_BYTES,
     IndexCapacityError,
     build_index_bytes,
-)
-from reliable_memory import (  # noqa: E402
-    canonical_json_bytes,
-    sha256_bytes,
-    validate_schema,
 )
 from settings import raise_hint, setting_value  # noqa: E402
 from vault_log import LOG_NAME  # noqa: E402
@@ -5310,7 +5306,7 @@ def _require_legacy_evidence_fields(item):
 
 
 def _require_native_evidence_fields(item):
-    from reliable_memory import validate_schema_object
+    from llm_wiki.formats.schema import validate_schema_object
 
     validate_schema_object(item, _NATIVE_EVIDENCE_SCHEMA)
     _require_calendar_date(item["daily_date"])
@@ -7207,7 +7203,7 @@ def _daily_file_identity(path):
 
 
 def _require_saved_context_source(source):
-    from reliable_memory import validate_schema_object
+    from llm_wiki.formats.schema import validate_schema_object
 
     document = json.loads(COMPILE_RECEIPT_V4_SCHEMA.read_text())
     schema = {"$defs": document["$defs"], **document["$defs"]["source_descriptor"]}

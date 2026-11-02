@@ -25,8 +25,9 @@ except ModuleNotFoundError:  # Python 3.10
 
 import lsp_process_tree as _lsp_process_tree
 from bounded_io import read_stable_bytes
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from lsp_paths import PYRIGHT_VERSION, managed_pyright_root
-from reliable_memory import _known_network_path, canonical_json_bytes, sha256_bytes
+from reliable_memory import _known_network_path
 from repository_scope import RepositoryScope
 
 ProcessTree = _lsp_process_tree.ProcessTree

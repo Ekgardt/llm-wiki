@@ -746,8 +746,8 @@ def _existing_page(page: Path) -> bytes | None:
 
 def _page_change(vault: Path, recurrence: Recurrence, today: str):
     """(operation id, change, precondition) for one page, or None when it is current."""
+    from llm_wiki.formats.canonical import sha256_bytes
     from markdown_transaction import stable_operation_id
-    from reliable_memory import sha256_bytes
 
     relative = f"knowledge/notes/{entity_slug(recurrence)}.md"
     page = Path(vault) / relative

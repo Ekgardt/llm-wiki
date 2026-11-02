@@ -25,9 +25,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
+from llm_wiki.formats.canonical import sha256_bytes  # noqa: E402
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT  # noqa: E402
-from reliable_memory import sha256_bytes  # noqa: E402
 
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 # One column, one identity: every writer of `retrieval_events` names a page by

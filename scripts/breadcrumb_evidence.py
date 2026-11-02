@@ -17,7 +17,7 @@ from bounded_io import (
     _validated_deadline,
     read_stable_bytes,
 )
-from reliable_memory import canonical_json_bytes, sha256_bytes
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 
 SOURCE_VERSION = "breadcrumb-source/v1"
 _RECORD_MARKER = b"## Integrity record\n\n    "

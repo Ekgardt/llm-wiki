@@ -34,6 +34,7 @@ from evidence_resolver import (  # noqa: E402
     daily_entries,
     validate_bag,
 )
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes  # noqa: E402
 from markdown_transaction import (  # noqa: E402
     MarkdownChange,
     _acl_lines_naming,
@@ -53,11 +54,9 @@ from memory_state import ROOT, STATE_ROOT  # noqa: E402
 from reliable_memory import (  # noqa: E402
     DEFAULTS,
     _set_owner_only,
-    canonical_json_bytes,
     fsync_directory,
     fsync_file,
     operational_deadline_active,
-    sha256_bytes,
 )
 
 # The Stage 2 contract's 90 hot days (CLAUDE.md: "Archives keep 90 hot days"), from
@@ -470,7 +469,8 @@ class DailyArchiver:
     def _receipt_operation_state(
         self, logical_path: str, digest: str, *, path: Path | None = None
     ) -> str | None:
-        from compile_memory import compile_receipt_path, compile_source_identity
+        from compile_memory import compile_receipt_path
+        from llm_wiki.formats.receipts import compile_source_identity
 
         operational_deadline_active(self.deadline)
         path = compile_receipt_path(compile_source_identity(logical_path, digest)) if path is None else path

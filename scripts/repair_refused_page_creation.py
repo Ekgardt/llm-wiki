@@ -35,13 +35,13 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+from llm_wiki.formats.canonical import sha256_bytes  # noqa: E402
 from markdown_transaction import (  # noqa: E402
     _image_bytes,
     active_or_legacy_coordinator,
     mutate_knowledge,
 )
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
-from reliable_memory import sha256_bytes  # noqa: E402
 
 KNOWLEDGE = "knowledge/"
 # A race is an accident and may be replayed. A DLP refusal is a decision: the

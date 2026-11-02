@@ -38,7 +38,8 @@ from types import MappingProxyType
 import corpus_snapshot
 import evidence_graph
 import generation_catalog
-from reliable_memory import canonical_json_bytes, fsync_directory, fsync_file, read_runtime_bytes
+from llm_wiki.formats.canonical import canonical_json_bytes
+from reliable_memory import fsync_directory, fsync_file, read_runtime_bytes
 from repository_scope import RepositoryScope, same_repository_record
 
 GRAPH_SCHEMA_VERSION = evidence_graph.GRAPH_SCHEMA_VERSION

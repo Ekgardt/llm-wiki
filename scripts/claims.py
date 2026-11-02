@@ -27,13 +27,9 @@ from evidence_resolver import (
     daily_entries,
 )
 from iso_time import block_instant, names_block
-from reliable_memory import (
-    canonical_json_bytes,
-    open_operational_db,
-    sha256_bytes,
-    validate_schema,
-    validate_schema_object,
-)
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
+from llm_wiki.formats.schema import validate_schema, validate_schema_object
+from reliable_memory import open_operational_db
 from settings import raise_hint, setting_value
 
 SCHEMA_DIR = Path(__file__).with_name("schemas")

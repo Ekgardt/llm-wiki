@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from reliable_memory import canonical_json_bytes
+from llm_wiki.formats.canonical import canonical_json_bytes
 from secret_redact import redact_secrets
 
 # The external DLP policy file is operator-written JSON of literals and fingerprints; 256 KiB

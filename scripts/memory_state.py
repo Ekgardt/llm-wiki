@@ -37,7 +37,8 @@ from pathlib import Path
 from typing import Any
 
 import process_liveness
-from reliable_memory import durable_publish_file, fsync_directory, sha256_bytes
+from llm_wiki.formats.canonical import sha256_bytes
+from reliable_memory import durable_publish_file, fsync_directory
 
 # Every hook imports this module, and the probe below runs at import. A hook's
 # whole budget is seconds; `rev-parse` answers in milliseconds.

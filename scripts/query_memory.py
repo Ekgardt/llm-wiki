@@ -1259,7 +1259,7 @@ def _with_claimed_citations(document: object) -> object:
 
 def _validated_answer_document(document: object) -> dict:
     from evidence_resolver import EvidenceResolutionError
-    from reliable_memory import SchemaValidationError, validate_schema
+    from llm_wiki.formats.schema import SchemaValidationError, validate_schema
 
     document = _with_claimed_citations(document)
     try:

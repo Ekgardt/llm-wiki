@@ -1229,7 +1229,7 @@ def _batch_occurrence_id(evidence: Sequence[str]) -> str:
     retried — the case the reservation exists to collapse.
     See `docs/research/2026-08-30-a-batch-named-after-one-of-its-members.md`.
     """
-    from reliable_memory import canonical_json_bytes, sha256_bytes
+    from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 
     return f"batch:{sha256_bytes(canonical_json_bytes(list(evidence)))}"
 
@@ -2952,7 +2952,8 @@ def _capture_source_record(
 
 
 def _encoded_capture_record(source: Mapping[str, object]) -> tuple[dict[str, object], bytes]:
-    from reliable_memory import canonical_json_bytes, sha256_bytes, validate_schema
+    from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
+    from llm_wiki.formats.schema import validate_schema
 
     evidence = source["evidence"]
     complete_digest = sha256_bytes(canonical_json_bytes(dict(source)))
@@ -3088,7 +3089,8 @@ def _ensure_capture_intent_directories(state_root: Path, intent_id: str) -> None
 
 
 def _remove_verified_pending(path: Path, state_root: Path, expected_sha256: str) -> None:
-    from reliable_memory import fsync_directory, read_runtime_bytes, sha256_bytes
+    from llm_wiki.formats.canonical import sha256_bytes
+    from reliable_memory import fsync_directory, read_runtime_bytes
 
     try:
         payload = read_runtime_bytes(
@@ -3279,9 +3281,9 @@ def _publish_durable_capture_intent(
     slug: str | None,
     trigger: str | None,
 ) -> str | None:
+    from llm_wiki.formats.canonical import sha256_bytes
     from markdown_transaction import active_markdown_coordinator
     from memory_queue import active_memory_queue
-    from reliable_memory import sha256_bytes
 
     fitted = _fitting_capture_record(envelope, payload, slug, trigger)
     if fitted is None:

@@ -6,6 +6,7 @@ import breadcrumb_protocol as protocol
 import doctor
 import pytest
 import reliable_memory as reliability
+from llm_wiki.formats import schema
 from reliable_memory import canonical_json_bytes
 
 from tests.test_breadcrumb_evidence import _source
@@ -18,9 +19,9 @@ from tests.test_doctor_exact_legacy_source_outcome import _reader
 def test_repeated_capture_validates_each_exact_record_only_once(native_work, monkeypatch):
     history, batch, _path = native_work
     logical = batch.inputs.dailies[0].logical_path
-    validation = Mock(wraps=reliability.validate_schema_object)
+    validation = Mock(wraps=schema.validate_schema_object)
     reads = Mock(wraps=evidence._read_source_document)
-    monkeypatch.setattr(reliability, "validate_schema_object", validation)
+    monkeypatch.setattr(schema, "validate_schema_object", validation)
     monkeypatch.setattr(evidence, "_read_source_document", reads)
     with _reader(history) as (_database, reader):
         first = _captured_parts(reader, history[4], logical)

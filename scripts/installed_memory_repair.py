@@ -19,11 +19,12 @@ import markdown_transaction
 import memory_queue
 from bounded_io import read_stable_bytes
 from install_control import validate_install_state
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
+from llm_wiki.formats.schema import validate_schema
 from reliable_memory import (
     DEFAULTS,
     OPERATIONAL_SCAN_BATCH_ROWS,
     OperationalDatabaseContract,
-    canonical_json_bytes,
     capture_operational_database_identity,
     capture_runtime_file_identity,
     durable_publish_file,
@@ -33,10 +34,8 @@ from reliable_memory import (
     publish_runtime_file,
     read_runtime_bytes,
     refresh_operational_deadline,
-    sha256_bytes,
     streamed_rows,
     sync_runtime_directory,
-    validate_schema,
     validate_state_root,
 )
 from secret_redact import describe_error_chain

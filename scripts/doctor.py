@@ -34,6 +34,7 @@ from bounded_io import open_stable_range, read_stable_bytes
 from evidence_resolver import MAX_DAILY_BYTES
 from install_control import SCHEDULER_LIMIT_HOURS, installed_at, validate_install_state
 from iso_time import utc_text
+from llm_wiki.formats.canonical import canonical_json_bytes
 from markdown_transaction import MarkdownCoordinator
 from reliable_memory import (
     open_readonly_operational_db,
@@ -3780,7 +3781,7 @@ def _owner_epoch_bytes(row: sqlite3.Row) -> bytes:
 
     _validate_role(row["role"])
     _require_lease_epoch(row["last_epoch"])
-    return reliable_memory.canonical_json_bytes(list(row))
+    return canonical_json_bytes(list(row))
 
 
 def _observation_epoch_digest(database: sqlite3.Connection, deadline: float) -> bytes:
@@ -5246,7 +5247,7 @@ def _maintenance_extractor_identity() -> str:
         "code_extractor": code_extractor.EXTRACTOR_VERSION,
         "corpus_extractor": corpus_snapshot.EXTRACTOR_VERSION,
     }
-    digest = hashlib.sha256(reliable_memory.canonical_json_bytes(inputs)).hexdigest()
+    digest = hashlib.sha256(canonical_json_bytes(inputs)).hexdigest()
     return f"maintenance-extractors/v3:{digest}"
 
 
@@ -8829,7 +8830,7 @@ def _corpus_policy(snapshot: object) -> dict:
 
 def _workspace_manifest_sha256(snapshot: object) -> str:
     """Identity of the non-knowledge sources, which decides graph reuse."""
-    from reliable_memory import canonical_json_bytes
+    from llm_wiki.formats.canonical import canonical_json_bytes
 
     membership = sorted(
         [

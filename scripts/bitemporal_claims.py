@@ -38,7 +38,7 @@ from claims import (
     _canonical_time,
     _instant_of,
 )
-from reliable_memory import canonical_json_bytes
+from llm_wiki.formats.canonical import canonical_json_bytes
 
 # A relation is single-valued when a subject can hold exactly one value for it
 # at one instant. Only those take part in automatic invalidation.

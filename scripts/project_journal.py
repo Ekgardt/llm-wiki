@@ -23,6 +23,8 @@ if TYPE_CHECKING:
 
 from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES
 from iso_time import utc_text
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
+from llm_wiki.formats.schema import validate_schema
 from markdown_transaction import (
     ABSENT,
     MarkdownChange,
@@ -33,12 +35,7 @@ from markdown_transaction import (
     TransactionFailure,
     active_or_legacy_coordinator,
 )
-from reliable_memory import (
-    begin_immediate,
-    canonical_json_bytes,
-    sha256_bytes,
-    validate_schema,
-)
+from reliable_memory import begin_immediate
 
 JOURNAL_HEADER = """---
 type: project-journal

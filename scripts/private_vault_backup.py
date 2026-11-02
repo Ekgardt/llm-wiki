@@ -21,18 +21,13 @@ from pathlib import Path
 import markdown_transaction
 import memory_queue
 from installed_memory_repair import validate_reliability_v3_runtime
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from operational_ownership import (
     OperationalOwnershipError,
     OwnerLease,
     OwnershipRegistry,
 )
-from reliable_memory import (
-    _harden_runtime_owner_only,
-    canonical_json_bytes,
-    fsync_directory,
-    fsync_file,
-    sha256_bytes,
-)
+from reliable_memory import _harden_runtime_owner_only, fsync_directory, fsync_file
 
 # Entries one source walk may list before it refuses with `source_entry_limit`; the
 # list is held in memory. Basis unknown beyond that: value predates measurement; the

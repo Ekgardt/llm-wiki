@@ -37,13 +37,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
+from llm_wiki.formats.canonical import sha256_bytes  # noqa: E402
 from markdown_transaction import (  # noqa: E402
     MAX_KNOWLEDGE_TARGET_BYTES,
     mutate_knowledge,
     stable_operation_id,
 )
 from memory_state import ROOT  # noqa: E402
-from reliable_memory import sha256_bytes  # noqa: E402
 from vault_editorial import EDITORIAL_NAMES  # noqa: E402
 
 # Reserved OKF filenames — no frontmatter allowed at bundle level.

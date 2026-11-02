@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from llm_wiki.formats.source import (
     SourceDescriptor as SourceDescriptor,
 )
@@ -27,13 +28,7 @@ from markdown_transaction import (
     _run_acl_command,
     _windows_acl_identity,
 )
-from reliable_memory import (
-    _known_network_path,
-    _windows_reparse_point,
-    canonical_json_bytes,
-    fsync_directory,
-    sha256_bytes,
-)
+from reliable_memory import _known_network_path, _windows_reparse_point, fsync_directory
 
 CACHE_SCHEMA_VERSION = 1
 # One cached compile plan; the largest on the live vault is 22.6 KB (2026-09-27), so 16 MiB only

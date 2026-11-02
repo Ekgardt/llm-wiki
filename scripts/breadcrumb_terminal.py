@@ -8,8 +8,9 @@ import breadcrumb_decision
 import breadcrumb_evidence
 import breadcrumb_storage
 from bounded_io import read_stable_bytes
+from llm_wiki.formats.canonical import sha256_bytes
 from markdown_transaction import MAX_KNOWLEDGE_TARGET_BYTES, committed_append_content_matches
-from reliable_memory import MAX_CAPTURE_DECISION_BYTES, read_runtime_bytes, sha256_bytes
+from reliable_memory import MAX_CAPTURE_DECISION_BYTES, read_runtime_bytes
 
 
 def _equal(actual, expected) -> None:

@@ -35,6 +35,8 @@ if TYPE_CHECKING:
     from operational_ownership import OwnerLease
 
 import compile_progress
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
+from llm_wiki.formats.schema import validate_schema
 from reliable_memory import (
     DEFAULTS,
     MAX_CAPTURE_DECISION_BYTES,
@@ -44,7 +46,6 @@ from reliable_memory import (
     _set_owner_only,
     _validate_or_initialize_operational_contract,
     begin_immediate,
-    canonical_json_bytes,
     configure_operational_deadline,
     fsync_directory,
     fsync_file,
@@ -56,8 +57,6 @@ from reliable_memory import (
     refresh_operational_deadline,
     restricted_relative_path,
     run_resumable_migration,
-    sha256_bytes,
-    validate_schema,
 )
 from secret_redact import redact_secrets, redact_structure
 

@@ -62,6 +62,7 @@ from types import MappingProxyType
 from typing import NamedTuple
 
 from context_budget import ContextBudget, TokenCount, TokenCounter, TokenUsage, count_tokens
+from llm_wiki.formats.canonical import canonical_json_bytes
 from model_dlp import (
     DLPContentBlocked,
     DLPPolicyError,
@@ -70,7 +71,6 @@ from model_dlp import (
     redact_transport_value,
     require_safe_model_output,
 )
-from reliable_memory import canonical_json_bytes
 from secret_redact import describe_error, redact_secrets
 
 # ---------------------------------------------------------------------------

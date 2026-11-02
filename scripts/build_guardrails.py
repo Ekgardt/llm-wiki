@@ -35,6 +35,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
 from claim_tree_manifest import snapshot_guardrail_sources_with_content  # noqa: E402
+from llm_wiki.formats.canonical import sha256_bytes  # noqa: E402
 from markdown_transaction import (  # noqa: E402
     ABSENT,
     MAX_KNOWLEDGE_TARGET_BYTES,
@@ -42,7 +43,6 @@ from markdown_transaction import (  # noqa: E402
     stable_operation_id,
 )
 from memory_state import ROOT  # noqa: E402
-from reliable_memory import sha256_bytes  # noqa: E402
 
 KNOWLEDGE = ROOT / "knowledge" / "notes"
 GUARDRAILS_FILE = ROOT / "knowledge" / "guardrails.md"

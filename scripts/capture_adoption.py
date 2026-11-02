@@ -74,7 +74,8 @@ MAX_ADOPTED_INTENTS_PER_PASS = 32
 
 def _verified_intent_bytes(state_root: Path, record: dict[str, Any]) -> bytes:
     """Read the record's own bytes and prove they are the ones it names."""
-    from reliable_memory import read_runtime_bytes, sha256_bytes
+    from llm_wiki.formats.canonical import sha256_bytes
+    from reliable_memory import read_runtime_bytes
 
     payload = read_runtime_bytes(
         state_root / str(record["relative_path"]),

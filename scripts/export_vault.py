@@ -519,7 +519,7 @@ def _write_allow_policy(destination: Path, ref: str) -> int:
     """
     import tempfile
 
-    from reliable_memory import canonical_json_bytes
+    from llm_wiki.formats.canonical import canonical_json_bytes
 
     with tempfile.TemporaryDirectory() as scratch:
         archive = Path(scratch) / "probe.zip"

@@ -33,9 +33,9 @@ from claims import (  # noqa: E402
     reflection_history_boundary,
     reflection_history_spans,
 )
+from llm_wiki.formats.canonical import sha256_bytes  # noqa: E402
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT  # noqa: E402
-from reliable_memory import sha256_bytes  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
 KNOWLEDGE = ROOT / "knowledge" / "notes"
