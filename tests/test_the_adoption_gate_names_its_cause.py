@@ -77,14 +77,14 @@ def test_admission_reads_use_existing_store_waits(tmp_path, monkeypatch, bounded
     root, state_root, _home = _build_root(tmp_path)
     _adopt(root, state_root)
     opened = []
-    real = installed_memory_repair.open_readonly_operational_db
+    real = installed_memory_repair._open_adopted_database
 
-    def observe(path, *args, **kwargs):
-        database = real(path, *args, **kwargs)
+    def observe(database_name, path, *args, **kwargs):
+        database = real(database_name, path, *args, **kwargs)
         opened.append((path.name, database.execute("PRAGMA busy_timeout").fetchone()[0]))
         return database
 
-    monkeypatch.setattr(installed_memory_repair, "open_readonly_operational_db", observe)
+    monkeypatch.setattr(installed_memory_repair, "_open_adopted_database", observe)
     monkeypatch.setattr(time, "monotonic", lambda: 100.0)
     deadline = 101.0 if bounded else None
     installed_memory_repair.require_reliability_v3_admission(root=root, state_root=state_root, deadline=deadline)

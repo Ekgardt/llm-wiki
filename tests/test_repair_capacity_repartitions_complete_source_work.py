@@ -166,7 +166,8 @@ def test_source_capacity_failure_can_split_before_any_semantic_review(stage):
     assert 'probe:claude:unavailable' in str(error)
 
 
-def test_lost_context_fails_its_child_without_hiding_or_discarding_its_sibling(vault, monkeypatch):
+@pytest.mark.parametrize('dry_run', [False, True])
+def test_lost_context_fails_its_child_without_hiding_or_discarding_its_sibling(vault, monkeypatch, dry_run):
     root, _state = vault
     original, feedback = _batch(root)
     children = compiler._repartition_compile_repair(original, feedback)
@@ -178,10 +179,11 @@ def test_lost_context_fails_its_child_without_hiding_or_discarding_its_sibling(v
     monkeypatch.setattr(compiler, '_record_failed_batch', record)
     monkeypatch.setattr(compiler, '_run_repairable_batch', run)
 
-    outcomes = compiler._run_repair_children(children, SimpleNamespace(),
+    outcomes = compiler._run_repair_children(children, SimpleNamespace(dry_run=dry_run),
         dict(coordinator=None, deadline=math.inf, cancelled=None, owner=None))
 
     assert outcomes == [compiler.BatchOutcome(1), compiler.BatchOutcome(0, 'published', 1)]
     assert record.call_args.args[0] == children[0][0].inputs
+    assert record.call_args.kwargs["record"] is (not dry_run)
     assert run.call_args.args[0] == children[1][0]
     run.assert_called_once()

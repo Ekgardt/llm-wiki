@@ -11,6 +11,7 @@ import memory_queue
 import pytest
 from llm_client import BackendResponse
 
+from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT
 from tests.test_compile_call_controller import work as work
 from tests.test_compile_leased_entrypoint import _run
 from tests.test_compile_leased_entrypoint import runtime as runtime
@@ -102,7 +103,7 @@ def test_unknown_historical_scope_cannot_prove_independence(upgraded):
 
 
 def _racing_call(work, barrier, invoke):
-    barrier.wait(timeout=60)
+    barrier.wait(timeout=LONG_TIMEOUT)
     try:
         _call(work, invoke)
     except controller.ProviderOutcomeUnknown:
@@ -120,20 +121,20 @@ def test_overlapping_live_dispatches_are_atomically_exclusive(upgraded):
         with lock:
             calls.append(True)
         started.set()
-        assert release.wait(timeout=60)
+        assert release.wait(timeout=PAUSE_TIMEOUT)
         return BackendResponse('one live call')
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(_racing_call, work, barrier, invoke) for work in (first, second)]
         try:
-            assert started.wait(timeout=60)
-            finished, _ = wait(futures, timeout=60, return_when=FIRST_COMPLETED)
+            assert started.wait(timeout=LONG_TIMEOUT)
+            finished, _ = wait(futures, timeout=LONG_TIMEOUT, return_when=FIRST_COMPLETED)
             assert len(finished) == 1
             assert next(iter(finished)).result() == 'blocked'
             assert calls == [True]
         finally:
             release.set()
-        assert sorted(future.result(timeout=60) for future in futures) == ['blocked', 'completed']
+        assert sorted(future.result(timeout=LONG_TIMEOUT) for future in futures) == ['blocked', 'completed']
 
 
 def test_repeat_consent_does_not_release_other_work_before_a_durable_answer(upgraded):

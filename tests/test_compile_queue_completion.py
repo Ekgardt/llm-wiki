@@ -6,6 +6,7 @@ import compile_controller as controller
 import memory_queue
 import pytest
 
+from tests.slow_machine import LONG_TIMEOUT
 from tests.test_compile_call_controller import work as work
 from tests.test_compile_progress_admission import upgraded as upgraded
 from tests.test_compile_protected_dispatch import compiler_case as compiler_case
@@ -49,7 +50,7 @@ def _worker_settle(work):
     counts = {'ok': 0, 'failed': 0, 'dead': 0, 'skipped': 0, 'halted': 0}
     memory_queue._run_and_settle(work[0], _truthy_processor,
         memory_queue._run_processor_child, work[1], counts,
-        deadline=time.monotonic() + 60, monotonic=time.monotonic,
+        deadline=time.monotonic() + LONG_TIMEOUT, monotonic=time.monotonic,
         lease_seconds=memory_queue.DEFAULTS.queue_lease_seconds,
         heartbeat_seconds=memory_queue.DEFAULTS.queue_heartbeat_seconds,
         max_attempts=memory_queue.DEFAULTS.queue_max_attempts,

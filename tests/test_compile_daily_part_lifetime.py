@@ -1,5 +1,6 @@
 """Streaming capture releases finished daily parts without weakening evidence."""
 import weakref
+from dataclasses import replace
 
 import compile_memory as compiler
 import pytest
@@ -43,7 +44,9 @@ def test_streamed_long_daily_preserves_all_parts_and_receipt_flags(vault):
         return digest in completed
 
     expected = compiler.snapshot_compile_inputs([path], compiled=compiled)
-    actual = tuple(record for group, record in compiler.iter_compile_records(
-        [path], compiled=compiled) if group == 'dailies')
+    # Streaming originals are borrowed ranges: compare their exact bytes while owned.
+    actual = tuple(replace(record, original_content=record.original_content[:])
+                   for group, record in compiler.iter_compile_records(
+                       [path], compiled=compiled) if group == 'dailies')
     assert actual == expected.dailies
     assert actual

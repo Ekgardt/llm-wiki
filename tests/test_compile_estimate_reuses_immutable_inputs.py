@@ -47,10 +47,12 @@ def test_model_adapter_counts_the_whole_prompt():
 
 def test_duplicate_daily_parts_are_still_refused():
     inputs = _inputs()
-    duplicated = cm.CompileInputs(inputs.dailies * 2, inputs.sources, ())
+    parts = tuple(cm._daily_parts(inputs.dailies[0].logical_path, inputs.dailies[0].content))
+    assert len(parts) == 1
+    duplicated = cm.CompileInputs(parts * 2, inputs.sources, ())
     measure = cm._batch_measure(duplicated, None, None)
-    with pytest.raises(ValueError, match='two parts'):
-        measure({inputs.dailies[0].part_key})
+    with pytest.raises(ValueError, match='gap or overlap'):
+        measure({parts[0].part_key})
 
 
 def test_duplicate_context_frames_are_preserved():

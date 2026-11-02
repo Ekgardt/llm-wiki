@@ -149,10 +149,17 @@ def _literal_hang_bounds(path: Path) -> list[str]:
     return found
 
 
+def _test_sources(pattern: str) -> list[Path]:
+    """All test modules and helpers; fixtures are input data, not executable tests."""
+    root = ROOT / "tests"
+    return sorted(path for path in root.rglob(pattern)
+                  if "fixtures" not in path.relative_to(root).parts)
+
+
 def test_no_test_carries_a_literal_hang_bound() -> None:
     """A positive wait names SHORT_TIMEOUT or LONG_TIMEOUT; a literal is a hang bound sized for one machine."""
     offenders: list[str] = []
-    for path in sorted((ROOT / "tests").glob("test_*.py")):
+    for path in _test_sources("test_*.py"):
         offenders.extend(_literal_hang_bounds(path))
 
     assert offenders == []
@@ -204,8 +211,29 @@ def _literal_deadlines(node: ast.AST, about_time: bool) -> list[int]:
 
 def test_no_test_gives_real_work_a_literal_deadline() -> None:
     offenders = {
-        path.name: _literal_deadlines(ast.parse(path.read_text(encoding="utf-8")), False)
-        for path in sorted((ROOT / "tests").glob("*.py"))
+        path.relative_to(ROOT / "tests").as_posix(): _literal_deadlines(ast.parse(path.read_text(encoding="utf-8")), False)
+        for path in _test_sources("*.py")
     }
 
     assert {name: lines for name, lines in offenders.items() if lines} == {}
+
+
+@pytest.mark.parametrize('guard,body', [
+    (test_no_test_carries_a_literal_hang_bound,
+     'def test_worker(event):\n    assert event.wait(60)\n'),
+    (test_no_test_gives_real_work_a_literal_deadline,
+     'def test_worker(run):\n    run(deadline=time.monotonic() + 60)\n'),
+])
+def test_nested_modules_cannot_hide_a_literal_bound(tmp_path, monkeypatch, guard, body):
+    files = {
+        'tests/test_collision.py': 'pass\n',
+        'tests/modules/formats/test_collision.py': body,
+        'tests/fixtures/test_input.py': 'deliberately invalid input Python !\n',
+    }
+    for name, content in files.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding='utf-8')
+    monkeypatch.setattr(sys.modules[__name__], 'ROOT', tmp_path)
+    with pytest.raises(AssertionError):
+        guard()

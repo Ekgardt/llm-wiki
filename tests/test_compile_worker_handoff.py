@@ -9,6 +9,7 @@ import pytest
 from context_budget import TokenUsage
 from llm_client import BackendResponse
 
+from tests.slow_machine import LONG_TIMEOUT
 from tests.test_compile_call_controller import work as work
 from tests.test_compile_progress_admission import upgraded as upgraded
 
@@ -76,7 +77,7 @@ def test_worker_settlement_requires_full_compile_beyond_transport_success(work, 
     memory_queue._run_and_settle(queue,
         memory_queue.LeaseProcessor(partial(_child_compile, mode)),
         memory_queue._run_processor_child, lease, counts,
-        deadline=time.monotonic() + 60, monotonic=time.monotonic,
+        deadline=time.monotonic() + LONG_TIMEOUT, monotonic=time.monotonic,
         lease_seconds=memory_queue.DEFAULTS.queue_lease_seconds,
         heartbeat_seconds=memory_queue.DEFAULTS.queue_heartbeat_seconds,
         max_attempts=memory_queue.DEFAULTS.queue_max_attempts,

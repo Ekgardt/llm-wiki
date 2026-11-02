@@ -1,8 +1,10 @@
-"""Two parts of one day never share a compile batch.
+"""Unverified parts of one day cannot share a compile batch.
 
 Sources are keyed by path, so the second part of a day in the same batch was
 dropped from the prompt while its receipt was still written. See
 docs/research/2026-09-25-one-part-of-a-day-per-batch.md.
+Verified adjacent parts now join without losing bytes; their positive and forged
+cases live in test_verified_adjacent_daily_parts_share_a_batch.py.
 """
 
 from __future__ import annotations
@@ -47,8 +49,8 @@ def test_the_first_part_of_a_long_day_joins_the_days_before_it() -> None:
     assert [len(group) for group in _groups(dailies)] == [2, 1]
 
 
-def test_a_batch_holding_two_parts_of_one_day_is_refused() -> None:
+def test_a_batch_holding_unverified_parts_of_one_day_is_refused() -> None:
     parts = [_part("knowledge/daily/2026-09-01.md", index, 2) for index in range(2)]
 
-    with pytest.raises(ValueError, match="two parts of one day"):
+    with pytest.raises(ValueError, match="source requires immutable bytes or an owned verified range"):
         compile_memory._deduplicated_sources(parts)
