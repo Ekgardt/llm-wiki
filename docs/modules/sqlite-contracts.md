@@ -1,7 +1,7 @@
 # SQLite value contracts
 
 `llm_wiki.sqlite_contracts` owns OperationalDatabaseContract,
-OperationalDatabaseContractError, MigrationStatement, their validators and exact
+OperationalDatabaseContractError, MigrationStatement, their validators, coded migration-error construction and exact
 SQLite identifier quoting. It imports only standard library modules and opens no
 files or databases. There is one definition of every type, default and validator.
 All connection handling, PRAGMAs, migration execution and durability remain in

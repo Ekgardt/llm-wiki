@@ -114,6 +114,30 @@ from llm_wiki.queue_schema import (
 from llm_wiki.queue_schema import (
     _QUEUE_V3_TRIGGER_SQL as _QUEUE_V3_TRIGGER_SQL,
 )
+from llm_wiki.queue_schema_operations import _QUEUE_V3_DROP_KEYWORD as _QUEUE_V3_DROP_KEYWORD
+from llm_wiki.queue_schema_operations import _QUEUE_V3_DROP_ORDER as _QUEUE_V3_DROP_ORDER
+from llm_wiki.queue_schema_operations import (
+    _check_no_populated_rebuild as _check_no_populated_rebuild,
+)
+from llm_wiki.queue_schema_operations import _drop_order_key as _drop_order_key
+from llm_wiki.queue_schema_operations import _drop_schema_object as _drop_schema_object
+from llm_wiki.queue_schema_operations import _drop_unexpected_objects as _drop_unexpected_objects
+from llm_wiki.queue_schema_operations import _expected_queue_v3_schema as _expected_queue_v3_schema
+from llm_wiki.queue_schema_operations import (
+    _malformed_queue_v3_objects as _malformed_queue_v3_objects,
+)
+from llm_wiki.queue_schema_operations import _normalized_sql as _normalized_sql
+from llm_wiki.queue_schema_operations import _queue_schema_rows as _queue_schema_rows
+from llm_wiki.queue_schema_operations import _queue_v3_object_matches as _queue_v3_object_matches
+from llm_wiki.queue_schema_operations import _queue_v3_schema_complete as _queue_v3_schema_complete
+from llm_wiki.queue_schema_operations import _queue_v3_statements as _queue_v3_statements
+from llm_wiki.queue_schema_operations import (
+    _queue_v3_trigger_statements as _queue_v3_trigger_statements,
+)
+from llm_wiki.queue_schema_operations import (
+    _repair_partial_queue_v3_schema as _repair_partial_queue_v3_schema,
+)
+from llm_wiki.queue_schema_operations import _table_is_populated as _table_is_populated
 from llm_wiki.queue_sources import _SOURCE_IDENTITY_KEYS as _SOURCE_IDENTITY_KEYS
 from llm_wiki.queue_sources import _collect_identity_from_mapping as _collect_identity_from_mapping
 from llm_wiki.queue_sources import (
@@ -125,7 +149,11 @@ from llm_wiki.queue_sources import _link_pair as _link_pair
 from llm_wiki.queue_sources import _normalized_source_link as _normalized_source_link
 from llm_wiki.queue_sources import _normalized_source_links as _normalized_source_links
 from llm_wiki.queue_sources import _payload_identity_fields as _payload_identity_fields
+from llm_wiki.queue_sources import _queue_v3_source_links as _queue_v3_source_links
 from llm_wiki.queue_sources import _require_canonical_daily_id as _require_canonical_daily_id
+from llm_wiki.queue_sources import (
+    _require_single_source_identity as _require_single_source_identity,
+)
 from llm_wiki.queue_sources import _source_identity_from_payload as _source_identity_from_payload
 from llm_wiki.queue_sources import _source_identity_strings as _source_identity_strings
 from llm_wiki.queue_sources import _unsafe_link_path as _unsafe_link_path
@@ -152,6 +180,8 @@ from llm_wiki.sqlite_contracts import (
     OperationalDatabaseContractError,
     quote_sqlite_identifier,
 )
+from llm_wiki.sqlite_contracts import _migration_error as _migration_error
+from llm_wiki.sqlite_transactions import begin_immediate
 from llm_wiki.windows_acl import _acl_is_owner_only as _acl_is_owner_only
 from llm_wiki.windows_acl import _acl_owner_lines as _acl_owner_lines
 from llm_wiki.windows_acl import _is_owner_only_windows as _is_owner_only_windows
@@ -160,7 +190,6 @@ from reliable_memory import (
     MAX_CAPTURE_DECISION_BYTES,
     _set_owner_only,
     _validate_or_initialize_operational_contract,
-    begin_immediate,
     configure_operational_deadline,
     fsync_directory,
     fsync_file,
@@ -222,65 +251,14 @@ _QUEUE_COMPILE_CONTRACT = OperationalDatabaseContract(
 )
 
 
-def _normalized_sql(value: str | None) -> str:
-    return " ".join((value or "").split()).casefold()
 
 
-def _queue_v3_object_matches(
-    database: sqlite3.Connection, kind: str, name: str, sql: str
-) -> bool:
-    row = database.execute(
-        "SELECT sql FROM sqlite_schema WHERE type=? AND name=?", (kind, name)
-    ).fetchone()
-    return row is not None and _normalized_sql(row[0]) == _normalized_sql(sql)
 
 
-def _queue_v3_statements(
-    *, include_triggers: bool = True
-) -> tuple[MigrationStatement, ...]:
-    statements: list[MigrationStatement] = []
-    definitions_by_kind = [
-        ("table", _QUEUE_V3_TABLE_SQL),
-        ("index", _QUEUE_V3_INDEX_SQL),
-    ]
-    if include_triggers:
-        definitions_by_kind.append(("trigger", _QUEUE_V3_TRIGGER_SQL))
-    for kind, definitions in definitions_by_kind:
-        for name, sql in definitions:
-            statements.append(
-                MigrationStatement(
-                    name=f"create_{name}",
-                    sql=sql,
-                    completed=lambda database, expected_kind=kind, expected_name=name, expected_sql=sql: (
-                        _queue_v3_object_matches(
-                            database, expected_kind, expected_name, expected_sql
-                        )
-                    ),
-                )
-            )
-    return tuple(statements)
 
 
-def _queue_v3_schema_complete(
-    database: sqlite3.Connection, *, include_triggers: bool = True
-) -> bool:
-    definitions_by_kind = [
-        ("table", _QUEUE_V3_TABLE_SQL),
-        ("index", _QUEUE_V3_INDEX_SQL),
-    ]
-    if include_triggers:
-        definitions_by_kind.append(("trigger", _QUEUE_V3_TRIGGER_SQL))
-    return all(
-        _queue_v3_object_matches(database, kind, name, sql)
-        for kind, definitions in definitions_by_kind
-        for name, sql in definitions
-    )
 
 
-def _migration_error(code: str, message: str) -> OperationalDatabaseContractError:
-    error = OperationalDatabaseContractError(message)
-    error.code = code
-    return error
 
 
 def _ordinary_purge_operation_id(manifest_sha256: str) -> str:
@@ -360,130 +338,24 @@ def _queue_v3_purge_authorizations_valid(database: sqlite3.Connection) -> bool:
     return all(_queue_v3_purge_authorization_valid(row) for row in rows)
 
 
-_QUEUE_V3_DROP_ORDER = {"trigger": 0, "index": 1, "table": 2}
-_QUEUE_V3_DROP_KEYWORD = {"index": "INDEX", "table": "TABLE", "trigger": "TRIGGER"}
 
 
-def _expected_queue_v3_schema() -> dict[tuple[str, str], str]:
-    """Every schema object a complete queue v3 candidate is made of."""
-    return {
-        (kind, name): sql
-        for kind, definitions in (
-            ("table", _QUEUE_V3_TABLE_SQL),
-            ("index", _QUEUE_V3_INDEX_SQL),
-            ("trigger", _QUEUE_V3_TRIGGER_SQL),
-        )
-        for name, sql in definitions
-    }
 
 
-def _queue_schema_rows(database: sqlite3.Connection) -> list[sqlite3.Row]:
-    return database.execute(
-        """SELECT type, name, sql FROM sqlite_schema
-           WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"""
-    ).fetchall()
 
 
-def _drop_order_key(item: tuple[str, str]) -> tuple[int, str]:
-    """Triggers before indexes before tables, so a drop never dangles."""
-    return _QUEUE_V3_DROP_ORDER.get(item[0], 3), item[1]
 
 
-def _drop_schema_object(
-    database: sqlite3.Connection, kind: str, name: str
-) -> None:
-    """Drop one schema object, refusing a kind this migration never creates."""
-    keyword = _QUEUE_V3_DROP_KEYWORD.get(kind)
-    if keyword is None:
-        raise _migration_error(
-            "queue_v3_schema_conflict",
-            "queue v3 candidate has an unsupported schema object",
-        )
-    with begin_immediate(database):
-        database.execute(f'DROP {keyword} {quote_sqlite_identifier(name)}')
 
 
-def _drop_unexpected_objects(
-    database: sqlite3.Connection,
-    unexpected: list[tuple[str, str]],
-    *,
-    allow_populated_rebuild: bool,
-) -> None:
-    """Objects we never create must go before the candidate can be trusted."""
-    if not allow_populated_rebuild:
-        raise _migration_error(
-            "queue_v3_schema_conflict",
-            "queue v3 candidate has unexpected schema objects",
-        )
-    for kind, name in sorted(unexpected, key=_drop_order_key):
-        _drop_schema_object(database, kind, name)
 
 
-def _table_is_populated(database: sqlite3.Connection, name: str) -> bool:
-    """An unreadable table counts as populated; we must not rebuild it blind."""
-    try:
-        row = database.execute(f'SELECT 1 FROM {quote_sqlite_identifier(name)} LIMIT 1').fetchone()
-    except sqlite3.DatabaseError:
-        return True
-    return row is not None
 
 
-def _check_no_populated_rebuild(
-    database: sqlite3.Connection,
-    malformed: list[tuple[str, str]],
-    *,
-    allow_populated_rebuild: bool,
-) -> None:
-    """Refuse to rebuild a partial table that still holds rows."""
-    if allow_populated_rebuild:
-        return
-    for kind, name in malformed:
-        if kind == "table" and _table_is_populated(database, name):
-            raise _migration_error(
-                "queue_v3_schema_conflict",
-                "queue v3 candidate has a populated partial table",
-            )
 
 
-def _malformed_queue_v3_objects(
-    database: sqlite3.Connection,
-    existing: list[sqlite3.Row],
-    expected: Mapping[tuple[str, str], str],
-) -> list[tuple[str, str]]:
-    """Objects whose definition differs from the one this version creates."""
-    return [
-        (str(row["type"]), str(row["name"]))
-        for row in existing
-        if not _queue_v3_object_matches(
-            database,
-            str(row["type"]),
-            str(row["name"]),
-            expected[(str(row["type"]), str(row["name"]))],
-        )
-    ]
 
 
-def _repair_partial_queue_v3_schema(
-    database: sqlite3.Connection, *, allow_populated_rebuild: bool
-) -> None:
-    expected = _expected_queue_v3_schema()
-    existing = _queue_schema_rows(database)
-    unexpected = [
-        (str(row["type"]), str(row["name"]))
-        for row in existing
-        if (str(row["type"]), str(row["name"])) not in expected
-    ]
-    if unexpected:
-        _drop_unexpected_objects(
-            database, unexpected, allow_populated_rebuild=allow_populated_rebuild
-        )
-        existing = _queue_schema_rows(database)
-    malformed = _malformed_queue_v3_objects(database, existing, expected)
-    _check_no_populated_rebuild(
-        database, malformed, allow_populated_rebuild=allow_populated_rebuild
-    )
-    for kind, name in sorted(malformed, key=_drop_order_key):
-        _drop_schema_object(database, kind, name)
 
 
 def _queue_v2_tables(database: sqlite3.Connection) -> set[str]:
@@ -541,38 +413,12 @@ def _queue_v2_columns(database: sqlite3.Connection, table: str) -> set[str]:
 
 
 
-def _require_single_source_identity(found: dict[str, set[str]]) -> tuple[str, str]:
-    """The one path and digest this payload names, or a refusal."""
-    if len(found["paths"]) != 1 or len(found["digests"]) != 1:
-        raise _migration_error(
-            "queue_v2_source_identity_ambiguous",
-            "queue v2 payload has an ambiguous source identity",
-        )
-    logical_path = next(iter(found["paths"]))
-    source_digest = next(iter(found["digests"]))
-    try:
-        MemoryQueue._validate_failure_identity(logical_path, source_digest)
-    except ValueError as exc:
-        raise _migration_error(
-            "queue_v2_source_identity_ambiguous",
-            "queue v2 payload has an invalid source identity",
-        ) from exc
-    return (logical_path, source_digest)
 
 
 
 
 
 
-def _queue_v3_source_links(payload_bytes: bytes) -> tuple[tuple[str, str], ...]:
-    try:
-        payload = json.loads(payload_bytes)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return ()
-    found = _distinct_source_identities(payload)
-    if not found["paths"] and not found["digests"]:
-        return ()
-    return (_require_single_source_identity(found),)
 
 def _queue_v3_row_matches(
     database: sqlite3.Connection,
@@ -1190,15 +1036,6 @@ def _queue_v2_migration_plan(
     return statements, summary
 
 
-def _queue_v3_trigger_statements() -> tuple[MigrationStatement, ...]:
-    """Only the statements that create the v3 triggers."""
-    trigger_names = {name for name, _sql in _QUEUE_V3_TRIGGER_SQL}
-    return tuple(
-        statement
-        for statement in _queue_v3_statements()
-        if statement.name.startswith("create_")
-        and statement.name.removeprefix("create_") in trigger_names
-    )
 
 
 def _require_empty_queue_v3(database: sqlite3.Connection) -> None:

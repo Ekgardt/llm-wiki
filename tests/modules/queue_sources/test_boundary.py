@@ -10,7 +10,7 @@ NAMES = {'_collect_identity_from_mapping', '_collect_source_identity_strings',
          '_unsafe_link_shape', '_unsafe_link_path', '_link_pair',
          '_normalized_source_link', '_normalized_source_links',
          '_validate_source_identity', '_validate_failure_identity',
-         '_source_identity_from_payload'}
+         '_source_identity_from_payload', '_require_single_source_identity', '_queue_v3_source_links'}
 
 
 def test_executor_has_no_source_contract_definitions():
@@ -22,7 +22,7 @@ def test_executor_has_no_source_contract_definitions():
 def test_source_contract_imports_only_stdlib():
     tree = ast.parse((ROOT / 'scripts/llm_wiki/queue_sources.py').read_text())
     imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
-    assert imported <= {'__future__', 'datetime', 'pathlib', 'types'}
+    assert imported <= {'__future__', 'datetime', 'pathlib', 'types', 'llm_wiki.sqlite_contracts'}
 
 
 def test_direct_imports_are_stdlib():

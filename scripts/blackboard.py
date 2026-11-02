@@ -49,6 +49,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from iso_time import utc_text  # noqa: E402
+from llm_wiki.sqlite_transactions import begin_immediate
 from markdown_transaction import (  # noqa: E402
     MAX_KNOWLEDGE_TARGET_BYTES,
     MarkdownCoordinator,
@@ -56,7 +57,6 @@ from markdown_transaction import (  # noqa: E402
     append_knowledge,
 )
 from memory_state import ROOT  # noqa: E402
-from reliable_memory import begin_immediate  # noqa: E402
 from secret_redact import redact_structure  # noqa: E402
 
 PROJECTS_DIR = ROOT / "knowledge" / "projects"

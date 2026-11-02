@@ -1983,3 +1983,13 @@ Existing stdlib-only python_parse, calendar_pass, iso_time, reply_json, page_sta
 and code_intelligence boundaries are qualified in place with owned context
 manifests; mixed tests separate pure assertions from integration scenarios without
 changing assertions. Shared test-only import guards live in tests/module_boundaries.py.
+
+`llm_wiki.queue_schema_operations` owns schema inspection and explicit repair on
+a supplied SQLite connection. SQL definitions remain in queue_schema; transaction
+boundaries and connection/adoption ownership are unchanged. sqlite_contracts owns
+the shared migration-error value constructor; queue_sources also owns strict
+migration identity parsing. None imports the queue executor.
+
+`llm_wiki.sqlite_transactions` owns the existing begin_immediate contextmanager
+on caller-owned connections. reliable_memory retains an identity alias; consumers
+import the transaction owner directly, preserving callbacks and rollback semantics.

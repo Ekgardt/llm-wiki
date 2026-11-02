@@ -1,14 +1,14 @@
 # Queue source identity contract
 
 `llm_wiki.queue_sources` owns pure extraction and validation of identities from
-queue payloads. It imports only the standard library and performs no runtime IO.
+queue payloads. It imports stdlib and the SQLite value contracts and performs no runtime IO.
 The source-identity map, collectors, daily-source validators and generic task-link
 validators have one implementation. The distinction matters: failure identities
 must name a canonical real daily date; generic source links may name other
 relative vault files. Existing byte limits and errors are preserved.
 
-The migration path still requires one distinct identity and constructs migration
-errors in memory_queue; ordinary failure recording still chooses the first
+The migration parser requires one distinct identity and constructs coded errors
+through sqlite_contracts; ordinary failure recording still chooses the first
 encountered pair. A JSON parser accepting a value does not prove authorization,
 file existence or committed Markdown. SQL and lease transitions remain in queue.
 

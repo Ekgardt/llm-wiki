@@ -55,3 +55,9 @@ class MigrationStatement:
 OperationalDatabaseContract.__module__ = "reliable_memory"
 OperationalDatabaseContractError.__module__ = "reliable_memory"
 MigrationStatement.__module__ = "reliable_memory"
+
+
+def _migration_error(code: str, message: str) -> OperationalDatabaseContractError:
+    error = OperationalDatabaseContractError(message)
+    error.code = code
+    return error

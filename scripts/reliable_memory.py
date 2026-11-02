@@ -47,6 +47,7 @@ from llm_wiki.sqlite_contracts import (
 from llm_wiki.sqlite_contracts import _require_migration_text as _require_migration_text
 from llm_wiki.sqlite_contracts import _require_positive_int as _require_positive_int
 from llm_wiki.sqlite_contracts import quote_sqlite_identifier as quote_sqlite_identifier
+from llm_wiki.sqlite_transactions import begin_immediate as begin_immediate
 
 # The one bound on a capture decision file, for the writer and every reader. The
 # indexer read it with 64 KiB while the writer allowed 1 MiB, so a verbose classifier
@@ -1187,24 +1188,6 @@ def _runtime_identity_from_metadata(
     )
 
 
-@contextlib.contextmanager
-def begin_immediate(
-    connection: sqlite3.Connection,
-    *,
-    before_commit: Callable[[], None] | None = None,
-) -> Iterator[sqlite3.Connection]:
-    connection.execute("BEGIN IMMEDIATE")
-    try:
-        yield connection
-        if before_commit is not None:
-            before_commit()
-        connection.commit()
-    except BaseException as original:
-        try:
-            connection.rollback()
-        except BaseException as rollback_error:
-            original.__context__ = rollback_error
-        raise
 
 
 def fsync_file(path: Path) -> None:

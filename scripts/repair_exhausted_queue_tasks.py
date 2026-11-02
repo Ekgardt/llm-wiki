@@ -31,9 +31,9 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from llm_wiki.reliability_defaults import DEFAULTS  # noqa: E402
+from llm_wiki.sqlite_transactions import begin_immediate  # noqa: E402
 from memory_queue import active_or_legacy_memory_queue  # noqa: E402
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
-from reliable_memory import begin_immediate  # noqa: E402
 
 STRANDED = (
     "SELECT id, kind, attempts, error_code, updated_at FROM tasks "

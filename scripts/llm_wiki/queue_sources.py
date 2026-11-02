@@ -7,6 +7,8 @@ from datetime import date
 from pathlib import Path
 from types import MappingProxyType
 
+from llm_wiki.sqlite_contracts import _migration_error
+
 _SOURCE_IDENTITY_KEYS = MappingProxyType(
     {
         "source_path": "paths",
@@ -173,4 +175,35 @@ def _source_identity_from_payload(payload_json: str) -> tuple[str, str] | None:
     if not paths or not found["digests"]:
         return None
     return _validated_failure_identity(paths[0], found["digests"][0])
+
+
+
+def _require_single_source_identity(found: dict[str, set[str]]) -> tuple[str, str]:
+    """The one path and digest this payload names, or a refusal."""
+    if len(found["paths"]) != 1 or len(found["digests"]) != 1:
+        raise _migration_error(
+            "queue_v2_source_identity_ambiguous",
+            "queue v2 payload has an ambiguous source identity",
+        )
+    logical_path = next(iter(found["paths"]))
+    source_digest = next(iter(found["digests"]))
+    try:
+        _validate_failure_identity(logical_path, source_digest)
+    except ValueError as exc:
+        raise _migration_error(
+            "queue_v2_source_identity_ambiguous",
+            "queue v2 payload has an invalid source identity",
+        ) from exc
+    return (logical_path, source_digest)
+
+
+def _queue_v3_source_links(payload_bytes: bytes) -> tuple[tuple[str, str], ...]:
+    try:
+        payload = json.loads(payload_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return ()
+    found = _distinct_source_identities(payload)
+    if not found["paths"] and not found["digests"]:
+        return ()
+    return (_require_single_source_identity(found),)
 

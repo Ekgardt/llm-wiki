@@ -81,3 +81,11 @@ assert MigrationStatement('n', 'SELECT 1', bool).name == 'n'
     scripts = str(Path(__file__).resolve().parents[3] / 'scripts')
     result = subprocess.run([sys.executable, '-c', program, scripts], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_named_migration_error_is_the_same_database_error_type():
+    from llm_wiki.sqlite_contracts import _migration_error
+    error = _migration_error('specific_code', 'specific detail')
+    assert type(error) is OperationalDatabaseContractError
+    assert error.code == 'specific_code'
+    assert str(error) == 'specific detail'

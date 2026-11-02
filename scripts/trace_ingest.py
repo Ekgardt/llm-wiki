@@ -50,7 +50,7 @@ from pathlib import Path
 
 from bounded_io import IO_CHUNK_BYTES
 from evidence_graph import MAX_NODE_FILTER, MAX_ROWS
-from reliable_memory import begin_immediate
+from llm_wiki.sqlite_transactions import begin_immediate
 
 TRACE_SCHEMA = "execution-trace/v1"
 STORE_SCHEMA_VERSION = "execution-traces/v1"

@@ -107,3 +107,20 @@ _validate_source_identity('2026-11-02', 'a' * 64)
 '''
     result = subprocess.run([sys.executable, '-c', program, str(Path(__file__).resolve().parents[3] / 'scripts')], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_strict_parser_keeps_migration_error_identity():
+    from llm_wiki.sqlite_contracts import OperationalDatabaseContractError
+    with pytest.raises(OperationalDatabaseContractError) as caught:
+        source._queue_v3_source_links(json.dumps({'source_path': PATH}).encode())
+    assert caught.value.code == 'queue_v2_source_identity_ambiguous'
+
+
+@pytest.mark.parametrize('payload', [b'{', b'\xff', b'{}'])
+def test_unreadable_or_absent_migration_identity_has_no_links(payload):
+    assert source._queue_v3_source_links(payload) == ()
+
+
+def test_strict_parser_keeps_daily_fallback_and_digest():
+    payload = json.dumps({'daily_id': '2026-11-02', 'hash': DIGEST}).encode()
+    assert source._queue_v3_source_links(payload) == ((PATH, DIGEST),)

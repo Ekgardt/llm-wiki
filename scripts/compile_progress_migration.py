@@ -17,10 +17,10 @@ import private_vault_backup as backup
 from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from llm_wiki.reliability_defaults import DEFAULTS
 from llm_wiki.sqlite_contracts import OperationalDatabaseContractError
+from llm_wiki.sqlite_transactions import begin_immediate
 from reliable_memory import (
     RuntimeFileIdentity,
     _require_runtime_parent_containment,
-    begin_immediate,
     capture_runtime_file_identity,
     open_operational_db,
     operational_deadline_active,

@@ -11,13 +11,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from iso_time import utc_text
+from llm_wiki.sqlite_transactions import begin_immediate
 from memory_state import STATE_ROOT
-from reliable_memory import (
-    begin_immediate,
-    open_operational_db,
-    open_readonly_operational_db,
-    validate_runtime_file,
-)
+from reliable_memory import open_operational_db, open_readonly_operational_db, validate_runtime_file
 from settings import setting_value
 
 SCHEMA_VERSION = 1

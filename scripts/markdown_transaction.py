@@ -47,6 +47,7 @@ from llm_wiki.sqlite_contracts import (
     OperationalDatabaseContractError,
     quote_sqlite_identifier,
 )
+from llm_wiki.sqlite_transactions import begin_immediate
 from llm_wiki.windows_acl import _acl_entry_lines as _acl_entry_lines
 from llm_wiki.windows_acl import _acl_failure as _acl_failure
 from llm_wiki.windows_acl import _acl_line_names_owner as _acl_line_names_owner
@@ -82,7 +83,6 @@ from llm_wiki.windows_native import (
 from model_dlp import DLPContentBlocked, DLPPolicyError, require_safe_publication
 from reliable_memory import (
     _set_owner_only,
-    begin_immediate,
     configure_operational_deadline,
     durable_publish_file,
     fsync_directory,

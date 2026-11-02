@@ -24,7 +24,9 @@
     "docs/research/2026-09-14-the-small-integrity-gaps.md",
     "tests/conftest.py",
     "tests/code_kernel_helpers.py",
-    "tests/module_context.py"
+    "tests/module_context.py",
+    "scripts/llm_wiki/sqlite_contracts.py",
+    "docs/modules/sqlite-contracts.md"
   ],
   "directories": [
     "tests/modules/queue_sources"

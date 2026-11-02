@@ -166,8 +166,8 @@ def save(chosen, *, expected, root=None):
 
 
 def _publish(coordinator, path, expected, rendered):
+    from llm_wiki.sqlite_transactions import begin_immediate
     from memory_state import atomic_write
-    from reliable_memory import begin_immediate
 
     with coordinator._connect() as database, begin_immediate(database):
         coordinator._assert_writer_ownership(database)
