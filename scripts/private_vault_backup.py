@@ -630,7 +630,7 @@ def _maintain_heartbeat(
     # A busy database is retried until the lease expires; a lost fence is final.
     # See `docs/research/2026-09-14-a-busy-database-is-not-a-lost-lease.md`.
     from lease_renewal import renew_until_stopped
-    from reliable_memory import DEFAULTS
+    from llm_wiki.reliability_defaults import DEFAULTS
 
     ended = renew_until_stopped(
         lambda: registry.heartbeat(lease),

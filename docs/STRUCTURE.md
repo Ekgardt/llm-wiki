@@ -1891,3 +1891,24 @@ manifest live at `docs/modules/queue-child-runtime.md` and
 Real queue/compile process scenarios remain additional qualification. This adds
 no runtime path, database, daemon or dependency. Approval is recorded in
 `knowledge/notes/queue-child-runtime-decision-20261102.md`.
+
+## Reliability defaults and queue heartbeat (approved 2026-11-02)
+
+`scripts/llm_wiki/reliability_defaults.py` owns the existing frozen
+ReliableMemoryDefaults and DEFAULTS. Values and fields are unchanged;
+reliable_memory reexports the same objects and the class retains its historical
+pickle module name. Import/construction are independent; pickle may load the
+legacy facade. Confirmed consumers import defaults from their owner directly.
+
+`scripts/llm_wiki/queue_heartbeat.py` owns _LeaseHeartbeat, _SourceFenceHeartbeat,
+their bounded join helper and existing stop floor. Narrow typing.Protocol
+interfaces describe the queue methods already called. SQL, fencing and wait
+implementations stay with queue backends. Thread lifecycle, defaults, renewal
+algorithm and error policy are preserved; lease_renewal remains the scheduler.
+Only stdlib, reliability_defaults, queue_contracts and lease_renewal are imported.
+Required old class names are identical aliases, not wrappers.
+
+Each has own tests under `tests/modules/<module_name>/` and a guide/context
+manifest under `docs/modules/` using the hyphenated name. Complete packets obey
+the 100,000-token ceiling. No runtime path, schema, daemon or numeric policy
+changes. Approval: `knowledge/notes/queue-renewal-boundaries-decision-20261102.md`.

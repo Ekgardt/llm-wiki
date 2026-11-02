@@ -101,8 +101,8 @@ from llm_wiki.queue_contracts import ResultConflictError as ResultConflictError
 from llm_wiki.queue_contracts import SemanticDecision as SemanticDecision
 from llm_wiki.queue_contracts import SourceFence as SourceFence
 from llm_wiki.queue_contracts import WorkerSummary as WorkerSummary
+from llm_wiki.reliability_defaults import DEFAULTS
 from reliable_memory import (
-    DEFAULTS,
     MAX_CAPTURE_DECISION_BYTES,
     MigrationStatement,
     OperationalDatabaseContract,

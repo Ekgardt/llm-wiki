@@ -22,8 +22,8 @@ from install_control import validate_install_state
 from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from llm_wiki.formats.queue_payload import validate_payload_blob
 from llm_wiki.formats.schema import validate_schema
+from llm_wiki.reliability_defaults import DEFAULTS
 from reliable_memory import (
-    DEFAULTS,
     OPERATIONAL_SCAN_BATCH_ROWS,
     OperationalDatabaseContract,
     capture_operational_database_identity,

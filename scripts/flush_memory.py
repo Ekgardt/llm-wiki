@@ -523,8 +523,8 @@ class _CaptureKeepAlive:
 
     def _run(self) -> None:
         from lease_renewal import renew_until_stopped
+        from llm_wiki.reliability_defaults import DEFAULTS
         from markdown_transaction import INTENT_FENCE_SECONDS
-        from reliable_memory import DEFAULTS
 
         # The ending error needs no handling here: publication stays fenced, so a
         # claim that ran out refuses to publish on its own. One round renews the
@@ -1540,7 +1540,7 @@ def _capture_queue_failure(error: BaseException) -> object:
 def _raise_if_attempts_spent(lease: object, error: BaseException) -> None:
     """The last attempt's failure is a loss, and is raised as one so it is recorded as one."""
     from capture_diagnostics import DurableWorkExhausted
-    from reliable_memory import DEFAULTS
+    from llm_wiki.reliability_defaults import DEFAULTS
 
     if int(getattr(lease, "attempt", 0)) >= DEFAULTS.queue_max_attempts:
         raise DurableWorkExhausted("capture task spent its last attempt") from error

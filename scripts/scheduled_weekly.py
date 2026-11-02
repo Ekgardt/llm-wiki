@@ -55,7 +55,7 @@ QUEUE_ARCHIVE = ROOT / "knowledge" / "raw" / "queue-archive"
 
 
 def _queue_purge_command(script: Path) -> list[str]:
-    from reliable_memory import DEFAULTS
+    from llm_wiki.reliability_defaults import DEFAULTS
 
     now = datetime.now(timezone.utc)
     before = now - timedelta(days=DEFAULTS.queue_result_retention_days)

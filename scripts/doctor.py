@@ -8204,12 +8204,13 @@ class _MaintenanceHeartbeat:
         See `docs/research/2026-09-14-a-busy-database-is-not-a-lost-lease.md`.
         """
         from lease_renewal import renew_until_stopped
+        from llm_wiki.reliability_defaults import DEFAULTS
 
         ended = renew_until_stopped(
             self._renew,
             interval=self.interval,
             lease_seconds=_lease_seconds(self.lease),
-            attempt_seconds=reliable_memory.DEFAULTS.markdown_busy_ms / 1_000,
+            attempt_seconds=DEFAULTS.markdown_busy_ms / 1_000,
             held_since=self._held_since,
             stop=self._stop,
             transient=_transient_beat_failure,

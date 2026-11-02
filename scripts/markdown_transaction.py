@@ -44,9 +44,9 @@ from claim_tree_manifest import (
 from iso_time import utc_text
 from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from llm_wiki.formats.schema import validate_schema
+from llm_wiki.reliability_defaults import DEFAULTS
 from model_dlp import DLPContentBlocked, DLPPolicyError, require_safe_publication
 from reliable_memory import (
-    DEFAULTS,
     MigrationStatement,
     OperationalDatabaseContract,
     OperationalDatabaseContractError,

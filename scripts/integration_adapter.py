@@ -3116,8 +3116,8 @@ class _CapturePublicationKeepAlive:
     """Keep both publication claims live and verify them before returning."""
 
     def __init__(self, registry, coordinator, owner, fence, *, held_since: float) -> None:
+        from llm_wiki.reliability_defaults import DEFAULTS
         from markdown_transaction import INTENT_FENCE_SECONDS
-        from reliable_memory import DEFAULTS
 
         self._registry, self._coordinator = registry, coordinator
         self._owner, self._fence = owner, fence
