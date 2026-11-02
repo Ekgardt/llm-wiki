@@ -1951,3 +1951,18 @@ timeouts, native signatures and error policy are preserved. Both modules have
 own tests and complete ≤100,000-token context manifests under tests/modules and
 docs/modules. No new runtime path, WinAPI surface or security policy is added.
 Approval: `knowledge/notes/windows-permissions-boundaries-decision-20261102.md`.
+
+### Approved completion mandate (2026-11-02)
+
+The owner approved sequential completion under
+`docs/research/2026-11-02-decomposition-completion-plan.md`, including refinement
+of internal boundaries within its responsibility families. Each boundary is
+documented and qualified before acceptance. Full maintenance packets remain
+limited to 100000 tokens; whole-repository coverage is not yet complete.
+This does not authorize deploying the candidate checkout into the installed vault.
+
+The next queue source-identity boundary is `llm_wiki.queue_sources`: pure payload
+identity collection, daily-source validation, and generic source-link validation.
+Migration refusal construction and SQL remain in memory_queue. Existing static
+method entry points are identical function aliases; no second implementation.
+Daily-only failure identities and general task source links retain distinct rules.
