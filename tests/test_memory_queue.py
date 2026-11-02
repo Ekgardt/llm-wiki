@@ -2195,3 +2195,10 @@ def test_queue_contract_values_cross_a_real_spawn_in_both_directions():
             process.terminate()
         process.join(LONG_TIMEOUT)
         receiver.close()
+
+
+def test_heartbeat_compatibility_names_are_the_owner_classes():
+    from llm_wiki import queue_heartbeat
+
+    assert memory_queue._LeaseHeartbeat is queue_heartbeat._LeaseHeartbeat
+    assert memory_queue._SourceFenceHeartbeat is queue_heartbeat._SourceFenceHeartbeat

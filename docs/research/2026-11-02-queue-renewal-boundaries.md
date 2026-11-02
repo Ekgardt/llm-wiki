@@ -142,3 +142,36 @@ logs/reliability-defaults-boundary-green.txt.
 
 Второй шаг heartbeat на момент этой записи ещё не реализован. Живая установка
 не менялась; public CI, native Windows/macOS и полный suite не заявлены.
+
+## Второй шаг: heartbeat
+
+Оба класса и bounded join теперь принадлежат queue_heartbeat. AST перенесённых
+тел совпал с bee6aac3 после нормализации двух queue-аннотаций; остальная очередь
+совпала после исключения imports и перенесённых узлов. Старые имена классов
+являются прямыми aliases. Stop floor патчится у нового владельца; прежний тест
+перенесён в собственный пакет. Boundary check сначала падал на прежнем владельце.
+
+13 собственных проверок прошли, включая настоящий stop timeout, fresh-interpreter
+запуск обоих потоков с запретом imports runtime, точные аргументы scheduler,
+публикацию нового record и сохранение исходной причины потери source fence.
+Python3.10:136passed, включая busy/expiry, потерю child и compile controller.
+Первый запуск в старом окружении не собрался из-за отсутствия tiktoken; успешный
+запуск использовал isolated environment с locked dev dependencies проекта.
+
+Evidence: logs/queue-heartbeat-preservation.json;
+logs/queue-heartbeat-boundary-red.txt; logs/queue-heartbeat-own.txt;
+logs/queue-heartbeat-python310.txt; logs/queue-heartbeat-related.txt/.xml;
+logs/queue-renewal-final-budget.txt. Статический граф актуализирован на bee6aac3,
+но остаётся неполным; callers join подтверждены и сверены по исходникам.
+Пакет включает исходники зависимостей, shared renewal tests и их документацию;
+размер считается o200k_base, без вычитания обязательного контекста.
+
+Расширенный набор дал387passed и один отказ глобального CCN guard: новая
+проверка imports объединила две независимые проверки и превысила CCN5. Она
+разделена; production код не менялся. Повторная квалификация own+global shape/CCN
+записана в logs/queue-heartbeat-final.txt/.xml. Это не полный regression suite.
+
+Повторная проверка:25passed (14 own и 11 global complexity/shape),34,78с.
+CI weights/discovery:8passed. Ruff и git diff --check прошли. Все десять
+объявленных пакетов укладываются в100000; исходник очереди остаётся129165токенов.
+Оба согласованных переноса завершены в candidate; установленный vault не менялся.

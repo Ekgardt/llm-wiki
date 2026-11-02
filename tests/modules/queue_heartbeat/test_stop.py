@@ -2,17 +2,12 @@
 
 from __future__ import annotations
 
-import sys
 import threading
-from pathlib import Path
 
 import pytest
+from llm_wiki import queue_heartbeat
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-
-import memory_queue  # noqa: E402
-
-from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
+from tests.slow_machine import SHORT_TIMEOUT
 
 
 class _DeafQueue:
@@ -30,13 +25,13 @@ class _DeafQueue:
 
 
 def test_a_heartbeat_thread_that_ignores_stop_is_refused_by_name(monkeypatch):
-    monkeypatch.setattr(memory_queue, "HEARTBEAT_STOP_FLOOR_SECONDS", 0.05)
+    monkeypatch.setattr(queue_heartbeat, "HEARTBEAT_STOP_FLOOR_SECONDS", 0.05)
     queue = _DeafQueue()
     lease = type("Lease", (), {"id": "lease-1"})()
-    heartbeat = memory_queue._LeaseHeartbeat(queue, lease, heartbeat_seconds=1, lease_seconds=2)
+    heartbeat = queue_heartbeat._LeaseHeartbeat(queue, lease, heartbeat_seconds=1, lease_seconds=2)
     heartbeat.start()
     try:
-        with pytest.raises(memory_queue.QueueOperationError, match="heartbeat_stop_timeout"):
+        with pytest.raises(queue_heartbeat.QueueOperationError, match="heartbeat_stop_timeout"):
             heartbeat.stop()
     finally:
         queue.released.set()
@@ -53,7 +48,7 @@ def test_a_heartbeat_thread_that_stops_is_joined_quietly():
             return lease
 
     lease = type("Lease", (), {"id": "lease-2"})()
-    heartbeat = memory_queue._LeaseHeartbeat(_Queue(), lease, heartbeat_seconds=1, lease_seconds=2)
+    heartbeat = queue_heartbeat._LeaseHeartbeat(_Queue(), lease, heartbeat_seconds=1, lease_seconds=2)
     heartbeat.start()
     heartbeat.stop()
     assert not heartbeat._thread.is_alive()
