@@ -25,6 +25,9 @@
     "docs/research/2026-11-02-module-boundaries-validation.md",
     "docs/research/2026-11-02-module-boundaries-and-token-budget.md",
     ".gitattributes",
-    "docs/research/2026-11-02-queue-payload-boundary.md"
+    "docs/research/2026-11-02-queue-payload-boundary.md",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py"
   ]
 }

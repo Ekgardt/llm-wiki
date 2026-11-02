@@ -19,21 +19,21 @@ def _imports(node):
     return set()
 
 
-def _allowed(name, level):
+def _allowed(name, level, test_helpers=()):
     if level:
         return False
     return name.split('.')[0] in ALLOWED or name in {
         'llm_wiki.queue_contracts', 'llm_wiki.queue_process_cleanup',
-    }
+    } | set(test_helpers)
 
 
-def _violations(source):
+def _violations(source, test_helpers=()):
     imports = set().union(*(_imports(node) for node in ast.walk(ast.parse(source))))
-    return sorted(name for name, level in imports if not _allowed(name, level))
+    return sorted(name for name, level in imports if not _allowed(name, level, test_helpers))
 
 
 def test_owned_tests_do_not_import_executors():
-    findings = {path.name: _violations(path.read_text(encoding='utf-8'))
+    findings = {path.name: _violations(path.read_text(encoding='utf-8'), {'tests.module_context'})
                 for path in Path(__file__).parent.glob('*.py')}
     assert not {path: bad for path, bad in findings.items() if bad}
 
@@ -87,3 +87,9 @@ assert cleanup._terminate_processor_child.__kwdefaults__['tracked_descendants'] 
         env={**os.environ, 'PYTHONPATH': str(ROOT / 'scripts')}, check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_measurement_helper_is_test_only():
+    source = 'from tests.module_context import measure_context'
+    assert _violations(source)
+    assert not _violations(source, {'tests.module_context'})

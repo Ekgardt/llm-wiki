@@ -23,7 +23,10 @@
     "scripts/llm_wiki/queue_timing.py",
     "docs/modules/queue-timing.md",
     "docs/research/2026-09-17-the-adopted-queue-waits-as-long-as-it-was-told.md",
-    "docs/research/2026-09-14-the-small-integrity-gaps.md"
+    "docs/research/2026-09-14-the-small-integrity-gaps.md",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py"
   ],
   "directories": [
     "tests/modules/queue_timing"

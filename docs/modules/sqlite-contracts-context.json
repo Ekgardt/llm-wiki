@@ -19,7 +19,10 @@
     "docs/modules/sqlite-contracts-context.json",
     "docs/research/2026-11-02-sqlite-contracts-boundary.md",
     "scripts/llm_wiki/sqlite_contracts.py",
-    "docs/modules/sqlite-contracts.md"
+    "docs/modules/sqlite-contracts.md",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py"
   ],
   "directories": [
     "tests/modules/sqlite_contracts"

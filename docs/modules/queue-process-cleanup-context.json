@@ -24,7 +24,10 @@
     "docs/modules/queue-process-cleanup.md",
     "docs/modules/queue-process-cleanup-context.json",
     "docs/research/2026-11-02-queue-process-cleanup-boundary.md",
-    "docs/research/2026-09-18-a-childs-tree-is-read-when-it-is-killed.md"
+    "docs/research/2026-09-18-a-childs-tree-is-read-when-it-is-killed.md",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py"
   ],
   "directories": [
     "tests/modules/queue_process_cleanup"

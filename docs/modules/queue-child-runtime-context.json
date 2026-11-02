@@ -29,7 +29,10 @@
     "docs/modules/queue-child-runtime-context.json",
     "docs/research/2026-11-02-queue-child-runtime-boundary.md",
     "docs/research/2026-09-14-a-lost-lease-stops-its-child.md",
-    "docs/research/2026-09-18-an-answer-that-arrived-is-not-a-timeout.md"
+    "docs/research/2026-09-18-an-answer-that-arrived-is-not-a-timeout.md",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py"
   ],
   "directories": [
     "tests/modules/queue_child_runtime"

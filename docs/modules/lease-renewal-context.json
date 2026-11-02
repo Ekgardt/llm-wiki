@@ -20,6 +20,9 @@
     "docs/modules/lease-renewal-context.json",
     "docs/research/2026-09-14-a-busy-database-is-not-a-lost-lease.md",
     "docs/research/2026-09-14-a-lost-lease-is-known-by-its-expiry.md",
-    "docs/research/2026-09-18-a-lease-expires-from-when-it-was-taken.md"
+    "docs/research/2026-09-18-a-lease-expires-from-when-it-was-taken.md",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py"
   ]
 }

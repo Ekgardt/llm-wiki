@@ -20,7 +20,10 @@
     "docs/modules/windows-native.md",
     "docs/modules/windows-native-context.json",
     "docs/research/2026-11-02-windows-permissions-boundaries.md",
-    "docs/research/2026-09-17-windows-names-and-windows-errors-are-read-as-they-are-written.md"
+    "docs/research/2026-09-17-windows-names-and-windows-errors-are-read-as-they-are-written.md",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py"
   ],
   "directories": [
     "tests/modules/windows_native"

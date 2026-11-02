@@ -16,7 +16,6 @@ import threading
 from pathlib import Path
 
 import pytest
-import tiktoken
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
@@ -272,8 +271,6 @@ def test_complete_lease_renewal_context_fits_user_ceiling():
             'docs/modules/lease-renewal.md', 'docs/modules/lease-renewal-context.json'} <= set(paths)
     assert len(paths) == len(set(paths))
     assert manifest['max_tokens'] == 100_000
-    encoder = tiktoken.get_encoding(manifest['encoding'])
-    counts = {name: len(encoder.encode((_ROOT / name).read_text(encoding='utf-8'),
-              disallowed_special=())) for name in paths}
-    print(f'lease-renewal context: {sum(counts.values())} tokens; {len(paths)} files')
-    assert sum(counts.values()) <= manifest['max_tokens'], counts
+    from tests.module_context import measure_context
+    total, files = measure_context(_ROOT, _ROOT / 'docs/modules/lease-renewal-context.json')
+    print(f'lease-renewal: {total} tokens; {files} files')

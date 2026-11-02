@@ -19,6 +19,9 @@
     "tests/test_context_packing.py",
     "docs/modules/context-budget.md",
     "docs/modules/context-budget-context.json",
-    "docs/research/2026-09-26-a-context-answer-sends-its-text-once.md"
+    "docs/research/2026-09-26-a-context-answer-sends-its-text-once.md",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py"
   ]
 }

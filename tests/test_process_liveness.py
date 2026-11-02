@@ -10,7 +10,6 @@ import sys
 from pathlib import Path
 
 import pytest
-import tiktoken
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -182,8 +181,13 @@ def _import_roots(node):
     return set()
 
 
-def _external_imports(source):
-    roots = set().union(*(_import_roots(node) for node in ast.walk(ast.parse(source))))
+def _test_helper_import(node, helpers):
+    return isinstance(node, ast.ImportFrom) and node.level == 0 and node.module in helpers
+
+
+def _external_imports(source, helpers=()):
+    nodes = [node for node in ast.walk(ast.parse(source)) if not _test_helper_import(node, helpers)]
+    roots = set().union(*(_import_roots(node) for node in nodes))
     return roots - sys.stdlib_module_names
 
 
@@ -194,7 +198,7 @@ def test_process_probe_has_no_executor_dependencies():
 
 def test_owned_tests_do_not_load_executors():
     source = Path(__file__).read_text(encoding='utf-8')
-    assert _external_imports(source) <= {'process_liveness', 'pytest', 'tiktoken'}
+    assert _external_imports(source, {'tests.module_context'}) <= {'process_liveness', 'pytest', 'tiktoken'}
 
 
 @pytest.mark.parametrize('source', [
@@ -217,11 +221,9 @@ def test_complete_process_liveness_context_fits_user_ceiling():
             'docs/modules/process-liveness.md', 'docs/modules/process-liveness-context.json'} <= set(paths)
     assert len(paths) == len(set(paths))
     assert manifest['max_tokens'] == 100_000
-    encoder = tiktoken.get_encoding(manifest['encoding'])
-    counts = {name: len(encoder.encode((_ROOT / name).read_text(encoding='utf-8'),
-              disallowed_special=())) for name in paths}
-    print(f'process-liveness context: {sum(counts.values())} tokens; {len(paths)} files')
-    assert sum(counts.values()) <= manifest['max_tokens'], counts
+    from tests.module_context import measure_context
+    total, files = measure_context(_ROOT, _ROOT / 'docs/modules/process-liveness-context.json')
+    print(f'process-liveness: {total} tokens; {files} files')
 
 
 @pytest.mark.parametrize('recorded_scope, observed, expected', [
@@ -237,3 +239,9 @@ def test_recorded_owner_requires_comparable_scope(monkeypatch, recorded_scope, o
     monkeypatch.setattr(process_liveness, '_linux_observer_scope', lambda: scope)
     identity = ':'.join(('linux-v2', *recorded_scope, '10'))
     assert process_liveness.recorded_process_state(42, identity, probe=lambda _pid: observed) == expected
+
+
+def test_context_helper_is_allowed_only_for_tests():
+    source = 'from tests.module_context import measure_context'
+    assert _external_imports(source)
+    assert not _external_imports(source, {'tests.module_context'})

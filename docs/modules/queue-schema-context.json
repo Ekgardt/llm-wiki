@@ -19,7 +19,10 @@
     "scripts/llm_wiki/queue_schema.py",
     "docs/modules/queue-schema.md",
     "docs/modules/queue-schema-context.json",
-    "docs/research/2026-11-02-queue-schema-boundary.md"
+    "docs/research/2026-11-02-queue-schema-boundary.md",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py"
   ],
   "directories": [
     "tests/modules/queue_schema"

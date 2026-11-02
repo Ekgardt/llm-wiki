@@ -8,7 +8,6 @@ import sys
 from pathlib import Path
 
 import pytest
-import tiktoken
 
 
 def test_parent_swap_to_outside_target_is_rejected_before_bytes_return(
@@ -271,8 +270,6 @@ def test_complete_bounded_io_context_fits_user_ceiling():
             'docs/modules/bounded-io.md', 'docs/modules/bounded-io-context.json'} <= set(paths)
     assert len(paths) == len(set(paths))
     assert manifest['max_tokens'] == 100_000
-    encoder = tiktoken.get_encoding(manifest['encoding'])
-    counts = {name: len(encoder.encode((_ROOT / name).read_text(encoding='utf-8'),
-              disallowed_special=())) for name in paths}
-    print(f'bounded-io context: {sum(counts.values())} tokens; {len(paths)} files')
-    assert sum(counts.values()) <= manifest['max_tokens'], counts
+    from tests.module_context import measure_context
+    total, files = measure_context(_ROOT, _ROOT / 'docs/modules/bounded-io-context.json')
+    print(f'bounded-io: {total} tokens; {files} files')

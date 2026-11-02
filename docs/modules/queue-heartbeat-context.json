@@ -31,7 +31,10 @@
     "tests/test_a_busy_database_is_not_a_lost_lease.py",
     "docs/research/2026-09-14-a-lost-lease-is-known-by-its-expiry.md",
     "docs/research/2026-09-18-a-lease-expires-from-when-it-was-taken.md",
-    "docs/modules/lease-renewal-context.json"
+    "docs/modules/lease-renewal-context.json",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py"
   ],
   "directories": [
     "tests/modules/queue_heartbeat"

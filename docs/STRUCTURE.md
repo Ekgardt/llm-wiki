@@ -1973,3 +1973,13 @@ SQLite identifier quoting. It imports only stdlib. reliable_memory retains all
 connection, filesystem, pragma and migration execution behavior, with direct
 aliases for the old names. Class pickle names remain reliable_memory for existing
 serialized callers. Consumers import values directly from sqlite_contracts.
+
+Maintenance packet tests share `tests/module_context.py`. Each packet explicitly
+includes its applicable pytest conftest/plugin bootstrap and the measurement code;
+the measured serialization includes file names and byte-length framing. Missing
+implicit loaders fail the declaration check rather than disappear from the count.
+
+Existing stdlib-only python_parse, calendar_pass, iso_time, reply_json, page_status
+and code_intelligence boundaries are qualified in place with owned context
+manifests; mixed tests separate pure assertions from integration scenarios without
+changing assertions. Shared test-only import guards live in tests/module_boundaries.py.

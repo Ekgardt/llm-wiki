@@ -24,7 +24,10 @@
     "scripts/llm_wiki/windows_acl.py",
     "docs/modules/windows-acl.md",
     "tests/test_a_windows_owner_with_a_non_ascii_name_is_verified.py",
-    "docs/research/2026-09-17-the-last-three-windows-readers-of-a-name-and-a-handle.md"
+    "docs/research/2026-09-17-the-last-three-windows-readers-of-a-name-and-a-handle.md",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py"
   ],
   "directories": [
     "tests/modules/windows_acl"
