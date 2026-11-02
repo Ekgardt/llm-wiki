@@ -1993,3 +1993,7 @@ migration identity parsing. None imports the queue executor.
 `llm_wiki.sqlite_transactions` owns the existing begin_immediate contextmanager
 on caller-owned connections. reliable_memory retains an identity alias; consumers
 import the transaction owner directly, preserving callbacks and rollback semantics.
+
+`llm_wiki.queue_migration_plan` owns v2 migration statement planning and exact
+reconciliation on supplied connections. The queue supplies its unchanged owner
+check explicitly; source opening, clock reads, transactions and adoption stay there.
