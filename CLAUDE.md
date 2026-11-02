@@ -515,3 +515,14 @@ uv run python scripts/build_tiers.py --all          # generate L1 overviews
 Runtime state is gitignored and never committed. `cache/` and `logs/` are
 regenerable; `run/` is operational state and follows the deletion contract in
 section 1.
+
+## Approved formats module (2026-11-02)
+
+`scripts/llm_wiki/formats/` owns canonical bytes, JSON-schema validation, source
+descriptors and receipt formats. It imports only the standard library and its
+own modules. Tests: `tests/modules/formats/`; contract: `docs/modules/formats.md`.
+No runtime state or publication authority belongs to this module. Existing
+public helper imports may expose the same objects; duplicated implementations
+and private parser imports from the compiler are forbidden. The complete owned
+context including instructions and test data must be at most 100,000 tokens.
+See `docs/STRUCTURE.md` and the 2026-11-02 modularity validation study.

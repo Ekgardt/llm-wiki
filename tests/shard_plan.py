@@ -33,7 +33,8 @@ DEFAULT_WEIGHT_SECONDS = 5.0
 
 def test_files() -> list[str]:
     """Every collected test module, in a stable order."""
-    return sorted(path.name for path in TESTS_DIR.glob("test_*.py"))
+    return sorted(path.relative_to(TESTS_DIR).as_posix() for path in TESTS_DIR.rglob("test_*.py")
+                  if "fixtures" not in path.relative_to(TESTS_DIR).parts)
 
 
 def weights() -> dict[str, float]:
@@ -62,7 +63,12 @@ def _case_file(case: ET.Element) -> str | None:
     parts = _case_module(case).split(".")
     if len(parts) < 2 or parts[0] != "tests":
         return None
-    return f"{parts[1]}.py"
+    module_parts = []
+    for part in parts[1:]:
+        module_parts.append(part)
+        if part.startswith("test_"):
+            return "/".join(module_parts) + ".py"
+    return None
 
 
 def junit_seconds(report: Path) -> dict[str, float]:

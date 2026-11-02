@@ -1714,7 +1714,8 @@ class _ReceiptOperation(NamedTuple):
 
 
 def _snapshot_receipt_fields(raw: bytes, path: str) -> tuple[str, str]:
-    from compile_memory import _receipt_source_fields, parse_compile_receipt_version
+    from llm_wiki.formats.receipts import parse_compile_receipt_version
+    from llm_wiki.formats.receipts import receipt_source_fields as _receipt_source_fields
 
     fields = _receipt_source_fields(raw)
     if fields is None:
@@ -1727,7 +1728,8 @@ def _snapshot_receipt_fields(raw: bytes, path: str) -> tuple[str, str]:
 
 
 def _committed_snapshot_receipt(database, path: str, raw: bytes, fields, *, require_create: bool = False) -> bool:
-    from compile_memory import _require_operation_integrity, parse_compile_receipt_version
+    from compile_memory import _require_operation_integrity
+    from llm_wiki.formats.receipts import parse_compile_receipt_version
 
     record = parse_compile_receipt_version(raw, logical_path=fields[0], source_sha256=fields[1])
     row = database.execute(
@@ -1844,7 +1846,7 @@ class _DoctorCompileAuthority(MarkdownCoordinator):
 
 
 def _historical_receipt_record(raw, path):
-    from compile_memory import parse_compile_receipt_version
+    from llm_wiki.formats.receipts import parse_compile_receipt_version
 
     fields = _snapshot_receipt_fields(raw, path)
     record = parse_compile_receipt_version(raw, logical_path=fields[0], source_sha256=fields[1])
@@ -2085,7 +2087,7 @@ def _all_current_work_records(records):
 
 
 def _require_current_work_record(raw, fields, expected):
-    from compile_memory import parse_compile_receipt_v4
+    from llm_wiki.formats.receipts import parse_compile_receipt_v4
 
     record = parse_compile_receipt_v4(raw, logical_path=fields[0], source_sha256=fields[1])
     if record != expected:
@@ -2234,7 +2236,7 @@ class _CompiledDaySupersession:
         return [self._staged_manifest(directory, staged[path], digest) for path, digest in receipts.items()]
 
     def _staged_manifest(self, directory, operation, digest):
-        from compile_memory import parse_compile_receipt_version
+        from llm_wiki.formats.receipts import parse_compile_receipt_version
 
         self._require_active()
         if operation["after"]["sha256"] != digest:

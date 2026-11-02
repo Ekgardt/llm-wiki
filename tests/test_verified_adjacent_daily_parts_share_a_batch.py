@@ -62,7 +62,8 @@ def test_v4_manifest_retains_every_joined_part_and_v1_stays_strict():
     assert len(manifest) == len(parts)
     assert [item["byte_start"] for item in manifest] == [part.byte_start for part in parts]
     with pytest.raises(ValueError):
-        compiler._require_packing_manifest_version({"packing": {"algorithm": "compile-complete-items/v1"}}, manifest)
+        from llm_wiki.formats.receipts import _require_packing_manifest_version
+        _require_packing_manifest_version({"packing": {"algorithm": "compile-complete-items/v1"}}, manifest)
 
 
 def test_partition_memo_parses_original_once_but_final_validation_is_fresh(monkeypatch):

@@ -86,6 +86,7 @@ dev = [
     "pyyaml>=6.0.3,<7",
     "ruff>=0.6.0",
     "lizard==1.23.0",
+    "tiktoken==0.14.0",
 ]
 # Not installed by default: CI syncs it alone to audit the lock for known
 # vulnerabilities (docs/research/2026-09-27-the-lock-is-audited.md).

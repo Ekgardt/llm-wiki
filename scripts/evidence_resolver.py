@@ -973,7 +973,7 @@ def _require_receipt_reference(
 
 
 def _require_versioned_receipt_reference(receipt_ref, logical_path, payload_hash):
-    from compile_memory import compile_source_identity
+    from llm_wiki.formats.receipts import compile_source_identity
 
     identity = receipt_ref["source_identity"]
     names = {f"knowledge/daily/receipts/v3-{identity}.md", f"knowledge/daily/receipts/v4-{identity}.md"}
@@ -1054,7 +1054,7 @@ def _authoritative_receipt(
             path=receipt_path,
             vault=Path(vault),  # type: ignore[arg-type]
         )
-    from compile_memory import parse_compile_receipt_version
+    from llm_wiki.formats.receipts import parse_compile_receipt_version
 
     receipt = parse_compile_receipt_version(
         receipt_bytes, logical_path=logical_path, source_sha256=payload_hash

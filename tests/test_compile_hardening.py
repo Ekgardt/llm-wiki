@@ -599,7 +599,8 @@ def test_unusable_receipts_are_discarded_only_when_asked(tmp_path, monkeypatch):
             raise ValueError("compile receipt evidence scope is invalid")
         return {"ok": True}
 
-    monkeypatch.setattr(compile_memory, "parse_compile_receipt_v3", parse)
+    from llm_wiki.formats import receipts
+    monkeypatch.setattr(receipts, "parse_compile_receipt_v3", parse)
 
     discarded = compile_memory.discard_unusable_receipts()
 

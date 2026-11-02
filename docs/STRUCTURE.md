@@ -1765,3 +1765,27 @@ family as well as the current lease. Only the original task or its explicit redr
 lineage can append or recover progress. Capture requires the pending source identity
 before its first snapshot transition; source identity alone is not a complete work
 or dependency identity.
+
+## Isolated formats module (approved 2026-11-02)
+
+The owner approved the bounded formats pilot after the modularity study, not
+a fixed 74-module architecture. `scripts/llm_wiki/formats/` owns canonical JSON,
+SHA-256, the existing closed JSON-schema validator, source descriptors and
+compile receipt parsing. Its `canonical.py`, `schema.py`, `source.py`, and
+`receipts.py` depend only on the standard library and each other, never on
+compiler, cache, queue, transaction, model or runtime ownership code.
+Existing schemas remain in `scripts/schemas/`. Receipt validity alone does not
+prove publication; transaction authority stays with its existing owner.
+
+Module tests live in `tests/modules/formats/` and its contract in
+`docs/modules/formats.md`. The complete owned context, shared instructions,
+fixtures and dependency contracts must fit 100,000 o200k_base tokens. Cross-module
+qualification scenarios remain counted separately and must not be removed.
+Existing public helper imports can re-export the same objects for compatibility;
+there is one implementation and one exception/type identity. Private parser
+consumers must import their owning module. No database, wire format, daemon,
+installation command or runtime root is added. Implementation and installed
+qualification are separate; the working branch is not installed by this decision.
+
+Research: `docs/research/2026-11-02-module-boundaries-validation.md`.
+Private decision: `knowledge/notes/isolated-formats-module-decision-20261102.md`.

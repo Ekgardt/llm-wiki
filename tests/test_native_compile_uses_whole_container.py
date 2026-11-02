@@ -255,7 +255,8 @@ def test_native_receipt_rejects_reversed_same_source_part_order(vault, monkeypat
     record["batch_manifest"].reverse()
     record["batch_manifest_sha256"] = compiler.sha256_bytes(compiler.canonical_json_bytes(record["batch_manifest"]))
     with pytest.raises(ValueError, match="manifest is not sorted"):
-        compiler._require_v4_manifest(record)
+        from llm_wiki.formats.receipts import _require_v4_manifest
+        _require_v4_manifest(record)
 
 
 def test_companion_receipt_hash_is_checked_at_transaction_prepare(vault, monkeypatch):

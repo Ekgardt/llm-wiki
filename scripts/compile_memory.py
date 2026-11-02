@@ -118,6 +118,52 @@ from llm_client import (  # noqa: E402
     resolve_codex_planning_basis,
     worst_case_call_seconds,
 )
+from llm_wiki.formats.receipts import (  # noqa: E402
+    COMPILE_RECEIPT_SCHEMA as COMPILE_RECEIPT_SCHEMA,
+)
+from llm_wiki.formats.receipts import (  # noqa: E402
+    COMPILE_RECEIPT_V3_SCHEMA as COMPILE_RECEIPT_V3_SCHEMA,
+)
+from llm_wiki.formats.receipts import (  # noqa: E402
+    COMPILE_RECEIPT_V4_SCHEMA as COMPILE_RECEIPT_V4_SCHEMA,
+)
+from llm_wiki.formats.receipts import (  # noqa: E402
+    UnsupportedCompileReceiptVersion as UnsupportedCompileReceiptVersion,
+)
+from llm_wiki.formats.receipts import (  # noqa: E402
+    _compile_operation_id as _compile_operation_id,
+)
+from llm_wiki.formats.receipts import (  # noqa: E402
+    _corrupt_receipt as _corrupt_receipt,
+)
+from llm_wiki.formats.receipts import (  # noqa: E402
+    _receipt_version_reader as _receipt_version_reader,
+)
+from llm_wiki.formats.receipts import (  # noqa: E402
+    _require_v4_descriptor as _require_v4_descriptor,
+)
+from llm_wiki.formats.receipts import (  # noqa: E402
+    compile_context_source_identity as compile_context_source_identity,
+)
+from llm_wiki.formats.receipts import (  # noqa: E402
+    compile_source_identity as compile_source_identity,
+)
+from llm_wiki.formats.receipts import (  # noqa: E402
+    parse_compile_receipt_v2 as parse_compile_receipt_v2,
+)
+from llm_wiki.formats.receipts import (  # noqa: E402
+    parse_compile_receipt_v3 as parse_compile_receipt_v3,
+)
+from llm_wiki.formats.receipts import (  # noqa: E402
+    parse_compile_receipt_v4 as parse_compile_receipt_v4,
+)
+from llm_wiki.formats.receipts import (  # noqa: E402
+    parse_compile_receipt_version as parse_compile_receipt_version,
+)
+from llm_wiki.formats.receipts import (  # noqa: E402
+    receipt_source_fields as _receipt_source_fields,
+)
+from llm_wiki.formats.schema import validate_rule as _validate_rule  # noqa: E402
 from markdown_transaction import (  # noqa: E402
     MarkdownChange,
     MarkdownCoordinator,
@@ -142,7 +188,6 @@ from rebuild_memory_index import (  # noqa: E402
     build_index_bytes,
 )
 from reliable_memory import (  # noqa: E402
-    _validate_rule,
     canonical_json_bytes,
     sha256_bytes,
     validate_schema,
@@ -167,9 +212,6 @@ COMPILE_PLAN_SCHEMA = Path(__file__).with_name("schemas") / "compile-plan-v2.jso
 # a vault that loses four in a row has a busier problem than a retry. See
 # `_published`.
 COMPILE_PUBLICATION_ATTEMPTS = 4
-COMPILE_RECEIPT_SCHEMA = Path(__file__).with_name("schemas") / "compile-receipt-v2.json"
-COMPILE_RECEIPT_V3_SCHEMA = Path(__file__).with_name("schemas") / "compile-receipt-v3.json"
-COMPILE_RECEIPT_V4_SCHEMA = Path(__file__).with_name("schemas") / "compile-receipt-v4.json"
 COMPILER_VERSION = "2.1.0"
 NORMALIZATION_VERSION = "normalize-v6"
 # Vault metadata input; numerical basis remains under audit. Knowledge notes
@@ -703,11 +745,6 @@ def compile_scope_paths(root: Path) -> list[Path]:
     return _live_note_paths(root / "knowledge" / "notes") + daily_logs(root / "knowledge" / "daily") + metadata
 
 
-def compile_source_identity(logical_path: str, source_sha256: str) -> str:
-    SourceDescriptor(logical_path, 0, source_sha256).canonical()
-    return sha256_bytes(canonical_json_bytes([logical_path, source_sha256]))
-
-
 def compile_receipt_path(source_identity: str) -> Path:
     if re.fullmatch(r"[0-9a-f]{64}", source_identity) is None:
         raise ValueError("source identity must be lowercase 64-hex")
@@ -1052,7 +1089,6 @@ class _DailyPartitionProofs:
         if key not in self.sources:
             self.sources[key] = (part.original_content, _partition_for_join(part, journal_indexes=self.journal_indexes))
         return self.sources[key][1]
-
 
 
 class _CapturedPartitions:
@@ -1675,7 +1711,6 @@ def _batch_text(inputs: CompileInputs, paths: set[str]) -> bytes:
     return b"\n".join(item.content for item in inputs.dailies if item.part_key in paths)
 
 
-
 class _BatchTextLookup:
     """One measure's original ordered part references, without copied source bytes."""
 
@@ -1713,9 +1748,6 @@ def _measure_batch_text(inputs, paths, measure):
     if _measure_owns_inputs(measure, inputs):
         return measure.batch_texts.text(inputs, paths)
     return _batch_text(inputs, paths)
-
-
-
 
 
 def _inverse_document_frequency(documents, total: int) -> dict[str, float]:
@@ -1827,7 +1859,6 @@ def _source_choice_schema(schema, choices):
                        'claim': _LEGACY_EVIDENCE_SCHEMA['properties']['claim']},
         'additionalProperties': False}]}
     return copy
-
 
 
 def _source_id_schema(choices):
@@ -2484,126 +2515,6 @@ def _batch_provider_identity(candidate):
 
 def _receipt_path(digest: str) -> Path:
     return DAILY_DIR / "receipts" / f"{digest}.md"
-
-
-def _corrupt_receipt(reason: BaseException, path: Path | None = None) -> ValueError:
-    """Say which receipt failed and why, not merely that one did.
-
-    The bare message was the same for four different causes, so the only way to
-    learn what happened was to reproduce it through the reader. Receipt paths
-    and these reasons are our own text, never page content.
-    """
-    named = "" if path is None else f" {path.name}"
-    return ValueError(f"compile receipt is corrupt{named}: {reason}")
-
-
-def parse_compile_receipt_v2(raw_bytes: bytes, digest: str) -> dict[str, object]:
-    """Validate canonical receipt bytes without requiring live transaction state."""
-    try:
-        return _parsed_receipt_v2(raw_bytes, digest)
-    except (
-        IndexError,
-        KeyError,
-        TypeError,
-        ValueError,
-        UnicodeDecodeError,
-        json.JSONDecodeError,
-    ) as exc:
-        raise _corrupt_receipt(exc) from exc
-
-
-def _parsed_receipt_v2(raw_bytes: bytes, digest: str) -> dict[str, object]:
-    text = raw_bytes.decode("utf-8", errors="strict")
-    frontmatter, body = text.split("---\n", 2)[1:]
-    prefix = "\n# Compile Receipt\n\nOne-sentence summary: This immutable receipt proves completion of a snapshot compile.\n\n## Record\n```json\n"
-    fields = _receipt_frontmatter(frontmatter)
-    _require_v2_frontmatter(fields)
-    record = _receipt_record(body, prefix, COMPILE_RECEIPT_SCHEMA)
-    _require_v2_agreement(fields, record, digest)
-    _require_v2_identity(record, digest)
-    _require_v2_evidence_scope(record, digest)
-    return record
-
-
-def _receipt_frontmatter(frontmatter: str) -> dict[str, str]:
-    fields: dict[str, str] = {}
-    for line in frontmatter.splitlines():
-        key, separator, value = line.partition(": ")
-        if not separator or key in fields:
-            raise ValueError("compile receipt frontmatter is invalid")
-        fields[key] = value
-    return fields
-
-
-def _receipt_record(body: str, prefix: str, schema: object) -> dict[str, object]:
-    """The one canonical JSON record a receipt body is allowed to carry."""
-    if not body.startswith(prefix) or not body.endswith("\n```\n"):
-        raise ValueError("compile receipt body is invalid")
-    canonical = body[len(prefix) : -5]
-    record = json.loads(canonical)
-    validate_schema(record, schema)
-    if canonical_json_bytes(record).decode() != canonical:
-        raise ValueError("compile receipt record is not canonical")
-    return record
-
-
-def _require_v2_frontmatter(fields: Mapping[str, str]) -> None:
-    if set(fields) != {
-        "type", "source_digest", "action_key", "status", "timestamp",
-        "confidence", "source_authority"
-    }:
-        raise ValueError("compile receipt frontmatter fields are invalid")
-    timestamp = datetime.fromisoformat(fields["timestamp"].replace("Z", "+00:00"))
-    if timestamp.tzinfo is None:
-        raise ValueError("compile receipt timestamp must include a timezone")
-
-
-def _require_v2_agreement(
-    fields: Mapping[str, str], record: Mapping[str, object], digest: str
-) -> None:
-    expected = {
-        "type": "compile-receipt",
-        "source_digest": digest,
-        "action_key": record["action_key"],
-        "status": record["state"],
-        "timestamp": record["completed_at"],
-        "confidence": "high",
-        "source_authority": "ai-derived",
-    }
-    if fields != expected or record["source_digest"] != digest:
-        raise ValueError("compile receipt frontmatter and record disagree")
-
-
-def _require_v2_identity(record: Mapping[str, object], digest: str) -> None:
-    input_digests = record["input_digests"]
-    if input_digests != sorted(set(input_digests)) or digest not in input_digests:
-        raise ValueError("compile receipt input digests are invalid")
-    expected_operation_id = "compile:" + sha256_bytes(
-        canonical_json_bytes(
-            {"action_key": record["action_key"], "source_digests": input_digests}
-        )
-    )
-    if record["operation_id"] != expected_operation_id:
-        raise ValueError("compile receipt operation identity is invalid")
-
-
-def _require_v2_evidence_scope(record: Mapping[str, object], digest: str) -> None:
-    operation_paths = [operation["path"] for operation in record["operations"]]
-    known = set(operation_paths)
-    if len(operation_paths) != len(known):
-        raise ValueError("compile receipt operation paths are duplicated")
-    for evidence in record["evidence"]:
-        _require_v2_evidence_entry(evidence, known, digest)
-
-
-def _require_v2_evidence_entry(
-    evidence: Mapping[str, str], operation_paths: set[str], digest: str
-) -> None:
-    if (
-        evidence["source_digest"] != digest
-        or evidence["operation_path"] not in operation_paths
-    ):
-        raise ValueError("compile receipt evidence scope is invalid")
 
 
 def read_compile_receipt_v2(
@@ -5722,8 +5633,6 @@ def _related_section(related: object) -> str:
     return "\n\n## Related\n" + "\n".join(f"- {item}" for item in related)
 
 
-
-
 def _ledger_bytes(claims: list, *, previous_version=None) -> bytes:
     return claim_json_bytes(claim_ledger_document(claims, previous_version=previous_version))
 
@@ -5818,26 +5727,6 @@ def _receipt_bytes(
     ).encode()
 
 
-
-
-def _compile_operation_id(
-    action_key: str,
-    batch_manifest_sha256: str,
-    dispositions: Sequence[Mapping[str, str]],
-) -> str:
-    return "compile:" + sha256_bytes(
-        canonical_json_bytes(
-            {
-                "action_key": action_key,
-                "batch_manifest_sha256": batch_manifest_sha256,
-                "dispositions": list(dispositions),
-            }
-        )
-    )
-
-
-
-
 def _v4_source_descriptor(part: DailySnapshot) -> dict[str, object]:
     physical = _physical_source(part)
     start, end = _snapshot_absolute_bounds(part)
@@ -5870,23 +5759,6 @@ def _standalone_snapshot_bounds(part):
 def _require_snapshot_source_hashes(part, physical):
     if immutable_source_digest(physical.content) != physical.sha256 or sha256_bytes(part.content) != part.sha256:
         raise ValueError("compile source context digest disagrees")
-
-
-def compile_context_source_identity(source: Mapping[str, object]) -> str:
-    return sha256_bytes(canonical_json_bytes({
-        "logical_path": source["logical_path"], "sha256": source["sha256"],
-        "original_sha256": source["original_sha256"],
-        "original_byte_size": source["original_byte_size"],
-        "byte_start": source["byte_start"], "byte_end": source["byte_end"],
-    }))
-
-
-def _require_v4_descriptor(source: Mapping[str, object]) -> None:
-    start, end = source["byte_start"], source["byte_end"]
-    if not (0 <= start <= end <= source["original_byte_size"]):
-        raise ValueError("compile source context bounds are invalid")
-    if end - start != source["byte_size"]:
-        raise ValueError("compile source context size disagrees")
 
 
 def _v4_manifest(inputs: CompileInputs) -> list[dict[str, object]]:
@@ -6054,135 +5926,6 @@ def _part_evidence_records(operation_path, binding, inputs):
             for part in _reference_parts(inputs, reference)]
 
 
-def parse_compile_receipt_v3(
-    raw_bytes: bytes, *, logical_path: str, source_sha256: str
-) -> dict[str, object]:
-    try:
-        return _parsed_receipt_v3(raw_bytes, logical_path, source_sha256)
-    except (
-        IndexError,
-        KeyError,
-        TypeError,
-        ValueError,
-        UnicodeDecodeError,
-        json.JSONDecodeError,
-    ) as exc:
-        raise _corrupt_receipt(exc) from exc
-
-
-def _parsed_receipt_v3(
-    raw_bytes: bytes, logical_path: str, source_sha256: str
-) -> dict[str, object]:
-    source_identity = compile_source_identity(logical_path, source_sha256)
-    text = raw_bytes.decode("utf-8", errors="strict")
-    frontmatter, body = text.split("---\n", 2)[1:]
-    prefix = (
-        "\n# Compile Receipt\n\n"
-        "One-sentence summary: This immutable receipt proves completion of a snapshot compile.\n\n"
-        "## Record\n```json\n"
-    )
-    _require_v3_frontmatter(_receipt_frontmatter(frontmatter), source_identity)
-    record = _receipt_record(body, prefix, COMPILE_RECEIPT_V3_SCHEMA)
-    _require_v3_source(record, source_identity, logical_path, source_sha256)
-    _require_v3_manifest(record)
-    _require_v3_identity(record)
-    _require_v3_evidence_scope(record, source_identity, logical_path, source_sha256)
-    return record
-
-
-def _require_v3_frontmatter(fields: Mapping[str, str], source_identity: str) -> None:
-    if fields != {
-        "type": "compile-receipt",
-        "schema_version": "compile-receipt/v3",
-        "source_identity": source_identity,
-        "status": "completed",
-        "confidence": "high",
-        "source_authority": "ai-derived",
-    }:
-        raise ValueError("compile receipt frontmatter fields are invalid")
-
-
-def _require_v3_source(
-    record: Mapping[str, object],
-    source_identity: str,
-    logical_path: str,
-    source_sha256: str,
-) -> None:
-    source = record["source"]
-    if (
-        record["source_identity"] != source_identity
-        or source["logical_path"] != logical_path
-        or source["sha256"] != source_sha256
-    ):
-        raise ValueError("compile receipt source identity disagrees")
-
-
-def _require_v3_manifest(record: Mapping[str, object]) -> None:
-    manifest = record["batch_manifest"]
-    _require_sorted_manifest(manifest)
-    if sha256_bytes(canonical_json_bytes(manifest)) != record["batch_manifest_sha256"]:
-        raise ValueError("compile receipt manifest digest disagrees")
-    _require_complete_dispositions(record, manifest)
-
-
-def _require_sorted_manifest(manifest: Sequence[Mapping[str, str]]) -> None:
-    if manifest != sorted(manifest, key=lambda item: item["logical_path"]):
-        raise ValueError("compile receipt manifest is not sorted")
-
-
-def _require_complete_dispositions(
-    record: Mapping[str, object], manifest: Sequence[Mapping[str, str]]
-) -> None:
-    identities = sorted(
-        compile_source_identity(item["logical_path"], item["sha256"])
-        for item in manifest
-    )
-    if [item["source_identity"] for item in record["dispositions"]] != identities:
-        raise ValueError("compile receipt dispositions are incomplete")
-
-
-def _require_v3_identity(record: Mapping[str, object]) -> None:
-    if record["operation_id"] != _compile_operation_id(
-        record["action_key"],
-        record["batch_manifest_sha256"],
-        record["dispositions"],
-    ):
-        raise ValueError("compile receipt operation identity is invalid")
-
-
-
-
-def _require_v3_evidence_scope(
-    record: Mapping[str, object],
-    source_identity: str,
-    logical_path: str,
-    source_sha256: str,
-) -> None:
-    operation_paths = {item["path"] for item in record["operations"]}
-    if len(operation_paths) != len(record["operations"]):
-        raise ValueError("compile receipt operation paths are duplicated")
-    for evidence in record["evidence"]:
-        _require_v3_evidence_entry(
-            evidence, operation_paths, source_identity, logical_path, source_sha256
-        )
-
-
-def _require_v3_evidence_entry(
-    evidence: Mapping[str, str],
-    operation_paths: set[str],
-    source_identity: str,
-    logical_path: str,
-    source_sha256: str,
-) -> None:
-    if (
-        evidence["source_identity"] != source_identity
-        or evidence["source_path"] != logical_path
-        or evidence["source_digest"] != source_sha256
-        or evidence["operation_path"] not in operation_paths
-    ):
-        raise ValueError("compile receipt evidence scope is invalid")
-
-
 def _receipt_reader_active(deadline: float | None) -> None:
     if deadline is not None:
         _require_compile_active(deadline, None)
@@ -6224,125 +5967,6 @@ def read_compile_receipt_v3(
         json.JSONDecodeError,
     ) as exc:
         raise _corrupt_receipt(exc, path) from exc
-
-
-def parse_compile_receipt_v4(
-    raw_bytes: bytes, *, logical_path: str, source_sha256: str
-) -> dict[str, object]:
-    try:
-        return _parsed_receipt_v4(raw_bytes, logical_path, source_sha256)
-    except (IndexError, KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise _corrupt_receipt(exc) from exc
-
-
-def _parsed_receipt_v4(raw_bytes: bytes, logical_path: str, source_sha256: str):
-    frontmatter, body = raw_bytes.decode("utf-8", errors="strict").split("---\n", 2)[1:]
-    prefix = ("\n# Compile Receipt\n\n"
-              "One-sentence summary: This immutable receipt proves completion of a snapshot compile.\n\n"
-              "## Record\n```json\n")
-    record = _receipt_record(body, prefix, COMPILE_RECEIPT_V4_SCHEMA)
-    identity = compile_context_source_identity(record["source"])
-    _require_v4_frontmatter(_receipt_frontmatter(frontmatter), identity)
-    _require_v3_source(record, identity, logical_path, source_sha256)
-    _require_v4_manifest(record)
-    _require_v3_identity(record)
-    _require_v3_evidence_scope(record, identity, logical_path, source_sha256)
-    return record
-
-
-def _require_v4_frontmatter(fields, identity):
-    expected = {
-        "type": "compile-receipt", "schema_version": "compile-receipt/v4",
-        "source_identity": identity, "status": "completed",
-        "confidence": "high", "source_authority": "ai-derived",
-    }
-    if fields != expected:
-        raise ValueError("compile receipt frontmatter fields are invalid")
-
-
-def _require_v4_manifest(record):
-    manifest = record["batch_manifest"]
-    _require_sorted_v4_manifest(manifest)
-    _require_v4_manifest_sources(record, manifest)
-    if sha256_bytes(canonical_json_bytes(manifest)) != record["batch_manifest_sha256"]:
-        raise ValueError("compile receipt manifest digest disagrees")
-    identities = sorted(compile_context_source_identity(item) for item in manifest)
-    if [item["source_identity"] for item in record["dispositions"]] != identities:
-        raise ValueError("compile receipt dispositions are incomplete")
-
-
-def _require_sorted_v4_manifest(manifest):
-    ordered = sorted(manifest, key=lambda item: (item["logical_path"], item["byte_start"]))
-    if manifest != ordered:
-        raise ValueError("compile receipt manifest is not sorted")
-
-
-def _require_v4_manifest_sources(record, manifest):
-    _require_packing_manifest_version(record, manifest)
-    identities = [compile_context_source_identity(item) for item in manifest]
-    if len(identities) != len(set(identities)) or record["source"] not in manifest:
-        raise ValueError("compile receipt source manifest is invalid")
-    for source in manifest:
-        _require_v4_descriptor(source)
-    _require_manifest_part_groups(manifest)
-
-
-def _require_packing_manifest_version(record, manifest):
-    if record["packing"]["algorithm"] != "compile-complete-items/v1":
-        return
-    paths = [source["logical_path"] for source in manifest]
-    if len(paths) != len(set(paths)):
-        raise ValueError("historical packing v1 requires unique source paths")
-
-
-def _require_manifest_part_groups(manifest):
-    grouped = {}
-    for source in manifest:
-        grouped.setdefault(source["logical_path"], []).append(source)
-    for sources in grouped.values():
-        _require_manifest_group(sources)
-
-
-def _require_manifest_group(sources):
-    if len(sources) == 1:
-        return
-    ordered = sorted(sources, key=lambda source: source["byte_start"])
-    if len(_manifest_physical_contexts(ordered)) != 1 or _manifest_discontinuous(ordered):
-        raise ValueError("compile receipt native source parts overlap, have gaps or disagree")
-
-
-def _manifest_physical_contexts(sources):
-    return {(source["original_sha256"], source["original_byte_size"]) for source in sources}
-
-
-def _manifest_discontinuous(sources):
-    return any(left["byte_end"] != right["byte_start"] for left, right in zip(sources, sources[1:]))
-
-
-def parse_compile_receipt_version(raw_bytes, *, logical_path, source_sha256):
-    try:
-        reader = _receipt_version_reader(raw_bytes)
-        return reader(raw_bytes, logical_path=logical_path, source_sha256=source_sha256)
-    except UnsupportedCompileReceiptVersion:
-        raise
-    except (IndexError, KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise _corrupt_receipt(exc) from exc
-
-
-class UnsupportedCompileReceiptVersion(ValueError):
-    """An older reader must preserve evidence written by a newer version."""
-
-
-def _receipt_version_reader(raw_bytes):
-    record = json.loads(raw_bytes.split(b"```json\n", 1)[1].split(b"\n```", 1)[0])
-    if not isinstance(record, dict):
-        raise ValueError("compile receipt record must be an object")
-    readers = {"compile-receipt/v3": parse_compile_receipt_v3,
-               "compile-receipt/v4": parse_compile_receipt_v4}
-    reader = readers.get(record.get("schema_version"))
-    if reader is None:
-        raise UnsupportedCompileReceiptVersion("unsupported compile receipt version")
-    return reader
 
 
 def read_compile_receipt_version(logical_path, source_sha256, coordinator, *, path, vault=None, deadline=None):
@@ -7570,7 +7194,6 @@ class _ContextReceiptSelector:
         return self.prefix_source[1]
 
 
-
 def _historical_receipt_file_identity(path):
     try:
         return _daily_file_identity(path)
@@ -7614,16 +7237,6 @@ def _existing_receipt_selection(selection, coordinator, deadline):
 
 def _receipt_predicate(coordinator: MarkdownCoordinator, *, deadline: float = math.inf):
     return _ContextReceiptSelector(coordinator, deadline)
-
-
-def _receipt_source_fields(raw: bytes) -> tuple[str, str] | None:
-    """The source a receipt claims, read from the receipt itself."""
-    try:
-        payload = json.loads(raw.split(b"```json", 1)[1].split(b"```", 1)[0])
-        source = payload["source"]
-        return str(source["logical_path"]), str(source["sha256"])
-    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
-        return None
 
 
 def _receipt_version_failure_reason(raw: bytes) -> str:
@@ -8845,7 +8458,6 @@ def _repair_operation_present(operation, inputs):
     except (KeyError, TypeError, ValueError):
         return False
     return True
-
 
 
 def _reviewed_operation_for_validation(operation, inputs):

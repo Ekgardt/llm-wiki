@@ -853,3 +853,19 @@ def test_runtime_root_authority_is_fresh_after_symlink_retarget(tmp_path: Path) 
     with pytest.raises(PermissionError, match='outside'):
         reliable_memory.read_runtime_bytes(first / 'record', root, max_bytes=1024)
     assert reliable_memory.read_runtime_bytes(second / 'record', root, max_bytes=1024) == b'second'
+
+
+def test_formats_facades_preserve_single_type_and_function_identity():
+    import compile_cache
+    import compile_memory
+    from llm_wiki.formats import canonical, receipts, schema, source
+
+    assert reliable_memory.canonical_json_bytes is canonical.canonical_json_bytes
+    assert reliable_memory.sha256_bytes is canonical.sha256_bytes
+    assert reliable_memory.SchemaValidationError is schema.SchemaValidationError
+    assert reliable_memory.validate_schema is schema.validate_schema
+    assert reliable_memory.validate_schema_object is schema.validate_schema_object
+    assert compile_cache.SourceDescriptor is source.SourceDescriptor
+    assert compile_cache.SourceOccurrenceBounds is source.SourceOccurrenceBounds
+    assert compile_memory.parse_compile_receipt_version is receipts.parse_compile_receipt_version
+    assert compile_memory.UnsupportedCompileReceiptVersion is receipts.UnsupportedCompileReceiptVersion

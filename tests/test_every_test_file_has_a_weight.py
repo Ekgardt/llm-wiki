@@ -63,3 +63,21 @@ def test_a_failed_measurement_returns_pytest_failure_and_keeps_weights(tmp_path,
     result = shard_plan.main(["--weigh", "tests/test_one.py"])
     assert result == exit_code
     assert table.read_text(encoding="utf-8") == before
+
+
+def test_nested_modules_are_included_but_input_fixtures_are_not(tmp_path, monkeypatch):
+    nested = tmp_path / 'modules/formats/test_contract.py'
+    fixture = tmp_path / 'fixtures/example/test_input.py'
+    for path in (nested, fixture):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('')
+    monkeypatch.setattr(shard_plan, 'TESTS_DIR', tmp_path)
+    assert shard_plan.test_files() == ['modules/formats/test_contract.py']
+
+
+def test_junit_preserves_nested_module_path_and_drops_test_class(tmp_path):
+    report = tmp_path / 'nested.xml'
+    report.write_text(REPORT.replace('tests.test_one', 'tests.modules.formats.test_one.TestContract'))
+    assert shard_plan.junit_seconds(report) == {
+        'modules/formats/test_one.py': 3.5, 'test_skipped_whole.py': 0.0,
+    }

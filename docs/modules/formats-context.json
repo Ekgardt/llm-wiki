@@ -1,0 +1,29 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "directories": [
+    "scripts/llm_wiki/formats",
+    "tests/modules/formats"
+  ],
+  "files": [
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/modules/formats.md",
+    "docs/modules/formats-context.json",
+    "scripts/schemas/compile-receipt-v2.json",
+    "scripts/schemas/compile-receipt-v3.json",
+    "scripts/schemas/compile-receipt-v4.json",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/research/2026-11-02-formats-module-pilot.md",
+    "docs/research/2026-11-02-module-boundaries-validation.md",
+    "docs/research/2026-11-02-module-boundaries-and-token-budget.md",
+    ".gitattributes"
+  ]
+}
