@@ -1553,6 +1553,9 @@ def test_retry_uses_full_jitter_and_longer_retry_after(
         (-1, None),
         ("9" * 100, 604800.0),
         (10**100, 604800.0),
+        (10**400, 604800.0),
+        (-10**400, None),
+        ("²", None),
         (datetime.max.replace(tzinfo=timezone.utc), 604800.0),
     ],
 )
@@ -2202,3 +2205,17 @@ def test_heartbeat_compatibility_names_are_the_owner_classes():
 
     assert memory_queue._LeaseHeartbeat is queue_heartbeat._LeaseHeartbeat
     assert memory_queue._SourceFenceHeartbeat is queue_heartbeat._SourceFenceHeartbeat
+
+
+@pytest.mark.parametrize(('retry_after', 'minimum'), [('²', 0), (-(10**400), 0), (10**400, 604800)],
+                         ids=['unicode-digit', 'huge-negative', 'huge-positive'])
+def test_unusual_numeric_retry_after_settles_legacy_failure(tmp_path, clock, retry_after, minimum):
+    queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(1))
+    task_id = queue.enqueue('query', 1, {})
+    lease = queue.claim('worker')
+    queue.fail(lease, QueueFailure('temporary', retry_after=retry_after))
+    task = queue.get(task_id)
+    assert task.state == 'ready'
+    assert task.lease_token is None
+    assert task.attempt_history[-1].outcome == 'failed'
+    assert (task.available_at - task.updated_at).total_seconds() >= minimum

@@ -3464,6 +3464,9 @@ def _no_retry_after(_value: object, _now: datetime) -> float | None:
 
 
 def _retry_after_number(value: object, _now: datetime) -> float | None:
+    # Bound Python's arbitrary-size integers before converting to a machine float.
+    if isinstance(value, int):
+        value = max(-1, min(value, _MAX_RETRY_AFTER_SECONDS))
     return _bounded_retry_number(float(value))  # type: ignore[arg-type]
 
 
@@ -3500,9 +3503,9 @@ def _bounded_retry_until(value: datetime, now: datetime) -> float:
 def _retry_after_from_text(value: str, now: datetime) -> float | None:
     """A Retry-After header: either a count of seconds or an HTTP date."""
     stripped = value.strip()
-    if stripped.isdigit():
-        return _bounded_retry_number(float(stripped))
     try:
+        if stripped.isdigit():
+            return _bounded_retry_number(float(stripped))
         parsed = email.utils.parsedate_to_datetime(stripped)
     except (TypeError, ValueError, OverflowError):
         return None
