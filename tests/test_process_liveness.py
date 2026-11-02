@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import ast
 import errno
+import json
 import os
 import sys
 from pathlib import Path
 
 import pytest
+import tiktoken
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -42,18 +45,6 @@ def test_esrch_is_dead_and_eperm_is_alive_in_doubt(monkeypatch) -> None:
     assert process_liveness.pid_alive(4242) is False
 
 
-def test_the_three_legacy_locks_ask_the_same_probe(monkeypatch) -> None:
-    """Audit OPS-08: memory_state, markdown_transaction and doctor delegate."""
-    import doctor
-    import markdown_transaction
-    import memory_state
-
-    monkeypatch.setattr(process_liveness, "process_state", lambda _pid: "unknown")
-
-    assert memory_state._is_pid_alive(4242) is True
-    assert markdown_transaction._pid_alive(4242) is True
-    assert doctor._pid_alive(4242) is True
-    assert doctor._lsp_pid_state(4242) == "unknown"
 
 
 def test_linux_identity_binds_scope_and_start_ticks(monkeypatch) -> None:
@@ -178,3 +169,71 @@ def test_owner_without_birth_identity_stays_unknown(system, identity, monkeypatc
     monkeypatch.setattr(process_liveness, "_platform_system", lambda: system)
     monkeypatch.setattr(process_liveness, "process_state", lambda _pid: "dead")
     assert process_liveness.recorded_process_state(4000000, identity) == "unknown"
+
+
+_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _import_roots(node):
+    if isinstance(node, ast.Import):
+        return {alias.name.split('.')[0] for alias in node.names}
+    if isinstance(node, ast.ImportFrom):
+        return {('.' * node.level + (node.module or '')).split('.')[0]}
+    return set()
+
+
+def _external_imports(source):
+    roots = set().union(*(_import_roots(node) for node in ast.walk(ast.parse(source))))
+    return roots - sys.stdlib_module_names
+
+
+def test_process_probe_has_no_executor_dependencies():
+    source = (_ROOT / 'scripts/process_liveness.py').read_text(encoding='utf-8')
+    assert not _external_imports(source)
+
+
+def test_owned_tests_do_not_load_executors():
+    source = Path(__file__).read_text(encoding='utf-8')
+    assert _external_imports(source) <= {'process_liveness', 'pytest', 'tiktoken'}
+
+
+@pytest.mark.parametrize('source', [
+    'import memory_state', 'from doctor import _pid_alive',
+    'def probe():\n import memory_queue as executor', 'from operational_ownership import *',
+    'from . import local', 'from .os import kill',
+])
+def test_boundary_detects_executor_and_relative_imports(source):
+    assert _external_imports(source)
+
+
+def test_boundary_accepts_standard_library():
+    assert not _external_imports('import os as system\nfrom pathlib import Path')
+
+
+def test_complete_process_liveness_context_fits_user_ceiling():
+    manifest = json.loads((_ROOT / 'docs/modules/process-liveness-context.json').read_text())
+    paths = manifest['files']
+    assert {'scripts/process_liveness.py', 'tests/test_process_liveness.py',
+            'docs/modules/process-liveness.md', 'docs/modules/process-liveness-context.json'} <= set(paths)
+    assert len(paths) == len(set(paths))
+    assert manifest['max_tokens'] == 100_000
+    encoder = tiktoken.get_encoding(manifest['encoding'])
+    counts = {name: len(encoder.encode((_ROOT / name).read_text(encoding='utf-8'),
+              disallowed_special=())) for name in paths}
+    print(f'process-liveness context: {sum(counts.values())} tokens; {len(paths)} files')
+    assert sum(counts.values()) <= manifest['max_tokens'], counts
+
+
+@pytest.mark.parametrize('recorded_scope, observed, expected', [
+    (('1' * 64, '550e8400-e29b-41d4-a716-446655440000', '4', '100', '4.200'), None, 'dead'),
+    (('1' * 64, '550e8400-e29b-41d4-a716-446655440000', '4', '101', '4.200'), None, 'unknown'),
+    (('1' * 64, '550e8400-e29b-41d4-a716-446655440000', '4', '100', '4.201'), None, 'unknown'),
+    (('2' * 64, '550e8400-e29b-41d4-a716-446655440000', '4', '100', '4.200'), None, 'unknown'),
+    (('1' * 64, '650e8400-e29b-41d4-a716-446655440000', '4', '100', '4.200'), None, 'dead'),
+])
+def test_recorded_owner_requires_comparable_scope(monkeypatch, recorded_scope, observed, expected):
+    scope = ('1' * 64, '550e8400-e29b-41d4-a716-446655440000', '4', '100', '4.200')
+    monkeypatch.setattr(process_liveness, '_platform_system', lambda: 'Linux')
+    monkeypatch.setattr(process_liveness, '_linux_observer_scope', lambda: scope)
+    identity = ':'.join(('linux-v2', *recorded_scope, '10'))
+    assert process_liveness.recorded_process_state(42, identity, probe=lambda _pid: observed) == expected

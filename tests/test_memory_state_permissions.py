@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 
+import process_liveness
 import pytest
 
 
@@ -216,3 +217,17 @@ def test_a_dead_state_lock_is_retired_and_a_live_one_waited_out(tmp_path, monkey
     memory_state._await_lock_turn(deadline=time.time() + 5, poll=0.01)
 
     assert (waited_out, lock.exists()) == (True, False)
+
+
+def test_the_three_legacy_locks_ask_the_same_probe(monkeypatch) -> None:
+    """Audit OPS-08: memory_state, markdown_transaction and doctor delegate."""
+    import doctor
+    import markdown_transaction
+    import memory_state
+
+    monkeypatch.setattr(process_liveness, "process_state", lambda _pid: "unknown")
+
+    assert memory_state._is_pid_alive(4242) is True
+    assert markdown_transaction._pid_alive(4242) is True
+    assert doctor._pid_alive(4242) is True
+    assert doctor._lsp_pid_state(4242) == "unknown"

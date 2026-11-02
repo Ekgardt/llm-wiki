@@ -1,0 +1,25 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/research/2026-11-02-formats-module-pilot.md",
+    "docs/research/2026-11-02-module-boundaries-validation.md",
+    "docs/research/2026-11-02-module-boundaries-and-token-budget.md",
+    ".gitattributes",
+    "scripts/process_liveness.py",
+    "tests/test_process_liveness.py",
+    "docs/modules/process-liveness.md",
+    "docs/modules/process-liveness-context.json",
+    "docs/research/2026-09-11-one-answer-to-is-this-process-alive.md",
+    "docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md",
+    "docs/research/2026-09-29-a-hidden-process-is-not-a-dead-owner.md"
+  ]
+}

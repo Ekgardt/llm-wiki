@@ -1173,3 +1173,54 @@ def test_cli_unexpected_failure_emits_generic_internal_error(
     captured = capsys.readouterr()
     assert captured.out == '{"codes":["internal_error"]}\n'
     assert captured.err == ""
+
+
+def _deny_memory_state_import(monkeypatch):
+    import builtins
+
+    original = builtins.__import__
+    attempted = []
+
+    def import_owner(name, *args, **kwargs):
+        if name == 'memory_state':
+            attempted.append(name)
+            raise ImportError('state executor unavailable')
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, '__import__', import_owner)
+    return attempted
+
+
+@pytest.mark.parametrize('state, expected', [('alive', True), ('dead', False), ('unknown', True)])
+def test_queue_process_probe_does_not_load_state_executor(monkeypatch, state, expected):
+    import process_liveness
+
+    monkeypatch.setattr(process_liveness, 'process_state', lambda _pid: state)
+    attempted = _deny_memory_state_import(monkeypatch)
+    assert memory_queue._pid_is_alive(4242) is expected
+    assert attempted == []
+
+
+@pytest.mark.parametrize('pid', [0, -1, True, False, '12', None, 1.5])
+def test_queue_process_probe_retains_invalid_pid_contract(pid):
+    assert memory_queue._pid_is_alive(pid) is False
+
+
+def test_queue_process_probe_retains_conservative_failure(monkeypatch):
+    import process_liveness
+
+    def refuse(_pid):
+        raise OSError('process information unavailable')
+
+    monkeypatch.setattr(process_liveness, 'pid_alive', refuse)
+    assert memory_queue._pid_is_alive(4242) is True
+
+
+def test_queue_process_probe_has_no_state_import():
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(memory_queue._pid_is_alive))
+    modules = [node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
+    assert 'memory_state' not in modules
+    assert 'process_liveness' in modules

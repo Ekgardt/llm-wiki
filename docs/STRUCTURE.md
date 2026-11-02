@@ -1846,3 +1846,14 @@ writes. Its own tests remain `tests/test_bounded_io.py` and
 `bounded-io-context.json`. Both modules use only stdlib. Their manifests count
 complete maintenance packets under 100,000 o200k_base tokens. Related integration
 tests remain with their existing owners. No runtime or source-path changes occur.
+
+## Existing process-liveness boundary (qualified 2026-11-02)
+
+`scripts/process_liveness.py` remains the stdlib-only owner of local process
+probes and recorded start-identity comparison. Own tests remain in
+`tests/test_process_liveness.py`; the unchanged three-lock integration case now
+lives in the existing `tests/test_memory_state_permissions.py`. Queue cleanup
+calls the common probe directly, preserving its legacy invalid-PID handling and
+conservative error result. Identity-bearing ownership decisions keep their
+existing readers. See `docs/modules/process-liveness.md` and its full context
+manifest. No source path, runtime location or OS probe implementation changes.

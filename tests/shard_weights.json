@@ -891,7 +891,7 @@
   "test_plugin_helpers.py": 41.6,
   "test_powershell_functions_stay_simple.py": 2.37,
   "test_private_vault_backup.py": 129.47,
-  "test_process_liveness.py": 0.02,
+  "test_process_liveness.py": 0.29,
   "test_process_namespace_ownership.py": 1.51,
   "test_project_checkpoint_triggers.py": 0.05,
   "test_project_context_output_failure.py": 0.04,

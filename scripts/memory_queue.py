@@ -13625,9 +13625,13 @@ def _fence_owner_alive(row: sqlite3.Row) -> bool:
 
 def _pid_is_alive(pid: int) -> bool:
     try:
-        from memory_state import _is_pid_alive
+        from process_liveness import pid_alive
 
-        return _is_pid_alive(pid)
+        # Preserve this adapter's legacy invalid-PID policy; the common probe
+        # itself reports invalid input as unknown.
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+            return False
+        return pid_alive(pid)
     except Exception:  # noqa: BLE001 - inability to prove death is treated as live
         return True
 
