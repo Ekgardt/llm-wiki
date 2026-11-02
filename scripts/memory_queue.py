@@ -29,6 +29,29 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, NoReturn
 
+from llm_wiki.queue_child_runtime import (
+    _await_child_message as _await_child_message,
+)
+from llm_wiki.queue_child_runtime import (
+    _child_ready_handshake as _child_ready_handshake,
+)
+from llm_wiki.queue_child_runtime import (
+    _ChildRun as _ChildRun,
+)
+from llm_wiki.queue_child_runtime import (
+    _decode_processor_frame as _decode_processor_frame,
+)
+from llm_wiki.queue_child_runtime import (
+    _encode_processor_outcome,
+    _send_processor_frame,
+)
+from llm_wiki.queue_child_runtime import (
+    _settle_child_exit as _settle_child_exit,
+)
+from llm_wiki.queue_child_runtime import (
+    run_processor_child as _run_child_runtime,
+)
+from llm_wiki.queue_contracts import _MAX_RESULT_BYTES
 from llm_wiki.queue_process_cleanup import (
     _pid_is_alive as _pid_is_alive,
 )
@@ -36,8 +59,10 @@ from llm_wiki.queue_process_cleanup import (
     _taskkill as _taskkill,
 )
 from llm_wiki.queue_process_cleanup import (
-    _terminate_processor_child,
-    _tracked_descendant_pids,
+    _terminate_processor_child as _terminate_processor_child,
+)
+from llm_wiki.queue_process_cleanup import (
+    _tracked_descendant_pids as _tracked_descendant_pids,
 )
 
 if TYPE_CHECKING:
@@ -108,7 +133,6 @@ _PERMANENT_CODES = {"invalid_input", "unsupported_version"}
 # A provider's retry-after is honoured up to a week, the one bound on that reading
 # (docs/research/2026-09-17-the-adopted-queue-waits-as-long-as-it-was-told.md).
 _MAX_RETRY_AFTER_SECONDS = 7 * 24 * 60 * 60
-_MAX_RESULT_BYTES = 16 * 1024 * 1024
 _MAX_EXPORT_METADATA_BYTES = 64 * 1024 * 1024
 # Ceiling on a task's configured attempts and on its attempt history. basis unknown — value predates measurement; review when a task reaches it in normal operation.
 _MAX_RUNTIME_ATTEMPTS = 100
@@ -14404,15 +14428,6 @@ def _run_processor_inline(
     return processor(task)
 
 
-def _encode_processor_outcome(outcome: object) -> bytes:
-    """The wire frame that carries one processor outcome to the parent."""
-    if isinstance(outcome, DeferredResult):
-        return b"D" + outcome.data
-    if isinstance(outcome, bool):
-        return b"T" if outcome else b"F"
-    return b"?"
-
-
 def _record_processor_failure(task: dict[str, Any], error: BaseException) -> None:
     """Leave the reason on disk before the wire flattens it to one letter.
 
@@ -14449,22 +14464,6 @@ def _processor_result_frame(
         return b"E"
 
 
-def _send_processor_frame(sender: Any, frame: bytes) -> None:
-    """Hand the frame over, but only once the parent says it is listening.
-
-    `frame` is the finished result: the caller evaluates it before this runs, so
-    `R` means "the task is done and I have an answer", not "I am up". The parent
-    reads the child's descendants on this signal, and that ordering is the
-    reason the set it gets is the tree the task left running rather than an
-    empty one. See
-    `docs/research/2026-09-18-a-childs-tree-is-read-when-it-is-killed.md`.
-    """
-    sender.send_bytes(b"R")
-    if not sender.poll(5) or sender.recv_bytes(1) != b"A":
-        return
-    sender.send_bytes(frame)
-
-
 def _processor_child_entry(
     sender: Any,
     processor: Callable[[dict], bool | DeferredResult],
@@ -14481,177 +14480,6 @@ def _processor_child_entry(
     finally:
         sender.close()
 
-# The whole-frame codes that carry a plain boolean outcome.
-_PROCESSOR_BOOLEAN_FRAMES = MappingProxyType({b"T": True, b"F": False})
-
-
-def _decode_deferred_frame(frame: bytes) -> DeferredResult:
-    """The deferred result a `D` frame carries."""
-    data = frame[1:]
-    if len(data) > _MAX_RESULT_BYTES:
-        raise QueueOperationError("processor_result_oversize")
-    return DeferredResult(data)
-
-
-def _processor_frame_failure(frame: bytes) -> str:
-    """Which failure a frame that carries no outcome means."""
-    return "processor_exception" if frame == b"E" else "processor_result_malformed"
-
-
-def _decode_processor_frame(frame: bytes) -> bool | DeferredResult:
-    if frame[:1] == b"D":
-        return _decode_deferred_frame(frame)
-    if frame in _PROCESSOR_BOOLEAN_FRAMES:
-        return _PROCESSOR_BOOLEAN_FRAMES[frame]
-    raise QueueOperationError(_processor_frame_failure(frame))
-
-
-@dataclass
-class _ChildRun:
-    """One processor child: its process, its pipe, and its deadline."""
-
-    process: multiprocessing.Process
-    receiver: object
-    deadline: float
-    tracked_descendants: set[int] | None = None
-    lease_lost: Callable[[], bool] | None = None
-    cancelled: Callable[[], bool] | None = None
-
-    def remaining(self) -> float:
-        return self.deadline - time.monotonic()
-
-    def lost(self) -> bool:
-        return self.lease_lost is not None and self.lease_lost()
-
-    def stop(self) -> None:
-        """Terminate the child, discovering its tree when we never tracked it.
-
-        Passing an explicit None means "there are no descendants"; only the
-        default sentinel asks for discovery, and before the handshake that is
-        what we want.
-        """
-        tracked = self.tracked_descendants
-        if tracked is None:
-            self.tracked_descendants = _terminate_processor_child(self.process)
-            return
-        self.tracked_descendants = _terminate_processor_child(
-            self.process, tracked_descendants=tracked
-        )
-
-
-# How often a waiting parent looks at its lease. See
-# `docs/research/2026-09-14-a-lost-lease-stops-its-child.md`.
-CHILD_LEASE_CHECK_SECONDS = 1.0
-
-
-def _await_child_message(run: _ChildRun) -> None:
-    """Wait for the child to say something before its deadline runs out or its lease is lost."""
-    while not run.receiver.poll(max(0.0, min(run.remaining(), CHILD_LEASE_CHECK_SECONDS))):
-        _stop_child_if_done_waiting(run)
-
-
-def _stop_child_if_done_waiting(run: _ChildRun) -> None:
-    """A deadline decides whether to keep waiting, not whether to drop an answer.
-
-    Without the second look, a frame written between the poll's expiry and this
-    check became `worker_timeout` and the finished work was thrown away. See
-    `docs/research/2026-09-18-an-answer-that-arrived-is-not-a-timeout.md`.
-    """
-    reason = _child_stop_reason(run)
-    if reason is not None:
-        run.stop()
-        raise QueueOperationError(reason)
-    if _may_keep_waiting(run):
-        return
-    run.stop()
-    raise TimeoutError
-
-
-def _child_stop_reason(run: _ChildRun) -> str | None:
-    if run.lost():
-        return 'lease_lost'
-    if run.cancelled is not None and run.cancelled():
-        return 'worker_cancelled'
-    return None
-
-
-def _may_keep_waiting(run: _ChildRun) -> bool:
-    """Time left, or an answer already in the pipe; either ends this check."""
-    return run.remaining() > 0 or bool(run.receiver.poll(0))
-
-
-def _child_ready_handshake(run: _ChildRun) -> None:
-    """The child says it has an answer, and only then do we track its tree.
-
-    `R` is sent after the processor has returned, not when the child starts, so
-    the tree recorded here is the one the finished task left behind — a provider
-    the processor shelled out to and did not wait for. Moving this earlier would
-    record an empty set and leave `_cleanup_confirmed` and `_await_cleanup`
-    verifying nothing.
-    """
-    _await_child_message(run)
-    try:
-        ready = run.receiver.recv_bytes(1)
-    except (OSError, EOFError):
-        raise QueueOperationError("processor_result_malformed") from None
-    if ready != b"R":
-        raise QueueOperationError("processor_result_malformed")
-    run.tracked_descendants = _tracked_descendant_pids(run.process.pid, os.name)
-    run.receiver.send_bytes(b"A")
-
-
-def _abandon_oversize_child(run: _ChildRun) -> None:
-    """A child that sent more than we accept is stopped, not waited out."""
-    run.receiver.close()
-    run.process.join(0.5)
-    if run.process.is_alive():
-        run.stop()
-
-
-def _child_result_frame(run: _ChildRun) -> bytes:
-    """The result frame the child sent, or why it could not be read."""
-    _await_child_message(run)
-    try:
-        return run.receiver.recv_bytes(_MAX_RESULT_BYTES + 1)
-    except OSError:
-        _abandon_oversize_child(run)
-        raise QueueOperationError("processor_result_oversize") from None
-    except EOFError:
-        raise QueueOperationError("processor_result_malformed") from None
-
-
-def _child_left_in_time(run: _ChildRun) -> bool:
-    """Whether the child exited within its deadline; a lingering one is stopped."""
-    while run.process.is_alive() and run.remaining() > 0:
-        if _child_stop_reason(run) is not None:
-            break
-        run.process.join(min(run.remaining(), CHILD_LEASE_CHECK_SECONDS))
-    if not run.process.is_alive():
-        return True
-    run.stop()
-    return False
-
-
-def _settle_child_exit(run: _ChildRun) -> None:
-    """Check how the child left, once its answer is already in hand.
-
-    A child that will not leave is a cleanup problem — `stop` kills its tree —
-    and no longer a reason to discard the frame it already sent. One that does
-    leave is still judged by its exit code. See
-    `docs/research/2026-09-18-an-answer-that-arrived-is-not-a-timeout.md`.
-    """
-    if not _child_left_in_time(run):
-        return
-    if run.process.exitcode != 0:
-        raise QueueOperationError("processor_child_failed")
-
-
-def _require_child_start(timeout, cancelled):
-    if timeout <= 0:
-        raise TimeoutError
-    if cancelled is not None and cancelled():
-        raise QueueOperationError('worker_cancelled')
-
 
 def _run_processor_child(
     processor: Callable[[dict], bool | DeferredResult],
@@ -14660,31 +14488,10 @@ def _run_processor_child(
     lease_lost: Callable[[], bool] | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> bool | DeferredResult:
-    _require_child_start(timeout, cancelled)
-    context = multiprocessing.get_context("spawn")
-    receiver, sender = context.Pipe(duplex=True)
-    process = context.Process(
-        target=_processor_child_entry,
-        args=(sender, processor, task),
-        daemon=False,
+    return _run_child_runtime(
+        processor, task, timeout, lease_lost, cancelled,
+        child_entry=_processor_child_entry,
     )
-    run = _ChildRun(process, receiver, time.monotonic() + timeout,
-                    lease_lost=lease_lost, cancelled=cancelled)
-    started = False
-    try:
-        process.start()
-        started = True
-        sender.close()
-        _child_ready_handshake(run)
-        frame = _child_result_frame(run)
-        _settle_child_exit(run)
-        return _decode_processor_frame(frame)
-    finally:
-        receiver.close()
-        if started:
-            # Through `stop`, which knows that a tree never tracked — a child
-            # that died before its handshake — is discovered now, not unknown.
-            run.stop()
 
 
 # The pause between claim attempts while the queue database is busy, within the

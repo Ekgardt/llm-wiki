@@ -5,6 +5,10 @@ The module owns the 20 existing public queue records and errors listed in
 open a database, start a worker, acquire ownership or validate new business rules.
 Frozen records retain the original fields, defaults and methods.
 
+The existing `_MAX_RESULT_BYTES` constant also lives here as the single 16 MiB
+result ceiling shared by queue storage and the child transport. Its value is
+unchanged; the 20 exported record/error types and their pickle names are unchanged.
+
 Consumers import types from `llm_wiki.queue_contracts`; queue operations remain
 in `memory_queue`. That facade reexports the identical objects. Their historical
 `memory_queue` module names are deliberately retained for pickle compatibility,

@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
+# Shared existing result ceiling for queue storage and child byte transport.
+_MAX_RESULT_BYTES = 16 * 1024 * 1024
+
 
 class LeaseFenceError(RuntimeError):
     """Raised when a lease token no longer owns an unexpired task."""

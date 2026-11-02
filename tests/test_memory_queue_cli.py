@@ -1045,3 +1045,14 @@ def test_queue_cleanup_names_reference_the_single_owner():
     names = ('_pid_is_alive', '_taskkill', '_terminate_processor_child', '_tracked_descendant_pids')
     for name in names:
         assert getattr(memory_queue, name) is getattr(cleanup, name)
+
+
+def test_queue_child_names_and_result_limit_reference_their_owners():
+    import llm_wiki.queue_child_runtime as child
+    from llm_wiki.queue_contracts import _MAX_RESULT_BYTES
+
+    names = ('_ChildRun', '_await_child_message', '_child_ready_handshake',
+             '_decode_processor_frame', '_settle_child_exit')
+    for name in names:
+        assert getattr(memory_queue, name) is getattr(child, name)
+    assert memory_queue._MAX_RESULT_BYTES == child._MAX_RESULT_BYTES == _MAX_RESULT_BYTES

@@ -11,17 +11,10 @@ was lost.
 from __future__ import annotations
 
 import multiprocessing
-import sys
 import time
-from pathlib import Path
 
+import llm_wiki.queue_child_runtime as child
 import pytest
-
-SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
-
-import memory_queue  # noqa: E402
 
 from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
 
@@ -51,9 +44,9 @@ def _sleep_forever() -> None:
     time.sleep(3600)
 
 
-def _expired_run(process: multiprocessing.Process, receiver) -> memory_queue._ChildRun:
+def _expired_run(process: multiprocessing.Process, receiver) -> child._ChildRun:
     """A child whose deadline is already in the past."""
-    return memory_queue._ChildRun(
+    return child._ChildRun(
         process, receiver, deadline=time.monotonic() - 1.0, tracked_descendants=set()
     )
 
@@ -72,7 +65,7 @@ def test_an_answer_that_lands_after_the_last_look_ends_the_wait() -> None:
     process = _finished_process()
     run = _expired_run(process, _PipeThatMissesTheFirstLook(receiver))
 
-    memory_queue._await_child_message(run)
+    child._await_child_message(run)
 
     assert (run.receiver.poll(0), process.exitcode) == (True, 0)
 
@@ -83,7 +76,7 @@ def test_an_empty_pipe_at_the_deadline_is_still_a_timeout() -> None:
     run = _expired_run(process, receiver)
 
     with pytest.raises(TimeoutError):
-        memory_queue._await_child_message(run)
+        child._await_child_message(run)
 
 
 def test_a_child_that_lingers_after_answering_does_not_lose_its_answer() -> None:
@@ -94,7 +87,7 @@ def test_a_child_that_lingers_after_answering_does_not_lose_its_answer() -> None
     run = _expired_run(process, receiver)
 
     try:
-        memory_queue._settle_child_exit(run)
+        child._settle_child_exit(run)
     finally:
         process.terminate()
         process.join(SHORT_TIMEOUT)

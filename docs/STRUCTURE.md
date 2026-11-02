@@ -1874,3 +1874,20 @@ manifest and guide are `docs/modules/queue-process-cleanup-context.json` and
 100,000-token ceiling; worker/spawn scenarios remain additional qualification.
 No runtime root, database, dependency or daemon is added. Approval is recorded
 in `knowledge/notes/queue-process-cleanup-decision-20261102.md`.
+
+## Queue child runtime (approved 2026-11-02)
+
+`scripts/llm_wiki/queue_child_runtime.py` owns queue child spawn, Pipe protocol,
+bounded result decoding, deadline/cancellation/lease-loss observation and calls
+to the existing queue_process_cleanup owner. It takes an explicit child entry
+function; it does not import queue executors, capture diagnostics or state.
+The existing memory_queue._run_processor_child signature remains as a thin
+adapter supplying memory_queue._processor_child_entry. That entry and diagnostic
+policy keep their previous spawn/import identity. The shared result byte limit
+has one definition in queue_contracts; its value and behavior are unchanged.
+Tests live in `tests/modules/queue_child_runtime/`; guide and complete context
+manifest live at `docs/modules/queue-child-runtime.md` and
+`docs/modules/queue-child-runtime-context.json`, with the 100,000-token gate.
+Real queue/compile process scenarios remain additional qualification. This adds
+no runtime path, database, daemon or dependency. Approval is recorded in
+`knowledge/notes/queue-child-runtime-decision-20261102.md`.

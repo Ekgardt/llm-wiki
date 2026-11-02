@@ -5,6 +5,11 @@ queue child-tree discovery, termination escalation and verified cleanup. It
 depends only on stdlib, `queue_contracts.QueueOperationError` and the common
 `process_liveness.pid_alive` probe. It does not launch jobs or own their leases.
 
+The later approved queue_child_runtime extraction makes that module the direct
+owner of `_ChildRun` and handshake calls into cleanup. memory_queue retains the
+required aliases used by existing consumers; the cleanup implementation stays
+unchanged. Launch orchestration is described in queue-child-runtime.md.
+
 ## Contract
 
 `_tracked_descendant_pids(pid, platform_name)` returns the known descendants or
