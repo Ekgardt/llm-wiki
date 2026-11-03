@@ -2143,3 +2143,13 @@ not just scripts and tests. Static absolute imports conservatively include local
 candidates in the repository, scripts, tests, benchmark and importing directory;
 relative imports and package initializers remain inside the repository. Runtime
 import paths are unchanged. See [closure correction](research/2026-11-03-benchmark-context-closure.md).
+
+### Offline fitting and answer representation owners
+
+Existing paths remain: [offline lane fitting](modules/fit-lane-score.md) reads saved
+results and depends on lane_score; [answer budget](modules/answer-budget.md) owns
+answer shaping and estimates; [answer cost](modules/answer-cost.md) depends on that
+estimate and owns optional telemetry. Pure tests move unchanged; real recorder,
+reader and MCP integration assertions remain. The test import guard gains explicit
+benchmark roots without changing its scripts-only default. No production byte,
+public command, threshold, environment contract, provider call or runtime path changes.

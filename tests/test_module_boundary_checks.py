@@ -40,3 +40,21 @@ def test_explicit_dependency_is_allowed_without_weakening_default(tmp_path):
     with pytest.raises(AssertionError, match='dependency'):
         assert_isolated_import(tmp_path, 'owner')
     assert_isolated_import(tmp_path, 'owner', dependencies=('dependency',))
+
+
+@pytest.mark.parametrize('forbidden_root', ['scripts', 'benchmark'])
+def test_explicit_launch_roots_guard_dependencies_in_each_root(tmp_path, forbidden_root):
+    from tests.module_boundaries import assert_isolated_import
+
+    scripts, benchmark = tmp_path / 'scripts', tmp_path / 'benchmark'
+    scripts.mkdir()
+    benchmark.mkdir()
+    (benchmark / 'owner.py').write_text('import dependency\n')
+    (scripts / 'dependency.py').write_text('import forbidden\n')
+    (tmp_path / forbidden_root / 'forbidden.py').write_text('')
+    with pytest.raises(AssertionError, match='forbidden'):
+        assert_isolated_import(tmp_path, 'owner', dependencies=('dependency',),
+                               source_roots=('scripts', 'benchmark'))
+    (scripts / 'dependency.py').write_text('')
+    assert_isolated_import(tmp_path, 'owner', dependencies=('dependency',),
+                           source_roots=('scripts', 'benchmark'))

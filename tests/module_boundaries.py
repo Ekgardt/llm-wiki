@@ -28,21 +28,22 @@ def assert_stdlib_boundary(root: Path, module: str) -> None:
     assert not nonstdlib_imports(source)
 
 
-def assert_isolated_import(root: Path, module: str, *, dependencies=()) -> None:
+def assert_isolated_import(root: Path, module: str, *, dependencies=(), source_roots=('scripts',)) -> None:
     program = '''
 import importlib, importlib.abc, json, pathlib, sys
-scripts = pathlib.Path(sys.argv[1])
+root = pathlib.Path(sys.argv[1])
 module = sys.argv[2]
 allowed = set(json.loads(sys.argv[3]))
-local = {p.stem for p in scripts.glob('*.py')} | {'llm_wiki'}
+roots = [root / name for name in json.loads(sys.argv[4])]
+local = {p.stem for folder in roots for p in folder.glob('*.py')} | {'llm_wiki'}
 class Guard(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         assert fullname in allowed or fullname.split('.')[0] not in local, fullname
-sys.path.insert(0, str(scripts))
+sys.path[:0] = [str(folder) for folder in roots]
 sys.meta_path.insert(0, Guard())
 importlib.import_module(module)
 '''
-    result = subprocess.run([sys.executable, '-c', program, str(root / 'scripts'), module,
-                             json.dumps([module, *dependencies])],
+    result = subprocess.run([sys.executable, '-c', program, str(root), module,
+                             json.dumps([module, *dependencies]), json.dumps(source_roots)],
                             capture_output=True, text=True, timeout=LONG_TIMEOUT)
     assert result.returncode == 0, result.stderr

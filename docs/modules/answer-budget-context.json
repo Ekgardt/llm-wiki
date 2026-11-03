@@ -1,0 +1,63 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md",
+    "scripts/answer_budget.py",
+    "docs/modules/answer-budget.md",
+    "docs/modules/answer-budget-context.json",
+    "docs/research/2026-08-28-token-budgeted-answers.md",
+    "docs/research/2026-08-29-a-default-budget-for-a-dead-code-answer.md",
+    "docs/research/2026-08-29-what-the-caller-asked.md",
+    "docs/research/2026-09-12-three-changes-to-pass-them.md",
+    "docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md",
+    "docs/research/2026-09-27-an-estimate-is-measured-and-an-open-day-waits.md",
+    "docs/research/2026-11-03-answer-budget-cost-owner-qualification.md",
+    "tests/test_an_answer_is_shaped_beyond_six_levels.py",
+    "tests/test_a_shared_prefix_is_chosen_by_its_cost.py"
+  ],
+  "directories": [
+    "tests/modules/answer_budget"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "scripts/answer_budget.py",
+      "docs/modules/answer-budget.md",
+      "docs/modules/answer-budget-context.json",
+      "docs/research/2026-08-28-token-budgeted-answers.md",
+      "docs/research/2026-08-29-a-default-budget-for-a-dead-code-answer.md",
+      "docs/research/2026-08-29-what-the-caller-asked.md",
+      "docs/research/2026-09-12-three-changes-to-pass-them.md",
+      "docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md",
+      "docs/research/2026-09-27-an-estimate-is-measured-and-an-open-day-waits.md",
+      "docs/research/2026-11-03-answer-budget-cost-owner-qualification.md",
+      "tests/test_an_answer_is_shaped_beyond_six_levels.py",
+      "tests/test_a_shared_prefix_is_chosen_by_its_cost.py"
+    ],
+    "directories": [
+      "tests/modules/answer_budget"
+    ]
+  }
+}
