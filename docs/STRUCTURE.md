@@ -2249,3 +2249,9 @@ opening/closing a second descriptor. SQLite IO imports this owner directly;
 runtime_records retains byte reads and platform file-identity capture, along with
 historical metadata aliases. This preserves live SQLite locks while removing an
 unrelated dependency on Windows workspace operations.
+
+[Ownership rows](modules/ownership-rows.md), in
+`scripts/llm_wiki/ownership_rows.py`, owns acquisition row values, epoch allocation,
+row insertion and exact-fence projection cleanup on a supplied SQLite connection.
+The registry retains transaction control and proof that an owner may be reclaimed;
+SQL, counter scope and binding-before-fence deletion order remain unchanged.
