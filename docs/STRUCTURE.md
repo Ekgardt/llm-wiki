@@ -2002,3 +2002,18 @@ path redaction and clipping remain with their current callers; aliases preserve
 stage instrumentation. See [research](research/2026-11-03-lsp-credential-boundary.md).
 
 Full contract: [LSP credential masking](modules/lsp-credentials.md).
+
+### Code classification and named repository refusal
+
+The existing `code_languages` and `repository_refusal` owners remain independent,
+with their present imports and behavior. Separate packets will own suffix-map
+identity and named refusal values; corpus/index/CLI integration remains with
+callers. See [research](research/2026-11-03-code-classification-refusal-packets.md).
+
+### Graph storage values
+
+The existing `graph_storable` owner keeps shared text, identity and metadata
+adaptation without graph writers or database imports. See
+[research](research/2026-11-03-graph-storable-packet.md).
+
+Full contracts: [Code languages](modules/code-languages.md), [Repository refusal](modules/repository-refusal.md), [Graph storage values](modules/graph-storable.md).

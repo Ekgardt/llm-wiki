@@ -3,7 +3,6 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import hashlib
-import json
 import os
 import stat
 from datetime import datetime, timezone
@@ -15,29 +14,7 @@ import pytest
 from code_languages import CODE_LANGUAGE_BY_SUFFIX, language_for_path
 from corpus_snapshot import CorpusChanged, collect_corpus, validate_live_snapshot
 
-EXPECTED_CODE_LANGUAGE_BY_SUFFIX = {
-    ".bash": "bash",
-    ".c": "c",
-    ".cc": "cpp",
-    ".cpp": "cpp",
-    ".cs": "c_sharp",
-    ".cxx": "cpp",
-    ".go": "go",
-    ".h": "c",
-    ".hh": "cpp",
-    ".hpp": "cpp",
-    ".hxx": "cpp",
-    ".java": "java",
-    ".js": "javascript",
-    ".jsx": "javascript",
-    ".php": "php",
-    ".py": "python",
-    ".rb": "ruby",
-    ".rs": "rust",
-    ".sh": "bash",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-}
+from tests.modules.code_languages.expected_languages import EXPECTED_CODE_LANGUAGE_BY_SUFFIX
 
 
 @pytest.fixture
@@ -278,30 +255,6 @@ def test_supported_code_suffixes_override_natural_language_inference(
 
     assert snapshot.sources[0].record.language == language
     assert snapshot.chunks[0].language == language
-
-
-def test_code_language_map_exactly_matches_independent_complete_contract():
-    assert dict(CODE_LANGUAGE_BY_SUFFIX) == EXPECTED_CODE_LANGUAGE_BY_SUFFIX
-
-
-def test_code_language_classifier_identity_binds_version_and_canonical_map():
-    from code_languages import (
-        CLASSIFIER_IDENTITY,
-        CLASSIFIER_MAP_SHA256,
-        CLASSIFIER_VERSION,
-    )
-
-    canonical = json.dumps(
-        EXPECTED_CODE_LANGUAGE_BY_SUFFIX,
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("ascii")
-    expected_digest = hashlib.sha256(canonical).hexdigest()
-
-    assert CLASSIFIER_VERSION == "code-language-classifier/v1"
-    assert CLASSIFIER_MAP_SHA256 == expected_digest
-    assert CLASSIFIER_IDENTITY == f"{CLASSIFIER_VERSION}+sha256:{expected_digest}"
 
 
 def test_corpus_and_code_graph_share_one_language_map():
