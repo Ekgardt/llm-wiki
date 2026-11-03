@@ -30,7 +30,8 @@
     "scripts/llm_wiki/windows_acl.py",
     "docs/modules/windows-acl.md",
     "scripts/llm_wiki/windows_native.py",
-    "docs/modules/windows-native.md"
+    "docs/modules/windows-native.md",
+    "docs/modules/context-bundle.md"
   ],
   "directories": [
     "tests/modules/runtime_environment"

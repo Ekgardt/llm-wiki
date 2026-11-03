@@ -24,7 +24,8 @@
     "scripts/llm_wiki/path_ancestry.py",
     "docs/modules/path-ancestry.md",
     "docs/modules/path-ancestry-context.json",
-    "docs/research/2026-11-03-path-ancestry-boundary.md"
+    "docs/research/2026-11-03-path-ancestry-boundary.md",
+    "docs/modules/context-bundle.md"
   ],
   "directories": [
     "tests/modules/path_ancestry"

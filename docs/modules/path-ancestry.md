@@ -21,3 +21,14 @@ and the design record; no range-reader implementation is needed by this owner.
 
 Run `uv run pytest tests/modules/path_ancestry -q -s`.
 Source: ../research/2026-11-03-path-ancestry-boundary.md.
+
+## Canonical ownership reference
+
+`llm_wiki.path_ancestry` owns the shared filesystem ancestry predicates used by
+bounded reads and SQLite lock probes: real-directory/reparse checks and the
+existing administrator-owned symlink exception. It imports only the standard
+library and performs no mutation. `bounded_io` keeps identity aliases for existing
+callers; neither reader nor SQLite imports the other's implementation for this
+policy. This predicate is not an atomic traversal sandbox. Caller no-follow and
+identity checks remain mandatory. See
+`research/2026-11-03-path-ancestry-boundary.md`.

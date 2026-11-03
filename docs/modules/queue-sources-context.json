@@ -27,7 +27,8 @@
     "tests/module_context.py",
     "scripts/llm_wiki/sqlite_contracts.py",
     "docs/modules/sqlite-contracts.md",
-    "scripts/llm_wiki/context_bundle.py"
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md"
   ],
   "directories": [
     "tests/modules/queue_sources"

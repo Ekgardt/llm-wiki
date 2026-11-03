@@ -25,3 +25,9 @@ completion callbacks, long/cyclic lineage and isolated import without connection
 
 Run `uv run pytest tests/modules/queue_migration_plan -q -s`.
 See ../research/2026-11-03-queue-migration-plan-boundary.md.
+
+## Canonical ownership reference
+
+`llm_wiki.queue_migration_plan` owns v2 migration statement planning and exact
+reconciliation on supplied connections. The queue supplies its unchanged owner
+check explicitly; source opening, clock reads, transactions and adoption stay there.

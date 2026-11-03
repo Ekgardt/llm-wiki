@@ -24,7 +24,8 @@
     "tests/code_kernel_helpers.py",
     "tests/module_context.py",
     "scripts/llm_wiki/context_bundle.py",
-    "scripts/llm_wiki/__init__.py"
+    "scripts/llm_wiki/__init__.py",
+    "docs/modules/context-bundle.md"
   ],
   "serialization": "exact-duplicates/v1",
   "ownership": {

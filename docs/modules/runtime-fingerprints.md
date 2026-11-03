@@ -15,3 +15,8 @@ memory, not accepted file size. Explicit byte budgets/deadlines stay unchanged.
 
 Public callable pickle names and old reliable_memory aliases remain identical.
 Run `uv run pytest tests/modules/runtime_fingerprints tests/test_migration_artifact_fingerprint.py -q`.
+
+## Canonical ownership reference
+
+Shared canonical contract: [runtime-contracts](runtime-contracts.md).
+The complete guide is included in this owner's maintenance packet.

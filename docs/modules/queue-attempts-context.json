@@ -35,7 +35,9 @@
     "docs/modules/formats.md",
     "scripts/llm_wiki/queue_schema.py",
     "scripts/llm_wiki/sqlite_transactions.py",
-    "docs/modules/sqlite-transactions.md"
+    "docs/modules/sqlite-transactions.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/queue-schema.md"
   ],
   "directories": [
     "tests/modules/queue_attempts"

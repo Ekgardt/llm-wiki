@@ -19,3 +19,8 @@ patches the binding actually used here, including imported sync/hardening helper
 patching the former facade cannot instrument an internal call anymore. Existing
 storage-failure recovery, ACL and transaction integration tests remain active.
 Run `uv run pytest tests/modules/runtime_publication -q`.
+
+## Canonical ownership reference
+
+Shared canonical contract: [runtime-contracts](runtime-contracts.md).
+The complete guide is included in this owner's maintenance packet.

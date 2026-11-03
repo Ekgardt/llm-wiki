@@ -28,7 +28,8 @@
     "tests/conftest.py",
     "tests/code_kernel_helpers.py",
     "tests/module_context.py",
-    "scripts/llm_wiki/context_bundle.py"
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md"
   ],
   "directories": [
     "tests/modules/queue_process_cleanup"

@@ -19,3 +19,10 @@ See ../research/2026-11-03-sqlite-control-boundaries.md.
 Tests replacing the entire clock object must patch sqlite_deadlines.time.
 Patching a shared stdlib time.monotonic attribute still reaches its importers;
 rebinding reliable_memory.time does not replace this owner's module binding.
+
+## Canonical ownership reference
+
+`llm_wiki.sqlite_deadlines` owns cooperative SQLite deadline/progress control;
+`llm_wiki.sqlite_migrations` owns resumable statement execution. Both use supplied
+connections. reliable_memory retains API aliases; connection and file ownership,
+transaction boundaries, callback order and existing limits are unchanged.

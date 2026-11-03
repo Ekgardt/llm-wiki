@@ -22,3 +22,10 @@ or non-string values to active. `is_retired` recognizes only superseded, archive
 deprecated and rejected. Unknown words remain current. `current_status_sql`
 generates the existing SQL predicate for stored status values; callers retain
 responsibility for normalized storage and trusted column names.
+
+## Canonical ownership reference
+
+Existing stdlib-only python_parse, calendar_pass, iso_time, reply_json, page_status
+and code_intelligence boundaries are qualified in place with owned context
+manifests; mixed tests separate pure assertions from integration scenarios without
+changing assertions. Shared test-only import guards live in tests/module_boundaries.py.

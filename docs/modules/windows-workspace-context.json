@@ -25,7 +25,8 @@
     "tests/test_windows_workspace.py",
     "docs/modules/windows-workspace.md",
     "docs/modules/windows-workspace-context.json",
-    "docs/research/2026-11-03-existing-platform-boundaries.md"
+    "docs/research/2026-11-03-existing-platform-boundaries.md",
+    "docs/modules/context-bundle.md"
   ],
   "directories": [
     "tests/modules/windows_workspace"

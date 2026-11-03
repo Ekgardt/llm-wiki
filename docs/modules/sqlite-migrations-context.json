@@ -27,7 +27,8 @@
     "scripts/llm_wiki/sqlite_transactions.py",
     "docs/modules/sqlite-contracts.md",
     "docs/modules/sqlite-transactions.md",
-    "scripts/llm_wiki/context_bundle.py"
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md"
   ],
   "directories": [
     "tests/modules/sqlite_migrations"

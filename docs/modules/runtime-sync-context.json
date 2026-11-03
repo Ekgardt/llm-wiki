@@ -28,7 +28,8 @@
     "scripts/llm_wiki/runtime_contracts.py",
     "docs/modules/runtime-contracts.md",
     "scripts/windows_workspace.py",
-    "docs/modules/windows-workspace.md"
+    "docs/modules/windows-workspace.md",
+    "docs/modules/context-bundle.md"
   ],
   "directories": [
     "tests/modules/runtime_sync"

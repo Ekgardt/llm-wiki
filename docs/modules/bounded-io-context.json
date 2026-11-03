@@ -29,7 +29,8 @@
     "scripts/llm_wiki/path_ancestry.py",
     "docs/modules/path-ancestry.md",
     "tests/module_boundaries.py",
-    "scripts/llm_wiki/__init__.py"
+    "scripts/llm_wiki/__init__.py",
+    "docs/modules/context-bundle.md"
   ],
   "serialization": "exact-duplicates/v1",
   "ownership": {

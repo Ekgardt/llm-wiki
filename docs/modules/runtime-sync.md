@@ -12,3 +12,8 @@ the requested filesystem boundary, not a multi-file transaction. The old public
 names and pickle paths remain available through identical reliable_memory aliases.
 Run `uv run pytest tests/modules/runtime_sync -q`. Linux checks do not qualify
 Windows flush behavior; original native tests remain platform-specific.
+
+## Canonical ownership reference
+
+Shared canonical contract: [runtime-contracts](runtime-contracts.md).
+The complete guide is included in this owner's maintenance packet.

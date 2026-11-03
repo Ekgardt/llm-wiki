@@ -23,3 +23,8 @@ threads, lock, порядок публикации ошибки и bounded join 
 busy database, потери аренды и прекращения дочернего выполнения.
 
 Evidence: docs/research/2026-11-02-queue-renewal-boundaries.md.
+
+## Reliability defaults and queue heartbeat (approved 2026-11-02)
+
+Shared canonical contract: [reliability-defaults](reliability-defaults.md).
+The complete guide is included in this owner's maintenance packet.

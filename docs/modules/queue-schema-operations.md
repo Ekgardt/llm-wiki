@@ -26,3 +26,11 @@ Migration/adoption integration additionally checks the owning runtime pipeline.
 
 Run `uv run pytest tests/modules/queue_schema_operations -q -s`.
 Source: ../research/2026-11-02-queue-schema-operations-boundary.md.
+
+## Canonical ownership reference
+
+`llm_wiki.queue_schema_operations` owns schema inspection and explicit repair on
+a supplied SQLite connection. SQL definitions remain in queue_schema; transaction
+boundaries and connection/adoption ownership are unchanged. sqlite_contracts owns
+the shared migration-error value constructor; queue_sources also owns strict
+migration identity parsing. None imports the queue executor.

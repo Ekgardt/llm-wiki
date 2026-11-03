@@ -27,7 +27,8 @@
     "docs/research/2026-09-26-one-iso-reading-for-every-python.md",
     "docs/research/2026-09-26-every-stored-instant-has-one-width.md",
     "docs/research/2026-09-27-the-daily-log-keeps-one-clock.md",
-    "scripts/llm_wiki/context_bundle.py"
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md"
   ],
   "directories": [
     "tests/modules/iso_time"

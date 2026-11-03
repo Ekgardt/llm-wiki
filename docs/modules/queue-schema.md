@@ -25,3 +25,15 @@ executor and are not an isolated module maintenance packet.
 
 Evidence: ../research/2026-11-02-queue-schema-boundary.md. This step does not finish
 modularizing the queue and is not a rollout to the installed vault.
+
+## Queue SQL definitions (approved 2026-11-02)
+
+`scripts/llm_wiki/queue_schema.py` owns the existing v3 table, index and trigger
+SQL tuples, including generated immutable triggers. It has no imports and does
+not open or change a database. SQL bytes, ordering and names remain unchanged.
+`memory_queue` imports the same tuples and keeps checksum composition, operational
+contracts, migrations, adoption, repair and execution. The extraction adds no
+schema version or runtime path. Own tests live in `tests/modules/queue_schema`;
+`docs/modules/queue-schema-context.json` measures the complete maintenance packet
+against the existing 100,000-token limit. Approval:
+`knowledge/notes/queue-schema-boundary-decision-20261102.md`.

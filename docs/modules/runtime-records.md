@@ -15,3 +15,8 @@ it is not an OS sandbox against arbitrary external writers.
 Public callable pickle paths and old reliable_memory exports remain unchanged.
 Run `uv run pytest tests/modules/runtime_records -q`; cross-owner lock preservation
 is also covered by test_adoption_preserves_an_open_database_lock.py.
+
+## Canonical ownership reference
+
+Shared canonical contract: [runtime-contracts](runtime-contracts.md).
+The complete guide is included in this owner's maintenance packet.

@@ -44,7 +44,8 @@
     "scripts/llm_wiki/sqlite_pragmas.py",
     "docs/modules/sqlite-pragmas.md",
     "scripts/llm_wiki/path_ancestry.py",
-    "docs/modules/path-ancestry.md"
+    "docs/modules/path-ancestry.md",
+    "docs/modules/context-bundle.md"
   ],
   "directories": [
     "tests/modules/sqlite_io"

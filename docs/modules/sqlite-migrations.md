@@ -18,3 +18,10 @@ real-file opening and abrupt subprocess-crash coverage at every event boundary.
 
 Run `uv run pytest tests/modules/sqlite_migrations -q -s`.
 See ../research/2026-11-03-sqlite-control-boundaries.md.
+
+## Canonical ownership reference
+
+`llm_wiki.sqlite_deadlines` owns cooperative SQLite deadline/progress control;
+`llm_wiki.sqlite_migrations` owns resumable statement execution. Both use supplied
+connections. reliable_memory retains API aliases; connection and file ownership,
+transaction boundaries, callback order and existing limits are unchanged.

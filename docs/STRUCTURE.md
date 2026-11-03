@@ -1768,14 +1768,7 @@ or dependency identity.
 
 ## Isolated formats module (approved 2026-11-02)
 
-The owner approved the bounded formats pilot after the modularity study, not
-a fixed 74-module architecture. `scripts/llm_wiki/formats/` owns canonical JSON,
-SHA-256, the existing closed JSON-schema validator, source descriptors and
-compile receipt parsing. Its `canonical.py`, `schema.py`, `source.py`, and
-`receipts.py` depend only on the standard library and each other, never on
-compiler, cache, queue, transaction, model or runtime ownership code.
-Existing schemas remain in `scripts/schemas/`. Receipt validity alone does not
-prove publication; transaction authority stays with its existing owner.
+Full owner contracts: [formats](modules/formats.md).
 
 Module tests live in `tests/modules/formats/` and its contract in
 `docs/modules/formats.md`. The complete owned context, shared instructions,
@@ -1787,171 +1780,49 @@ consumers must import their owning module. No database, wire format, daemon,
 installation command or runtime root is added. Implementation and installed
 qualification are separate; the working branch is not installed by this decision.
 
-Research: `docs/research/2026-11-02-module-boundaries-validation.md`.
-Private decision: `knowledge/notes/isolated-formats-module-decision-20261102.md`.
-
-
 ## Existing context-budget boundary (qualified 2026-11-02)
 
-`scripts/context_budget.py` already owns token-accounting values and deterministic
-complete-item packing, with only standard-library imports. It remains at that
-path with its existing public API and no new compatibility layer. Owned tests
-remain `tests/test_context_budget.py` and `tests/test_context_packing.py`.
-`docs/modules/context-budget.md` and its context manifest record this existing
-boundary and enforce the 100,000-token maintenance ceiling. Consumer integration
-suites keep their owners and are additional context for cross-module changes.
-No runtime, provider, limit, source path or installation behavior changes.
-
+Full owner contracts: [context-budget](modules/context-budget.md).
 
 ## Queue payload format (approved 2026-11-02)
 
-`llm_wiki.formats.queue_payload` owns `PayloadValidation`, `validate_payload_blob`,
-their pure JSON/hash helpers and the existing four payload limits. It uses only
-the standard library and `formats.canonical`. `memory_queue` re-exports its two
-public objects unchanged for compatibility and imports its payload byte ceiling.
-Repair reads the validator from its owner. SQLite, task transitions, ownership,
-worker execution and migrations remain in the queue. The complete formats packet
-includes the new source and tests; its existing 100,000-token gate applies.
-See `docs/research/2026-11-02-queue-payload-boundary.md`; private approval:
-`knowledge/notes/queue-payload-formats-decision-20261102.md`.
-
+Full owner contracts: [formats](modules/formats.md).
 
 ## Queue type contract (approved 2026-11-02)
 
-`scripts/llm_wiki/queue_contracts.py` owns the 20 existing public queue record,
-result and error types listed in `docs/research/2026-11-02-queue-contracts-boundary.md`.
-It imports only the standard library. `memory_queue` re-exports the same objects;
-their stable `__module__ = "memory_queue"` preserves public pickle names. Import
-and construction are isolated, but pickle can resolve that public facade.
-`TaskFence` and `QueueRetryPolicy` retain their existing ownership dependencies.
-Own tests live in `tests/modules/queue_contracts/`; the full context manifest and
-contract live in `docs/modules/queue-contracts-context.json` and
-`docs/modules/queue-contracts.md`. The 100,000-token ceiling includes all owned
-source, tests, data and necessary instructions/contracts. Process/queue integration
-remains additional qualification. No database, runtime, limit or command changes.
-Private approval: `knowledge/notes/queue-contracts-decision-20261102.md`.
+Full owner contracts: [queue-contracts](modules/queue-contracts.md).
 
 ## Existing renewal and bounded-input boundaries (qualified 2026-11-02)
 
-`scripts/lease_renewal.py` owns cooperative renewal scheduling and SQLite
-contention classification. Its callers retain acquisition, fenced writes,
-thread ownership and loss handling. The source and imports remain in place;
-`tests/test_a_busy_database_is_not_a_lost_lease.py` is its own test file.
-See `docs/modules/lease-renewal.md` and `lease-renewal-context.json`.
-
-`scripts/bounded_io.py` owns stable byte reads, verified source ranges and their
-existing shared byte limits. It does not own publication, transactions or ACL
-writes. Its own tests remain `tests/test_bounded_io.py` and
-`tests/test_stable_source_ranges.py`; see `docs/modules/bounded-io.md` and
-`bounded-io-context.json`. Renewal uses only stdlib; bounded IO also imports the
-shared path_ancestry policy. Their manifests count
-complete maintenance packets under 100,000 o200k_base tokens. Related integration
-tests remain with their existing owners. No runtime or source-path changes occur.
+Full owner contracts: [lease-renewal](modules/lease-renewal.md), [bounded-io](modules/bounded-io.md).
 
 ## Existing process-liveness boundary (qualified 2026-11-02)
 
-`scripts/process_liveness.py` remains the stdlib-only owner of local process
-probes and recorded start-identity comparison. Own tests remain in
-`tests/test_process_liveness.py`; the unchanged three-lock integration case now
-lives in the existing `tests/test_memory_state_permissions.py`. Queue cleanup
-calls the common probe directly, preserving its legacy invalid-PID handling and
-conservative error result. Identity-bearing ownership decisions keep their
-existing readers. See `docs/modules/process-liveness.md` and its full context
-manifest. No source path, runtime location or OS probe implementation changes.
+Full owner contracts: [process-liveness](modules/process-liveness.md).
 
 ## Queue process cleanup (approved 2026-11-02)
 
-`scripts/llm_wiki/queue_process_cleanup.py` owns the existing child-tree discovery,
-termination escalation and verified cleanup algorithm extracted from memory_queue:
-30 functions and three constants. Dependencies are stdlib, queue_contracts and
-process_liveness. Process launch, Pipe protocol, heartbeat, queue state and failure
-reporting remain in memory_queue. Required legacy names are identical imported
-objects, not wrappers or duplicate implementations. Internal patches in tests
-target the actual owner. Existing unknown-tree, permission and live-descendant
-refusals, deadlines and platform limitations remain unchanged.
-Own tests live in `tests/modules/queue_process_cleanup/`; the complete context
-manifest and guide are `docs/modules/queue-process-cleanup-context.json` and
-`docs/modules/queue-process-cleanup.md`. The packet is bounded by the user's
-100,000-token ceiling; worker/spawn scenarios remain additional qualification.
-No runtime root, database, dependency or daemon is added. Approval is recorded
-in `knowledge/notes/queue-process-cleanup-decision-20261102.md`.
+Full owner contracts: [queue-process-cleanup](modules/queue-process-cleanup.md).
 
 ## Queue child runtime (approved 2026-11-02)
 
-`scripts/llm_wiki/queue_child_runtime.py` owns queue child spawn, Pipe protocol,
-bounded result decoding, deadline/cancellation/lease-loss observation and calls
-to the existing queue_process_cleanup owner. It takes an explicit child entry
-function; it does not import queue executors, capture diagnostics or state.
-The existing memory_queue._run_processor_child signature remains as a thin
-adapter supplying memory_queue._processor_child_entry. That entry and diagnostic
-policy keep their previous spawn/import identity. The shared result byte limit
-has one definition in queue_contracts; its value and behavior are unchanged.
-Tests live in `tests/modules/queue_child_runtime/`; guide and complete context
-manifest live at `docs/modules/queue-child-runtime.md` and
-`docs/modules/queue-child-runtime-context.json`, with the 100,000-token gate.
-Real queue/compile process scenarios remain additional qualification. This adds
-no runtime path, database, daemon or dependency. Approval is recorded in
-`knowledge/notes/queue-child-runtime-decision-20261102.md`.
+Full owner contracts: [queue-child-runtime](modules/queue-child-runtime.md).
 
 ## Reliability defaults and queue heartbeat (approved 2026-11-02)
 
-`scripts/llm_wiki/reliability_defaults.py` owns the existing frozen
-ReliableMemoryDefaults and DEFAULTS. Values and fields are unchanged;
-reliable_memory reexports the same objects and the class retains its historical
-pickle module name. Import/construction are independent; pickle may load the
-legacy facade. Confirmed consumers import defaults from their owner directly.
-
-`scripts/llm_wiki/queue_heartbeat.py` owns _LeaseHeartbeat, _SourceFenceHeartbeat,
-their bounded join helper and existing stop floor. Narrow typing.Protocol
-interfaces describe the queue methods already called. SQL, fencing and wait
-implementations stay with queue backends. Thread lifecycle, defaults, renewal
-algorithm and error policy are preserved; lease_renewal remains the scheduler.
-Only stdlib, reliability_defaults, queue_contracts and lease_renewal are imported.
-Required old class names are identical aliases, not wrappers.
-
-Each has own tests under `tests/modules/<module_name>/` and a guide/context
-manifest under `docs/modules/` using the hyphenated name. Complete packets obey
-the 100,000-token ceiling. No runtime path, schema, daemon or numeric policy
-changes. Approval: `knowledge/notes/queue-renewal-boundaries-decision-20261102.md`.
+Full owner contracts: [reliability-defaults](modules/reliability-defaults.md), [queue-heartbeat](modules/queue-heartbeat.md).
 
 ## Queue SQL definitions (approved 2026-11-02)
 
-`scripts/llm_wiki/queue_schema.py` owns the existing v3 table, index and trigger
-SQL tuples, including generated immutable triggers. It has no imports and does
-not open or change a database. SQL bytes, ordering and names remain unchanged.
-`memory_queue` imports the same tuples and keeps checksum composition, operational
-contracts, migrations, adoption, repair and execution. The extraction adds no
-schema version or runtime path. Own tests live in `tests/modules/queue_schema`;
-`docs/modules/queue-schema-context.json` measures the complete maintenance packet
-against the existing 100,000-token limit. Approval:
-`knowledge/notes/queue-schema-boundary-decision-20261102.md`.
+Full owner contracts: [queue-schema](modules/queue-schema.md).
 
 ## Queue timing values (approved 2026-11-02)
 
-`scripts/llm_wiki/queue_timing.py` owns the existing UTC conversion and timestamp
-format/parsing functions, Retry-After readers and adopted retry delay calculation.
-It depends only on stdlib and reliability_defaults. The queue keeps _utc_now,
-SQL and state transitions; the legacy queue keeps its configurable retry policy.
-Function compatibility names are identical aliases. RNG tests patch the new owner.
-The existing seven-day Retry-After bound, defaults, full jitter and time semantics
-remain unchanged. Own tests and the complete ≤100,000-token context manifest live
-under `tests/modules/queue_timing` and `docs/modules/queue-timing*` respectively.
-Approval: `knowledge/notes/queue-timing-boundary-decision-20261102.md`.
+Full owner contracts: [queue-timing](modules/queue-timing.md).
 
 ## Windows native binding and ACL ownership (approved 2026-11-02)
 
-`scripts/llm_wiki/windows_native.py` owns the existing two ctypes structures,
-five kernel32 prototypes and single lazy cached loader. Handle operations remain
-in markdown_transaction and use identical imported objects. Importing the owner
-does not load a Windows DLL. `scripts/llm_wiki/windows_acl.py` owns the existing
-ACL commands, identity/codec parsing and strict/boolean checks from transaction
-and queue, depending only on stdlib and windows_native. reliable_memory accesses
-these owners directly instead of importing queue or transaction for Windows IO.
-POSIX behavior, explicit-versus-inherited verification differences, commands,
-timeouts, native signatures and error policy are preserved. Both modules have
-own tests and complete ≤100,000-token context manifests under tests/modules and
-docs/modules. No new runtime path, WinAPI surface or security policy is added.
-Approval: `knowledge/notes/windows-permissions-boundaries-decision-20261102.md`.
+Full owner contracts: [windows-native](modules/windows-native.md), [windows-acl](modules/windows-acl.md).
 
 ### Approved completion mandate (2026-11-02)
 
@@ -1962,64 +1833,34 @@ documented and qualified before acceptance. Full maintenance packets remain
 limited to 100000 tokens; whole-repository coverage is not yet complete.
 This does not authorize deploying the candidate checkout into the installed vault.
 
-The next queue source-identity boundary is `llm_wiki.queue_sources`: pure payload
-identity collection, daily-source validation, and generic source-link validation.
-Strict migration identity parsing is also owned here; sqlite_contracts constructs
-migration refusals. SQL remains with queue/migration owners. Existing static
-method entry points are identical function aliases; no second implementation.
-Daily-only failure identities and general task source links retain distinct rules.
+Full owner contracts: [queue-sources](modules/queue-sources.md).
 
-`llm_wiki.sqlite_contracts` owns the existing operational database contract,
-migration statement and contract error types, their value validators, and exact
-SQLite identifier quoting. It imports only stdlib. reliable_memory retains identity aliases; sqlite_io owns connection lifetime and
-the runtime filesystem owners own file behavior. sqlite_pragmas, sqlite_migrations
-and sqlite_deadlines own their named control policies, with direct aliases for
-the old names. Class pickle names remain reliable_memory for existing
-serialized callers. Consumers import values directly from sqlite_contracts.
+Full owner contracts: [sqlite-contracts](modules/sqlite-contracts.md).
 
 Maintenance packet tests share `tests/module_context.py`. Each packet explicitly
 includes its applicable pytest conftest/plugin bootstrap and the measurement code;
 the measured serialization includes file names and byte-length framing. Missing
 implicit loaders fail the declaration check rather than disappear from the count.
 
-Existing stdlib-only python_parse, calendar_pass, iso_time, reply_json, page_status
-and code_intelligence boundaries are qualified in place with owned context
-manifests; mixed tests separate pure assertions from integration scenarios without
-changing assertions. Shared test-only import guards live in tests/module_boundaries.py.
+Full owner contracts: [python-parse](modules/python-parse.md), [calendar-pass](modules/calendar-pass.md), [iso-time](modules/iso-time.md), [reply-json](modules/reply-json.md), [page-status](modules/page-status.md), [code-intelligence](modules/code-intelligence.md).
 
-`llm_wiki.queue_schema_operations` owns schema inspection and explicit repair on
-a supplied SQLite connection. SQL definitions remain in queue_schema; transaction
-boundaries and connection/adoption ownership are unchanged. sqlite_contracts owns
-the shared migration-error value constructor; queue_sources also owns strict
-migration identity parsing. None imports the queue executor.
+Full owner contracts: [queue-schema-operations](modules/queue-schema-operations.md).
 
-`llm_wiki.sqlite_transactions` owns the existing begin_immediate contextmanager
-on caller-owned connections. reliable_memory retains an identity alias; consumers
-import the transaction owner directly, preserving callbacks and rollback semantics.
+Full owner contracts: [sqlite-transactions](modules/sqlite-transactions.md).
 
-`llm_wiki.queue_migration_plan` owns v2 migration statement planning and exact
-reconciliation on supplied connections. The queue supplies its unchanged owner
-check explicitly; source opening, clock reads, transactions and adoption stay there.
+Full owner contracts: [queue-migration-plan](modules/queue-migration-plan.md).
 
-`llm_wiki.sqlite_deadlines` owns cooperative SQLite deadline/progress control;
-`llm_wiki.sqlite_migrations` owns resumable statement execution. Both use supplied
-connections. reliable_memory retains API aliases; connection and file ownership,
-transaction boundaries, callback order and existing limits are unchanged.
+Full owner contracts: [sqlite-deadlines](modules/sqlite-deadlines.md), [sqlite-migrations](modules/sqlite-migrations.md).
 
 Maintenance bundles may explicitly use exact-duplicates/v1: identical file bodies
 appear once, with counted backward references for other paths. The stdlib-only
 llm_wiki.context_bundle codec restores every path and byte; measurement verifies
 that round trip before counting. Source files and runtime formats are unchanged.
+Full owner contracts: [context-bundle](modules/context-bundle.md).
 
-`llm_wiki.restricted_paths` owns lexical POSIX relative-path and allowed-root
-validation. `llm_wiki.sqlite_pragmas` owns settings and contract-header readback on
-supplied SQLite connections. Filesystem containment and ownership remain with the runtime filesystem owners;
-SQLite opening and closing belong to sqlite_io. Old APIs retain identity aliases.
+Full owner contracts: [restricted-paths](modules/restricted-paths.md), [sqlite-pragmas](modules/sqlite-pragmas.md).
 
-`llm_wiki.queue_attempts` owns attempt-history and lease/failure SQL steps on
-caller-supplied connections and timestamps. `llm_wiki.queue_validation` owns pure
-argument/policy checks. Transactions, clocks and admission remain in the queue;
-shared base filter states and the unchanged attempt bound live in queue_contracts.
+Full owner contracts: [queue-attempts](modules/queue-attempts.md), [queue-validation](modules/queue-validation.md).
 
 Existing `windows_workspace.py` and `lsp_process_tree.py` remain separate platform
 owners: handle-relative filesystem operations and process-tree lifetime,
@@ -2027,55 +1868,17 @@ respectively. Windows workspace is qualified with its focused tests. The complet
 LSP process-tree packet exceeds the token ceiling and is not yet qualified; its
 subprocess fixture must not be omitted to fit. No public path or runtime ownership changes.
 See `research/2026-11-03-existing-platform-boundaries.md`.
+Full owner contracts: [windows-workspace](modules/windows-workspace.md).
 
-`secret_redact.py` and `repository_scope.py` are independent stdlib-only owners
-qualified in place. Redaction owns best-effort text/structure masking; scope owns
-canonical repository/checkout identity and bounded Git inspection. Their module
-packets retain focused tests; provider timeout and scope/index consistency checks
-remain active under their respective integration test owners. See
-`research/2026-11-03-redaction-and-repository-scope-boundaries.md`.
-The redactor's pure tests embedded in audit/security/structure suites move into
-`tests/modules/secret_redact/` unchanged. DLP/cache integration remains in
-`tests/test_redaction_policy_cache_contract.py`; the compile-packing comparison
-imports the single original-pattern test helper from the redactor's test owner.
+Full owner contracts: [secret-redact](modules/secret-redact.md), [repository-scope](modules/repository-scope.md).
 
-Runtime filesystem decomposition keeps the public `reliable_memory` entry points
-as compatibility aliases; SQLite lifecycle belongs to `llm_wiki.sqlite_io`. `llm_wiki.runtime_contracts` owns values/errors;
-`runtime_environment` owns locality and permissions; `runtime_records` owns
-metadata, reads and file identity; `runtime_sync` owns checked flushes;
-`runtime_publication` owns sibling-file staging/publication and replacement proof.
-Dependencies flow from publication to the lower owners without reverse imports.
-SQLite metadata validation still avoids opening/closing a live database inode.
-See `research/2026-11-03-runtime-io-boundaries.md`.
-`llm_wiki.runtime_fingerprints` separately owns offline two-pass fingerprints and
-their streaming/deadline policy. `runtime_records` supplies metadata/read/identity
-only; publication does not depend on fingerprinting. This removes an unnecessary
-source dependency while retaining all required context in each measured packet.
+Full owner contracts: [runtime-contracts](modules/runtime-contracts.md), [runtime-environment](modules/runtime-environment.md), [runtime-records](modules/runtime-records.md), [runtime-sync](modules/runtime-sync.md), [runtime-publication](modules/runtime-publication.md), [runtime-fingerprints](modules/runtime-fingerprints.md).
 
-`llm_wiki.sqlite_io` owns the remaining operational SQLite connection lifecycle,
-locking probes, database-directory preparation, stranded-journal recovery and
-streamed scans. `reliable_memory` retains identical public compatibility aliases
-and the existing capture-decision size constant; no database format, runtime
-location, transaction semantics or public command changes. See
-`research/2026-11-03-sqlite-io-boundary.md`.
+Full owner contracts: [sqlite-io](modules/sqlite-io.md).
 
-`llm_wiki.path_ancestry` owns the shared filesystem ancestry predicates used by
-bounded reads and SQLite lock probes: real-directory/reparse checks and the
-existing administrator-owned symlink exception. It imports only the standard
-library and performs no mutation. `bounded_io` keeps identity aliases for existing
-callers; neither reader nor SQLite imports the other's implementation for this
-policy. This predicate is not an atomic traversal sandbox. Caller no-follow and
-identity checks remain mandatory. See
-`research/2026-11-03-path-ancestry-boundary.md`.
+Full owner contracts: [path-ancestry](modules/path-ancestry.md).
 
-`llm_wiki.queue_artifacts` owns queue artifact file/stream IO: owner-only checks,
-stable reads/digests, sequential staged production, create-only publication,
-checked flushes and export scratch cleanup. `memory_queue` retains compatibility
-aliases and compile-journal-specific error mapping; SQL, task transitions, lease
-settlement and retention authorization remain queue responsibilities. The artifact
-owner depends on value/deadline/permission/sync primitives and never imports the
-executor or compile journal. See
-`research/2026-11-03-queue-artifact-io-boundary.md`.
+Full owner contracts: [queue-artifacts](modules/queue-artifacts.md).
 
 Maintenance-context tooling in `tests/module_context.py` and
 `tests/module_boundaries.py` has a test-only qualification packet. Beyond actual
@@ -2085,6 +1888,7 @@ initializers. It reports omitted paths before counting; it neither imports the
 product nor silently adds files. Dynamic/configuration/subprocess dependencies
 remain explicit research and integration obligations. See
 `research/2026-11-03-context-source-closure.md`.
+Full owner contracts: [context-tooling](modules/context-tooling.md).
 
 Each module context manifest has a separate `ownership` declaration for its
 unique tracked files/directories. Shared context may overlap; ownership may not.
@@ -2093,3 +1897,9 @@ that claims are tracked/present/contained and included in the owner's packet,
 and reports every unassigned tracked file. Its explicit `--check-complete` gate
 fails until none remain; successful partial inventory is never decomposition
 completion. See `research/2026-11-03-module-file-ownership.md`.
+
+Detailed module contracts are maintained in their existing owner guides under
+`docs/modules/`, with this document retaining canonical navigation and global
+rules. Every packet includes the full guides for its owned and dependency source
+owners; an ownership-registry-based guard checks coverage. Transfer evidence is
+recorded in `research/2026-11-03-module-contract-documentation.md`.

@@ -25,7 +25,8 @@
     "docs/modules/runtime-contracts.md",
     "docs/modules/runtime-contracts-context.json",
     "docs/research/2026-11-03-runtime-io-boundaries.md",
-    "tests/test_runtime_io_compatibility.py"
+    "tests/test_runtime_io_compatibility.py",
+    "docs/modules/context-bundle.md"
   ],
   "directories": [
     "tests/modules/runtime_contracts"

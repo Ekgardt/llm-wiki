@@ -21,3 +21,10 @@ Source: ../research/2026-11-02-existing-leaf-contracts.md.
 3.10 the existing operator-chain preflight prevents a stack-killing expression;
 flat literals remain parseable. Newer Python uses its parser's own guard. The
 3000-operator safety boundary and small-stack regression are preserved.
+
+## Canonical ownership reference
+
+Existing stdlib-only python_parse, calendar_pass, iso_time, reply_json, page_status
+and code_intelligence boundaries are qualified in place with owned context
+manifests; mixed tests separate pure assertions from integration scenarios without
+changing assertions. Shared test-only import guards live in tests/module_boundaries.py.

@@ -40,7 +40,8 @@
     "scripts/llm_wiki/runtime_sync.py",
     "docs/modules/runtime-sync.md",
     "scripts/llm_wiki/sqlite_deadlines.py",
-    "docs/modules/sqlite-deadlines.md"
+    "docs/modules/sqlite-deadlines.md",
+    "docs/modules/context-bundle.md"
   ],
   "directories": [
     "tests/modules/queue_artifacts"

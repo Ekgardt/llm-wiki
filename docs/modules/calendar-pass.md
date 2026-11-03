@@ -22,3 +22,10 @@ the supplied question anchor, and returns an absolute day difference.
 `states_the_gap` applies the existing one-day tolerance and week alternatives.
 `calendar_note` renders data for the caller; this module does not call a model
 or decide whether the evidence supports a claim.
+
+## Canonical ownership reference
+
+Existing stdlib-only python_parse, calendar_pass, iso_time, reply_json, page_status
+and code_intelligence boundaries are qualified in place with owned context
+manifests; mixed tests separate pure assertions from integration scenarios without
+changing assertions. Shared test-only import guards live in tests/module_boundaries.py.

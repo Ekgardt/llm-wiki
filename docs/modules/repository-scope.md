@@ -22,3 +22,16 @@ unit tests. No new Git write, cache, database, bound or subprocess is introduced
 
 Run `uv run pytest tests/test_repository_scope.py tests/modules/repository_scope -q`.
 See `../research/2026-11-03-redaction-and-repository-scope-boundaries.md`.
+
+## Canonical ownership reference
+
+`secret_redact.py` and `repository_scope.py` are independent stdlib-only owners
+qualified in place. Redaction owns best-effort text/structure masking; scope owns
+canonical repository/checkout identity and bounded Git inspection. Their module
+packets retain focused tests; provider timeout and scope/index consistency checks
+remain active under their respective integration test owners. See
+`research/2026-11-03-redaction-and-repository-scope-boundaries.md`.
+The redactor's pure tests embedded in audit/security/structure suites move into
+`tests/modules/secret_redact/` unchanged. DLP/cache integration remains in
+`tests/test_redaction_policy_cache_contract.py`; the compile-packing comparison
+imports the single original-pattern test helper from the redactor's test owner.

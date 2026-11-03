@@ -18,3 +18,10 @@ by their integration suites. No new dependency, normalization or limit is introd
 
 Run `uv run pytest tests/modules/restricted_paths -q -s`.
 See ../research/2026-11-03-path-and-pragma-boundaries.md.
+
+## Canonical ownership reference
+
+`llm_wiki.restricted_paths` owns lexical POSIX relative-path and allowed-root
+validation. `llm_wiki.sqlite_pragmas` owns settings and contract-header readback on
+supplied SQLite connections. Filesystem containment and ownership remain with the runtime filesystem owners;
+SQLite opening and closing belong to sqlite_io. Old APIs retain identity aliases.

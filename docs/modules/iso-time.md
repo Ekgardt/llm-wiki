@@ -22,3 +22,10 @@ unzoned parsed instants are UTC. `utc_text` emits fixed-width UTC microseconds.
 `local_now` and `block_instant` deliberately use the machine's local clock;
 `names_block` checks the existing quarter-hour offset rule for a supplied UTC
 instant. These distinct time contracts are preserved, not unified implicitly.
+
+## Canonical ownership reference
+
+Existing stdlib-only python_parse, calendar_pass, iso_time, reply_json, page_status
+and code_intelligence boundaries are qualified in place with owned context
+manifests; mixed tests separate pure assertions from integration scenarios without
+changing assertions. Shared test-only import guards live in tests/module_boundaries.py.

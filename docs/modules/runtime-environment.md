@@ -12,3 +12,8 @@ ACL work uses the existing owner. SQLite lock probes and admission remain caller
 responsibility. An environment check is not a filesystem sandbox or durable permit.
 The former reliable_memory names remain identity aliases; tests replace bindings
 where they are actually looked up. Run `uv run pytest tests/modules/runtime_environment -q`.
+
+## Canonical ownership reference
+
+Shared canonical contract: [runtime-contracts](runtime-contracts.md).
+The complete guide is included in this owner's maintenance packet.

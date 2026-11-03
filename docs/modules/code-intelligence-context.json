@@ -26,7 +26,8 @@
     "docs/research/2026-11-02-existing-leaf-contracts.md",
     "tests/test_code_intelligence.py",
     "docs/research/2026-09-18-the-superseded-plan-a-seam-leaves-the-code.md",
-    "scripts/llm_wiki/context_bundle.py"
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md"
   ],
   "directories": [
     "tests/modules/code_intelligence"

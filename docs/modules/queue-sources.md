@@ -22,3 +22,12 @@ and migration error types separately from this isolated module's own tests.
 Run `uv run pytest tests/modules/queue_sources -q -s` for the owned contract.
 The context manifest includes every own test and the obligatory instructions.
 Source: ../research/2026-11-02-queue-sources-boundary.md.
+
+## Canonical ownership reference
+
+The queue source-identity boundary is `llm_wiki.queue_sources`: pure payload
+identity collection, daily-source validation, and generic source-link validation.
+Strict migration identity parsing is also owned here; sqlite_contracts constructs
+migration refusals. SQL remains with queue/migration owners. Existing static
+method entry points are identical function aliases; no second implementation.
+Daily-only failure identities and general task source links retain distinct rules.

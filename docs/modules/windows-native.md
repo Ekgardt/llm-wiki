@@ -19,3 +19,18 @@ The context manifest includes source, all own tests and required docs/instructio
 its ceiling is 100000 o200k_base tokens.
 
 Evidence: ../research/2026-11-02-windows-permissions-boundaries.md.
+
+## Windows native binding and ACL ownership (approved 2026-11-02)
+
+`scripts/llm_wiki/windows_native.py` owns the existing two ctypes structures,
+five kernel32 prototypes and single lazy cached loader. Handle operations remain
+in markdown_transaction and use identical imported objects. Importing the owner
+does not load a Windows DLL. `scripts/llm_wiki/windows_acl.py` owns the existing
+ACL commands, identity/codec parsing and strict/boolean checks from transaction
+and queue, depending only on stdlib and windows_native. Runtime filesystem owners reach
+these lower modules without importing queue or transaction for Windows IO.
+POSIX behavior, explicit-versus-inherited verification differences, commands,
+timeouts, native signatures and error policy are preserved. Both modules have
+own tests and complete ≤100,000-token context manifests under tests/modules and
+docs/modules. No new runtime path, WinAPI surface or security policy is added.
+Approval: `knowledge/notes/windows-permissions-boundaries-decision-20261102.md`.

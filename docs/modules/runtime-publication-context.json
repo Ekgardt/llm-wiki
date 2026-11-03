@@ -43,7 +43,8 @@
     "docs/modules/windows-workspace.md",
     "scripts/llm_wiki/formats/__init__.py",
     "scripts/llm_wiki/formats/canonical.py",
-    "docs/modules/formats.md"
+    "docs/modules/formats.md",
+    "docs/modules/context-bundle.md"
   ],
   "directories": [
     "tests/modules/runtime_publication"

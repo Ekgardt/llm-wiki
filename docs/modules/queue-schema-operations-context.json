@@ -28,7 +28,9 @@
     "docs/modules/sqlite-contracts.md",
     "scripts/llm_wiki/sqlite_transactions.py",
     "docs/modules/sqlite-transactions.md",
-    "scripts/llm_wiki/context_bundle.py"
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/queue-schema.md"
   ],
   "directories": [
     "tests/modules/queue_schema_operations"

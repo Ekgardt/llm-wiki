@@ -66,3 +66,14 @@ repository-wide completion or savings over a full LLM task cycle.
 Evidence: local `logs/context-budget-baseline.txt`,
 `logs/context-budget-graph-before.json`, `logs/context-budget-test-consumers.json`;
 `tests/test_context_budget.py`, `tests/test_context_packing.py`.
+
+## Existing context-budget boundary (qualified 2026-11-02)
+
+`scripts/context_budget.py` already owns token-accounting values and deterministic
+complete-item packing, with only standard-library imports. It remains at that
+path with its existing public API and no new compatibility layer. Owned tests
+remain `tests/test_context_budget.py` and `tests/test_context_packing.py`.
+`docs/modules/context-budget.md` and its context manifest record this existing
+boundary and enforce the 100,000-token maintenance ceiling. Consumer integration
+suites keep their owners and are additional context for cross-module changes.
+No runtime, provider, limit, source path or installation behavior changes.

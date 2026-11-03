@@ -27,7 +27,8 @@
     "tests/test_one_answer_or_none.py",
     "docs/research/2026-09-14-the-document-after-the-notes.md",
     "docs/research/2026-09-14-one-answer-or-none.md",
-    "scripts/llm_wiki/context_bundle.py"
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md"
   ],
   "directories": [
     "tests/modules/reply_json"

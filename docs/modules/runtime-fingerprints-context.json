@@ -42,7 +42,8 @@
     "scripts/llm_wiki/runtime_records.py",
     "docs/modules/runtime-records.md",
     "scripts/llm_wiki/path_ancestry.py",
-    "docs/modules/path-ancestry.md"
+    "docs/modules/path-ancestry.md",
+    "docs/modules/context-bundle.md"
   ],
   "directories": [
     "tests/modules/runtime_fingerprints"

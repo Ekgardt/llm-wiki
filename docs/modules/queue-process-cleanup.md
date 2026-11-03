@@ -74,3 +74,20 @@ primary references, alternatives and preservation gates are recorded in
 in logs/queue-cleanup-preservation.json and logs/queue-cleanup-*.txt. Validation
 results are recorded after execution; neither installation nor native Windows/
 macOS success follows from Linux tests.
+
+## Queue process cleanup (approved 2026-11-02)
+
+`scripts/llm_wiki/queue_process_cleanup.py` owns the existing child-tree discovery,
+termination escalation and verified cleanup algorithm extracted from memory_queue:
+30 functions and three constants. Dependencies are stdlib, queue_contracts and
+process_liveness. Process launch and Pipe protocol belong to queue_child_runtime; heartbeat belongs
+to queue_heartbeat. Queue state and failure reporting remain in memory_queue. Required legacy names are identical imported
+objects, not wrappers or duplicate implementations. Internal patches in tests
+target the actual owner. Existing unknown-tree, permission and live-descendant
+refusals, deadlines and platform limitations remain unchanged.
+Own tests live in `tests/modules/queue_process_cleanup/`; the complete context
+manifest and guide are `docs/modules/queue-process-cleanup-context.json` and
+`docs/modules/queue-process-cleanup.md`. The packet is bounded by the user's
+100,000-token ceiling; worker/spawn scenarios remain additional qualification.
+No runtime root, database, dependency or daemon is added. Approval is recorded
+in `knowledge/notes/queue-process-cleanup-decision-20261102.md`.

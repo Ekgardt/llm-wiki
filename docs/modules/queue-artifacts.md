@@ -25,3 +25,14 @@ producer failure cleanup, deadline refusal, bounded reads, file substitution and
 metadata protection. Queue/capture/adoption tests exercise callers separately.
 Run `uv run pytest tests/modules/queue_artifacts -q -s`.
 Source: ../research/2026-11-03-queue-artifact-io-boundary.md.
+
+## Canonical ownership reference
+
+`llm_wiki.queue_artifacts` owns queue artifact file/stream IO: owner-only checks,
+stable reads/digests, sequential staged production, create-only publication,
+checked flushes and export scratch cleanup. `memory_queue` retains compatibility
+aliases and compile-journal-specific error mapping; SQL, task transitions, lease
+settlement and retention authorization remain queue responsibilities. The artifact
+owner depends on value/deadline/permission/sync primitives and never imports the
+executor or compile journal. See
+`research/2026-11-03-queue-artifact-io-boundary.md`.

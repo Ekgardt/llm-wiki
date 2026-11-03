@@ -25,7 +25,8 @@
     "docs/modules/page-status-context.json",
     "docs/research/2026-11-02-existing-leaf-contracts.md",
     "docs/research/2026-08-24-which-pages-count-as-current.md",
-    "scripts/llm_wiki/context_bundle.py"
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md"
   ],
   "directories": [
     "tests/modules/page_status"

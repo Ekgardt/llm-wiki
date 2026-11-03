@@ -22,3 +22,10 @@ expected container kind. Otherwise they require exactly one prose-embedded value
 matching the supplied shape. Shape selection does not replace schema validation
 by the caller. Ambiguous multiple answers and unreadable JSON remain refusals;
 the parser never chooses the last answer merely because it appeared last.
+
+## Canonical ownership reference
+
+Existing stdlib-only python_parse, calendar_pass, iso_time, reply_json, page_status
+and code_intelligence boundaries are qualified in place with owned context
+manifests; mixed tests separate pure assertions from integration scenarios without
+changing assertions. Shared test-only import guards live in tests/module_boundaries.py.

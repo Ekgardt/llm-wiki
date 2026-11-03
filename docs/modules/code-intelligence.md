@@ -22,3 +22,10 @@ values. PositionRange is frozen/slotted and accepts nonnegative signed-int64
 byte boundaries with end >= start, including an empty range. Booleans are not
 integers for this contract. It represents byte offsets, not UTF-16 positions
 or a claim that a range was verified against a source file.
+
+## Canonical ownership reference
+
+Existing stdlib-only python_parse, calendar_pass, iso_time, reply_json, page_status
+and code_intelligence boundaries are qualified in place with owned context
+manifests; mixed tests separate pure assertions from integration scenarios without
+changing assertions. Shared test-only import guards live in tests/module_boundaries.py.

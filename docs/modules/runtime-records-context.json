@@ -34,7 +34,8 @@
     "scripts/llm_wiki/windows_native.py",
     "docs/modules/windows-native.md",
     "scripts/windows_workspace.py",
-    "docs/modules/windows-workspace.md"
+    "docs/modules/windows-workspace.md",
+    "docs/modules/context-bundle.md"
   ],
   "directories": [
     "tests/modules/runtime_records"

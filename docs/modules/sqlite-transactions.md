@@ -25,3 +25,9 @@ and the complete small source without loading the filesystem implementation.
 
 Run `uv run pytest tests/modules/sqlite_transactions -q -s`.
 Source: ../research/2026-11-02-sqlite-transactions-boundary.md.
+
+## Canonical ownership reference
+
+`llm_wiki.sqlite_transactions` owns the existing begin_immediate contextmanager
+on caller-owned connections. reliable_memory retains an identity alias; consumers
+import the transaction owner directly, preserving callbacks and rollback semantics.

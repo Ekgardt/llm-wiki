@@ -27,7 +27,8 @@
     "tests/test_python_3_10_does_not_crash_on_a_deep_expression.py",
     "docs/research/2026-09-25-one-hard-python-file-does-not-freeze-the-index.md",
     "docs/research/2026-09-26-python-3-10-does-not-crash-on-a-deep-expression.md",
-    "scripts/llm_wiki/context_bundle.py"
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md"
   ],
   "directories": [
     "tests/modules/python_parse"

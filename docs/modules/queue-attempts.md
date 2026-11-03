@@ -23,3 +23,10 @@ covering the complete queue and ownership pipeline.
 
 Run `uv run pytest tests/modules/queue_attempts -q -s`.
 See ../research/2026-11-03-queue-attempt-and-validation-boundaries.md.
+
+## Canonical ownership reference
+
+`llm_wiki.queue_attempts` owns attempt-history and lease/failure SQL steps on
+caller-supplied connections and timestamps. `llm_wiki.queue_validation` owns pure
+argument/policy checks. Transactions, clocks and admission remain in the queue;
+shared base filter states and the unchanged attempt bound live in queue_contracts.

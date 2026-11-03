@@ -25,3 +25,13 @@ integration with actual migrations, ownership and transaction recovery.
 
 Run `uv run pytest tests/modules/sqlite_contracts -q -s`.
 Source: ../research/2026-11-02-sqlite-contracts-boundary.md.
+
+## Canonical ownership reference
+
+`llm_wiki.sqlite_contracts` owns the existing operational database contract,
+migration statement and contract error types, their value validators, and exact
+SQLite identifier quoting. It imports only stdlib. reliable_memory retains identity aliases; sqlite_io owns connection lifetime and
+the runtime filesystem owners own file behavior. sqlite_pragmas, sqlite_migrations
+and sqlite_deadlines own their named control policies, with direct aliases for
+the old names. Class pickle names remain reliable_memory for existing
+serialized callers. Consumers import values directly from sqlite_contracts.

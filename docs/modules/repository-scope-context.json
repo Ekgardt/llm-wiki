@@ -25,7 +25,8 @@
     "docs/modules/repository-scope.md",
     "docs/modules/repository-scope-context.json",
     "docs/research/2026-11-03-redaction-and-repository-scope-boundaries.md",
-    "tests/test_repository_scope.py"
+    "tests/test_repository_scope.py",
+    "docs/modules/context-bundle.md"
   ],
   "directories": [
     "tests/modules/repository_scope"

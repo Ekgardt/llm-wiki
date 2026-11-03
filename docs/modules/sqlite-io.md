@@ -22,3 +22,12 @@ Run `uv run pytest tests/modules/sqlite_io -q -s` plus the stranded-journal,
 lock-probe, operational-database and doctor integration regressions. The packet
 contains all lower source dependencies; broader integration fixtures run separately.
 Source: ../research/2026-11-03-sqlite-io-boundary.md.
+
+## Canonical ownership reference
+
+`llm_wiki.sqlite_io` owns the remaining operational SQLite connection lifecycle,
+locking probes, database-directory preparation, stranded-journal recovery and
+streamed scans. `reliable_memory` retains identical public compatibility aliases
+and the existing capture-decision size constant; no database format, runtime
+location, transaction semantics or public command changes. See
+`research/2026-11-03-sqlite-io-boundary.md`.

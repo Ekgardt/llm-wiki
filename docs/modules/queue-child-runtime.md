@@ -71,3 +71,20 @@ unchanged. See `docs/research/2026-11-02-queue-child-runtime-boundary.md` for
 approval, alternatives, primary sources and validation results. Local evidence:
 logs/queue-child-*. Native Windows/macOS and installation are not inferred from
 Linux tests. The installed vault remains separate from candidate qualification.
+
+## Queue child runtime (approved 2026-11-02)
+
+`scripts/llm_wiki/queue_child_runtime.py` owns queue child spawn, Pipe protocol,
+bounded result decoding, deadline/cancellation/lease-loss observation and calls
+to the existing queue_process_cleanup owner. It takes an explicit child entry
+function; it does not import queue executors, capture diagnostics or state.
+The existing memory_queue._run_processor_child signature remains as a thin
+adapter supplying memory_queue._processor_child_entry. That entry and diagnostic
+policy keep their previous spawn/import identity. The shared result byte limit
+has one definition in queue_contracts; its value and behavior are unchanged.
+Tests live in `tests/modules/queue_child_runtime/`; guide and complete context
+manifest live at `docs/modules/queue-child-runtime.md` and
+`docs/modules/queue-child-runtime-context.json`, with the 100,000-token gate.
+Real queue/compile process scenarios remain additional qualification. This adds
+no runtime path, database, daemon or dependency. Approval is recorded in
+`knowledge/notes/queue-child-runtime-decision-20261102.md`.

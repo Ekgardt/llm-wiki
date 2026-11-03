@@ -25,7 +25,8 @@
     "docs/modules/calendar-pass-context.json",
     "docs/research/2026-11-02-existing-leaf-contracts.md",
     "docs/research/2026-09-08-the-calendar-does-the-arithmetic.md",
-    "scripts/llm_wiki/context_bundle.py"
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md"
   ],
   "directories": [
     "tests/modules/calendar_pass"

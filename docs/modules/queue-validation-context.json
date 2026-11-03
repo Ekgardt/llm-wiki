@@ -25,7 +25,8 @@
     "tests/module_context.py",
     "scripts/llm_wiki/context_bundle.py",
     "scripts/llm_wiki/queue_contracts.py",
-    "docs/modules/queue-contracts.md"
+    "docs/modules/queue-contracts.md",
+    "docs/modules/context-bundle.md"
   ],
   "directories": [
     "tests/modules/queue_validation"
