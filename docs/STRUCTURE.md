@@ -2271,3 +2271,10 @@ applicability/denominators, costs and refusal calibration. Model judging and rep
 execution remain outside. Its reviewed September19 history catalog partitions the
 unchanged document by topic; only selected records enter the packet, and unowned
 records remain visible in project inventory. No metric or public path changes.
+
+### Paired consolidation reports
+
+[Consolidation scoring](modules/consolidation-score.md) owns existing paired
+statistics, arm-row projection and cost summaries. Real worker execution, vault
+changes and stream publication stay with callers. Full source, original assertions
+and numerical behavior are preserved.
