@@ -49,6 +49,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── integration_adapter.py       v4.x: thin native lifecycle adapter
 │   ├── event_envelope.py            v4.x: shared lifecycle event contract
 │   ├── mcp_contract.py              v4.x: uniform MCP response envelope/resources
+│   ├── llm_wiki/mcp_response_values.py Pure MCP schema and response value rules
 │   ├── doctor.py                    v4.x: degraded-only health + safe repair
 │   ├── repair_installed_memory.py   explicit check/apply v3 adoption
 │   ├── code_graph.py                v4.0: tree-sitter code intelligence
@@ -2266,5 +2267,9 @@ and live language-server navigation remain separate.
 Full owner contract: [managed Go source builds](modules/go-source-build.md).
 The staging-directory compiler step retains its profile dependency; downloads,
 installation publication and server lifecycle remain with their existing owners.
+
+Full owner contract: [MCP response values](modules/mcp-response-values.md).
+The pure schema/value rules have no runtime dependency; mcp_contract retains root,
+clock and Git observation plus public schema/constant reexports.
 The existing reader uses supplied SQLite connections; admission, snapshot control,
 pruning and stronger source-specific evidence retain their current owners.
