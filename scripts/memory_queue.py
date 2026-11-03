@@ -9074,7 +9074,7 @@ class _QueueV3CandidateReader:
         append_event(database, event)
 
     def _verify_retained_compile_answer(self, database, answer):
-        from compile_controller import _decoded_answer, _require_same_call
+        from llm_wiki.compile_answer_records import _decoded_answer, _require_same_call
 
         dispatch = compile_progress.answer_dispatch(database, answer)
         _require_same_call(answer, dispatch)

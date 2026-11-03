@@ -2163,3 +2163,12 @@ class module identities for existing imports and serialized objects. Fields,
 canonical JSON, defaults and shallow frozen semantics stay unchanged. The
 [model records contract](modules/model-records.md) and its complete context packet
 cover the data boundary; real provider and compile recovery tests remain required.
+
+### Saved compile answer records
+
+`scripts/llm_wiki/compile_answer_records.py` owns existing saved model/candidate
+answer bytes and their call binding. The queue's retained-answer verifier imports
+this owner directly; the controller retains four used function aliases and the
+shared completed-refusal set. No transport, SQL, artifact IO, repeat authorization
+or settlement moves into the record owner. Remaining queue/controller dependencies
+are separate work. See the [compile answer record contract](modules/compile-answer-records.md).

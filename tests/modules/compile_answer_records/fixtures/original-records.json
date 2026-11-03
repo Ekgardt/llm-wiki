@@ -1,0 +1,409 @@
+{
+  "dispatch": {
+    "work_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "task_id": "fixture-task",
+    "sequence": 2,
+    "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "stage": "snapshot_ready",
+    "outcome": "running",
+    "details": {
+      "model_call": {
+        "schema": "compile-model-call/v1",
+        "request_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "checkpoint_sequence": 1,
+        "checkpoint_digest": "cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d",
+        "phase": "dispatch"
+      }
+    }
+  },
+  "cases": [
+    {
+      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"schema\":\"compile-model-answer/v1\",\"text\":\"ответ é 全\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":null,\"output_tokens\":null}}",
+      "kind": "BackendResponse",
+      "input": {
+        "text": "ответ é 全",
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cache_read_tokens": null,
+          "cache_write_tokens": null,
+          "duration_ms": null,
+          "estimated_cost": null,
+          "cost_kind": "unknown"
+        }
+      },
+      "expected": {
+        "text": "ответ é 全",
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cache_read_tokens": null,
+          "cache_write_tokens": null,
+          "duration_ms": null,
+          "estimated_cost": null,
+          "cost_kind": "unknown"
+        }
+      }
+    },
+    {
+      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"schema\":\"compile-model-answer/v1\",\"text\":\"\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":10,\"output_tokens\":0}}",
+      "kind": "BackendResponse",
+      "input": {
+        "text": "",
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 0,
+          "cache_read_tokens": null,
+          "cache_write_tokens": null,
+          "duration_ms": null,
+          "estimated_cost": null,
+          "cost_kind": "unknown"
+        }
+      },
+      "expected": {
+        "text": "",
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 0,
+          "cache_read_tokens": null,
+          "cache_write_tokens": null,
+          "duration_ms": null,
+          "estimated_cost": null,
+          "cost_kind": "unknown"
+        }
+      }
+    },
+    {
+      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"schema\":\"compile-model-answer/v1\",\"text\":\"partial\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":null,\"output_tokens\":3}}",
+      "kind": "BackendResponse",
+      "input": {
+        "text": "partial",
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": 3,
+          "cache_read_tokens": null,
+          "cache_write_tokens": null,
+          "duration_ms": null,
+          "estimated_cost": null,
+          "cost_kind": "unknown"
+        }
+      },
+      "expected": {
+        "text": "partial",
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": 3,
+          "cache_read_tokens": null,
+          "cache_write_tokens": null,
+          "duration_ms": null,
+          "estimated_cost": null,
+          "cost_kind": "unknown"
+        }
+      }
+    },
+    {
+      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"result\":{\"available\":true,\"descriptor\":{\"candidate_index\":0,\"capabilities\":{\"structured_output\":\"native\"},\"fallback_from\":[],\"inference_settings\":{\"max_tokens\":37},\"model\":\"fixture-model\",\"provider\":\"fake\"},\"failure_class\":null,\"failure_detail\":null,\"input_token_count\":{\"source\":\"reported\",\"tokens\":12},\"structured_output\":\"native\",\"text\":\"answer\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":12,\"output_tokens\":null}},\"schema\":\"compile-candidate-result/v1\"}",
+      "kind": "LLMResult",
+      "input": {
+        "descriptor": {
+          "candidate_index": 0,
+          "capabilities": {
+            "structured_output": "native"
+          },
+          "fallback_from": [],
+          "inference_settings": {
+            "max_tokens": 37
+          },
+          "model": "fixture-model",
+          "provider": "fake"
+        },
+        "text": "answer",
+        "available": true,
+        "failure_class": null,
+        "structured_output": "native",
+        "usage": {
+          "input_tokens": 12,
+          "output_tokens": null,
+          "cache_read_tokens": null,
+          "cache_write_tokens": null,
+          "duration_ms": null,
+          "estimated_cost": null,
+          "cost_kind": "unknown"
+        },
+        "input_token_count": {
+          "tokens": 12,
+          "source": "reported"
+        },
+        "failure_detail": null
+      },
+      "expected": {
+        "descriptor": {
+          "candidate_index": 0,
+          "capabilities": {
+            "structured_output": "native"
+          },
+          "fallback_from": [],
+          "inference_settings": {
+            "max_tokens": 37
+          },
+          "model": "fixture-model",
+          "provider": "fake"
+        },
+        "text": "answer",
+        "available": true,
+        "failure_class": null,
+        "structured_output": "native",
+        "usage": {
+          "input_tokens": 12,
+          "output_tokens": null,
+          "cache_read_tokens": null,
+          "cache_write_tokens": null,
+          "duration_ms": null,
+          "estimated_cost": null,
+          "cost_kind": "unknown"
+        },
+        "input_token_count": {
+          "tokens": 12,
+          "source": "reported"
+        },
+        "failure_detail": null
+      }
+    },
+    {
+      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"result\":{\"available\":true,\"descriptor\":{\"candidate_index\":0,\"capabilities\":{\"structured_output\":\"native\"},\"fallback_from\":[],\"inference_settings\":{\"max_tokens\":37},\"model\":\"fixture-model\",\"provider\":\"fake\"},\"failure_class\":\"empty_response\",\"failure_detail\":\"fixture refusal\",\"input_token_count\":null,\"structured_output\":\"prompt\",\"text\":null,\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":null,\"output_tokens\":null}},\"schema\":\"compile-candidate-result/v1\"}",
+      "kind": "LLMResult",
+      "input": {
+        "descriptor": {
+          "candidate_index": 0,
+          "capabilities": {
+            "structured_output": "native"
+          },
+          "fallback_from": [],
+          "inference_settings": {
+            "max_tokens": 37
+          },
+          "model": "fixture-model",
+          "provider": "fake"
+        },
+        "text": null,
+        "available": true,
+        "failure_class": "empty_response",
+        "structured_output": "prompt",
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cache_read_tokens": null,
+          "cache_write_tokens": null,
+          "duration_ms": null,
+          "estimated_cost": null,
+          "cost_kind": "unknown"
+        },
+        "input_token_count": null,
+        "failure_detail": "fixture refusal"
+      },
+      "expected": {
+        "descriptor": {
+          "candidate_index": 0,
+          "capabilities": {
+            "structured_output": "native"
+          },
+          "fallback_from": [],
+          "inference_settings": {
+            "max_tokens": 37
+          },
+          "model": "fixture-model",
+          "provider": "fake"
+        },
+        "text": null,
+        "available": true,
+        "failure_class": "empty_response",
+        "structured_output": "prompt",
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cache_read_tokens": null,
+          "cache_write_tokens": null,
+          "duration_ms": null,
+          "estimated_cost": null,
+          "cost_kind": "unknown"
+        },
+        "input_token_count": null,
+        "failure_detail": "fixture refusal"
+      }
+    },
+    {
+      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"result\":{\"available\":true,\"descriptor\":{\"candidate_index\":0,\"capabilities\":{\"structured_output\":\"native\"},\"fallback_from\":[],\"inference_settings\":{\"max_tokens\":37},\"model\":\"fixture-model\",\"provider\":\"fake\"},\"failure_class\":\"dlp_output_blocked\",\"failure_detail\":\"fixture refusal\",\"input_token_count\":null,\"structured_output\":\"prompt\",\"text\":null,\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":null,\"output_tokens\":null}},\"schema\":\"compile-candidate-result/v1\"}",
+      "kind": "LLMResult",
+      "input": {
+        "descriptor": {
+          "candidate_index": 0,
+          "capabilities": {
+            "structured_output": "native"
+          },
+          "fallback_from": [],
+          "inference_settings": {
+            "max_tokens": 37
+          },
+          "model": "fixture-model",
+          "provider": "fake"
+        },
+        "text": null,
+        "available": true,
+        "failure_class": "dlp_output_blocked",
+        "structured_output": "prompt",
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cache_read_tokens": null,
+          "cache_write_tokens": null,
+          "duration_ms": null,
+          "estimated_cost": null,
+          "cost_kind": "unknown"
+        },
+        "input_token_count": null,
+        "failure_detail": "fixture refusal"
+      },
+      "expected": {
+        "descriptor": {
+          "candidate_index": 0,
+          "capabilities": {
+            "structured_output": "native"
+          },
+          "fallback_from": [],
+          "inference_settings": {
+            "max_tokens": 37
+          },
+          "model": "fixture-model",
+          "provider": "fake"
+        },
+        "text": null,
+        "available": true,
+        "failure_class": "dlp_output_blocked",
+        "structured_output": "prompt",
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cache_read_tokens": null,
+          "cache_write_tokens": null,
+          "duration_ms": null,
+          "estimated_cost": null,
+          "cost_kind": "unknown"
+        },
+        "input_token_count": null,
+        "failure_detail": "fixture refusal"
+      }
+    },
+    {
+      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"result\":{\"available\":true,\"descriptor\":{\"candidate_index\":0,\"capabilities\":{\"structured_output\":\"native\"},\"fallback_from\":[],\"inference_settings\":{\"max_tokens\":37},\"model\":\"fixture-model\",\"provider\":\"fake\"},\"failure_class\":\"dlp_scan_error\",\"failure_detail\":\"fixture refusal\",\"input_token_count\":null,\"structured_output\":\"prompt\",\"text\":null,\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":null,\"output_tokens\":null}},\"schema\":\"compile-candidate-result/v1\"}",
+      "kind": "LLMResult",
+      "input": {
+        "descriptor": {
+          "candidate_index": 0,
+          "capabilities": {
+            "structured_output": "native"
+          },
+          "fallback_from": [],
+          "inference_settings": {
+            "max_tokens": 37
+          },
+          "model": "fixture-model",
+          "provider": "fake"
+        },
+        "text": null,
+        "available": true,
+        "failure_class": "dlp_scan_error",
+        "structured_output": "prompt",
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cache_read_tokens": null,
+          "cache_write_tokens": null,
+          "duration_ms": null,
+          "estimated_cost": null,
+          "cost_kind": "unknown"
+        },
+        "input_token_count": null,
+        "failure_detail": "fixture refusal"
+      },
+      "expected": {
+        "descriptor": {
+          "candidate_index": 0,
+          "capabilities": {
+            "structured_output": "native"
+          },
+          "fallback_from": [],
+          "inference_settings": {
+            "max_tokens": 37
+          },
+          "model": "fixture-model",
+          "provider": "fake"
+        },
+        "text": null,
+        "available": true,
+        "failure_class": "dlp_scan_error",
+        "structured_output": "prompt",
+        "usage": {
+          "input_tokens": null,
+          "output_tokens": null,
+          "cache_read_tokens": null,
+          "cache_write_tokens": null,
+          "duration_ms": null,
+          "estimated_cost": null,
+          "cost_kind": "unknown"
+        },
+        "input_token_count": null,
+        "failure_detail": "fixture refusal"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "case": "noncanonical",
+      "encoded": "{\"dispatch\": {\"model_call\": {\"checkpoint_digest\": \"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\", \"checkpoint_sequence\": 1, \"phase\": \"dispatch\", \"request_digest\": \"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\", \"schema\": \"compile-model-call/v1\"}, \"sequence\": 2, \"source_digest\": \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\", \"stage\": \"snapshot_ready\", \"work_id\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}, \"schema\": \"compile-model-answer/v1\", \"text\": \"\\u043e\\u0442\\u0432\\u0435\\u0442 \\u00e9 \\u5168\", \"usage\": {\"cache_read_tokens\": null, \"cache_write_tokens\": null, \"cost_kind\": \"unknown\", \"duration_ms\": null, \"estimated_cost\": null, \"input_tokens\": null, \"output_tokens\": null}}",
+      "error_type": "ProgressCorrupt",
+      "message": "saved model answer is invalid or belongs to another call"
+    },
+    {
+      "case": "wrong-work",
+      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},\"schema\":\"compile-model-answer/v1\",\"text\":\"ответ é 全\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":null,\"output_tokens\":null}}",
+      "error_type": "ProgressCorrupt",
+      "message": "saved model answer is invalid or belongs to another call"
+    },
+    {
+      "case": "wrong-request",
+      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"schema\":\"compile-model-answer/v1\",\"text\":\"ответ é 全\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":null,\"output_tokens\":null}}",
+      "error_type": "ProgressCorrupt",
+      "message": "saved model answer is invalid or belongs to another call"
+    },
+    {
+      "case": "extra-field",
+      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"extra\":true,\"schema\":\"compile-model-answer/v1\",\"text\":\"ответ é 全\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":null,\"output_tokens\":null}}",
+      "error_type": "ProgressCorrupt",
+      "message": "saved model answer is invalid or belongs to another call"
+    },
+    {
+      "case": "negative-usage",
+      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"schema\":\"compile-model-answer/v1\",\"text\":\"ответ é 全\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":-1,\"output_tokens\":null}}",
+      "error_type": "ProgressCorrupt",
+      "message": "saved model answer is invalid or belongs to another call"
+    },
+    {
+      "case": "boolean-usage",
+      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"schema\":\"compile-model-answer/v1\",\"text\":\"ответ é 全\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":true,\"output_tokens\":null}}",
+      "error_type": "ProgressCorrupt",
+      "message": "saved model answer is invalid or belongs to another call"
+    },
+    {
+      "case": "wrong-schema",
+      "encoded": "{\"dispatch\":{\"model_call\":{\"checkpoint_digest\":\"cd9db608668d811273baff9bf466e0ae2d3303b7956dfca34adb7e8c03ab1d7d\",\"checkpoint_sequence\":1,\"phase\":\"dispatch\",\"request_digest\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"schema\":\"compile-model-call/v1\"},\"sequence\":2,\"source_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"stage\":\"snapshot_ready\",\"work_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"},\"schema\":\"other/v1\",\"text\":\"ответ é 全\",\"usage\":{\"cache_read_tokens\":null,\"cache_write_tokens\":null,\"cost_kind\":\"unknown\",\"duration_ms\":null,\"estimated_cost\":null,\"input_tokens\":null,\"output_tokens\":null}}",
+      "error_type": "ProgressCorrupt",
+      "message": "saved model answer is invalid or belongs to another call"
+    },
+    {
+      "case": "array",
+      "encoded": "[]",
+      "error_type": "ProgressCorrupt",
+      "message": "saved model answer is invalid or belongs to another call"
+    }
+  ]
+}
