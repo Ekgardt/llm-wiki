@@ -2079,3 +2079,15 @@ stay unchanged. See
 [research](research/2026-11-03-existing-leaf-owner-qualification.md).
 
 Full contracts: [okf types](modules/okf-types.md), [host transcripts](modules/host-transcripts.md), [ephemeral paths](modules/ephemeral-paths.md), [embedding model](modules/embedding-model.md), [inference threads](modules/inference-threads.md).
+
+### Exact maintenance record infrastructure
+
+Test-only record catalogs describe complete logical partitions of large
+historical/data artifacts without rewriting the originals. Selected packet records
+retain exact source bytes and provenance; complete coverage and unique ownership
+are checked separately, so a partial selection cannot claim a whole file. Code
+imports and mandatory guides remain whole. This implements the record-view part
+of the approved completion plan; see
+[research](research/2026-11-03-large-artifact-context-investigation.md).
+
+Full contract: [exact record contexts](modules/context-records.md).

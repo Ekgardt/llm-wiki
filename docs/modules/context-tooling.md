@@ -110,3 +110,5 @@ Sources: the approved decomposition completion plan and research documents on
 context-source-closure, module-file-ownership, module-contract-documentation,
 test-import-context-closure and canonical-module-qualification-context. The three
 2026-11-02 pilot documents remain full historical evidence in formats/tooling.
+
+Shared canonical contract: [Exact record contexts](context-records.md).

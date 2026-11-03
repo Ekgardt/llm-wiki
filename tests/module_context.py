@@ -8,11 +8,8 @@ from pathlib import Path
 import tiktoken
 from llm_wiki.context_bundle import pack_files, unpack_files
 
-
-def _contained(root: Path, name: str) -> Path:
-    path = (root / name).resolve()
-    path.relative_to(root.resolve())
-    return path
+from tests.module_context_paths import _contained as _contained
+from tests.module_record_context import context_record_files, selected_entries
 
 
 def _source_file(path: Path) -> bool:
@@ -178,28 +175,41 @@ def required_source_context(root: Path, files: set[Path]) -> set[Path]:
     return seen
 
 
+def _whole_entries(root: Path, files: set[Path]) -> dict[str, bytes]:
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(files)}
+
+
+def context_entries(root: Path, files: set[Path], manifest: dict) -> dict[str, bytes]:
+    entries = _whole_entries(root, files)
+    assert not any(name.startswith('@record/') for name in entries), 'Reserved record entry path'
+    entries.update(selected_entries(root, manifest))
+    return entries
+
+
+def _raw_entries(entries: dict[str, bytes]) -> str:
+    return ''.join(f'FILE {name} {len(content)} bytes\n' + content.decode('utf-8') + '\n'
+                   for name, content in entries.items())
+
+
 def serialized_bundle(root: Path, files: set[Path]) -> str:
-    return ''.join(_framed_file(root, path) for path in sorted(files))
+    return _raw_entries(_whole_entries(root, files))
 
 
-def _framed_file(root: Path, path: Path) -> str:
-    content = path.read_bytes()
-    return f'FILE {path.relative_to(root).as_posix()} {len(content)} bytes\n' + content.decode('utf-8') + '\n'
-
-
-
-def compact_bundle(root: Path, files: set[Path]) -> str:
-    originals = {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(files)}
+def _packed_entries(originals: dict[str, bytes]) -> str:
     bundle = pack_files(originals)
     assert unpack_files(bundle) == originals, 'Maintenance bundle lost file content'
     return bundle
 
 
+def compact_bundle(root: Path, files: set[Path]) -> str:
+    return _packed_entries(_whole_entries(root, files))
+
+
 def _manifest_bundle(root: Path, files: set[Path], manifest: dict) -> str:
-    serializers = {'raw/v1': serialized_bundle, 'exact-duplicates/v1': compact_bundle}
+    serializers = {'raw/v1': _raw_entries, 'exact-duplicates/v1': _packed_entries}
     kind = manifest.get('serialization', 'raw/v1')
     assert kind in serializers, f'Unknown maintenance serialization: {kind}'
-    return serializers[kind](root, files)
+    return serializers[kind](context_entries(root, files, manifest))
 
 
 def measure_context(root: Path, manifest_path: Path) -> tuple[int, int]:
@@ -208,7 +218,9 @@ def measure_context(root: Path, manifest_path: Path) -> tuple[int, int]:
     assert manifest['max_tokens'] == 100000, 'Owner limit cannot be changed'
     assert manifest['encoding'] == 'o200k_base', 'Measurement encoding cannot drift'
     files = context_files(root, manifest)
-    needed = required_bootstrap(root, files) | required_source_context(root, files) | {manifest_path.resolve(), root / 'tests/module_context.py',
+    authority = {root / name for name in ('AGENTS.md', 'CLAUDE.md', 'rules/development-laws.md',
+                                         'docs/AGENTS.md', 'docs/STRUCTURE.md')}
+    needed = authority | context_record_files(root, manifest) | required_bootstrap(root, files) | required_source_context(root, files) | {manifest_path.resolve(), root / 'tests/module_context.py',
                                                        root / 'scripts/llm_wiki/context_bundle.py',
                                                        root / 'docs/modules/context-tooling.md'}
     assert needed <= files, f'Missing required context: {sorted(str(p.relative_to(root)) for p in needed - files)}'

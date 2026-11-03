@@ -36,7 +36,11 @@
     "tests/modules/lsp_server_profile/paths.py",
     "tests/test_language_registry_has_no_discovery_dependency.py",
     "docs/research/2026-11-03-language-profile-data-boundaries.md",
-    "docs/modules/context-tooling.md"
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md"
   ],
   "directories": [
     "tests/modules/lsp_profiles"

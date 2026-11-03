@@ -39,7 +39,11 @@
     "scripts/llm_wiki/sqlite_deadlines.py",
     "docs/modules/sqlite-deadlines.md",
     "docs/modules/context-bundle.md",
-    "docs/modules/context-tooling.md"
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md"
   ],
   "directories": [
     "tests/modules/queue_artifacts"

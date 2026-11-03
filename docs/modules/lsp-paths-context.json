@@ -24,7 +24,11 @@
     "docs/modules/lsp-paths-context.json",
     "tests/test_lsp_paths.py",
     "docs/research/2026-11-03-path-artifact-leaves.md",
-    "docs/modules/context-tooling.md"
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md"
   ],
   "directories": [
     "tests/modules/lsp_paths"

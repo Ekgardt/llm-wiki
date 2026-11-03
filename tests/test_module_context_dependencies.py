@@ -18,6 +18,8 @@ def _packet(root, sources, included):
     required = {
         'tests/module_context.py': '', 'scripts/llm_wiki/context_bundle.py': '',
         'docs/modules/context-tooling.md': 'Full current qualification contract',
+        'AGENTS.md': '', 'CLAUDE.md': '', 'rules/development-laws.md': '',
+        'docs/AGENTS.md': '', 'docs/STRUCTURE.md': '',
     }
     for name, body in (required | sources).items():
         _write(root, name, body)
@@ -94,7 +96,7 @@ def test_complete_cycles_namespace_and_installed_imports_are_accepted(tmp_path):
     manifest = _packet(tmp_path, sources, list(sources))
     total, files = measure_context(tmp_path, manifest)
     assert total > 0
-    assert files == 7
+    assert files == 12
 
 
 def test_local_dependency_symlink_outside_root_is_refused(tmp_path):
@@ -196,4 +198,17 @@ def test_current_qualification_contract_cannot_be_omitted(tmp_path):
     packet['files'].remove('docs/modules/context-tooling.md')
     manifest.write_text(json.dumps(packet))
     with pytest.raises(AssertionError, match='docs/modules/context-tooling.md'):
+        measure_context(tmp_path, manifest)
+
+
+@pytest.mark.parametrize('name', [
+    'AGENTS.md', 'CLAUDE.md', 'rules/development-laws.md',
+    'docs/AGENTS.md', 'docs/STRUCTURE.md',
+])
+def test_complete_authority_files_cannot_be_replaced_by_record_views(tmp_path, name):
+    manifest = _packet(tmp_path, {}, [])
+    packet = json.loads(manifest.read_text())
+    packet['files'] = [item for item in packet['files'] if item != name]
+    manifest.write_text(json.dumps(packet))
+    with pytest.raises(AssertionError, match=name):
         measure_context(tmp_path, manifest)

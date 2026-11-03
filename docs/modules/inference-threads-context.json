@@ -27,7 +27,11 @@
     "docs/research/2026-09-14-no-model-running-at-exit.md",
     "docs/research/2026-09-25-every-process-settles-its-inference-at-exit.md",
     "docs/research/2026-09-14-every-budget-inside-its-step.md",
-    "tests/test_every_process_settles_its_inference_at_exit.py"
+    "tests/test_every_process_settles_its_inference_at_exit.py",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md"
   ],
   "directories": [
     "tests/modules/inference_threads"

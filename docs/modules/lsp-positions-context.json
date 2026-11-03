@@ -29,7 +29,11 @@
     "tests/fixtures/code_kernel/python/pkg/unicode_api.py",
     "tests/fixtures/code_kernel/python/pkg/__init__.py",
     "tests/fixtures/code_kernel/python/pkg/api.py",
-    "docs/modules/context-tooling.md"
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md"
   ],
   "directories": [
     "tests/modules/lsp_positions"

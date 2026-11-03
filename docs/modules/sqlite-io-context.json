@@ -43,7 +43,11 @@
     "scripts/llm_wiki/path_ancestry.py",
     "docs/modules/path-ancestry.md",
     "docs/modules/context-bundle.md",
-    "docs/modules/context-tooling.md"
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md"
   ],
   "directories": [
     "tests/modules/sqlite_io"

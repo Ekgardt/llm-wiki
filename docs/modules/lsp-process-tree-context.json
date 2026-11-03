@@ -28,7 +28,11 @@
     "docs/research/2026-11-03-lsp-process-tree-packet.md",
     "docs/research/2026-09-27-a-signal-handler-writes-without-a-buffer.md",
     "docs/research/2026-09-17-lsp-what-could-not-be-read-is-not-an-empty-group.md",
-    "docs/modules/context-tooling.md"
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md"
   ],
   "directories": [
     "tests/modules/lsp_process_tree"

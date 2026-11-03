@@ -32,7 +32,11 @@
     "docs/modules/restricted-paths.md",
     "tests/module_boundaries.py",
     "docs/research/2026-11-03-queue-capture-validation.md",
-    "docs/modules/context-tooling.md"
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md"
   ],
   "directories": [
     "tests/modules/queue_validation"

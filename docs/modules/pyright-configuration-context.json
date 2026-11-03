@@ -26,7 +26,11 @@
     "scripts/llm_wiki/formats/__init__.py",
     "scripts/llm_wiki/formats/canonical.py",
     "docs/modules/formats.md",
-    "docs/modules/context-tooling.md"
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md"
   ],
   "directories": [
     "tests/modules/pyright_configuration"

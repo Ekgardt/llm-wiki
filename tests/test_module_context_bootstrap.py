@@ -110,7 +110,8 @@ def _import_roots(node):
 
 def _allowed_measurement_import(name):
     import sys
-    return name == 'llm_wiki.context_bundle' or name.split('.')[0] in sys.stdlib_module_names | {'tiktoken'}
+    helpers = {'tests.module_context_paths', 'tests.module_records', 'tests.module_record_context'}
+    return name in helpers | {'llm_wiki.context_bundle'} or name.split('.')[0] in sys.stdlib_module_names | {'tiktoken'}
 
 
 def test_codec_allowance_does_not_allow_any_other_product_module():
@@ -143,3 +144,12 @@ def test_unknown_serialization_is_not_silently_treated_as_raw(tmp_path):
     from tests.module_context import _manifest_bundle
     with pytest.raises(AssertionError, match='Unknown maintenance serialization'):
         _manifest_bundle(tmp_path, set(), {'serialization': 'made-up'})
+
+
+@pytest.mark.parametrize('name', ['module_context_paths', 'module_records', 'module_record_context'])
+def test_record_measurement_helpers_cannot_import_product_executors(name):
+    import ast
+    tree = ast.parse((ROOT / 'tests' / f'{name}.py').read_text())
+    nodes = [n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))]
+    roots = set().union(*(_import_roots(node) for node in nodes))
+    assert all(_allowed_measurement_import(item) for item in roots)

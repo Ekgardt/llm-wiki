@@ -23,7 +23,11 @@
     "docs/modules/code-languages.md",
     "docs/modules/code-languages-context.json",
     "docs/research/2026-11-03-code-classification-refusal-packets.md",
-    "docs/modules/context-tooling.md"
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md"
   ],
   "directories": [
     "tests/modules/code_languages"

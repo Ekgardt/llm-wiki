@@ -23,7 +23,11 @@
     "docs/modules/utf8-text.md",
     "docs/modules/utf8-text-context.json",
     "docs/research/2026-11-03-utf8-prefix-boundary.md",
-    "docs/modules/context-tooling.md"
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md"
   ],
   "directories": [
     "tests/modules/utf8_text"

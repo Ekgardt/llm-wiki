@@ -21,7 +21,11 @@
     "tests/code_kernel_helpers.py",
     "tests/module_context.py",
     "tests/module_boundaries.py",
-    "docs/modules/context-tooling.md"
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md"
   ],
   "directories": [
     "tests/modules/context_bundle"

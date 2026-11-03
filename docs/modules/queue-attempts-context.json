@@ -35,7 +35,11 @@
     "docs/modules/sqlite-transactions.md",
     "docs/modules/context-bundle.md",
     "docs/modules/queue-schema.md",
-    "docs/modules/context-tooling.md"
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md"
   ],
   "directories": [
     "tests/modules/queue_attempts"

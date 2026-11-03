@@ -59,20 +59,34 @@ def _registry(root: Path, tracked: set[str]) -> dict[str, str]:
     return dict(sorted(ownership.items()))
 
 
+def _record_contexts(root):
+    from tests.module_context import context_files
+
+    for manifest in sorted((root / 'docs/modules').glob('*-context.json')):
+        data = json.loads(manifest.read_bytes())
+        names = _relative_names(root, context_files(root, data))
+        yield manifest.name.removesuffix('-context.json'), data, names
+
+
 def ownership_report(root: Path, *, tracked: set[str] | None = None) -> dict:
     root = root.resolve()
     if tracked is None:
         tracked = tracked_files(root)
     ownership = _registry(root, tracked)
-    unassigned = sorted(tracked - ownership.keys())
+    from tests.module_record_ownership import record_ownership_report
+
+    records = record_ownership_report(root, tracked, ownership, _record_contexts(root))
+    covered = ownership.keys() | set(records['fully_recorded'])
+    unassigned = sorted(tracked - covered)
     return {
-        'schema_version': 'module-ownership/v1',
+        'schema_version': 'module-ownership/v2',
         'complete': not unassigned,
         'tracked_count': len(tracked),
-        'owned_count': len(ownership),
+        'owned_count': len(covered),
         'unassigned_count': len(unassigned),
         'ownership': ownership,
         'unassigned': unassigned,
+        **records,
     }
 
 

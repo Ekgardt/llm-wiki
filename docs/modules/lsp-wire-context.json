@@ -27,7 +27,11 @@
     "docs/modules/lsp-wire.md",
     "docs/modules/lsp-wire-context.json",
     "docs/research/2026-11-03-lsp-wire-boundary.md",
-    "docs/modules/context-tooling.md"
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md"
   ],
   "directories": [
     "tests/modules/lsp_wire"
