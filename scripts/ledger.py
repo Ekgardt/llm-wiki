@@ -253,6 +253,9 @@ from llm_wiki.ledger_core import (
     write_table as write_table,
 )
 
+# Compatibility default of extend_entity_pages(limit=20), retained under the
+# approved behavior-preserving decomposition. Callers can override limit; no
+# calibration evidence was found for 20. Revisit with publication workload evidence.
 MAX_PAGES_PER_RUN = 20
 
 

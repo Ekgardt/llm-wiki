@@ -48,3 +48,14 @@ Sources checked: [bounded contexts](https://martinfowler.com/bliki/BoundedContex
 [import contracts](https://import-linter.readthedocs.io/en/stable/contract_types/),
 [SQLite semantics](https://docs.python.org/3.14/library/sqlite3.html),
 [pickle module identity](https://docs.python.org/3.14/library/pickle.html).
+
+## Runtime publication default provenance
+
+The facade retains extend_entity_pages(limit=20) for the approved behavior-preserving
+contract; callers can already supply another limit. No measured justification for
+20 was found. The September27 inventory marked this constant not worked, and the
+old contiguous block let an unrelated neighbour comment satisfy the presence guard.
+Separating the facade exposed that gap. The constant now states compatibility and
+the need for separate workload-based recalibration explicitly; neither the value
+nor the guard changes. This is documentation of an existing uncalibrated default,
+not a claim that 20 is an optimal throughput or safety limit.
