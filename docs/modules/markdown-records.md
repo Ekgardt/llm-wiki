@@ -16,3 +16,6 @@ Cross-owner pickle compatibility remains an integration obligation in
  tests/test_module_legacy_aliases.py, outside the isolated value tests.
 
 Source: [boundary research](../research/2026-11-03-ownership-and-markdown-record-boundaries.md).
+
+PreconditionChangedError also identifies a target snapshot lost during capture or
+staging. It remains a ValueError subtype; the coordinator decides whether to retry.

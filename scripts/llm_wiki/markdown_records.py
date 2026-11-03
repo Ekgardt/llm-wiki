@@ -172,7 +172,7 @@ class TargetPathBoundaryError(ValueError):
 
 
 class PreconditionChangedError(ValueError):
-    """A target changed between the caller's read and its prepare."""
+    """A target snapshot changed before or during transaction preparation."""
 
 
 class TransactionImageError(RuntimeError):

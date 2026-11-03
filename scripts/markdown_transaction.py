@@ -2807,7 +2807,7 @@ def _require_read_size(
     content: bytes, after: os.stat_result, target: Path, max_bytes: int | None
 ) -> None:
     if len(content) != after.st_size:
-        raise ValueError(f"transaction target changed while reading: {target}")
+        raise PreconditionChangedError(f"transaction target changed while reading: {target}")
     if max_bytes is not None and len(content) > max_bytes:
         raise ValueError(f"transaction target exceeds {max_bytes} bytes: {target}")
 
@@ -3959,6 +3959,9 @@ def _contended_append_candidate(coordinator: MarkdownCoordinator, candidate_id: 
     """
     try:
         return _run_append_candidate(coordinator, candidate_id, *args, **kwargs)
+    except PreconditionChangedError:
+        # Capture can lose its snapshot before prepare's own retry boundary.
+        return "retry"
     except (OSError, sqlite3.Error) as exc:
         if not _is_transient_writer_contention(exc):
             raise
@@ -8218,7 +8221,7 @@ class MarkdownCoordinator:
         if before is None:
             yield None
             if current() is not None:
-                raise ValueError(f"transaction target changed while reading: {name}")
+                raise PreconditionChangedError(f"transaction target changed while reading: {name}")
             return
         self._validate_capture_metadata(before, Path(name), max_bytes)
         descriptor = _open_capture_descriptor(name, name, dir_fd=dir_fd)
@@ -8231,7 +8234,7 @@ class MarkdownCoordinator:
     @contextlib.contextmanager
     def _capture_descriptor_range(self, descriptor, before, name, current):
         if not self._same_capture_identity(before, os.fstat(descriptor)):
-            raise ValueError(f"transaction target changed before open: {name}")
+            raise PreconditionChangedError(f"transaction target changed before open: {name}")
         check = functools.partial(self._require_capture_range_live,
                                   descriptor, before, name, current)
         check()
@@ -8278,12 +8281,12 @@ class MarkdownCoordinator:
     ) -> tuple[bytes, os.stat_result]:
         opened = os.fstat(descriptor)
         if not self._same_capture_identity(before, opened):
-            raise ValueError(f"transaction target changed before open: {target}")
+            raise PreconditionChangedError(f"transaction target changed before open: {target}")
         self._validate_capture_metadata(opened, target, max_bytes)
         content = _descriptor_bytes(descriptor, max_bytes)
         after = os.fstat(descriptor)
         if not self._same_capture_snapshot(opened, after):
-            raise ValueError(f"transaction target changed while reading: {target}")
+            raise PreconditionChangedError(f"transaction target changed while reading: {target}")
         _require_read_size(content, after, target, max_bytes)
         return content, after
 
@@ -8442,27 +8445,27 @@ class MarkdownCoordinator:
         self, after: os.stat_result, current: os.stat_result | None, label: object
     ) -> None:
         if current is None or not self._same_capture_snapshot(after, current):
-            raise ValueError(f"transaction target changed while reading: {label}")
+            raise PreconditionChangedError(f"transaction target changed while reading: {label}")
 
     def _require_unchanged_hash(
         self, after: os.stat_result, current: os.stat_result | None, label: object
     ) -> None:
         if current is None or not self._same_capture_snapshot(after, current):
-            raise ValueError(f"transaction target changed while hashing: {label}")
+            raise PreconditionChangedError(f"transaction target changed while hashing: {label}")
 
     def _hash_stable_descriptor(
         self, descriptor: int, before: os.stat_result, target: Path
     ) -> tuple[str, os.stat_result]:
         opened = os.fstat(descriptor)
         if not self._same_capture_identity(before, opened):
-            raise ValueError(f"transaction target changed before hash: {target}")
+            raise PreconditionChangedError(f"transaction target changed before hash: {target}")
         self._validate_capture_metadata(
             opened, target, MAX_KNOWLEDGE_TARGET_BYTES
         )
         digest, total = _bounded_digest(descriptor, target)
         after = os.fstat(descriptor)
         if not self._same_capture_snapshot(opened, after) or total != after.st_size:
-            raise ValueError(f"transaction target changed while hashing: {target}")
+            raise PreconditionChangedError(f"transaction target changed while hashing: {target}")
         return digest, after
 
     def _hash_operation_target(
