@@ -1864,9 +1864,10 @@ Full owner contracts: [queue-attempts](modules/queue-attempts.md), [queue-valida
 
 Existing `windows_workspace.py` and `lsp_process_tree.py` remain separate platform
 owners: handle-relative filesystem operations and process-tree lifetime,
-respectively. Windows workspace is qualified with its focused tests. The complete
-LSP process-tree packet exceeds the token ceiling and is not yet qualified; its
-subprocess fixture must not be omitted to fit. No public path or runtime ownership changes.
+respectively. Each complete packet includes its focused tests and real subprocess
+fixtures. The process-tree fixture is now shared independently of LSP protocol
+behavior. Native platform skips remain explicit. No public path or runtime
+ownership changes.
 See `research/2026-11-03-existing-platform-boundaries.md`.
 Full owner contracts: [windows-workspace](modules/windows-workspace.md).
 
@@ -1903,3 +1904,12 @@ Detailed module contracts are maintained in their existing owner guides under
 rules. Every packet includes the full guides for its owned and dependency source
 owners; an ownership-registry-based guard checks coverage. Transfer evidence is
 recorded in `research/2026-11-03-module-contract-documentation.md`.
+
+The process-tree qualification now separates its shared test subprocess fixture
+from fake LSP protocol/semantic behavior; production `lsp_process_tree` stays in
+place. The process-only proc-scanning regressions move intact to the owner suite.
+See `docs/research/2026-11-03-lsp-process-tree-packet.md`; this boundary is covered
+by the approved autonomous decomposition mandate. Its complete packet passes the
+budget and focused Linux/Python 3.10 checks; native platform CI remains pending.
+
+Full process-tree owner contract: [lsp-process-tree](modules/lsp-process-tree.md).

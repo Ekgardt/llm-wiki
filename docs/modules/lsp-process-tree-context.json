@@ -1,0 +1,52 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/research/2026-11-02-formats-module-pilot.md",
+    "docs/research/2026-11-02-module-boundaries-validation.md",
+    "docs/research/2026-11-02-module-boundaries-and-token-budget.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/research/2026-11-03-existing-platform-boundaries.md",
+    "docs/modules/context-bundle.md",
+    "scripts/lsp_process_tree.py",
+    "tests/test_lsp_process_tree.py",
+    "tests/fake_process_tree.py",
+    "docs/modules/lsp-process-tree.md",
+    "docs/modules/lsp-process-tree-context.json",
+    "docs/research/2026-11-03-lsp-process-tree-packet.md",
+    "docs/research/2026-09-27-a-signal-handler-writes-without-a-buffer.md",
+    "docs/research/2026-09-17-lsp-what-could-not-be-read-is-not-an-empty-group.md"
+  ],
+  "directories": [
+    "tests/modules/lsp_process_tree"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "scripts/lsp_process_tree.py",
+      "tests/test_lsp_process_tree.py",
+      "tests/fake_process_tree.py",
+      "docs/modules/lsp-process-tree.md",
+      "docs/modules/lsp-process-tree-context.json",
+      "docs/research/2026-11-03-lsp-process-tree-packet.md"
+    ],
+    "directories": [
+      "tests/modules/lsp_process_tree"
+    ]
+  }
+}

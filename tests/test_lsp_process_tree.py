@@ -18,7 +18,7 @@ from lsp_process_tree import ProcessTree
 
 from tests.slow_machine import SHORT_TIMEOUT
 
-FAKE_SERVER = Path(__file__).with_name("fake_lsp_server.py").resolve()
+FAKE_SERVER = Path(__file__).with_name("fake_process_tree.py").resolve()
 
 
 def _command(*arguments: str) -> list[str]:
