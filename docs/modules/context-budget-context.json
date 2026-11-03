@@ -23,7 +23,8 @@
     "tests/conftest.py",
     "tests/code_kernel_helpers.py",
     "tests/module_context.py",
-    "scripts/llm_wiki/context_bundle.py"
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/__init__.py"
   ],
   "serialization": "exact-duplicates/v1"
 }

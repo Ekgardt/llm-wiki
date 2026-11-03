@@ -99,6 +99,75 @@ def _plugin_files(root: Path, path: Path) -> set[Path]:
     return set().union(*(_local_plugin(root, name) for name in _plugin_names(path)))
 
 
+def _product_python(root: Path, path: Path) -> bool:
+    return path.is_relative_to(root / 'scripts') and path.suffix == '.py'
+
+
+def _package_initializers(root: Path, base: Path) -> set[Path]:
+    scripts = root / 'scripts'
+    parents = [p for p in base.parents if p.is_relative_to(scripts)]
+    candidates = [p / '__init__.py' for p in parents if p != scripts]
+    return _existing_paths(candidates)
+
+
+def _existing_paths(candidates) -> set[Path]:
+    return {p for p in candidates if p.is_file()}
+
+
+def _local_source_files(root: Path, base: Path) -> set[Path]:
+    found = _existing_paths([base.with_suffix('.py'), base / '__init__.py'])
+    if not found and not base.is_dir():
+        return set()  # Installed or stdlib import, not a source under scripts/.
+    found.update(_package_initializers(root, base))
+    return {_contained(root, str(p.relative_to(root))) for p in found}
+
+
+def _relative_import_parent(root: Path, source: Path, level: int) -> Path:
+    parent = source.parent
+    for _ in range(level - 1):
+        parent = parent.parent
+    assert parent.is_relative_to(root / 'scripts'), 'Relative import escapes script root'
+    return parent
+
+
+def _from_import_sources(root: Path, source: Path, node: ast.ImportFrom) -> set[Path]:
+    parent = root / 'scripts'
+    if node.level:
+        parent = _relative_import_parent(root, source, node.level)
+    base = parent.joinpath(*(node.module or '').split('.'))
+    children = set().union(*(_local_source_files(root, base / a.name) for a in node.names))
+    return _local_source_files(root, base) | children
+
+
+def _import_sources(root: Path, source: Path, node: ast.AST) -> set[Path]:
+    if isinstance(node, ast.Import):
+        bases = [root / 'scripts' / Path(*a.name.split('.')) for a in node.names]
+        return set().union(*(_local_source_files(root, base) for base in bases))
+    if isinstance(node, ast.ImportFrom):
+        return _from_import_sources(root, source, node)
+    return set()
+
+
+def _source_dependencies(root: Path, source: Path) -> set[Path]:
+    nodes = ast.walk(ast.parse(source.read_bytes()))
+    imports = set().union(*(_import_sources(root, source, node) for node in nodes))
+    parents = _package_initializers(root, source.with_suffix(''))
+    return imports | {_contained(root, str(p.relative_to(root))) for p in parents}
+
+
+def required_source_context(root: Path, files: set[Path]) -> set[Path]:
+    """Existing local product imports, including package code and lazy imports."""
+    pending = {p for p in files if _product_python(root, p)}
+    seen: set[Path] = set()
+    while pending:
+        source = pending.pop()
+        if source in seen:
+            continue
+        seen.add(source)
+        pending.update(_source_dependencies(root, source) - seen)
+    return seen
+
+
 def serialized_bundle(root: Path, files: set[Path]) -> str:
     return ''.join(_framed_file(root, path) for path in sorted(files))
 
@@ -129,7 +198,7 @@ def measure_context(root: Path, manifest_path: Path) -> tuple[int, int]:
     assert manifest['max_tokens'] == 100000, 'Owner limit cannot be changed'
     assert manifest['encoding'] == 'o200k_base', 'Measurement encoding cannot drift'
     files = context_files(root, manifest)
-    needed = required_bootstrap(root, files) | {manifest_path.resolve(), root / 'tests/module_context.py',
+    needed = required_bootstrap(root, files) | required_source_context(root, files) | {manifest_path.resolve(), root / 'tests/module_context.py',
                                                        root / 'scripts/llm_wiki/context_bundle.py'}
     assert needed <= files, f'Missing required context: {sorted(str(p.relative_to(root)) for p in needed - files)}'
     total = len(tiktoken.get_encoding(manifest['encoding']).encode_ordinary(_manifest_bundle(root, files, manifest)))

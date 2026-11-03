@@ -1,0 +1,122 @@
+"""Local source imports cannot disappear behind a small declared packet."""
+import json
+from pathlib import Path
+
+import pytest
+
+from tests.module_context import measure_context
+
+
+def _write(root, name, text):
+    path = root / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def _packet(root, sources, included):
+    required = {'tests/module_context.py': '', 'scripts/llm_wiki/context_bundle.py': ''}
+    for name, body in (required | sources).items():
+        _write(root, name, body)
+    return _write(root, 'context.json', json.dumps({
+        'encoding': 'o200k_base', 'max_tokens': 100000,
+        'serialization': 'exact-duplicates/v1',
+        'files': [*required, *included, 'context.json'],
+    }))
+
+
+@pytest.mark.parametrize('source', [
+    'import dependency', 'import dependency as alias', 'from dependency import VALUE',
+    'def read():\n import dependency', 'if False:\n import dependency',
+])
+def test_omitted_absolute_dependency_is_named_before_counting(tmp_path, source):
+    manifest = _packet(tmp_path, {
+        'scripts/owner.py': source, 'scripts/dependency.py': 'VALUE = 1',
+    }, ['scripts/owner.py'])
+    with pytest.raises(AssertionError, match='scripts/dependency.py'):
+        measure_context(tmp_path, manifest)
+
+
+def test_transitive_dependency_is_required(tmp_path):
+    manifest = _packet(tmp_path, {
+        'scripts/owner.py': 'import middle', 'scripts/middle.py': 'import dependency',
+        'scripts/dependency.py': '',
+    }, ['scripts/owner.py', 'scripts/middle.py'])
+    with pytest.raises(AssertionError, match='scripts/dependency.py'):
+        measure_context(tmp_path, manifest)
+
+
+@pytest.mark.parametrize('source', ['from .dependency import VALUE', 'from . import dependency'])
+def test_relative_dependency_is_required(tmp_path, source):
+    manifest = _packet(tmp_path, {
+        'scripts/pkg/__init__.py': '', 'scripts/pkg/owner.py': source,
+        'scripts/pkg/dependency.py': 'VALUE = 1',
+    }, ['scripts/pkg/__init__.py', 'scripts/pkg/owner.py'])
+    with pytest.raises(AssertionError, match='scripts/pkg/dependency.py'):
+        measure_context(tmp_path, manifest)
+
+
+def test_package_initializer_is_required(tmp_path):
+    manifest = _packet(tmp_path, {
+        'scripts/owner.py': 'import pkg.child', 'scripts/pkg/__init__.py': '',
+        'scripts/pkg/child.py': '',
+    }, ['scripts/owner.py', 'scripts/pkg/child.py'])
+    with pytest.raises(AssertionError, match='scripts/pkg/__init__.py'):
+        measure_context(tmp_path, manifest)
+
+
+def test_imported_submodule_is_required(tmp_path):
+    manifest = _packet(tmp_path, {
+        'scripts/owner.py': 'from pkg import child', 'scripts/pkg/__init__.py': '',
+        'scripts/pkg/child.py': '',
+    }, ['scripts/owner.py', 'scripts/pkg/__init__.py'])
+    with pytest.raises(AssertionError, match='scripts/pkg/child.py'):
+        measure_context(tmp_path, manifest)
+
+
+def test_initializer_imports_are_followed(tmp_path):
+    manifest = _packet(tmp_path, {
+        'scripts/owner.py': 'import pkg.child', 'scripts/pkg/__init__.py': 'import dependency',
+        'scripts/pkg/child.py': '', 'scripts/dependency.py': '',
+    }, ['scripts/owner.py', 'scripts/pkg/__init__.py', 'scripts/pkg/child.py'])
+    with pytest.raises(AssertionError, match='scripts/dependency.py'):
+        measure_context(tmp_path, manifest)
+
+
+def test_complete_cycles_namespace_and_installed_imports_are_accepted(tmp_path):
+    sources = {
+        'scripts/first.py': 'import second\nimport ns.child\nimport json\nimport tiktoken',
+        'scripts/second.py': 'import first', 'scripts/ns/child.py': '',
+    }
+    manifest = _packet(tmp_path, sources, list(sources))
+    total, files = measure_context(tmp_path, manifest)
+    assert total > 0
+    assert files == 6
+
+
+def test_local_dependency_symlink_outside_root_is_refused(tmp_path):
+    root = tmp_path / 'repo'
+    outside = _write(tmp_path, 'outside.py', '')
+    manifest = _packet(root, {'scripts/owner.py': 'import dependency'}, ['scripts/owner.py'])
+    try:
+        (root / 'scripts/dependency.py').symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f'symlink unavailable: {exc}')
+    with pytest.raises(ValueError):
+        measure_context(root, manifest)
+
+
+def test_actual_declared_packets_have_complete_local_source_closure():
+    from tests.module_context import context_files, required_source_context
+    root = Path(__file__).resolve().parents[1]
+    for manifest in (root / 'docs/modules').glob('*-context.json'):
+        files = context_files(root, json.loads(manifest.read_text()))
+        assert required_source_context(root, files) <= files, manifest.name
+
+
+def test_declared_source_own_package_initializer_is_required(tmp_path):
+    manifest = _packet(tmp_path, {
+        'scripts/pkg/__init__.py': 'VALUE = 1', 'scripts/pkg/owner.py': '',
+    }, ['scripts/pkg/owner.py'])
+    with pytest.raises(AssertionError, match='scripts/pkg/__init__.py'):
+        measure_context(tmp_path, manifest)

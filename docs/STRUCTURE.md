@@ -2074,3 +2074,12 @@ settlement and retention authorization remain queue responsibilities. The artifa
 owner depends on value/deadline/permission/sync primitives and never imports the
 executor or compile journal. See
 `research/2026-11-03-queue-artifact-io-boundary.md`.
+
+Maintenance-context tooling in `tests/module_context.py` and
+`tests/module_boundaries.py` has a test-only qualification packet. Beyond actual
+pytest bootstrap, codec and token framing, the counter requires declared product
+sources to include their statically visible local import closure and package
+initializers. It reports omitted paths before counting; it neither imports the
+product nor silently adds files. Dynamic/configuration/subprocess dependencies
+remain explicit research and integration obligations. See
+`research/2026-11-03-context-source-closure.md`.
