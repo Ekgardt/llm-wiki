@@ -171,3 +171,16 @@ def test_queue_contracts_guard_detects_executor_dependency(source):
 @pytest.mark.parametrize('source', ['from memory_queue import MemoryQueue', 'import memory_queue as queue; queue.active_or_legacy_memory_queue()', 'from llm_wiki.queue_contracts import QueueFailure'])
 def test_queue_contracts_guard_allows_operations_and_owned_types(source):
     assert not _queue_contracts_violations(source)
+
+
+def test_queue_resolution_uses_the_call_lifecycle_owner():
+    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text())
+    imports = [node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
+    resolvers = _call_resolver_imports(imports)
+    assert resolvers == ['llm_wiki.compile_call_runtime', 'llm_wiki.compile_call_runtime']
+    assert not any(node.module == 'compile_controller' for node in imports)
+
+
+def _call_resolver_imports(imports):
+    return [node.module for node in imports
+            if any(a.name == 'resolve_model_call' for a in node.names)]

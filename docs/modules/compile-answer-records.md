@@ -14,11 +14,11 @@ The queue still verifies its actual lease, task family, artifact hash and SQL
 transaction. This module neither reads artifacts nor authorizes replay. A decoded
 transport result is not a semantically approved compile plan.
 
-The controller keeps four used direct function aliases and the refusal constant.
+The controller keeps the two record helpers used by existing corruption tests
+(_answer_event and _encoded_answer) and the refusal constant.
 Remove them only when its call paths and existing helper consumers no longer use
 those names. The queue's retained-answer check imports this owner directly; its
-separate settlement resolver still depends on the controller and is not claimed
-to be decomposed here. No duplicate decoder, model transport or runtime store exists.
+settlement resolver now uses the separate compile-call-runtime owner. No duplicate decoder, model transport or runtime store exists.
 
 Tests retain seven pre-transfer response encodings/decoded values and eight
 malformed-record refusals, including existing NFC normalization. Binding tests
@@ -41,7 +41,7 @@ Shared canonical contract: [Exact record contexts](context-records.md).
 
 `scripts/llm_wiki/compile_answer_records.py` owns existing saved model/candidate
 answer bytes and their call binding. The queue's retained-answer verifier imports
-this owner directly; the controller retains four used function aliases and the
+this owner directly; the controller retains two used record helper aliases and the
 shared completed-refusal set. No transport, SQL, artifact IO, repeat authorization
 or settlement moves into the record owner. Remaining queue/controller dependencies
 are separate work. See the [compile answer record contract](compile-answer-records.md).

@@ -2082,3 +2082,10 @@ as integration tests grouped by queue, runtime, Windows, LSP, renderer and forma
 consumers; they are required regression work and are not implicitly qualified by
 a leaf packet. Import closure alone does not prove completeness of file reads.
 See [the correction](research/2026-11-03-boundary-source-read-context.md).
+
+### Durable model-call lifecycle
+
+`scripts/llm_wiki/compile_call_runtime.py` owns existing call reservation, replay,
+uncertainty and repeat resolution through an explicit queue object and protected
+invoke callback. Queue SQL/leases/artifacts and compiler semantic orchestration
+retain their owners. See the [call lifecycle contract](modules/compile-call-runtime.md).

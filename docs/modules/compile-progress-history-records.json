@@ -4,607 +4,91 @@
   "bytes": 380666,
   "sha256": "8db876e16e9f9b4a57e82129eae99bd78f960a5943aa98d7ffedd904f3323611",
   "records": [
-    {
-      "id": "storage-foundation",
-      "label": "Storage design, implementation and certification foundation",
-      "start": 0,
-      "end": 6885,
-      "sha256": "0facfa07ab96d62f78aa25c14c7548025f714da945d13609c56401dd6341a980"
-    },
-    {
-      "id": "adoption-envelope-and-compatible-readers",
-      "label": "Dependencies blocking activation / Adoption envelope and compatible readers (2026-10-19)",
-      "start": 6885,
-      "end": 9592,
-      "sha256": "3a44101b1089316514092d0ee02f0e93baae5a00b877b987fcf3807cfac67e90"
-    },
-    {
-      "id": "history-candidate-schema-migration-2026-10-19-isolated-implementation",
-      "label": "Candidate schema migration (2026-10-19; isolated implementation)",
-      "start": 9592,
-      "end": 12826,
-      "sha256": "d899063e7d525b529995d1459d059990e93c887f84119662a94ee6b79777841f"
-    },
-    {
-      "id": "history-offline-artifact-fingerprints-2026-10-19",
-      "label": "Offline artifact fingerprints (2026-10-19)",
-      "start": 12826,
-      "end": 15156,
-      "sha256": "65e6fb4f9439d9c887d839d0b02d9fd67744bb75ce502389f51c8a2bd2fee574"
-    },
-    {
-      "id": "history-offline-cutover-design-refinement-2026-10-19",
-      "label": "Offline cutover design refinement (2026-10-19)",
-      "start": 15156,
-      "end": 20556,
-      "sha256": "cf52688952b5936ed63bcf52892f00c1043f92fc164453ce477db0e7c0c915fb"
-    },
-    {
-      "id": "history-retention-reference-race-2026-10-19-isolated-implementation",
-      "label": "Retention reference race (2026-10-19, isolated implementation)",
-      "start": 20556,
-      "end": 23997,
-      "sha256": "6f7529e7c7e89cbce572ee477aa97ac88f82c5654cc0217f99a66f96af49be0e"
-    },
-    {
-      "id": "history-durable-model-call-controller-2026-10-19-isolated-implementation",
-      "label": "Durable model-call controller (2026-10-19, isolated implementation)",
-      "start": 23997,
-      "end": 28306,
-      "sha256": "0017b770615bbc63222975df219fe058602e8691420597400306fe5551cad007"
-    },
-    {
-      "id": "history-explicit-repeat-decision-2026-10-19-internal-api-only",
-      "label": "Explicit repeat decision (2026-10-19, internal API only)",
-      "start": 28306,
-      "end": 30390,
-      "sha256": "5647b77e661156c010404f7a17b8d6a6fe41e6923f16f3181b830d94a12272ed"
-    },
-    {
-      "id": "history-protected-dispatch-and-semantic-replay-integration-2026-10-19",
-      "label": "Protected dispatch and semantic replay integration (2026-10-19)",
-      "start": 30390,
-      "end": 34712,
-      "sha256": "f3380e7efc7e12f9d0dad14d64374d450aaaf0ab080291d3a2b478e78ea2c785"
-    },
-    {
-      "id": "history-captured-input-artifacts-2026-10-19",
-      "label": "Captured input artifacts (2026-10-19)",
-      "start": 34712,
-      "end": 37839,
-      "sha256": "a11de59a606ac85ad5eccf0ab470b5b22bee59126d0916df5d60a18386349725"
-    },
-    {
-      "id": "history-streaming-artifact-i-o-approved-2026-10-19",
-      "label": "Streaming artifact I/O (approved 2026-10-19)",
-      "start": 37839,
-      "end": 41723,
-      "sha256": "60b9791697442acc84d5d68fd15f1f7d911814852b448926f1ffd0454b1d79ea"
-    },
-    {
-      "id": "history-record-addressable-snapshot-container-2026-10-19",
-      "label": "Record-addressable snapshot container (2026-10-19)",
-      "start": 41723,
-      "end": 45900,
-      "sha256": "832909bb971205c3b98cc60ab8754ecf7c3e84be94a1b10f943203031a65c197"
-    },
-    {
-      "id": "history-context-planning-from-the-retained-archive-2026-10-19",
-      "label": "Context planning from the retained archive (2026-10-19)",
-      "start": 45900,
-      "end": 50269,
-      "sha256": "505ec981fdff52b020b799121cf986a78c6baac8e6490d2b2bfc4c66cacbea41"
-    },
-    {
-      "id": "history-sequential-capture-into-the-same-artifact-2026-10-20",
-      "label": "Sequential capture into the same artifact (2026-10-20)",
-      "start": 50269,
-      "end": 54447,
-      "sha256": "d6d48a08c3771f25068f251c34233814d45f9d4c38fed133606dd1cd2275bd73"
-    },
-    {
-      "id": "history-2026-10-20-physical-day-read-scope",
-      "label": "2026-10-20 — physical-day read scope",
-      "start": 54447,
-      "end": 56104,
-      "sha256": "ec6f28d8019bb477fea339edb74bf5de63855309e6bef3ae0b0e63cff362c09b"
-    },
-    {
-      "id": "history-2026-10-20-incremental-common-batch-algorithm",
-      "label": "2026-10-20 — incremental common batch algorithm",
-      "start": 56104,
-      "end": 59041,
-      "sha256": "895c767d076645f069d8875decdd2eb1d07cf397c67ed3096597ae81c46b0abd"
-    },
-    {
-      "id": "history-2026-10-20-streamed-daily-planning-and-global-citation-identity",
-      "label": "2026-10-20 — streamed daily planning and global citation identity",
-      "start": 59041,
-      "end": 64641,
-      "sha256": "95bb784039cf65e3e28d8b114592922bdd2cbef11057c2ae6e5baf54608dab7b"
-    },
-    {
-      "id": "history-2026-10-20-durable-streamed-source-capture-and-task-family-fencing",
-      "label": "2026-10-20 — durable streamed source capture and task-family fencing",
-      "start": 64641,
-      "end": 69358,
-      "sha256": "00f2a065225c90deb6b136af882cf368a9b7ada992a575df7ee1378fe87681c9"
-    },
-    {
-      "id": "history-2026-10-20-stable-dependency-file-fingerprint-prerequisite",
-      "label": "2026-10-20: stable dependency-file fingerprint prerequisite",
-      "start": 69358,
-      "end": 71688,
-      "sha256": "cbcf9a5db0e02eabf45bbe998f80cd9299db5b7c4f79ac852ebc3eaeea304d8e"
-    },
-    {
-      "id": "history-2026-10-20-explicit-dependency-manifests-and-origin-scoped-work-identity",
-      "label": "2026-10-20: explicit dependency manifests and origin-scoped work identity",
-      "start": 71688,
-      "end": 75895,
-      "sha256": "76cfb181fa25f2fc92f548288ed8b84174d51c2b1a1de6ea9f1d9a1a75eb1c94"
-    },
-    {
-      "id": "history-2026-10-20-require-live-dependency-verification-at-durable-dispatch",
-      "label": "2026-10-20: require live dependency verification at durable dispatch",
-      "start": 75895,
-      "end": 78902,
-      "sha256": "575ce588090d388fdb04954de219da58b85701cf4c1a4ed677ed1de266c67a36"
-    },
-    {
-      "id": "history-2026-10-20-configured-python-runtime-dependency-component",
-      "label": "2026-10-20: configured Python runtime dependency component",
-      "start": 78902,
-      "end": 82425,
-      "sha256": "6a66b4d3485cb6fb15de1b21e71cf32aed9cafa9d42e13b82071ad740a6fa90a"
-    },
-    {
-      "id": "history-2026-10-20-find-original-work-before-inspecting-live-sources",
-      "label": "2026-10-20: find original work before inspecting live sources",
-      "start": 82425,
-      "end": 87017,
-      "sha256": "1ef443bc7922adc9c49492a95ea9372897a5b7f127798039d30947f46590bffc"
-    },
-    {
-      "id": "history-2026-10-20-streamed-admission-reports-refused-units-independently",
-      "label": "2026-10-20: streamed admission reports refused units independently",
-      "start": 87017,
-      "end": 90327,
-      "sha256": "28d2d3b0e1a3202b6c1df54b7dea7d6f4a7d89187d7c4482d3ae3dd7fafe1ccd"
-    },
-    {
-      "id": "history-2026-10-20-durable-complete-preflight-metadata",
-      "label": "2026-10-20: durable, complete preflight metadata",
-      "start": 90327,
-      "end": 95212,
-      "sha256": "c3adc1ca1619281bd790ce24928341c83e6c169a29cdf9b07ae9779b35ff50b8"
-    },
-    {
-      "id": "history-2026-10-20-uncertainty-belongs-to-the-call-delivery-blocking-happens-at-exit",
-      "label": "2026-10-20: uncertainty belongs to the call; delivery blocking happens at exit",
-      "start": 95212,
-      "end": 99798,
-      "sha256": "7285a6da4e7526d111531c2f03405c7dc6c7e4ef276eb8d9cd3199bd954acefd"
-    },
-    {
-      "id": "history-2026-10-20-consume-only-the-retained-complete-preflight",
-      "label": "2026-10-20: consume only the retained complete preflight",
-      "start": 99798,
-      "end": 104429,
-      "sha256": "528baf8e6ef0a459ff616802e5c4302907d107fb50f35e63400498308537533b"
-    },
-    {
-      "id": "history-2026-10-20-complete-refreshed-context-without-repeated-whole-captures",
-      "label": "2026-10-20 — complete refreshed context without repeated whole captures",
-      "start": 104429,
-      "end": 107466,
-      "sha256": "79dbf0c9a1659fa84fad4a771e63016fbced51ee388b51a2f8582547bf4ca7c1"
-    },
-    {
-      "id": "history-2026-10-20-durable-batch-admission-from-retained-preflight",
-      "label": "2026-10-20 — durable batch admission from retained preflight",
-      "start": 107466,
-      "end": 110420,
-      "sha256": "3f8965d554be7a5892b0eac67a0619b6e86a0901ef14b6f5cc524c23b9aef9d7"
-    },
-    {
-      "id": "history-2026-10-20-retained-batch-context-and-orphan-recovery",
-      "label": "2026-10-20 — retained batch context and orphan recovery",
-      "start": 110420,
-      "end": 113846,
-      "sha256": "1c780ee3f63ecde41cd33e1843e2c97a784a1db3b64321316a372e0e11af88ff"
-    },
-    {
-      "id": "history-2026-10-20-semantic-preparation-from-retained-context",
-      "label": "2026-10-20 — semantic preparation from retained context",
-      "start": 113846,
-      "end": 117227,
-      "sha256": "23dde867a86a12d76eab837903a4a3cb7ccb1d273b124bbb4152d93d40d7109d"
-    },
-    {
-      "id": "history-2026-10-20-accepted-publication-checkpoint-before-markdown-writes",
-      "label": "2026-10-20 — accepted publication checkpoint before Markdown writes",
-      "start": 117227,
-      "end": 120767,
-      "sha256": "cd972bdd2e7f8d86a3da88b2b9f89ed8a102e8f7ab3de16b5846e68b41a13f81"
-    },
-    {
-      "id": "history-2026-10-20-source-backed-publication-completion",
-      "label": "2026-10-20 — source-backed publication completion",
-      "start": 120767,
-      "end": 126217,
-      "sha256": "c05d055b07fa0adc41912894849e723846821a51d430e4212004e07c528f561f"
-    },
-    {
-      "id": "history-saved-publication-execution-2026-10-20",
-      "label": "Saved publication execution (2026-10-20)",
-      "start": 126217,
-      "end": 128861,
-      "sha256": "86ff58d0c8acb69fb3d287428405fdf6625ccc4366246841c44625985787218c"
-    },
-    {
-      "id": "history-worker-lease-handoff-investigation-2026-10-20",
-      "label": "Worker lease handoff investigation (2026-10-20)",
-      "start": 128861,
-      "end": 131383,
-      "sha256": "98a3dd6baaa7f4a073f7addb3f239548c04baf5d113adaa1e3e35e2fca0f3e9e"
-    },
-    {
-      "id": "history-joining-prepared-batch-resolution-and-publication-2026-10-20",
-      "label": "Joining prepared batch resolution and publication (2026-10-20)",
-      "start": 131383,
-      "end": 134110,
-      "sha256": "5d701f1477e558358109bb5a1f94b0ddca5dc5a3deb63f5b34dff44128b845bb"
-    },
-    {
-      "id": "history-durable-repair-partition-decision-2026-10-20",
-      "label": "Durable repair partition decision (2026-10-20)",
-      "start": 134110,
-      "end": 137546,
-      "sha256": "96f8472f0709e9f74998bf72f7b10f96c3d4e47247bb7d947d6b5fe8019e4249"
-    },
-    {
-      "id": "history-repair-child-admission-and-execution-2026-10-20",
-      "label": "Repair child admission and execution (2026-10-20)",
-      "start": 137546,
-      "end": 140132,
-      "sha256": "1bd93b4356c7e168815a9d75882b014ea61e774913b76f85e89e2ff5d84cf2c4"
-    },
-    {
-      "id": "history-receipt-backed-repair-tree-completion-2026-10-20",
-      "label": "Receipt-backed repair-tree completion (2026-10-20)",
-      "start": 140132,
-      "end": 143160,
-      "sha256": "52a6d68089e6d6c917ee5fa78040136774eb8f1b8393faec580d1cc5dc92e955"
-    },
-    {
-      "id": "history-iterative-execution-of-retained-repair-trees-2026-10-20-implementation-underway",
-      "label": "Iterative execution of retained repair trees (2026-10-20, implementation underway)",
-      "start": 143160,
-      "end": 146554,
-      "sha256": "a3ae76dc348ed6423f8ebc51174c3dc0c8b83a2310e44b86353237179c987368"
-    },
-    {
-      "id": "history-whole-preflight-completion-2026-10-20-implementation-underway",
-      "label": "Whole-preflight completion (2026-10-20, implementation underway)",
-      "start": 146554,
-      "end": 149732,
-      "sha256": "0640c2534b829211c9124084296db527ecf2a473b5fd375beb73ef59ab792b43"
-    },
-    {
-      "id": "history-queue-settlement-requires-compile-completion-2026-10-20-implementation-underway",
-      "label": "Queue settlement requires compile completion (2026-10-20, implementation underway)",
-      "start": 149732,
-      "end": 154404,
-      "sha256": "cc941151e93d1eb01197f2b8c94fba56af70dc8bec5b41b4c36beb4c25fe81fa"
-    },
-    {
-      "id": "history-atomic-initial-capture-admission-2026-10-20-candidate-implemented",
-      "label": "Atomic initial capture admission (2026-10-20, candidate implemented)",
-      "start": 154404,
-      "end": 157731,
-      "sha256": "cdd53765066e0e5179a629b216393efe273f281267046e34a6bb944e6247be41"
-    },
-    {
-      "id": "history-independent-known-resolution-failures-2026-10-20-candidate-implemented",
-      "label": "Independent known resolution failures (2026-10-20, candidate implemented)",
-      "start": 157731,
-      "end": 161477,
-      "sha256": "e37a43a2ef97b271c59209252b93e4c5cc947c04d4e66a11b93e0b3efb320e88"
-    },
-    {
-      "id": "history-shared-run-planning-preparation-2026-10-20-candidate-implemented",
-      "label": "Shared run planning preparation (2026-10-20, candidate implemented)",
-      "start": 161477,
-      "end": 165328,
-      "sha256": "bf29dcece3102b79e45a743e076eea3217c12f03aff5884f09dca40911134118"
-    },
-    {
-      "id": "history-configuration-and-execution-inventory-composition-2026-10-20-candidate-implemented",
-      "label": "Configuration and execution inventory composition (2026-10-20, candidate implemented)",
-      "start": 165328,
-      "end": 169480,
-      "sha256": "76ac6929f64566cf7a9e01316036ad3cc221f838041b68f443fd437062d93991"
-    },
-    {
-      "id": "history-leased-queue-compiler-integration-2026-10-20-candidate-implemented",
-      "label": "Leased queue compiler integration (2026-10-20, candidate implemented)",
-      "start": 169480,
-      "end": 173439,
-      "sha256": "b97741f87b0bec14af5de1dea69e6a172907cfbc6e752638488d76d1b17bac79"
-    },
-    {
-      "id": "history-2026-10-20-receipt-discovery-source-lifetime",
-      "label": "2026-10-20 — receipt discovery source lifetime",
-      "start": 173439,
-      "end": 176356,
-      "sha256": "c146b05a4bf665db18738b236843dcd924065dc93167458d2023ad1778e4c6db"
-    },
-    {
-      "id": "history-2026-10-20-retain-planning-observations-for-replay",
-      "label": "2026-10-20 — retain planning observations for replay",
-      "start": 176356,
-      "end": 182629,
-      "sha256": "ab73bf0de0c6088e311646b62e63c131d7edb64e32de4b58eaf644cba74d50ba"
-    },
-    {
-      "id": "history-2026-10-20-cross-work-source-uncertainty",
-      "label": "2026-10-20 — cross-work source uncertainty",
-      "start": 182629,
-      "end": 188481,
-      "sha256": "5f62b5e3b73a4a00c55c67cfa2466275bcb65a759181aceb28a2eb783013a87a"
-    },
-    {
-      "id": "history-2026-10-20-ingress-ownership-and-immutable-request-binding",
-      "label": "2026-10-20 — ingress ownership and immutable request binding",
-      "start": 188481,
-      "end": 193618,
-      "sha256": "637a4072b70c61926298e9437ca6259c82310b1ad1474129292db2e07a112904"
-    },
-    {
-      "id": "history-2026-10-20-source-selection-enters-retained-execution-intent",
-      "label": "2026-10-20 — source selection enters retained execution intent",
-      "start": 193618,
-      "end": 196039,
-      "sha256": "e1ce10687e0d477704a1de00ae529949a55d2809b8270ec8c78d63b1b1ffc455"
-    },
-    {
-      "id": "history-2026-10-20-selecting-a-foreground-task-without-bypassing-queue-admission",
-      "label": "2026-10-20 — selecting a foreground task without bypassing queue admission",
-      "start": 196039,
-      "end": 199694,
-      "sha256": "8ba5bd142c32f95c3cd5fba386e6923f6e04f6e388edfb875669baa53defa03f"
-    },
-    {
-      "id": "history-2026-10-20-ephemeral-compile-lock-handoff-through-supervised-execution",
-      "label": "2026-10-20 — ephemeral compile-lock handoff through supervised execution",
-      "start": 199694,
-      "end": 203111,
-      "sha256": "7a62df02b6ffa1399d371c35c20866c66bd0d13bb3c3c6f147a3ef3210d76827"
-    },
-    {
-      "id": "history-2026-10-20-caller-cancellation-through-the-existing-worker-lifecycle",
-      "label": "2026-10-20 — caller cancellation through the existing worker lifecycle",
-      "start": 203111,
-      "end": 207727,
-      "sha256": "27b927f9279ea4757a9b212f9033c8e75cec4d52aba2bd843431596e0bf69abd"
-    },
-    {
-      "id": "history-2026-10-20-resume-the-same-unfinished-foreground-request",
-      "label": "2026-10-20 — resume the same unfinished foreground request",
-      "start": 207727,
-      "end": 213679,
-      "sha256": "aa8431704051fbba3b8a4c065c4fd0b22921166c5688aec7a080fa78a8863b73"
-    },
-    {
-      "id": "history-2026-10-20-isolate-worker-diagnostics-from-mcp-transport",
-      "label": "2026-10-20 — isolate worker diagnostics from MCP transport",
-      "start": 213679,
-      "end": 216106,
-      "sha256": "998e3af8fa8f90848989fc7c88a29ea46ccca768e63f84670c250ef90bff328e"
-    },
-    {
-      "id": "history-2026-10-20-do-not-retain-every-daily-part-during-source-capture",
-      "label": "2026-10-20 — do not retain every daily part during source capture",
-      "start": 216106,
-      "end": 219854,
-      "sha256": "90baaf637daa3c218fb042f4a2467f9675eddf3f9cbd25d24ca3d489dc04ed77"
-    },
-    {
-      "id": "history-2026-10-20-archive-replay-retains-only-shared-record-fields",
-      "label": "2026-10-20 — archive replay retains only shared record fields",
-      "start": 219854,
-      "end": 223052,
-      "sha256": "5efa686209f5d5bcec8bdda356fffef24b4385847d20d9bd0b24cb6c3bf85058"
-    },
-    {
-      "id": "history-2026-10-20-reuse-an-original-digest-only-for-the-same-immutable-bytes",
-      "label": "2026-10-20 — reuse an original digest only for the same immutable bytes",
-      "start": 223052,
-      "end": 226418,
-      "sha256": "345733017902945669a30ae6a45b0952e10890a5e9f892b32c4dacd11a6227ad"
-    },
-    {
-      "id": "history-2026-10-20-validate-retained-capture-bodies-without-materializing-them",
-      "label": "2026-10-20 — validate retained capture bodies without materializing them",
-      "start": 226418,
-      "end": 230899,
-      "sha256": "c2c26bb2ef2d1413d9c0baf84720df9be1662f9e1dce15e22fe5b8a6518a0d62"
-    },
-    {
-      "id": "history-2026-10-20-parse-entry-identifiers-from-ranges-not-copied-entry-bodies",
-      "label": "2026-10-20 — parse entry identifiers from ranges, not copied entry bodies",
-      "start": 230899,
-      "end": 235098,
-      "sha256": "4655c7c18412829427dc28ee5e8d44b7edea3d8933f7500ba1d64aeb7bf80167"
-    },
-    {
-      "id": "history-2026-10-20-remove-the-canonical-boundary-parser-s-buffer-requirement",
-      "label": "2026-10-20 — remove the canonical boundary parser's buffer requirement",
-      "start": 235098,
-      "end": 240660,
-      "sha256": "73489f4a67be257d3c20f8a723cbffdb8bcbc6a282f90f7d69a4b103095e8e48"
-    },
-    {
-      "id": "history-2026-10-20-owned-verified-original-ranges-and-part-provenance",
-      "label": "2026-10-20 — owned verified original ranges and part provenance",
-      "start": 240660,
-      "end": 245205,
-      "sha256": "a39a154412367181729e53da1c3aff3c7ce6a0a4d55862a5c39541bc6a79e126"
-    },
-    {
-      "id": "history-2026-10-20-native-journal-index-retains-ranges-not-matched-bodies",
-      "label": "2026-10-20 — native journal index retains ranges, not matched bodies",
-      "start": 245205,
-      "end": 249135,
-      "sha256": "a9c798d1017e7ebf036aee8b44c62edc64bfa1144d2d8f2e807af88d0a1687e3"
-    },
-    {
-      "id": "history-2026-10-20-shared-verified-source-authority-for-evidence-resolution",
-      "label": "2026-10-20 — shared verified source authority for evidence resolution",
-      "start": 249135,
-      "end": 253876,
-      "sha256": "7714f4f329938689327fb2bab2cf79c1596314e78ea47938ee448668aad59a17"
-    },
-    {
-      "id": "history-2026-10-20-retained-daily-originals-enter-the-actual-archive-planner-as-ranges",
-      "label": "2026-10-20 — retained daily originals enter the actual archive planner as ranges",
-      "start": 253876,
-      "end": 295799,
-      "sha256": "84dcf112dd9665c7df666758e5ffe8ce70acfc584a3cbaec06f7bd9397884fd0"
-    },
-    {
-      "id": "history-point-7-integration-reconciliation-2026-10-20",
-      "label": "Point 7 integration reconciliation — 2026-10-20",
-      "start": 295799,
-      "end": 299547,
-      "sha256": "efbd2b62394cf83ec4e754e93b438a3590ed29be86cb9c78bff592a624a20149"
-    },
-    {
-      "id": "history-explicit-repair-command-migration-entry-design-2026-10-20",
-      "label": "Explicit repair-command migration entry — design 2026-10-20",
-      "start": 299547,
-      "end": 306820,
-      "sha256": "48d2bea64a742050fcf5ee5d5dc4150c524e5dfef42a37150af953f59a9bbe95"
-    },
-    {
-      "id": "history-law-9-aggregate-compile-quotas-2026-10-20",
-      "label": "Law-9 aggregate compile quotas — 2026-10-20",
-      "start": 306820,
-      "end": 311336,
-      "sha256": "eb54a6d9b1c19796f452ff1100da469c69fdd194bd4e6ebdec492634a4eba6fa"
-    },
-    {
-      "id": "history-index-publication-consumes-one-source-body-at-a-time-design-2026-10-20",
-      "label": "Index publication consumes one source body at a time — design 2026-10-20",
-      "start": 311336,
-      "end": 315438,
-      "sha256": "68ca438982587746ac357d03b572fc8eb06ffaf19d159fe8c8de2969343eda72"
-    },
-    {
-      "id": "history-manifest-only-claim-capture-and-standalone-index-planning-design-2026-10-20",
-      "label": "Manifest-only claim capture and standalone index planning — design 2026-10-20",
-      "start": 315438,
-      "end": 319932,
-      "sha256": "502ee8b5888153982a14f92a82acd102fe4cf259adb2d75fb3eead153799b058"
-    },
-    {
-      "id": "history-2026-10-20-operator-recovery-admission-in-progress",
-      "label": "2026-10-20: operator recovery admission (in progress)",
-      "start": 319932,
-      "end": 323833,
-      "sha256": "e1c06c978ee5ce918da27da8ffc5c742fd0c5042e173f5b4ef49e4122e3f9324"
-    },
-    {
-      "id": "history-2026-10-20-operator-inspection-before-recovery-in-progress",
-      "label": "2026-10-20: operator inspection before recovery (in progress)",
-      "start": 323833,
-      "end": 328339,
-      "sha256": "04231092e30d3e70a65ff932d980c4a64daf5d9491208ab9e11d5b2298e370fa"
-    },
-    {
-      "id": "history-2026-10-20-distinguish-resolved-calls-from-repeat-consent-in-progress",
-      "label": "2026-10-20: distinguish resolved calls from repeat consent (in progress)",
-      "start": 328339,
-      "end": 333353,
-      "sha256": "6fc1b96613799dcc94353d4714032a698633540c80a8e9240d4613e43001be90"
-    },
-    {
-      "id": "history-2026-10-20-crash-safe-operator-queue-settlement-in-progress",
-      "label": "2026-10-20: crash-safe operator queue settlement (in progress)",
-      "start": 333353,
-      "end": 340010,
-      "sha256": "05c6c6bfcb0d5bec81229eab4a631f68283d277e772708c4eb369df3928b6beb"
-    },
-    {
-      "id": "history-remaining-archive-streaming-boundary-investigation-2026-10-20",
-      "label": "Remaining archive streaming boundary — investigation 2026-10-20",
-      "start": 340010,
-      "end": 348321,
-      "sha256": "6cf007d2e2f54302f215f35981a9984e5e174e1df1bd1a2c397bbf3bad1a42c8"
-    },
-    {
-      "id": "history-streaming-archive-construction-design-2026-10-20",
-      "label": "Streaming archive construction — design 2026-10-20",
-      "start": 348321,
-      "end": 352791,
-      "sha256": "0e1006e49782aee98cfaa0b0410fd873be41b6513cde3f4b01516671e5ffdc2e"
-    },
-    {
-      "id": "history-transaction-image-verification-design-2026-10-20",
-      "label": "Transaction image verification — design 2026-10-20",
-      "start": 352791,
-      "end": 356457,
-      "sha256": "1288977e853dc14207b970c98f9d9163a79b366ae14b33d94d846a07c5d57393"
-    },
-    {
-      "id": "history-transaction-image-creation-design-2026-10-20",
-      "label": "Transaction image creation — design 2026-10-20",
-      "start": 356457,
-      "end": 360131,
-      "sha256": "566b7aba972c8a1a38f31894570eb0dc89ba15ff94c383e006e77aacbaf8fe1d"
-    },
-    {
-      "id": "history-before-image-capture-ownership-2026-10-20-design-before-implementation",
-      "label": "Before-image capture ownership (2026-10-20, design before implementation)",
-      "start": 360131,
-      "end": 365055,
-      "sha256": "2c936e1b2b6f9396f4e9d3329eff59ed574c8a6ac8752457272a20b77c4bf83a"
-    },
-    {
-      "id": "history-image-loading-and-undo-verification-2026-10-20-design-before-implementation",
-      "label": "Image loading and undo verification (2026-10-20, design before implementation)",
-      "start": 365055,
-      "end": 369265,
-      "sha256": "ebd758e634ae24bdb9ae666bf38537474f1c37406862f28b9d3849c37794d624"
-    },
-    {
-      "id": "history-fresh-install-compile-journal-2026-10-20-design-before-implementation",
-      "label": "Fresh-install compile journal (2026-10-20, design before implementation)",
-      "start": 369265,
-      "end": 376015,
-      "sha256": "58749a436a367f88ad0bf7b222ccc6491cf9a32689a007c930a8e891a76622fe"
-    },
-    {
-      "id": "history-2026-10-20-compile-capture-reads-supported-knowledge-pages",
-      "label": "2026-10-20: compile capture reads supported knowledge pages",
-      "start": 376015,
-      "end": 377391,
-      "sha256": "f00e1a4403d6f783af94b2a03dc6f452fcd04532464d81d2a2adacd49825c49f"
-    },
-    {
-      "id": "history-2026-10-20-preview-does-not-overwrite-real-compile-state",
-      "label": "2026-10-20: preview does not overwrite real compile state",
-      "start": 377391,
-      "end": 379093,
-      "sha256": "ab245cd10f1b74ace32a028a1186020a0330bb07a167f523836c905bcc971081"
-    },
-    {
-      "id": "history-2026-10-20-quote-bearing-parts-disambiguate-repeated-timestamps",
-      "label": "2026-10-20: quote-bearing parts disambiguate repeated timestamps",
-      "start": 379093,
-      "end": 380666,
-      "sha256": "b25136628b659373bd8553642c9d968b199f0e581ba937208cdff2a1727993f1"
-    }
+    {"id":"storage-foundation","label":"Storage design, implementation and certification foundation","start":0,"end":6885,"sha256":"0facfa07ab96d62f78aa25c14c7548025f714da945d13609c56401dd6341a980"},
+    {"id":"adoption-envelope-and-compatible-readers","label":"Dependencies blocking activation / Adoption envelope and compatible readers (2026-10-19)","start":6885,"end":9592,"sha256":"3a44101b1089316514092d0ee02f0e93baae5a00b877b987fcf3807cfac67e90"},
+    {"id":"history-candidate-schema-migration-2026-10-19-isolated-implementation","label":"Candidate schema migration (2026-10-19; isolated implementation)","start":9592,"end":12826,"sha256":"d899063e7d525b529995d1459d059990e93c887f84119662a94ee6b79777841f"},
+    {"id":"history-offline-artifact-fingerprints-2026-10-19","label":"Offline artifact fingerprints (2026-10-19)","start":12826,"end":15156,"sha256":"65e6fb4f9439d9c887d839d0b02d9fd67744bb75ce502389f51c8a2bd2fee574"},
+    {"id":"history-offline-cutover-design-refinement-2026-10-19","label":"Offline cutover design refinement (2026-10-19)","start":15156,"end":20556,"sha256":"cf52688952b5936ed63bcf52892f00c1043f92fc164453ce477db0e7c0c915fb"},
+    {"id":"history-retention-reference-race-2026-10-19-isolated-implementation","label":"Retention reference race (2026-10-19, isolated implementation)","start":20556,"end":23997,"sha256":"6f7529e7c7e89cbce572ee477aa97ac88f82c5654cc0217f99a66f96af49be0e"},
+    {"id":"history-durable-model-call-controller-2026-10-19-isolated-implementation","label":"Durable model-call controller (2026-10-19, isolated implementation)","start":23997,"end":28306,"sha256":"0017b770615bbc63222975df219fe058602e8691420597400306fe5551cad007"},
+    {"id":"history-explicit-repeat-decision-2026-10-19-internal-api-only","label":"Explicit repeat decision (2026-10-19, internal API only)","start":28306,"end":30390,"sha256":"5647b77e661156c010404f7a17b8d6a6fe41e6923f16f3181b830d94a12272ed"},
+    {"id":"history-protected-dispatch-and-semantic-replay-integration-2026-10-19","label":"Protected dispatch and semantic replay integration (2026-10-19)","start":30390,"end":34712,"sha256":"f3380e7efc7e12f9d0dad14d64374d450aaaf0ab080291d3a2b478e78ea2c785"},
+    {"id":"history-captured-input-artifacts-2026-10-19","label":"Captured input artifacts (2026-10-19)","start":34712,"end":37839,"sha256":"a11de59a606ac85ad5eccf0ab470b5b22bee59126d0916df5d60a18386349725"},
+    {"id":"history-streaming-artifact-i-o-approved-2026-10-19","label":"Streaming artifact I/O (approved 2026-10-19)","start":37839,"end":41723,"sha256":"60b9791697442acc84d5d68fd15f1f7d911814852b448926f1ffd0454b1d79ea"},
+    {"id":"history-record-addressable-snapshot-container-2026-10-19","label":"Record-addressable snapshot container (2026-10-19)","start":41723,"end":45900,"sha256":"832909bb971205c3b98cc60ab8754ecf7c3e84be94a1b10f943203031a65c197"},
+    {"id":"history-context-planning-from-the-retained-archive-2026-10-19","label":"Context planning from the retained archive (2026-10-19)","start":45900,"end":50269,"sha256":"505ec981fdff52b020b799121cf986a78c6baac8e6490d2b2bfc4c66cacbea41"},
+    {"id":"history-sequential-capture-into-the-same-artifact-2026-10-20","label":"Sequential capture into the same artifact (2026-10-20)","start":50269,"end":54447,"sha256":"d6d48a08c3771f25068f251c34233814d45f9d4c38fed133606dd1cd2275bd73"},
+    {"id":"history-2026-10-20-physical-day-read-scope","label":"2026-10-20 — physical-day read scope","start":54447,"end":56104,"sha256":"ec6f28d8019bb477fea339edb74bf5de63855309e6bef3ae0b0e63cff362c09b"},
+    {"id":"history-2026-10-20-incremental-common-batch-algorithm","label":"2026-10-20 — incremental common batch algorithm","start":56104,"end":59041,"sha256":"895c767d076645f069d8875decdd2eb1d07cf397c67ed3096597ae81c46b0abd"},
+    {"id":"history-2026-10-20-streamed-daily-planning-and-global-citation-identity","label":"2026-10-20 — streamed daily planning and global citation identity","start":59041,"end":64641,"sha256":"95bb784039cf65e3e28d8b114592922bdd2cbef11057c2ae6e5baf54608dab7b"},
+    {"id":"history-2026-10-20-durable-streamed-source-capture-and-task-family-fencing","label":"2026-10-20 — durable streamed source capture and task-family fencing","start":64641,"end":69358,"sha256":"00f2a065225c90deb6b136af882cf368a9b7ada992a575df7ee1378fe87681c9"},
+    {"id":"history-2026-10-20-stable-dependency-file-fingerprint-prerequisite","label":"2026-10-20: stable dependency-file fingerprint prerequisite","start":69358,"end":71688,"sha256":"cbcf9a5db0e02eabf45bbe998f80cd9299db5b7c4f79ac852ebc3eaeea304d8e"},
+    {"id":"history-2026-10-20-explicit-dependency-manifests-and-origin-scoped-work-identity","label":"2026-10-20: explicit dependency manifests and origin-scoped work identity","start":71688,"end":75895,"sha256":"76cfb181fa25f2fc92f548288ed8b84174d51c2b1a1de6ea9f1d9a1a75eb1c94"},
+    {"id":"history-2026-10-20-require-live-dependency-verification-at-durable-dispatch","label":"2026-10-20: require live dependency verification at durable dispatch","start":75895,"end":78902,"sha256":"575ce588090d388fdb04954de219da58b85701cf4c1a4ed677ed1de266c67a36"},
+    {"id":"history-2026-10-20-configured-python-runtime-dependency-component","label":"2026-10-20: configured Python runtime dependency component","start":78902,"end":82425,"sha256":"6a66b4d3485cb6fb15de1b21e71cf32aed9cafa9d42e13b82071ad740a6fa90a"},
+    {"id":"history-2026-10-20-find-original-work-before-inspecting-live-sources","label":"2026-10-20: find original work before inspecting live sources","start":82425,"end":87017,"sha256":"1ef443bc7922adc9c49492a95ea9372897a5b7f127798039d30947f46590bffc"},
+    {"id":"history-2026-10-20-streamed-admission-reports-refused-units-independently","label":"2026-10-20: streamed admission reports refused units independently","start":87017,"end":90327,"sha256":"28d2d3b0e1a3202b6c1df54b7dea7d6f4a7d89187d7c4482d3ae3dd7fafe1ccd"},
+    {"id":"history-2026-10-20-durable-complete-preflight-metadata","label":"2026-10-20: durable, complete preflight metadata","start":90327,"end":95212,"sha256":"c3adc1ca1619281bd790ce24928341c83e6c169a29cdf9b07ae9779b35ff50b8"},
+    {"id":"history-2026-10-20-uncertainty-belongs-to-the-call-delivery-blocking-happens-at-exit","label":"2026-10-20: uncertainty belongs to the call; delivery blocking happens at exit","start":95212,"end":99798,"sha256":"7285a6da4e7526d111531c2f03405c7dc6c7e4ef276eb8d9cd3199bd954acefd"},
+    {"id":"history-2026-10-20-consume-only-the-retained-complete-preflight","label":"2026-10-20: consume only the retained complete preflight","start":99798,"end":104429,"sha256":"528baf8e6ef0a459ff616802e5c4302907d107fb50f35e63400498308537533b"},
+    {"id":"history-2026-10-20-complete-refreshed-context-without-repeated-whole-captures","label":"2026-10-20 — complete refreshed context without repeated whole captures","start":104429,"end":107466,"sha256":"79dbf0c9a1659fa84fad4a771e63016fbced51ee388b51a2f8582547bf4ca7c1"},
+    {"id":"history-2026-10-20-durable-batch-admission-from-retained-preflight","label":"2026-10-20 — durable batch admission from retained preflight","start":107466,"end":110420,"sha256":"3f8965d554be7a5892b0eac67a0619b6e86a0901ef14b6f5cc524c23b9aef9d7"},
+    {"id":"history-2026-10-20-retained-batch-context-and-orphan-recovery","label":"2026-10-20 — retained batch context and orphan recovery","start":110420,"end":113846,"sha256":"1c780ee3f63ecde41cd33e1843e2c97a784a1db3b64321316a372e0e11af88ff"},
+    {"id":"history-2026-10-20-semantic-preparation-from-retained-context","label":"2026-10-20 — semantic preparation from retained context","start":113846,"end":117227,"sha256":"23dde867a86a12d76eab837903a4a3cb7ccb1d273b124bbb4152d93d40d7109d"},
+    {"id":"history-2026-10-20-accepted-publication-checkpoint-before-markdown-writes","label":"2026-10-20 — accepted publication checkpoint before Markdown writes","start":117227,"end":120767,"sha256":"cd972bdd2e7f8d86a3da88b2b9f89ed8a102e8f7ab3de16b5846e68b41a13f81"},
+    {"id":"history-2026-10-20-source-backed-publication-completion","label":"2026-10-20 — source-backed publication completion","start":120767,"end":126217,"sha256":"c05d055b07fa0adc41912894849e723846821a51d430e4212004e07c528f561f"},
+    {"id":"history-saved-publication-execution-2026-10-20","label":"Saved publication execution (2026-10-20)","start":126217,"end":128861,"sha256":"86ff58d0c8acb69fb3d287428405fdf6625ccc4366246841c44625985787218c"},
+    {"id":"history-worker-lease-handoff-investigation-2026-10-20","label":"Worker lease handoff investigation (2026-10-20)","start":128861,"end":131383,"sha256":"98a3dd6baaa7f4a073f7addb3f239548c04baf5d113adaa1e3e35e2fca0f3e9e"},
+    {"id":"history-joining-prepared-batch-resolution-and-publication-2026-10-20","label":"Joining prepared batch resolution and publication (2026-10-20)","start":131383,"end":134110,"sha256":"5d701f1477e558358109bb5a1f94b0ddca5dc5a3deb63f5b34dff44128b845bb"},
+    {"id":"history-durable-repair-partition-decision-2026-10-20","label":"Durable repair partition decision (2026-10-20)","start":134110,"end":137546,"sha256":"96f8472f0709e9f74998bf72f7b10f96c3d4e47247bb7d947d6b5fe8019e4249"},
+    {"id":"history-repair-child-admission-and-execution-2026-10-20","label":"Repair child admission and execution (2026-10-20)","start":137546,"end":140132,"sha256":"1bd93b4356c7e168815a9d75882b014ea61e774913b76f85e89e2ff5d84cf2c4"},
+    {"id":"history-receipt-backed-repair-tree-completion-2026-10-20","label":"Receipt-backed repair-tree completion (2026-10-20)","start":140132,"end":143160,"sha256":"52a6d68089e6d6c917ee5fa78040136774eb8f1b8393faec580d1cc5dc92e955"},
+    {"id":"history-iterative-execution-of-retained-repair-trees-2026-10-20-implementation-underway","label":"Iterative execution of retained repair trees (2026-10-20, implementation underway)","start":143160,"end":146554,"sha256":"a3ae76dc348ed6423f8ebc51174c3dc0c8b83a2310e44b86353237179c987368"},
+    {"id":"history-whole-preflight-completion-2026-10-20-implementation-underway","label":"Whole-preflight completion (2026-10-20, implementation underway)","start":146554,"end":149732,"sha256":"0640c2534b829211c9124084296db527ecf2a473b5fd375beb73ef59ab792b43"},
+    {"id":"history-queue-settlement-requires-compile-completion-2026-10-20-implementation-underway","label":"Queue settlement requires compile completion (2026-10-20, implementation underway)","start":149732,"end":154404,"sha256":"cc941151e93d1eb01197f2b8c94fba56af70dc8bec5b41b4c36beb4c25fe81fa"},
+    {"id":"history-atomic-initial-capture-admission-2026-10-20-candidate-implemented","label":"Atomic initial capture admission (2026-10-20, candidate implemented)","start":154404,"end":157731,"sha256":"cdd53765066e0e5179a629b216393efe273f281267046e34a6bb944e6247be41"},
+    {"id":"history-independent-known-resolution-failures-2026-10-20-candidate-implemented","label":"Independent known resolution failures (2026-10-20, candidate implemented)","start":157731,"end":161477,"sha256":"e37a43a2ef97b271c59209252b93e4c5cc947c04d4e66a11b93e0b3efb320e88"},
+    {"id":"history-shared-run-planning-preparation-2026-10-20-candidate-implemented","label":"Shared run planning preparation (2026-10-20, candidate implemented)","start":161477,"end":165328,"sha256":"bf29dcece3102b79e45a743e076eea3217c12f03aff5884f09dca40911134118"},
+    {"id":"history-configuration-and-execution-inventory-composition-2026-10-20-candidate-implemented","label":"Configuration and execution inventory composition (2026-10-20, candidate implemented)","start":165328,"end":169480,"sha256":"76ac6929f64566cf7a9e01316036ad3cc221f838041b68f443fd437062d93991"},
+    {"id":"history-leased-queue-compiler-integration-2026-10-20-candidate-implemented","label":"Leased queue compiler integration (2026-10-20, candidate implemented)","start":169480,"end":173439,"sha256":"b97741f87b0bec14af5de1dea69e6a172907cfbc6e752638488d76d1b17bac79"},
+    {"id":"history-2026-10-20-receipt-discovery-source-lifetime","label":"2026-10-20 — receipt discovery source lifetime","start":173439,"end":176356,"sha256":"c146b05a4bf665db18738b236843dcd924065dc93167458d2023ad1778e4c6db"},
+    {"id":"history-2026-10-20-retain-planning-observations-for-replay","label":"2026-10-20 — retain planning observations for replay","start":176356,"end":182629,"sha256":"ab73bf0de0c6088e311646b62e63c131d7edb64e32de4b58eaf644cba74d50ba"},
+    {"id":"history-2026-10-20-cross-work-source-uncertainty","label":"2026-10-20 — cross-work source uncertainty","start":182629,"end":188481,"sha256":"5f62b5e3b73a4a00c55c67cfa2466275bcb65a759181aceb28a2eb783013a87a"},
+    {"id":"history-2026-10-20-ingress-ownership-and-immutable-request-binding","label":"2026-10-20 — ingress ownership and immutable request binding","start":188481,"end":193618,"sha256":"637a4072b70c61926298e9437ca6259c82310b1ad1474129292db2e07a112904"},
+    {"id":"history-2026-10-20-source-selection-enters-retained-execution-intent","label":"2026-10-20 — source selection enters retained execution intent","start":193618,"end":196039,"sha256":"e1ce10687e0d477704a1de00ae529949a55d2809b8270ec8c78d63b1b1ffc455"},
+    {"id":"history-2026-10-20-selecting-a-foreground-task-without-bypassing-queue-admission","label":"2026-10-20 — selecting a foreground task without bypassing queue admission","start":196039,"end":199694,"sha256":"8ba5bd142c32f95c3cd5fba386e6923f6e04f6e388edfb875669baa53defa03f"},
+    {"id":"history-2026-10-20-ephemeral-compile-lock-handoff-through-supervised-execution","label":"2026-10-20 — ephemeral compile-lock handoff through supervised execution","start":199694,"end":203111,"sha256":"7a62df02b6ffa1399d371c35c20866c66bd0d13bb3c3c6f147a3ef3210d76827"},
+    {"id":"history-2026-10-20-caller-cancellation-through-the-existing-worker-lifecycle","label":"2026-10-20 — caller cancellation through the existing worker lifecycle","start":203111,"end":207727,"sha256":"27b927f9279ea4757a9b212f9033c8e75cec4d52aba2bd843431596e0bf69abd"},
+    {"id":"history-2026-10-20-resume-the-same-unfinished-foreground-request","label":"2026-10-20 — resume the same unfinished foreground request","start":207727,"end":213679,"sha256":"aa8431704051fbba3b8a4c065c4fd0b22921166c5688aec7a080fa78a8863b73"},
+    {"id":"history-2026-10-20-isolate-worker-diagnostics-from-mcp-transport","label":"2026-10-20 — isolate worker diagnostics from MCP transport","start":213679,"end":216106,"sha256":"998e3af8fa8f90848989fc7c88a29ea46ccca768e63f84670c250ef90bff328e"},
+    {"id":"history-2026-10-20-do-not-retain-every-daily-part-during-source-capture","label":"2026-10-20 — do not retain every daily part during source capture","start":216106,"end":219854,"sha256":"90baaf637daa3c218fb042f4a2467f9675eddf3f9cbd25d24ca3d489dc04ed77"},
+    {"id":"history-2026-10-20-archive-replay-retains-only-shared-record-fields","label":"2026-10-20 — archive replay retains only shared record fields","start":219854,"end":223052,"sha256":"5efa686209f5d5bcec8bdda356fffef24b4385847d20d9bd0b24cb6c3bf85058"},
+    {"id":"history-2026-10-20-reuse-an-original-digest-only-for-the-same-immutable-bytes","label":"2026-10-20 — reuse an original digest only for the same immutable bytes","start":223052,"end":226418,"sha256":"345733017902945669a30ae6a45b0952e10890a5e9f892b32c4dacd11a6227ad"},
+    {"id":"history-2026-10-20-validate-retained-capture-bodies-without-materializing-them","label":"2026-10-20 — validate retained capture bodies without materializing them","start":226418,"end":230899,"sha256":"c2c26bb2ef2d1413d9c0baf84720df9be1662f9e1dce15e22fe5b8a6518a0d62"},
+    {"id":"history-2026-10-20-parse-entry-identifiers-from-ranges-not-copied-entry-bodies","label":"2026-10-20 — parse entry identifiers from ranges, not copied entry bodies","start":230899,"end":235098,"sha256":"4655c7c18412829427dc28ee5e8d44b7edea3d8933f7500ba1d64aeb7bf80167"},
+    {"id":"history-2026-10-20-remove-the-canonical-boundary-parser-s-buffer-requirement","label":"2026-10-20 — remove the canonical boundary parser's buffer requirement","start":235098,"end":240660,"sha256":"73489f4a67be257d3c20f8a723cbffdb8bcbc6a282f90f7d69a4b103095e8e48"},
+    {"id":"history-2026-10-20-owned-verified-original-ranges-and-part-provenance","label":"2026-10-20 — owned verified original ranges and part provenance","start":240660,"end":245205,"sha256":"a39a154412367181729e53da1c3aff3c7ce6a0a4d55862a5c39541bc6a79e126"},
+    {"id":"history-2026-10-20-native-journal-index-retains-ranges-not-matched-bodies","label":"2026-10-20 — native journal index retains ranges, not matched bodies","start":245205,"end":249135,"sha256":"a9c798d1017e7ebf036aee8b44c62edc64bfa1144d2d8f2e807af88d0a1687e3"},
+    {"id":"history-2026-10-20-shared-verified-source-authority-for-evidence-resolution","label":"2026-10-20 — shared verified source authority for evidence resolution","start":249135,"end":253876,"sha256":"7714f4f329938689327fb2bab2cf79c1596314e78ea47938ee448668aad59a17"},
+    {"id":"history-2026-10-20-retained-daily-originals-enter-the-actual-archive-planner-as-ranges","label":"2026-10-20 — retained daily originals enter the actual archive planner as ranges","start":253876,"end":295799,"sha256":"84dcf112dd9665c7df666758e5ffe8ce70acfc584a3cbaec06f7bd9397884fd0"},
+    {"id":"history-point-7-integration-reconciliation-2026-10-20","label":"Point 7 integration reconciliation — 2026-10-20","start":295799,"end":299547,"sha256":"efbd2b62394cf83ec4e754e93b438a3590ed29be86cb9c78bff592a624a20149"},
+    {"id":"history-explicit-repair-command-migration-entry-design-2026-10-20","label":"Explicit repair-command migration entry — design 2026-10-20","start":299547,"end":306820,"sha256":"48d2bea64a742050fcf5ee5d5dc4150c524e5dfef42a37150af953f59a9bbe95"},
+    {"id":"history-law-9-aggregate-compile-quotas-2026-10-20","label":"Law-9 aggregate compile quotas — 2026-10-20","start":306820,"end":311336,"sha256":"eb54a6d9b1c19796f452ff1100da469c69fdd194bd4e6ebdec492634a4eba6fa"},
+    {"id":"history-index-publication-consumes-one-source-body-at-a-time-design-2026-10-20","label":"Index publication consumes one source body at a time — design 2026-10-20","start":311336,"end":315438,"sha256":"68ca438982587746ac357d03b572fc8eb06ffaf19d159fe8c8de2969343eda72"},
+    {"id":"history-manifest-only-claim-capture-and-standalone-index-planning-design-2026-10-20","label":"Manifest-only claim capture and standalone index planning — design 2026-10-20","start":315438,"end":319932,"sha256":"502ee8b5888153982a14f92a82acd102fe4cf259adb2d75fb3eead153799b058"},
+    {"id":"history-2026-10-20-operator-recovery-admission-in-progress","label":"2026-10-20: operator recovery admission (in progress)","start":319932,"end":323833,"sha256":"e1c06c978ee5ce918da27da8ffc5c742fd0c5042e173f5b4ef49e4122e3f9324"},
+    {"id":"history-2026-10-20-operator-inspection-before-recovery-in-progress","label":"2026-10-20: operator inspection before recovery (in progress)","start":323833,"end":328339,"sha256":"04231092e30d3e70a65ff932d980c4a64daf5d9491208ab9e11d5b2298e370fa"},
+    {"id":"history-2026-10-20-distinguish-resolved-calls-from-repeat-consent-in-progress","label":"2026-10-20: distinguish resolved calls from repeat consent (in progress)","start":328339,"end":333353,"sha256":"6fc1b96613799dcc94353d4714032a698633540c80a8e9240d4613e43001be90"},
+    {"id":"history-2026-10-20-crash-safe-operator-queue-settlement-in-progress","label":"2026-10-20: crash-safe operator queue settlement (in progress)","start":333353,"end":340010,"sha256":"05c6c6bfcb0d5bec81229eab4a631f68283d277e772708c4eb369df3928b6beb"},
+    {"id":"history-remaining-archive-streaming-boundary-investigation-2026-10-20","label":"Remaining archive streaming boundary — investigation 2026-10-20","start":340010,"end":348321,"sha256":"6cf007d2e2f54302f215f35981a9984e5e174e1df1bd1a2c397bbf3bad1a42c8"},
+    {"id":"history-streaming-archive-construction-design-2026-10-20","label":"Streaming archive construction — design 2026-10-20","start":348321,"end":352791,"sha256":"0e1006e49782aee98cfaa0b0410fd873be41b6513cde3f4b01516671e5ffdc2e"},
+    {"id":"history-transaction-image-verification-design-2026-10-20","label":"Transaction image verification — design 2026-10-20","start":352791,"end":356457,"sha256":"1288977e853dc14207b970c98f9d9163a79b366ae14b33d94d846a07c5d57393"},
+    {"id":"history-transaction-image-creation-design-2026-10-20","label":"Transaction image creation — design 2026-10-20","start":356457,"end":360131,"sha256":"566b7aba972c8a1a38f31894570eb0dc89ba15ff94c383e006e77aacbaf8fe1d"},
+    {"id":"history-before-image-capture-ownership-2026-10-20-design-before-implementation","label":"Before-image capture ownership (2026-10-20, design before implementation)","start":360131,"end":365055,"sha256":"2c936e1b2b6f9396f4e9d3329eff59ed574c8a6ac8752457272a20b77c4bf83a"},
+    {"id":"history-image-loading-and-undo-verification-2026-10-20-design-before-implementation","label":"Image loading and undo verification (2026-10-20, design before implementation)","start":365055,"end":369265,"sha256":"ebd758e634ae24bdb9ae666bf38537474f1c37406862f28b9d3849c37794d624"},
+    {"id":"history-fresh-install-compile-journal-2026-10-20-design-before-implementation","label":"Fresh-install compile journal (2026-10-20, design before implementation)","start":369265,"end":376015,"sha256":"58749a436a367f88ad0bf7b222ccc6491cf9a32689a007c930a8e891a76622fe"},
+    {"id":"history-2026-10-20-compile-capture-reads-supported-knowledge-pages","label":"2026-10-20: compile capture reads supported knowledge pages","start":376015,"end":377391,"sha256":"f00e1a4403d6f783af94b2a03dc6f452fcd04532464d81d2a2adacd49825c49f"},
+    {"id":"history-2026-10-20-preview-does-not-overwrite-real-compile-state","label":"2026-10-20: preview does not overwrite real compile state","start":377391,"end":379093,"sha256":"ab245cd10f1b74ace32a028a1186020a0330bb07a167f523836c905bcc971081"},
+    {"id":"history-2026-10-20-quote-bearing-parts-disambiguate-repeated-timestamps","label":"2026-10-20: quote-bearing parts disambiguate repeated timestamps","start":379093,"end":380666,"sha256":"b25136628b659373bd8553642c9d968b199f0e581ba937208cdff2a1727993f1"}
   ]
 }

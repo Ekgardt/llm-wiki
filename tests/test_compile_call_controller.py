@@ -940,10 +940,10 @@ def test_recovery_cli_without_consent_keeps_unknown_blocked(work, monkeypatch, c
 
 
 def test_recovery_cli_consent_releases_work_without_calling_provider(work, monkeypatch, capsys):
-    import compile_controller
+    from llm_wiki import compile_call_runtime
 
     queue, old, dispatch = _blocked_unknown(work)
-    monkeypatch.setattr(compile_controller, '_invoke_and_save', lambda *args: _must_not_call())
+    monkeypatch.setattr(compile_call_runtime, '_invoke_and_save', lambda *args: _must_not_call())
     code, result = _recover_cli(queue, old.id, dispatch, monkeypatch, capsys,
                                ('--accept-unknown-cost', '--reason', 'explicit local decision'))
     assert code == 0
@@ -1242,3 +1242,14 @@ def test_operator_cli_names_missing_journal_upgrade(tmp_path, monkeypatch, capsy
     assert code == 2
     assert result == {'codes': ['compile_progress_upgrade_required']}
     assert queue.db_path.read_bytes() == before
+
+
+def test_call_lifecycle_public_aliases_keep_one_implementation():
+    import compile_controller
+    from llm_wiki import compile_call_runtime
+
+    names = ('ProviderOutcomeUnknown', 'CompileDelivery', 'run_model_call',
+             'authorize_model_repeat', 'resolve_model_call', '_require_checkpoint', '_dispatch_event')
+    assert all(getattr(compile_controller, name) is getattr(compile_call_runtime, name) for name in names)
+    assert compile_call_runtime.ProviderOutcomeUnknown.__module__ == 'compile_controller'
+    assert compile_call_runtime.CompileDelivery.__module__ == 'compile_controller'

@@ -8999,7 +8999,7 @@ class _QueueV3CandidateReader:
 
     def settle_compile_resolution(self, lease, dispatch, resolution, *, check_owner=None):
         """Revalidate the result, then release only this administrative lease."""
-        from compile_controller import resolve_model_call
+        from llm_wiki.compile_call_runtime import resolve_model_call
 
         if resolve_model_call(self, lease, dispatch) != resolution:
             raise compile_progress.ProgressConflict('compile resolution changed before settlement')
@@ -12342,7 +12342,7 @@ def _heartbeat_compile_resolution(queue, lease, dispatch, authorization, policy,
 
 
 def _finish_compile_recovery(queue, lease, dispatch, authorization, owner, lost):
-    from compile_controller import resolve_model_call
+    from llm_wiki.compile_call_runtime import resolve_model_call
 
     resolution = resolve_model_call(queue, lease, dispatch, authorization=authorization)
     state = queue.settle_compile_resolution(
