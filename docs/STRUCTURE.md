@@ -8,6 +8,10 @@
 
 ## Three-zone layout
 
+The [comparative adapter fixture](modules/comparative-adapter-fixture.md) retains
+the existing deterministic subprocess test protocol in place. Its synthetic
+metrics exercise the benchmark runner; they are not measured product results.
+
 The [BEAM data owner](modules/beam-data.md) keeps the existing Parquet converter
 and its seven original tests. The optional `benchmark-data` extra supplies
 PyArrow 26.0.1; an explicitly selected Parquet suite and a three-OS CI job test
