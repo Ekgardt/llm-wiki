@@ -2348,3 +2348,7 @@ The [classification protocol](modules/classification-protocol.md) owns the share
 prompt and response grammar independently of capture runtime. flush_memory keeps
 old-path aliases; the benchmark imports the same leaf. Prompt bytes, parser
 behavior, queue admission and publication contracts stay unchanged.
+
+The [classification benchmark metrics](modules/flush-classification-metrics.md)
+owner grades confirmed cases through the shared protocol and evaluates the
+existing gates. Provider adapters, corpus IO and CLI remain with the runner.

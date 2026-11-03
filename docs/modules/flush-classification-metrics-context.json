@@ -1,0 +1,52 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md",
+    "benchmark/flush_classification_metrics.py",
+    "benchmark/flush-classification-v1.json",
+    "docs/modules/flush-classification-metrics.md",
+    "docs/modules/flush-classification-metrics-context.json",
+    "scripts/llm_wiki/classification_protocol.py",
+    "docs/modules/classification-protocol.md",
+    "benchmark/flush-classification-v1.schema.json",
+    "benchmark/flush-classification-v3.schema.json",
+    "docs/research/2026-09-23-the-corpus-labels-itself.md"
+  ],
+  "directories": [
+    "tests/modules/flush_classification_metrics"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "benchmark/flush_classification_metrics.py",
+      "benchmark/flush-classification-v1.json",
+      "docs/modules/flush-classification-metrics.md",
+      "docs/modules/flush-classification-metrics-context.json"
+    ],
+    "directories": [
+      "tests/modules/flush_classification_metrics"
+    ]
+  }
+}

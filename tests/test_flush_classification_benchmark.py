@@ -296,3 +296,41 @@ def test_builder_namespace_import_shares_the_canonical_label_types(tmp_path):
         [sys.executable, '-c', program, str(ROOT)], cwd=tmp_path, capture_output=True, text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_runner_keeps_scoring_aliases():
+    import flush_classification_metrics as metrics
+
+    assert stand.CaseOutcome is metrics.CaseOutcome
+    assert stand.score_case is metrics.score_case
+    assert stand.confirmed_cases is metrics.confirmed_cases
+    assert stand.label_state is metrics.label_state
+    assert stand.measure is metrics.measure
+    assert stand.evaluate is metrics.evaluate
+
+
+def test_runner_executes_from_neutral_directory(tmp_path):
+    import subprocess
+
+    result = subprocess.run(
+        [sys.executable, str(BENCHMARK / 'run_flush_classification.py'), '--json'],
+        cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)['gates']['passed'] is True
+
+
+def test_runner_namespace_import_shares_scoring_type(tmp_path):
+    import subprocess
+
+    program = (
+        'import sys; sys.path.insert(0, sys.argv[1]); '
+        'import benchmark.run_flush_classification as runner; '
+        'import flush_classification_metrics as metrics; '
+        'assert runner.CaseOutcome is metrics.CaseOutcome; '
+        'assert runner.run(runner.load_corpus(runner.CORPUS), runner.ADAPTERS["canned"])["gates"]["passed"]'
+    )
+    result = subprocess.run(
+        [sys.executable, '-c', program, str(ROOT)], cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
