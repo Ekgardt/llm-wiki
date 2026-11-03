@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from llm_wiki import runtime_environment
 
 from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
 
@@ -572,9 +573,9 @@ def test_filesystem_health_rejects_network_mounts_on_supported_platforms(
     import doctor
     import reliable_memory
 
-    monkeypatch.setattr(reliable_memory, "_platform_system", lambda: system)
-    monkeypatch.setattr(reliable_memory, "_read_posix_mount_data", lambda: (mount_data, False))
-    monkeypatch.setattr(reliable_memory, "_query_darwin_mounts", lambda: darwin_data)
+    monkeypatch.setattr(runtime_environment, "_platform_system", lambda: system)
+    monkeypatch.setattr(runtime_environment, "_read_posix_mount_data", lambda: (mount_data, False))
+    monkeypatch.setattr(runtime_environment, "_query_darwin_mounts", lambda: darwin_data)
     if system != "Windows":
         monkeypatch.setattr(type(Path("/")), "resolve", lambda self, *, strict=False: self)
     if system == "Windows":

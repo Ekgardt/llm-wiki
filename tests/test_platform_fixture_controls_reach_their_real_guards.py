@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import integration_adapter
 import markdown_transaction
-import reliable_memory
+from llm_wiki import runtime_records
 
 from tests import test_native_user_frames_keep_their_physical_evidence as native_cases
 from tests import test_plugin_helpers as plugin_cases
@@ -43,5 +43,5 @@ def _contains_real_directory_link(path):
 
 def test_inside_reparse_control_preserves_the_windows_refusal(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime_cases, "os", SimpleNamespace(name="nt"))
-    monkeypatch.setattr(reliable_memory, "_windows_reparse_point", _contains_real_directory_link)
+    monkeypatch.setattr(runtime_records, "_windows_reparse_point", _contains_real_directory_link)
     runtime_cases.test_runtime_parent_authority_is_fresh_after_symlink_retarget(tmp_path)

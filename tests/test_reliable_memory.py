@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 import reliable_memory
+from llm_wiki import runtime_environment
 from reliable_memory import (
     DEFAULTS,
     UnsafeStateRoot,
@@ -521,7 +522,7 @@ def test_state_root_accepts_normal_local_sqlite_locking(tmp_path):
 
 
 def test_state_root_rejects_known_network_path(tmp_path, monkeypatch):
-    monkeypatch.setattr("reliable_memory._known_network_path", lambda path: True)
+    monkeypatch.setattr('llm_wiki.runtime_environment._known_network_path', lambda path: True)
     with pytest.raises(UnsafeStateRoot, match="local filesystem"):
         validate_state_root(tmp_path)
 
@@ -532,9 +533,9 @@ def test_posix_network_mount_detection_uses_longest_mount_point(monkeypatch):
 37 36 8:1 / /srv/local rw,relatime - ext4 /dev/sda1 rw
 38 36 0:44 / /srv/network rw,relatime - cifs //server/share rw
 """
-    monkeypatch.setattr(reliable_memory, "_platform_system", lambda: "Linux", raising=False)
+    monkeypatch.setattr(runtime_environment, "_platform_system", lambda: "Linux", raising=False)
     monkeypatch.setattr(
-        reliable_memory, "_read_posix_mount_data", lambda: (mount_data, True), raising=False
+        runtime_environment, "_read_posix_mount_data", lambda: (mount_data, True), raising=False
     )
     monkeypatch.setattr(type(Path("/")), "resolve", lambda self, *, strict=False: self)
     assert reliable_memory._known_network_path(Path("/uncovered")) is True
@@ -554,8 +555,8 @@ def test_posix_mount_detection_resolves_symlink_target(monkeypatch):
         calls.append((self, strict))
         return Path("/mnt/network/state")
 
-    monkeypatch.setattr(reliable_memory, "_platform_system", lambda: "Linux")
-    monkeypatch.setattr(reliable_memory, "_read_posix_mount_data", lambda: (mount_data, True))
+    monkeypatch.setattr(runtime_environment, "_platform_system", lambda: "Linux")
+    monkeypatch.setattr(runtime_environment, "_read_posix_mount_data", lambda: (mount_data, True))
     monkeypatch.setattr(type(link), "resolve", resolve)
 
     assert reliable_memory._known_network_path(link) is True
@@ -564,9 +565,9 @@ def test_posix_mount_detection_resolves_symlink_target(monkeypatch):
 
 def test_posix_proc_mounts_network_types_are_detected(monkeypatch):
     mounts = "server:/nfs /mnt/nfs nfs rw 0 0\nsshfs /mnt/ssh fuse.sshfs rw 0 0\n"
-    monkeypatch.setattr(reliable_memory, "_platform_system", lambda: "Linux", raising=False)
+    monkeypatch.setattr(runtime_environment, "_platform_system", lambda: "Linux", raising=False)
     monkeypatch.setattr(
-        reliable_memory, "_read_posix_mount_data", lambda: (mounts, False), raising=False
+        runtime_environment, "_read_posix_mount_data", lambda: (mounts, False), raising=False
     )
     monkeypatch.setattr(type(Path("/")), "resolve", lambda self, *, strict=False: self)
     assert reliable_memory._known_network_path(Path("/mnt/nfs/state")) is True
@@ -580,10 +581,10 @@ server:/team on /Volumes/Team Share (nfs, nodev, nosuid)
 /dev/disk4s1 on /Volumes/Team Share/local (apfs, local)
 //user@server/share on /Volumes/SMB\\040Share (smbfs, nodev, nosuid)
 """
-    monkeypatch.setattr(reliable_memory, "_platform_system", lambda: "Darwin")
-    monkeypatch.setattr(reliable_memory, "_read_posix_mount_data", lambda: ("", True))
+    monkeypatch.setattr(runtime_environment, "_platform_system", lambda: "Darwin")
+    monkeypatch.setattr(runtime_environment, "_read_posix_mount_data", lambda: ("", True))
     monkeypatch.setattr(
-        reliable_memory, "_query_darwin_mounts", lambda: mount_output, raising=False
+        runtime_environment, "_query_darwin_mounts", lambda: mount_output, raising=False
     )
     monkeypatch.setattr(type(Path("/")), "resolve", lambda self, *, strict=False: self)
 
@@ -593,8 +594,8 @@ server:/team on /Volumes/Team Share (nfs, nodev, nosuid)
 
 
 def test_darwin_mount_query_timeout_fails_open_for_unknown_path(monkeypatch):
-    monkeypatch.setattr(reliable_memory, "_platform_system", lambda: "Darwin")
-    monkeypatch.setattr(reliable_memory, "_read_posix_mount_data", lambda: ("", True))
+    monkeypatch.setattr(runtime_environment, "_platform_system", lambda: "Darwin")
+    monkeypatch.setattr(runtime_environment, "_read_posix_mount_data", lambda: ("", True))
 
     def timeout(*args, **kwargs):
         raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
@@ -619,7 +620,7 @@ def test_darwin_mount_query_is_bounded(monkeypatch):
 
 def test_owner_permission_errors_are_not_suppressed(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        reliable_memory, "_owner_permissions_supported", lambda path: True, raising=False
+        runtime_environment, "_owner_permissions_supported", lambda path: True, raising=False
     )
 
     def deny_chmod(self, mode):
@@ -634,7 +635,7 @@ def test_owner_mode_must_match_after_chmod(tmp_path, monkeypatch):
     root = tmp_path / "state"
     root.mkdir(mode=0o755)
     monkeypatch.setattr(
-        reliable_memory, "_owner_permissions_supported", lambda path: True, raising=False
+        runtime_environment, "_owner_permissions_supported", lambda path: True, raising=False
     )
     monkeypatch.setattr(Path, "chmod", lambda self, mode: None)
     with pytest.raises(PermissionError, match="owner-only"):
@@ -643,7 +644,7 @@ def test_owner_mode_must_match_after_chmod(tmp_path, monkeypatch):
 
 def test_unsupported_owner_bits_skip_chmod_explicitly(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        reliable_memory, "_owner_permissions_supported", lambda path: False, raising=False
+        runtime_environment, "_owner_permissions_supported", lambda path: False, raising=False
     )
     monkeypatch.setattr(
         Path,
@@ -655,9 +656,9 @@ def test_unsupported_owner_bits_skip_chmod_explicitly(tmp_path, monkeypatch):
 
 
 def test_state_root_rejects_windows_reparse_point(tmp_path, monkeypatch):
-    monkeypatch.setattr("reliable_memory._windows_reparse_point", lambda path: True)
+    monkeypatch.setattr('llm_wiki.runtime_environment._windows_reparse_point', lambda path: True)
     monkeypatch.setattr(
-        "reliable_memory._known_network_path",
+        'llm_wiki.runtime_environment._known_network_path',
         lambda path: pytest.fail("network probing must follow reparse rejection"),
     )
     with pytest.raises(UnsafeStateRoot, match="reparse"):
@@ -703,7 +704,7 @@ def test_concurrent_state_root_validation_uses_unique_probe_databases(tmp_path, 
         return real_connect(database, *args, **kwargs)
 
     monkeypatch.setattr(reliable_memory.sqlite3, "connect", recording_connect)
-    monkeypatch.setattr(reliable_memory, "_known_network_path", lambda path: False)
+    monkeypatch.setattr(runtime_environment, "_known_network_path", lambda path: False)
     monkeypatch.setattr(reliable_memory, "_windows_reparse_point", lambda path: False)
     monkeypatch.setattr(reliable_memory, "_set_owner_only", lambda path, mode: True)
     with ThreadPoolExecutor(max_workers=24) as executor:

@@ -2036,3 +2036,16 @@ The redactor's pure tests embedded in audit/security/structure suites move into
 `tests/modules/secret_redact/` unchanged. DLP/cache integration remains in
 `tests/test_redaction_policy_cache_contract.py`; the compile-packing comparison
 imports the single original-pattern test helper from the redactor's test owner.
+
+Runtime filesystem decomposition keeps the public `reliable_memory` entry points
+and SQLite lifecycle there. `llm_wiki.runtime_contracts` owns values/errors;
+`runtime_environment` owns locality and permissions; `runtime_records` owns
+metadata, reads and file identity; `runtime_sync` owns checked flushes;
+`runtime_publication` owns sibling-file staging/publication and replacement proof.
+Dependencies flow from publication to the lower owners without reverse imports.
+SQLite metadata validation still avoids opening/closing a live database inode.
+See `research/2026-11-03-runtime-io-boundaries.md`.
+`llm_wiki.runtime_fingerprints` separately owns offline two-pass fingerprints and
+their streaming/deadline policy. `runtime_records` supplies metadata/read/identity
+only; publication does not depend on fingerprinting. This removes an unnecessary
+source dependency while retaining all required context in each measured packet.

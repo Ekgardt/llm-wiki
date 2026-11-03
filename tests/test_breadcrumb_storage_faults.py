@@ -8,6 +8,7 @@ from functools import partial
 import breadcrumb_protocol
 import pytest
 import reliable_memory
+from llm_wiki import runtime_publication
 
 from tests.test_breadcrumb_storage import SCOPE, _bundle, _publish
 from tests.test_queue_v3_capture_links import _coordinator, _queue
@@ -32,14 +33,14 @@ def _install_fault(monkeypatch, directory, suffix, fault):
         "directory-sync": ("fsync_directory", published, errno.EIO),
     }
     name, selected, error_number = choices[fault]
-    original = getattr(reliable_memory, name)
+    original = getattr(runtime_publication, name)
 
     def refused(path, *args, **kwargs):
         if selected(path):
             raise OSError(error_number, f"injected {fault} failure")
         return original(path, *args, **kwargs)
 
-    monkeypatch.setattr(reliable_memory, name, refused)
+    monkeypatch.setattr(runtime_publication, name, refused)
 
 
 @pytest.mark.parametrize("suffix", [".anchor", ".part", ".json"])

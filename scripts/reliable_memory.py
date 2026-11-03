@@ -3,24 +3,17 @@
 from __future__ import annotations
 
 import contextlib
-import ctypes
-import errno
-import hashlib
+import ctypes as ctypes
 import os
-import platform
-import re
 import secrets
 import sqlite3
 import stat
-import subprocess
+import subprocess as subprocess
 import time
-import warnings
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
-from bounded_io import IO_CHUNK_BYTES
+from bounded_io import IO_CHUNK_BYTES as IO_CHUNK_BYTES
 from llm_wiki.formats.canonical import (
     canonical_json_bytes as canonical_json_bytes,
 )
@@ -44,6 +37,124 @@ from llm_wiki.restricted_paths import _require_normalized_relative as _require_n
 from llm_wiki.restricted_paths import _require_posix_relative_text as _require_posix_relative_text
 from llm_wiki.restricted_paths import _under_root as _under_root
 from llm_wiki.restricted_paths import restricted_relative_path as restricted_relative_path
+from llm_wiki.runtime_contracts import (
+    MetadataDurabilityUnavailable as MetadataDurabilityUnavailable,
+)
+from llm_wiki.runtime_contracts import RuntimeFileIdentity as RuntimeFileIdentity
+from llm_wiki.runtime_contracts import UnsafeStateRoot as UnsafeStateRoot
+from llm_wiki.runtime_environment import _CLOUD_DIRECTORY_NAMES as _CLOUD_DIRECTORY_NAMES
+from llm_wiki.runtime_environment import _chmod_or_warn as _chmod_or_warn
+from llm_wiki.runtime_environment import _decode_mount_path as _decode_mount_path
+from llm_wiki.runtime_environment import _harden_runtime_owner_only as _harden_runtime_owner_only
+from llm_wiki.runtime_environment import _has_reparse_attribute as _has_reparse_attribute
+from llm_wiki.runtime_environment import _is_network_filesystem as _is_network_filesystem
+from llm_wiki.runtime_environment import _known_network_path as _known_network_path
+from llm_wiki.runtime_environment import (
+    _owner_permissions_supported as _owner_permissions_supported,
+)
+from llm_wiki.runtime_environment import _parse_darwin_mounts as _parse_darwin_mounts
+from llm_wiki.runtime_environment import _parse_posix_mounts as _parse_posix_mounts
+from llm_wiki.runtime_environment import _path_is_under as _path_is_under
+from llm_wiki.runtime_environment import _platform_system as _platform_system
+from llm_wiki.runtime_environment import _posix_mount_table as _posix_mount_table
+from llm_wiki.runtime_environment import _posix_network_path as _posix_network_path
+from llm_wiki.runtime_environment import _query_darwin_mounts as _query_darwin_mounts
+from llm_wiki.runtime_environment import _read_posix_mount_data as _read_posix_mount_data
+from llm_wiki.runtime_environment import _require_applied_mode as _require_applied_mode
+from llm_wiki.runtime_environment import (
+    _require_local_non_reparse_root as _require_local_non_reparse_root,
+)
+from llm_wiki.runtime_environment import _require_owner_only_file as _require_owner_only_file
+from llm_wiki.runtime_environment import _require_windows_owner_only as _require_windows_owner_only
+from llm_wiki.runtime_environment import _set_owner_only as _set_owner_only
+from llm_wiki.runtime_environment import _warn_if_cloud_synchronized as _warn_if_cloud_synchronized
+from llm_wiki.runtime_environment import _windows_network_anchor as _windows_network_anchor
+from llm_wiki.runtime_environment import _windows_reparse_point as _windows_reparse_point
+from llm_wiki.runtime_fingerprints import _digest_runtime_descriptor as _digest_runtime_descriptor
+from llm_wiki.runtime_fingerprints import _fingerprint_metadata as _fingerprint_metadata
+from llm_wiki.runtime_fingerprints import (
+    _require_fingerprint_metadata as _require_fingerprint_metadata,
+)
+from llm_wiki.runtime_fingerprints import _verified_runtime_digest as _verified_runtime_digest
+from llm_wiki.runtime_fingerprints import fingerprint_regular_file as fingerprint_regular_file
+from llm_wiki.runtime_fingerprints import fingerprint_runtime_file as fingerprint_runtime_file
+from llm_wiki.runtime_publication import _adopted_or_duplicate as _adopted_or_duplicate
+from llm_wiki.runtime_publication import _discard_staged as _discard_staged
+from llm_wiki.runtime_publication import _fsync_parent_on_posix as _fsync_parent_on_posix
+from llm_wiki.runtime_publication import _link_then_unlink as _link_then_unlink
+from llm_wiki.runtime_publication import _move_into_place as _move_into_place
+from llm_wiki.runtime_publication import _move_posix as _move_posix
+from llm_wiki.runtime_publication import _move_windows as _move_windows
+from llm_wiki.runtime_publication import _publication_digest as _publication_digest
+from llm_wiki.runtime_publication import _publish_staged as _publish_staged
+from llm_wiki.runtime_publication import _replace_in_place as _replace_in_place
+from llm_wiki.runtime_publication import (
+    _require_create_only_carries_no_evidence as _require_create_only_carries_no_evidence,
+)
+from llm_wiki.runtime_publication import _require_distinct_siblings as _require_distinct_siblings
+from llm_wiki.runtime_publication import (
+    _require_publication_arguments as _require_publication_arguments,
+)
+from llm_wiki.runtime_publication import (
+    _require_replacement_carries_evidence as _require_replacement_carries_evidence,
+)
+from llm_wiki.runtime_publication import (
+    _require_replacement_evidence as _require_replacement_evidence,
+)
+from llm_wiki.runtime_publication import _require_replacement_shape as _require_replacement_shape
+from llm_wiki.runtime_publication import _require_runtime_arguments as _require_runtime_arguments
+from llm_wiki.runtime_publication import _require_runtime_mode as _require_runtime_mode
+from llm_wiki.runtime_publication import _require_runtime_payload as _require_runtime_payload
+from llm_wiki.runtime_publication import _require_unchanged_identity as _require_unchanged_identity
+from llm_wiki.runtime_publication import _resolved_parents as _resolved_parents
+from llm_wiki.runtime_publication import (
+    _resolved_runtime_destination as _resolved_runtime_destination,
+)
+from llm_wiki.runtime_publication import _resolved_sibling_pair as _resolved_sibling_pair
+from llm_wiki.runtime_publication import _settled_publication as _settled_publication
+from llm_wiki.runtime_publication import _unlink_staged as _unlink_staged
+from llm_wiki.runtime_publication import (
+    _verify_published_runtime_permissions as _verify_published_runtime_permissions,
+)
+from llm_wiki.runtime_publication import _write_all as _write_all
+from llm_wiki.runtime_publication import _write_staged_bytes as _write_staged_bytes
+from llm_wiki.runtime_publication import durable_publish_file as durable_publish_file
+from llm_wiki.runtime_publication import publish_runtime_file as publish_runtime_file
+from llm_wiki.runtime_records import _confirm_runtime_identity as _confirm_runtime_identity
+from llm_wiki.runtime_records import _contained_runtime_metadata as _contained_runtime_metadata
+from llm_wiki.runtime_records import _posix_runtime_identity_names as _posix_runtime_identity_names
+from llm_wiki.runtime_records import _require_bounded_regular_file as _require_bounded_regular_file
+from llm_wiki.runtime_records import _require_file_size_budget as _require_file_size_budget
+from llm_wiki.runtime_records import (
+    _require_nonnegative_file_budget as _require_nonnegative_file_budget,
+)
+from llm_wiki.runtime_records import (
+    _require_runtime_parent_containment as _require_runtime_parent_containment,
+)
+from llm_wiki.runtime_records import _require_stable_read as _require_stable_read
+from llm_wiki.runtime_records import (
+    _runtime_identity_from_metadata as _runtime_identity_from_metadata,
+)
+from llm_wiki.runtime_records import _validated_runtime_metadata as _validated_runtime_metadata
+from llm_wiki.runtime_records import (
+    _windows_runtime_identity_names as _windows_runtime_identity_names,
+)
+from llm_wiki.runtime_records import (
+    capture_operational_database_identity as capture_operational_database_identity,
+)
+from llm_wiki.runtime_records import capture_runtime_file_identity as capture_runtime_file_identity
+from llm_wiki.runtime_records import read_runtime_bytes as read_runtime_bytes
+from llm_wiki.runtime_records import validate_operational_db_file as validate_operational_db_file
+from llm_wiki.runtime_records import validate_runtime_file as validate_runtime_file
+from llm_wiki.runtime_sync import _close_windows_handle as _close_windows_handle
+from llm_wiki.runtime_sync import _file_sync_mode as _file_sync_mode
+from llm_wiki.runtime_sync import _fsync_directory_posix as _fsync_directory_posix
+from llm_wiki.runtime_sync import _fsync_directory_windows as _fsync_directory_windows
+from llm_wiki.runtime_sync import _metadata_durability_error as _metadata_durability_error
+from llm_wiki.runtime_sync import _opened_directory_descriptor as _opened_directory_descriptor
+from llm_wiki.runtime_sync import fsync_directory as fsync_directory
+from llm_wiki.runtime_sync import fsync_file as fsync_file
+from llm_wiki.runtime_sync import sync_runtime_directory as sync_runtime_directory
 from llm_wiki.sqlite_contracts import MigrationStatement as MigrationStatement
 from llm_wiki.sqlite_contracts import OperationalDatabaseContract as OperationalDatabaseContract
 from llm_wiki.sqlite_contracts import (
@@ -90,156 +201,6 @@ from llm_wiki.sqlite_transactions import begin_immediate as begin_immediate
 # about 170 times the 1 500-token answer the classifier asks for, so it refuses only an
 # answer no summary needs, and CLI providers do not enforce the request's token cap.
 MAX_CAPTURE_DECISION_BYTES = 1024 * 1024
-
-
-class UnsafeStateRoot(ValueError):
-    """Raised when runtime state cannot safely use local SQLite locking."""
-
-
-class MetadataDurabilityUnavailable(OSError):
-    """Raised when the platform cannot prove the requested metadata boundary."""
-
-    code = "metadata_durability_unavailable"
-
-
-@dataclass(frozen=True)
-class RuntimeFileIdentity:
-    platform: str
-    volume: str
-    file_id: str
-    size: int
-    mtime_ns: int
-
-
-def _windows_network_anchor(path: Path) -> bool:
-    anchor = path.resolve(strict=False).anchor
-    if not anchor:
-        return False
-    drive_type_remote = 4
-    return ctypes.windll.kernel32.GetDriveTypeW(anchor) == drive_type_remote
-
-
-def _posix_mount_table() -> list[tuple[str, str]]:
-    mount_data, is_mountinfo = _read_posix_mount_data()
-    mounts = _parse_posix_mounts(mount_data, is_mountinfo=is_mountinfo)
-    if mounts or _platform_system() != "Darwin":
-        return mounts
-    return _parse_darwin_mounts(_query_darwin_mounts())
-
-
-def _posix_network_path(path: Path) -> bool:
-    target = str(path.resolve(strict=False)).replace("\\", "/")
-    matching = [entry for entry in _posix_mount_table() if _path_is_under(target, entry[0])]
-    if not matching:
-        return False
-    _mount_point, filesystem = max(matching, key=lambda entry: len(entry[0]))
-    return _is_network_filesystem(filesystem)
-
-
-def _known_network_path(path: Path) -> bool:
-    if str(path).startswith(("\\\\", "//")):
-        return True
-    if _platform_system() == "Windows":
-        return _windows_network_anchor(path)
-    return _posix_network_path(path)
-
-
-def _platform_system() -> str:
-    return platform.system()
-
-
-def _read_posix_mount_data() -> tuple[str, bool]:
-    for path, is_mountinfo in (
-        (Path("/proc/self/mountinfo"), True),
-        (Path("/proc/mounts"), False),
-    ):
-        try:
-            return path.read_text(encoding="utf-8"), is_mountinfo
-        except OSError:
-            continue
-    return "", True
-
-
-def _query_darwin_mounts() -> str:
-    try:
-        result = subprocess.run(
-            ["/sbin/mount"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=2.0,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    if result.returncode != 0:
-        return ""
-    return result.stdout[:1_048_576]
-
-
-def _parse_posix_mounts(data: str, *, is_mountinfo: bool) -> list[tuple[str, str]]:
-    mounts: list[tuple[str, str]] = []
-    for line in data.splitlines():
-        try:
-            if is_mountinfo:
-                left, right = line.split(" - ", 1)
-                mount_point = left.split()[4]
-                filesystem = right.split()[0]
-            else:
-                _source, mount_point, filesystem, *_rest = line.split()
-        except (IndexError, ValueError):
-            continue
-        mounts.append((_decode_mount_path(mount_point), filesystem.casefold()))
-    return mounts
-
-
-def _parse_darwin_mounts(data: str) -> list[tuple[str, str]]:
-    mounts: list[tuple[str, str]] = []
-    for line in data.splitlines():
-        match = re.match(r"^.* on (.+) \(([^,()]+)(?:,|\))", line)
-        if match is None:
-            continue
-        mount_point, filesystem = match.groups()
-        mounts.append((_decode_mount_path(mount_point), filesystem.casefold()))
-    return mounts
-
-
-def _is_network_filesystem(filesystem: str) -> bool:
-    return filesystem in {
-        "9p",
-        "afpfs",
-        "ceph",
-        "cifs",
-        "nfs",
-        "nfs4",
-        "smbfs",
-        "sshfs",
-        "webdav",
-    } or filesystem.endswith(".sshfs")
-
-
-def _decode_mount_path(value: str) -> str:
-    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), value)
-
-
-def _path_is_under(path: str, mount_point: str) -> bool:
-    mount_point = mount_point.rstrip("/") or "/"
-    return mount_point == "/" or path == mount_point or path.startswith(f"{mount_point}/")
-
-
-def _has_reparse_attribute(candidate: Path) -> bool:
-    if not candidate.exists():
-        return False
-    attributes = getattr(candidate.stat(follow_symlinks=False), "st_file_attributes", 0)
-    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    return bool(attributes & reparse_flag)
-
-
-def _windows_reparse_point(path: Path) -> bool:
-    if os.name != "nt":
-        return False
-    current = path.absolute()
-    candidates = [current, *current.parents]
-    return any(_has_reparse_attribute(candidate) for candidate in candidates)
 
 
 def _second_writer_is_blocked(second: sqlite3.Connection) -> bool:
@@ -376,29 +337,6 @@ def _sqlite_directory_lock_probe(directory: Path, *, deadline: float = float("in
         _cleanup_lock_probe(probe, connections, directory, identity)
 
 
-_CLOUD_DIRECTORY_NAMES = frozenset(
-    {"dropbox", "googledrive", "google drive", "iclouddrive", "onedrive"}
-)
-
-
-def _require_local_non_reparse_root(path: Path) -> None:
-    if _windows_reparse_point(path):
-        raise UnsafeStateRoot(f"state root must not traverse a Windows reparse point: {path}")
-    if _known_network_path(path):
-        raise UnsafeStateRoot(f"state root must use a local filesystem: {path}")
-
-
-def _warn_if_cloud_synchronized(path: Path) -> None:
-    """Cloud sync is detected by name only; locking there is probed, not proven."""
-    if not any(part.casefold() in _CLOUD_DIRECTORY_NAMES for part in path.parts):
-        return
-    warnings.warn(
-        f"state root appears to be cloud-synchronized; local locking is only probed: {path}",
-        RuntimeWarning,
-        stacklevel=3,
-    )
-
-
 def _prepare_local_database_directory(path: Path) -> Path:
     path = Path(path)
     _require_local_non_reparse_root(path)
@@ -422,53 +360,6 @@ def validate_database_directory(path: Path) -> None:
     path = _prepare_local_database_directory(path)
     if _sqlite_directory_lock_probe(path) is not True:
         raise UnsafeStateRoot(f"database directory failed the SQLite two-connection locking probe: {path}")
-
-
-def _owner_permissions_supported(path: Path) -> bool:
-    return _platform_system() != "Windows" and os.name == "posix"
-
-
-def _chmod_or_warn(path: Path, mode: int) -> bool:
-    """Apply `mode`; False (with the warning) when the filesystem has no permission bits."""
-    if stat.S_IMODE(path.stat().st_mode) == mode:
-        return True
-    try:
-        path.chmod(mode)
-    except OSError as exc:
-        unsupported = {errno.ENOSYS, errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)}
-        if exc.errno not in unsupported:
-            raise
-        warnings.warn(
-            f"owner-only permission bits are unsupported for {path}",
-            RuntimeWarning,
-            stacklevel=3,
-        )
-        return False
-    return True
-
-
-def _require_applied_mode(path: Path, mode: int) -> None:
-    actual = stat.S_IMODE(path.stat().st_mode)
-    if actual != mode:
-        raise PermissionError(f"owner-only mode {mode:o} was not applied to {path}: got {actual:o}")
-
-
-def _set_owner_only(path: Path, mode: int) -> bool:
-    if not _owner_permissions_supported(path):
-        return False
-    if not _chmod_or_warn(path, mode):
-        return False
-    _require_applied_mode(path, mode)
-    return True
-
-
-def _harden_runtime_owner_only(path: Path, mode: int) -> None:
-    if os.name == "nt":
-        from llm_wiki.windows_acl import _harden_windows_acl
-
-        _harden_windows_acl(Path(path))
-        return
-    _set_owner_only(Path(path), mode)
 
 
 def open_operational_db(
@@ -558,138 +449,6 @@ def _configure_operational_connection(
             initialize=initialize_contract,
         )
     _set_owner_only(path, 0o600)
-
-
-def _contained_runtime_metadata(path: Path, state_root: Path) -> os.stat_result:
-    root = Path(state_root).resolve(strict=True)
-    try:
-        parent = path.parent.resolve(strict=True)
-        _require_runtime_parent_containment(parent, root)
-    except (OSError, ValueError) as exc:
-        raise PermissionError("runtime file is outside the configured state root") from exc
-    return path.lstat()
-
-
-def _require_runtime_parent_containment(parent: Path, root: Path) -> None:
-    normalized_root = os.path.normcase(root)
-    normalized_parent = os.path.normcase(parent)
-    if os.path.commonpath((normalized_parent, normalized_root)) != normalized_root:
-        raise ValueError("runtime parent is outside the configured state root")
-
-
-def _require_bounded_regular_file(
-    path: Path, metadata: os.stat_result, max_bytes: int | None
-) -> None:
-    if (
-        stat.S_ISLNK(metadata.st_mode)
-        or _windows_reparse_point(path)
-        or not stat.S_ISREG(metadata.st_mode)
-    ):
-        raise PermissionError("runtime file must be a bounded regular file")
-    _require_file_size_budget(metadata.st_size, max_bytes)
-
-
-def _require_file_size_budget(size: int, max_bytes: int | None) -> None:
-    """SQLite metadata opens need no whole-file byte budget."""
-    if max_bytes is None:
-        return
-    if size > max_bytes:
-        raise PermissionError("runtime file must be a bounded regular file")
-
-
-def _require_nonnegative_file_budget(max_bytes: int | None) -> None:
-    if max_bytes is None:
-        return
-    if max_bytes < 0:
-        raise ValueError("max_bytes must be non-negative")
-
-
-def _require_windows_owner_only(path: Path) -> None:
-    from llm_wiki.windows_acl import _is_owner_only_windows
-
-    if not _is_owner_only_windows(path):
-        raise PermissionError("runtime file must be owner-only")
-
-
-def _require_owner_only_file(path: Path, metadata: os.stat_result) -> None:
-    if os.name == "nt":
-        _require_windows_owner_only(path)
-        return
-    mode = stat.S_IMODE(metadata.st_mode)
-    if mode & 0o077 or mode & 0o600 != 0o600:
-        raise PermissionError("runtime file must be owner-only")
-
-
-def _validated_runtime_metadata(
-    path: Path,
-    state_root: Path,
-    *,
-    max_bytes: int | None,
-    owner_only: bool,
-) -> os.stat_result:
-    """Validate a bounded regular runtime file from metadata alone."""
-    _require_nonnegative_file_budget(max_bytes)
-    metadata = _contained_runtime_metadata(path, state_root)
-    _require_bounded_regular_file(path, metadata, max_bytes)
-    if owner_only:
-        _require_owner_only_file(path, metadata)
-    return metadata
-
-
-def _confirm_runtime_identity(path: Path, metadata: os.stat_result) -> None:
-    """Prove the validated metadata still describes the file behind the path.
-
-    Never call this for a file that may already have an open SQLite connection
-    in this process. Closing any descriptor releases every POSIX advisory lock
-    the process holds on that inode, whichever descriptor took them, so this
-    probe would silently strip the locks a live connection depends on.
-    """
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
-    try:
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(metadata, opened):
-            raise PermissionError("runtime file identity changed during validation")
-    finally:
-        os.close(descriptor)
-
-
-def validate_runtime_file(
-    path: Path,
-    state_root: Path,
-    *,
-    max_bytes: int,
-    owner_only: bool = False,
-) -> os.stat_result:
-    """Validate one bounded regular runtime file without following links."""
-    path = Path(path)
-    metadata = _validated_runtime_metadata(
-        path, state_root, max_bytes=max_bytes, owner_only=owner_only
-    )
-    _confirm_runtime_identity(path, metadata)
-    return metadata
-
-
-def validate_operational_db_file(
-    path: Path,
-    state_root: Path,
-    *,
-    max_bytes: int | None,
-    owner_only: bool = False,
-) -> os.stat_result:
-    """Validate an operational database without opening a second descriptor.
-
-    `validate_runtime_file` proves identity by opening and closing its own
-    descriptor. On POSIX that close drops every advisory lock this process holds
-    on the inode, including the locks an already-open SQLite connection relies
-    on, so concurrent writers stop excluding each other and one of them deletes
-    the rollback journal underneath a live transaction. The database openers
-    bracket `sqlite3.connect` with `lstat` and `samestat` instead, which proves
-    the same identity across the connect without touching a descriptor.
-    """
-    return _validated_runtime_metadata(
-        Path(path), state_root, max_bytes=max_bytes, owner_only=owner_only
-    )
 
 
 # A crashed writer leaves a rollback journal beside the database, and SQLite
@@ -847,586 +606,3 @@ def _opened_readonly_operational_db(
         database.close()
         operational_deadline_active(deadline)
         raise
-
-
-def _require_stable_read(opened, after, length: int, max_bytes: int) -> None:
-    """The file did not change under the descriptor, and the read stayed bounded."""
-    moved = not os.path.samestat(opened, after) or (
-        opened.st_size,
-        opened.st_mtime_ns,
-    ) != (after.st_size, after.st_mtime_ns)
-    if moved or length > max_bytes:
-        raise PermissionError("runtime file changed during bounded read")
-
-
-def read_runtime_bytes(
-    path: Path,
-    state_root: Path,
-    *,
-    max_bytes: int,
-    owner_only: bool = False,
-) -> bytes:
-    """Read stable bounded runtime bytes through a no-follow descriptor."""
-    expected = validate_runtime_file(path, state_root, max_bytes=max_bytes, owner_only=owner_only)
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
-    try:
-        opened = os.fstat(descriptor)
-        if not os.path.samestat(expected, opened):
-            raise PermissionError("runtime file identity changed before read")
-        data = os.read(descriptor, max_bytes + 1)
-        _require_stable_read(opened, os.fstat(descriptor), len(data), max_bytes)
-        return data
-    finally:
-        os.close(descriptor)
-
-
-def _fingerprint_metadata(metadata: os.stat_result) -> tuple[int, ...]:
-    return (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size,
-            metadata.st_mtime_ns, metadata.st_ctime_ns)
-
-
-def _require_fingerprint_metadata(expected, actual) -> None:
-    if _fingerprint_metadata(expected) != _fingerprint_metadata(actual):
-        raise PermissionError("runtime file changed during fingerprint")
-
-
-def _digest_runtime_descriptor(descriptor: int, size: int, deadline) -> str:
-    digest, length = hashlib.sha256(), 0
-    while length <= size:
-        operational_deadline_active(deadline)
-        chunk = os.read(descriptor, min(IO_CHUNK_BYTES, size + 1 - length))
-        if not chunk:
-            break
-        digest.update(chunk)
-        length += len(chunk)
-    operational_deadline_active(deadline)
-    if length != size:
-        raise PermissionError("runtime file size changed during fingerprint")
-    return digest.hexdigest()
-
-
-def _verified_runtime_digest(descriptor, expected, deadline) -> str:
-    digest = _digest_runtime_descriptor(descriptor, expected.st_size, deadline)
-    _require_fingerprint_metadata(expected, os.fstat(descriptor))
-    os.lseek(descriptor, 0, os.SEEK_SET)
-    if _digest_runtime_descriptor(descriptor, expected.st_size, deadline) != digest:
-        raise PermissionError("runtime file content changed during fingerprint")
-    return digest
-
-
-def fingerprint_runtime_file(
-    path: Path, state_root: Path, *, max_bytes: int | None = None, deadline=None,
-) -> tuple[str, RuntimeFileIdentity]:
-    """Stream a stable owner-only artifact, binding its digest to its identity.
-
-    Only use for offline artifacts: closing a descriptor for a live SQLite file
-    can release this process's advisory locks. The maintenance fence and closed
-    SQLite connections remain the caller's responsibility. Chunk size bounds
-    memory, not accepted file size; a growing file is refused at its initial size.
-    A second hash detects rewrites hidden by coarse/restored timestamps. This
-    consistency witness cannot replace exclusion of noncooperating writers.
-    """
-    return fingerprint_regular_file(
-        path, state_root, owner_only=True, max_bytes=max_bytes, deadline=deadline,
-    )
-
-
-def fingerprint_regular_file(
-    path: Path, root: Path, *, owner_only: bool = False,
-    max_bytes: int | None = None, deadline=None,
-) -> tuple[str, RuntimeFileIdentity]:
-    """Fingerprint stable regular bytes without following a leaf symlink.
-
-    Code and installed dependencies may be publicly readable. Runtime callers
-    retain their owner-only requirement through fingerprint_runtime_file.
-    This is the same two-pass consistency witness, not a writer exclusion lock;
-    the offline-file restriction of fingerprint_runtime_file also applies here.
-    """
-    operational_deadline_active(deadline)
-    path = Path(path)
-    expected = _validated_runtime_metadata(
-        path, root, max_bytes=max_bytes, owner_only=owner_only,
-    )
-    identity = _runtime_identity_from_metadata(path, expected)
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
-    try:
-        _require_fingerprint_metadata(expected, os.fstat(descriptor))
-        digest = _verified_runtime_digest(descriptor, expected, deadline)
-        _require_fingerprint_metadata(expected, os.fstat(descriptor))
-        _require_fingerprint_metadata(expected, path.stat(follow_symlinks=False))
-        return digest, identity
-    finally:
-        os.close(descriptor)
-
-
-def _windows_runtime_identity_names(target: Path) -> tuple[str, str]:
-    """Volume and file id for one open runtime file, writers still allowed."""
-    import windows_workspace
-
-    handle = windows_workspace.open_shared_readonly_runtime_file(target)
-    try:
-        volume, file_id, is_directory = windows_workspace.identity(
-            handle, directory=False
-        )
-    finally:
-        windows_workspace.close_handle(handle)
-    if is_directory:
-        raise PermissionError("runtime artifact must be a regular file")
-    return f"volume:{volume}", f"file-id:{file_id.hex()}"
-
-
-def _posix_runtime_identity_names(current: os.stat_result) -> tuple[str, str]:
-    return f"dev:{current.st_dev}", f"ino:{current.st_ino}"
-
-
-def capture_runtime_file_identity(
-    path: Path, *, state_root: Path
-) -> RuntimeFileIdentity:
-    """Capture stable platform file identity for one runtime artifact."""
-    target = Path(path)
-    root = Path(state_root).resolve(strict=True)
-    metadata = validate_runtime_file(target, root, max_bytes=1 << 50)
-    return _runtime_identity_from_metadata(target, metadata)
-
-
-def capture_operational_database_identity(
-    path: Path, *, state_root: Path
-) -> RuntimeFileIdentity:
-    """Identify a live database without closing a non-SQLite descriptor."""
-    target = Path(path)
-    root = Path(state_root).resolve(strict=True)
-    metadata = validate_operational_db_file(target, root, max_bytes=None)
-    return _runtime_identity_from_metadata(target, metadata)
-
-
-def _runtime_identity_from_metadata(
-    target: Path, metadata: os.stat_result
-) -> RuntimeFileIdentity:
-    on_windows = os.name == "nt"
-    names = _windows_runtime_identity_names(target) if on_windows else None
-    current = target.stat(follow_symlinks=False)
-    if not os.path.samestat(metadata, current):
-        raise PermissionError("runtime file identity changed during capture")
-    if names is None:
-        names = _posix_runtime_identity_names(current)
-    volume_name, file_name = names
-    return RuntimeFileIdentity(
-        platform="windows" if on_windows else "posix",
-        volume=volume_name,
-        file_id=file_name,
-        size=current.st_size,
-        mtime_ns=current.st_mtime_ns,
-    )
-
-
-def fsync_file(path: Path) -> None:
-    with Path(path).open(_file_sync_mode()) as handle:
-        os.fsync(handle.fileno())
-
-
-def _file_sync_mode() -> str:
-    # Windows FlushFileBuffers requires write access; POSIX fsync does not.
-    if os.name == "nt":
-        return "rb+"
-    return "rb"
-
-
-def _fsync_directory_windows(path: Path) -> None:
-    import windows_workspace
-
-    handle: int | None = None
-    try:
-        handle = windows_workspace.open_writable_directory_path(Path(path))
-        if not windows_workspace.flush_directory(handle):
-            raise ctypes.WinError(ctypes.get_last_error())
-    except (OSError, RuntimeError) as exc:
-        raise _metadata_durability_error("Windows directory flush failed", exc) from exc
-    finally:
-        _close_windows_handle(windows_workspace, handle)
-
-
-def _close_windows_handle(windows_workspace, handle: int | None) -> None:
-    if handle is None:
-        return
-    windows_workspace.close_handle(handle)
-
-
-def _opened_directory_descriptor(path: Path) -> int:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    try:
-        return os.open(Path(path), flags)
-    except OSError as exc:
-        raise _metadata_durability_error("directory open for fsync failed", exc) from exc
-
-
-def _fsync_directory_posix(path: Path) -> None:
-    descriptor = _opened_directory_descriptor(path)
-    try:
-        os.fsync(descriptor)
-    except OSError as exc:
-        raise _metadata_durability_error("directory fsync failed", exc) from exc
-    finally:
-        os.close(descriptor)
-
-
-def fsync_directory(path: Path) -> None:
-    """Sync directory metadata or fail when the platform cannot prove it."""
-    if os.name == "nt":
-        _fsync_directory_windows(path)
-        return
-    _fsync_directory_posix(path)
-
-
-def _metadata_durability_error(
-    message: str,
-    error: BaseException,
-) -> MetadataDurabilityUnavailable:
-    error_number = getattr(error, "errno", None)
-    if error_number is None:
-        result = MetadataDurabilityUnavailable(f"{message}: {error}")
-    else:
-        result = MetadataDurabilityUnavailable(error_number, f"{message}: {error}")
-    if getattr(error, "winerror", None) is not None:
-        result.winerror = error.winerror
-    return result
-
-
-def _publication_digest(path: Path, parent: Path, *, max_bytes: int) -> str | None:
-    try:
-        path.lstat()
-    except FileNotFoundError:
-        return None
-    return sha256_bytes(read_runtime_bytes(path, parent, max_bytes=max_bytes))
-
-
-def durable_publish_file(
-    staged: Path,
-    destination: Path,
-    *,
-    replace: bool,
-    expected_sha256: str,
-    max_bytes: int,
-) -> Literal["published", "adopted", "duplicate"]:
-    """Publish one sibling file and return published, adopted, or duplicate."""
-    _require_publication_arguments(replace, expected_sha256, max_bytes)
-    staged, destination, parent = _resolved_sibling_pair(staged, destination)
-    settled = _settled_publication(staged, destination, parent, expected_sha256, max_bytes)
-    if settled is not None:
-        return settled
-    _move_into_place(staged, destination, parent, replace=replace)
-    if _publication_digest(destination, parent, max_bytes=max_bytes) != expected_sha256:
-        raise RuntimeError("durable publication conflict: destination read-back failed")
-    return "published"
-
-
-def _require_publication_arguments(
-    replace: object, expected_sha256: str, max_bytes: object
-) -> None:
-    if not isinstance(replace, bool):
-        raise TypeError("replace must be a boolean")
-    if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
-        raise ValueError("expected_sha256 must be lowercase 64-hex")
-    _require_positive_int("max_bytes", max_bytes)
-
-
-def _resolved_parents(staged: Path, destination: Path) -> tuple[Path, Path]:
-    try:
-        return staged.parent.resolve(strict=True), destination.parent.resolve(strict=True)
-    except OSError as exc:
-        raise PermissionError("publication parent must exist") from exc
-
-
-def _require_distinct_siblings(
-    staged: Path, destination: Path, staged_parent: Path, destination_parent: Path
-) -> None:
-    if staged_parent != destination_parent:
-        raise ValueError("staged and destination must be sibling paths")
-    if os.path.normcase(staged.name) == os.path.normcase(destination.name):
-        raise ValueError("staged and destination must be distinct names")
-
-
-def _resolved_sibling_pair(staged: Path, destination: Path) -> tuple[Path, Path, Path]:
-    """Both paths under one resolved local parent, or a refusal naming why not."""
-    staged = Path(staged)
-    destination = Path(destination)
-    staged_parent, destination_parent = _resolved_parents(staged, destination)
-    _require_distinct_siblings(staged, destination, staged_parent, destination_parent)
-    if _known_network_path(staged_parent) or _windows_reparse_point(staged_parent):
-        raise UnsafeStateRoot("durable publication requires one local non-reparse parent")
-    return staged_parent / staged.name, staged_parent / destination.name, staged_parent
-
-
-def _adopted_or_duplicate(staged_digest: object, expected_sha256: str, parent: Path):
-    """The destination already holds the expected bytes; what the staged file adds."""
-    if staged_digest is None:
-        _fsync_parent_on_posix(parent)
-        return "adopted"
-    if staged_digest == expected_sha256:
-        return "duplicate"
-    raise RuntimeError("durable publication conflict: staged bytes do not match")
-
-
-def _fsync_parent_on_posix(parent: Path) -> None:
-    if os.name == "nt":
-        return
-    fsync_directory(parent)
-
-
-def _settled_publication(
-    staged: Path, destination: Path, parent: Path, expected_sha256: str, max_bytes: int
-):
-    """An outcome reached without moving anything, or None when a move is due."""
-    staged_digest = _publication_digest(staged, parent, max_bytes=max_bytes)
-    destination_digest = _publication_digest(destination, parent, max_bytes=max_bytes)
-    if destination_digest == expected_sha256:
-        return _adopted_or_duplicate(staged_digest, expected_sha256, parent)
-    if staged_digest != expected_sha256:
-        raise RuntimeError("durable publication conflict: expected bytes are unavailable")
-    return None
-
-
-def _move_windows(staged: Path, destination: Path, *, replace: bool) -> None:
-    import windows_workspace
-
-    try:
-        windows_workspace.flush_file_path(staged)
-        windows_workspace.move_file_write_through(staged, destination, replace=replace)
-    except FileExistsError:
-        raise
-    except (OSError, RuntimeError) as exc:
-        raise _metadata_durability_error("Windows metadata publication failed", exc) from exc
-
-
-def _replace_in_place(staged: Path, destination: Path) -> None:
-    try:
-        os.replace(staged, destination)
-    except OSError as exc:
-        raise _metadata_durability_error("metadata replacement failed", exc) from exc
-
-
-def _unlink_staged(staged: Path, parent: Path) -> None:
-    try:
-        os.unlink(staged)
-    except OSError:
-        fsync_directory(parent)
-        raise
-
-
-def _link_then_unlink(staged: Path, destination: Path, parent: Path) -> None:
-    try:
-        os.link(staged, destination, follow_symlinks=False)
-    except FileExistsError:
-        raise
-    except OSError as exc:
-        raise _metadata_durability_error("metadata publication link failed", exc) from exc
-    _unlink_staged(staged, parent)
-
-
-def _move_posix(staged: Path, destination: Path, parent: Path, *, replace: bool) -> None:
-    try:
-        fsync_file(staged)
-    except OSError as exc:
-        raise _metadata_durability_error("staged file fsync failed", exc) from exc
-    if replace:
-        _replace_in_place(staged, destination)
-    else:
-        _link_then_unlink(staged, destination, parent)
-    fsync_directory(parent)
-
-
-def _move_into_place(
-    staged: Path, destination: Path, parent: Path, *, replace: bool
-) -> None:
-    if os.name == "nt":
-        _move_windows(staged, destination, replace=replace)
-        return
-    _move_posix(staged, destination, parent, replace=replace)
-
-
-def publish_runtime_file(
-    path: Path,
-    data: bytes,
-    *,
-    state_root: Path,
-    create_only: bool,
-    expected: RuntimeFileIdentity | None = None,
-    expected_sha256: str | None = None,
-    mode: int = 0o600,
-) -> RuntimeFileIdentity:
-    """Publish runtime bytes through the shared checked durability primitive."""
-    _require_runtime_arguments(data, create_only, mode, expected, expected_sha256)
-    root = Path(state_root).resolve(strict=True)
-    parent, destination = _resolved_runtime_destination(path, root)
-    _require_replacement_evidence(
-        destination, root, create_only, expected, expected_sha256
-    )
-    staged = parent / f".{destination.name}.{secrets.token_hex(16)}.tmp"
-    _write_staged_bytes(staged, data, mode)
-    _harden_runtime_owner_only(staged, mode)
-    _publish_staged(staged, destination, parent, data, create_only, expected)
-    _verify_published_runtime_permissions(destination, mode)
-    published = capture_runtime_file_identity(destination, state_root=root)
-    if published.size != len(data):
-        raise RuntimeError("published runtime file size changed during read-back")
-    return published
-
-
-def _verify_published_runtime_permissions(path: Path, mode: int) -> None:
-    """Same-parent publication preserves permissions; any drift must remain a refusal."""
-    if os.name == "nt":
-        from llm_wiki.windows_acl import _verify_windows_owner_acl  # noqa: E402
-
-        _verify_windows_owner_acl(path)
-        return
-    _require_applied_mode(path, mode)
-
-
-def _require_runtime_mode(mode: object) -> None:
-    if isinstance(mode, bool) or not isinstance(mode, int) or not 0 <= mode <= 0o777:
-        raise ValueError("mode must be a valid permission mode")
-
-
-def _require_create_only_carries_no_evidence(
-    create_only: bool, expected: object, expected_sha256: object
-) -> None:
-    if not create_only:
-        return
-    if expected is not None or expected_sha256 is not None:
-        raise ValueError("create-only publication does not accept replacement evidence")
-
-
-def _require_replacement_carries_evidence(
-    create_only: bool, expected: object, expected_sha256: object
-) -> None:
-    if create_only:
-        return
-    if expected is None or expected_sha256 is None:
-        raise ValueError("replacement requires expected identity and SHA-256")
-
-
-def _require_replacement_shape(
-    create_only: bool, expected: object, expected_sha256: object
-) -> None:
-    _require_create_only_carries_no_evidence(create_only, expected, expected_sha256)
-    _require_replacement_carries_evidence(create_only, expected, expected_sha256)
-
-
-def _require_runtime_payload(data: object, create_only: object) -> None:
-    if not isinstance(data, bytes):
-        raise TypeError("runtime file data must be bytes")
-    if not isinstance(create_only, bool):
-        raise TypeError("create_only must be a boolean")
-
-
-def _require_runtime_arguments(
-    data: object,
-    create_only: object,
-    mode: object,
-    expected: object,
-    expected_sha256: object,
-) -> None:
-    _require_runtime_payload(data, create_only)
-    _require_runtime_mode(mode)
-    _require_replacement_shape(create_only, expected, expected_sha256)
-    if expected_sha256 is not None and re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
-        raise ValueError("expected_sha256 must be lowercase 64-hex")
-
-
-def _resolved_runtime_destination(path: Path, root: Path) -> tuple[Path, Path]:
-    destination = Path(path)
-    try:
-        parent = destination.parent.resolve(strict=True)
-        parent.relative_to(root)
-    except (OSError, ValueError) as exc:
-        raise PermissionError("runtime publication path is outside the state root") from exc
-    return parent, parent / destination.name
-
-
-def _require_unchanged_identity(current: object, expected: object) -> None:
-    if current != expected:
-        raise PermissionError("runtime file identity changed before publication")
-
-
-def _require_replacement_evidence(
-    destination: Path,
-    root: Path,
-    create_only: bool,
-    expected: object,
-    expected_sha256: object,
-) -> None:
-    """The file being replaced is still the one the caller measured."""
-    if create_only:
-        return
-    current = capture_runtime_file_identity(destination, state_root=root)
-    _require_unchanged_identity(current, expected)
-    current_bytes = read_runtime_bytes(destination, root, max_bytes=max(1, current.size))
-    if sha256_bytes(current_bytes) != expected_sha256:
-        raise PermissionError("runtime file bytes changed before publication")
-
-
-def _write_all(descriptor: int, data: bytes) -> None:
-    view = memoryview(data)
-    while view:
-        written = os.write(descriptor, view)
-        if written <= 0:
-            raise OSError("runtime staging write made no progress")
-        view = view[written:]
-
-
-def _write_staged_bytes(staged: Path, data: bytes, mode: int) -> None:
-    descriptor = os.open(
-        staged,
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_NOFOLLOW", 0),
-        mode,
-    )
-    try:
-        _write_all(descriptor, data)
-        os.fsync(descriptor)
-    except BaseException:
-        os.close(descriptor)
-        _discard_staged(staged)
-        raise
-    else:
-        os.close(descriptor)
-
-
-def _discard_staged(staged: Path) -> None:
-    with contextlib.suppress(OSError):
-        staged.unlink()
-
-
-def _publish_staged(
-    staged: Path,
-    destination: Path,
-    parent: Path,
-    data: bytes,
-    create_only: bool,
-    expected: object,
-) -> None:
-    max_bytes = max(1, len(data), 0 if expected is None else expected.size)
-    try:
-        outcome = durable_publish_file(
-            staged,
-            destination,
-            replace=not create_only,
-            expected_sha256=sha256_bytes(data),
-            max_bytes=max_bytes,
-        )
-    except BaseException:
-        _discard_staged(staged)
-        raise
-    if outcome != "duplicate":
-        return
-    staged.unlink()
-    fsync_directory(parent)
-
-
-def sync_runtime_directory(path: Path) -> None:
-    """Expose the shared checked metadata sync boundary to runtime publishers."""
-    fsync_directory(Path(path))

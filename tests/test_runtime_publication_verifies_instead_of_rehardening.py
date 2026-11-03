@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 import reliable_memory
+from llm_wiki import runtime_environment, runtime_publication
 
 from tests.test_a_windows_owner_with_a_non_ascii_name_is_verified import OWNER, _icacls_writing
 
@@ -19,7 +20,7 @@ def _destination(tmp_path):
 def test_same_parent_publication_hardens_only_its_private_staged_file(tmp_path, monkeypatch):
     destination = _destination(tmp_path)
     harden = Mock(wraps=reliable_memory._harden_runtime_owner_only)
-    monkeypatch.setattr(reliable_memory, '_harden_runtime_owner_only', harden)
+    monkeypatch.setattr(runtime_publication, '_harden_runtime_owner_only', harden)
 
     published = reliable_memory.publish_runtime_file(destination, b'accepted',
         state_root=tmp_path, create_only=True)
@@ -40,7 +41,7 @@ def test_permission_drift_after_publication_is_refused_without_remasking_it(tmp_
         publish(*args)
         destination.chmod(0o644)
 
-    monkeypatch.setattr(reliable_memory, '_publish_staged', broaden)
+    monkeypatch.setattr(runtime_publication, '_publish_staged', broaden)
 
     with pytest.raises(PermissionError, match='mode'):
         reliable_memory.publish_runtime_file(destination, b'accepted', state_root=tmp_path, create_only=True)
@@ -51,7 +52,7 @@ def test_permission_drift_after_publication_is_refused_without_remasking_it(tmp_
 def test_initial_permission_failure_cannot_publish_an_artifact(tmp_path, monkeypatch):
     destination = _destination(tmp_path)
     harden = Mock(side_effect=PermissionError('initial private permissions denied'))
-    monkeypatch.setattr(reliable_memory, '_harden_runtime_owner_only', harden)
+    monkeypatch.setattr(runtime_publication, '_harden_runtime_owner_only', harden)
 
     with pytest.raises(PermissionError, match='initial private permissions denied'):
         reliable_memory.publish_runtime_file(destination, b'accepted', state_root=tmp_path, create_only=True)
@@ -63,7 +64,7 @@ def test_windows_postpublication_check_reads_the_owner_acl_and_propagates_a_refu
 
     destination = _destination(tmp_path)
     verify = Mock(side_effect=PermissionError('owner-only ACL changed'))
-    monkeypatch.setattr(reliable_memory, 'os', SimpleNamespace(name='nt'))
+    monkeypatch.setattr(runtime_publication, 'os', SimpleNamespace(name='nt'))
     monkeypatch.setattr(windows_acl, '_verify_windows_owner_acl', verify)
 
     with pytest.raises(PermissionError, match='owner-only ACL changed'):
@@ -87,7 +88,7 @@ def test_windows_published_artifact_is_owner_only_without_a_second_permission_wr
 
     destination = _destination(tmp_path)
     harden = Mock(wraps=reliable_memory._harden_runtime_owner_only)
-    monkeypatch.setattr(reliable_memory, '_harden_runtime_owner_only', harden)
+    monkeypatch.setattr(runtime_publication, '_harden_runtime_owner_only', harden)
 
     reliable_memory.publish_runtime_file(destination, b'accepted', state_root=tmp_path, create_only=True)
 
@@ -151,7 +152,7 @@ def test_windows_initial_permissions_call_the_acl_owner_directly(tmp_path, monke
     from llm_wiki import windows_acl
 
     harden = Mock()
-    monkeypatch.setattr(reliable_memory, 'os', SimpleNamespace(name='nt'))
+    monkeypatch.setattr(runtime_environment, 'os', SimpleNamespace(name='nt'))
     monkeypatch.setattr(windows_acl, '_harden_windows_acl', harden)
     reliable_memory._harden_runtime_owner_only(tmp_path / 'artifact', 0o600)
     harden.assert_called_once_with(tmp_path / 'artifact')

@@ -11,7 +11,7 @@ They intentionally remain distinct contracts. Names, codec fallbacks, errors and
 fail-closed results are unchanged. This module does not replace path containment,
 atomic creation, handle identity or transaction fencing, and is not an OS sandbox.
 
-reliable_memory now directly calls the Windows ACL owner from its three Windows
+runtime_environment and runtime_publication directly call the Windows ACL owner from their Windows
 permission paths. POSIX chmod/unsupported warnings stay unchanged. Queue and
 transaction retain their platform dispatch and expose identical compatibility
 functions. Archives, evidence resolver, compile cache and LSP import the relevant
