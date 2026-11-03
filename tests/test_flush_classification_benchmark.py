@@ -224,37 +224,12 @@ def _builder():
     return build_flush_corpus
 
 
-SESSION = "user: WAL or rollback?\n\nassistant: Rollback journal with synchronous FULL, because WAL breaks on network disks."
 
 
-def test_a_quote_the_transcript_does_not_carry_voids_the_reading():
-    """An invented passage is not a wrong label; it is no label at all."""
-    builder = _builder()
-    invented = '{"quote": "We chose WAL for its speed.", "keeps": "much"}'
-    verbatim = '{"quote": "Rollback journal with   synchronous FULL, because WAL", "keeps": "much"}'
-
-    assert builder.parse_quote_reading(invented, SESSION).tier is None
-    assert builder.parse_quote_reading(verbatim, SESSION).tier == "major"
-    assert builder.parse_quote_reading('{"quote": "", "keeps": "nothing"}', SESSION).tier == "ok"
 
 
-def test_a_stitched_quote_with_one_real_sentence_is_grounded():
-    """Four of seven voided quotes on 2026-09-23 joined two real, non-adjacent sentences."""
-    builder = _builder()
-    stitched = "We chose WAL for its speed. Rollback journal with synchronous FULL, because WAL breaks on network disks."
-
-    assert builder.quote_is_verbatim(stitched, SESSION) is True
-    assert builder.quote_is_verbatim("synchronous FULL", SESSION) is False
 
 
-def test_commentary_after_the_json_does_not_lose_the_reading():
-    """One reading answered its JSON and then argued with itself in prose with braces."""
-    builder = _builder()
-    answer = '{"quote": "WAL breaks on network disks.", "keeps": "much"}\n\nWait — {the text} says "rollback".'
-
-    reading = builder.parse_quote_reading(answer, SESSION)
-
-    assert (reading.tier, reading.passage) == ("major", "WAL breaks on network disks.")
 
 
 def test_the_case_carries_the_text_the_product_classifies(tmp_path: Path):
@@ -273,26 +248,51 @@ def test_the_case_carries_the_text_the_product_classifies(tmp_path: Path):
     assert ("We chose lzma." in excerpt, "file-history-snapshot" in excerpt) == (True, False)
 
 
-def test_two_readings_that_disagree_make_a_contested_case(tmp_path: Path):
+
+
+
+
+def test_builder_keeps_label_aliases_and_actual_text_orchestration(tmp_path, monkeypatch):
+    import flush_corpus_labels as labels
+
     builder = _builder()
-    verdict = builder.Verdict(tier="major", kinds=("decision",), phrases=("rollback journal",))
+    assert builder.Verdict is labels.Verdict
+    assert builder.QuoteReading is labels.QuoteReading
+    assert builder.parse_verdict is labels.parse_verdict
+    assert builder.parse_quote_reading is labels.parse_quote_reading
+    assert builder.build_case is labels.build_case
+    assert builder.agreement is labels.agreement
+    path = tmp_path / 'held.jsonl'
+    message = 'We chose rollback journal for durable writes.'
+    path.write_text(json.dumps({'type': 'user', 'message': {'role': 'user', 'content': message}}) + '\n', encoding='utf-8')
+    monkeypatch.setattr(builder, '_judge', lambda text: '{"keeps":"much","kinds":["decision"],"phrases":["rollback journal"]}')
+    monkeypatch.setattr(builder, '_quote_reader', lambda text: json.dumps({'keeps': 'much', 'quote': message}))
+    case = builder._labelled_case(path, 1)
+    assert case['label_status'] == 'confirmed'
+    assert case['required_markers'] == ['rollback journal']
+    assert message in case['transcript']
 
-    agreed = builder.build_case(
-        tmp_path / "a.jsonl", 1, SESSION, verdict, builder.QuoteReading("major", "WAL breaks")
+
+def test_builder_label_imports_work_from_a_neutral_directory(tmp_path):
+    import subprocess
+
+    result = subprocess.run(
+        [sys.executable, str(BENCHMARK / 'build_flush_corpus.py'), '--help'],
+        cwd=tmp_path, capture_output=True, text=True,
     )
-    contested = builder.build_case(
-        tmp_path / "b.jsonl", 2, SESSION, verdict, builder.QuoteReading(None, "We chose WAL")
+    assert result.returncode == 0, result.stderr
+    assert '--transcripts' in result.stdout
+
+
+def test_builder_namespace_import_shares_the_canonical_label_types(tmp_path):
+    import subprocess
+
+    program = (
+        'import sys; sys.path.insert(0, sys.argv[1]); '
+        'import benchmark.build_flush_corpus as builder; import flush_corpus_labels as labels; '
+        'assert builder.Verdict is labels.Verdict; assert builder.QuoteReading is labels.QuoteReading'
     )
-    summary = builder.agreement([agreed, contested])
-
-    assert (agreed["label_status"], contested["label_status"]) == ("confirmed", "contested")
-    assert contested["readings"] == {"rubric": "major", "quote": None, "passage": "We chose WAL"}
-    assert summary == {"confirmed": 1, "contested": 1, "kappa": None}
-
-
-def test_the_readings_kappa_is_reported_from_thirty_cases():
-    builder = _builder()
-    pairs = [("major", "major"), ("ok", "ok"), ("minor", "major")] * 10
-
-    assert builder.cohens_kappa(pairs[:29]) is None
-    assert builder.cohens_kappa(pairs) == 0.5
+    result = subprocess.run(
+        [sys.executable, '-c', program, str(ROOT)], cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr

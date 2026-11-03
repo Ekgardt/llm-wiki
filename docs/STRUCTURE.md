@@ -2338,3 +2338,8 @@ The [conflict fixture builder](modules/conflict-fixture-builder.md) owns the
 existing Parquet-to-fixture CLI, delegates pure interpretation to
 factconsolidation-data and uses the optional benchmark-data extra for real file
 qualification. Its source, output format and installation behavior are unchanged.
+
+The [classification corpus labels](modules/flush-corpus-labels.md) module owns
+pure reading interpretation, case construction and agreement measures. The
+existing builder retains IO, provider orchestration and CLI, re-exporting moved
+names as direct compatibility aliases without duplicate implementations.
