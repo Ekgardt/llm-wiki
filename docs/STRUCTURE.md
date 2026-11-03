@@ -2143,3 +2143,16 @@ schema hash, optional checkpoint indexes and supplied-connection schema inspecti
 opening, transaction settlement, migration execution and row invariants remain with
 the coordinator. Optional indexes do not change the adoption hash. See
 [the owner guide](modules/coordinator-schema.md).
+
+### Position refresh and pinned transfer owners
+
+`fresh_positions.py` owns read-only Python line/span correction through the shared
+parser; it preserves indexed positions on unavailable input and marks exhausted
+file refresh budgets. It does not mutate generations or implement LSP encodings.
+`pinned_download.py` owns response selection, deadline-bounded streaming and
+transient retry. Installers retain integrity verification, partial-file cleanup,
+locks and adoption. Both retain current product paths. Owner tests isolate these
+contracts; existing navigation/installation integration obligations remain visible.
+
+Owner guides: [current positions](modules/fresh-positions.md) and
+[pinned transfers](modules/pinned-download.md).

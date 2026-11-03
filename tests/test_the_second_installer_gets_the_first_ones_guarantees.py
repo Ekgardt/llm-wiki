@@ -197,32 +197,8 @@ def _lock_file(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-class _StubOpener:
-    def open(self, request: object, timeout: float | None = None) -> object:
-        return request
 
 
-def test_the_pinned_opener_carries_no_proxy_and_refuses_a_redirect(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: list[object] = []
-
-    def build_opener(*handlers: object) -> _StubOpener:
-        captured.extend(handlers)
-        return _StubOpener()
-
-    monkeypatch.setattr(pinned_download.urllib.request, "build_opener", build_opener)
-
-    pinned_download.open_pinned_url(
-        urllib.request.Request(SERVER_URL), timeout=SHORT_TIMEOUT
-    )
-
-    kinds = [type(handler) for handler in captured]
-    assert (
-        urllib.request.ProxyHandler in kinds,
-        pinned_download.RejectRedirect in kinds,
-    ) == (True, True)
-    assert captured[0].proxies == {}
 
 
 def test_the_archive_is_streamed_in_chunks_instead_of_read_whole(

@@ -1,0 +1,54 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "scripts/pinned_download.py",
+    "docs/modules/pinned-download.md",
+    "docs/modules/pinned-download-context.json",
+    "docs/research/2026-11-03-position-and-download-owner-qualification.md",
+    "scripts/bounded_io.py",
+    "scripts/llm_wiki/path_ancestry.py",
+    "docs/modules/bounded-io.md",
+    "docs/modules/path-ancestry.md",
+    "docs/research/2026-09-17-inst-the-second-installer-gets-the-first-ones-guarantees.md",
+    "docs/research/2026-09-24-two-post-merge-failures-on-main.md",
+    "docs/research/2026-09-27-every-pinned-download-retries-the-network.md",
+    "docs/modules/context-records.md",
+    "docs/modules/fresh-positions.md"
+  ],
+  "directories": [
+    "tests/modules/pinned_download"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "scripts/pinned_download.py",
+      "docs/modules/pinned-download.md",
+      "docs/modules/pinned-download-context.json"
+    ],
+    "directories": [
+      "tests/modules/pinned_download"
+    ]
+  }
+}

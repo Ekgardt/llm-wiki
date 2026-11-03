@@ -84,7 +84,7 @@ def test_mixed_entries_keep_exact_spans_without_a_buffer():
 @pytest.mark.parametrize('header', [
     b'## [id] ' + b'x' * (IO_CHUNK_BYTES * 3),
     b'<!-- llm-wiki-operation:' + b'a' * (IO_CHUNK_BYTES * 3) + b' -->',
-])
+], ids=['long-heading', 'long-operation-marker'])
 def test_long_header_body_and_marker_identifier_are_scanned_in_ranges(header):
     raw = header + b'\n[12:34:56] fact\n## [tail] End\n'
     assert resolver._entry_starts(_RangeSource(raw)) == _previous_starts(raw)
