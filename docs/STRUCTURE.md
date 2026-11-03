@@ -2019,3 +2019,9 @@ closing remain in reliable_memory; old APIs retain identity aliases.
 caller-supplied connections and timestamps. `llm_wiki.queue_validation` owns pure
 argument/policy checks. Transactions, clocks and admission remain in the queue;
 shared base filter states and the unchanged attempt bound live in queue_contracts.
+
+Existing `windows_workspace.py` and `lsp_process_tree.py` remain separate platform
+owners: handle-relative filesystem operations and process-tree lifetime,
+respectively. Their qualification packets retain existing focused tests and
+subprocess fixture dependencies; no public path or runtime ownership changes.
+See `research/2026-11-03-existing-platform-boundaries.md`.

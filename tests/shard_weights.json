@@ -87,6 +87,8 @@
   "modules/windows_native/test_boundary.py": 0.07,
   "modules/windows_native/test_context_budget.py": 0.25,
   "modules/windows_native/test_native.py": 0.02,
+  "modules/windows_workspace/test_boundary.py": 0.08,
+  "modules/windows_workspace/test_context_budget.py": 0.28,
   "test_a_backlog_drains_in_windows.py": 0.14,
   "test_a_backup_image_carries_what_git_does_not.py": 94.45,
   "test_a_backup_snapshots_what_hooks_write.py": 46.53,
