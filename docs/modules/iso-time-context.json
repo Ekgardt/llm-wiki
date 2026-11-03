@@ -40,7 +40,8 @@
     "files": [
       "docs/modules/iso-time-context.json",
       "docs/modules/iso-time.md",
-      "scripts/iso_time.py"
+      "scripts/iso_time.py",
+      "docs/research/2026-09-26-one-iso-reading-for-every-python.md"
     ],
     "directories": [
       "tests/modules/iso_time"

@@ -36,7 +36,8 @@
       "docs/modules/process-liveness-context.json",
       "docs/modules/process-liveness.md",
       "scripts/process_liveness.py",
-      "tests/test_process_liveness.py"
+      "tests/test_process_liveness.py",
+      "docs/research/2026-09-11-one-answer-to-is-this-process-alive.md"
     ],
     "directories": []
   }

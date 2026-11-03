@@ -43,7 +43,8 @@
       "docs/modules/verified-artifacts.md",
       "docs/modules/verified-artifacts-context.json",
       "tests/test_the_verdict_cache_forgets_the_oldest.py",
-      "docs/research/2026-11-03-path-artifact-leaves.md"
+      "docs/research/2026-11-03-path-artifact-leaves.md",
+      "docs/research/2026-09-17-the-verdict-cache-forgets-the-oldest-not-the-first-in-the-alphabet.md"
     ],
     "directories": [
       "tests/modules/verified_artifacts"
