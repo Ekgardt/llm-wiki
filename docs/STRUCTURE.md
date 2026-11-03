@@ -2286,3 +2286,10 @@ and [LIT-RAGBench](modules/litragbench-data.md) each own their existing local
 loader/converter and original tests. Full real preparation dependencies remain in
 their packets. Public paths, source bytes, dates and normalization rules stay
 unchanged; no corpus download or model execution is introduced.
+
+### FactConsolidation preparation
+
+[FactConsolidation data](modules/factconsolidation-data.md) owns existing frame
+parsing, conflict grouping and the complete derived fixture. Resolver/model
+execution and Parquet acquisition stay outside. Source, fixture bytes, public
+paths and original assertions are preserved.
