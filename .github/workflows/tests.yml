@@ -560,11 +560,18 @@ jobs:
       # Selecting this nonstandard filename together with its parent directory
       # can deduplicate it out of collection. Keep the explicit suite separate.
       - run: uv run --locked --no-sync pytest tests/modules/beam_data/parquet_qualification.py -q --junitxml=beam-parquet.xml
+      - run: uv run --locked --no-sync pytest tests/modules/conflict_fixture_builder/parquet_qualification.py -q --junitxml=conflict-fixture-parquet.xml
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.6.2
         if: always()
         with:
           name: beam-parquet-${{ matrix.platform }}-attempt-${{ github.run_attempt }}
           path: beam-parquet.xml
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.6.2
+        if: always()
+        with:
+          name: conflict-fixture-parquet-${{ matrix.platform }}-attempt-${{ github.run_attempt }}
+          path: conflict-fixture-parquet.xml
           if-no-files-found: error
 
   pyright-navigation:

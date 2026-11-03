@@ -258,6 +258,8 @@ def test_optional_beam_parquet_is_required_on_all_supported_platforms():
     assert 'pytest tests/modules/beam_data/parquet_qualification.py -q' in commands
     assert 'tests/test_beam_becomes_a_question_this_stand_can_read.py' in commands
     assert '--junitxml=beam-parquet.xml' in commands
+    assert 'pytest tests/modules/conflict_fixture_builder/parquet_qualification.py -q' in commands
+    assert '--junitxml=conflict-fixture-parquet.xml' in commands
 
 
 def test_job_timeouts_names_and_timing_artifacts_match_approved_classes() -> None:

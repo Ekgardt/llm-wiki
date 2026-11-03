@@ -2333,3 +2333,8 @@ source. It measures a deterministic extractor, not model record quality.
 The [deterministic corpus generator](modules/python-qualification-corpus.md) owns
 fixture creation and gold bytes. Navigation execution, sampling and acceptance
 gates remain with the runner; original integration assertions stay intact.
+
+The [conflict fixture builder](modules/conflict-fixture-builder.md) owns the
+existing Parquet-to-fixture CLI, delegates pure interpretation to
+factconsolidation-data and uses the optional benchmark-data extra for real file
+qualification. Its source, output format and installation behavior are unchanged.
