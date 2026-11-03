@@ -422,31 +422,6 @@ def _stat_with(
     )
 
 
-def test_exported_pyright_configuration_is_recursively_immutable() -> None:
-    analysis = PYRIGHT_CONFIGURATION["python"]["analysis"]
-    original = analysis["logLevel"]
-    try:
-        with pytest.raises(TypeError):
-            analysis["logLevel"] = "Information"
-    finally:
-        if isinstance(analysis, dict):
-            analysis["logLevel"] = original
-    assert PYRIGHT_CONFIGURATION["python"]["analysis"]["logLevel"] == "Error"
-
-
-def test_exported_pyright_initialization_lists_are_immutable() -> None:
-    exclude = PYRIGHT_INITIALIZATION_OPTIONS["files"]["exclude"]
-    try:
-        with pytest.raises((AttributeError, TypeError)):
-            exclude.append("**/outside")
-    finally:
-        if isinstance(exclude, list):
-            exclude.clear()
-    assert thaw_pyright_profile_value(PYRIGHT_INITIALIZATION_OPTIONS) == {
-        "files": {"exclude": []}
-    }
-
-
 def test_thawed_profile_values_match_live_manifest_fingerprints() -> None:
     thaw = getattr(pyright_profile, "thaw_pyright_profile_value", None)
     assert callable(thaw)
@@ -3432,3 +3407,15 @@ def test_node_probe_is_shell_free_credentials_reduced_bounded_and_records_full_v
     assert process.stdin.closed
     assert process.stdout.closed
     assert process.stderr.closed
+
+
+def test_configuration_facade_preserves_public_object_and_pickle_identity():
+    import pickle
+
+    from llm_wiki import pyright_configuration
+
+    assert PYRIGHT_CONFIGURATION is pyright_configuration.PYRIGHT_CONFIGURATION
+    assert PYRIGHT_INITIALIZATION_OPTIONS is pyright_configuration.PYRIGHT_INITIALIZATION_OPTIONS
+    assert thaw_pyright_profile_value is pyright_configuration.thaw_pyright_profile_value
+    assert thaw_pyright_profile_value.__module__ == 'pyright_profile'
+    assert pickle.loads(pickle.dumps(thaw_pyright_profile_value)) is thaw_pyright_profile_value

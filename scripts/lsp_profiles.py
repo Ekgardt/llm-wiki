@@ -1,7 +1,7 @@
 """The managed language servers this build knows how to pin, install and drive.
 
 Pyright is defined here from the constants that have always governed it in
-`scripts/pyright_profile.py` -- imported, never retyped -- so that expressing it
+the lower `llm_wiki.pyright_configuration` owner -- imported, never retyped -- so that expressing it
 through the language-neutral seam cannot drift from the behaviour the existing
 Pyright tests pin. `tests/test_lsp_server_profile.py` asserts that equivalence
 directly: same argv, same configuration bytes, same initialization-option bytes.
@@ -29,6 +29,15 @@ from __future__ import annotations
 import platform
 from pathlib import Path
 
+from llm_wiki.pyright_configuration import (
+    PYRIGHT_CONFIGURATION,
+    PYRIGHT_INITIALIZATION_OPTIONS,
+    PYRIGHT_INSTALL_MANIFEST_SCHEMA,
+    PYRIGHT_PACKAGE_INTEGRITY,
+    PYRIGHT_PACKAGE_URL,
+    PYRIGHT_SERVER_RELATIVE,
+    QUALIFIED_NODE_MAJOR,
+)
 from lsp_paths import PYRIGHT_VERSION
 from lsp_server_profile import (
     READINESS_INITIALIZED,
@@ -43,15 +52,6 @@ from lsp_server_profile import (
     SourceBuild,
     freeze_profile_value,
     normalized_platform,
-)
-from pyright_profile import (
-    PYRIGHT_CONFIGURATION,
-    PYRIGHT_INITIALIZATION_OPTIONS,
-    PYRIGHT_INSTALL_MANIFEST_SCHEMA,
-    PYRIGHT_PACKAGE_INTEGRITY,
-    PYRIGHT_PACKAGE_URL,
-    PYRIGHT_SERVER_RELATIVE,
-    QUALIFIED_NODE_MAJOR,
 )
 
 # Pyright's vendor progress notifications. These are the three names currently

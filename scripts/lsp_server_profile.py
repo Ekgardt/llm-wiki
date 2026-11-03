@@ -212,7 +212,7 @@ def _frozen_sequence(value: list | tuple) -> tuple:
 def freeze_profile_value(value: object) -> object:
     """Deep-freeze a JSON-shaped profile value into hashable, immutable form.
 
-    Mirrors `pyright_profile._freeze_pyright_profile_value` so a profile's
+    Mirrors `llm_wiki.pyright_configuration._freeze_pyright_profile_value` so a profile's
     static option trees cannot be mutated by a caller that received them.
     """
     if isinstance(value, Mapping):

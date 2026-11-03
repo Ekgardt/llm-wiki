@@ -16,7 +16,6 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
-from types import MappingProxyType
 
 try:
     import tomllib
@@ -26,21 +25,45 @@ except ModuleNotFoundError:  # Python 3.10
 import lsp_process_tree as _lsp_process_tree
 from bounded_io import read_stable_bytes
 from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
+from llm_wiki.pyright_configuration import (
+    PYRIGHT_CONFIGURATION as PYRIGHT_CONFIGURATION,
+)
+from llm_wiki.pyright_configuration import (
+    PYRIGHT_CONFIGURATION_SHA256 as PYRIGHT_CONFIGURATION_SHA256,
+)
+from llm_wiki.pyright_configuration import (
+    PYRIGHT_INITIALIZATION_OPTIONS as PYRIGHT_INITIALIZATION_OPTIONS,
+)
+from llm_wiki.pyright_configuration import (
+    PYRIGHT_INITIALIZATION_OPTIONS_SHA256 as PYRIGHT_INITIALIZATION_OPTIONS_SHA256,
+)
+from llm_wiki.pyright_configuration import (
+    PYRIGHT_INSTALL_MANIFEST_SCHEMA as PYRIGHT_INSTALL_MANIFEST_SCHEMA,
+)
+from llm_wiki.pyright_configuration import (
+    PYRIGHT_PACKAGE_INTEGRITY as PYRIGHT_PACKAGE_INTEGRITY,
+)
+from llm_wiki.pyright_configuration import (
+    PYRIGHT_PACKAGE_SHA256 as PYRIGHT_PACKAGE_SHA256,
+)
+from llm_wiki.pyright_configuration import (
+    PYRIGHT_PACKAGE_URL as PYRIGHT_PACKAGE_URL,
+)
+from llm_wiki.pyright_configuration import (
+    PYRIGHT_SERVER_RELATIVE as PYRIGHT_SERVER_RELATIVE,
+)
+from llm_wiki.pyright_configuration import (
+    QUALIFIED_NODE_MAJOR as QUALIFIED_NODE_MAJOR,
+)
+from llm_wiki.pyright_configuration import (
+    thaw_pyright_profile_value as thaw_pyright_profile_value,
+)
 from lsp_paths import PYRIGHT_VERSION, managed_pyright_root
 from reliable_memory import _known_network_path
 from repository_scope import RepositoryScope
 
 ProcessTree = _lsp_process_tree.ProcessTree
 
-PYRIGHT_PACKAGE_URL = "https://registry.npmjs.org/pyright/-/pyright-1.1.411.tgz"
-PYRIGHT_PACKAGE_SHA256 = (
-    "bd5c488fc20fa237a944279bf32cae2f986cf10d5d5d9e8705819859daeb2f4a"
-)
-PYRIGHT_PACKAGE_INTEGRITY = (
-    "sha512-03S/vmS5lF1S/tVbKc2WNXCMq8JWCwta/qIYjj1jvqbQhoy+N3NgBzHTSmUlbYD6DJwqQ5XHf108QujoqeURvw=="
-)
-QUALIFIED_NODE_MAJOR = 22
-PYRIGHT_SERVER_RELATIVE = Path("package/langserver.index.js")
 
 # `langserver.index.js` is a 229-byte shim whose whole body is a `require` of
 # `./dist/pyright-langserver`; the megabytes the process executes are the
@@ -52,65 +75,17 @@ MAX_EXECUTED_TREE_FILES = 64
 MAX_EXECUTED_TREE_BYTES = 32 * 1024 * 1024
 
 
-def _freeze_pyright_profile_value(value: object) -> object:
-    if isinstance(value, dict):
-        return MappingProxyType(
-            {key: _freeze_pyright_profile_value(item) for key, item in value.items()}
-        )
-    if isinstance(value, list):
-        return tuple(_freeze_pyright_profile_value(item) for item in value)
-    return value
 
 
-def _thaw_mapping(value: Mapping) -> dict:
-    return {key: thaw_pyright_profile_value(item) for key, item in value.items()}
 
 
-def _thaw_tuple(value: tuple) -> list:
-    return [thaw_pyright_profile_value(item) for item in value]
 
 
-def thaw_pyright_profile_value(value: object) -> object:
-    """Return a mutable JSON-domain copy of an immutable profile value."""
-    if isinstance(value, Mapping):
-        return _thaw_mapping(value)
-    return _thaw_non_mapping(value)
 
 
-def _thaw_non_mapping(value: object) -> object:
-    if isinstance(value, tuple):
-        return _thaw_tuple(value)
-    if value is None or isinstance(value, (bool, int, str)):
-        return value
-    raise TypeError(f"unsupported Pyright profile value: {type(value).__name__}")
 
 
-PYRIGHT_CONFIGURATION = _freeze_pyright_profile_value({
-    "python": {
-        "analysis": {
-            "autoSearchPaths": True,
-            "diagnosticMode": "openFilesOnly",
-            "logLevel": "Error",
-            "useLibraryCodeForTypes": True,
-        }
-    },
-    "pyright": {
-        "disableLanguageServices": False,
-        "disableOrganizeImports": True,
-        "disableTaggedHints": False,
-    },
-})
-PYRIGHT_INITIALIZATION_OPTIONS = _freeze_pyright_profile_value(
-    {"files": {"exclude": []}}
-)
 
-PYRIGHT_INSTALL_MANIFEST_SCHEMA = "pyright-install/v2"
-PYRIGHT_CONFIGURATION_SHA256 = sha256_bytes(
-    canonical_json_bytes(thaw_pyright_profile_value(PYRIGHT_CONFIGURATION))
-)
-PYRIGHT_INITIALIZATION_OPTIONS_SHA256 = sha256_bytes(
-    canonical_json_bytes(thaw_pyright_profile_value(PYRIGHT_INITIALIZATION_OPTIONS))
-)
 
 # Files read while qualifying a Pyright install (sizes measured 2026-09-27): package.json 1.4 KB,
 # the install manifest 749 bytes, the largest package-lock.json on this host 205 KB, the

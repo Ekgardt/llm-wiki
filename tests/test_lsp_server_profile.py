@@ -20,28 +20,13 @@ import pytest
 from lsp_server_profile import (
     READINESS_INITIALIZED,
     READINESS_WORK_DONE_PROGRESS,
-    IdentityNotification,
     LanguageServerProfile,
     ProfileError,
     ProfileRegistry,
-    RuntimeOption,
     freeze_profile_value,
-    thaw_profile_value,
 )
 
-# `Path("/srv/vault").is_absolute()` is False on Windows — a path needs a drive
-# there — so every root handed to a profile has to be anchored to one. Eight
-# Windows jobs failed on 2026-08-30 with "node must be an absolute path" and a
-# comparison of "D:\\srv\\vault…" against "\\srv\\vault…".
-ANCHOR = Path(Path.cwd().anchor)
-
-
-def _abs(*parts: str) -> Path:
-    """An absolute path on every platform these tests run on."""
-    return ANCHOR.joinpath(*parts)
-
-
-STATE_ROOT = _abs("srv", "vault")
+from tests.modules.lsp_server_profile.paths import STATE_ROOT, _abs
 
 
 def _canonical(value: object) -> bytes:
@@ -275,13 +260,6 @@ def test_a_native_server_is_its_own_interpreter():
     assert lsp_profiles.profile_for_path(Path("main.go")).name == "gopls"
 
 
-def test_a_profile_declares_one_runtime_and_only_one():
-    with pytest.raises(ProfileError):
-        _profile(node_major=None)
-    with pytest.raises(ProfileError):
-        _profile(native=True)
-
-
 def test_every_pinned_platform_archive_is_named_by_digest_and_size():
     artifacts = lsp_profiles.GOPLS_PROFILE.platform_artifacts
     systems = sorted({artifact.system for artifact in artifacts})
@@ -322,78 +300,18 @@ def test_two_profiles_may_not_claim_the_same_suffix():
 # --------------------------------------------------------------------------
 
 
-def _profile(**overrides) -> LanguageServerProfile:
-    fields = {
-        "name": "x",
-        "language_ids": ("x",),
-        "file_suffixes": (".x",),
-        "version": "1",
-        "package_url": "https://example.invalid/a.tgz",
-        "package_integrity": "sha512-AAAA",
-        "server_relative": Path("package/main.js"),
-        "managed_relative_root": Path("cache/code-tools/x/1"),
-        "install_manifest_schema": "x/v1",
-        "node_major": 22,
-        "launch_flags": ("--stdio",),
-        "server_notifications": frozenset(),
-        "configuration": freeze_profile_value({}),
-        "initialization_options": freeze_profile_value({}),
-        "readiness": READINESS_INITIALIZED,
-        "degradation_prefix": "x",
-    }
-    fields.update(overrides)
-    return LanguageServerProfile(**fields)
 
 
-@pytest.mark.parametrize(
-    "overrides",
-    [
-        {"package_url": "http://example.invalid/a.tgz"},
-        {"package_integrity": "sha1-AAAA"},
-        {"server_relative": _abs("absolute", "main.js")},
-        {"server_relative": Path("../escape/main.js")},
-        {"managed_relative_root": Path("../../etc")},
-        {"readiness": "whenever"},
-        {"node_major": 0},
-        {"node_minor_floor": -1},
-        {"file_suffixes": ()},
-        {"language_ids": ()},
-    ],
-)
-def test_an_unhonourable_profile_is_refused_at_construction(overrides):
-    with pytest.raises(ProfileError):
-        _profile(**overrides)
 
 
-def test_a_relative_launch_path_is_refused():
-    with pytest.raises(ProfileError):
-        _profile().launch_command(Path("node"), _abs("a", "b.js"), _abs("c"))
 
 
-def test_a_runtime_option_will_not_overwrite_a_non_object():
-    option = RuntimeOption(key_path=("a", "b"), sibling_relative=Path("t.js"))
-    with pytest.raises(ProfileError):
-        option.applied({"a": "already a string"}, STATE_ROOT / "managed")
 
 
-def test_a_runtime_option_creates_the_branch_it_needs():
-    option = RuntimeOption(key_path=("a", "b", "c"), sibling_relative=Path("t.js"))
-    managed = _abs("srv", "managed")
-    result = option.applied({}, managed)
-    assert result == {"a": {"b": {"c": str(managed / "t.js")}}}
 
 
-def test_a_runtime_option_needs_an_absolute_managed_root():
-    option = RuntimeOption(key_path=("a",), sibling_relative=Path("t.js"))
-    with pytest.raises(ProfileError):
-        option.applied({}, Path("relative/managed"))
 
 
-def test_an_identity_notification_needs_every_field_named():
-    with pytest.raises(ProfileError):
-        IdentityNotification(
-            method="", version_key="v", source_key="s", required_source="u"
-        )
 
 
 # --------------------------------------------------------------------------
@@ -401,23 +319,10 @@ def test_an_identity_notification_needs_every_field_named():
 # --------------------------------------------------------------------------
 
 
-def test_a_frozen_profile_value_cannot_be_mutated():
-    frozen = freeze_profile_value({"a": {"b": [1, 2]}})
-    with pytest.raises(TypeError):
-        frozen["a"] = 1
-    assert frozen["a"]["b"] == (1, 2)
 
 
-def test_thawing_returns_a_plain_mutable_copy():
-    frozen = freeze_profile_value({"a": {"b": [1, 2]}})
-    thawed = thaw_profile_value(frozen)
-    thawed["a"]["b"].append(3)
-    assert frozen["a"]["b"] == (1, 2)
 
 
-def test_an_unsupported_profile_value_is_refused():
-    with pytest.raises(ProfileError):
-        freeze_profile_value({"a": object()})
 
 
 def test_the_wire_options_are_a_fresh_copy_each_time():
