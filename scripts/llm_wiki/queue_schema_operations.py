@@ -6,11 +6,12 @@ from collections.abc import Mapping
 
 from llm_wiki.queue_schema import _QUEUE_V3_INDEX_SQL, _QUEUE_V3_TABLE_SQL, _QUEUE_V3_TRIGGER_SQL
 from llm_wiki.sqlite_contracts import MigrationStatement, _migration_error, quote_sqlite_identifier
+from llm_wiki.sqlite_schema_text import normalized_schema_sql
 from llm_wiki.sqlite_transactions import begin_immediate
 
 
 def _normalized_sql(value: str | None) -> str:
-    return " ".join((value or "").split()).casefold()
+    return normalized_schema_sql(value)
 
 
 def _queue_v3_object_matches(

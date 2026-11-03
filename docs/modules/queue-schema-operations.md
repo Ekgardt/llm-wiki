@@ -16,7 +16,8 @@ An unreadable table counts as populated. Populated malformed tables are refused
 unless the caller explicitly allows rebuilding from its migration source.
 Unsupported object kinds remain refusals even with rebuild permission. Drop order
 is triggers, indexes, tables; every identifier is quoted exactly. Definition
-comparison retains existing whitespace/case normalization. Creation callbacks are
+comparison uses [schema text](sqlite-schema-text.md), preserving literals and
+quoted identities while normalizing outside-token ASCII formatting. Creation callbacks are
 bound to the correct definition, and trigger installation is a separate phase.
 
 Old queue function/constant names are identity aliases for existing internal callers

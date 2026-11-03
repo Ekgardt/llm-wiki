@@ -2108,3 +2108,9 @@ and validation; `compile_progress` retains journal storage and compatible export
 [Journal schema](modules/compile-journal-schema.md) owns protected declarations;
 [queue database contracts](modules/queue-database-contract.md) check supplied
 connections. File opening, migrations and transaction ownership remain unchanged.
+
+### SQLite schema comparison text
+
+The [schema text owner](modules/sqlite-schema-text.md) preserves SQL literal values,
+quoted identities and comments while normalizing outside-token ASCII formatting.
+Queue and coordinator schema validators share it; schema versions remain unchanged.

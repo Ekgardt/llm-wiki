@@ -32,7 +32,9 @@
     "tests/module_context_paths.py",
     "tests/module_records.py",
     "tests/module_record_context.py",
-    "docs/modules/context-records.md"
+    "docs/modules/context-records.md",
+    "scripts/llm_wiki/sqlite_schema_text.py",
+    "docs/modules/sqlite-schema-text.md"
   ],
   "directories": [
     "tests/modules/queue_schema_operations"

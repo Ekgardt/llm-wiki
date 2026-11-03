@@ -54,6 +54,7 @@ from llm_wiki.sqlite_deadlines import (
     refresh_operational_deadline,
 )
 from llm_wiki.sqlite_migrations import run_resumable_migration
+from llm_wiki.sqlite_schema_text import normalized_schema_sql
 from llm_wiki.sqlite_transactions import begin_immediate
 from llm_wiki.windows_acl import _acl_entry_lines as _acl_entry_lines
 from llm_wiki.windows_acl import _acl_failure as _acl_failure
@@ -633,7 +634,7 @@ _COORDINATOR_V2_SCHEMA_OBJECTS = {
 
 
 def _normalized_coordinator_sql(value: str | None) -> str:
-    return " ".join((value or "").split()).casefold()
+    return normalized_schema_sql(value)
 
 
 def _coordinator_v3_object_matches(
