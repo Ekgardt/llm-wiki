@@ -18,7 +18,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-import transaction_lineage
+
+from tests.modules.transaction_lineage.fixtures import _add, _database
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
@@ -27,40 +28,8 @@ import doctor  # noqa: E402
 TRANSACTION_COLUMNS = {"id", "operation_id", "state", "parent_transaction_id"}
 
 
-def _database() -> sqlite3.Connection:
-    connection = sqlite3.connect(":memory:")
-    connection.execute(
-        'CREATE TABLE "transaction" ('
-        "id TEXT PRIMARY KEY, operation_id TEXT NOT NULL UNIQUE, "
-        "state TEXT NOT NULL, parent_transaction_id TEXT)"
-    )
-    connection.execute(
-        'CREATE TABLE "operation" ('
-        "transaction_id TEXT NOT NULL, position INTEGER NOT NULL, "
-        "kind TEXT NOT NULL, path TEXT NOT NULL)"
-    )
-    return connection
 
 
-def _add(
-    database: sqlite3.Connection,
-    identifier: str,
-    operation_id: str,
-    state: str,
-    operations: tuple[tuple[str, str], ...] = (),
-    parent: str | None = None,
-) -> None:
-    database.execute(
-        'INSERT INTO "transaction" (id, operation_id, state, parent_transaction_id) '
-        "VALUES (?, ?, ?, ?)",
-        (identifier, operation_id, state, parent),
-    )
-    for position, (kind, path) in enumerate(operations):
-        database.execute(
-            'INSERT INTO "operation" (transaction_id, position, kind, path) '
-            "VALUES (?, ?, ?, ?)",
-            (identifier, position, kind, path),
-        )
 
 
 def _unresolved(database: sqlite3.Connection) -> int:
@@ -191,20 +160,6 @@ def test_the_parent_chain_still_resolves_on_its_own() -> None:
     assert _unresolved(database) == 0
 
 
-@pytest.mark.parametrize(
-    ("operation_id", "expected"),
-    (
-        ("compile:abc", "compile:abc"),
-        ("compile:abc#2", "compile:abc"),
-        ("post-tool:abc:cas:1", "post-tool:abc"),
-        ("post-tool:abc#3:cas:2", "post-tool:abc"),
-        ("compile:abc:cas:notanumber", "compile:abc:cas:notanumber"),
-    ),
-)
-def test_the_base_identity_strips_only_retry_ordinals(
-    operation_id: str, expected: str
-) -> None:
-    assert transaction_lineage.base_operation_identity(operation_id) == expected
 
 
 def test_the_maintenance_owner_opens_the_adoption_aware_coordinator(

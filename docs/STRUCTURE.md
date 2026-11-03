@@ -2248,3 +2248,7 @@ Full owner contract: [answer-refinement](modules/answer-refinement.md).
 Full owner contract: [trusted profile collection](modules/trace-collector.md).
 The converter retains trusted-profile input; graph ingestion and dynamic-evidence
 publication remain separate responsibilities.
+
+Full owner contract: [transaction lineage](modules/transaction-lineage.md).
+The existing reader uses supplied SQLite connections; admission, snapshot control,
+pruning and stronger source-specific evidence retain their current owners.
