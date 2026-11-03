@@ -2215,3 +2215,11 @@ access-token/SID probe from `operational_ownership.py`. The registry keeps the o
 aliases and platform dispatch; SQL, leases, process identity and role/scope actor
 derivation retain their owners. Exact ctypes signatures, token closing, SID buffer
 release, native errors and existing identity bounds are preserved.
+
+[ONNX encoder](modules/onnx-encoder.md) owns the existing local-cache-only CPU
+encoder in place: token padding, masked pooling, normalization and row ordering.
+Search retains model selection, diagnostics and fallback. [Evidence pruning](modules/evidence-pruning.md)
+owns the existing question-based sentence scoring and exact byte-span selection;
+query/context assembly retains clocks, publication and citation checks. Both
+packets preserve production bytes and original unit assertions. Their whole-product
+policy and context/query integrations remain separate explicit obligations.
