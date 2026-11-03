@@ -50,3 +50,15 @@ def test_public_pem_helper_keeps_identity_and_serialization():
     assert helper is lsp_credentials.redact_private_key_blocks
     assert helper.__module__ == 'lsp_security'
     assert pickle.loads(pickle.dumps(helper)) is helper
+
+
+def test_queue_record_aliases_and_internal_row_pickle_stay_compatible():
+    from llm_wiki import queue_task_records
+
+    for name in ('_task_record', '_export_task_record', '_exported_task_record', '_ExportedRows'):
+        assert getattr(memory_queue, name) is getattr(queue_task_records, name)
+    rows = memory_queue._ExportedRows([], [], None, None)
+    assert type(rows).__module__ == 'memory_queue'
+    restored = pickle.loads(pickle.dumps(rows, protocol=4))
+    assert type(restored) is memory_queue._ExportedRows
+    assert restored == rows

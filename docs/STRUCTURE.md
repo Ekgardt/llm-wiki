@@ -2108,3 +2108,11 @@ command, process ownership and wire behavior. Pure protocol/harness tests move
 into its owner packet; actual-server and worker-timeout integration checks remain
 in their existing files with all assertions. Full contract:
 [MCP supervisor](modules/mcp-supervisor.md); [qualification research](research/2026-11-03-mcp-supervisor-owner-qualification.md).
+
+### Queue task record boundary
+
+Task/history row conversion and legacy/v3 export representation move to
+`llm_wiki.queue_task_records`; SQL reads, payload checks and transactional ownership
+remain in `memory_queue`. The existing v3 schema and public record identities stay
+unchanged. Full contract: [queue task records](modules/queue-task-records.md);
+[research](research/2026-11-03-queue-task-record-boundary.md).
