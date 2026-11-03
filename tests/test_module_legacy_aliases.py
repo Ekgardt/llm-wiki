@@ -110,3 +110,15 @@ def test_ownership_records_retain_old_serialization():
 
 def test_markdown_records_retain_old_serialization():
     _assert_record_serialization('markdown_records', 'markdown_transaction')
+
+
+def test_ownership_validation_aliases_keep_one_serializable_implementation():
+    import operational_ownership
+    from llm_wiki import ownership_validation
+
+    names = _definitions('scripts/llm_wiki/ownership_validation.py')
+    assert not names & _definitions('scripts/operational_ownership.py')
+    for name in names:
+        value = getattr(ownership_validation, name)
+        assert getattr(operational_ownership, name) is value
+        assert pickle.loads(pickle.dumps(value, protocol=4)) is value

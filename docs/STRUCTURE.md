@@ -2181,3 +2181,10 @@ The owner approved automatic `tests` pushes on the exact working branch
 read-only workflow permissions and per-ref concurrency remain. Installer jobs use
 GitHub runners only; this grants no live-vault deployment or main merge. Retire
 this temporary branch trigger when the decomposition branch is retired.
+
+[Ownership input validation](modules/ownership-validation.md) owns the existing
+process/role/text and marker representation checks. It decodes supplied SQLite
+rows and compares supplied identities/bytes without opening databases, observing
+processes or touching files. Registry admission, timing, clock reads, SQL and
+marker publication/removal remain in operational_ownership. Legacy aliases retain
+one implementation and the current failures, role sets and size bounds.
