@@ -61,23 +61,6 @@ def test_a_code_question_leaves_code_and_docs_exactly_where_they_were():
         )
 
 
-def test_the_prior_is_only_ever_turned_off_by_a_positive_reading():
-    """An unreadable or absent intent list keeps the vault's own rule."""
-    assert provenance.curated_pages_first(()) is True
-    assert provenance.curated_pages_first(None) is True
-    assert provenance.curated_pages_first(("question", "cross_language")) is True
-    assert provenance.curated_pages_first(("exact_identifier",)) is False
-
-
-def test_living_under_a_code_root_never_lifts_a_page():
-    """Raw evidence stays at its own weight; the rule only ever demotes."""
-    raw = provenance.source_type_weight(
-        "raw-source", "docs/notes/transcript.md", curated_first=True
-    )
-    assert raw == provenance.TYPE_WEIGHTS["raw-source"]
-    assert raw < provenance.TYPE_WEIGHTS["doc"]
-
-
 _ROWS = (
     {
         "candidate_id": "one",

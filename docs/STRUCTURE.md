@@ -2289,3 +2289,8 @@ immutable code/vault/project/archive membership values. The collector keeps
 public aliases and all traversal/safety behavior; provenance reads policy
 directly, without importing corpus collection. Values, allowed paths and runtime
 roots are unchanged.
+
+[Provenance](modules/provenance.md) owns existing authority/type/intent/substance
+weights and their pure behavior tests. It reads immutable corpus membership
+policy directly. Integrated retrieval, search and capture checks retain their
+original scenarios; shared link/prose fixtures have one test-data owner.

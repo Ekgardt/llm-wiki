@@ -1,0 +1,55 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md",
+    "scripts/provenance.py",
+    "docs/modules/provenance.md",
+    "docs/modules/provenance-context.json",
+    "docs/research/2026-08-24-ranking-by-what-a-page-is.md",
+    "docs/research/2026-08-25-intent-conditional-ranking-weights.md",
+    "docs/research/2026-09-26-a-link-list-is-not-an-answer.md",
+    "docs/research/2026-09-27-an-unstated-authority-is-inferred.md",
+    "scripts/llm_wiki/corpus_membership_policy.py",
+    "docs/modules/corpus-membership-policy.md"
+  ],
+  "directories": [
+    "tests/modules/provenance"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "scripts/provenance.py",
+      "docs/modules/provenance.md",
+      "docs/modules/provenance-context.json",
+      "docs/research/2026-08-24-ranking-by-what-a-page-is.md",
+      "docs/research/2026-08-25-intent-conditional-ranking-weights.md",
+      "docs/research/2026-09-26-a-link-list-is-not-an-answer.md",
+      "docs/research/2026-09-27-an-unstated-authority-is-inferred.md"
+    ],
+    "directories": [
+      "tests/modules/provenance"
+    ]
+  }
+}

@@ -204,18 +204,6 @@ def test_the_capture_worker_writes_the_record_before_classifying(monkeypatch):
     assert "why systemd and not cron?" in written[0][1]
 
 
-def test_a_session_record_ranks_below_a_compiled_page() -> None:
-    """The words are the user's; the page written from them still wins.
-
-    A session record is evidence, not a stated fact, so its authority weight sits
-    below both a user-stated page and an ai-derived compiled one.
-    """
-    from provenance import authority_weight
-
-    assert authority_weight("session", "knowledge/notes/x.md") < authority_weight("ai-derived", "knowledge/notes/x.md")
-    assert authority_weight("session", "knowledge/notes/x.md") < authority_weight("user", "knowledge/notes/x.md")
-
-
 def test_the_record_declares_the_session_authority() -> None:
     document = session_evidence.render_session_document({"session": "s"}, TRANSCRIPT)
 

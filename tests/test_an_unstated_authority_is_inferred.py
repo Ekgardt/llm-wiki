@@ -4,18 +4,7 @@ docs/research/2026-09-27-an-unstated-authority-is-inferred.md
 """
 from __future__ import annotations
 
-from provenance import AUTHORITY_WEIGHTS, authority_weight
-
-
-def test_an_unstated_page_ranks_as_inferred_and_other_sources_stay_neutral() -> None:
-    weights = [
-        authority_weight(None, "knowledge/notes/a-page.md"),
-        authority_weight("user", "knowledge/notes/a-page.md"),
-        authority_weight(None, "scripts/tool.py"),
-        authority_weight(None, "knowledge/daily/2026-09-01.md"),
-    ]
-
-    assert weights == [AUTHORITY_WEIGHTS["inferred"], AUTHORITY_WEIGHTS["user"], 1.0, 1.0]
+from provenance import AUTHORITY_WEIGHTS
 
 
 def test_the_markdown_fallback_ranks_an_unstated_page_as_inferred(tmp_path, monkeypatch) -> None:
