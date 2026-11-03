@@ -190,3 +190,80 @@ def test_an_unreadable_mode_falls_back_to_the_measured_default(monkeypatch) -> N
     monkeypatch.setenv(MODE_ENV, "yes-please")
     other = {"components": {}, "data": {"ok": True}}
     assert attach_answer_cost(other, elapsed_seconds=0.02, budget_seconds=10.0) is False
+
+
+@pytest.mark.parametrize("body", ["x" * 80_000, "Привет 世界 🧭" * 8_000])
+def test_repeated_attachment_measures_the_same_answer(body):
+    envelope = {"components": {}, "data": {"body": body}}
+    expected = estimate_tokens(envelope)
+    assert attach_answer_cost(envelope, elapsed_seconds=0.1, budget_seconds=10)
+    first = envelope["data"][COST_KEY]
+    assert attach_answer_cost(envelope, elapsed_seconds=0.2, budget_seconds=10)
+    assert first["tokens_estimated"] == expected
+    assert envelope["data"][COST_KEY]["tokens_estimated"] == expected
+    assert envelope["data"][COST_KEY]["duration_ms"] == 200
+
+
+def test_measurement_omits_only_the_reserved_location_without_mutation():
+    telemetry = {"old": "старое" * 100}
+    nested = {COST_KEY: "nested answer fact" * 100}
+    data = {"body": "世界 🧭", COST_KEY: telemetry, "nested": nested}
+    envelope = {"components": {}, COST_KEY: "top level fact" * 100, "data": data}
+    expected = estimate_tokens({
+        "components": {}, COST_KEY: envelope[COST_KEY],
+        "data": {"body": data["body"], "nested": nested},
+    })
+    before = repr(envelope)
+    block = build_cost_block(envelope, elapsed_seconds=0.1, budget_seconds=10)
+    assert block["tokens_estimated"] == expected
+    assert repr(envelope) == before
+    assert envelope["data"] is data
+    assert data[COST_KEY] is telemetry
+    assert data["nested"] is nested
+
+
+@pytest.mark.parametrize("bad", [{(1, 2): "invalid key"}, "\ud800"])
+def test_real_estimator_failure_preserves_existing_telemetry_and_body(bad):
+    telemetry = {"old": 42}
+    data = {COST_KEY: telemetry, "body": bad}
+    envelope = {"components": {}, "data": data}
+    before = repr(envelope)
+    block = build_cost_block(envelope, elapsed_seconds=0.1, budget_seconds=10)
+    assert block["tokens_estimated"] is None
+    assert repr(envelope) == before
+    assert envelope["data"] is data
+    assert data[COST_KEY] is telemetry
+    assert data["body"] is bad
+
+
+def test_real_circular_body_failure_does_not_damage_the_input():
+    body = []
+    body.append(body)
+    telemetry = {"old": 42}
+    data = {"body": body, COST_KEY: telemetry}
+    envelope = {"components": {}, "data": data}
+    block = build_cost_block(envelope, elapsed_seconds=0.1, budget_seconds=10)
+    assert block["tokens_estimated"] is None
+    assert envelope["data"] is data
+    assert data[COST_KEY] is telemetry
+    assert data["body"] is body
+    assert body[0] is body
+
+
+def test_invalid_old_telemetry_is_excluded_before_real_estimation():
+    telemetry = {(1, 2): "invalid JSON key"}
+    envelope = {"components": {}, "data": {COST_KEY: telemetry, "body": "é"}}
+    block = build_cost_block(envelope, elapsed_seconds=0.1, budget_seconds=10)
+    assert block["tokens_estimated"] == estimate_tokens({"components": {}, "data": {"body": "é"}})
+    assert envelope["data"][COST_KEY] is telemetry
+
+
+@pytest.mark.parametrize("mode", ["auto", "never"])
+def test_refused_attachment_keeps_the_old_block(monkeypatch, mode):
+    monkeypatch.setenv(MODE_ENV, mode)
+    telemetry = {"old": 42}
+    data = {"body": "small", COST_KEY: telemetry}
+    envelope = {"components": {}, "data": data}
+    assert not attach_answer_cost(envelope, elapsed_seconds=0.1, budget_seconds=10)
+    assert envelope["data"] is data
+    assert data[COST_KEY] is telemetry

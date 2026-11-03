@@ -31,7 +31,9 @@
     "docs/research/2026-11-03-answer-budget-cost-owner-qualification.md",
     "scripts/answer_budget.py",
     "docs/modules/answer-budget.md",
-    "docs/research/2026-09-27-an-estimate-is-measured-and-an-open-day-waits.md"
+    "docs/research/2026-09-27-an-estimate-is-measured-and-an-open-day-waits.md",
+    "docs/research/2026-11-03-dependency-contract-paired-maintenance-result.md",
+    "docs/modules/contract-qualification.md"
   ],
   "directories": [
     "tests/modules/answer_cost"

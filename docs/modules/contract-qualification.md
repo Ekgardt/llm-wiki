@@ -45,6 +45,11 @@ context reads, replies, retries, corrections and verification, and report any
 missing usage instrumentation. A smaller first prompt alone is not an efficiency
 result.
 
+The [first independent pair](../research/2026-11-03-dependency-contract-paired-maintenance-result.md)
+passed real tests on both arms and cross-checks, but complete model usage was
+not exposed. It supplies limited correctness evidence; full-cycle savings remain
+unknown and the source-omission gate remains unadopted.
+
 Source: approved `docs/research/2026-11-03-qualified-dependency-contract-proposal.md`;
 private fresh-runner boundary decision 2026-11-03; existing project test-timeout
 contract and the primary sources recorded in the approved proposal.

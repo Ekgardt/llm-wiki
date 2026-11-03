@@ -799,7 +799,7 @@
   "test_an_update_replaces_what_it_owns.py": 11.56,
   "test_an_update_says_what_it_did_not_bring_into_force.py": 9.88,
   "test_answer_budget.py": 0.03,
-  "test_answer_cost.py": 0.04,
+  "test_answer_cost.py": 0.5,
   "test_append_lost_capture_precondition.py": 14.51,
   "test_append_race_lineage.py": 71.76,
   "test_append_retries_a_changed_capture.py": 0.38,

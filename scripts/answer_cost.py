@@ -151,9 +151,19 @@ def _answer_body(envelope):
 def _estimated_tokens(envelope):
     """The estimate, or None when it cannot be produced. Never 0 as a stand-in."""
     try:
-        return estimate_tokens(envelope)
+        return estimate_tokens(_without_cost_block(envelope))
     except (TypeError, ValueError, RecursionError):
         return None
+
+
+def _without_cost_block(envelope):
+    """Detach only the reserved field's containers; leave caller data untouched."""
+    data = _answer_body(envelope)
+    if data is None or COST_KEY not in data:
+        return envelope
+    measured_data = dict(data)
+    del measured_data[COST_KEY]
+    return {**envelope, "data": measured_data}
 
 
 def _milliseconds(seconds):

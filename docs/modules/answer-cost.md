@@ -13,7 +13,15 @@ OpenTelemetry implementation or claim of current-schema conformance is introduce
 
 Qualification: [research](../research/2026-11-03-answer-budget-cost-owner-qualification.md).
 Run pure and real MCP tests, Python 3.14, actual complexity and complete context
-reconstruction. Production bytes and all public imports remain unchanged.
+reconstruction. Initial owner qualification preserved production bytes and imports.
+
+The subsequent [paired maintenance correction](../research/2026-11-03-dependency-contract-paired-maintenance-result.md)
+excludes an existing reserved data.answer_cost block from measurement through
+shallow copies of the envelope and data dictionary. Other equally named fields
+remain measured. Serialization errors preserve caller containers, and refusal
+to attach telemetry retains any old block. The real estimator and attachment
+policy remain unchanged. Contract-only context is still experimental: full-cycle
+model usage was unavailable, so source omission has not been adopted.
 
 Shared canonical contract: [Answer budget](answer-budget.md).
 
