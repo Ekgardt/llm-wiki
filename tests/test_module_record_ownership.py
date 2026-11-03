@@ -106,3 +106,13 @@ def test_changed_unowned_record_invalidates_ownership(workspace):
     (root / 'docs/history.md').write_text('changed')
     with pytest.raises(ValueError, match='length changed'):
         ownership_report(root, tracked=_tracked(one))
+
+
+def test_context_records_do_not_make_a_whole_owned_source_partial(workspace):
+    root, _ = workspace
+    one = _owner(root, 'one', ['first'], claims=[], whole=True)
+    report = ownership_report(root, tracked=_tracked(one))
+    assert report['complete']
+    assert report['partially_owned'] == {}
+    assert report['fully_recorded'] == []
+    assert report['record_ownership'] == {}

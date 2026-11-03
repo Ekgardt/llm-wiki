@@ -61,9 +61,10 @@ def record_ownership_report(root, tracked, whole, contexts):
         _manifest_records(root, item, catalogs, tracked, owners)
     claimed_sources = {entry[len('@record/'):].rsplit('#', 1)[0] for entry in owners}
     _require(claimed_sources.isdisjoint(whole), 'Whole-file and record ownership overlap')
-    missing = _missing_records(catalogs, owners)
+    partitioned = {source: value for source, value in catalogs.items() if source not in whole}
+    missing = _missing_records(partitioned, owners)
     return {
         'record_ownership': dict(sorted(owners.items())),
         'partially_owned': missing,
-        'fully_recorded': sorted(catalogs.keys() - missing.keys()),
+        'fully_recorded': sorted(partitioned.keys() - missing.keys()),
     }

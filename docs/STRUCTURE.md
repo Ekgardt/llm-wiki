@@ -2091,3 +2091,12 @@ of the approved completion plan; see
 [research](research/2026-11-03-large-artifact-context-investigation.md).
 
 Full contract: [exact record contexts](modules/context-records.md).
+
+### Existing compile-progress storage qualification (in progress)
+
+The existing append-only SQLite checkpoint owner remains at
+`scripts/compile_progress.py`. A complete exact-record catalog of the mixed
+historical design will preserve all original bytes while the storage packet carries
+its necessary history. No schema, source implementation, public path or runtime
+behavior changes. Full contract: [compile progress](modules/compile-progress.md);
+[qualification research](research/2026-11-03-compile-progress-storage-packet.md).

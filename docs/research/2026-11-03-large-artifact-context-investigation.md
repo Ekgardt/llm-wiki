@@ -137,3 +137,14 @@ also reconstruct selected bytes and independently validate the entire source
 partition. Actual catalog proof remains required when catalogs are introduced.
 The inventory still reports incomplete: 537 owned / 3262 tracked, 2725 unassigned.
 No native platform or useful LLM task-cycle saving is inferred from these checks.
+
+## Whole-file owner with shared record context
+
+The first real catalog review exposed an inventory inconsistency: a source already
+owned as a whole file could also be used as shared record context with no record
+ownership, yet appear in partially_owned. A new regression reproduced that false
+partial listing. Coverage now excludes whole-owned sources from record completion
+accounting, while the existing whole/record ownership-overlap refusal remains.
+All nine record-ownership cases pass, including duplicate and overlapping claims.
+This corrects report classification; it neither changes record bytes nor grants
+ownership to a context-only selection. The separate red/green logs are retained.

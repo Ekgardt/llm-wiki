@@ -1,0 +1,84 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md",
+    "scripts/compile_progress.py",
+    "tests/test_compile_progress_journal.py",
+    "docs/modules/compile-progress.md",
+    "docs/modules/compile-progress-context.json",
+    "docs/modules/compile-progress-history-records.json",
+    "docs/research/2026-11-03-compile-progress-storage-packet.md",
+    "scripts/llm_wiki/sqlite_deadlines.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/formats/source.py",
+    "docs/modules/sqlite-deadlines.md",
+    "docs/modules/formats.md"
+  ],
+  "directories": [
+    "tests/modules/compile_progress"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "scripts/compile_progress.py",
+      "tests/test_compile_progress_journal.py",
+      "docs/modules/compile-progress.md",
+      "docs/modules/compile-progress-context.json",
+      "docs/modules/compile-progress-history-records.json",
+      "docs/research/2026-11-03-compile-progress-storage-packet.md"
+    ],
+    "directories": [
+      "tests/modules/compile_progress"
+    ],
+    "records": [
+      {
+        "catalog": "docs/modules/compile-progress-history-records.json",
+        "ids": [
+          "storage-foundation"
+        ]
+      }
+    ]
+  },
+  "records": [
+    {
+      "catalog": "docs/modules/compile-progress-history-records.json",
+      "ids": [
+        "storage-foundation",
+        "adoption-envelope-and-compatible-readers",
+        "history-candidate-schema-migration-2026-10-19-isolated-implementation",
+        "history-retention-reference-race-2026-10-19-isolated-implementation",
+        "history-durable-model-call-controller-2026-10-19-isolated-implementation",
+        "history-explicit-repeat-decision-2026-10-19-internal-api-only",
+        "history-2026-10-20-explicit-dependency-manifests-and-origin-scoped-work-identity",
+        "history-whole-preflight-completion-2026-10-20-implementation-underway",
+        "history-queue-settlement-requires-compile-completion-2026-10-20-implementation-underway",
+        "history-2026-10-20-cross-work-source-uncertainty",
+        "history-2026-10-20-operator-inspection-before-recovery-in-progress",
+        "history-2026-10-20-distinguish-resolved-calls-from-repeat-consent-in-progress",
+        "history-fresh-install-compile-journal-2026-10-20-design-before-implementation"
+      ]
+    }
+  ]
+}
