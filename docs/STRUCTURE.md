@@ -2060,3 +2060,11 @@ packets; other packets retain their own research and all required source,
 tests, contracts and instructions. This selects relevant context without claiming
 unique source reduction or measured task-cycle savings. See
 [research](research/2026-11-03-canonical-module-qualification-context.md).
+
+### Compile source failure byte contract
+
+The compile producer uses the existing source-failure API's 64-byte bound
+and shared strict UTF-8 prefix instead of its obsolete 200-character slice.
+Queue validation, schemas, source identity, deadlines and write-error propagation
+stay unchanged. The real producer failure is reproduced in a temporary v3 queue;
+see [research](research/2026-11-03-compile-source-error-byte-bound.md).

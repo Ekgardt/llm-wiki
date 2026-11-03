@@ -763,6 +763,7 @@
   "test_compile_source_address_groups_preserve_every_row.py": 0.01,
   "test_compile_source_address_runs_are_lossless.py": 11.32,
   "test_compile_source_completeness.py": 0.03,
+  "test_compile_source_failure_byte_bound.py": 4.36,
   "test_compile_source_line_choices.py": 0.69,
   "test_compile_source_overlap.py": 3.44,
   "test_compile_streamed_archive_batches.py": 2.98,

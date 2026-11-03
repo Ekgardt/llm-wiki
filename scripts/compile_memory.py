@@ -165,6 +165,7 @@ from llm_wiki.formats.receipts import (  # noqa: E402
 from llm_wiki.formats.schema import validate_rule as _validate_rule  # noqa: E402
 from llm_wiki.formats.schema import validate_schema  # noqa: E402
 from llm_wiki.formats.source import SourceDescriptor, SourceOccurrenceBounds  # noqa: E402
+from llm_wiki.utf8_text import _utf8_prefix  # noqa: E402
 from markdown_transaction import (  # noqa: E402
     MarkdownChange,
     MarkdownCoordinator,
@@ -173,7 +174,7 @@ from markdown_transaction import (  # noqa: E402
     _writer_wait_window,
     active_or_legacy_coordinator,
 )
-from memory_queue import active_or_legacy_memory_queue  # noqa: E402
+from memory_queue import MAX_SOURCE_FAILURE_CODE_BYTES, active_or_legacy_memory_queue  # noqa: E402
 from memory_state import (  # noqa: E402
     ROOT,
     STATE_ROOT,
@@ -8644,7 +8645,7 @@ def _record_compile_source_failures(
         queue.record_source_failure(
             source.logical_path,
             source.sha256,
-            error_code=error_code[:200],
+            error_code=_utf8_prefix(error_code[:MAX_SOURCE_FAILURE_CODE_BYTES], MAX_SOURCE_FAILURE_CODE_BYTES),
             producer="compile",
             deadline=deadline,
         )
