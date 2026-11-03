@@ -22,9 +22,11 @@
     "docs/modules/sqlite-transactions.md",
     "tests/conftest.py",
     "tests/code_kernel_helpers.py",
-    "tests/module_context.py"
+    "tests/module_context.py",
+    "scripts/llm_wiki/context_bundle.py"
   ],
   "directories": [
     "tests/modules/sqlite_transactions"
-  ]
+  ],
+  "serialization": "exact-duplicates/v1"
 }

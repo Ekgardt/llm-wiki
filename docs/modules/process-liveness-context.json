@@ -23,6 +23,8 @@
     "docs/research/2026-09-29-a-hidden-process-is-not-a-dead-owner.md",
     "tests/conftest.py",
     "tests/code_kernel_helpers.py",
-    "tests/module_context.py"
-  ]
+    "tests/module_context.py",
+    "scripts/llm_wiki/context_bundle.py"
+  ],
+  "serialization": "exact-duplicates/v1"
 }

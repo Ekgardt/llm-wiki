@@ -27,9 +27,11 @@
     "docs/research/2026-09-18-a-childs-tree-is-read-when-it-is-killed.md",
     "tests/conftest.py",
     "tests/code_kernel_helpers.py",
-    "tests/module_context.py"
+    "tests/module_context.py",
+    "scripts/llm_wiki/context_bundle.py"
   ],
   "directories": [
     "tests/modules/queue_process_cleanup"
-  ]
+  ],
+  "serialization": "exact-duplicates/v1"
 }

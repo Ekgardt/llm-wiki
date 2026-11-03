@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import tiktoken
+from llm_wiki.context_bundle import pack_files, unpack_files
 
 
 def _contained(root: Path, name: str) -> Path:
@@ -107,14 +108,30 @@ def _framed_file(root: Path, path: Path) -> str:
     return f'FILE {path.relative_to(root).as_posix()} {len(content)} bytes\n' + content.decode('utf-8') + '\n'
 
 
+
+def compact_bundle(root: Path, files: set[Path]) -> str:
+    originals = {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(files)}
+    bundle = pack_files(originals)
+    assert unpack_files(bundle) == originals, 'Maintenance bundle lost file content'
+    return bundle
+
+
+def _manifest_bundle(root: Path, files: set[Path], manifest: dict) -> str:
+    serializers = {'raw/v1': serialized_bundle, 'exact-duplicates/v1': compact_bundle}
+    kind = manifest.get('serialization', 'raw/v1')
+    assert kind in serializers, f'Unknown maintenance serialization: {kind}'
+    return serializers[kind](root, files)
+
+
 def measure_context(root: Path, manifest_path: Path) -> tuple[int, int]:
     root = root.resolve()
     manifest = json.loads(manifest_path.read_bytes())
     assert manifest['max_tokens'] == 100000, 'Owner limit cannot be changed'
     assert manifest['encoding'] == 'o200k_base', 'Measurement encoding cannot drift'
     files = context_files(root, manifest)
-    needed = required_bootstrap(root, files) | {manifest_path.resolve(), root / 'tests/module_context.py'}
+    needed = required_bootstrap(root, files) | {manifest_path.resolve(), root / 'tests/module_context.py',
+                                                       root / 'scripts/llm_wiki/context_bundle.py'}
     assert needed <= files, f'Missing required context: {sorted(str(p.relative_to(root)) for p in needed - files)}'
-    total = len(tiktoken.get_encoding(manifest['encoding']).encode_ordinary(serialized_bundle(root, files)))
+    total = len(tiktoken.get_encoding(manifest['encoding']).encode_ordinary(_manifest_bundle(root, files, manifest)))
     assert total <= manifest['max_tokens'], f'{manifest_path.name}: {total} tokens'
     return total, len(files)

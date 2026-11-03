@@ -34,9 +34,11 @@
     "docs/modules/lease-renewal-context.json",
     "tests/conftest.py",
     "tests/code_kernel_helpers.py",
-    "tests/module_context.py"
+    "tests/module_context.py",
+    "scripts/llm_wiki/context_bundle.py"
   ],
   "directories": [
     "tests/modules/queue_heartbeat"
-  ]
+  ],
+  "serialization": "exact-duplicates/v1"
 }

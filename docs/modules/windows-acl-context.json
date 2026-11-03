@@ -27,9 +27,11 @@
     "docs/research/2026-09-17-the-last-three-windows-readers-of-a-name-and-a-handle.md",
     "tests/conftest.py",
     "tests/code_kernel_helpers.py",
-    "tests/module_context.py"
+    "tests/module_context.py",
+    "scripts/llm_wiki/context_bundle.py"
   ],
   "directories": [
     "tests/modules/windows_acl"
-  ]
+  ],
+  "serialization": "exact-duplicates/v1"
 }

@@ -94,16 +94,52 @@ def test_incomplete_manifest_fails_before_budget_success(tmp_path):
 
 def test_measurement_helper_cannot_import_product_executors():
     import ast
-    import sys
     tree = ast.parse((ROOT / 'tests/module_context.py').read_text())
     nodes = [n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))]
     roots = set().union(*(_import_roots(node) for node in nodes))
-    assert roots <= sys.stdlib_module_names | {'tiktoken'}
+    assert all(_allowed_measurement_import(name) for name in roots)
 
 
 def _import_roots(node):
     import ast
     if isinstance(node, ast.ImportFrom):
         assert node.level == 0
-        return {(node.module or '').split('.')[0]}
-    return {a.name.split('.')[0] for a in node.names}
+        return {node.module or ''}
+    return {a.name for a in node.names}
+
+
+def _allowed_measurement_import(name):
+    import sys
+    return name == 'llm_wiki.context_bundle' or name.split('.')[0] in sys.stdlib_module_names | {'tiktoken'}
+
+
+def test_codec_allowance_does_not_allow_any_other_product_module():
+    assert _allowed_measurement_import('llm_wiki.context_bundle')
+    assert not _allowed_measurement_import('llm_wiki.queue_child_runtime')
+    assert not _allowed_measurement_import('memory_queue')
+
+
+def test_compact_measurement_refuses_a_lossy_codec(tmp_path, monkeypatch):
+    from tests import module_context
+    path = _write(tmp_path, 'content.py', 'data = 1')
+    monkeypatch.setattr(module_context, 'unpack_files', lambda bundle: {})
+    with pytest.raises(AssertionError, match='lost file content'):
+        module_context.compact_bundle(tmp_path, {path})
+
+
+def test_codec_source_is_required_in_measurement_packet(tmp_path):
+    from tests.module_context import measure_context
+    helper = _write(tmp_path, 'tests/module_context.py', '')
+    _write(tmp_path, 'scripts/llm_wiki/context_bundle.py', '')
+    manifest = _write(tmp_path, 'context.json', json.dumps({
+        'encoding': 'o200k_base', 'max_tokens': 100000,
+        'serialization': 'exact-duplicates/v1',
+        'files': ['context.json', str(helper.relative_to(tmp_path))]}))
+    with pytest.raises(AssertionError, match='Missing required context'):
+        measure_context(tmp_path, manifest)
+
+
+def test_unknown_serialization_is_not_silently_treated_as_raw(tmp_path):
+    from tests.module_context import _manifest_bundle
+    with pytest.raises(AssertionError, match='Unknown maintenance serialization'):
+        _manifest_bundle(tmp_path, set(), {'serialization': 'made-up'})

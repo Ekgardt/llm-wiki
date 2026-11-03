@@ -2002,3 +2002,8 @@ check explicitly; source opening, clock reads, transactions and adoption stay th
 `llm_wiki.sqlite_migrations` owns resumable statement execution. Both use supplied
 connections. reliable_memory retains API aliases; connection and file ownership,
 transaction boundaries, callback order and existing limits are unchanged.
+
+Maintenance bundles may explicitly use exact-duplicates/v1: identical file bodies
+appear once, with counted backward references for other paths. The stdlib-only
+llm_wiki.context_bundle codec restores every path and byte; measurement verifies
+that round trip before counting. Source files and runtime formats are unchanged.

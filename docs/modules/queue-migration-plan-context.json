@@ -30,9 +30,11 @@
     "scripts/llm_wiki/sqlite_contracts.py",
     "docs/modules/formats.md",
     "docs/modules/queue-sources.md",
-    "docs/modules/sqlite-contracts.md"
+    "docs/modules/sqlite-contracts.md",
+    "scripts/llm_wiki/context_bundle.py"
   ],
   "directories": [
     "tests/modules/queue_migration_plan"
-  ]
+  ],
+  "serialization": "exact-duplicates/v1"
 }

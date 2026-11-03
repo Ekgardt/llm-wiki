@@ -26,9 +26,11 @@
     "scripts/llm_wiki/sqlite_contracts.py",
     "scripts/llm_wiki/sqlite_transactions.py",
     "docs/modules/sqlite-contracts.md",
-    "docs/modules/sqlite-transactions.md"
+    "docs/modules/sqlite-transactions.md",
+    "scripts/llm_wiki/context_bundle.py"
   ],
   "directories": [
     "tests/modules/sqlite_migrations"
-  ]
+  ],
+  "serialization": "exact-duplicates/v1"
 }

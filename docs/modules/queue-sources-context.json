@@ -26,9 +26,11 @@
     "tests/code_kernel_helpers.py",
     "tests/module_context.py",
     "scripts/llm_wiki/sqlite_contracts.py",
-    "docs/modules/sqlite-contracts.md"
+    "docs/modules/sqlite-contracts.md",
+    "scripts/llm_wiki/context_bundle.py"
   ],
   "directories": [
     "tests/modules/queue_sources"
-  ]
+  ],
+  "serialization": "exact-duplicates/v1"
 }
