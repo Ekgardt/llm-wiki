@@ -2042,3 +2042,11 @@ queue byte-bound correction without introducing a duplicate algorithm. See
 [research](research/2026-11-03-utf8-prefix-boundary.md).
 
 Full contracts: [Queue worker values](modules/queue-worker-state.md), [UTF-8 prefixes](modules/utf8-text.md).
+
+### Processor reason byte bound
+
+Generic worker reason codes use the shared strict UTF-8 prefix to obey the
+existing 64-byte SQLite constraint. ASCII and explicit QueueOperationError codes,
+retry policy and schemas stay unchanged. The reproduced failure and correction
+are separate from the preceding transfer; see
+[research](research/2026-11-03-processor-error-code-byte-bound.md).

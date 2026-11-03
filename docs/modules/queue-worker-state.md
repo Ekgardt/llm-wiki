@@ -17,11 +17,13 @@ that integration test is outside the pure packet. Unit cases run against the old
 owner before import retargeting. Guard tests prevent reverse imports and duplicate
 bodies; all original worker/capture tests remain unchanged.
 
-The existing generic reason converter has a known byte/character defect: its
-64-character slice can exceed the schema's 64-byte ceiling for Unicode type names.
-This extraction does not fix or hide it; the separate reproduced correction is
-tracked in the byte-bound research. Explicit QueueOperationError codes preserve
-their existing contract. No universal exception sanitization claim is made.
+Generic reason codes obey the existing 64-byte schema ceiling through the shared
+strict UTF-8 prefix. Complete Unicode characters are preserved; ASCII codes remain
+unchanged. Explicit QueueOperationError codes retain their existing contract.
+Regression cases cover two-, three- and four-byte type names and real v3 retry
+and terminal failure settlement. No universal exception sanitization claim is made.
+
+Shared canonical contract: [Strict UTF-8 prefixes](utf8-text.md).
 
 Run `pytest tests/modules/queue_worker_state tests/test_worker_text_compatibility.py
  tests/test_a_dead_task_names_its_reason.py tests/test_memory_queue.py -q`.

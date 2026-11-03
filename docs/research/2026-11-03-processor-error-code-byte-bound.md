@@ -13,7 +13,7 @@ queue.fail raises IntegrityError and leaves it leased. Evidence:
 logs/queue-error-unicode-baseline.json (isolated SQLite constraint),
 logs/queue-error-unicode-real-queue.json (actual candidate queue API).
 
-## Intended separate correction
+## Separate correction
 
 After the exact-body extraction is qualified, pass the existing character-bounded
 generic code to the shared strict _utf8_prefix helper extracted from the renderer.
@@ -48,7 +48,7 @@ Checked 2026-11-03, three independent publishers:
 Rejected: catch IntegrityError and report success (loses failure settlement),
 raise the schema limit (changes contract), truncate UTF-8 blindly (invalid text),
 replace every Unicode name with a generic reason (unnecessary loss of diagnostic
-identity). Correction is pending; neither transfer nor documentation fixes it.
+identity). The separate correction reuses the existing UTF-8 primitive.
 
 ## Shared primitive and related-case evidence
 
@@ -58,4 +58,21 @@ avoids a duplicate incremental-decoder algorithm or reverse renderer import.
 Related normal type names produced 111, 158 and 205 bytes for two-, three- and
 four-byte characters. A surrogate name failed at type construction before the
 converter ran. Evidence: logs/queue-error-unicode-related-baseline.json.
-The correction is pending and is not claimed as part of the exact-body transfer.
+The correction is separate from the exact-body transfer.
+
+## Qualification
+
+Nine new regression cases failed before correction (21 existing cases passed).
+After correction, the worker/text units, original serialization identities,
+real queue retry/terminal settlement and capture consumers passed: 209 tests.
+Original consumer assertions remain byte-identical. Ruff and measured CCN/shape
+checks passed for every changed Python file. Explicit queue codes and ASCII
+codes retain their existing tests and behavior. No database migration is needed.
+
+Python 3.10 focused qualification: 71 passed. Global boundary, ownership,
+structure and policy qualification: 1498 passed, 2 platform skips. All 61
+serialized packets reconstructed every path and byte; largest 97926 tokens
+before this evidence paragraph. Separate compile source-failure recording still
+uses a 200-character producer slice against the already-correct 64-byte queue
+validator; this related producer mismatch is investigated separately, not claimed
+fixed by the worker change.

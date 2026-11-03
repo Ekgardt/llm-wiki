@@ -237,7 +237,7 @@
   "test_a_dead_owner_is_reclaimed_without_its_marker.py": 3.11,
   "test_a_dead_owner_root_is_swept_when_the_next_server_starts.py": 2.24,
   "test_a_dead_task_can_be_purged_when_it_is_asked_for.py": 18.58,
-  "test_a_dead_task_names_its_reason.py": 0.01,
+  "test_a_dead_task_names_its_reason.py": 1.74,
   "test_a_decorator_is_a_call_until_it_is_a_route.py": 0.02,
   "test_a_definition_and_a_service_walk_say_what_they_left_out.py": 10.31,
   "test_a_definition_under_a_platform_test_is_still_a_definition.py": 0.01,

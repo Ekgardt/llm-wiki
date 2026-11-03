@@ -30,7 +30,9 @@
     "docs/modules/queue-contracts.md",
     "scripts/llm_wiki/reliability_defaults.py",
     "docs/modules/reliability-defaults.md",
-    "docs/research/2026-11-03-processor-error-code-byte-bound.md"
+    "docs/research/2026-11-03-processor-error-code-byte-bound.md",
+    "scripts/llm_wiki/utf8_text.py",
+    "docs/modules/utf8-text.md"
   ],
   "directories": [
     "tests/modules/queue_worker_state"

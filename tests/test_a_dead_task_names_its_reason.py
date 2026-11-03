@@ -75,3 +75,23 @@ def test_the_capture_worker_names_the_same_code() -> None:
     failure = flush_memory._capture_queue_failure(RuntimeError("intent_fence_lost"))
 
     assert (failure.error_code, failure.retry_after) == ("processor_failed:intent_fence_lost", None)
+
+
+@pytest.mark.parametrize('character', ['Я', '文', '😀'])
+@pytest.mark.parametrize(('permanent', 'expected_state'), [(False, 'ready'), (True, 'dead')])
+def test_unicode_reason_settles_the_real_v3_lease(tmp_path, character, permanent, expected_state):
+    from tests.test_memory_queue import _v3_queue
+
+    queue = _v3_queue(tmp_path)
+    task_id = queue.enqueue('query', 1, {'query': 'plain'})
+    lease = queue.claim('unicode-reason-worker')
+    assert lease is not None and lease.id == task_id
+    error = type(character * 80, (Exception,), {})('private text')
+    code = processor_error_code(error)
+    assert flush_memory._capture_queue_failure(error).error_code == code
+    queue.fail(lease, memory_queue.QueueFailure(code, permanent=permanent))
+    task = queue.get(task_id)
+    assert task.state == expected_state
+    assert task.error_code == code
+    assert task.attempt_history[-1].error_code == code
+    assert len(code.encode('utf-8')) <= memory_queue.PROCESSOR_ERROR_CODE_BYTES

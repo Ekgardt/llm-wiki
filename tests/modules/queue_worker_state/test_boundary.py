@@ -10,12 +10,15 @@ ROOT = Path(__file__).resolve().parents[3]
 def test_worker_value_import_is_isolated():
     assert_isolated_import(ROOT, 'llm_wiki.queue_worker_state', dependencies=(
         'llm_wiki', 'llm_wiki.queue_contracts', 'llm_wiki.reliability_defaults',
+        'llm_wiki.utf8_text',
     ))
 
 
 def test_worker_values_depend_only_on_lower_contracts():
     source = (ROOT / 'scripts/llm_wiki/queue_worker_state.py').read_text()
-    assert nonstdlib_imports(source) == {'llm_wiki.queue_contracts', 'llm_wiki.reliability_defaults'}
+    assert nonstdlib_imports(source) == {
+        'llm_wiki.queue_contracts', 'llm_wiki.reliability_defaults', 'llm_wiki.utf8_text',
+    }
 
 
 def test_queue_has_no_second_worker_value_implementation():

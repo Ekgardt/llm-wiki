@@ -65,3 +65,15 @@ def test_idle_progress_keeps_clock_and_processed_count():
     assert progress.advance({'ok': 0, 'failed': 0, 'dead': 2, 'skipped': 1, 'halted': True}) == 'idle'
     assert (progress.processed, progress.idle_started) == (4, 10.0)
     assert progress.totals == {'ok': 0, 'failed': 0, 'dead': 2, 'skipped': 1}
+
+
+@pytest.mark.parametrize(('name', 'expected'), [
+    ('Я' * 80, 'processor_failed:' + 'Я' * 23),
+    ('文' * 80, 'processor_failed:' + '文' * 15),
+    ('😀' * 80, 'processor_failed:' + '😀' * 11),
+])
+def test_unicode_type_reason_fits_stored_bytes(name, expected):
+    kind = type(name, (Exception,), {})
+    code = processor_error_code(kind('private text must not enter the reason'))
+    assert code == expected
+    assert len(code.encode('utf-8')) <= 64

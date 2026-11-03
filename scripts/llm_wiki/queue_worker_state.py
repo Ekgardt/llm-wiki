@@ -8,6 +8,7 @@ from typing import NamedTuple
 
 from llm_wiki.queue_contracts import DeferredResult, QueueOperationError
 from llm_wiki.reliability_defaults import DEFAULTS
+from llm_wiki.utf8_text import _utf8_prefix
 
 
 class QueueRetryPolicy(NamedTuple):
@@ -37,7 +38,8 @@ def processor_error_code(error: BaseException) -> str:
         return error.code
     message = str(error)
     reason = message if _CODE_SHAPED_MESSAGE.fullmatch(message) else type(error).__name__
-    return f"processor_failed:{reason}"[:PROCESSOR_ERROR_CODE_BYTES]
+    code = f"processor_failed:{reason}"[:PROCESSOR_ERROR_CODE_BYTES]
+    return _utf8_prefix(code, PROCESSOR_ERROR_CODE_BYTES)
 
 
 class _ProcessorOutcome(NamedTuple):
