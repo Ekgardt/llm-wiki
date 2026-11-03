@@ -2223,3 +2223,9 @@ owns the existing question-based sentence scoring and exact byte-span selection;
 query/context assembly retains clocks, publication and citation checks. Both
 packets preserve production bytes and original unit assertions. Their whole-product
 policy and context/query integrations remain separate explicit obligations.
+
+[Coordinator invariants](modules/coordinator-invariants.md) owns the existing
+supplied-connection SQLite integrity, foreign-key, operation-shape, projection,
+epoch and blackboard consistency checks and row counts. It opens no database and
+settles no transaction. `markdown_transaction.py` retains aliases, file admission,
+schema validation, migration, publication and recovery; SQL and errors are unchanged.
