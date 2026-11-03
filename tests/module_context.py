@@ -209,7 +209,8 @@ def measure_context(root: Path, manifest_path: Path) -> tuple[int, int]:
     assert manifest['encoding'] == 'o200k_base', 'Measurement encoding cannot drift'
     files = context_files(root, manifest)
     needed = required_bootstrap(root, files) | required_source_context(root, files) | {manifest_path.resolve(), root / 'tests/module_context.py',
-                                                       root / 'scripts/llm_wiki/context_bundle.py'}
+                                                       root / 'scripts/llm_wiki/context_bundle.py',
+                                                       root / 'docs/modules/context-tooling.md'}
     assert needed <= files, f'Missing required context: {sorted(str(p.relative_to(root)) for p in needed - files)}'
     total = len(tiktoken.get_encoding(manifest['encoding']).encode_ordinary(_manifest_bundle(root, files, manifest)))
     assert total <= manifest['max_tokens'], f'{manifest_path.name}: {total} tokens'

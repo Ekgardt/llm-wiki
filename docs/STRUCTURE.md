@@ -2050,3 +2050,13 @@ existing 64-byte SQLite constraint. ASCII and explicit QueueOperationError codes
 retry policy and schemas stay unchanged. The reproduced failure and correction
 are separate from the preceding transfer; see
 [research](research/2026-11-03-processor-error-code-byte-bound.md).
+
+### Canonical maintenance qualification context
+
+Every module packet carries the full current
+[qualification contract](modules/context-tooling.md). The three original pilot
+research documents remain unchanged in the repository and in the formats/tooling
+packets; other packets retain their own research and all required source,
+tests, contracts and instructions. This selects relevant context without claiming
+unique source reduction or measured task-cycle savings. See
+[research](research/2026-11-03-canonical-module-qualification-context.md).

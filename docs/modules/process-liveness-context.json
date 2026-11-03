@@ -10,9 +10,6 @@
     "pyproject.toml",
     "docs/AGENTS.md",
     "docs/STRUCTURE.md",
-    "docs/research/2026-11-02-formats-module-pilot.md",
-    "docs/research/2026-11-02-module-boundaries-validation.md",
-    "docs/research/2026-11-02-module-boundaries-and-token-budget.md",
     ".gitattributes",
     "scripts/process_liveness.py",
     "tests/test_process_liveness.py",
@@ -26,7 +23,8 @@
     "tests/module_context.py",
     "scripts/llm_wiki/context_bundle.py",
     "scripts/llm_wiki/__init__.py",
-    "docs/modules/context-bundle.md"
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md"
   ],
   "serialization": "exact-duplicates/v1",
   "ownership": {

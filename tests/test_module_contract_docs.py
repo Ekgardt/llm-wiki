@@ -90,3 +90,9 @@ def test_shared_contract_cannot_escape_the_repository(tmp_path):
     guide.write_text('Shared canonical contract: [outside](../outside.md).')
     with pytest.raises(ValueError):
         _guide_closure(tmp_path, {guide})
+
+
+@pytest.mark.parametrize('manifest', MANIFESTS, ids=lambda p: p.stem)
+def test_every_packet_retains_current_qualification_contract(manifest):
+    files = context_files(ROOT, json.loads(manifest.read_text()))
+    assert ROOT / 'docs/modules/context-tooling.md' in files

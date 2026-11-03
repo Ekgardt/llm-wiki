@@ -30,13 +30,15 @@
     "tests/code_kernel_helpers.py",
     "tests/module_context.py",
     "scripts/llm_wiki/context_bundle.py",
-    "docs/modules/context-bundle.md"
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md"
   ],
   "serialization": "exact-duplicates/v1",
   "ownership": {
     "files": [
       "docs/modules/formats-context.json",
-      "docs/modules/formats.md"
+      "docs/modules/formats.md",
+      "docs/research/2026-11-02-formats-module-pilot.md"
     ],
     "directories": [
       "scripts/llm_wiki/formats",

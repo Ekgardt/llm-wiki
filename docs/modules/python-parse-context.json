@@ -10,9 +10,6 @@
     "pyproject.toml",
     "docs/AGENTS.md",
     "docs/STRUCTURE.md",
-    "docs/research/2026-11-02-formats-module-pilot.md",
-    "docs/research/2026-11-02-module-boundaries-validation.md",
-    "docs/research/2026-11-02-module-boundaries-and-token-budget.md",
     ".gitattributes",
     "scripts/llm_wiki/__init__.py",
     "tests/modules/__init__.py",
@@ -28,7 +25,8 @@
     "docs/research/2026-09-25-one-hard-python-file-does-not-freeze-the-index.md",
     "docs/research/2026-09-26-python-3-10-does-not-crash-on-a-deep-expression.md",
     "scripts/llm_wiki/context_bundle.py",
-    "docs/modules/context-bundle.md"
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md"
   ],
   "directories": [
     "tests/modules/python_parse"

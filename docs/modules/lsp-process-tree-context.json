@@ -10,9 +10,6 @@
     "pyproject.toml",
     "docs/AGENTS.md",
     "docs/STRUCTURE.md",
-    "docs/research/2026-11-02-formats-module-pilot.md",
-    "docs/research/2026-11-02-module-boundaries-validation.md",
-    "docs/research/2026-11-02-module-boundaries-and-token-budget.md",
     ".gitattributes",
     "scripts/llm_wiki/__init__.py",
     "tests/modules/__init__.py",
@@ -30,7 +27,8 @@
     "docs/modules/lsp-process-tree-context.json",
     "docs/research/2026-11-03-lsp-process-tree-packet.md",
     "docs/research/2026-09-27-a-signal-handler-writes-without-a-buffer.md",
-    "docs/research/2026-09-17-lsp-what-could-not-be-read-is-not-an-empty-group.md"
+    "docs/research/2026-09-17-lsp-what-could-not-be-read-is-not-an-empty-group.md",
+    "docs/modules/context-tooling.md"
   ],
   "directories": [
     "tests/modules/lsp_process_tree"

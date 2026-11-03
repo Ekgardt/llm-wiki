@@ -10,9 +10,6 @@
     "pyproject.toml",
     "docs/AGENTS.md",
     "docs/STRUCTURE.md",
-    "docs/research/2026-11-02-formats-module-pilot.md",
-    "docs/research/2026-11-02-module-boundaries-validation.md",
-    "docs/research/2026-11-02-module-boundaries-and-token-budget.md",
     ".gitattributes",
     "scripts/llm_wiki/__init__.py",
     "tests/modules/__init__.py",
@@ -31,7 +28,8 @@
     "tests/test_lsp_positions.py",
     "tests/fixtures/code_kernel/python/pkg/unicode_api.py",
     "tests/fixtures/code_kernel/python/pkg/__init__.py",
-    "tests/fixtures/code_kernel/python/pkg/api.py"
+    "tests/fixtures/code_kernel/python/pkg/api.py",
+    "docs/modules/context-tooling.md"
   ],
   "directories": [
     "tests/modules/lsp_positions"

@@ -15,7 +15,10 @@ def _write(root, name, text):
 
 
 def _packet(root, sources, included):
-    required = {'tests/module_context.py': '', 'scripts/llm_wiki/context_bundle.py': ''}
+    required = {
+        'tests/module_context.py': '', 'scripts/llm_wiki/context_bundle.py': '',
+        'docs/modules/context-tooling.md': 'Full current qualification contract',
+    }
     for name, body in (required | sources).items():
         _write(root, name, body)
     return _write(root, 'context.json', json.dumps({
@@ -91,7 +94,7 @@ def test_complete_cycles_namespace_and_installed_imports_are_accepted(tmp_path):
     manifest = _packet(tmp_path, sources, list(sources))
     total, files = measure_context(tmp_path, manifest)
     assert total > 0
-    assert files == 6
+    assert files == 7
 
 
 def test_local_dependency_symlink_outside_root_is_refused(tmp_path):
@@ -184,4 +187,13 @@ def test_bootstrap_infrastructure_does_not_hide_explicit_test_imports(tmp_path):
     assert measure_context(tmp_path, manifest)[0] > 0
     (tmp_path / 'tests/test_owner.py').write_text('import dependency')
     with pytest.raises(AssertionError, match='scripts/dependency.py'):
+        measure_context(tmp_path, manifest)
+
+
+def test_current_qualification_contract_cannot_be_omitted(tmp_path):
+    manifest = _packet(tmp_path, {}, [])
+    packet = json.loads(manifest.read_text())
+    packet['files'].remove('docs/modules/context-tooling.md')
+    manifest.write_text(json.dumps(packet))
+    with pytest.raises(AssertionError, match='docs/modules/context-tooling.md'):
         measure_context(tmp_path, manifest)
