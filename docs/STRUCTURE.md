@@ -2270,3 +2270,9 @@ in contract-identity. Both source implementations stay in the integration packet
 experimental contexts do not replace canonical full-source packets before the
 approved paired maintenance comparison passes. No persistent success cache or
 product runtime location is added.
+
+[Release manifest](modules/release-manifest.md) owns the existing read-only Git
+commit/blob digest and release-note rendering helper. Tag creation remains a
+separate consumer. Qualification changes neither release commands nor publication
+permissions; opaque committed file contents are inputs to hashing, not executed
+dependencies.
