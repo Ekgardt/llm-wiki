@@ -46,6 +46,39 @@ def test_an_unweighted_file_costs_the_table_mean() -> None:
     assert shard_plan._cost("test_new.py", {"a.py": 1.0, "b.py": 9.0}) == 5.0
 
 
+@pytest.mark.parametrize("measured, expected", [(3.0, 20.0), (27.0, 27.0)])
+def test_incremental_measurement_retains_slower_platform_cost(monkeypatch, measured, expected):
+    monkeypatch.setattr(shard_plan, "test_files", lambda: ["test_one.py", "test_new.py"])
+    actual = shard_plan.refreshed(
+        {"test_one.py": 20.0, "test_deleted.py": 9.0},
+        {"test_one.py": measured, "test_new.py": 1.25},
+    )
+    assert actual == {"test_new.py": 1.25, "test_one.py": expected}
+
+
+def test_weigh_does_not_erase_a_slower_platform_measurement(tmp_path, monkeypatch):
+    table = tmp_path / "weights.json"
+    table.write_text('{"test_one.py": 20.0}\n', encoding="utf-8")
+    monkeypatch.setattr(shard_plan, "WEIGHTS_PATH", table)
+    monkeypatch.setattr(shard_plan, "test_files", lambda: ["test_one.py"])
+    monkeypatch.setattr(shard_plan, "weigh", lambda _paths: {"test_one.py": 3.0})
+    assert shard_plan.main(["--weigh", "tests/test_one.py"]) == 0
+    assert shard_plan.weights() == {"test_one.py": 20.0}
+
+
+def test_explicit_artifact_refresh_can_retire_an_old_slow_cost(tmp_path, monkeypatch):
+    table = tmp_path / "weights.json"
+    table.write_text('{"test_one.py": 20.0}\n', encoding="utf-8")
+    monkeypatch.setattr(shard_plan, "WEIGHTS_PATH", table)
+    monkeypatch.setattr(shard_plan, "test_files", lambda: ["test_one.py"])
+    (tmp_path / "linux.xml").write_text(REPORT, encoding="utf-8")
+    (tmp_path / "windows.xml").write_text(
+        REPORT.replace('time="2.0"', 'time="9.0"'), encoding="utf-8",
+    )
+    assert shard_plan.main(["--refresh", str(tmp_path)]) == 0
+    assert shard_plan.weights() == {"test_one.py": 10.5}
+
+
 @pytest.mark.parametrize("exit_code", [1, 7])
 def test_a_failed_measurement_returns_pytest_failure_and_keeps_weights(tmp_path, monkeypatch, exit_code):
     table = tmp_path / "weights.json"

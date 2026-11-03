@@ -8,6 +8,12 @@
 
 ## Three-zone layout
 
+CI shard costs remain in `tests/shard_weights.json`, maintained by
+`tests/shard_plan.py`. Incremental measurements preserve the slower recorded
+cost; an explicit `--refresh` replaces costs from a reviewed complete
+cross-platform JUnit set. A partial or local run is not a complete refresh.
+This keeps the existing file layout, five shards and job deadlines unchanged.
+
 ```
 llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │

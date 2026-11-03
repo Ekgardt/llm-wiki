@@ -6,11 +6,12 @@ own cores, so splitting the files shortens the wall clock without adding
 contention on one machine.
 
 `shard_weights.json` holds seconds per file, the slowest any CI job measured.
-Refresh it from the JUnit artifacts the workflow uploads
+Refresh it from a reviewed complete cross-platform set of JUnit artifacts
 (`python -m tests.shard_plan --refresh <downloaded artifacts>`), and weigh a new
 test file with `python -m tests.shard_plan --weigh tests/test_new.py`; a test
 holds every test file to having a weight. A file still without one costs the
-table's mean, not a guess: a flat 5 s left 578 of 705 files unweighted and the
+table's mean, not a guess. Incremental measurements retain a slower recorded
+cost; only explicit --refresh replaces it. A flat 5 s left 578 of 705 files unweighted and the
 Windows shards of one run between 809 s and 1996 s (audit 2026-09-26 C-13,
 docs/research/2026-09-26-every-test-file-has-a-weight.md).
 """
@@ -90,9 +91,13 @@ def slowest(reports: Iterable[Path]) -> dict[str, float]:
     return merged
 
 
-def refreshed(table: dict[str, float], measured: dict[str, float]) -> dict[str, float]:
-    """Measured files take their new cost; files that no longer exist leave the table."""
+def refreshed(
+    table: dict[str, float], measured: dict[str, float], *, replace: bool = False,
+) -> dict[str, float]:
+    """Retain slower evidence unless replacing from a reviewed complete artifact set."""
     present = set(test_files())
+    if not replace:
+        measured = {name: max(table.get(name, 0.0), cost) for name, cost in measured.items()}
     merged = {**table, **measured}
     return {name: round(merged[name], 2) for name in sorted(merged) if name in present}
 
@@ -143,7 +148,7 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one CI shard of the test suite.")
     parser.add_argument("--shard", type=int, help="1-based shard number")
     parser.add_argument("--of", type=int, help="total shard count")
-    parser.add_argument("--refresh", type=Path, help="rewrite the weights from JUnit files under this directory")
+    parser.add_argument("--refresh", type=Path, help="replace weights from a complete cross-platform JUnit set")
     parser.add_argument("--weigh", nargs="+", help="measure these test files here and record them")
     parser.add_argument("--list", action="store_true", help="print the files and exit")
     parser.add_argument("pytest_args", nargs=argparse.REMAINDER)
@@ -153,7 +158,7 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
 def _maintain_weights(args: argparse.Namespace) -> bool:
     """Rewrite the weights when asked; True when that was the whole job."""
     if args.refresh is not None:
-        _write_weights(refreshed(weights(), slowest(sorted(args.refresh.rglob("*.xml")))))
+        _write_weights(refreshed(weights(), slowest(sorted(args.refresh.rglob("*.xml"))), replace=True))
         return True
     if args.weigh:
         _write_weights(refreshed(weights(), weigh(args.weigh)))
