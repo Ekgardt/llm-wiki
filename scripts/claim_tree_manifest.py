@@ -9,7 +9,7 @@ from pathlib import Path
 
 from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes
 from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
-from reliable_memory import restricted_relative_path
+from llm_wiki.restricted_paths import restricted_relative_path
 from settings import raise_hint, setting_value
 
 # Eight megabytes: the same ceiling `project_journal.MAX_JOURNAL_BYTES` allows

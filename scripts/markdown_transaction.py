@@ -41,6 +41,7 @@ from iso_time import utc_text
 from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from llm_wiki.formats.schema import validate_schema
 from llm_wiki.reliability_defaults import DEFAULTS
+from llm_wiki.restricted_paths import restricted_relative_path
 from llm_wiki.sqlite_contracts import (
     MigrationStatement,
     OperationalDatabaseContract,
@@ -96,7 +97,6 @@ from reliable_memory import (
     open_readonly_operational_db,
     publish_runtime_file,
     read_runtime_bytes,
-    restricted_relative_path,
     validate_state_root,
 )
 from transaction_lineage import quarantine_witnesses, resolved_quarantines

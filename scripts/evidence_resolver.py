@@ -1997,7 +1997,7 @@ def verify_evidence_span(supplied: Mapping[str, object], *, vault: Path) -> None
 
 def _citation_source_path(relative: object, vault: Path) -> Path:
     try:
-        from reliable_memory import restricted_relative_path
+        from llm_wiki.restricted_paths import restricted_relative_path
 
         normalized = restricted_relative_path(str(relative), ("knowledge",))
         root = Path(vault).resolve(strict=True)

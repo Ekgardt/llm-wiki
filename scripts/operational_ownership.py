@@ -23,6 +23,7 @@ import process_liveness
 from iso_time import utc_text
 from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from llm_wiki.reliability_defaults import DEFAULTS
+from llm_wiki.restricted_paths import restricted_relative_path
 from llm_wiki.sqlite_contracts import OperationalDatabaseContract
 from llm_wiki.sqlite_transactions import begin_immediate
 from process_liveness import _is_plain_int, _platform_system
@@ -31,7 +32,6 @@ from reliable_memory import (
     capture_runtime_file_identity,
     open_operational_db,
     read_runtime_bytes,
-    restricted_relative_path,
 )
 
 OwnerRole = Literal[

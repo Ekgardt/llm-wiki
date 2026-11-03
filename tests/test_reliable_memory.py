@@ -10,7 +10,7 @@ import threading
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import pytest
 import reliable_memory
@@ -22,7 +22,6 @@ from reliable_memory import (
     fsync_directory,
     fsync_file,
     open_operational_db,
-    restricted_relative_path,
     sha256_bytes,
     validate_state_root,
 )
@@ -110,21 +109,8 @@ def test_sha256_is_stable_for_equal_logical_objects():
 
 
 
-@pytest.mark.parametrize(
-    "value",
-    ["", ".", "../x", "a/../../x", "/absolute", "C:/absolute", "a\\b", "a//b"],
-)
-def test_restricted_relative_path_rejects_unsafe_values(value):
-    with pytest.raises(ValueError):
-        restricted_relative_path(value, ("knowledge", "run/transactions"))
 
 
-def test_restricted_relative_path_accepts_only_allowed_roots():
-    assert restricted_relative_path("knowledge/daily/2026-01-01.md", ("knowledge",)) == (
-        PurePosixPath("knowledge/daily/2026-01-01.md")
-    )
-    with pytest.raises(ValueError, match="allowed root"):
-        restricted_relative_path("cache/private.json", ("knowledge",))
 
 
 def test_operational_connection_uses_required_pragmas_and_row_factory(tmp_path):

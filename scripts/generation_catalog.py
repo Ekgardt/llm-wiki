@@ -22,12 +22,12 @@ from pathlib import Path, PurePosixPath
 from bounded_io import IO_CHUNK_BYTES
 from iso_time import utc_text
 from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
+from llm_wiki.restricted_paths import restricted_relative_path
 from reliable_memory import (
     fsync_directory,
     open_operational_db,
     open_readonly_operational_db,
     read_runtime_bytes,
-    restricted_relative_path,
     validate_runtime_file,
     validate_state_root,
 )

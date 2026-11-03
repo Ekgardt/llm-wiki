@@ -17,7 +17,7 @@ import time
 import warnings
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Literal
 
 from bounded_io import IO_CHUNK_BYTES
@@ -38,6 +38,12 @@ from llm_wiki.formats.schema import (
 )
 from llm_wiki.reliability_defaults import DEFAULTS as DEFAULTS
 from llm_wiki.reliability_defaults import ReliableMemoryDefaults as ReliableMemoryDefaults
+from llm_wiki.restricted_paths import _is_posix_relative_text as _is_posix_relative_text
+from llm_wiki.restricted_paths import _require_inside_a_root as _require_inside_a_root
+from llm_wiki.restricted_paths import _require_normalized_relative as _require_normalized_relative
+from llm_wiki.restricted_paths import _require_posix_relative_text as _require_posix_relative_text
+from llm_wiki.restricted_paths import _under_root as _under_root
+from llm_wiki.restricted_paths import restricted_relative_path as restricted_relative_path
 from llm_wiki.sqlite_contracts import MigrationStatement as MigrationStatement
 from llm_wiki.sqlite_contracts import OperationalDatabaseContract as OperationalDatabaseContract
 from llm_wiki.sqlite_contracts import (
@@ -64,6 +70,16 @@ from llm_wiki.sqlite_migrations import (
     _require_unique_statement_names as _require_unique_statement_names,
 )
 from llm_wiki.sqlite_migrations import run_resumable_migration as run_resumable_migration
+from llm_wiki.sqlite_pragmas import _apply_operational_pragmas as _apply_operational_pragmas
+from llm_wiki.sqlite_pragmas import (
+    _apply_readonly_operational_pragmas as _apply_readonly_operational_pragmas,
+)
+from llm_wiki.sqlite_pragmas import _initialized_contract_identity as _initialized_contract_identity
+from llm_wiki.sqlite_pragmas import _pragma_integer as _pragma_integer
+from llm_wiki.sqlite_pragmas import _require_pragma as _require_pragma
+from llm_wiki.sqlite_pragmas import (
+    _validate_or_initialize_operational_contract as _validate_or_initialize_operational_contract,
+)
 from llm_wiki.sqlite_transactions import begin_immediate as begin_immediate
 
 # The one bound on a capture decision file, for the writer and every reader. The
@@ -76,12 +92,6 @@ from llm_wiki.sqlite_transactions import begin_immediate as begin_immediate
 MAX_CAPTURE_DECISION_BYTES = 1024 * 1024
 
 
-
-
-
-
-
-
 class UnsafeStateRoot(ValueError):
     """Raised when runtime state cannot safely use local SQLite locking."""
 
@@ -90,12 +100,6 @@ class MetadataDurabilityUnavailable(OSError):
     """Raised when the platform cannot prove the requested metadata boundary."""
 
     code = "metadata_durability_unavailable"
-
-
-
-
-
-
 
 
 @dataclass(frozen=True)
@@ -467,16 +471,6 @@ def _harden_runtime_owner_only(path: Path, mode: int) -> None:
     _set_owner_only(Path(path), mode)
 
 
-
-
-
-
-
-
-
-
-
-
 def open_operational_db(
     path: Path,
     *,
@@ -544,21 +538,6 @@ def _operational_db_identity(path: Path) -> os.stat_result:
     return path.stat(follow_symlinks=False)
 
 
-def _apply_operational_pragmas(connection: sqlite3.Connection, busy_ms: int) -> None:
-    connection.row_factory = sqlite3.Row
-    connection.execute(f"PRAGMA busy_timeout={busy_ms:d}")
-    mode = connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
-    if str(mode).casefold() != "delete":
-        raise sqlite3.OperationalError(f"SQLite refused journal_mode=DELETE: {mode}")
-    connection.execute("PRAGMA synchronous=FULL")
-    connection.execute("PRAGMA foreign_keys=ON")
-    connection.execute("PRAGMA trusted_schema=OFF")
-    _require_pragma(connection, "synchronous", 2)
-    _require_pragma(connection, "foreign_keys", 1)
-    _require_pragma(connection, "trusted_schema", 0)
-    _require_pragma(connection, "busy_timeout", busy_ms)
-
-
 def _configure_operational_connection(
     connection: sqlite3.Connection,
     path: Path,
@@ -579,75 +558,6 @@ def _configure_operational_connection(
             initialize=initialize_contract,
         )
     _set_owner_only(path, 0o600)
-
-
-def _pragma_integer(connection: sqlite3.Connection, name: str) -> int:
-    row = connection.execute(f"PRAGMA {name}").fetchone()
-    if row is None or isinstance(row[0], bool) or not isinstance(row[0], int):
-        raise OperationalDatabaseContractError(
-            f"operational database PRAGMA {name} returned an invalid value"
-        )
-    return row[0]
-
-
-def _require_pragma(
-    connection: sqlite3.Connection,
-    name: str,
-    expected: int,
-) -> None:
-    actual = _pragma_integer(connection, name)
-    if actual != expected:
-        raise OperationalDatabaseContractError(
-            f"operational database PRAGMA {name} mismatch: expected {expected}, got {actual}"
-        )
-
-
-def _validate_or_initialize_operational_contract(
-    connection: sqlite3.Connection,
-    contract: OperationalDatabaseContract,
-    *,
-    initialize: bool,
-) -> None:
-    identity = (
-        _pragma_integer(connection, "application_id"),
-        _pragma_integer(connection, "user_version"),
-    )
-    if initialize:
-        identity = _initialized_contract_identity(connection, contract, identity)
-    if identity != (contract.application_id, contract.user_version):
-        raise OperationalDatabaseContractError(
-            "operational database application_id or user_version mismatch"
-        )
-
-
-def _initialized_contract_identity(
-    connection: sqlite3.Connection,
-    contract: OperationalDatabaseContract,
-    identity: tuple[int, int],
-) -> tuple[int, int]:
-    """Stamp an empty database with the contract; refuse one stamped otherwise."""
-    if identity == (0, 0):
-        connection.execute(f"PRAGMA application_id={contract.application_id:d}")
-        connection.execute(f"PRAGMA user_version={contract.user_version:d}")
-        return (
-            _pragma_integer(connection, "application_id"),
-            _pragma_integer(connection, "user_version"),
-        )
-    if identity != (contract.application_id, contract.user_version):
-        raise OperationalDatabaseContractError(
-            "cannot initialize a conflicting operational database contract"
-        )
-    return identity
-
-
-
-
-
-
-
-
-
-
 
 
 def _contained_runtime_metadata(path: Path, state_root: Path) -> os.stat_result:
@@ -939,25 +849,6 @@ def _opened_readonly_operational_db(
         raise
 
 
-def _apply_readonly_operational_pragmas(
-    database: sqlite3.Connection, busy_ms: int
-) -> None:
-    database.row_factory = sqlite3.Row
-    database.execute(f"PRAGMA busy_timeout={busy_ms:d}")
-    database.execute("PRAGMA foreign_keys=ON")
-    database.execute("PRAGMA trusted_schema=OFF")
-    database.execute("PRAGMA query_only=ON")
-    mode = database.execute("PRAGMA journal_mode").fetchone()[0]
-    if str(mode).casefold() != "delete":
-        raise OperationalDatabaseContractError(
-            f"operational database journal_mode mismatch: expected delete, got {mode}"
-        )
-    _require_pragma(database, "synchronous", 2)
-    _require_pragma(database, "foreign_keys", 1)
-    _require_pragma(database, "trusted_schema", 0)
-    _require_pragma(database, "busy_timeout", busy_ms)
-
-
 def _require_stable_read(opened, after, length: int, max_bytes: int) -> None:
     """The file did not change under the descriptor, and the read stayed bounded."""
     moved = not os.path.samestat(opened, after) or (
@@ -1128,8 +1019,6 @@ def _runtime_identity_from_metadata(
         size=current.st_size,
         mtime_ns=current.st_mtime_ns,
     )
-
-
 
 
 def fsync_file(path: Path) -> None:
@@ -1541,49 +1430,3 @@ def _publish_staged(
 def sync_runtime_directory(path: Path) -> None:
     """Expose the shared checked metadata sync boundary to runtime publishers."""
     fsync_directory(Path(path))
-
-
-def _is_posix_relative_text(value: object) -> bool:
-    if not isinstance(value, str) or not value:
-        return False
-    return "\\" not in value and "//" not in value
-
-
-def _require_posix_relative_text(value: object) -> None:
-    if not _is_posix_relative_text(value):
-        raise ValueError("path must be a non-empty normalized POSIX relative path")
-    if re.match(r"^[A-Za-z]:", value):
-        raise ValueError("drive-qualified paths are forbidden")
-
-
-def _require_normalized_relative(path: PurePosixPath, value: str) -> None:
-    unnormalized = (
-        path.is_absolute()
-        or str(path) != value
-        or any(part in {"", ".", ".."} for part in path.parts)
-    )
-    if unnormalized:
-        raise ValueError("path must be normalized and relative")
-
-
-def _under_root(path: PurePosixPath, root: PurePosixPath) -> bool:
-    return path == root or root in path.parents
-
-
-def _require_inside_a_root(path: PurePosixPath, allowed_roots: tuple[str, ...]) -> None:
-    roots = tuple(PurePosixPath(root) for root in allowed_roots)
-    if not roots or not any(_under_root(path, root) for root in roots):
-        raise ValueError("path is outside every allowed root")
-
-
-def restricted_relative_path(value: str, allowed_roots: tuple[str, ...]) -> PurePosixPath:
-    _require_posix_relative_text(value)
-    path = PurePosixPath(value)
-    _require_normalized_relative(path, value)
-    _require_inside_a_root(path, allowed_roots)
-    return path
-
-
-# Which validator a typed rule selects, in declaration order. A table rather
-# than a chain: the chain was five `and`-joined branches in one function and
-# carried most of this module's measured complexity.

@@ -1963,15 +1963,17 @@ This does not authorize deploying the candidate checkout into the installed vaul
 
 The next queue source-identity boundary is `llm_wiki.queue_sources`: pure payload
 identity collection, daily-source validation, and generic source-link validation.
-Migration refusal construction and SQL remain in memory_queue. Existing static
+Strict migration identity parsing is also owned here; sqlite_contracts constructs
+migration refusals. SQL remains with queue/migration owners. Existing static
 method entry points are identical function aliases; no second implementation.
 Daily-only failure identities and general task source links retain distinct rules.
 
 `llm_wiki.sqlite_contracts` owns the existing operational database contract,
 migration statement and contract error types, their value validators, and exact
 SQLite identifier quoting. It imports only stdlib. reliable_memory retains all
-connection, filesystem, pragma and migration execution behavior, with direct
-aliases for the old names. Class pickle names remain reliable_memory for existing
+connection lifetime and filesystem behavior; sqlite_pragmas, sqlite_migrations
+and sqlite_deadlines own their named control policies, with direct aliases for
+the old names. Class pickle names remain reliable_memory for existing
 serialized callers. Consumers import values directly from sqlite_contracts.
 
 Maintenance packet tests share `tests/module_context.py`. Each packet explicitly
@@ -2007,3 +2009,8 @@ Maintenance bundles may explicitly use exact-duplicates/v1: identical file bodie
 appear once, with counted backward references for other paths. The stdlib-only
 llm_wiki.context_bundle codec restores every path and byte; measurement verifies
 that round trip before counting. Source files and runtime formats are unchanged.
+
+`llm_wiki.restricted_paths` owns lexical POSIX relative-path and allowed-root
+validation. `llm_wiki.sqlite_pragmas` owns settings and contract-header readback on
+supplied SQLite connections. Filesystem containment, ownership, opening and
+closing remain in reliable_memory; old APIs retain identity aliases.

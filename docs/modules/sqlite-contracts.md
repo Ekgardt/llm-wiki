@@ -4,8 +4,11 @@
 OperationalDatabaseContractError, MigrationStatement, their validators, coded migration-error construction and exact
 SQLite identifier quoting. It imports only standard library modules and opens no
 files or databases. There is one definition of every type, default and validator.
-All connection handling, PRAGMAs, migration execution and durability remain in
-reliable_memory. General SQL identifier quoting is not SQL value interpolation.
+reliable_memory owns connection lifetime, filesystem handling and durability.
+sqlite_pragmas owns settings/header policy; sqlite_migrations owns resumable
+statement execution; sqlite_deadlines owns cooperative deadline control. These
+owners consume the value contracts directly. General SQL identifier quoting is
+not SQL value interpolation.
 
 reliable_memory re-exports the same objects. Their historical `__module__` stays
 reliable_memory so existing serialized values retain exact pickle lookup paths.

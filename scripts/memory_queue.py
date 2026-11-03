@@ -217,6 +217,7 @@ from llm_wiki.queue_timing import _retry_after_text as _retry_after_text
 from llm_wiki.queue_timing import _retry_available_at as _retry_available_at
 from llm_wiki.queue_timing import _timestamp as _timestamp
 from llm_wiki.reliability_defaults import DEFAULTS
+from llm_wiki.restricted_paths import restricted_relative_path
 from llm_wiki.sqlite_contracts import (
     MigrationStatement,
     OperationalDatabaseContract,
@@ -230,6 +231,7 @@ from llm_wiki.sqlite_deadlines import (
     refresh_operational_deadline,
 )
 from llm_wiki.sqlite_migrations import run_resumable_migration
+from llm_wiki.sqlite_pragmas import _validate_or_initialize_operational_contract
 from llm_wiki.sqlite_transactions import begin_immediate
 from llm_wiki.windows_acl import _acl_is_owner_only as _acl_is_owner_only
 from llm_wiki.windows_acl import _acl_owner_lines as _acl_owner_lines
@@ -238,13 +240,11 @@ from llm_wiki.windows_acl import _windows_acl_lines as _windows_acl_lines
 from reliable_memory import (
     MAX_CAPTURE_DECISION_BYTES,
     _set_owner_only,
-    _validate_or_initialize_operational_contract,
     fsync_directory,
     fsync_file,
     open_operational_db,
     open_readonly_operational_db,
     read_runtime_bytes,
-    restricted_relative_path,
 )
 from secret_redact import redact_secrets, redact_structure
 
