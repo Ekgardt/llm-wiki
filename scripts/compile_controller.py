@@ -3072,12 +3072,31 @@ def _require_acyclic_dependency_directory(resolved, ancestors):
 
 
 def _compile_runtime_library(config):
+    import sys
+
+    if sys.platform == 'win32':
+        return _windows_compile_runtime_library()
+    return _unix_compile_runtime_library(config)
+
+
+def _unix_compile_runtime_library(config):
     if config.get('Py_ENABLE_SHARED') == 0:
         return {}
     if config.get('Py_ENABLE_SHARED') != 1:
         raise ValueError('Python shared-library configuration is unavailable')
     name = config.get('INSTSONAME') or config.get('LDLIBRARY')
     return {'python-library': Path(config['LIBDIR']) / name}
+
+
+def _windows_compile_runtime_library():
+    import sys
+
+    from llm_wiki.windows_native import loaded_module_filename
+
+    handle = getattr(sys, 'dllhandle', None)
+    if isinstance(handle, bool) or not isinstance(handle, int) or handle <= 0:
+        raise ValueError('Python DLL handle is unavailable')
+    return {'python-library': Path(loaded_module_filename(handle))}
 
 
 def _compile_runtime_parameters(config):

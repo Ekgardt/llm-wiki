@@ -51,6 +51,7 @@ _WINDOWS_KERNEL32_PROTOTYPES = (
         (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD),
     ),
     ("GetConsoleOutputCP", wintypes.UINT, ()),
+    ("GetModuleFileNameW", wintypes.DWORD, (wintypes.HMODULE, wintypes.LPWSTR, wintypes.DWORD)),
 )
 
 
@@ -68,5 +69,20 @@ def _windows_kernel32():
         function.restype = restype
         function.argtypes = argtypes
     return kernel32
+
+
+def loaded_module_filename(handle: int) -> str:
+    """Resolve an already loaded module; zero selects the current executable."""
+    kernel32 = _windows_kernel32()
+    # Start at Win32 MAX_PATH; this is an allocation size, not a path limit.
+    capacity = 260
+    while True:
+        buffer = ctypes.create_unicode_buffer(capacity)
+        length = kernel32.GetModuleFileNameW(handle, buffer, capacity)
+        if length == 0:
+            raise ctypes.WinError(ctypes.get_last_error())
+        if length < capacity:
+            return buffer.value
+        capacity *= 2
 
 

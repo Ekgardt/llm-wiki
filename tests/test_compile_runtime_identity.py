@@ -9,6 +9,8 @@ import pytest
 
 @pytest.fixture
 def runtime(tmp_path, monkeypatch):
+    # This fixture explicitly models Unix shared/static-library configuration.
+    monkeypatch.setattr(sys, 'platform', 'linux')
     stdlib = tmp_path / 'stdlib'
     stdlib.mkdir()
     packages = stdlib / 'site-packages'
@@ -97,3 +99,53 @@ def test_unknown_shared_library_configuration_refuses_qualification(runtime):
     config.pop('Py_ENABLE_SHARED')
     with pytest.raises(ValueError, match='configuration is unavailable'):
         controller.compile_runtime_dependency_manifest()
+
+
+def test_windows_library_uses_loaded_handle_without_unix_configuration(tmp_path, monkeypatch):
+    from llm_wiki import windows_native
+
+    path = tmp_path / 'actual-loaded-runtime.dll'
+    path.write_bytes(b'Python DLL')
+    handle = 1 << 40
+    calls = []
+
+    def filename(value):
+        calls.append(value)
+        return str(path)
+
+    monkeypatch.setattr(sys, 'platform', 'win32')
+    monkeypatch.setattr(sys, 'dllhandle', handle, raising=False)
+    monkeypatch.setattr(windows_native, 'loaded_module_filename', filename, raising=False)
+    assert controller._compile_runtime_library({}) == {'python-library': path}
+    assert calls == [handle]
+
+
+@pytest.mark.parametrize('handle', [None, 0, -1, True, 'handle'])
+def test_windows_library_refuses_missing_or_invalid_handle(monkeypatch, handle):
+    monkeypatch.setattr(sys, 'platform', 'win32')
+    monkeypatch.setattr(sys, 'dllhandle', handle, raising=False)
+    with pytest.raises(ValueError, match='Python DLL handle is unavailable'):
+        controller._compile_runtime_library({})
+
+
+def test_windows_library_propagates_native_lookup_failure(monkeypatch):
+    from llm_wiki import windows_native
+
+    def refused(handle):
+        raise OSError('native lookup failed')
+
+    monkeypatch.setattr(sys, 'platform', 'win32')
+    monkeypatch.setattr(sys, 'dllhandle', 123, raising=False)
+    monkeypatch.setattr(windows_native, 'loaded_module_filename', refused)
+    with pytest.raises(OSError, match='native lookup failed'):
+        controller._compile_runtime_library({})
+
+
+def test_actual_runtime_library_can_be_fingerprinted():
+    libraries = controller._compile_runtime_library(sysconfig.get_config_vars())
+    for path in libraries.values():
+        record = controller._compile_dependency_file(path, None)
+        assert record['size'] > 0
+        assert len(record['sha256']) == 64
+    if sys.platform == 'win32':
+        assert set(libraries) == {'python-library'}

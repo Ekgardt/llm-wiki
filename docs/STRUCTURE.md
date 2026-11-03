@@ -2188,3 +2188,16 @@ rows and compares supplied identities/bytes without opening databases, observing
 processes or touching files. Registry admission, timing, clock reads, SQL and
 marker publication/removal remain in operational_ownership. Legacy aliases retain
 one implementation and the current failures, role sets and size bounds.
+
+Windows compile-runtime identity resolves the loaded Python DLL from `sys.dllhandle`
+through the existing lazy Windows API owner. It fingerprints that actual file;
+missing handles and native lookup errors refuse qualification. Unix configured
+shared/static-library handling remains distinct. Buffer growth handles long paths
+without a guessed DLL name or silently omitted runtime dependency.
+
+[Context ownership](modules/context-ownership.md) qualifies the existing Git file
+ownership inventory and its whole synthetic-repository test suite in place.
+Measurement/source-closure tooling retains its own owner. Both packets include
+full dependencies; whole-repository integration assertions and the explicit
+completion gate remain unchanged. This introduces no contract-only dependency
+exception or production behavior change.

@@ -34,3 +34,11 @@ timeouts, native signatures and error policy are preserved. Both modules have
 own tests and complete ≤100,000-token context manifests under tests/modules and
 docs/modules. No new runtime path, WinAPI surface or security policy is added.
 Approval: `knowledge/notes/windows-permissions-boundaries-decision-20261102.md`.
+
+`loaded_module_filename(handle)` resolves a module already loaded by the current
+process through GetModuleFileNameW. The handle is borrowed: this helper neither
+loads nor unloads that module. Zero has the native API meaning of current
+executable; the compile-runtime caller separately refuses a missing/zero Python
+DLL handle. A Unicode buffer grows on truncation; native errors propagate. The
+initial MAX_PATH-sized allocation is not a limit on accepted paths.
+Source: [Windows Python library identity](../research/2026-11-03-windows-python-library-identity.md).

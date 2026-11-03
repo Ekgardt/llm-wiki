@@ -40,6 +40,7 @@ def _refusing_kernel32() -> SimpleNamespace:
         GetFileInformationByHandle=_Function(0),
         SetFileInformationByHandle=_Function(0),
         GetConsoleOutputCP=_Function(866),
+        GetModuleFileNameW=_Function(0),
     )
 
 

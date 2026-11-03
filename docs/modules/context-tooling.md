@@ -134,3 +134,8 @@ Run all six integration files together with `tests/test_module_registry_integrat
 and the packet checks; they preserve the former assertions and are still part of
 the full suite. Their context is not silently charged to a leaf owner or declared
 complete: whole-project integration ownership remains outstanding.
+
+The existing file inventory and its complete synthetic-repository tests now have
+[their own maintenance owner](context-ownership.md). Their original paths and
+commands above remain. Source/byte/token qualification stays here; no full-source
+closure or complete-project assertion is relaxed by that responsibility split.

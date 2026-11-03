@@ -1,0 +1,52 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md",
+    "docs/modules/context-ownership.md",
+    "docs/modules/context-ownership-context.json",
+    "docs/research/2026-11-03-context-ownership-owner.md",
+    "tests/module_ownership.py",
+    "tests/test_module_ownership.py",
+    "docs/research/2026-11-03-module-file-ownership.md",
+    "tests/module_record_ownership.py"
+  ],
+  "directories": [
+    "tests/modules/context_ownership"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/context-ownership.md",
+      "docs/modules/context-ownership-context.json",
+      "docs/research/2026-11-03-context-ownership-owner.md",
+      "tests/module_ownership.py",
+      "tests/test_module_ownership.py",
+      "docs/research/2026-11-03-module-file-ownership.md"
+    ],
+    "directories": [
+      "tests/modules/context_ownership"
+    ]
+  }
+}

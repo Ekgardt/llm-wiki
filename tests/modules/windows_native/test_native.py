@@ -47,6 +47,8 @@ def test_every_signature_is_installed_before_use(loaded):
     assert library.GetFileInformationByHandle.argtypes == (
         wintypes.HANDLE, ctypes.POINTER(native._WindowsFileInformation))
     assert library.GetConsoleOutputCP.restype is wintypes.UINT
+    assert library.GetModuleFileNameW.argtypes == (wintypes.HMODULE, wintypes.LPWSTR, wintypes.DWORD)
+    assert library.GetModuleFileNameW.restype is wintypes.DWORD
 
 
 def test_structures_preserve_field_names_and_types():
