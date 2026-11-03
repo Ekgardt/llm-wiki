@@ -2281,3 +2281,7 @@ publication, migration and actual log writers remain consumer responsibilities.
 Full owner contract: [daily-log selection](modules/daily-log-selection.md).
 The supplied-directory selector has no runtime-state dependency; memory_state
 retains public object reexports and all operational state ownership.
+
+Full owner contract: [state JSON values](modules/state-json-values.md).
+The value layer receives the existing byte budget explicitly; memory_state keeps
+its public budget binding, locks, recovery and durable publication.

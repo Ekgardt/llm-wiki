@@ -21,9 +21,7 @@ written by a faster one.
 """
 from __future__ import annotations
 
-import errno
 import hashlib
-import json
 import os
 import secrets
 import subprocess
@@ -46,6 +44,18 @@ from llm_wiki.daily_log_selection import (
     daily_logs as daily_logs,
 )
 from llm_wiki.formats.canonical import sha256_bytes
+from llm_wiki.state_json_values import (
+    _decoded_state,
+)
+from llm_wiki.state_json_values import (
+    _serialized_state as _serialize_state_values,
+)
+from llm_wiki.state_json_values import (
+    _state_bytes as _state_bytes,
+)
+from llm_wiki.state_json_values import (
+    trim_state_to_budget as _trim_state_values,
+)
 from reliable_memory import durable_publish_file, fsync_directory
 
 # Every hook imports this module, and the probe below runs at import. A hook's
@@ -124,19 +134,6 @@ def _is_pid_alive(pid: int) -> bool:
     return process_liveness.pid_alive(pid)
 
 
-def _decoded_state(raw: bytes) -> dict[str, Any] | None:
-    """The state these bytes hold, or None: not UTF-8, not JSON, or not an object.
-
-    One definition of "readable" for the reader and the writer. See
-    `docs/research/2026-09-17-a-torn-state-file-is-recovered-whatever-its-bytes.md`.
-    """
-    try:
-        value = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    return value if isinstance(value, dict) else None
-
-
 def _keep_corrupt_copy(raw: bytes) -> None:
     """Preserve the corrupt bytes for forensics; do not silently clobber."""
     try:
@@ -170,49 +167,14 @@ def load_state() -> dict[str, Any]:
 # growth shows up as eviction rather than as a blind spot.
 MAX_STATE_TARGET_BYTES = 192 * 1024
 
-# The maps that grow with use: dedupe memory and per-project reducer caches.
-# Entries have varying encoded sizes; the shared byte budget bounds the file.
-_TRIMMABLE_STATE_KEYS = (
-    "tool_capture_dedupe",
-    "prompt_capture_dedupe",
-    "project_checkpoint_reducers",
-)
-
-
-def _state_bytes(state: dict[str, Any]) -> int:
-    return len(json.dumps(state, indent=2, ensure_ascii=False).encode("utf-8"))
-
-
-def _evict_oldest(state: dict[str, Any], key: str) -> bool:
-    """Drop the oldest entry of one growth map; True when something went."""
-    entries = state.get(key)
-    if not isinstance(entries, dict) or not entries:
-        return False
-    entries.pop(next(iter(entries)))
-    return True
-
 
 def trim_state_to_budget(state: dict[str, Any]) -> int:
-    """Evict oldest dedupe and reducer entries until the file fits its bound.
-
-    Returns how many entries were dropped. Losing a dedupe entry can cost one
-    duplicate capture later; losing the health of two checks costs every finding
-    they would have made, which is the worse of the two.
-    """
-    dropped = 0
-    while _state_bytes(state) > MAX_STATE_TARGET_BYTES:
-        if not any(_evict_oldest(state, key) for key in _TRIMMABLE_STATE_KEYS):
-            return dropped
-        dropped += 1
-    return dropped
+    """Apply the existing disposable-cache policy using the current byte budget."""
+    return _trim_state_values(state, MAX_STATE_TARGET_BYTES)
 
 
 def _serialized_state(state: dict[str, Any]) -> str:
-    trim_state_to_budget(state)
-    text = json.dumps(state, indent=2, ensure_ascii=False)
-    if len(text.encode("utf-8")) > MAX_STATE_TARGET_BYTES:
-        raise OSError(errno.EFBIG, "state exceeds the shared writable byte budget; protected state was preserved")
-    return text
+    return _serialize_state_values(state, MAX_STATE_TARGET_BYTES)
 
 
 def _write_state_text(text: str) -> None:
