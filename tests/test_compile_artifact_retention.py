@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import compile_progress as progress
 import memory_queue
 import pytest
+import reliable_memory as reliable
 
 from tests.test_compile_progress_admission import upgraded as upgraded
 
@@ -100,7 +101,7 @@ def _capture_export(queue, tmp_path, event):
     target = export / archive
     target.parent.mkdir(parents=True)
     target.write_bytes(queue.read_compile_artifact(event))
-    target.chmod(0o600)
+    reliable._harden_runtime_owner_only(target, 0o600)
     artifact = memory_queue._CapturePurgeArtifact(
         reference, archive, event.details['artifact']['sha256'],
     )

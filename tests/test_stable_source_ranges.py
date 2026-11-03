@@ -5,6 +5,8 @@ import os
 import bounded_io as bio
 import pytest
 
+from tests.native_file_replacement import allow_file_replacement
+
 
 def test_live_range_is_verified_without_whole_file_materialization(tmp_path, monkeypatch):
     path = tmp_path / 'daily.md'
@@ -30,9 +32,11 @@ def test_live_range_is_verified_without_whole_file_materialization(tmp_path, mon
 
 
 @pytest.mark.parametrize('mutation', ['replace', 'append', 'rewrite'])
-def test_live_range_rejects_changed_source_even_for_cached_block(tmp_path, mutation):
+def test_live_range_rejects_changed_source_even_for_cached_block(tmp_path, monkeypatch, mutation):
     path = tmp_path / 'daily.md'
     path.write_bytes(b'original evidence')
+    if mutation == 'replace':
+        allow_file_replacement(monkeypatch, path)
     with pytest.raises(bio.SourceChangedDuringRead):
         with bio.open_stable_range(path, 1024) as source:
             assert source[:1] == b'o'
@@ -97,3 +101,14 @@ def test_live_range_rejects_symlink(tmp_path):
     with pytest.raises(PermissionError):
         with bio.open_stable_range(link, 1024):
             pytest.fail('symlink admitted')
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows default descriptor sharing')
+def test_default_windows_range_prevents_path_replacement(tmp_path):
+    path = tmp_path / 'daily.md'
+    path.write_bytes(b'original evidence')
+    with bio.open_stable_range(path, 1024) as source:
+        with pytest.raises(PermissionError):
+            path.rename(path.with_suffix('.old'))
+        assert source[:] == b'original evidence'
+    assert path.read_bytes() == b'original evidence'

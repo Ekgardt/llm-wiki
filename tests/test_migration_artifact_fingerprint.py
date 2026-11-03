@@ -10,19 +10,23 @@ import pytest
 import reliable_memory as reliable
 from bounded_io import IO_CHUNK_BYTES
 
+from tests.native_file_replacement import allow_file_replacement
+
 
 def _artifact(tmp_path, content=b'original'):
     path = tmp_path / 'queue.sqlite3'
     path.write_bytes(content)
-    path.chmod(0o600)
+    reliable._harden_runtime_owner_only(path, 0o600)
+    reliable._require_owner_only_file(path, path.stat())
     return path
 
 
 def test_receipt_rejects_path_replaced_after_bytes_read(tmp_path, monkeypatch):
     path = _artifact(tmp_path)
+    allow_file_replacement(monkeypatch, path)
     replacement = tmp_path / 'new'
     replacement.write_bytes(b'replaced')
-    replacement.chmod(0o600)
+    reliable._harden_runtime_owner_only(replacement, 0o600)
     original_read = os.read
 
     def replace_after_read(descriptor, count):
@@ -70,7 +74,8 @@ def test_fingerprint_honors_expired_deadline_before_read(tmp_path, monkeypatch):
         reliable.fingerprint_runtime_file(path, tmp_path, deadline=time.monotonic() - 1)
 
 
-@pytest.mark.parametrize('content', [b'', b'abc', b'a' * (IO_CHUNK_BYTES + 9)])
+@pytest.mark.parametrize('content', [b'', b'abc', b'a' * (IO_CHUNK_BYTES + 9)],
+                         ids=['empty', 'short', 'multiple-chunks'])
 def test_short_reads_still_hash_the_complete_file(tmp_path, monkeypatch, content):
     path = _artifact(tmp_path, content)
     original_read = os.read

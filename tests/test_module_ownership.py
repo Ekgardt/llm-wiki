@@ -10,7 +10,7 @@ from tests.module_ownership import main, ownership_report, tracked_files
 def _write(root, name, content=''):
     path = root / name
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
+    path.write_text(content, encoding='utf-8')
     return path
 
 
@@ -88,7 +88,7 @@ def test_directory_ownership_is_expanded_and_checked(tmp_path):
         'files': [name], 'directories': ['owned'],
         'ownership': {'files': [name], 'directories': ['owned']},
     }))
-    report = ownership_report(tmp_path, tracked={name, str(source.relative_to(tmp_path))})
+    report = ownership_report(tmp_path, tracked={name, source.relative_to(tmp_path).as_posix()})
     assert report['ownership']['owned/source.py'] == 'one'
     _write(tmp_path, 'owned/untracked.py')
     with pytest.raises(AssertionError, match='Untracked ownership'):

@@ -2125,3 +2125,12 @@ bootstrap and environment creation. Linux, Windows and macOS remain tested; the
 current native macOS lane is ARM64. Intel macOS full dependencies are not qualified:
 both the previous and updated ONNX Runtime locks lack its binary distribution.
 See [the approved plan](research/2026-11-03-python314-unified-runtime-proposal.md).
+
+### Native replacement test support
+
+`tests/native_file_replacement.py` is shared integration-test support. On Windows
+it uses the shared Windows ABI declarations to create a delete-sharing reader for one selected
+fixture path, allowing the original identity guard assertions to run after a real
+replacement. Production descriptor sharing and permission checks remain intact;
+a separate native test checks ordinary open-file replacement refusal. This helper
+remains an explicit integration dependency, not a qualified leaf module.

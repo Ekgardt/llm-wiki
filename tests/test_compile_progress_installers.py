@@ -23,21 +23,30 @@ PS_NAMES = ("Get-CompileProgressState", "Invoke-CompileProgressMigration",
 
 
 def _shim(tmp_path):
-    binary = tmp_path / "uv"
-    binary.write_text(f"#!{sys.executable}\n" + """
-import json, os, sys
-with open(os.environ['TEST_CALLS'], 'a') as out:
+    binary = tmp_path / "uv-shim.py"
+    binary.write_text("""
+import json, os, subprocess, sys
+with open(os.environ['TEST_CALLS'], 'a', encoding='utf-8') as out:
     out.write(json.dumps(sys.argv[1:]) + '\\n')
 if os.environ.get('TEST_RUN_REAL') == '1':
-    os.execv(sys.executable, [sys.executable, *sys.argv[5:]])
+    sys.exit(subprocess.run([sys.executable, *sys.argv[5:]], check=False).returncode)
 if '--check' in sys.argv:
     print(json.dumps({'details': {'compile_progress': os.environ['TEST_PROGRESS']}}))
     sys.exit(0)
 print('migration diagnostic')
 sys.exit(int(os.environ['TEST_MIGRATION_EXIT']))
-""")
-    binary.chmod(0o700)
+""", encoding="utf-8")
     return binary
+
+
+def _shim_function(platform, shim):
+    python = Path(sys.executable).as_posix()
+    path = shim.as_posix()
+    functions = {
+        'bash': f'uv() {{ {shlex.quote(python)} {shlex.quote(path)} "$@"; }}\n',
+        'pwsh': f'function uv {{ & {ps_literal(python)} {ps_literal(path)} @args }}\n',
+    }
+    return functions[platform]
 
 
 def _shell_script(state, image, confirmed):
@@ -79,7 +88,7 @@ def _run_slice(tmp_path, platform, state, image, confirmed, **settings):
     executable = shutil.which(platform)
     if executable is None:
         pytest.skip(f"{platform} unavailable")
-    _shim(tmp_path)
+    shim = _shim(tmp_path)
     (state / "logs").mkdir(parents=True, exist_ok=True)
     calls = tmp_path / "calls.jsonl"
     env = dict(os.environ, PATH=str(tmp_path) + os.pathsep + os.environ["PATH"],
@@ -88,10 +97,11 @@ def _run_slice(tmp_path, platform, state, image, confirmed, **settings):
     env.update(settings)
     scripts = {"bash": (_shell_script, ["-c"]), "pwsh": (_powershell_script, ["-NoProfile", "-NonInteractive", "-Command"])}
     render, flags = scripts[platform]
-    result = subprocess.run([executable, *flags, render(state, image, confirmed)],
+    source = _shim_function(platform, shim) + render(state, image, confirmed)
+    result = subprocess.run([executable, *flags, source],
                             env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
-    return result, [json.loads(line) for line in calls.read_text().splitlines()]
+    return result, [json.loads(line) for line in calls.read_text(encoding='utf-8').splitlines()]
 
 
 @pytest.mark.parametrize("platform", ["bash", "pwsh"])
@@ -166,3 +176,21 @@ def test_inspection_does_not_announce_readiness_for_an_invalid_queue(tmp_path):
     report = repair.inspect_installed_vault(root=root, state_root=state)
     assert report["overall_status"] == "error"
     assert "compile_progress" not in report["details"]
+
+
+def test_real_shim_waits_and_preserves_arguments_and_failure(tmp_path):
+    child = tmp_path / 'child with spaces.py'
+    output = tmp_path / 'result with spaces.json'
+    child.write_text(
+        "import json, pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]), encoding='utf-8')\n"
+        "sys.exit(7)\n", encoding='utf-8',
+    )
+    arguments = ['space value', 'quote"value', 'back\\slash']
+    env = dict(os.environ, TEST_RUN_REAL='1', TEST_CALLS=str(tmp_path / 'calls.jsonl'))
+    result = subprocess.run(
+        [sys.executable, str(_shim(tmp_path)), 'run', '--locked', '--no-sync', 'python',
+         str(child), str(output), *arguments], env=env, check=False,
+    )
+    assert result.returncode == 7
+    assert json.loads(output.read_text(encoding='utf-8')) == arguments
