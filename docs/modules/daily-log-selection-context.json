@@ -28,7 +28,8 @@
     "docs/modules/daily-log-selection.md",
     "docs/modules/daily-log-selection-context.json",
     "docs/research/2026-09-17-a-daily-log-is-named-by-its-date-everywhere.md",
-    "docs/research/2026-09-27-an-estimate-is-measured-and-an-open-day-waits.md"
+    "docs/research/2026-09-27-an-estimate-is-measured-and-an-open-day-waits.md",
+    "docs/modules/answer-budget.md"
   ],
   "directories": [
     "tests/modules/daily_log_selection"
