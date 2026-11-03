@@ -140,6 +140,8 @@ def _require_test_fixture(function) -> None:
 def _require_patch_arguments(call) -> None:
     if len(call.args) != 3 or call.keywords:
         raise ValueError('Only explicit object/name/replacement patches are supported')
+    if any(isinstance(arg, ast.Starred) for arg in call.args):
+        raise ValueError('Dynamic patch argument expansion requires full source')
 
 
 def _require_public_function(name, bindings: dict, kinds: dict) -> None:

@@ -29,6 +29,7 @@ def test_public_fault_injection_does_not_require_private_implementation():
     ('def test_unknown(monkeypatch):', 'def test_unknown():'),
     ('def test_unknown', 'def helper'),
     ('lambda data: None', 'lambda data: globals()'),
+    ('lambda data: None', '*values'),
     ('lambda data: None)', 'lambda data: None, raising=False)'),
 ])
 def test_implementation_sensitive_or_unverifiable_patch_refuses(before, after):
