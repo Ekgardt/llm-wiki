@@ -1771,63 +1771,58 @@ lineage can append or recover progress. Capture requires the pending source iden
 before its first snapshot transition; source identity alone is not a complete work
 or dependency identity.
 
+## Qualified module navigation
+
+The links below name full owner contracts. Every packet must include its owned
+and dependency guides in full; global authority and runtime rules above still apply.
+
 ## Isolated formats module (approved 2026-11-02)
 
-Full owner contracts: [formats](modules/formats.md).
-
-Module tests live in `tests/modules/formats/` and its contract in
-`docs/modules/formats.md`. The complete owned context, shared instructions,
-fixtures and dependency contracts must fit 100,000 o200k_base tokens. Cross-module
-qualification scenarios remain counted separately and must not be removed.
-Existing public helper imports can re-export the same objects for compatibility;
-there is one implementation and one exception/type identity. Private parser
-consumers must import their owning module. No database, wire format, daemon,
-installation command or runtime root is added. Implementation and installed
-qualification are separate; the working branch is not installed by this decision.
+[formats](modules/formats.md).
 
 ## Existing context-budget boundary (qualified 2026-11-02)
 
-Full owner contracts: [context-budget](modules/context-budget.md).
+[context-budget](modules/context-budget.md).
 
 ## Queue payload format (approved 2026-11-02)
 
-Full owner contracts: [formats](modules/formats.md).
+[formats](modules/formats.md).
 
 ## Queue type contract (approved 2026-11-02)
 
-Full owner contracts: [queue-contracts](modules/queue-contracts.md).
+[queue-contracts](modules/queue-contracts.md).
 
 ## Existing renewal and bounded-input boundaries (qualified 2026-11-02)
 
-Full owner contracts: [lease-renewal](modules/lease-renewal.md), [bounded-io](modules/bounded-io.md).
+[lease-renewal](modules/lease-renewal.md), [bounded-io](modules/bounded-io.md).
 
 ## Existing process-liveness boundary (qualified 2026-11-02)
 
-Full owner contracts: [process-liveness](modules/process-liveness.md).
+[process-liveness](modules/process-liveness.md).
 
 ## Queue process cleanup (approved 2026-11-02)
 
-Full owner contracts: [queue-process-cleanup](modules/queue-process-cleanup.md).
+[queue-process-cleanup](modules/queue-process-cleanup.md).
 
 ## Queue child runtime (approved 2026-11-02)
 
-Full owner contracts: [queue-child-runtime](modules/queue-child-runtime.md).
+[queue-child-runtime](modules/queue-child-runtime.md).
 
 ## Reliability defaults and queue heartbeat (approved 2026-11-02)
 
-Full owner contracts: [reliability-defaults](modules/reliability-defaults.md), [queue-heartbeat](modules/queue-heartbeat.md).
+[reliability-defaults](modules/reliability-defaults.md), [queue-heartbeat](modules/queue-heartbeat.md).
 
 ## Queue SQL definitions (approved 2026-11-02)
 
-Full owner contracts: [queue-schema](modules/queue-schema.md).
+[queue-schema](modules/queue-schema.md).
 
 ## Queue timing values (approved 2026-11-02)
 
-Full owner contracts: [queue-timing](modules/queue-timing.md).
+[queue-timing](modules/queue-timing.md).
 
 ## Windows native binding and ACL ownership (approved 2026-11-02)
 
-Full owner contracts: [windows-native](modules/windows-native.md), [windows-acl](modules/windows-acl.md).
+[windows-native](modules/windows-native.md), [windows-acl](modules/windows-acl.md).
 
 ### Approved completion mandate (2026-11-02)
 
@@ -1838,34 +1833,34 @@ documented and qualified before acceptance. Full maintenance packets remain
 limited to 100000 tokens; whole-repository coverage is not yet complete.
 This does not authorize deploying the candidate checkout into the installed vault.
 
-Full owner contracts: [queue-sources](modules/queue-sources.md).
+[queue-sources](modules/queue-sources.md).
 
-Full owner contracts: [sqlite-contracts](modules/sqlite-contracts.md).
+[sqlite-contracts](modules/sqlite-contracts.md).
 
 Maintenance packet tests share `tests/module_context.py`. Each packet explicitly
 includes its applicable pytest conftest/plugin bootstrap and the measurement code;
 the measured serialization includes file names and byte-length framing. Missing
 implicit loaders fail the declaration check rather than disappear from the count.
 
-Full owner contracts: [python-parse](modules/python-parse.md), [calendar-pass](modules/calendar-pass.md), [iso-time](modules/iso-time.md), [reply-json](modules/reply-json.md), [page-status](modules/page-status.md), [code-intelligence](modules/code-intelligence.md).
+[python-parse](modules/python-parse.md), [calendar-pass](modules/calendar-pass.md), [iso-time](modules/iso-time.md), [reply-json](modules/reply-json.md), [page-status](modules/page-status.md), [code-intelligence](modules/code-intelligence.md).
 
-Full owner contracts: [queue-schema-operations](modules/queue-schema-operations.md).
+[queue-schema-operations](modules/queue-schema-operations.md).
 
-Full owner contracts: [sqlite-transactions](modules/sqlite-transactions.md).
+[sqlite-transactions](modules/sqlite-transactions.md).
 
-Full owner contracts: [queue-migration-plan](modules/queue-migration-plan.md).
+[queue-migration-plan](modules/queue-migration-plan.md).
 
-Full owner contracts: [sqlite-deadlines](modules/sqlite-deadlines.md), [sqlite-migrations](modules/sqlite-migrations.md).
+[sqlite-deadlines](modules/sqlite-deadlines.md), [sqlite-migrations](modules/sqlite-migrations.md).
 
 Maintenance bundles may explicitly use exact-duplicates/v1: identical file bodies
 appear once, with counted backward references for other paths. The stdlib-only
 llm_wiki.context_bundle codec restores every path and byte; measurement verifies
 that round trip before counting. Source files and runtime formats are unchanged.
-Full owner contracts: [context-bundle](modules/context-bundle.md).
+[context-bundle](modules/context-bundle.md).
 
-Full owner contracts: [restricted-paths](modules/restricted-paths.md), [sqlite-pragmas](modules/sqlite-pragmas.md).
+[restricted-paths](modules/restricted-paths.md), [sqlite-pragmas](modules/sqlite-pragmas.md).
 
-Full owner contracts: [queue-attempts](modules/queue-attempts.md), [queue-validation](modules/queue-validation.md).
+[queue-attempts](modules/queue-attempts.md), [queue-validation](modules/queue-validation.md).
 
 Existing `windows_workspace.py` and `lsp_process_tree.py` remain separate platform
 owners: handle-relative filesystem operations and process-tree lifetime,
@@ -1874,17 +1869,17 @@ fixtures. The process-tree fixture is now shared independently of LSP protocol
 behavior. Native platform skips remain explicit. No public path or runtime
 ownership changes.
 See `research/2026-11-03-existing-platform-boundaries.md`.
-Full owner contracts: [windows-workspace](modules/windows-workspace.md).
+[windows-workspace](modules/windows-workspace.md).
 
-Full owner contracts: [secret-redact](modules/secret-redact.md), [repository-scope](modules/repository-scope.md).
+[secret-redact](modules/secret-redact.md), [repository-scope](modules/repository-scope.md).
 
-Full owner contracts: [runtime-contracts](modules/runtime-contracts.md), [runtime-environment](modules/runtime-environment.md), [runtime-records](modules/runtime-records.md), [runtime-sync](modules/runtime-sync.md), [runtime-publication](modules/runtime-publication.md), [runtime-fingerprints](modules/runtime-fingerprints.md).
+[runtime-contracts](modules/runtime-contracts.md), [runtime-environment](modules/runtime-environment.md), [runtime-records](modules/runtime-records.md), [runtime-sync](modules/runtime-sync.md), [runtime-publication](modules/runtime-publication.md), [runtime-fingerprints](modules/runtime-fingerprints.md).
 
-Full owner contracts: [sqlite-io](modules/sqlite-io.md).
+[sqlite-io](modules/sqlite-io.md).
 
-Full owner contracts: [path-ancestry](modules/path-ancestry.md).
+[path-ancestry](modules/path-ancestry.md).
 
-Full owner contracts: [queue-artifacts](modules/queue-artifacts.md).
+[queue-artifacts](modules/queue-artifacts.md).
 
 Maintenance-context tooling in `tests/module_context.py` and
 `tests/module_boundaries.py` has a test-only qualification packet. Beyond actual
@@ -1894,7 +1889,7 @@ initializers. It reports omitted paths before counting; it neither imports the
 product nor silently adds files. Dynamic/configuration/subprocess dependencies
 remain explicit research and integration obligations. See
 `research/2026-11-03-context-source-closure.md`.
-Full owner contracts: [context-tooling](modules/context-tooling.md).
+[context-tooling](modules/context-tooling.md).
 
 Each module context manifest has a separate `ownership` declaration for its
 unique tracked files/directories. Shared context may overlap; ownership may not.
@@ -1910,13 +1905,6 @@ rules. Every packet includes the full guides for its owned and dependency source
 owners; an ownership-registry-based guard checks coverage. Transfer evidence is
 recorded in `research/2026-11-03-module-contract-documentation.md`.
 
-The process-tree qualification now separates its shared test subprocess fixture
-from fake LSP protocol/semantic behavior; production `lsp_process_tree` stays in
-place. The process-only proc-scanning regressions move intact to the owner suite.
-See `docs/research/2026-11-03-lsp-process-tree-packet.md`; this boundary is covered
-by the approved autonomous decomposition mandate. Its complete packet passes the
-budget and focused Linux/Python 3.10 checks; native platform CI remains pending.
-
 Full process-tree owner contract: [lsp-process-tree](modules/lsp-process-tree.md).
 
 Existing `lsp_paths.py` and `verified_artifacts.py` remain separate leaf owners:
@@ -1926,62 +1914,48 @@ Pure cache tests move into their owner suite; graph/search integration tests sta
 with those consumers and share the single timestamp setup helper. See
 `research/2026-11-03-path-artifact-leaves.md` for the qualification boundary.
 
-Full owner contracts: [lsp-paths](modules/lsp-paths.md), [verified-artifacts](modules/verified-artifacts.md).
-
-The queue-validation owner includes pure capture input, descriptor,
-path, fence-field and scan-cursor checks. Queue call sites keep their existing
-ordering and transaction boundaries; TaskFence identity and semantic-decision
-orchestration remain in the executor. The canonical dependency owners provide
-format/hash and relative-path checks. One identical digest checker becomes an
-alias, preserving both call names without duplicate bodies. See
-`research/2026-11-03-queue-capture-validation.md` and the full queue-validation guide.
+[lsp-paths](modules/lsp-paths.md), [verified-artifacts](modules/verified-artifacts.md).
 
 Test LSP artifacts launched through verified descriptors are self-contained:
 the common code-kernel fixture producer packages the fake server and shared
 process helper together and hashes that whole artifact. The descriptor/path-swap
 regression uses the same producer. Production launch and verification are unchanged.
 
-The flush capture-decision producer delegates its stage-specific path wrapper
-to the same pure queue-validation builder that validates the path. Its one-argument
-entry point remains for existing callers; the second JSON/hash implementation is
-removed. The producer seam regression protects this shared ownership; runtime
-paths and bytes are unchanged.
-
 ### LSP wire codec
 
-Full owner contracts: [lsp-wire](modules/lsp-wire.md).
+[lsp-wire](modules/lsp-wire.md).
 
 ### Interruption propagation (qualified in place)
 
-Full owner contracts: [interruption](modules/interruption.md).
+[interruption](modules/interruption.md).
 
 ### LSP source positions (qualified in place)
 
-Full owner contracts: [lsp-positions](modules/lsp-positions.md).
+[lsp-positions](modules/lsp-positions.md).
 
 ### Language profile data
 
-Full owner contracts: [pyright-configuration](modules/pyright-configuration.md), [lsp-server-profile](modules/lsp-server-profile.md).
+[pyright-configuration](modules/pyright-configuration.md), [lsp-server-profile](modules/lsp-server-profile.md).
 
 ### Managed language registry
 
-Full owner contracts: [lsp-profiles](modules/lsp-profiles.md).
+[lsp-profiles](modules/lsp-profiles.md).
 
 ### LSP text normalization
 
-Full owner contracts: [lsp-text](modules/lsp-text.md).
+[lsp-text](modules/lsp-text.md).
 
 ### LSP credential text
 
-Full owner contracts: [lsp-credentials](modules/lsp-credentials.md).
+[lsp-credentials](modules/lsp-credentials.md).
 
 ### Code classification and named repository refusal
 
-Full owner contracts: [code-languages](modules/code-languages.md), [repository-refusal](modules/repository-refusal.md).
+[code-languages](modules/code-languages.md), [repository-refusal](modules/repository-refusal.md).
 
 ### Graph storage values
 
-Full owner contracts: [graph-storable](modules/graph-storable.md).
+[graph-storable](modules/graph-storable.md).
 
 ### Maintenance test dependency completeness
 
@@ -1996,15 +1970,15 @@ a separately measured integration obligation, outside the tooling unit packet.
 
 ### Queue worker values
 
-Full owner contracts: [queue-worker-state](modules/queue-worker-state.md).
+[queue-worker-state](modules/queue-worker-state.md).
 
 ### Strict UTF-8 prefix
 
-Full owner contracts: [utf8-text](modules/utf8-text.md).
+[utf8-text](modules/utf8-text.md).
 
 ### Processor reason byte bound
 
-Full owner contracts: [queue-worker-state](modules/queue-worker-state.md).
+[queue-worker-state](modules/queue-worker-state.md).
 
 ### Canonical maintenance qualification context
 
@@ -2026,7 +2000,7 @@ see [research](research/2026-11-03-compile-source-error-byte-bound.md).
 
 ### Existing leaf owners
 
-Full owner contracts: [okf-types](modules/okf-types.md), [host-transcripts](modules/host-transcripts.md), [ephemeral-paths](modules/ephemeral-paths.md), [embedding-model](modules/embedding-model.md), [inference-threads](modules/inference-threads.md).
+[okf-types](modules/okf-types.md), [host-transcripts](modules/host-transcripts.md), [ephemeral-paths](modules/ephemeral-paths.md), [embedding-model](modules/embedding-model.md), [inference-threads](modules/inference-threads.md).
 
 ### Exact maintenance record infrastructure
 
@@ -2042,23 +2016,23 @@ Full contract: [exact record contexts](modules/context-records.md).
 
 ### Existing compile-progress storage qualification
 
-Full owner contracts: [compile-progress](modules/compile-progress.md).
+[compile-progress](modules/compile-progress.md).
 
 ### Existing MCP supervisor qualification
 
-Full owner contracts: [mcp-supervisor](modules/mcp-supervisor.md).
+[mcp-supervisor](modules/mcp-supervisor.md).
 
 ### Queue task record boundary
 
-Full owner contracts: [queue-task-records](modules/queue-task-records.md).
+[queue-task-records](modules/queue-task-records.md).
 
 ### Queue evidence representation
 
-Full owner contracts: [queue-evidence-records](modules/queue-evidence-records.md), [queue-task-records](modules/queue-task-records.md).
+[queue-evidence-records](modules/queue-evidence-records.md), [queue-task-records](modules/queue-task-records.md).
 
 ### Existing retrieval leaf owners
 
-Full owner contracts: [lane-score](modules/lane-score.md), [temporal-anchor](modules/temporal-anchor.md), [evidence-sufficiency](modules/evidence-sufficiency.md).
+[lane-score](modules/lane-score.md), [temporal-anchor](modules/temporal-anchor.md), [evidence-sufficiency](modules/evidence-sufficiency.md).
 
 ### Python maintenance context across launch roots
 
@@ -2071,15 +2045,15 @@ record ownership across all paths. See [closure correction](research/2026-11-03-
 
 ### Offline fitting and answer representation owners
 
-Full owner contracts: [fit-lane-score](modules/fit-lane-score.md), [answer-budget](modules/answer-budget.md), [answer-cost](modules/answer-cost.md).
+[fit-lane-score](modules/fit-lane-score.md), [answer-budget](modules/answer-budget.md), [answer-cost](modules/answer-cost.md).
 
 ### Provider value records
 
-Full owner contracts: [model-records](modules/model-records.md).
+[model-records](modules/model-records.md).
 
 ### Saved compile answer records
 
-Full owner contracts: [compile-answer-records](modules/compile-answer-records.md).
+[compile-answer-records](modules/compile-answer-records.md).
 
 
 ### Source-inspection tests and context completeness
@@ -2142,21 +2116,11 @@ remains an explicit integration dependency, not a qualified leaf module.
 
 ### Coordinator schema owner
 
-`llm_wiki.coordinator_schema` owns the existing v3 table/header contract, historical
-schema hash, optional checkpoint indexes and supplied-connection schema inspection.
-`markdown_transaction` re-exports the same objects for existing callers. Connection
-opening, transaction settlement, migration execution and row invariants remain with
-the coordinator. Optional indexes do not change the adoption hash. See
-[the owner guide](modules/coordinator-schema.md).
+[Coordinator schema](modules/coordinator-schema.md).
 
 ### Position refresh and pinned transfer owners
 
-`fresh_positions.py` owns read-only Python line/span correction through the shared
-parser; it preserves indexed positions on unavailable input and marks exhausted
-file refresh budgets. It does not mutate generations or implement LSP encodings.
-`pinned_download.py` owns response selection, deadline-bounded streaming and
-transient retry. Installers retain integrity verification, partial-file cleanup,
-locks and adoption. Both retain current product paths. Owner tests isolate these
+Both retain current product paths. Owner tests isolate these
 contracts; existing navigation/installation integration obligations remain visible.
 
 Owner guides: [current positions](modules/fresh-positions.md) and
@@ -2187,7 +2151,7 @@ read-only workflow permissions and per-ref concurrency remain. Installer jobs us
 GitHub runners only; this grants no live-vault deployment or main merge. Retire
 this temporary branch trigger when the decomposition branch is retired.
 
-Full owner contract: [ownership-validation](modules/ownership-validation.md).
+[ownership-validation](modules/ownership-validation.md).
 
 Windows compile-runtime identity resolves the loaded Python DLL from `sys.dllhandle`
 through the existing lazy Windows API owner. It fingerprints that actual file;
@@ -2195,11 +2159,11 @@ missing handles and native lookup errors refuse qualification. Unix configured
 shared/static-library handling remains distinct. Buffer growth handles long paths
 without a guessed DLL name or silently omitted runtime dependency.
 
-Full owner contract: [context-ownership](modules/context-ownership.md).
+[context-ownership](modules/context-ownership.md).
 
-Full owner contract: [codex-turn-policy](modules/codex-turn-policy.md).
+[codex-turn-policy](modules/codex-turn-policy.md).
 
-Full owner contract: [windows-actor](modules/windows-actor.md).
+[windows-actor](modules/windows-actor.md).
 
 [ONNX encoder](modules/onnx-encoder.md) owns the existing local-cache-only CPU
 encoder in place: token padding, masked pooling, normalization and row ordering.
@@ -2209,15 +2173,15 @@ query/context assembly retains clocks, publication and citation checks. Both
 packets preserve production bytes and original unit assertions. Their whole-product
 policy and context/query integrations remain separate explicit obligations.
 
-Full owner contract: [coordinator-invariants](modules/coordinator-invariants.md).
+[coordinator-invariants](modules/coordinator-invariants.md).
 
-Full owner contract: [ownership-timing](modules/ownership-timing.md).
+[ownership-timing](modules/ownership-timing.md).
 
-Full owner contract: [coordinator-validation](modules/coordinator-validation.md).
+[coordinator-validation](modules/coordinator-validation.md).
 
-Full owner contract: [runtime-metadata](modules/runtime-metadata.md).
+[runtime-metadata](modules/runtime-metadata.md).
 
-Full owner contract: [ownership-rows](modules/ownership-rows.md).
+[ownership-rows](modules/ownership-rows.md).
 
 The approved dependency-contract pilot uses separate test-only
 [contract identity tooling](modules/contract-identity.md). Its full-byte and explicit public-surface fingerprints
@@ -2234,7 +2198,7 @@ experimental contexts do not replace canonical full-source packets before the
 approved paired maintenance comparison passes. No persistent success cache or
 product runtime location is added.
 
-Full owner contract: [release-manifest](modules/release-manifest.md).
+[release-manifest](modules/release-manifest.md).
 
 [Release history](modules/release-history.md) owns exact published CHANGELOG
 version records and their complete byte catalog; [pending release history](modules/release-pending.md)
@@ -2243,49 +2207,22 @@ fully covered. [Release tag](modules/release-tag.md) owns existing tag orchestra
 and its workflow, sharing the complete declared-version record. Authority files
 and executable sources retain whole-file context requirements.
 
-Full owner contract: [corpus-membership-policy](modules/corpus-membership-policy.md).
+[corpus-membership-policy](modules/corpus-membership-policy.md).
 
-Full owner contract: [provenance](modules/provenance.md).
+[provenance](modules/provenance.md).
 
-Full owner contract: [page-facts](modules/page-facts.md).
+[page-facts](modules/page-facts.md).
 
-Full owner contract: [answer-refinement](modules/answer-refinement.md).
-Full owner contract: [trusted profile collection](modules/trace-collector.md).
-The converter retains trusted-profile input; graph ingestion and dynamic-evidence
-publication remain separate responsibilities.
-
-Full owner contract: [transaction lineage](modules/transaction-lineage.md).
-The existing reader uses supplied SQLite connections; admission, snapshot control,
-pruning and stronger source-specific evidence retain their current owners.
-
-Full owner contract: [static knowledge-writer analysis](modules/knowledge-writer-scanner.md).
-The scanner reports source findings; transaction enforcement and the actual writer
-behavioral matrix remain separate responsibilities.
-
-Full owner contract: [Python import resolution](modules/import-resolver.md).
-Lexical/workspace resolution retains its parser dependency; generation publication
-and live language-server navigation remain separate.
-
-Full owner contract: [managed Go source builds](modules/go-source-build.md).
-The staging-directory compiler step retains its profile dependency; downloads,
-installation publication and server lifecycle remain with their existing owners.
-
-Full owner contract: [MCP response values](modules/mcp-response-values.md).
-The pure schema/value rules have no runtime dependency; mcp_contract retains root,
-clock and Git observation plus public schema/constant reexports.
-
-Full owner contract: [vault editorial policy](modules/vault-editorial.md).
-Existing editorial-name and private-log constants retain their source paths;
-publication, migration and actual log writers remain consumer responsibilities.
-
-Full owner contract: [daily-log selection](modules/daily-log-selection.md).
-The supplied-directory selector has no runtime-state dependency; memory_state
-retains public object reexports and all operational state ownership.
-
-Full owner contract: [state JSON values](modules/state-json-values.md).
-The value layer receives the existing byte budget explicitly; memory_state keeps
-its public budget binding, locks, recovery and durable publication.
-
+[answer-refinement](modules/answer-refinement.md).
+[trusted profile collection](modules/trace-collector.md).
+[transaction lineage](modules/transaction-lineage.md).
+[static knowledge-writer analysis](modules/knowledge-writer-scanner.md).
+[Python import resolution](modules/import-resolver.md).
+[managed Go source builds](modules/go-source-build.md).
+[MCP response values](modules/mcp-response-values.md).
+[vault editorial policy](modules/vault-editorial.md).
+[daily-log selection](modules/daily-log-selection.md).
+[state JSON values](modules/state-json-values.md).
 Dated research about one module boundary belongs to that module when its complete
 record is already included in the packet. Other packets retain their full shared
 context. Historical versions and results stay dated evidence; assigning an owner
@@ -2293,11 +2230,7 @@ does not rewrite them or qualify current runtime behavior.
 
 ### CI timing evidence
 
-The existing [CI timing report owner](modules/ci-timing-report.md) compiles retained
-workflow/JUnit measurements and owns its closed report schema. Its CLI, XML refusal
-policy and numerical acceptance rules are unchanged. Workflow execution and job
-configuration remain separate; complete workflow and contributor instructions are
-included as context. Own tests import the existing canonical schema validator.
+[CI timing evidence](modules/ci-timing-report.md).
 
 ### Offline benchmark report readers
 
@@ -2330,3 +2263,11 @@ Public paths, source bytes and all original assertions are preserved.
 stratified selection, evidence labels, twins and tune/decide assignment. Runner,
 scorer and coverage integrations remain separate. Dataset paths, sample selection,
 source bytes and original assertions are preserved; no dataset is downloaded.
+
+### Deterministic benchmark scoring
+
+[LongMemEval scoring](modules/longmemeval-score.md) owns existing text metrics,
+applicability/denominators, costs and refusal calibration. Model judging and report
+execution remain outside. Its reviewed September19 history catalog partitions the
+unchanged document by topic; only selected records enter the packet, and unowned
+records remain visible in project inventory. No metric or public path changes.

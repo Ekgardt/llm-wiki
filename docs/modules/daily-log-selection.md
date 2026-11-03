@@ -36,3 +36,9 @@ The owner adds actual directory-selection cases and fresh import isolation; the
 consumer checks public identity. Complete historical filename/open-day records
 remain packet context. Exact byte reconstruction and the 100000-token gate apply;
 these checks do not claim paired full-cycle model savings or live installation.
+
+
+## Preserved structure reference — 2026-11-03
+
+The supplied-directory selector has no runtime-state dependency; memory_state
+retains public object reexports and all operational state ownership.

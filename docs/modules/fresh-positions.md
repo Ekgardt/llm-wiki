@@ -16,3 +16,10 @@ remain unchanged. This is correction for caller-selected paths, not a filesystem
 sandbox or general symbol resolver. Dependency: [Python parser](python-parse.md).
 All existing unit tests remain at their paths and are owned by this packet;
 root navigation integration obligations remain independently visible.
+
+
+## Preserved structure reference — 2026-11-03
+
+`fresh_positions.py` owns read-only Python line/span correction through the shared
+parser; it preserves indexed positions on unavailable input and marks exhausted
+file refresh budgets. It does not mutate generations or implement LSP encodings.

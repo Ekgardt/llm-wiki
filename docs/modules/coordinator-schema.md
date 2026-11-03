@@ -24,3 +24,13 @@ remain unchanged.
 Dependencies: [SQLite contracts](sqlite-contracts.md),
 [canonical formats](formats.md), [schema comparison text](sqlite-schema-text.md).
 Source: [boundary research](../research/2026-11-03-coordinator-schema-boundary.md).
+
+
+## Preserved structure reference — 2026-11-03
+
+`llm_wiki.coordinator_schema` owns the existing v3 table/header contract, historical
+schema hash, optional checkpoint indexes and supplied-connection schema inspection.
+`markdown_transaction` re-exports the same objects for existing callers. Connection
+opening, transaction settlement, migration execution and row invariants remain with
+the coordinator. Optional indexes do not change the adoption hash. See
+[the owner guide](coordinator-schema.md).

@@ -17,3 +17,10 @@ Independent existing retry/opener tests move here unchanged. Installer-specific
 streaming, partial-file cleanup, lock and offline-component tests retain their
 integration roles and are not replaced by leaf tests. No production path moves,
 second implementation or network library is introduced.
+
+
+## Preserved structure reference — 2026-11-03
+
+`pinned_download.py` owns response selection, deadline-bounded streaming and
+transient retry. Installers retain integrity verification, partial-file cleanup,
+locks and adoption.

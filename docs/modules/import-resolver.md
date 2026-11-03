@@ -53,3 +53,9 @@ records remain complete historical context; their dated product status is not
 silently rewritten as current status. Full source, tests, helper, dependency,
 instructions and history must fit 100000 tokens and reconstruct exactly.
 No live installation or paired LLM task-cost reduction is claimed.
+
+
+## Preserved structure reference — 2026-11-03
+
+Lexical/workspace resolution retains its parser dependency; generation publication
+and live language-server navigation remain separate.

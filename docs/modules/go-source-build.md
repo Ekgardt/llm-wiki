@@ -49,3 +49,9 @@ and temporary cache trees. The POSIX shell fixture remains a test compiler, not
 a real Go installation; this qualification does not claim a newly verified
 native Windows gopls build. Full context must fit 100000 tokens and reconstruct
 exactly. No live installation or paired LLM task-cost improvement is claimed.
+
+
+## Preserved structure reference — 2026-11-03
+
+The staging-directory compiler step retains its profile dependency; downloads,
+installation publication and server lifecycle remain with their existing owners.

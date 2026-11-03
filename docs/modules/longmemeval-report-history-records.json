@@ -1,0 +1,113 @@
+{
+  "schema": "module-records/v1",
+  "source": "docs/research/2026-09-19-a-number-names-its-stand.md",
+  "bytes": 18985,
+  "sha256": "f772276210316eca0e1b2037e288f39aa6c8b4112c329edf0c343a72c4486799",
+  "records": [
+    {
+      "id": "introduction",
+      "label": "introduction",
+      "start": 0,
+      "end": 1059,
+      "sha256": "9ed6d72cf57e3aae7b2fb151055ca6bb8cf5c0f45f2bd44ecda40aced86c5871"
+    },
+    {
+      "id": "refusal-calibration",
+      "label": "refusal calibration",
+      "start": 1059,
+      "end": 4881,
+      "sha256": "c226c882f7a73d214fcbfd3a4ee30712119585a2bf52f2e0a171a6a9e9c12148"
+    },
+    {
+      "id": "competitor-provenance",
+      "label": "competitor provenance",
+      "start": 4881,
+      "end": 8755,
+      "sha256": "e3e38a7f1d2a8cc368dedad3c9456e9281c7138033947e68cac17c77144121f3"
+    },
+    {
+      "id": "comparison-introduction",
+      "label": "comparison introduction",
+      "start": 8755,
+      "end": 9115,
+      "sha256": "c0e7f7f325f44a9841fe1b9a598f8bc0fcf96971430945f88ac4c0f9172b1a77"
+    },
+    {
+      "id": "parity-thirteen",
+      "label": "parity thirteen",
+      "start": 9115,
+      "end": 9847,
+      "sha256": "b61d9e7ab5be04c83c139a0486ef8f4bef2d25e1c0131521caf8db3c7d6f024a"
+    },
+    {
+      "id": "parity-sixteen",
+      "label": "parity sixteen",
+      "start": 9847,
+      "end": 11458,
+      "sha256": "7f1f37d7e8e727049d6475db1eb820caf8a15db18afc1b686058b7ce3f2fe33c"
+    },
+    {
+      "id": "missing-parity-artifacts",
+      "label": "missing parity artifacts",
+      "start": 11458,
+      "end": 12514,
+      "sha256": "eb0f1970b9e4ff6c3e3e8d3629d09d604880853d6deb4ba6000af40878e1746e"
+    },
+    {
+      "id": "tokens-per-question",
+      "label": "tokens per question",
+      "start": 12514,
+      "end": 13351,
+      "sha256": "ed55a89d5d8bb18b11097bf6e46ff48a14a934c0aec75459ad518965e0353d35"
+    },
+    {
+      "id": "warm-search",
+      "label": "warm search",
+      "start": 13351,
+      "end": 14087,
+      "sha256": "698773e97c17dda7b3800b75e32405cbeebae67ccc358a38dd74190edae2c53d"
+    },
+    {
+      "id": "seconds-per-answer",
+      "label": "seconds per answer",
+      "start": 14087,
+      "end": 14782,
+      "sha256": "d7b8cc839f8c19e933d3eca5f07e152b8b8bbabb90e7733180c2a44b9d4a00d4"
+    },
+    {
+      "id": "category-tables",
+      "label": "category tables",
+      "start": 14782,
+      "end": 15627,
+      "sha256": "900c6ca7f2d12b158b657f886f4bff6e025e60780e8262f628b363f99d06204f"
+    },
+    {
+      "id": "unsourced-tokens",
+      "label": "unsourced tokens",
+      "start": 15627,
+      "end": 15996,
+      "sha256": "14fb1c44a475ddf755c55b93d2998ca25696b52a1ea0d1ad7856b74093609cef"
+    },
+    {
+      "id": "locomo-attribution",
+      "label": "locomo attribution",
+      "start": 15996,
+      "end": 16612,
+      "sha256": "60926cabe68db9d1cb17816ddf7f6bae3dd238120fab012ba5683dc96752872b"
+    },
+    {
+      "id": "corrections",
+      "label": "corrections",
+      "start": 16612,
+      "end": 17660,
+      "sha256": "b28124513ebf89d3facf977e2c6922b9033507cb53dfdc6dffc976faa8f9e38d"
+    },
+    {
+      "id": "sources",
+      "label": "sources",
+      "start": 17660,
+      "end": 18985,
+      "sha256": "7ca8eff75268418e9dbb71692454b56b2acb9f5e1c7c206fc21402fc79ca13ca"
+    }
+  ]
+}

@@ -58,3 +58,9 @@ preservation, actual CCN/shape checks, real reader and original integration test
 full source/guide/ownership checks and a reversible packet of at most 100000
 tokens. No whole-project completion, task-cost saving or live installation is
 implied by this owner qualification.
+
+
+## Preserved structure reference — 2026-11-03
+
+The existing reader uses supplied SQLite connections; admission, snapshot control,
+pruning and stronger source-specific evidence retain their current owners.

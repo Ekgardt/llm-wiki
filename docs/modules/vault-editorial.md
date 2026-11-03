@@ -37,3 +37,9 @@ imports, frozen-name semantics, real template resolution, Git ignore behavior an
 retained consumer tests check the boundary. Complete packet measurement and exact
 reconstruction enforce the user's 100000-token limit. No full-cycle LLM savings,
 native-platform completion or live installation follows from these checks alone.
+
+
+## Preserved structure reference — 2026-11-03
+
+Existing editorial-name and private-log constants retain their source paths;
+publication, migration and actual log writers remain consumer responsibilities.

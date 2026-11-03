@@ -61,3 +61,9 @@ CI run 41691722619 found that the new profile fixture read its UTF-8 source
 without declaring the encoding. The existing repository encoding guard reproduced
 the failure locally. The fixture now uses the same explicit UTF-8 encoding for
 writing and reading; the guard and production converter remain unchanged.
+
+
+## Preserved structure reference — 2026-11-03
+
+The converter retains trusted-profile input; graph ingestion and dynamic-evidence
+publication remain separate responsibilities.

@@ -40,3 +40,12 @@ and [defusedxml](https://github.com/tiran/defusedxml) for retaining explicit XML
 refusal rather than replacing it with a generic parser. Python documentation now
 names 3.14.10; qualification uses the existing locked 3.14.7 environment, with no
 runtime upgrade in this change.
+
+
+## Preserved structure reference — 2026-11-03
+
+The existing [CI timing report owner](ci-timing-report.md) compiles retained
+workflow/JUnit measurements and owns its closed report schema. Its CLI, XML refusal
+policy and numerical acceptance rules are unchanged. Workflow execution and job
+configuration remain separate; complete workflow and contributor instructions are
+included as context. Own tests import the existing canonical schema validator.

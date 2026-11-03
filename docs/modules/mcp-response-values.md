@@ -53,3 +53,9 @@ value and integration checks accompany the move. The complete September 26 tool
 schema budget record stays historical context: wire repetition is not silently
 counted as prompt savings. The full packet must fit 100000 tokens and reconstruct
 exactly; no paired task-cost reduction or live installation is claimed.
+
+
+## Preserved structure reference — 2026-11-03
+
+The pure schema/value rules have no runtime dependency; mcp_contract retains root,
+clock and Git observation plus public schema/constant reexports.

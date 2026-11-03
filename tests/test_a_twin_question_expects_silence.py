@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 from tests.modules.longmemeval_data.twin_fixture import _question
+from tests.modules.longmemeval_score.splits_fixtures import _row
 
 BENCHMARK_DIR = Path(__file__).resolve().parents[1] / "benchmark"
 if str(BENCHMARK_DIR) not in sys.path:
@@ -23,10 +24,6 @@ if str(BENCHMARK_DIR) not in sys.path:
 import longmemeval_judge  # noqa: E402
 import longmemeval_score  # noqa: E402
 import run_longmemeval  # noqa: E402
-
-
-def _row(**fields: object) -> dict:
-    return {"question_id": "q1", "category": "single-session-user", "gold": "a gravel bike", **fields}
 
 
 def test_a_refused_twin_scores_right_and_an_answered_twin_scores_wrong() -> None:
@@ -62,12 +59,3 @@ def test_the_runner_appends_one_twin_per_answerable_question_and_names_the_arm()
 
     assert [q["question_id"] for q in questions] == ["q1", "q2_abs", "q1_twin"]
     assert run_longmemeval._run_tag(args) == "n2-seed1-twins"
-
-
-def test_the_report_carries_each_half_of_the_stand_on_its_own() -> None:
-    rows = [_row(question_id=f"id{n}", status="answered", hypothesis="a gravel bike") for n in range(20)]
-
-    splits = longmemeval_score.split_calibration(rows)
-
-    assert set(splits) == {"tune", "decide"}
-    assert splits["tune"]["answerable"] + splits["decide"]["answerable"] == 20

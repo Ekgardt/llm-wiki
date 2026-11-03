@@ -35,3 +35,13 @@ Production evidence readers keep their conservative unknown result on unreadable
 metadata. This test correction changes no process ownership or cleanup policy.
 Evidence: Linux CI job 126085901978 at 09922834 and the
 [Linux procfs descriptor contract](https://www.kernel.org/doc/html/v6.8/filesystems/proc.html#process-specific-subdirectories).
+
+
+## Preserved structure reference — 2026-11-03
+
+The process-tree qualification now separates its shared test subprocess fixture
+from fake LSP protocol/semantic behavior; production `lsp_process_tree` stays in
+place. The process-only proc-scanning regressions move intact to the owner suite.
+See `docs/research/2026-11-03-lsp-process-tree-packet.md`; this boundary is covered
+by the approved autonomous decomposition mandate. Its complete packet passes the
+budget and focused Linux/Python 3.10 checks; native platform CI remains pending.

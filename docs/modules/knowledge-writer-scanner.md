@@ -53,3 +53,9 @@ owner. Complete source, tests, instructions and historical context must fit
 100000 tokens and reconstruct byte-for-byte. The full September 18 orphan-tools
 record remains shared historical context, not a claim that its unrelated tools
 are owned here. No paired LLM cost improvement or live installation is claimed.
+
+
+## Preserved structure reference — 2026-11-03
+
+The scanner reports source findings; transaction enforcement and the actual writer
+behavioral matrix remain separate responsibilities.

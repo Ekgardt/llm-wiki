@@ -47,3 +47,9 @@ implementation. Original real persistence/recovery/refusal checks remain intact.
 Owner boundary/value tests, actual complexity, full context and exact reconstruction
 must pass. Historical budget and recovery research remains complete context. No
 whole-task model savings or live deployment is claimed.
+
+
+## Preserved structure reference — 2026-11-03
+
+The value layer receives the existing byte budget explicitly; memory_state keeps
+its public budget binding, locks, recovery and durable publication.

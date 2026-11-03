@@ -50,3 +50,21 @@ The flush producer's stage-specific wrapper delegates to the same decision-path
 builder used by validation. It retains its existing argument list, while the wire
 path's JSON/hash algorithm has one implementation. The producer seam and existing
 terminal/redrive scenarios are covered by the caller's integration suite.
+
+
+## Preserved structure reference — 2026-11-03
+
+The queue-validation owner includes pure capture input, descriptor,
+path, fence-field and scan-cursor checks. Queue call sites keep their existing
+ordering and transaction boundaries; TaskFence identity and semantic-decision
+orchestration remain in the executor. The canonical dependency owners provide
+format/hash and relative-path checks. One identical digest checker becomes an
+alias, preserving both call names without duplicate bodies. See
+`research/2026-11-03-queue-capture-validation.md` and the full queue-validation guide.
+
+
+The flush capture-decision producer delegates its stage-specific path wrapper
+to the same pure queue-validation builder that validates the path. Its one-argument
+entry point remains for existing callers; the second JSON/hash implementation is
+removed. The producer seam regression protects this shared ownership; runtime
+paths and bytes are unchanged.
