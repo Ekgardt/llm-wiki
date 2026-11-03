@@ -1993,3 +1993,12 @@ clipping, calling the same functions through aliases. See
 [research](research/2026-11-03-lsp-text-normalization.md).
 
 Full contracts: [Language registry](modules/lsp-profiles.md), [LSP text](modules/lsp-text.md).
+
+### LSP credential text
+
+`llm_wiki.lsp_credentials` owns the existing assignment, standalone-token,
+URL-userinfo and multiline private-key transformations. Admission, normalization,
+path redaction and clipping remain with their current callers; aliases preserve
+stage instrumentation. See [research](research/2026-11-03-lsp-credential-boundary.md).
+
+Full contract: [LSP credential masking](modules/lsp-credentials.md).
