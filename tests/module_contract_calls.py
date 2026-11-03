@@ -11,10 +11,14 @@ from tests.module_contract_surface import declared_kinds
 def require_public_calls(source: str, module: str, interface: str) -> dict:
     kinds = declared_kinds(interface)
     bindings = require_direct_public_access(source, module, kinds)
-    signatures = _signatures(interface)
-    for node in ast.walk(ast.parse(source)):
-        _check_call(node, bindings, signatures)
+    _require_tree_call_shapes(ast.parse(source), bindings, interface)
     return bindings
+
+
+def _require_tree_call_shapes(tree, bindings: dict, interface: str) -> None:
+    signatures = _signatures(interface)
+    for node in ast.walk(tree):
+        _check_call(node, bindings, signatures)
 
 
 def _signatures(interface: str) -> dict:

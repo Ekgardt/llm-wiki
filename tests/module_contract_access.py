@@ -11,7 +11,9 @@ import ast
 
 # Reflection and code loading cannot be resolved by this direct-import checker.
 _DYNAMIC_NAMES = frozenset({'eval', 'exec', 'compile', 'globals', 'locals', 'vars',
-                            'getattr', 'setattr', 'delattr', '__import__'})
+                            'getattr', 'setattr', 'delattr', '__import__',
+                            '__builtins__', '__loader__', '__spec__', '__class__',
+                            '__classcell__'})
 _DYNAMIC_MODULES = frozenset({'importlib', 'inspect', 'sys', 'ctypes', 'builtins',
                               'pickle', 'marshal', 'types', 'runpy'})
 
@@ -19,12 +21,20 @@ _DYNAMIC_MODULES = frozenset({'importlib', 'inspect', 'sys', 'ctypes', 'builtins
 def require_direct_public_access(source: str, module: str, exports: dict) -> dict:
     """Return local/public bindings only for supported explicit API accesses."""
     tree = ast.parse(source)
-    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    return _require_access_tree(tree, module, exports, approved_attributes=set())
+
+
+def _require_access_tree(tree, module: str, exports: dict, *, approved_attributes: set) -> dict:
+    parents = _parent_map(tree)
     bindings = _bindings(tree, module, exports)
     for node in ast.walk(tree):
-        _check_node(node, parents, bindings, exports)
+        _check_node(node, parents, bindings, exports, approved_attributes)
         _check_import_shadow(node, parents, bindings, module)
     return bindings
+
+
+def _parent_map(tree) -> dict:
+    return {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
 
 
 def _bindings(tree: ast.Module, module: str, exports: dict) -> dict:
@@ -94,15 +104,17 @@ def _add_binding(alias: ast.alias, exports: dict, found: dict) -> None:
     found[local] = alias.name
 
 
-def _check_node(node, parents: dict, bindings: dict, exports: dict) -> None:
+def _check_node(node, parents: dict, bindings: dict, exports: dict, approved: set) -> None:
     if isinstance(node, ast.Name):
         _check_name(node, parents, bindings, exports)
     if isinstance(node, ast.Attribute):
-        _require_static_attribute(node)
+        _require_static_attribute(node, approved)
     _check_shadow(node, bindings)
 
 
-def _require_static_attribute(node: ast.Attribute) -> None:
+def _require_static_attribute(node: ast.Attribute, approved: set) -> None:
+    if node in approved:
+        return
     if node.attr.startswith('__') or node.attr in _DYNAMIC_NAMES:
         raise ValueError('Reflective attribute access is not qualified')
 
@@ -116,7 +128,7 @@ def _check_import_shadow(node, parents: dict, bindings: dict, module: str) -> No
 
 
 def _check_name(node, parents: dict, bindings: dict, exports: dict) -> None:
-    if node.id in _DYNAMIC_NAMES or node.id.startswith('__'):
+    if node.id in _DYNAMIC_NAMES:
         raise ValueError(f'Dynamic dispatch is not qualified: {node.id}')
     if node.id not in bindings:
         return

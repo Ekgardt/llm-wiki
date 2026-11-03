@@ -7,6 +7,7 @@ import pytest
 
 from tests.module_context import context_reader
 from tests.module_contract_calls import require_public_calls
+from tests.module_contract_patches import require_test_public_calls
 from tests.module_contract_surface import require_declared_surface
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -26,6 +27,30 @@ def test_runtime_binding_is_the_actual_checkout_provider():
     assert Path(answer_cost.__file__).resolve() == ROOT / 'scripts/answer_cost.py'
     assert answer_cost.estimate_tokens is answer_budget.estimate_tokens
     assert answer_cost.BYTES_PER_TOKEN == answer_budget.BYTES_PER_TOKEN == 2
+
+
+@pytest.mark.parametrize(('filename', 'expected'), [
+    ('test_contract.py', {'estimate_tokens': 'estimate_tokens'}),
+    ('test_boundary.py', {}),
+    ('test_context_budget.py', {}),
+])
+def test_original_consumer_tests_only_inject_public_dependency_failures(filename, expected):
+    assert require_test_public_calls(
+        read_source(ROOT / 'tests/modules/answer_cost' / filename),
+        module='answer_budget',
+        interface=read_source(ROOT / 'docs/modules/answer-budget-interface.pyi'),
+        consumer_module='answer_cost',
+        consumer_source=read_source(ROOT / 'scripts/answer_cost.py'),
+    ) == expected
+
+
+def test_actual_pytest_fixture_restores_the_real_public_binding(monkeypatch):
+    assert type(monkeypatch) is pytest.MonkeyPatch
+    original = answer_budget.estimate_tokens
+    with monkeypatch.context() as scoped:
+        scoped.setattr(answer_cost, 'estimate_tokens', lambda data: None)
+        assert answer_cost.estimate_tokens({}) is None
+    assert answer_cost.estimate_tokens is original
 
 
 @pytest.mark.parametrize(('value', 'tokens'), [('', 1), ('x', 2), ('Ж', 2), ('😀', 3), ({}, 1)])

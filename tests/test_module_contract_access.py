@@ -63,7 +63,13 @@ def test_function_escape_reflection_and_shadowing_refuse(use):
     'exec(source)', 'value = object.__getattribute__(obj, name)',
     'value = helper.getattr(obj, name)',
     'loader = __builtins__["__import__"]',
+    'loader = __loader__', 'loader = __spec__.loader', 'klass = __class__',
 ])
 def test_dynamic_access_is_not_misrepresented_as_a_static_binding(source):
     with pytest.raises(ValueError):
         _check(IMPORT + source)
+
+
+def test_own_module_identity_metadata_is_not_reflective_dispatch():
+    source = IMPORT + 'identity = (__file__, __name__, __package__, __doc__)\n'
+    assert _check(source) == {'estimate': 'estimate', 'RATIO': 'RATIO'}

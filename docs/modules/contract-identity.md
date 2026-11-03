@@ -66,3 +66,30 @@ keyword-only and variadic parameter shapes. Defaults are not executed. Wrong
 arity, unknown/duplicate keywords and calls through constant exports refuse.
 Dynamic `*args`/`**kwargs` expansion retains full source because this checker
 cannot establish its actual call shape. This is not runtime type or value proof.
+
+## Public fault-injection tests
+
+`tests/module_contract_patches.py` recognizes explicit pytest monkeypatch calls
+on the consumer's real imported public function aliases. Targets derive from the
+checked consumer source and interface. No manifest exemption list is accepted.
+Private/undeclared members, constants, indirect reexports, changing target/fixture
+bindings, dynamic member names and unsupported fixture shapes refuse. The full
+replacement expression stays in the syntax walk; it cannot hide reflective access.
+This permits the two original public failure-injection tests unchanged. It does
+not make their mocked outcomes provider qualification.
+
+The real fixture probe verifies pytest's MonkeyPatch type and restoration to the
+actual provider function. Fresh qualification must additionally verify bindings
+after the complete selected test run and run independent unmocked integrations.
+Sources checked 2026-11-03: Python3.14 unittest.mock “Where to patch”
+(https://docs.python.org/3.14/library/unittest.mock.html#where-to-patch) and pytest
+monkeypatch documentation (https://docs.pytest.org/en/stable/how-to/monkeypatch.html).
+Both describe changing lookup bindings and scoped restoration; neither supplies
+a proof of arbitrary Python behavior.
+
+Module identity values such as `__file__` and `__name__` are data reads, not
+dispatch. The initial blanket double-underscore-name rejection wrongly refused
+the consumer's ordinary context/boundary tests. The name guard instead rejects
+actual reflective namespaces (builtins, loader/spec and class cells) and dynamic
+call primitives; attribute introspection remains refused. All three original
+consumer test files now participate in the static pilot probe.
