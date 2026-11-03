@@ -1922,3 +1922,16 @@ with those consumers and share the single timestamp setup helper. See
 `research/2026-11-03-path-artifact-leaves.md` for the qualification boundary.
 
 Full owner contracts: [lsp-paths](modules/lsp-paths.md), [verified-artifacts](modules/verified-artifacts.md).
+
+The next planned queue-validation transfer covers pure capture input, descriptor,
+path, fence-field and scan-cursor checks. Queue call sites keep their existing
+ordering and transaction boundaries; TaskFence identity and semantic-decision
+orchestration remain in the executor. The canonical dependency owners provide
+format/hash and relative-path checks. One identical digest checker becomes an
+alias, preserving both call names without duplicate bodies. See
+`research/2026-11-03-queue-capture-validation.md` and the full queue-validation guide.
+
+Test LSP artifacts launched through verified descriptors are self-contained:
+the common code-kernel fixture producer packages the fake server and shared
+process helper together and hashes that whole artifact. The descriptor/path-swap
+regression uses the same producer. Production launch and verification are unchanged.

@@ -14,7 +14,6 @@ import subprocess
 import sys
 import threading
 import time
-import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -1572,10 +1571,9 @@ def test_generation_guard_launches_from_inherited_descriptor_after_path_replacem
 ) -> None:
     server = tmp_path / "server.py"
     retired = tmp_path / "retired.py"
-    # Keep the descriptor fixture self-contained after sharing process helpers.
-    with zipfile.ZipFile(server, "w") as archive:
-        archive.write(FAKE_SERVER, "__main__.py")
-        archive.write(FAKE_SERVER.with_name("fake_process_tree.py"), "fake_process_tree.py")
+    from tests.code_kernel_helpers import package_fake_lsp_server
+
+    package_fake_lsp_server(server)
     descriptors: list[int] = []
 
     class Guard:

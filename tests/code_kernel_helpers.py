@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import zipfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,6 +66,15 @@ class SemanticPyrightFixture:
         )
 
 
+def package_fake_lsp_server(destination: Path) -> Path:
+    """Keep every fixture dependency inside the verified launch artifact."""
+    server = Path(__file__).with_name("fake_lsp_server.py")
+    with zipfile.ZipFile(destination, "w") as archive:
+        archive.write(server, "__main__.py")
+        archive.write(server.with_name("fake_process_tree.py"), "fake_process_tree.py")
+    return destination
+
+
 def create_semantic_pyright_fixture(
     repository: Path,
     *,
@@ -77,7 +87,7 @@ def create_semantic_pyright_fixture(
         PyrightIdentity,
     )
 
-    server = Path(__file__).with_name("fake_lsp_server.py").resolve()
+    server = package_fake_lsp_server(repository / ".git" / "fake-lsp-server.pyz")
     node = Path(sys.executable).resolve()
     event_log = repository / ".git" / "fake-lsp-events.jsonl"
     config_path = repository / ".fake-lsp-server.json"

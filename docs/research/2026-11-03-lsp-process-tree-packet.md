@@ -75,3 +75,30 @@ files,2734 unassigned: this is another module, not whole-project completion.
 The complete integration repeat finished:558 passed,46 platform skips. Checkpoint
 6780ef23 is committed/pushed; its full regression is now running separately in a
 pinned worktree. No full pass for that checkpoint is claimed yet.
+
+Full-run follow-up at016257e0: semantic navigation fixtures also launch the fake
+server through verified descriptor/copy paths. The earlier descriptor-test-only
+ZIP repair did not cover the common create_semantic_pyright_fixture producer.
+Two focused regressions reproduce failed restart/not-ready navigation. The pinned
+6780ef23 full run is interrupted after these failures; it is not a full pass.
+
+Fix the common artifact producer: one package_fake_lsp_server helper in existing
+tests/code_kernel_helpers.py writes the actual fake server plus process dependency
+into a stdlib executable ZIP. Both the semantic identity fixture and the descriptor
+replacement regression use it. The former hashes that complete artifact; no
+production loader, security check, import path or assertion changes. This removes
+the one-off ZIP implementation from the descriptor test. Existing failing consumer
+assertions provide regression protection. The earlier Python zipapp source and
+platform research apply; no new product mechanism is introduced.
+Fresh graph generation-18e46a8be3cfb109-03cb84f5 at016257e0 finds55 callers of the
+semantic fixture; direct source inspection confirms the server is hashed and then
+launched through the existing protected profile. Evidence: logs/lsp-shared-fixture-package-*.
+
+Shared-package repair qualification:8 focused regressions pass on Python3.12
+and3.10;455 session/navigation/recovery consumers and50 remaining direct fixture
+consumers pass. Actual complexity/shape and Ruff pass; every assertion in the
+changed files remains identical.48 complete artifacts still round-trip; largest
+96514 tokens before this evidence paragraph. The interrupted old full run reports
+5404 tests,14 failures and44 skips; it is partial, not a completed regression.
+The complete module/bootstrap/ownership/structure/privacy/CI/limit/weight/complexity
+run also passed1086 checks,2 skips. A new pinned full run is required after commit.
