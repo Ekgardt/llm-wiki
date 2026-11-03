@@ -2065,3 +2065,12 @@ callers; neither reader nor SQLite imports the other's implementation for this
 policy. This predicate is not an atomic traversal sandbox. Caller no-follow and
 identity checks remain mandatory. See
 `research/2026-11-03-path-ancestry-boundary.md`.
+
+`llm_wiki.queue_artifacts` owns queue artifact file/stream IO: owner-only checks,
+stable reads/digests, sequential staged production, create-only publication,
+checked flushes and export scratch cleanup. `memory_queue` retains compatibility
+aliases and compile-journal-specific error mapping; SQL, task transitions, lease
+settlement and retention authorization remain queue responsibilities. The artifact
+owner depends on value/deadline/permission/sync primitives and never imports the
+executor or compile journal. See
+`research/2026-11-03-queue-artifact-io-boundary.md`.

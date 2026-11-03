@@ -1401,6 +1401,7 @@ def test_queue_hardens_directory_database_temp_and_result(
         lambda path, mode: protected.append((Path(path), mode)),
         raising=False,
     )
+    monkeypatch.setattr("llm_wiki.queue_artifacts._harden_owner_only", memory_queue._harden_owner_only)
     queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(1))
     task_id = queue.enqueue("query", 1, {})
     lease = queue.claim("worker")
