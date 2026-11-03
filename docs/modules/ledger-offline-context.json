@@ -1,0 +1,58 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md",
+    "scripts/llm_wiki/ledger_core.py",
+    "docs/modules/ledger-core.md",
+    "docs/research/2026-09-22-a-ledger-of-things-and-events-posted-once.md",
+    "docs/research/2026-09-27-a-cut-says-what-it-left-out.md",
+    "benchmark/ledger_offline.py",
+    "tests/test_the_offline_ledger_reads_the_question_not_the_label.py",
+    "scripts/aggregation_pass.py",
+    "scripts/temporal_anchor.py",
+    "scripts/reply_json.py",
+    "docs/modules/temporal-anchor.md",
+    "docs/modules/reply-json.md",
+    "docs/modules/ledger-offline.md",
+    "docs/modules/ledger-offline-context.json",
+    "docs/research/2026-09-19-the-aggregation-pass-is-chosen-by-the-question.md",
+    "docs/modules/answer-refinement.md"
+  ],
+  "directories": [
+    "tests/modules/ledger_offline"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "benchmark/ledger_offline.py",
+      "tests/test_the_offline_ledger_reads_the_question_not_the_label.py",
+      "docs/modules/ledger-offline.md",
+      "docs/modules/ledger-offline-context.json"
+    ],
+    "directories": [
+      "tests/modules/ledger_offline"
+    ]
+  }
+}

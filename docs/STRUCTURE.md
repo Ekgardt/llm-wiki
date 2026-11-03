@@ -2300,3 +2300,9 @@ paths and original assertions are preserved.
 and entity text. The existing ledger entry retains generation selection and
 transaction publication, with identical-object compatibility exports. The offline
 benchmark imports the core; SQL, page bytes and public runtime calls stay unchanged.
+
+### Offline ledger benchmark owner
+
+The existing [offline ledger stand](modules/ledger-offline.md) owns deterministic
+counting evaluation and its file interface; its packet retains full product dependency
+source. It measures a deterministic extractor, not model record quality.
