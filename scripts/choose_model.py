@@ -278,6 +278,18 @@ def _menu_answer(answer, models, current):
 
 
 def _select(args):
+    if not args.provider and os.environ.get('MEMORY_LLM_PROVIDER') == 'fake':
+        return _test_provider_selection(args)
+    return _select_from_provider(args)
+
+
+def _test_provider_selection(args):
+    if args.model or args.reasoning:
+        raise ValueError('the fake test provider cannot select a model or reasoning')
+    return {'status': 'test-provider', 'provider': 'fake', 'model': ''}
+
+
+def _select_from_provider(args):
     import model_selection
 
     expected = model_selection.file_bytes(args.root)

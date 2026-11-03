@@ -439,6 +439,8 @@ jobs:
         with:
           version: "0.12.3"
           enable-cache: true
+      - run: uv python install 3.13
+      - run: uv python pin 3.13
       # Created before HOME moves: the steps above install into the runner's own home.
       - name: A home of its own, so nothing of the runner's is configured
         shell: bash

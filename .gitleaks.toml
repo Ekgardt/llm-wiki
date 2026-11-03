@@ -103,3 +103,44 @@ regexes = [
   '''(?m)^    "curl \\\\\\n  \-u user:privatepw https://example\.test",$''',
   '''(?m)^    "curl `\\n  \-u user:privatepw https://example\.test",$''',
 ]
+
+[[allowlists]]
+description = "Exact disposable decomposition fixture values"
+condition = "AND"
+targetRules = ["private-key"]
+regexTarget = "line"
+paths = ['''^tests/modules/lsp_credentials/test_credentials\.py$''']
+regexes = [
+  '''(?m)^    \('before\\n\-\-\-\-\-BEGIN PRIVATE KEY\-\-\-\-\-\\nabc\\n\-\-\-\-\-END PRIVATE KEY\-\-\-\-\-\\nafter',$''',
+]
+
+[[allowlists]]
+description = "Exact disposable decomposition fixture values"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexTarget = "line"
+paths = ['''^tests/modules/queue_evidence_records/fixtures/existing\-records\.json$''']
+regexes = [
+  '''(?m)^        "disposition_key": "33a984e07d4fbfb84f580d85a707d4d32c6385201951cf42ebf707dbe1709c06",$''',
+  '''(?m)^        "disposition_key": "4f5f8f6929bc347fd363b43d1b879961c54ff0be1cfe2482376dfa5f327a03a2",$''',
+  '''(?m)^        "disposition_key": "b535265409153a1fae12ba087323f27d71ce2574d2e00b8f82dcc29795ab845e",$''',
+  '''(?m)^        "package_key": "b535265409153a1fae12ba087323f27d71ce2574d2e00b8f82dcc29795ab845e",$''',
+  '''(?m)^        "purge_token": "c4d7c3eef524e4c3dac3e0b5523372e9c66f296ad184f37bd5f8e1a0ac5d4793",$''',
+  '''(?m)^        "task_fence_token_digest": "fd137c7b81f93daf7ec0977eef25f2bbaed5bcc6be09074adfe7e81494cd0c23",$''',
+  '''(?m)^      "disposition_key": "33a984e07d4fbfb84f580d85a707d4d32c6385201951cf42ebf707dbe1709c06"$''',
+  '''(?m)^      "disposition_key": "a1b22cba1de651380e8d0b8bd3fedb3513bd8793bad44ffacc4d741ddaefac7d",$''',
+  '''(?m)^      "package_key": "33a984e07d4fbfb84f580d85a707d4d32c6385201951cf42ebf707dbe1709c06",$''',
+  '''(?m)^      "package_key": "4f5f8f6929bc347fd363b43d1b879961c54ff0be1cfe2482376dfa5f327a03a2",$''',
+  '''(?m)^      "package_key": "a1b22cba1de651380e8d0b8bd3fedb3513bd8793bad44ffacc4d741ddaefac7d",$''',
+]
+
+[[allowlists]]
+description = "Exact disposable decomposition fixture values"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexTarget = "line"
+paths = ['''^tests/modules/queue_task_records/fixtures/existing\-records\.json$''']
+regexes = [
+  '''(?m)^          "token": "7e007a1c8ce14711b53e286a015323cbecbcb1cd44f7a183cc54026e0606daca",$''',
+  '''(?m)^        "lease_token": "7e007a1c8ce14711b53e286a015323cbecbcb1cd44f7a183cc54026e0606daca",$''',
+]

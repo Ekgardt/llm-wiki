@@ -422,3 +422,12 @@ def test_local_builds_are_audited_without_removing_the_pypi_pass() -> None:
     assert any("osv" not in arguments for arguments in audits)
     required = {"--vulnerability-service", "osv", "--strict", "--disable-pip"}
     assert any(required <= set(arguments) for arguments in audits)
+
+
+def test_end_to_end_installer_pins_python_before_changing_home():
+    steps = _workflow()['jobs']['install-end-to-end']['steps']
+    commands = [step.get('run', '') for step in steps]
+    install = commands.index('uv python install 3.13')
+    pin = commands.index('uv python pin 3.13')
+    home = next(index for index, step in enumerate(steps) if 'HOME' in step.get('env', {}))
+    assert install < pin < home
