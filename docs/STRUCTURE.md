@@ -2255,3 +2255,11 @@ unrelated dependency on Windows workspace operations.
 row insertion and exact-fence projection cleanup on a supplied SQLite connection.
 The registry retains transaction control and proof that an owner may be reclaimed;
 SQL, counter scope and binding-before-fence deletion order remain unchanged.
+
+The approved dependency-contract pilot uses separate test-only
+[contract identity tooling](modules/contract-identity.md). Its byte fingerprints
+are evidence inputs, not qualification or permission to omit implementation.
+The default full-source gate remains unchanged. The first candidate boundary is
+answer_cost → answer_budget; adoption requires complete public semantics,
+verified access and runtime binding, real integration tests, bounded ownership
+and paired maintenance evidence under the approved proposal.
