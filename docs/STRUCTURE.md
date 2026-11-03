@@ -2343,3 +2343,8 @@ The [classification corpus labels](modules/flush-corpus-labels.md) module owns
 pure reading interpretation, case construction and agreement measures. The
 existing builder retains IO, provider orchestration and CLI, re-exporting moved
 names as direct compatibility aliases without duplicate implementations.
+
+The [classification protocol](modules/classification-protocol.md) owns the shared
+prompt and response grammar independently of capture runtime. flush_memory keeps
+old-path aliases; the benchmark imports the same leaf. Prompt bytes, parser
+behavior, queue admission and publication contracts stay unchanged.

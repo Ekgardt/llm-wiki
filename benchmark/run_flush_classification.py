@@ -21,7 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from flush_memory import (  # noqa: E402
+from llm_wiki.classification_protocol import (  # noqa: E402
     CLASSIFICATION_SYSTEM_PROMPT,
     _classify_response,
     build_classification_prompt,

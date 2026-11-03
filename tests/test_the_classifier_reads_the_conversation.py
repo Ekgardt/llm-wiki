@@ -77,3 +77,30 @@ def test_the_capture_path_sends_the_prompt_the_stand_measures():
 
 def test_text_that_is_not_a_transcript_is_kept_as_it_stands():
     assert flush_memory._readable_evidence("just a note") == "just a note"
+
+
+def test_capture_and_stand_share_the_protocol_objects():
+    from llm_wiki import classification_protocol as protocol
+
+    from benchmark import run_flush_classification as stand
+
+    assert flush_memory._classify_response is protocol._classify_response
+    assert flush_memory.build_classification_prompt is protocol.build_classification_prompt
+    assert stand._classify_response is protocol._classify_response
+    assert stand.build_classification_prompt is protocol.build_classification_prompt
+    assert stand.CLASSIFICATION_SYSTEM_PROMPT == flush_memory.CLASSIFICATION_SYSTEM_PROMPT
+
+
+def test_stand_import_does_not_load_capture_executor(tmp_path):
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    program = (
+        'import sys; sys.path.insert(0, sys.argv[1]); '
+        'import benchmark.run_flush_classification; assert "flush_memory" not in sys.modules'
+    )
+    result = subprocess.run(
+        [sys.executable, '-c', program, str(root)], cwd=tmp_path, text=True, capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
