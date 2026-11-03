@@ -48,7 +48,8 @@
       "docs/modules/import-resolver-context.json",
       "tests/test_symbol_registry_cancellation.py",
       "tests/test_symbol_registry_walk.py",
-      "tests/symbol_registry_allocation_probe.py"
+      "tests/symbol_registry_allocation_probe.py",
+      "docs/research/2026-09-26-the-registry-reads-only-its-own-files.md"
     ],
     "directories": [
       "tests/modules/import_resolver"

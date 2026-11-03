@@ -5,10 +5,11 @@ new runtime path or wrapper. The module imports only
 stdlib and is imported in a fresh process that refuses other product modules.
 Its public parse function and failure types retain their behavior.
 
-The packet owns its source, the tests named in the manifest, its own boundary and
-budget guards, shared measurement/import helpers, pytest bootstrap, required
-instructions and the linked historical rationale. Mixed integration scenarios
-remain separately qualified; their assertions were not discarded.
+The manifest's ownership section names the source, tests and documents this
+module owns. Its complete packet also includes shared measurement/import helpers,
+pytest bootstrap, required instructions and historical context. Including a file
+does not transfer its ownership. Mixed integration scenarios remain separately
+qualified; their assertions were not discarded.
 
 Run `uv run pytest tests/modules/python_parse tests/test_python_3_10_does_not_crash_on_a_deep_expression.py -q -s`.
 The manifest enforces the 100000-token owner limit on the serialized bundle.

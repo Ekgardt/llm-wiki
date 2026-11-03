@@ -38,7 +38,8 @@
     "files": [
       "docs/modules/page-status-context.json",
       "docs/modules/page-status.md",
-      "scripts/page_status.py"
+      "scripts/page_status.py",
+      "docs/research/2026-08-24-which-pages-count-as-current.md"
     ],
     "directories": [
       "tests/modules/page_status"

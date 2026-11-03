@@ -41,7 +41,8 @@
       "scripts/vault_editorial.py",
       "scripts/vault_log.py",
       "docs/modules/vault-editorial.md",
-      "docs/modules/vault-editorial-context.json"
+      "docs/modules/vault-editorial-context.json",
+      "docs/research/2026-09-14-the-vault-log-is-private.md"
     ],
     "directories": [
       "tests/modules/vault_editorial"

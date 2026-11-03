@@ -5,10 +5,11 @@ production source change, new runtime path or wrapper. The module imports only
 stdlib and is imported in a fresh process that refuses other product modules.
 Its public functions/types and existing limits retain their original behavior.
 
-The packet owns its source, the tests named in the manifest, its own boundary and
-budget guards, shared measurement/import helpers, pytest bootstrap, required
-instructions and the linked historical rationale. Mixed integration scenarios
-remain separately qualified; their assertions were not discarded.
+The manifest's ownership section names the source, tests and documents this
+module owns. Its complete packet also includes shared measurement/import helpers,
+pytest bootstrap, required instructions and historical context. Including a file
+does not transfer its ownership. Mixed integration scenarios remain separately
+qualified; their assertions were not discarded.
 
 Run `uv run pytest tests/modules/reply_json tests/test_one_answer_or_none.py -q -s`.
 The manifest enforces the 100000-token owner limit on the serialized bundle.

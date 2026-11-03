@@ -39,7 +39,8 @@
     "files": [
       "scripts/llm_wiki/daily_log_selection.py",
       "docs/modules/daily-log-selection.md",
-      "docs/modules/daily-log-selection-context.json"
+      "docs/modules/daily-log-selection-context.json",
+      "docs/research/2026-09-17-a-daily-log-is-named-by-its-date-everywhere.md"
     ],
     "directories": [
       "tests/modules/daily_log_selection"
