@@ -87,6 +87,18 @@ from llm_wiki.queue_child_runtime import (
 from llm_wiki.queue_contracts import _MAX_RESULT_BYTES
 from llm_wiki.queue_contracts import _MAX_RUNTIME_ATTEMPTS as _MAX_RUNTIME_ATTEMPTS
 from llm_wiki.queue_contracts import _STATES as _STATES
+from llm_wiki.queue_evidence_records import _capture_resolution_record as _capture_resolution_record
+from llm_wiki.queue_evidence_records import _capture_seal_digest as _capture_seal_digest
+from llm_wiki.queue_evidence_records import _corrupt_disposition_key as _corrupt_disposition_key
+from llm_wiki.queue_evidence_records import (
+    _corrupt_disposition_record as _corrupt_disposition_record,
+)
+from llm_wiki.queue_evidence_records import _corrupt_manifest as _corrupt_manifest
+from llm_wiki.queue_evidence_records import _corrupt_metadata as _corrupt_metadata
+from llm_wiki.queue_evidence_records import _corrupt_records_match as _corrupt_records_match
+from llm_wiki.queue_evidence_records import _CorruptEvidence as _CorruptEvidence
+from llm_wiki.queue_evidence_records import _purge_receipt_record as _purge_receipt_record
+from llm_wiki.queue_evidence_records import _require_identical_seal as _require_identical_seal
 from llm_wiki.queue_migration_plan import _QUEUE_V2_FAILURE_COLUMNS as _QUEUE_V2_FAILURE_COLUMNS
 from llm_wiki.queue_migration_plan import _QUEUE_V2_HISTORY_COLUMNS as _QUEUE_V2_HISTORY_COLUMNS
 from llm_wiki.queue_migration_plan import _QUEUE_V2_MIGRATED_TABLES as _QUEUE_V2_MIGRATED_TABLES
@@ -142,6 +154,7 @@ from llm_wiki.queue_process_cleanup import (
 from llm_wiki.queue_process_cleanup import (
     _tracked_descendant_pids as _tracked_descendant_pids,
 )
+from llm_wiki.queue_task_records import _attempt_history_entry as _attempt_history_entry
 from llm_wiki.queue_task_records import _export_task_record as _export_task_record
 from llm_wiki.queue_task_records import _exported_task_record as _exported_task_record
 from llm_wiki.queue_task_records import _ExportedRows as _ExportedRows
@@ -476,7 +489,6 @@ def _queue_v3_purge_authorizations_valid(database: sqlite3.Connection) -> bool:
 
 # Which bucket each payload key contributes a source-identity string to.
 
-
 def _still_held(source: sqlite3.Connection, table: str, where: str) -> bool:
     """Whether any such row is inside its lease; a null expiry cannot say, so it is.
 
@@ -511,7 +523,6 @@ def _require_unambiguous_v2_owners(
 
 
 # The tables a queue v2 migration fills, and the ones it must leave empty.
-
 
 def _queue_v3_row_counts(database: sqlite3.Connection) -> dict[str, int]:
     return {
@@ -1493,68 +1504,6 @@ def _blocked_purge(task_id: str, code: str) -> CorruptPurgeProgress:
     return _purge_progress(task_id, "", 0, 0, state="blocked", code=code)
 
 
-@dataclass(frozen=True)
-class _CorruptEvidence:
-    """The immutable bytes and digests one corrupt export is derived from."""
-
-    raw: bytes
-    history: bytes
-    metadata: bytes
-    raw_sha256: str
-    history_sha256: str
-    metadata_sha256: str
-    disposition_key: str
-    lineage_generation: int
-
-
-def _attempt_history_entry(item: Mapping[str, object]) -> dict[str, object]:
-    return {
-        "attempt": int(item["attempt"]),
-        "started_at": str(item["started_at"]),
-        "finished_at": str(item["finished_at"]),
-        "outcome": str(item["outcome"]),
-        "error_code": item["error_code"],
-    }
-
-
-def _corrupt_metadata(task_id: str, row: Mapping[str, object]) -> bytes:
-    return canonical_json_bytes(
-        {
-            "task_id": task_id,
-            "kind": str(row["kind"]),
-            "handler_version": int(row["handler_version"]),
-            "input_hash": str(row["input_hash"]),
-            "state": "dead",
-            "error_code": row["error_code"],
-            "lineage_generation": int(row["lineage_generation"]),
-        }
-    )
-
-
-def _corrupt_disposition_key(
-    *,
-    actor: str,
-    history_sha256: str,
-    metadata_sha256: str,
-    raw_sha256: str,
-    reason: str,
-    task_id: str,
-) -> str:
-    """One key for exactly this task, these bytes, this actor and this reason."""
-    return sha256_bytes(
-        canonical_json_bytes(
-            {
-                "actor_identity": actor,
-                "history_sha256": history_sha256,
-                "metadata_sha256": metadata_sha256,
-                "raw_sha256": raw_sha256,
-                "reason": reason,
-                "task_id": task_id,
-            }
-        )
-    )
-
-
 def _corrupt_child_leaf_blocker(
     queue: MemoryQueue, database: sqlite3.Connection, child: sqlite3.Row, now: datetime
 ) -> str | None:
@@ -1713,29 +1662,6 @@ def _corrupt_package_trustworthy(package: Path, disposition: sqlite3.Row) -> boo
     ) and _corrupt_payload_matches(package, records[2], disposition)
 
 
-def _corrupt_records_match(
-    manifest_bytes: bytes,
-    disposition_bytes: bytes,
-    manifest: Mapping[str, object],
-    record: Mapping[str, object],
-    disposition: sqlite3.Row,
-) -> bool:
-    """The package's own records agree with the row that points at them."""
-    if sha256_bytes(manifest_bytes) != disposition["manifest_sha256"]:
-        return False
-    if sha256_bytes(disposition_bytes) != disposition["disposition_sha256"]:
-        return False
-    task_id = disposition["task_id"]
-    package_path = disposition["package_path"]
-    named = (
-        manifest["task_id"],
-        record["task_id"],
-        manifest["package_path"],
-        record["package_path"],
-    )
-    return named == (task_id, task_id, package_path, package_path)
-
-
 def _corrupt_payload_matches(
     package: Path, manifest: Mapping[str, object], disposition: sqlite3.Row
 ) -> bool:
@@ -1865,69 +1791,6 @@ def _capture_binding_of(
     )
 
 
-def _corrupt_manifest(
-    operation: sqlite3.Row,
-    *,
-    operation_id: str,
-    task_id: str,
-    disposition_key: str,
-) -> dict[str, object]:
-    """The manifest describing everything the export produced."""
-    manifest = {
-        "schema_version": "corrupt-task-manifest/v1",
-        "operation_id": operation_id,
-        "task_id": task_id,
-        "package_key": disposition_key,
-        "package_path": f"run/queue-results/corrupt-{disposition_key}",
-        "raw_sha256": str(operation["raw_sha256"]),
-        "history_sha256": str(operation["history_sha256"]),
-        "metadata_sha256": str(operation["metadata_sha256"]),
-        "lineage_generation": int(operation["lineage_generation"]),
-        "link_count": int(operation["link_count"]),
-        "page_count": int(operation["page_count"]),
-        "rolling_root": str(operation["rolling_root"]),
-    }
-    validate_schema(
-        manifest,
-        Path(__file__).with_name("schemas") / "corrupt-task-manifest-v1.json",
-    )
-    return manifest
-
-
-def _corrupt_disposition_record(
-    *,
-    operation_id: str,
-    task_id: str,
-    disposition_key: str,
-    manifest_sha256: str,
-    active_link_digest: str,
-    actor: str,
-    reason: str,
-    disposed_at: str,
-) -> dict[str, object]:
-    """The record that retires the task and points at its evidence."""
-    record = {
-        "schema_version": "corrupt-task-disposition/v1",
-        "operation_id": operation_id,
-        "task_id": task_id,
-        "package_key": disposition_key,
-        "package_path": f"run/queue-results/corrupt-{disposition_key}",
-        "manifest_path": (
-            f"run/queue-results/corrupt-{disposition_key}/manifest.json"
-        ),
-        "manifest_sha256": manifest_sha256,
-        "active_link_digest": active_link_digest,
-        "actor_identity": actor,
-        "reason": reason,
-        "disposed_at": disposed_at,
-    }
-    validate_schema(
-        record,
-        Path(__file__).with_name("schemas") / "corrupt-task-disposition-v1.json",
-    )
-    return record
-
-
 def _verify_corrupt_package_bytes(
     package: Path,
     *,
@@ -2031,37 +1894,6 @@ def _insert_link_resolution(
         raise QueueOperationError("capture_link_resolution_failed")
 
 
-def _capture_resolution_record(
-    *,
-    task_id: str,
-    supersedes_digest: str | None,
-    observed: Mapping[str, object],
-    selected_intent: Mapping[str, object] | None,
-    actor: str,
-    reason: str,
-    now: datetime,
-) -> dict[str, object]:
-    """The schema-valid record one link resolution appends."""
-    record = {
-        "schema_version": "capture-task-link-resolution/v1",
-        "task_id": task_id,
-        "supersedes_digest": supersedes_digest,
-        "observed": dict(observed),
-        "selected_intent": (
-            None if selected_intent is None else dict(selected_intent)
-        ),
-        "actor_identity": actor,
-        "reason": reason,
-        "created_at": _timestamp(now),
-    }
-    validate_schema(
-        record,
-        Path(__file__).with_name("schemas")
-        / "capture-task-link-resolution-v1.json",
-    )
-    return record
-
-
 def _require_repair_projection(
     database: sqlite3.Connection, owner: OwnerLease, now: datetime
 ) -> None:
@@ -2163,35 +1995,6 @@ def _require_package_digests(package: Path, disposition: sqlite3.Row) -> None:
         raise QueueOperationError("corrupt_package_invalid")
 
 
-def _purge_receipt_record(
-    operation: sqlite3.Row,
-    disposition: sqlite3.Row,
-    *,
-    operation_id: str,
-    task_id: str,
-) -> dict[str, object]:
-    """The schema-valid receipt that closes one purge."""
-    receipt = {
-        "schema_version": "corrupt-purge/v1",
-        "operation_id": operation_id,
-        "task_id": task_id,
-        "package_key": str(disposition["disposition_key"]),
-        "package_path": str(disposition["package_path"]),
-        "manifest_sha256": str(disposition["manifest_sha256"]),
-        "disposition_sha256": str(disposition["disposition_sha256"]),
-        "original_frozen_root": str(disposition["original_frozen_root"]),
-        "purge_page_count": int(operation["page_count"]),
-        "final_rolling_root": str(operation["rolling_root"]),
-        "final_generation": int(operation["expected_generation"]),
-        "observed_incoming_link_count": 0,
-    }
-    validate_schema(
-        receipt,
-        Path(__file__).with_name("schemas") / "corrupt-purge-v1.json",
-    )
-    return receipt
-
-
 def _write_purge_receipt(package: Path, receipt: Mapping[str, object]) -> bytes:
     """Write the receipt and read it back to prove it landed."""
     receipt_bytes = canonical_json_bytes(receipt)
@@ -2202,45 +2005,6 @@ def _write_purge_receipt(package: Path, receipt: Mapping[str, object]) -> bytes:
     if written != receipt_bytes:
         raise QueueOperationError("corrupt_purge_receipt_invalid")
     return receipt_bytes
-
-
-def _capture_seal_digest(
-    *,
-    task_id: str,
-    consumer_kind: str,
-    consumer_id: str,
-    active_link_digest: str,
-) -> str:
-    """One digest for exactly this consumer sealing exactly this link."""
-    return sha256_bytes(
-        canonical_json_bytes(
-            {
-                "active_digest": active_link_digest,
-                "consumer_id": consumer_id,
-                "consumer_kind": consumer_kind,
-                "task_id": task_id,
-            }
-        )
-    )
-
-
-def _require_identical_seal(
-    existing: sqlite3.Row,
-    *,
-    consumer_kind: str,
-    consumer_id: str,
-    active_link_digest: str,
-    seal_digest: str,
-) -> None:
-    """A second seal is a no-op only when it is the very same seal."""
-    stored = (
-        existing["active_digest"],
-        existing["consumer_kind"],
-        existing["consumer_id"],
-        existing["seal_digest"],
-    )
-    if stored != (active_link_digest, consumer_kind, consumer_id, seal_digest):
-        raise QueueOperationError("capture_link_sealed")
 
 
 def _record_capture_seal(

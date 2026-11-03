@@ -31,3 +31,7 @@ Source: ../research/2026-11-03-queue-task-record-boundary.md.
 Shared canonical contract: [Queue value contracts](queue-contracts.md).
 Shared canonical contract: [Queue timing](queue-timing.md).
 Shared canonical contract: [Closed formats](formats.md).
+
+The normal export and corruption-history paths share `_attempt_history_entry`.
+Its five-field dictionary was AST-identical in both former implementations; the
+list mapper now calls the same function and the queue retains its required alias.

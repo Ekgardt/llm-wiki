@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -60,17 +60,19 @@ def _exported_capture_binding(
     }
 
 
+def _attempt_history_entry(item: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "attempt": int(item["attempt"]),
+        "started_at": str(item["started_at"]),
+        "finished_at": str(item["finished_at"]),
+        "outcome": str(item["outcome"]),
+        "error_code": item["error_code"],
+    }
+
+
+
 def _exported_attempt_history(history: Sequence[sqlite3.Row]) -> list[dict[str, object]]:
-    return [
-        {
-            "attempt": int(item["attempt"]),
-            "started_at": str(item["started_at"]),
-            "finished_at": str(item["finished_at"]),
-            "outcome": str(item["outcome"]),
-            "error_code": item["error_code"],
-        }
-        for item in history
-    ]
+    return [_attempt_history_entry(item) for item in history]
 
 
 def _exported_source_links(links: Sequence[sqlite3.Row]) -> list[dict[str, object]]:

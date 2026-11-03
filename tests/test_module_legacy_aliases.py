@@ -55,10 +55,26 @@ def test_public_pem_helper_keeps_identity_and_serialization():
 def test_queue_record_aliases_and_internal_row_pickle_stay_compatible():
     from llm_wiki import queue_task_records
 
-    for name in ('_task_record', '_export_task_record', '_exported_task_record', '_ExportedRows'):
+    for name in ('_task_record', '_export_task_record', '_exported_task_record', '_ExportedRows', '_attempt_history_entry'):
         assert getattr(memory_queue, name) is getattr(queue_task_records, name)
     rows = memory_queue._ExportedRows([], [], None, None)
     assert type(rows).__module__ == 'memory_queue'
     restored = pickle.loads(pickle.dumps(rows, protocol=4))
     assert type(restored) is memory_queue._ExportedRows
     assert restored == rows
+
+
+def test_queue_evidence_aliases_and_serialized_identity_are_retained():
+    import pickle
+
+    import memory_queue
+    from llm_wiki import queue_evidence_records
+
+    names = ('_CorruptEvidence', '_corrupt_metadata', '_corrupt_disposition_key',
+             '_corrupt_records_match', '_corrupt_manifest', '_corrupt_disposition_record',
+             '_capture_resolution_record', '_purge_receipt_record', '_capture_seal_digest',
+             '_require_identical_seal')
+    for name in names:
+        assert getattr(memory_queue, name) is getattr(queue_evidence_records, name)
+    value = queue_evidence_records._CorruptEvidence(b'a', b'b', b'c', 'd', 'e', 'f', 'g', 1)
+    assert pickle.loads(pickle.dumps(value)) == value

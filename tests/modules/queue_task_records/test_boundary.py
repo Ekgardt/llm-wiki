@@ -35,3 +35,17 @@ def test_required_queue_calls_use_aliases_not_duplicate_implementations():
     owned = {node.name for node in local.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
     assert not names & owned
     assert '_read_exported_rows' in names
+
+
+def test_attempt_history_has_one_shared_row_mapper():
+    tree = ast.parse(SOURCE.read_text())
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    assert '_attempt_history_entry' in functions
+    mapper = functions['_exported_attempt_history']
+    assert not any(isinstance(node, ast.Dict) for node in ast.walk(mapper))
+    assert _named_calls(mapper) == {'_attempt_history_entry'}
+
+
+def _named_calls(tree):
+    calls = (node for node in ast.walk(tree) if isinstance(node, ast.Call))
+    return {node.func.id for node in calls if isinstance(node.func, ast.Name)}

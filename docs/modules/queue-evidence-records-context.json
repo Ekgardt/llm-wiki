@@ -1,0 +1,65 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md",
+    "scripts/llm_wiki/queue_contracts.py",
+    "scripts/llm_wiki/queue_timing.py",
+    "scripts/llm_wiki/reliability_defaults.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/formats/schema.py",
+    "docs/modules/queue-contracts.md",
+    "docs/modules/queue-timing.md",
+    "docs/modules/reliability-defaults.md",
+    "docs/modules/formats.md",
+    "scripts/llm_wiki/queue_evidence_records.py",
+    "docs/modules/queue-evidence-records.md",
+    "docs/modules/queue-evidence-records-context.json",
+    "docs/research/2026-11-03-queue-evidence-record-boundary.md",
+    "scripts/schemas/corrupt-task-manifest-v1.json",
+    "scripts/schemas/corrupt-task-disposition-v1.json",
+    "scripts/schemas/capture-task-link-resolution-v1.json",
+    "scripts/schemas/corrupt-purge-v1.json",
+    "scripts/llm_wiki/formats/canonical.py"
+  ],
+  "directories": [
+    "tests/modules/queue_evidence_records"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "scripts/llm_wiki/queue_evidence_records.py",
+      "docs/modules/queue-evidence-records.md",
+      "docs/modules/queue-evidence-records-context.json",
+      "docs/research/2026-11-03-queue-evidence-record-boundary.md",
+      "scripts/schemas/corrupt-task-manifest-v1.json",
+      "scripts/schemas/corrupt-task-disposition-v1.json",
+      "scripts/schemas/capture-task-link-resolution-v1.json",
+      "scripts/schemas/corrupt-purge-v1.json"
+    ],
+    "directories": [
+      "tests/modules/queue_evidence_records"
+    ]
+  }
+}
