@@ -43,7 +43,8 @@
     "docs/modules/compile-call-runtime-context.json",
     "docs/research/2026-11-03-compile-call-runtime-boundary.md",
     "scripts/llm_wiki/compile_event_records.py",
-    "docs/modules/compile-event-records.md"
+    "docs/modules/compile-event-records.md",
+    "docs/modules/compile-journal-schema.md"
   ],
   "directories": [
     "tests/modules/compile_call_runtime"

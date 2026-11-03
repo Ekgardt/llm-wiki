@@ -1,0 +1,60 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md",
+    "scripts/llm_wiki/queue_database_contract.py",
+    "docs/modules/queue-database-contract.md",
+    "docs/modules/queue-database-contract-context.json",
+    "docs/research/2026-11-03-queue-database-contract-boundary.md",
+    "tests/modules/compile_journal_schema/original-contracts.json",
+    "scripts/llm_wiki/compile_event_records.py",
+    "scripts/llm_wiki/compile_journal_schema.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/formats/canonical.py",
+    "scripts/llm_wiki/queue_schema.py",
+    "scripts/llm_wiki/sqlite_contracts.py",
+    "scripts/llm_wiki/sqlite_pragmas.py",
+    "docs/modules/compile-event-records.md",
+    "docs/modules/compile-journal-schema.md",
+    "docs/modules/formats.md",
+    "docs/modules/queue-schema.md",
+    "docs/modules/sqlite-contracts.md",
+    "docs/modules/sqlite-pragmas.md"
+  ],
+  "directories": [
+    "tests/modules/queue_database_contract"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "scripts/llm_wiki/queue_database_contract.py",
+      "docs/modules/queue-database-contract.md",
+      "docs/modules/queue-database-contract-context.json"
+    ],
+    "directories": [
+      "tests/modules/queue_database_contract"
+    ]
+  }
+}

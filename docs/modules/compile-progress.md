@@ -61,3 +61,8 @@ facade retains identical exports and historical class identity. SQL behavior is
 unchanged.
 
 Shared canonical contract: [Compile event records](compile-event-records.md).
+
+Protected schema declarations and validation now belong to compile_journal_schema;
+the same exports remain here.
+
+Shared canonical contract: [Compile journal schema](compile-journal-schema.md).

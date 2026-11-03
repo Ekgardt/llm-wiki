@@ -2102,3 +2102,9 @@ locked registry name/version with the universal OSV report; omitted variants fai
 
 The [event record owner](modules/compile-event-records.md) holds pure compile values
 and validation; `compile_progress` retains journal storage and compatible exports.
+
+### Queue database compatibility
+
+[Journal schema](modules/compile-journal-schema.md) owns protected declarations;
+[queue database contracts](modules/queue-database-contract.md) check supplied
+connections. File opening, migrations and transaction ownership remain unchanged.

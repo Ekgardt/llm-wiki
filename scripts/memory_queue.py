@@ -271,6 +271,19 @@ from llm_wiki.queue_contracts import ResultConflictError as ResultConflictError
 from llm_wiki.queue_contracts import SemanticDecision as SemanticDecision
 from llm_wiki.queue_contracts import SourceFence as SourceFence
 from llm_wiki.queue_contracts import WorkerSummary as WorkerSummary
+from llm_wiki.queue_database_contract import _QUEUE_COMPILE_CONTRACT as _QUEUE_COMPILE_CONTRACT
+from llm_wiki.queue_database_contract import _QUEUE_V3_CONTRACT as _QUEUE_V3_CONTRACT
+from llm_wiki.queue_database_contract import (
+    QUEUE_COMPILE_SCHEMA_SHA256 as QUEUE_COMPILE_SCHEMA_SHA256,
+)
+from llm_wiki.queue_database_contract import QUEUE_V3_SCHEMA_SHA256 as QUEUE_V3_SCHEMA_SHA256
+from llm_wiki.queue_database_contract import _checked_queue_connection as _checked_queue_connection
+from llm_wiki.queue_database_contract import (
+    _queue_contract_for_version as _queue_contract_for_version,
+)
+from llm_wiki.queue_database_contract import (
+    _require_supported_queue_contract as _require_supported_queue_contract,
+)
 from llm_wiki.queue_heartbeat import (
     _LeaseHeartbeat as _LeaseHeartbeat,
 )
@@ -350,8 +363,10 @@ from llm_wiki.restricted_paths import restricted_relative_path
 from llm_wiki.sqlite_contracts import (
     MigrationStatement,
     OperationalDatabaseContract,
-    OperationalDatabaseContractError,
     quote_sqlite_identifier,
+)
+from llm_wiki.sqlite_contracts import (
+    OperationalDatabaseContractError as OperationalDatabaseContractError,
 )
 from llm_wiki.sqlite_contracts import _migration_error as _migration_error
 from llm_wiki.sqlite_deadlines import (
@@ -360,7 +375,9 @@ from llm_wiki.sqlite_deadlines import (
     refresh_operational_deadline,
 )
 from llm_wiki.sqlite_migrations import run_resumable_migration
-from llm_wiki.sqlite_pragmas import _validate_or_initialize_operational_contract
+from llm_wiki.sqlite_pragmas import (
+    _validate_or_initialize_operational_contract as _validate_or_initialize_operational_contract,
+)
 from llm_wiki.sqlite_transactions import begin_immediate
 from llm_wiki.windows_acl import _acl_is_owner_only as _acl_is_owner_only
 from llm_wiki.windows_acl import _acl_owner_lines as _acl_owner_lines
@@ -385,29 +402,6 @@ _MAX_EXPORT_METADATA_BYTES = 64 * 1024 * 1024
 # session start, so the reason has to fit a line, not carry a stack.
 MAX_PROCESSOR_REASON_CHARS = 300
 _MAX_CLI_DETAIL_CHARS = 240
-_QUEUE_V3_CONTRACT = OperationalDatabaseContract(application_id=0x4C575133)
-
-QUEUE_V3_SCHEMA_SHA256 = sha256_bytes(
-    canonical_json_bytes(
-        {
-            "tables": [list(item) for item in _QUEUE_V3_TABLE_SQL],
-            "indexes": [list(item) for item in _QUEUE_V3_INDEX_SQL],
-            "triggers": [list(item) for item in _QUEUE_V3_TRIGGER_SQL],
-            "application_id": _QUEUE_V3_CONTRACT.application_id,
-            "user_version": _QUEUE_V3_CONTRACT.user_version,
-        }
-    )
-)
-
-QUEUE_COMPILE_SCHEMA_SHA256 = sha256_bytes(canonical_json_bytes({
-    "base": QUEUE_V3_SCHEMA_SHA256,
-    "version": compile_progress.QUEUE_SCHEMA_VERSION,
-    "journal": list(compile_progress.SCHEMA_STATEMENTS),
-}))
-_QUEUE_COMPILE_CONTRACT = OperationalDatabaseContract(
-    application_id=_QUEUE_V3_CONTRACT.application_id,
-    user_version=compile_progress.QUEUE_SCHEMA_VERSION,
-)
 
 
 def _ordinary_purge_operation_id(manifest_sha256: str) -> str:
@@ -739,33 +733,6 @@ def _require_inside_state_root(path: Path, state_root: Path) -> None:
         raise PermissionError("queue v3 database is outside the state root") from exc
 
 
-def _queue_contract_for_version(version: int) -> OperationalDatabaseContract:
-    contracts = {_QUEUE_V3_CONTRACT.user_version: _QUEUE_V3_CONTRACT,
-                 compile_progress.QUEUE_SCHEMA_VERSION: _QUEUE_COMPILE_CONTRACT}
-    if version not in contracts:
-        raise OperationalDatabaseContractError("unsupported queue database version")
-    return contracts[version]
-
-
-def _require_supported_queue_contract(database: sqlite3.Connection) -> None:
-    version = database.execute("PRAGMA user_version").fetchone()[0]
-    contract = _queue_contract_for_version(version)
-    _validate_or_initialize_operational_contract(database, contract, initialize=False)
-    if version == compile_progress.QUEUE_SCHEMA_VERSION:
-        compile_progress._require_schema(database)
-
-
-def _checked_queue_connection(database: sqlite3.Connection, expected_contract=None) -> sqlite3.Connection:
-    try:
-        _require_supported_queue_contract(database)
-        if expected_contract is not None:
-            _validate_or_initialize_operational_contract(database, expected_contract, initialize=False)
-        return database
-    except BaseException:
-        database.close()
-        raise
-
-
 def _open_queue_v3_readonly(path: Path, state_root: Path, *, deadline: float | None = None, expected_contract=None) -> sqlite3.Connection:
     """Read a supported queue version; adoption still binds the exact active one."""
     return _checked_queue_connection(open_readonly_operational_db(
@@ -866,6 +833,7 @@ def audit_compile_progress(database, state_root: Path, *, deadline=None):
 
     queue = _QueueV3CandidateReader(Path(state_root) / "run" / "queue-v3.sqlite3")
     return audit_events(database, partial(queue.verify_compile_artifact, deadline=deadline), deadline=deadline)
+
 
 def _require_active(
     deadline: float, cancelled: Callable[[], bool] | None = None

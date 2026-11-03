@@ -29,29 +29,11 @@ from llm_wiki.compile_event_records import _require_sequence as _require_sequenc
 from llm_wiki.compile_event_records import _snapshot_event as _snapshot_event
 from llm_wiki.compile_event_records import _validate_event as _validate_event
 from llm_wiki.compile_event_records import artifact_identity as artifact_identity
+from llm_wiki.compile_journal_schema import QUEUE_SCHEMA_VERSION as QUEUE_SCHEMA_VERSION
+from llm_wiki.compile_journal_schema import SCHEMA_STATEMENTS as SCHEMA_STATEMENTS
+from llm_wiki.compile_journal_schema import _require_schema as _require_schema
+from llm_wiki.compile_journal_schema import _require_schema_object as _require_schema_object
 from llm_wiki.sqlite_deadlines import operational_deadline_active
-
-QUEUE_SCHEMA_VERSION = 4
-
-SCHEMA_STATEMENTS = (
-    """CREATE TABLE compile_work_events (
-        work_id TEXT NOT NULL,
-        sequence INTEGER NOT NULL CHECK(sequence >= 0),
-        task_id TEXT NOT NULL REFERENCES tasks(id),
-        source_digest TEXT NOT NULL,
-        stage TEXT NOT NULL,
-        outcome TEXT NOT NULL,
-        details_json TEXT NOT NULL,
-        event_digest TEXT NOT NULL,
-        PRIMARY KEY(work_id, sequence)
-    )""",
-    """CREATE TRIGGER compile_work_events_no_update
-       BEFORE UPDATE ON compile_work_events
-       BEGIN SELECT RAISE(ABORT, 'compile events are immutable'); END""",
-    """CREATE TRIGGER compile_work_events_no_delete
-       BEFORE DELETE ON compile_work_events
-       BEGIN SELECT RAISE(ABORT, 'compile event retirement requires migration'); END""",
-)
 
 
 def _decoded_event(row: sqlite3.Row) -> CompileEvent:
@@ -322,24 +304,6 @@ def append_event(database: sqlite3.Connection, event: CompileEvent) -> None:
         (event.work_id, event.sequence, event.task_id, event.source_digest,
          event.stage, event.outcome, _canonical(event.details), _event_digest(event)),
     )
-
-
-def _require_schema_object(database, kind: str, name: str, sql: str) -> None:
-    row = database.execute(
-        'SELECT type,sql FROM sqlite_master WHERE name=?', (name,),
-    ).fetchone()
-    if row is None or (row['type'], row['sql']) != (kind, sql.strip()):
-        raise ProgressCorrupt('compile journal schema or protection changed')
-
-
-def _require_schema(database) -> None:
-    objects = (
-        ('table', 'compile_work_events'),
-        ('trigger', 'compile_work_events_no_update'),
-        ('trigger', 'compile_work_events_no_delete'),
-    )
-    for (kind, name), sql in zip(objects, SCHEMA_STATEMENTS):
-        _require_schema_object(database, kind, name, sql)
 
 
 def _audit_event(row, previous, counts, verify_artifact):

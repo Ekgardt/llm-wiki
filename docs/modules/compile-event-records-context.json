@@ -31,7 +31,8 @@
     "docs/modules/compile-progress-history-records.json",
     "docs/modules/compile-progress.md",
     "docs/modules/sqlite-deadlines.md",
-    "docs/modules/formats.md"
+    "docs/modules/formats.md",
+    "docs/modules/compile-journal-schema.md"
   ],
   "directories": [
     "tests/modules/compile_event_records"

@@ -1,0 +1,18 @@
+{
+  "queue_schema_sha256": "9384cbb91d1983761f1e803c4ff208108ec20fd07d8a8856263f112521695912",
+  "compile_schema_sha256": "13fff6ff8603a350c3ec528edf3dc4981a9a04fde8fbff013d3d76f66437844d",
+  "queue_contract": {
+    "application_id": 1280790835,
+    "user_version": 3
+  },
+  "compile_contract": {
+    "application_id": 1280790835,
+    "user_version": 4
+  },
+  "journal_version": 4,
+  "journal_sql": [
+    "CREATE TABLE compile_work_events (\n        work_id TEXT NOT NULL,\n        sequence INTEGER NOT NULL CHECK(sequence >= 0),\n        task_id TEXT NOT NULL REFERENCES tasks(id),\n        source_digest TEXT NOT NULL,\n        stage TEXT NOT NULL,\n        outcome TEXT NOT NULL,\n        details_json TEXT NOT NULL,\n        event_digest TEXT NOT NULL,\n        PRIMARY KEY(work_id, sequence)\n    )",
+    "CREATE TRIGGER compile_work_events_no_update\n       BEFORE UPDATE ON compile_work_events\n       BEGIN SELECT RAISE(ABORT, 'compile events are immutable'); END",
+    "CREATE TRIGGER compile_work_events_no_delete\n       BEFORE DELETE ON compile_work_events\n       BEGIN SELECT RAISE(ABORT, 'compile event retirement requires migration'); END"
+  ]
+}

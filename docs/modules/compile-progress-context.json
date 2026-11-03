@@ -36,7 +36,9 @@
     "docs/modules/sqlite-deadlines.md",
     "docs/modules/formats.md",
     "scripts/llm_wiki/compile_event_records.py",
-    "docs/modules/compile-event-records.md"
+    "docs/modules/compile-event-records.md",
+    "scripts/llm_wiki/compile_journal_schema.py",
+    "docs/modules/compile-journal-schema.md"
   ],
   "directories": [
     "tests/modules/compile_progress"
