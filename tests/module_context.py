@@ -97,13 +97,11 @@ def _plugin_files(root: Path, path: Path) -> set[Path]:
 
 
 def _context_python(root: Path, path: Path) -> bool:
-    zones = (root / 'scripts', root / 'tests')
-    return path.suffix == '.py' and any(path.is_relative_to(zone) for zone in zones)
+    return path.suffix == '.py' and path.is_relative_to(root)
 
 
 def _package_initializers(root: Path, base: Path) -> set[Path]:
-    zones = (root / 'scripts', root / 'tests')
-    parents = [p for p in base.parents if any(p.is_relative_to(zone) for zone in zones)]
+    parents = [p for p in base.parents if p.is_relative_to(root)]
     candidates = [p / '__init__.py' for p in parents]
     return _existing_paths(candidates)
 
@@ -124,30 +122,33 @@ def _relative_import_parent(root: Path, source: Path, level: int) -> Path:
     parent = source.parent
     for _ in range(level - 1):
         parent = parent.parent
-    zones = (root / 'scripts', root / 'tests')
-    assert any(parent.is_relative_to(zone) for zone in zones), 'Relative import escapes source roots'
+    assert parent.is_relative_to(root), 'Relative import escapes repository'
     return parent
 
 
-def _absolute_import_base(root: Path, name: str) -> Path:
+def _absolute_import_bases(root: Path, source: Path, name: str) -> set[Path]:
+    """Current launch roots, conservatively retaining ambiguous local names."""
     parts = name.split('.')
-    if parts[0] in {'scripts', 'tests'}:
-        return root.joinpath(*parts)
-    return (root / 'scripts').joinpath(*parts)
+    roots = {root, root / 'scripts', root / 'tests', root / 'benchmark', source.parent}
+    return {folder.joinpath(*parts) for folder in roots}
+
+
+def _from_import_bases(root: Path, source: Path, node: ast.ImportFrom) -> set[Path]:
+    if node.level:
+        parent = _relative_import_parent(root, source, node.level)
+        return {parent.joinpath(*(node.module or '').split('.'))}
+    return _absolute_import_bases(root, source, node.module or '')
 
 
 def _from_import_sources(root: Path, source: Path, node: ast.ImportFrom) -> set[Path]:
-    base = _absolute_import_base(root, node.module or '')
-    if node.level:
-        parent = _relative_import_parent(root, source, node.level)
-        base = parent.joinpath(*(node.module or '').split('.'))
-    children = set().union(*(_local_source_files(root, base / a.name) for a in node.names))
-    return _local_source_files(root, base) | children
+    bases = _from_import_bases(root, source, node)
+    children = {base / alias.name for base in bases for alias in node.names}
+    return set().union(*(_local_source_files(root, base) for base in bases | children))
 
 
 def _import_sources(root: Path, source: Path, node: ast.AST) -> set[Path]:
     if isinstance(node, ast.Import):
-        bases = [_absolute_import_base(root, a.name) for a in node.names]
+        bases = set().union(*(_absolute_import_bases(root, source, a.name) for a in node.names))
         return set().union(*(_local_source_files(root, base) for base in bases))
     if isinstance(node, ast.ImportFrom):
         return _from_import_sources(root, source, node)

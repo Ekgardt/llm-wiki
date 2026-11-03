@@ -51,6 +51,85 @@ def test_transitive_dependency_is_required(tmp_path):
         measure_context(tmp_path, manifest)
 
 
+@pytest.mark.parametrize('owner', ['benchmark/owner.py', 'integrations/owner.py', 'owner.py'])
+@pytest.mark.parametrize('statement', ['import dependency', 'def later():\n import dependency'])
+def test_every_declared_python_source_requires_its_product_dependencies(tmp_path, owner, statement):
+    manifest = _packet(tmp_path, {
+        owner: statement, 'scripts/dependency.py': 'VALUE = 1',
+    }, [owner])
+    with pytest.raises(AssertionError, match='scripts/dependency.py'):
+        measure_context(tmp_path, manifest)
+
+
+@pytest.mark.parametrize('dependency', ['benchmark/helper.py', 'helper.py', 'tests/helper.py'])
+def test_launch_root_imports_cannot_be_mistaken_for_installed_packages(tmp_path, dependency):
+    manifest = _packet(tmp_path, {
+        'tests/check.py': 'import helper', dependency: 'VALUE = 1',
+    }, ['tests/check.py'])
+    with pytest.raises(AssertionError, match=dependency):
+        measure_context(tmp_path, manifest)
+
+
+def test_a_benchmark_sibling_import_is_followed(tmp_path):
+    manifest = _packet(tmp_path, {
+        'benchmark/nested/owner.py': 'import sibling',
+        'benchmark/nested/sibling.py': 'VALUE = 1',
+    }, ['benchmark/nested/owner.py'])
+    with pytest.raises(AssertionError, match='benchmark/nested/sibling.py'):
+        measure_context(tmp_path, manifest)
+
+
+def test_all_ambiguous_local_candidates_are_required(tmp_path):
+    manifest = _packet(tmp_path, {
+        'scripts/owner.py': 'import helper', 'scripts/helper.py': '',
+        'benchmark/helper.py': '',
+    }, ['scripts/owner.py', 'scripts/helper.py'])
+    with pytest.raises(AssertionError, match='benchmark/helper.py'):
+        measure_context(tmp_path, manifest)
+
+
+@pytest.mark.parametrize('statement', ['from . import child', 'from .child import VALUE'])
+def test_benchmark_relative_children_are_required(tmp_path, statement):
+    manifest = _packet(tmp_path, {
+        'benchmark/pkg/__init__.py': '', 'benchmark/pkg/owner.py': statement,
+        'benchmark/pkg/child.py': 'VALUE = 1',
+    }, ['benchmark/pkg/__init__.py', 'benchmark/pkg/owner.py'])
+    with pytest.raises(AssertionError, match='benchmark/pkg/child.py'):
+        measure_context(tmp_path, manifest)
+
+
+def test_benchmark_initializers_and_their_imports_are_followed(tmp_path):
+    manifest = _packet(tmp_path, {
+        'benchmark/pkg/__init__.py': 'import dependency',
+        'benchmark/pkg/owner.py': '', 'scripts/dependency.py': '',
+    }, ['benchmark/pkg/owner.py'])
+    with pytest.raises(AssertionError, match='benchmark/pkg/__init__.py'):
+        measure_context(tmp_path, manifest)
+    manifest.write_text(manifest.read_text().replace(
+        '"benchmark/pkg/owner.py"', '"benchmark/pkg/owner.py", "benchmark/pkg/__init__.py"'
+    ))
+    with pytest.raises(AssertionError, match='scripts/dependency.py'):
+        measure_context(tmp_path, manifest)
+
+
+def test_relative_benchmark_import_cannot_escape_the_repository(tmp_path):
+    manifest = _packet(tmp_path, {
+        'benchmark/pkg/owner.py': 'from .... import outside',
+    }, ['benchmark/pkg/owner.py'])
+    with pytest.raises(AssertionError, match='Relative import escapes'):
+        measure_context(tmp_path, manifest)
+
+
+def test_complete_benchmark_cycle_and_installed_dependency_are_accepted(tmp_path):
+    sources = {
+        'benchmark/owner.py': 'import helper\nimport numpy',
+        'benchmark/helper.py': 'import owner\nimport product',
+        'scripts/product.py': '',
+    }
+    manifest = _packet(tmp_path, sources, list(sources))
+    assert measure_context(tmp_path, manifest)[0] > 0
+
+
 @pytest.mark.parametrize('source', ['from .dependency import VALUE', 'from . import dependency'])
 def test_relative_dependency_is_required(tmp_path, source):
     manifest = _packet(tmp_path, {

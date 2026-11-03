@@ -1029,7 +1029,7 @@
   "test_model_publication_authenticates_preserved_prefix.py": 147.57,
   "test_module_boundary_checks.py": 0.15,
   "test_module_context_bootstrap.py": 0.09,
-  "test_module_context_dependencies.py": 3.29,
+  "test_module_context_dependencies.py": 4.34,
   "test_module_contract_docs.py": 0.69,
   "test_module_legacy_aliases.py": 0.12,
   "test_module_ownership.py": 0.27,

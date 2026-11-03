@@ -2135,3 +2135,11 @@ owns single-span coverage with a downward dependency on the date resolver. Pure 
 move out of mixed integration files without changing assertions; real retrieval and
 answer checks stay. No ranking constants, date rules or thresholds change.
 See [qualification](research/2026-11-03-retrieval-leaf-owner-qualification.md).
+
+### Python maintenance context across launch roots
+
+Packet source closure includes declared benchmark and other contained Python files,
+not just scripts and tests. Static absolute imports conservatively include local
+candidates in the repository, scripts, tests, benchmark and importing directory;
+relative imports and package initializers remain inside the repository. Runtime
+import paths are unchanged. See [closure correction](research/2026-11-03-benchmark-context-closure.md).

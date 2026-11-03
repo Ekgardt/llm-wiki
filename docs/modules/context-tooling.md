@@ -46,8 +46,12 @@ whole-project lockfile obligation remain visible in the ownership registry.
 
 Source closure conservatively follows production and test/support AST imports:
 eager, lazy and conditional imports, relative helpers, imported submodules and
-package initializers under scripts/ and tests/. Cycles terminate through visited
-paths. A dependency's full owner guide and recursively declared shared contracts
+package initializers for every declared contained Python file. Absolute names
+conservatively include candidates in the importing directory and the repository's
+scripts/, tests/, benchmark/ and root launch paths; ambiguous local names require
+all candidates. Relative imports stay inside the repository. These paths reflect
+current Python entry points; a new launch root needs explicit qualification.
+Cycles terminate through visited paths. A dependency's full owner guide and recursively declared shared contracts
 are required. Every guide is reachable from STRUCTURE.md. Dynamic loading,
 config-selected providers, external processes, resources and side effects still
 need explicit investigation: the static graph is not a complete runtime oracle.

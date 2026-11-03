@@ -40,7 +40,8 @@
     "tests/module_records.py",
     "tests/module_record_context.py",
     "docs/modules/context-records.md",
-    "tests/module_record_ownership.py"
+    "tests/module_record_ownership.py",
+    "docs/research/2026-11-03-benchmark-context-closure.md"
   ],
   "directories": [
     "tests/modules/context_tooling"
@@ -66,7 +67,8 @@
       "docs/research/2026-11-02-module-boundaries-validation.md",
       "docs/research/2026-11-03-canonical-module-qualification-context.md",
       "docs/research/2026-11-03-existing-leaf-owner-qualification.md",
-      "tests/module_context_paths.py"
+      "tests/module_context_paths.py",
+      "docs/research/2026-11-03-benchmark-context-closure.md"
     ],
     "directories": [
       "tests/modules/context_tooling"
