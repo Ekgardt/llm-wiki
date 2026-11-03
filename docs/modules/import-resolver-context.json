@@ -1,0 +1,57 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md",
+    "scripts/import_resolver.py",
+    "docs/modules/import-resolver.md",
+    "docs/modules/import-resolver-context.json",
+    "tests/test_symbol_registry_cancellation.py",
+    "tests/test_symbol_registry_walk.py",
+    "tests/symbol_registry_allocation_probe.py",
+    "docs/research/2026-08-29-what-a-symbol-registry-must-retain.md",
+    "docs/research/2026-09-25-the-live-graph-reads-only-its-own-files.md",
+    "docs/research/2026-09-26-the-registry-reads-only-its-own-files.md",
+    "docs/research/2026-09-25-one-hard-python-file-does-not-freeze-the-index.md",
+    "scripts/python_parse.py",
+    "docs/modules/python-parse.md"
+  ],
+  "directories": [
+    "tests/modules/import_resolver"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "scripts/import_resolver.py",
+      "docs/modules/import-resolver.md",
+      "docs/modules/import-resolver-context.json",
+      "tests/test_symbol_registry_cancellation.py",
+      "tests/test_symbol_registry_walk.py",
+      "tests/symbol_registry_allocation_probe.py"
+    ],
+    "directories": [
+      "tests/modules/import_resolver"
+    ]
+  }
+}

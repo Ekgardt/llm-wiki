@@ -2258,5 +2258,9 @@ Full owner contract: [transaction lineage](modules/transaction-lineage.md).
 Full owner contract: [static knowledge-writer analysis](modules/knowledge-writer-scanner.md).
 The scanner reports source findings; transaction enforcement and the actual writer
 behavioral matrix remain separate responsibilities.
+
+Full owner contract: [Python import resolution](modules/import-resolver.md).
+Lexical/workspace resolution retains its parser dependency; generation publication
+and live language-server navigation remain separate.
 The existing reader uses supplied SQLite connections; admission, snapshot control,
 pruning and stronger source-specific evidence retain their current owners.
