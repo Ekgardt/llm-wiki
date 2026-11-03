@@ -2316,3 +2316,10 @@ session/turn coverage, prompt evidence and aggregate counts from supplied data.
 Benchmark execution, scoring, retrieval and report publication remain with callers.
 Existing matching rules and all original assertions are preserved; shared synthetic
 test fixtures have one owner. Historical measurements remain dated evidence.
+
+### Benchmark grading protocol and interchange
+
+[LongMemEval protocol](modules/longmemeval-protocol.md) owns the existing local
+grading templates, label/accuracy calculations and hypothesis JSONL exporter.
+It performs no model calls. Judge execution and reports remain with consumers.
+Public paths, source bytes and all original assertions are preserved.
