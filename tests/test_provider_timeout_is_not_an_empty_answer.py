@@ -69,3 +69,15 @@ def test_the_lineage_names_the_timeout_so_a_log_reader_can_tell_them_apart(
     item = llm_client._llm_fallback_item(result)
     assert item.endswith(":provider_timeout")
     assert "empty_response" not in item
+
+
+def test_a_bad_timeout_override_is_refused_by_name(monkeypatch):
+    """Audit L5: `MEMORY_LLM_TIMEOUT_S=abc` names the variable, not `int()`."""
+    import llm_client
+    import pytest
+
+    monkeypatch.setenv("MEMORY_LLM_TIMEOUT_S", "abc")
+    with pytest.raises(ValueError, match="MEMORY_LLM_TIMEOUT_S must be a positive integer"):
+        llm_client._timeout_s()
+    monkeypatch.setenv("MEMORY_LLM_TIMEOUT_S", "45")
+    assert llm_client._timeout_s() == 45

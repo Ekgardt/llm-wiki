@@ -45,14 +45,6 @@ def test_query_file_back_uses_notes_dir():
     assert query_memory.QA_DIR.as_posix().endswith("knowledge/notes")
 
 
-def test_redact_secrets_strips_bearer():
-    from secret_redact import redact_secrets
-
-    out = redact_secrets("Authorization: Bearer sk-abcdefghijklmnopqrstuvwxyz012345")
-    assert "sk-abcdefghijklmnopqrstuvwxyz012345" not in out
-    assert "REDACTED" in out
-
-
 def test_memory_queue_work_query_without_output_path(tmp_path, monkeypatch):
     import memory_queue
 

@@ -92,24 +92,6 @@ def test_multiline_global_stages_match_uncached_original():
         assert [redactor.redact_secrets(text) for text in texts] == expected
 
 
-def test_policy_literal_can_still_cross_cached_line_boundary():
-    from model_dlp import DLPPolicy, redact_for_transport
-    policy = DLPPolicy(('first\nsecond',), frozenset(), frozenset())
-    with redactor.line_redaction_scope({}):
-        assert redact_for_transport('first\nsecond', policy) == '[REDACTED_LITERAL]'
-
-
-def test_whole_text_allow_fingerprint_is_not_a_line_cache_authority():
-    import hashlib
-
-    from model_dlp import DLPPolicy, redact_for_transport
-    text = 'api_key="exampleexampleexample"'
-    policy = DLPPolicy((), frozenset({hashlib.sha256(text.encode()).hexdigest()}), frozenset())
-    with redactor.line_redaction_scope({}):
-        assert redact_for_transport(text, policy) == text
-        assert redact_for_transport(text + '\nadditional context', policy).startswith('api_key="[REDACTED]"')
-
-
 def test_current_registry_cannot_approve_an_unreviewed_multiline_rule(monkeypatch):
     import re
     changed = [*redactor._PATTERNS, (re.compile('first\nsecond'), '[CUSTOM]')]

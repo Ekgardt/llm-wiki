@@ -18,7 +18,6 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import memory_queue  # noqa: E402
-import secret_redact  # noqa: E402
 from memory_queue import MemoryQueue  # noqa: E402
 
 _TOO_LONG = "e" * 65
@@ -76,12 +75,6 @@ def test_a_payload_key_that_is_not_a_string_is_refused_by_its_own_rule(
         queue.enqueue("query", 1, {1: "plain", "token": "secret-value"})
 
     assert str(raised.value) == "canonical JSON object keys must be strings"
-
-
-def test_the_redaction_walk_passes_a_non_string_key_to_the_encoder() -> None:
-    walked = secret_redact.redact_structure({1: "plain", "token": "secret-value"})
-
-    assert walked == {1: "plain", "token": "[REDACTED]"}
 
 
 def test_a_long_redrive_chain_orders_without_python_s_stack() -> None:

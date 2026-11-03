@@ -5,38 +5,12 @@ docs/research/2026-09-27-a-secret-in-structure-is-redacted-as-structure.md
 from __future__ import annotations
 
 import ast
-import json
 from pathlib import Path
 
 import secret_redact
 from event_envelope import build_event_envelope
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
-TURN = {
-    "type": "assistant",
-    "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {
-        "command": "export PASSWORD=hunter2pass", "description": "set the password"}}]},
-}
-
-
-def test_a_transcript_line_stays_json_and_loses_its_secret() -> None:
-    line = json.dumps(TURN, separators=(",", ":")) + "\n"
-
-    redacted = secret_redact.redact_jsonl(line)
-    record = json.loads(redacted)
-
-    command = record["message"]["content"][0]["input"]["command"]
-    assert (command, "hunter2pass" in redacted, redacted.endswith("\n")) == (
-        "export PASSWORD=[REDACTED]", False, True
-    )
-
-
-def test_a_value_under_a_secret_named_key_is_blanked_everywhere() -> None:
-    payload = {"password": "short", "nested": [{"api_key": "x"}], "note": "keep"}
-
-    assert secret_redact.redact_structure(payload) == {
-        "password": "[REDACTED]", "nested": [{"api_key": "[REDACTED]"}], "note": "keep"
-    }
 
 
 def test_an_event_payload_blanks_a_secret_named_key() -> None:

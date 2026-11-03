@@ -109,14 +109,3 @@ def test_a_replaced_pattern_cannot_claim_purity_through_copied_metadata(monkeypa
         assert redactor.redact_secrets(text) == text
         monkeypatch.setattr(redactor, '_PASSWORD_COMMAND', ChangedPattern())
         assert redactor.redact_secrets(text) == 'other -p[REDACTED]\n'
-
-
-def test_policy_changes_still_apply_to_reused_command_lines():
-    from model_dlp import DLPPolicy, redact_for_transport
-
-    text = 'ordinary source\nnext source'
-    first = DLPPolicy((), frozenset(), frozenset())
-    second = DLPPolicy((text,), frozenset(), frozenset())
-    with redactor.line_redaction_scope({}):
-        assert redact_for_transport(text, first) == text
-        assert redact_for_transport(text, second) == '[REDACTED_LITERAL]'

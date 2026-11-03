@@ -216,3 +216,14 @@ def test_the_guard_does_not_fire_on_a_field_comparison():
         "repository_scope.checkout_id)\n"
     )
     assert _findings_in_file(ast.parse(source), Path("evidence_graph.py")) == []
+
+
+def test_the_git_budget_matches_the_one_the_index_gives_the_same_probe():
+    """One operation, one bound. Two seconds was a Linux figure.
+
+    Research: docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md.
+    """
+    import repository_index
+    import repository_scope as scope_module
+
+    assert scope_module.GIT_TIMEOUT_SECONDS == repository_index.GIT_TIMEOUT_SECONDS
