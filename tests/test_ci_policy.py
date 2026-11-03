@@ -431,3 +431,21 @@ def test_end_to_end_installer_pins_python_before_changing_home():
     pin = commands.index('uv python pin 3.13')
     home = next(index for index, step in enumerate(steps) if 'HOME' in step.get('env', {}))
     assert install < pin < home
+
+
+def _audit_commands_containing(text):
+    commands = _commands(_workflow()['jobs']['dependency-audit']).splitlines()
+    return [line for line in commands if text in line]
+
+
+def _universal_audit_arguments():
+    return [shlex.split(line) for line in _audit_commands_containing('pip-audit --locked')]
+
+
+def test_dependency_audit_covers_all_marker_variants():
+    export = _audit_commands_containing('--format pylock.toml')[0]
+    assert {'--locked', '--all-extras', '--all-groups', '--no-emit-project'} <= set(shlex.split(export))
+    audits = _universal_audit_arguments()
+    assert any('osv' not in args for args in audits)
+    assert any({'--vulnerability-service', 'osv', '--strict', '--format', 'json'} <= set(args) for args in audits)
+    assert _audit_commands_containing('scripts/check_dependency_audit.py uv.lock')

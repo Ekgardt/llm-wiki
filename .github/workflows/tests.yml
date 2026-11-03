@@ -60,6 +60,13 @@ jobs:
       # query exact local versions through OSV; collection failures must fail CI.
       - run: uv run --locked --no-sync pip-audit --requirement "${{ runner.temp }}/locked-requirements.txt" --disable-pip --vulnerability-service osv --strict --progress-spinner off
 
+      # Universal pylock collection retains variants for every interpreter/OS.
+      - run: mkdir -p "${{ runner.temp }}/universal-audit"
+      - run: uv export --locked --all-extras --all-groups --no-emit-project --format pylock.toml -o "${{ runner.temp }}/universal-audit/pylock.toml"
+      - run: uv run --locked --no-sync pip-audit --locked "${{ runner.temp }}/universal-audit" --progress-spinner off
+      - run: uv run --locked --no-sync pip-audit --locked "${{ runner.temp }}/universal-audit" --vulnerability-service osv --strict --progress-spinner off --format json --output "${{ runner.temp }}/universal-audit/osv.json"
+      - run: uv run --locked --no-sync python scripts/check_dependency_audit.py uv.lock "${{ runner.temp }}/universal-audit/osv.json"
+
   lint:
     name: timing::focused::lint
     runs-on: ubuntu-24.04

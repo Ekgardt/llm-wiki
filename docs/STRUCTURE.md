@@ -2092,3 +2092,8 @@ See [the correction](research/2026-11-03-boundary-source-read-context.md).
 uncertainty and repeat resolution through an explicit queue object and protected
 invoke callback. Queue SQL/leases/artifacts and compiler semantic orchestration
 retain their owners. See the [call lifecycle contract](modules/compile-call-runtime.md).
+
+### Dependency audit coverage
+
+The CI-only [coverage verifier](modules/dependency-audit-coverage.md) compares every
+locked registry name/version with the universal OSV report; omitted variants fail.
