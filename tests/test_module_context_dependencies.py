@@ -105,7 +105,7 @@ def test_benchmark_initializers_and_their_imports_are_followed(tmp_path):
     }, ['benchmark/pkg/owner.py'])
     with pytest.raises(AssertionError, match='benchmark/pkg/__init__.py'):
         measure_context(tmp_path, manifest)
-    manifest.write_text(manifest.read_text().replace(
+    manifest.write_text(manifest.read_text(encoding='utf-8').replace(
         '"benchmark/pkg/owner.py"', '"benchmark/pkg/owner.py", "benchmark/pkg/__init__.py"'
     ))
     with pytest.raises(AssertionError, match='scripts/dependency.py'):
@@ -291,3 +291,14 @@ def test_complete_authority_files_cannot_be_replaced_by_record_views(tmp_path, n
     manifest.write_text(json.dumps(packet))
     with pytest.raises(AssertionError, match=name):
         measure_context(tmp_path, manifest)
+
+
+@pytest.mark.parametrize('path_type', ['PurePosixPath', 'PureWindowsPath'])
+def test_relative_context_names_use_manifest_separators(path_type):
+    import pathlib
+
+    from tests.module_context import relative_context_names
+
+    root = getattr(pathlib, path_type)('checkout')
+    paths = {root / 'tests' / 'validator.py', root / 'docs' / 'records.json'}
+    assert relative_context_names(root, paths) == ['docs/records.json', 'tests/validator.py']

@@ -10,37 +10,37 @@ SCRIPTS = ROOT / "scripts"
 
 
 def test_restricted_paths_filesystem_module_no_longer_defines_owner_function():
-    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text(encoding='utf-8'))
     assert 'restricted_relative_path' not in {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
 
 
 def test_runtime_contracts_former_facade_has_no_second_implementation():
-    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text(encoding='utf-8'))
     assert 'UnsafeStateRoot' not in {getattr(n, 'name', None) for n in tree.body}
 
 
 def test_runtime_environment_former_facade_has_no_second_implementation():
-    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text(encoding='utf-8'))
     assert '_windows_network_anchor' not in {getattr(n, 'name', None) for n in tree.body}
 
 
 def test_runtime_fingerprints_former_facade_has_no_second_implementation():
-    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text(encoding='utf-8'))
     assert '_fingerprint_metadata' not in {getattr(n, 'name', None) for n in tree.body}
 
 
 def test_runtime_publication_former_facade_has_no_second_implementation():
-    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text(encoding='utf-8'))
     assert '_publication_digest' not in {getattr(n, 'name', None) for n in tree.body}
 
 
 def test_runtime_records_former_facade_has_no_second_implementation():
-    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text(encoding='utf-8'))
     assert '_contained_runtime_metadata' not in {getattr(n, 'name', None) for n in tree.body}
 
 
 def test_runtime_sync_former_facade_has_no_second_implementation():
-    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text(encoding='utf-8'))
     assert 'fsync_file' not in {getattr(n, 'name', None) for n in tree.body}
 
 
@@ -48,33 +48,33 @@ _sqlite_contracts_NAMES = {'OperationalDatabaseContract', 'OperationalDatabaseCo
 
 
 def test_sqlite_contracts_durability_module_has_no_contract_definitions():
-    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text(encoding='utf-8'))
     nodes = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))]
     assert not _sqlite_contracts_NAMES.intersection(n.name for n in nodes)
 
 
 def test_sqlite_deadlines_filesystem_module_no_longer_owns_control():
-    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text(encoding='utf-8'))
     assert 'operational_deadline_active' not in {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
 
 
 def test_sqlite_io_facade_has_no_function_bodies():
-    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text(encoding='utf-8'))
     assert not any(isinstance(n, ast.FunctionDef) for n in tree.body)
 
 
 def test_sqlite_migrations_filesystem_module_no_longer_owns_control():
-    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text(encoding='utf-8'))
     assert 'run_resumable_migration' not in {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
 
 
 def test_sqlite_pragmas_filesystem_module_no_longer_defines_owner_function():
-    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text(encoding='utf-8'))
     assert '_apply_operational_pragmas' not in {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
 
 
 def test_sqlite_transactions_filesystem_module_no_longer_defines_transaction_control():
-    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text(encoding='utf-8'))
     assert 'begin_immediate' not in {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
 
 

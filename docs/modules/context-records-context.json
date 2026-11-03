@@ -31,7 +31,8 @@
     "tests/test_module_record_ownership.py",
     "docs/modules/context-records-context.json",
     "docs/research/2026-11-03-large-artifact-context-investigation.md",
-    "tests/module_ownership.py"
+    "tests/module_ownership.py",
+    "docs/research/2026-11-03-native-ci-source-text-and-paths.md"
   ],
   "directories": [
     "tests/modules/context_records"

@@ -25,7 +25,7 @@ def _required_guides(root, files, ownership, *, record_names=()):
 
 
 def _shared_targets(root, guide):
-    lines = [line for line in guide.read_text().splitlines() if line.startswith('Shared canonical contract:')]
+    lines = [line for line in guide.read_text(encoding='utf-8').splitlines() if line.startswith('Shared canonical contract:')]
     matches = [re.fullmatch(r'Shared canonical contract: \[.*?\]\(([^)]+)\)\.', line) for line in lines]
     assert all(matches), f'Malformed shared contract reference: {guide}'
     return {_contained(root, str(guide.parent.relative_to(root) / match.group(1))) for match in matches}
@@ -57,7 +57,7 @@ def test_packet_retains_full_guides_for_its_source_owners(manifest, ownership):
 
 
 def test_canonical_entry_point_links_each_owner_guide(ownership):
-    source = (ROOT / 'docs/STRUCTURE.md').read_text()
+    source = (ROOT / 'docs/STRUCTURE.md').read_text(encoding='utf-8')
     for owner in set(ownership.values()):
         assert f'(modules/{owner}.md)' in source, owner
 

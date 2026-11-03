@@ -5,7 +5,7 @@ import hashlib
 import os
 from pathlib import Path
 
-from bounded_io import IO_CHUNK_BYTES
+from bounded_io import IO_CHUNK_BYTES, path_descriptor_change_time_matches
 
 from llm_wiki.runtime_contracts import RuntimeFileIdentity
 from llm_wiki.runtime_records import _runtime_identity_from_metadata, _validated_runtime_metadata
@@ -19,6 +19,12 @@ def _fingerprint_metadata(metadata: os.stat_result) -> tuple[int, ...]:
 
 def _require_fingerprint_metadata(expected, actual) -> None:
     if _fingerprint_metadata(expected) != _fingerprint_metadata(actual):
+        raise PermissionError("runtime file changed during fingerprint")
+
+
+def _require_opened_fingerprint_metadata(expected, opened):
+    same_fields = _fingerprint_metadata(expected)[:-1] == _fingerprint_metadata(opened)[:-1]
+    if not same_fields or not path_descriptor_change_time_matches(expected, opened):
         raise PermissionError("runtime file changed during fingerprint")
 
 
@@ -83,9 +89,10 @@ def fingerprint_regular_file(
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
     try:
-        _require_fingerprint_metadata(expected, os.fstat(descriptor))
-        digest = _verified_runtime_digest(descriptor, expected, deadline)
-        _require_fingerprint_metadata(expected, os.fstat(descriptor))
+        opened = os.fstat(descriptor)
+        _require_opened_fingerprint_metadata(expected, opened)
+        digest = _verified_runtime_digest(descriptor, opened, deadline)
+        _require_fingerprint_metadata(opened, os.fstat(descriptor))
         _require_fingerprint_metadata(expected, path.stat(follow_symlinks=False))
         return digest, identity
     finally:

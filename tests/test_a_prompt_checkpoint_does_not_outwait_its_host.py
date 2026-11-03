@@ -1,4 +1,5 @@
 """Durable hook capture must not wait another writer for its project handoff."""
+import json
 import threading
 import time
 from functools import partial, wraps
@@ -46,12 +47,14 @@ def _timed_call(function, measurements, name):
     @wraps(function)
     def measured(*args, **kwargs):
         started = time.perf_counter()
+        thread_started = time.thread_time()
         try:
             return function(*args, **kwargs)
         finally:
             entry = measurements.setdefault(name, {"calls": 0, "seconds": 0.0})
             entry["calls"] += 1
             entry["seconds"] += time.perf_counter() - started
+            entry["thread_cpu_seconds"] = entry.get("thread_cpu_seconds", 0.0) + time.thread_time() - thread_started
     return measured
 
 
@@ -94,11 +97,11 @@ def test_capture_keeps_its_checkpoint_pending_without_waiting_past_host(tmp_path
         assert held.wait(LONG_TIMEOUT)
         result, elapsed, phases = _measure_ingestion(envelope, monkeypatch)
         assert result["capture_durable"] is True
-        assert elapsed < adapter.HOST_HOOK_TIMEOUT_SECONDS, {
+        assert elapsed < adapter.HOST_HOOK_TIMEOUT_SECONDS, json.dumps({
             "elapsed_seconds": elapsed, "nested_phases": phases,
             "registration_error": result.get("capture_registration_error"),
             "post_capture_error": result.get("post_capture_error"),
-        }
+        }, sort_keys=True)
         assert list((state_root / "run/capture-intents/ready").rglob("*.json"))
     finally:
         release.set()

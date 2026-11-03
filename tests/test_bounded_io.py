@@ -267,3 +267,18 @@ def test_boundary_only_allows_the_exact_ancestry_owner():
     assert _nonstdlib_imports('from llm_wiki.path_ancestry import _acceptable_ancestor') <= allowed
     assert not _nonstdlib_imports('from llm_wiki import memory_queue') <= allowed
     assert not _nonstdlib_imports('from llm_wiki.runtime_publication import publish_runtime_file') <= allowed
+
+
+@pytest.mark.parametrize('platform,birthtime,ctime,expected', [
+    ('nt', 10, 20, True), ('nt', 11, 10, False),
+    ('posix', 10, 20, False), ('posix', 11, 10, True),
+])
+def test_cross_api_timestamp_comparison_uses_matching_semantics(monkeypatch, platform, birthtime, ctime, expected):
+    from types import SimpleNamespace
+
+    import bounded_io
+
+    before = SimpleNamespace(st_birthtime_ns=10, st_ctime_ns=10)
+    opened = SimpleNamespace(st_birthtime_ns=birthtime, st_ctime_ns=ctime)
+    monkeypatch.setattr(bounded_io, 'os', SimpleNamespace(name=platform))
+    assert bounded_io.path_descriptor_change_time_matches(before, opened) is expected

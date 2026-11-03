@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _definitions(path):
-    tree = ast.parse((ROOT / path).read_text())
+    tree = ast.parse((ROOT / path).read_text(encoding='utf-8'))
     return {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
 
 
@@ -27,7 +27,7 @@ def test_legacy_names_are_identical_and_have_no_second_implementation():
 
 
 def test_legacy_aliases_are_the_only_reader_implementation():
-    tree = ast.parse((ROOT / 'scripts/bounded_io.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/bounded_io.py').read_text(encoding='utf-8'))
     definitions = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
     for name in ('_acceptable_ancestor', '_system_symlink', '_root_controlled'):
         assert name not in definitions

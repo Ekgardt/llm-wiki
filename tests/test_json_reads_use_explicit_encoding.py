@@ -52,3 +52,18 @@ def test_repository_json_reads_declare_their_encoding():
     findings = {str(path.relative_to(ROOT)): _default_json_reads(path.read_bytes())
                 for path in _repository_sources()}
     assert not {name: lines for name, lines in findings.items() if lines}
+
+
+def _module_inspection_tests():
+    tests = ROOT / 'tests'
+    return set(tests.glob('*module*.py')) | set(tests.glob('*compatibility*.py')) | set((tests / 'modules').rglob('*.py'))
+
+
+def _default_text_reads(source):
+    return [node.lineno for node in ast.walk(ast.parse(source)) if _implicit_text_read(node)]
+
+
+def test_module_source_inspection_declares_text_encoding():
+    findings = {str(path.relative_to(ROOT)): _default_text_reads(path.read_bytes())
+                for path in _module_inspection_tests()}
+    assert not {name: lines for name, lines in findings.items() if lines}

@@ -16,7 +16,7 @@ def _compile_answer_records_named_functions(tree, name):
 
 
 def test_compile_answer_records_retained_queue_answer_is_verified_without_importing_the_controller():
-    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text(encoding='utf-8'))
     functions = _compile_answer_records_named_functions(tree, '_verify_retained_compile_answer')
     assert len(functions) == 1
     imports = {n.module for n in ast.walk(functions[0]) if isinstance(n, ast.ImportFrom)}
@@ -24,7 +24,7 @@ def test_compile_answer_records_retained_queue_answer_is_verified_without_import
 
 
 def test_queue_attempts_executor_no_longer_defines_owned_function():
-    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text(encoding='utf-8'))
     assert '_apply_failure_state' not in {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
 
 
@@ -32,22 +32,22 @@ _queue_evidence_records_SOURCE = ROOT / 'scripts/llm_wiki/queue_evidence_records
 
 
 def test_queue_evidence_records_required_queue_calls_use_aliases_not_duplicate_implementations():
-    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text(encoding='utf-8'))
     names = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
-    local = ast.parse(_queue_evidence_records_SOURCE.read_text())
+    local = ast.parse(_queue_evidence_records_SOURCE.read_text(encoding='utf-8'))
     owned = {node.name for node in local.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
     assert not names & owned
     assert '_read_exported_rows' in names
 
 
 def test_queue_heartbeat_executor_does_not_define_heartbeat_implementation():
-    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text(encoding='utf-8'))
     names = {node.name for node in tree.body if isinstance(node, (ast.ClassDef, ast.FunctionDef))}
     assert not names.intersection({'_LeaseHeartbeat', '_SourceFenceHeartbeat', '_join_heartbeat_or_refuse'})
 
 
 def test_queue_migration_plan_executor_no_longer_defines_migration_plan():
-    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text(encoding='utf-8'))
     names = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
     assert not names.intersection({'_queue_v2_migration_statements', '_queue_v2_reconciliation_complete', '_ordered_queue_v2_tasks'})
 
@@ -56,7 +56,7 @@ _queue_schema_NAMES = {'_QUEUE_V3_TABLE_SQL', '_QUEUE_V3_INDEX_SQL', '_QUEUE_V3_
 
 
 def test_queue_schema_executor_does_not_define_schema():
-    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text(encoding='utf-8'))
     assigned = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)}
     assert not assigned.intersection(_queue_schema_NAMES)
 
@@ -65,7 +65,7 @@ _queue_schema_operations_NAMES = {'_normalized_sql', '_queue_v3_object_matches',
 
 
 def test_queue_schema_operations_executor_no_longer_defines_schema_operations():
-    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text(encoding='utf-8'))
     names = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
     assert not names.intersection(_queue_schema_operations_NAMES)
 
@@ -74,7 +74,7 @@ _queue_sources_NAMES = {'_collect_identity_from_mapping', '_collect_source_ident
 
 
 def test_queue_sources_executor_has_no_source_contract_definitions():
-    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text(encoding='utf-8'))
     names = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
     assert not names.intersection(_queue_sources_NAMES)
 
@@ -83,9 +83,9 @@ _queue_task_records_SOURCE = ROOT / 'scripts/llm_wiki/queue_task_records.py'
 
 
 def test_queue_task_records_required_queue_calls_use_aliases_not_duplicate_implementations():
-    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text(encoding='utf-8'))
     names = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
-    local = ast.parse(_queue_task_records_SOURCE.read_text())
+    local = ast.parse(_queue_task_records_SOURCE.read_text(encoding='utf-8'))
     owned = {node.name for node in local.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
     assert not names & owned
     assert '_read_exported_rows' in names
@@ -94,13 +94,13 @@ def test_queue_task_records_required_queue_calls_use_aliases_not_duplicate_imple
 
 
 def test_queue_timing_executor_does_not_define_timing_functions():
-    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text(encoding='utf-8'))
     names = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
     assert not names.intersection(_queue_timing_NAMES)
 
 
 def _queue_validation_defined_functions(path):
-    return {n.name for n in ast.parse(path.read_text()).body if isinstance(n, ast.FunctionDef)}
+    return {n.name for n in ast.parse(path.read_text(encoding='utf-8')).body if isinstance(n, ast.FunctionDef)}
 
 
 def test_queue_validation_executor_no_longer_defines_owned_function():
@@ -110,13 +110,13 @@ def test_queue_validation_executor_no_longer_defines_owned_function():
 
 
 def test_queue_worker_state_queue_has_no_second_worker_value_implementation():
-    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text(encoding='utf-8'))
     names = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
     assert not names.intersection({'QueueRetryPolicy', '_ProcessorOutcome', '_WorkerProgress', 'processor_error_code'})
 
 
 def test_queue_worker_state_capture_reason_conversion_does_not_import_queue_executor():
-    tree = ast.parse((ROOT / 'scripts/flush_memory.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/flush_memory.py').read_text(encoding='utf-8'))
     function = next(n for n in tree.body if getattr(n, 'name', None) == '_capture_queue_failure')
     assert isinstance(function, ast.FunctionDef)
     imports = {n.module for n in ast.walk(function) if isinstance(n, ast.ImportFrom)}
@@ -175,7 +175,7 @@ def test_queue_contracts_guard_allows_operations_and_owned_types(source):
 
 
 def test_queue_resolution_uses_the_call_lifecycle_owner():
-    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text())
+    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text(encoding='utf-8'))
     imports = [node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
     resolvers = _call_resolver_imports(imports)
     assert resolvers == ['llm_wiki.compile_call_runtime', 'llm_wiki.compile_call_runtime']

@@ -213,6 +213,11 @@ def _manifest_bundle(root: Path, files: set[Path], manifest: dict) -> str:
     return serializers[kind](context_entries(root, files, manifest))
 
 
+def relative_context_names(root, paths):
+    """Manifest and diagnostic paths have the same separators on every host."""
+    return sorted(path.relative_to(root).as_posix() for path in paths)
+
+
 def measure_context(root: Path, manifest_path: Path) -> tuple[int, int]:
     root = root.resolve()
     manifest = json.loads(manifest_path.read_bytes())
@@ -224,7 +229,7 @@ def measure_context(root: Path, manifest_path: Path) -> tuple[int, int]:
     needed = authority | context_record_files(root, manifest) | required_bootstrap(root, files) | required_source_context(root, files) | {manifest_path.resolve(), root / 'tests/module_context.py',
                                                        root / 'scripts/llm_wiki/context_bundle.py',
                                                        root / 'docs/modules/context-tooling.md'}
-    assert needed <= files, f'Missing required context: {sorted(str(p.relative_to(root)) for p in needed - files)}'
+    assert needed <= files, f'Missing required context: {relative_context_names(root, needed - files)}'
     total = len(tiktoken.get_encoding(manifest['encoding']).encode_ordinary(_manifest_bundle(root, files, manifest)))
     assert total <= manifest['max_tokens'], f'{manifest_path.name}: {total} tokens'
     return total, len(files)

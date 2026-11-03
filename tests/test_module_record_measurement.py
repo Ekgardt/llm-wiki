@@ -4,7 +4,7 @@ import json
 import pytest
 from llm_wiki.context_bundle import unpack_files
 
-from tests.module_context import _manifest_bundle, measure_context
+from tests.module_context import _manifest_bundle, measure_context, relative_context_names
 from tests.module_record_context import context_record_files
 from tests.test_module_record_context import workspace as workspace
 from tests.test_module_records import PARTS
@@ -40,7 +40,7 @@ def _packet(root, manifest):
         if not path.exists():
             path.write_text('')
     manifest.update(encoding='o200k_base', max_tokens=100000,
-                    files=sorted(str(p.relative_to(root)) for p in needed))
+                    files=relative_context_names(root, needed))
     path = root / 'context.json'
     path.write_text(json.dumps(manifest))
     return path

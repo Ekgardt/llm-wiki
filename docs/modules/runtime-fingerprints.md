@@ -20,3 +20,11 @@ Run `uv run pytest tests/modules/runtime_fingerprints tests/test_migration_artif
 
 Shared canonical contract: [runtime-contracts](runtime-contracts.md).
 The complete guide is included in this owner's maintenance packet.
+
+
+Path and descriptor baselines remain separate: bounded_io supplies the initial
+cross-API timestamp comparison, descriptor ctime stays checked during both hash
+passes, and the final path is checked against its original complete metadata.
+Run tests/test_path_and_descriptor_timestamps.py with the migration tests; it
+covers both public readers under synthetic Windows observations and refusal of
+subsequent descriptor/identity changes. Native CI remains a separate gate.

@@ -94,7 +94,7 @@ def test_incomplete_manifest_fails_before_budget_success(tmp_path):
 
 def test_measurement_helper_cannot_import_product_executors():
     import ast
-    tree = ast.parse((ROOT / 'tests/module_context.py').read_text())
+    tree = ast.parse((ROOT / 'tests/module_context.py').read_text(encoding='utf-8'))
     nodes = [n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))]
     roots = set().union(*(_import_roots(node) for node in nodes))
     assert all(_allowed_measurement_import(name) for name in roots)
@@ -149,7 +149,7 @@ def test_unknown_serialization_is_not_silently_treated_as_raw(tmp_path):
 @pytest.mark.parametrize('name', ['module_context_paths', 'module_records', 'module_record_context'])
 def test_record_measurement_helpers_cannot_import_product_executors(name):
     import ast
-    tree = ast.parse((ROOT / 'tests' / f'{name}.py').read_text())
+    tree = ast.parse((ROOT / 'tests' / f'{name}.py').read_text(encoding='utf-8'))
     nodes = [n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))]
     roots = set().union(*(_import_roots(node) for node in nodes))
     assert all(_allowed_measurement_import(item) for item in roots)

@@ -45,7 +45,9 @@
     "tests/module_context_paths.py",
     "tests/module_records.py",
     "tests/module_record_context.py",
-    "docs/modules/context-records.md"
+    "docs/modules/context-records.md",
+    "docs/research/2026-11-03-path-and-descriptor-timestamps.md",
+    "tests/test_path_and_descriptor_timestamps.py"
   ],
   "directories": [
     "tests/modules/runtime_fingerprints"
@@ -55,7 +57,8 @@
     "files": [
       "docs/modules/runtime-fingerprints-context.json",
       "docs/modules/runtime-fingerprints.md",
-      "scripts/llm_wiki/runtime_fingerprints.py"
+      "scripts/llm_wiki/runtime_fingerprints.py",
+      "tests/test_path_and_descriptor_timestamps.py"
     ],
     "directories": [
       "tests/modules/runtime_fingerprints"

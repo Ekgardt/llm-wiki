@@ -44,7 +44,8 @@
     "docs/research/2026-11-03-benchmark-context-closure.md",
     "docs/modules/formats.md",
     "tests/test_module_context_reads.py",
-    "docs/research/2026-11-03-boundary-source-read-context.md"
+    "docs/research/2026-11-03-boundary-source-read-context.md",
+    "docs/research/2026-11-03-native-ci-source-text-and-paths.md"
   ],
   "directories": [
     "tests/modules/context_tooling"
@@ -73,7 +74,8 @@
       "tests/module_context_paths.py",
       "docs/research/2026-11-03-benchmark-context-closure.md",
       "tests/test_module_context_reads.py",
-      "docs/research/2026-11-03-boundary-source-read-context.md"
+      "docs/research/2026-11-03-boundary-source-read-context.md",
+      "docs/research/2026-11-03-native-ci-source-text-and-paths.md"
     ],
     "directories": [
       "tests/modules/context_tooling"

@@ -93,12 +93,21 @@ def _file_identity(info: os.stat_result) -> tuple[int, int, int, int]:
 
 def _require_opened_identity(
     descriptor: int, identity: tuple[int, int, int, int], label: str
-) -> None:
+) -> os.stat_result:
     opened = os.fstat(descriptor)
     if not stat.S_ISREG(opened.st_mode):
         raise PermissionError(f"{label} changed before open")
     if identity != _file_identity(opened):
         raise SourceChangedDuringRead(f"{label} changed before open")
+    return opened
+
+
+def path_descriptor_change_time_matches(before, opened):
+    """Compare like timestamps across Windows path/descriptor stat APIs."""
+    if os.name == "nt":
+        return (getattr(before, "st_birthtime_ns", before.st_ctime_ns)
+                == getattr(opened, "st_birthtime_ns", opened.st_ctime_ns))
+    return before.st_ctime_ns == opened.st_ctime_ns
 
 
 def _read_bounded_chunks(
@@ -201,9 +210,11 @@ def open_stable_range(path, max_bytes, *, label="file", deadline=None):
     path = Path(path)
     descriptor, before = _open_source_descriptor(path, max_bytes, label, deadline)
     try:
-        _require_opened_identity(descriptor, _file_identity(before), label)
+        opened = _require_opened_identity(descriptor, _file_identity(before), label)
+        if not path_descriptor_change_time_matches(before, opened):
+            raise SourceChangedDuringRead(f"{label} changed before open")
         with os.fdopen(descriptor, 'rb', buffering=0, closefd=False) as stream:
-            check = partial(_require_live_source, descriptor, path, before, label)
+            check = partial(_require_live_source, descriptor, path, opened, label)
             source = VerifiedByteRange(stream, before.st_size, None, deadline, owner_check=check)
             yield source
             source.verify_content(label=label)

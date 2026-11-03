@@ -67,7 +67,7 @@ def test_raw_read_guard_accepts_checked_reader():
 @pytest.mark.parametrize('path', sorted((ROOT / 'tests/modules').glob('*/test_boundary.py')) + [ROOT / 'tests/module_boundaries.py'],
                          ids=lambda p: p.parent.name)
 def test_module_boundary_sources_use_checked_reads(path):
-    assert not _unchecked_reads(path.read_text()), path.relative_to(ROOT)
+    assert not _unchecked_reads(path.read_text(encoding='utf-8')), path.relative_to(ROOT)
 
 
 def test_shared_boundary_helper_cannot_read_an_undeclared_source(tmp_path):

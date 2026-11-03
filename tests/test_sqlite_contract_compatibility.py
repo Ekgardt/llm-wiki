@@ -36,4 +36,4 @@ def test_production_consumers_do_not_import_value_contracts_from_io(module):
 
 
 def _from_imports(path):
-    return [n for n in ast.walk(ast.parse(path.read_text())) if isinstance(n, ast.ImportFrom)]
+    return [n for n in ast.walk(ast.parse(path.read_text(encoding='utf-8'))) if isinstance(n, ast.ImportFrom)]

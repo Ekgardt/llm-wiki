@@ -100,3 +100,13 @@ writes. Its own tests remain `tests/test_bounded_io.py` and
 shared path_ancestry policy. Their manifests count
 complete maintenance packets under 100,000 o200k_base tokens. Related integration
 tests remain with their existing owners. No runtime or source-path changes occur.
+
+
+## Path and descriptor timestamp domains
+
+Initial cross-API validation compares Windows birthtime (legacy ctime fallback),
+and POSIX ctime. A live range then retains the validated descriptor snapshot and
+checks its ctime against later descriptor observations. This preserves change
+checks when Windows path stat and fstat give ctime different meanings. Identity,
+size, mtime, final hashes and cleanup remain enforced. See
+[research](../research/2026-11-03-path-and-descriptor-timestamps.md).
