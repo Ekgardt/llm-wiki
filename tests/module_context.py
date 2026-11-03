@@ -99,14 +99,15 @@ def _plugin_files(root: Path, path: Path) -> set[Path]:
     return set().union(*(_local_plugin(root, name) for name in _plugin_names(path)))
 
 
-def _product_python(root: Path, path: Path) -> bool:
-    return path.is_relative_to(root / 'scripts') and path.suffix == '.py'
+def _context_python(root: Path, path: Path) -> bool:
+    zones = (root / 'scripts', root / 'tests')
+    return path.suffix == '.py' and any(path.is_relative_to(zone) for zone in zones)
 
 
 def _package_initializers(root: Path, base: Path) -> set[Path]:
-    scripts = root / 'scripts'
-    parents = [p for p in base.parents if p.is_relative_to(scripts)]
-    candidates = [p / '__init__.py' for p in parents if p != scripts]
+    zones = (root / 'scripts', root / 'tests')
+    parents = [p for p in base.parents if any(p.is_relative_to(zone) for zone in zones)]
+    candidates = [p / '__init__.py' for p in parents]
     return _existing_paths(candidates)
 
 
@@ -126,22 +127,30 @@ def _relative_import_parent(root: Path, source: Path, level: int) -> Path:
     parent = source.parent
     for _ in range(level - 1):
         parent = parent.parent
-    assert parent.is_relative_to(root / 'scripts'), 'Relative import escapes script root'
+    zones = (root / 'scripts', root / 'tests')
+    assert any(parent.is_relative_to(zone) for zone in zones), 'Relative import escapes source roots'
     return parent
 
 
+def _absolute_import_base(root: Path, name: str) -> Path:
+    parts = name.split('.')
+    if parts[0] in {'scripts', 'tests'}:
+        return root.joinpath(*parts)
+    return (root / 'scripts').joinpath(*parts)
+
+
 def _from_import_sources(root: Path, source: Path, node: ast.ImportFrom) -> set[Path]:
-    parent = root / 'scripts'
+    base = _absolute_import_base(root, node.module or '')
     if node.level:
         parent = _relative_import_parent(root, source, node.level)
-    base = parent.joinpath(*(node.module or '').split('.'))
+        base = parent.joinpath(*(node.module or '').split('.'))
     children = set().union(*(_local_source_files(root, base / a.name) for a in node.names))
     return _local_source_files(root, base) | children
 
 
 def _import_sources(root: Path, source: Path, node: ast.AST) -> set[Path]:
     if isinstance(node, ast.Import):
-        bases = [root / 'scripts' / Path(*a.name.split('.')) for a in node.names]
+        bases = [_absolute_import_base(root, a.name) for a in node.names]
         return set().union(*(_local_source_files(root, base) for base in bases))
     if isinstance(node, ast.ImportFrom):
         return _from_import_sources(root, source, node)
@@ -156,15 +165,16 @@ def _source_dependencies(root: Path, source: Path) -> set[Path]:
 
 
 def required_source_context(root: Path, files: set[Path]) -> set[Path]:
-    """Existing local product imports, including package code and lazy imports."""
-    pending = {p for p in files if _product_python(root, p)}
+    """Product and test/support imports, apart from declared pytest infrastructure."""
+    bootstrap = required_bootstrap(root, files)
+    pending = {p for p in files if _context_python(root, p)} - bootstrap
     seen: set[Path] = set()
     while pending:
         source = pending.pop()
         if source in seen:
             continue
         seen.add(source)
-        pending.update(_source_dependencies(root, source) - seen)
+        pending.update(_source_dependencies(root, source) - seen - bootstrap)
     return seen
 
 

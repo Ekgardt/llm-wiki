@@ -39,3 +39,9 @@ this repository's existing scripts import path in its own process. Its normal
 report can succeed while honestly reporting `complete: false`; the completion
 gate returns failure in that case. No file class is silently excluded.
 See ../research/2026-11-03-module-file-ownership.md.
+
+Source closure includes imports from test/support Python, package initializers
+and relative helpers. Only actual pytest bootstrap remains infrastructure;
+explicit test imports cannot hide behind that treatment. Mixed public-facade
+compatibility tests remain integration obligations unless their full consumer
+source is included. See the test-import-context-closure research.

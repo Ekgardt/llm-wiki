@@ -1,6 +1,5 @@
 """Credential masking has one owner and no filesystem/runtime imports."""
 import ast
-import pickle
 from pathlib import Path
 
 from tests.module_boundaries import assert_isolated_import, nonstdlib_imports
@@ -25,12 +24,3 @@ def test_security_has_no_duplicate_credential_implementation():
         '_redact_standalone_secrets', '_scheme_character', '_scheme_start',
         '_is_scheme', '_authority_terminator', '_authority_end', '_userinfo_span',
         '_redact_url_userinfo', 'redact_private_key_blocks'})
-
-
-def test_public_pem_helper_keeps_identity_and_serialization():
-    import lsp_security
-    from llm_wiki import lsp_credentials
-    helper = lsp_security.redact_private_key_blocks
-    assert helper is lsp_credentials.redact_private_key_blocks
-    assert helper.__module__ == 'lsp_security'
-    assert pickle.loads(pickle.dumps(helper)) is helper

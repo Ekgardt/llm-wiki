@@ -28,3 +28,7 @@ Run `pytest tests/modules/lsp_credentials tests/test_lsp_security.py
 Pure cases first passed against the original owner; structural guards failed
 before the transfer. The full packet includes source dependencies and their
 contracts, tests, instructions, bootstrap and lossless measurement tooling.
+
+Cross-owner alias/pickle checks live in `tests/test_module_legacy_aliases.py`,
+an integration obligation outside this pure owner packet. Their assertions are
+preserved; the packet guard now follows imports from test/support files too.

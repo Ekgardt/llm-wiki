@@ -2017,3 +2017,11 @@ adaptation without graph writers or database imports. See
 [research](research/2026-11-03-graph-storable-packet.md).
 
 Full contracts: [Code languages](modules/code-languages.md), [Repository refusal](modules/repository-refusal.md), [Graph storage values](modules/graph-storable.md).
+
+### Maintenance test dependency completeness
+
+Packet qualification follows imports from its test/support sources as well as
+production sources. Mixed facade/serialization checks remain integration tests;
+they do not enter a leaf packet without their consumer context. Existing full
+pytest bootstrap remains infrastructure, with no new exception lists. See
+[research](research/2026-11-03-test-import-context-closure.md).

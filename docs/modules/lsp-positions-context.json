@@ -29,7 +29,9 @@
     "scripts/code_intelligence.py",
     "docs/modules/code-intelligence.md",
     "tests/test_lsp_positions.py",
-    "tests/fixtures/code_kernel/python/pkg/unicode_api.py"
+    "tests/fixtures/code_kernel/python/pkg/unicode_api.py",
+    "tests/fixtures/code_kernel/python/pkg/__init__.py",
+    "tests/fixtures/code_kernel/python/pkg/api.py"
   ],
   "directories": [
     "tests/modules/lsp_positions"

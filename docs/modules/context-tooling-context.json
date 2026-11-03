@@ -32,7 +32,8 @@
     "docs/research/2026-11-03-module-file-ownership.md",
     "docs/modules/context-bundle.md",
     "tests/test_module_contract_docs.py",
-    "docs/research/2026-11-03-module-contract-documentation.md"
+    "docs/research/2026-11-03-module-contract-documentation.md",
+    "docs/research/2026-11-03-test-import-context-closure.md"
   ],
   "directories": [
     "tests/modules/context_tooling"
@@ -52,7 +53,8 @@
       "tests/test_module_context_dependencies.py",
       "tests/test_module_ownership.py",
       "tests/test_module_contract_docs.py",
-      "docs/research/2026-11-03-module-contract-documentation.md"
+      "docs/research/2026-11-03-module-contract-documentation.md",
+      "docs/research/2026-11-03-test-import-context-closure.md"
     ],
     "directories": [
       "tests/modules/context_tooling"

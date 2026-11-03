@@ -28,3 +28,6 @@ See `research/2026-11-03-runtime-io-boundaries.md`.
 their streaming/deadline policy. `runtime_records` supplies metadata/read/identity
 only; publication does not depend on fingerprinting. This removes an unnecessary
 source dependency while retaining all required context in each measured packet.
+
+`tests/test_runtime_io_compatibility.py` remains unchanged integration coverage,
+outside this pure value packet; it loads the complete reliable_memory facade.

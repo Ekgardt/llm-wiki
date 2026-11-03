@@ -32,3 +32,7 @@ callers; neither reader nor SQLite imports the other's implementation for this
 policy. This predicate is not an atomic traversal sandbox. Caller no-follow and
 identity checks remain mandatory. See
 `research/2026-11-03-path-ancestry-boundary.md`.
+
+Cross-owner alias/pickle checks live in `tests/test_module_legacy_aliases.py`,
+an integration obligation outside this pure owner packet. Their assertions are
+preserved; the packet guard now follows imports from test/support files too.

@@ -1,12 +1,6 @@
 """One implementation, exact legacy aliases and no upward import."""
 import ast
-import base64
-import json
-import pickle
 from pathlib import Path
-
-import reliable_memory
-from llm_wiki import sqlite_io
 
 from tests.module_boundaries import assert_isolated_import, nonstdlib_imports
 
@@ -18,13 +12,6 @@ def test_facade_has_no_function_bodies():
     assert not any(isinstance(n, ast.FunctionDef) for n in tree.body)
 
 
-def test_public_aliases_preserve_pickle_bytes():
-    fixture = Path(__file__).with_name('legacy-pickle.json')
-    for name, encoded in json.loads(fixture.read_text()).items():
-        value = getattr(sqlite_io, name)
-        assert getattr(reliable_memory, name) is value
-        assert pickle.dumps(value, protocol=4) == base64.b64decode(encoded)
-        assert pickle.loads(base64.b64decode(encoded)) is value
 
 
 def test_import_only_reaches_declared_lower_owners():

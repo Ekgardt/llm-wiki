@@ -120,3 +120,68 @@ def test_declared_source_own_package_initializer_is_required(tmp_path):
     }, ['scripts/pkg/owner.py'])
     with pytest.raises(AssertionError, match='scripts/pkg/__init__.py'):
         measure_context(tmp_path, manifest)
+
+
+@pytest.mark.parametrize('source', [
+    'import dependency', 'from dependency import VALUE',
+    'def test_later():\n import dependency',
+    'from scripts.dependency import VALUE',
+])
+def test_test_imported_product_source_is_required(tmp_path, source):
+    manifest = _packet(tmp_path, {
+        'tests/test_owner.py': source, 'scripts/dependency.py': 'VALUE = 1',
+    }, ['tests/test_owner.py'])
+    with pytest.raises(AssertionError, match='scripts/dependency.py'):
+        measure_context(tmp_path, manifest)
+
+
+def test_shared_test_helper_and_its_product_dependency_are_required(tmp_path):
+    manifest = _packet(tmp_path, {
+        'tests/test_owner.py': 'from tests.helper import VALUE',
+        'tests/helper.py': 'from dependency import VALUE',
+        'scripts/dependency.py': 'VALUE = 1',
+    }, ['tests/test_owner.py', 'tests/helper.py'])
+    with pytest.raises(AssertionError, match='scripts/dependency.py'):
+        measure_context(tmp_path, manifest)
+
+
+@pytest.mark.parametrize('source', ['from .helper import VALUE', 'from . import helper'])
+def test_relative_test_helper_is_required(tmp_path, source):
+    manifest = _packet(tmp_path, {
+        'tests/pkg/__init__.py': '', 'tests/pkg/test_owner.py': source,
+        'tests/pkg/helper.py': 'VALUE = 1',
+    }, ['tests/pkg/__init__.py', 'tests/pkg/test_owner.py'])
+    with pytest.raises(AssertionError, match='tests/pkg/helper.py'):
+        measure_context(tmp_path, manifest)
+
+
+def test_test_package_initializer_imports_are_followed(tmp_path):
+    manifest = _packet(tmp_path, {
+        'tests/pkg/__init__.py': 'import dependency',
+        'tests/pkg/test_owner.py': '', 'scripts/dependency.py': '',
+    }, ['tests/pkg/__init__.py', 'tests/pkg/test_owner.py'])
+    with pytest.raises(AssertionError, match='scripts/dependency.py'):
+        measure_context(tmp_path, manifest)
+
+
+def test_test_dependency_symlink_outside_root_is_refused(tmp_path):
+    root = tmp_path / 'repo'
+    outside = _write(tmp_path, 'outside.py', '')
+    manifest = _packet(root, {'tests/test_owner.py': 'from tests import helper'}, ['tests/test_owner.py'])
+    try:
+        (root / 'tests/helper.py').symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f'symlink unavailable: {exc}')
+    with pytest.raises(ValueError):
+        measure_context(root, manifest)
+
+
+def test_bootstrap_infrastructure_does_not_hide_explicit_test_imports(tmp_path):
+    manifest = _packet(tmp_path, {
+        'tests/conftest.py': 'import dependency', 'tests/test_owner.py': '',
+        'scripts/dependency.py': '',
+    }, ['tests/conftest.py', 'tests/test_owner.py'])
+    assert measure_context(tmp_path, manifest)[0] > 0
+    (tmp_path / 'tests/test_owner.py').write_text('import dependency')
+    with pytest.raises(AssertionError, match='scripts/dependency.py'):
+        measure_context(tmp_path, manifest)

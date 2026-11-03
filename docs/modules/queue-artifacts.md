@@ -36,3 +36,7 @@ settlement and retention authorization remain queue responsibilities. The artifa
 owner depends on value/deadline/permission/sync primitives and never imports the
 executor or compile journal. See
 `research/2026-11-03-queue-artifact-io-boundary.md`.
+
+Cross-owner alias/pickle checks live in `tests/test_module_legacy_aliases.py`,
+an integration obligation outside this pure owner packet. Their assertions are
+preserved; the packet guard now follows imports from test/support files too.
