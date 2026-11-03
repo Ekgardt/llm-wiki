@@ -87,3 +87,26 @@ in flush_memory, specialized to the flush stage. It is not a monkeypatch consume
 of the moved function. Consolidation into a call to the now-shared pure path
 builder is the next source step after refresh; do not claim all duplicate cleanup
 finished until that producer is updated and its capture-terminal tests pass.
+
+Next cleanup, still under this boundary: flush_memory._capture_decision_relative_path
+keeps its one-argument signature but delegates to queue_validation's canonical
+builder with stage='flush'. The wrapper is needed by its two current producer
+call sites; the duplicate canonical-JSON/hash body is not. All returned paths
+must remain identical. Add a producer seam regression that fails while flush owns
+a second algorithm, then run the existing18 terminal/redrive scenarios. The same
+current canonical-format/validation research applies; no new API, runtime path,
+normalization or dependency technology is introduced. Flush already calls the
+queue in these scenarios, and the dependency is now on its pure lower owner.
+
+Cleanup graph refreshed at2d4c57d0: generation-18e46bc68269f9c7-6c7d011f.
+The producer has two call sites (_index_capture_decision and the capture-decision
+reader); the shared validator retains its direct caller. Existing18 terminal and
+redrive regressions passed after the preceding validator transfer.
+
+Producer cleanup complete: the new seam regression failed against the duplicated
+body, then passed after delegation.80 related cases pass onPython3.12 and3.10;
+18 weighted terminal checks pass.141 relevant structure/source/guide/privacy/weight
+guards pass,1 platform skip. Ruff and actual complexity/shape pass. The old terminal
+test file is byte-identical up to the appended regression, and the wrapper keeps
+its signature and flush stage. All48 complete artifacts still round-trip within
+the cap. No full-current or native platform pass is claimed;7854a031 is still running.

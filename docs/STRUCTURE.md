@@ -1935,3 +1935,9 @@ Test LSP artifacts launched through verified descriptors are self-contained:
 the common code-kernel fixture producer packages the fake server and shared
 process helper together and hashes that whole artifact. The descriptor/path-swap
 regression uses the same producer. Production launch and verification are unchanged.
+
+The flush capture-decision producer delegates its stage-specific path wrapper
+to the same pure queue-validation builder that validates the path. Its one-argument
+entry point remains for existing callers; the second JSON/hash implementation is
+removed. The producer seam regression protects this shared ownership; runtime
+paths and bytes are unchanged.

@@ -45,3 +45,8 @@ introduced. Private root helper aliases remain for existing queue call sites;
 they can be removed only when those callers or the compatibility surface retire.
 The two lookup constants had no outside consumers and have no duplicate facade.
 See the full evidence in `docs/research/2026-11-03-queue-capture-validation.md`.
+
+The flush producer's stage-specific wrapper delegates to the same decision-path
+builder used by validation. It retains its existing argument list, while the wire
+path's JSON/hash algorithm has one implementation. The producer seam and existing
+terminal/redrive scenarios are covered by the caller's integration suite.

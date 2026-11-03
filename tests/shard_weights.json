@@ -572,7 +572,7 @@
   "test_capture_recovery_fairness.py": 70.93,
   "test_capture_renewal_boundaries.py": 77.96,
   "test_capture_renewal_shutdown.py": 0.94,
-  "test_capture_terminal.py": 322.3,
+  "test_capture_terminal.py": 12.06,
   "test_capture_uses_the_host_budget.py": 21.55,
   "test_capture_worker_dispatch.py": 15.65,
   "test_capture_worker_fails_instead_of_abandoning.py": 11.78,

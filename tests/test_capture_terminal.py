@@ -1123,3 +1123,19 @@ def test_a_tier_a_model_put_in_bold_is_still_that_tier() -> None:
 
     with pytest.raises(RuntimeError, match="invalid flush output"):
         flush_memory._parse_capture_wire_output("Sure! Here is my answer\nFLUSH_MAJOR")
+
+
+def test_flush_decision_path_uses_the_shared_queue_wire_contract(monkeypatch):
+    from llm_wiki import queue_validation
+
+    calls = []
+
+    def shared_path(intent_id, stage):
+        calls.append((intent_id, stage))
+        return 'shared-contract-path'
+
+    monkeypatch.setattr(queue_validation, '_capture_decision_relative_path', shared_path)
+
+    result = flush_memory._capture_decision_relative_path('intent')
+
+    assert (result, calls) == ('shared-contract-path', [('intent', 'flush')])

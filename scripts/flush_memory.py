@@ -782,12 +782,9 @@ def _ensure_capture_results_directory(queue: object) -> None:
 
 
 def _capture_decision_relative_path(intent_id: str) -> str:
-    from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
+    from llm_wiki.queue_validation import _capture_decision_relative_path as decision_path
 
-    key = sha256_bytes(
-        canonical_json_bytes({"intent_id": intent_id, "stage": "flush"})
-    )
-    return f"run/queue-results/capture-decision-{key}.json"
+    return decision_path(intent_id, "flush")
 
 
 def _index_capture_decision(
