@@ -2201,3 +2201,11 @@ Measurement/source-closure tooling retains its own owner. Both packets include
 full dependencies; whole-repository integration assertions and the explicit
 completion gate remain unchanged. This introduces no contract-only dependency
 exception or production behavior change.
+
+[Codex turn policy](modules/codex-turn-policy.md) owns the existing in-memory
+capture-window and pending-tail decisions in `scripts/codex_turn_end.py`.
+It receives state and time; `codex_memory.py` retains locking, durable state,
+ingress and failed-capture restoration. The four original pure regressions move
+to its packet; disk/ingress integration assertions remain intact. Historical
+September17 count-based trimming is superseded by protection of pending/unknown
+entries, not reinstated. No cadence, runtime path or hook registration changes.
