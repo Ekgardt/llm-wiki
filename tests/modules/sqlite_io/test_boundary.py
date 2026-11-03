@@ -1,17 +1,13 @@
 """One implementation, exact legacy aliases and no upward import."""
-import ast
 from pathlib import Path
 
 from tests.module_boundaries import assert_isolated_import, nonstdlib_imports
+from tests.module_context import context_reader
 
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def test_facade_has_no_function_bodies():
-    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text())
-    assert not any(isinstance(n, ast.FunctionDef) for n in tree.body)
-
-
+read_source = context_reader(ROOT, ROOT / 'docs/modules/sqlite-io-context.json')
 
 
 def test_import_only_reaches_declared_lower_owners():
@@ -24,7 +20,7 @@ def test_import_only_reaches_declared_lower_owners():
 
 
 def test_lazy_and_eager_imports_name_only_lower_owners():
-    source = (ROOT / 'scripts/llm_wiki/sqlite_io.py').read_text()
+    source = read_source(ROOT / 'scripts/llm_wiki/sqlite_io.py')
     assert nonstdlib_imports(source) <= {
         'llm_wiki.runtime_contracts', 'llm_wiki.runtime_environment',
         'llm_wiki.runtime_records', 'llm_wiki.sqlite_contracts',

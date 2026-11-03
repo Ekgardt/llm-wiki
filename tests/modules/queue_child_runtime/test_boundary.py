@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
+from tests.module_context import context_reader
+
 ROOT = Path(__file__).resolve().parents[3]
+
+
+read_source = context_reader(ROOT, ROOT / 'docs/modules/queue-child-runtime-context.json')
 ALLOWED = sys.stdlib_module_names | {'pytest', 'tiktoken', 'process_liveness'}
 
 
@@ -32,14 +37,14 @@ def _violations(source, test_helpers=()):
 
 
 def test_owned_tests_do_not_import_executors():
-    findings = {path.name: _violations(path.read_text(encoding='utf-8'), {'tests.module_context'})
+    findings = {path.name: _violations(read_source(path, encoding='utf-8'), {'tests.module_context'})
                 for path in Path(__file__).parent.glob('*.py')}
     assert not {path: bad for path, bad in findings.items() if bad}
 
 
 def test_cleanup_source_does_not_import_executors():
     path = ROOT / 'scripts/llm_wiki/queue_child_runtime.py'
-    assert not _violations(path.read_text(encoding='utf-8'))
+    assert not _violations(read_source(path, encoding='utf-8'))
 
 
 def _assigned_names(tree):
@@ -49,7 +54,7 @@ def _assigned_names(tree):
 
 def test_result_limit_is_not_duplicated_in_transport():
     path = ROOT / 'scripts/llm_wiki/queue_child_runtime.py'
-    tree = ast.parse(path.read_text(encoding='utf-8'))
+    tree = ast.parse(read_source(path, encoding='utf-8'))
     assert '_MAX_RESULT_BYTES' not in _assigned_names(tree)
 
 

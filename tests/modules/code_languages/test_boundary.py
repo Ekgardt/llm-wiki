@@ -2,12 +2,15 @@
 from pathlib import Path
 
 from tests.module_boundaries import assert_isolated_import, assert_stdlib_boundary
+from tests.module_context import context_reader
 
 ROOT = Path(__file__).resolve().parents[3]
 
+read_source = context_reader(ROOT, ROOT / 'docs/modules/code-languages-context.json')
+
 
 def test_owner_has_only_standard_library_dependencies():
-    assert_stdlib_boundary(ROOT, 'code_languages')
+    assert_stdlib_boundary(ROOT, 'code_languages', read_source=read_source)
 
 
 def test_owner_import_cannot_load_runtime_consumers():

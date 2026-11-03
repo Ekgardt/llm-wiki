@@ -5,17 +5,21 @@ import sys
 from pathlib import Path
 
 from tests.module_boundaries import assert_stdlib_boundary
+from tests.module_context import context_reader
 from tests.slow_machine import LONG_TIMEOUT
 
 ROOT = Path(__file__).resolve().parents[3]
 
 
+read_source = context_reader(ROOT, ROOT / 'docs/modules/context-bundle-context.json')
+
+
 def test_source_uses_only_standard_library():
-    assert_stdlib_boundary(ROOT, 'llm_wiki/context_bundle')
+    assert_stdlib_boundary(ROOT, 'llm_wiki/context_bundle', read_source=read_source)
 
 
 def test_codec_does_not_read_or_write_files():
-    tree = ast.parse((ROOT / 'scripts/llm_wiki/context_bundle.py').read_text())
+    tree = ast.parse(read_source(ROOT / 'scripts/llm_wiki/context_bundle.py'))
     calls = [n.func for n in ast.walk(tree) if isinstance(n, ast.Call)]
     names = {getattr(n, 'attr', getattr(n, 'id', '')) for n in calls}
     assert not names.intersection({'open', 'read_bytes', 'write_bytes', 'read_text', 'write_text'})

@@ -42,7 +42,9 @@
     "docs/modules/context-records.md",
     "tests/module_record_ownership.py",
     "docs/research/2026-11-03-benchmark-context-closure.md",
-    "docs/modules/formats.md"
+    "docs/modules/formats.md",
+    "tests/test_module_context_reads.py",
+    "docs/research/2026-11-03-boundary-source-read-context.md"
   ],
   "directories": [
     "tests/modules/context_tooling"
@@ -69,7 +71,9 @@
       "docs/research/2026-11-03-canonical-module-qualification-context.md",
       "docs/research/2026-11-03-existing-leaf-owner-qualification.md",
       "tests/module_context_paths.py",
-      "docs/research/2026-11-03-benchmark-context-closure.md"
+      "docs/research/2026-11-03-benchmark-context-closure.md",
+      "tests/test_module_context_reads.py",
+      "docs/research/2026-11-03-boundary-source-read-context.md"
     ],
     "directories": [
       "tests/modules/context_tooling"

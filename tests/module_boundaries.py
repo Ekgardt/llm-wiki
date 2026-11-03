@@ -23,8 +23,8 @@ def nonstdlib_imports(source: str) -> set[str]:
     return {name for name, level in imports if level or name.split('.')[0] not in sys.stdlib_module_names}
 
 
-def assert_stdlib_boundary(root: Path, module: str) -> None:
-    source = (root / 'scripts' / f'{module}.py').read_text()
+def assert_stdlib_boundary(root: Path, module: str, *, read_source) -> None:
+    source = read_source(root / 'scripts' / f'{module}.py')
     assert not nonstdlib_imports(source)
 
 

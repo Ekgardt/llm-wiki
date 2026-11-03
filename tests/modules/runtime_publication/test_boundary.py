@@ -1,19 +1,17 @@
 """Runtime layers must not import the former facade or higher executors."""
-import ast
 from pathlib import Path
 
 from tests.module_boundaries import assert_isolated_import, nonstdlib_imports
+from tests.module_context import context_reader
 
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def test_former_facade_has_no_second_implementation():
-    tree = ast.parse((ROOT / 'scripts/reliable_memory.py').read_text())
-    assert '_publication_digest' not in {getattr(n, 'name', None) for n in tree.body}
+read_source = context_reader(ROOT, ROOT / 'docs/modules/runtime-publication-context.json')
 
 
 def test_owner_has_only_declared_lower_dependencies():
-    source = (ROOT / 'scripts/llm_wiki/runtime_publication.py').read_text()
+    source = read_source(ROOT / 'scripts/llm_wiki/runtime_publication.py')
     assert nonstdlib_imports(source) <= {'llm_wiki.runtime_sync', 'llm_wiki.formats.canonical', 'windows_workspace', 'llm_wiki.windows_acl', 'llm_wiki.runtime_records', 'llm_wiki.sqlite_contracts', 'llm_wiki.runtime_environment', 'llm_wiki.runtime_contracts'}
 
 

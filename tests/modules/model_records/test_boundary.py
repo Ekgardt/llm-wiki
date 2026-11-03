@@ -2,13 +2,17 @@
 from pathlib import Path
 
 from tests.module_boundaries import assert_isolated_import, nonstdlib_imports
+from tests.module_context import context_reader
 
 ROOT = Path(__file__).resolve().parents[3]
 
 
+read_source = context_reader(ROOT, ROOT / 'docs/modules/model-records-context.json')
+
+
 def test_values_depend_only_on_existing_lower_value_contracts():
     source = ROOT / 'scripts/llm_wiki/model_records.py'
-    assert nonstdlib_imports(source.read_text()) == {
+    assert nonstdlib_imports(read_source(source)) == {
         'context_budget', 'llm_wiki.formats.canonical',
     }
 

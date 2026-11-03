@@ -118,3 +118,19 @@ test-import-context-closure and canonical-module-qualification-context. The thre
 2026-11-02 pilot documents remain full historical evidence in formats/tooling.
 
 Shared canonical contract: [Exact record contexts](context-records.md).
+
+## Source inspection
+
+`context_reader(root, manifest_path)` binds UTF-8 source reads to the packet's
+whole-file declaration. Resolving the target prevents a symlink from adding an
+external input. Undeclared files are refused even when present in the checkout.
+Boundary tests must use this reader instead of direct file reads. The static
+regression checks read_text/read_bytes/open calls in their Python AST; it does
+not claim arbitrary IO or subprocess string analysis. Existing subprocess
+fixture reads use declared fixtures; isolated imports remain separately guarded.
+
+Consumer source assertions live in `tests/test_{queue,runtime,windows,lsp,renderer,formats}_module_consumer_boundaries.py`.
+Run all six integration files together with `tests/test_module_context_reads.py`
+and the packet checks; they preserve the former assertions and are still part of
+the full suite. Their context is not silently charged to a leaf owner or declared
+complete: whole-project integration ownership remains outstanding.

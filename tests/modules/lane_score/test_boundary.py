@@ -2,12 +2,15 @@
 from pathlib import Path
 
 from tests.module_boundaries import assert_isolated_import, assert_stdlib_boundary
+from tests.module_context import context_reader
 
 ROOT = Path(__file__).resolve().parents[3]
 
+read_source = context_reader(ROOT, ROOT / 'docs/modules/lane-score-context.json')
+
 
 def test_only_declared_computation_dependencies():
-    assert_stdlib_boundary(ROOT, 'lane_score')
+    assert_stdlib_boundary(ROOT, 'lane_score', read_source=read_source)
 
 
 def test_import_does_not_load_retrieval_or_the_queue():

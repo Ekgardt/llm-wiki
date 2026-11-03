@@ -3,13 +3,17 @@ import ast
 from pathlib import Path
 
 from tests.module_boundaries import assert_isolated_import, nonstdlib_imports
+from tests.module_context import context_reader
 
 ROOT = Path(__file__).resolve().parents[3]
+
+
+read_source = context_reader(ROOT, ROOT / 'docs/modules/queue-task-records-context.json')
 SOURCE = ROOT / 'scripts/llm_wiki/queue_task_records.py'
 
 
 def test_representation_has_only_the_existing_lower_contracts():
-    assert nonstdlib_imports(SOURCE.read_text()) == {
+    assert nonstdlib_imports(read_source(SOURCE)) == {
         'llm_wiki.queue_contracts', 'llm_wiki.queue_timing', 'llm_wiki.formats.schema',
     }
 
@@ -22,23 +26,14 @@ def test_representation_import_cannot_load_the_queue():
 
 
 def test_sql_execution_stays_outside_the_representation_owner():
-    tree = ast.parse(SOURCE.read_text())
+    tree = ast.parse(read_source(SOURCE))
     attributes = {node.func.attr for node in ast.walk(tree)
                   if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
     assert not attributes & {'connect', 'execute', 'executemany', 'commit', 'rollback'}
 
 
-def test_required_queue_calls_use_aliases_not_duplicate_implementations():
-    tree = ast.parse((ROOT / 'scripts/memory_queue.py').read_text())
-    names = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
-    local = ast.parse(SOURCE.read_text())
-    owned = {node.name for node in local.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
-    assert not names & owned
-    assert '_read_exported_rows' in names
-
-
 def test_attempt_history_has_one_shared_row_mapper():
-    tree = ast.parse(SOURCE.read_text())
+    tree = ast.parse(read_source(SOURCE))
     functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
     assert '_attempt_history_entry' in functions
     mapper = functions['_exported_attempt_history']

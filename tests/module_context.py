@@ -228,3 +228,19 @@ def measure_context(root: Path, manifest_path: Path) -> tuple[int, int]:
     total = len(tiktoken.get_encoding(manifest['encoding']).encode_ordinary(_manifest_bundle(root, files, manifest)))
     assert total <= manifest['max_tokens'], f'{manifest_path.name}: {total} tokens'
     return total, len(files)
+
+
+def _read_declared_source(root: Path, manifest_path: Path, path: Path, *, encoding='utf-8') -> str:
+    target = path.resolve()
+    assert target.is_relative_to(root.resolve()), f'Undeclared context read: {path}'
+    manifest = json.loads(manifest_path.read_bytes())
+    declared = context_files(root.resolve(), manifest)
+    assert target in declared, f'Undeclared context read: {path}'
+    return target.read_text(encoding=encoding)
+
+
+def context_reader(root: Path, manifest_path: Path):
+    """Bind source inspection to the same whole-file declaration that is measured."""
+    from functools import partial
+
+    return partial(_read_declared_source, root, manifest_path)

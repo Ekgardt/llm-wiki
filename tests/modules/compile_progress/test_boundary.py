@@ -2,12 +2,16 @@
 from pathlib import Path
 
 from tests.module_boundaries import assert_isolated_import, nonstdlib_imports
+from tests.module_context import context_reader
 
 ROOT = Path(__file__).resolve().parents[3]
 
 
+read_source = context_reader(ROOT, ROOT / 'docs/modules/compile-progress-context.json')
+
+
 def test_storage_source_has_only_declared_lower_dependencies():
-    source = (ROOT / 'scripts/compile_progress.py').read_text()
+    source = read_source(ROOT / 'scripts/compile_progress.py')
     assert nonstdlib_imports(source) == {
         'llm_wiki.sqlite_deadlines', 'llm_wiki.formats.source',
     }

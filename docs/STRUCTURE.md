@@ -2072,3 +2072,13 @@ Full owner contracts: [model-records](modules/model-records.md).
 ### Saved compile answer records
 
 Full owner contracts: [compile-answer-records](modules/compile-answer-records.md).
+
+
+### Source-inspection tests and context completeness
+
+Pure module boundary tests read repository sources through the manifest-checked
+reader in `tests/module_context.py`. Consumer-wide source assertions are retained
+as integration tests grouped by queue, runtime, Windows, LSP, renderer and format
+consumers; they are required regression work and are not implicitly qualified by
+a leaf packet. Import closure alone does not prove completeness of file reads.
+See [the correction](research/2026-11-03-boundary-source-read-context.md).
