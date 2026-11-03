@@ -2278,3 +2278,11 @@ records remain visible in project inventory. No metric or public path changes.
 statistics, arm-row projection and cost summaries. Real worker execution, vault
 changes and stream publication stay with callers. Full source, original assertions
 and numerical behavior are preserved.
+
+### Local benchmark question adapters
+
+[LoCoMo](modules/locomo-data.md), [RefusalBench](modules/refusalbench-data.md)
+and [LIT-RAGBench](modules/litragbench-data.md) each own their existing local
+loader/converter and original tests. Full real preparation dependencies remain in
+their packets. Public paths, source bytes, dates and normalization rules stay
+unchanged; no corpus download or model execution is introduced.
