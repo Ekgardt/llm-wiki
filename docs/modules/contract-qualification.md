@@ -50,6 +50,12 @@ passed real tests on both arms and cross-checks, but complete model usage was
 not exposed. It supplies limited correctness evidence; full-cycle savings remain
 unknown and the source-omission gate remains unadopted.
 
+The [instrumented repeat](../research/2026-11-03-dependency-contract-instrumented-pair.md)
+completed both arms, including the initial tokenizer-cache failure and a fresh
+verification phase. Participant input plus output was 1526320 versus 1353352
+tokens. Root coordination costs were not allocated, so project-wide full-cycle
+savings remain unproven and canonical source omission remains unadopted.
+
 Source: approved `docs/research/2026-11-03-qualified-dependency-contract-proposal.md`;
 private fresh-runner boundary decision 2026-11-03; existing project test-timeout
 contract and the primary sources recorded in the approved proposal.

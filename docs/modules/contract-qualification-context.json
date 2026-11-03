@@ -55,7 +55,8 @@
     "docs/modules/context-ownership.md",
     "tests/module_contract_candidate.py",
     "tests/test_module_contract_candidate.py",
-    "docs/research/2026-11-03-dependency-contract-paired-maintenance-result.md"
+    "docs/research/2026-11-03-dependency-contract-paired-maintenance-result.md",
+    "docs/research/2026-11-03-dependency-contract-instrumented-pair.md"
   ],
   "directories": [
     "tests/modules/contract_qualification"
@@ -73,7 +74,8 @@
       "tests/test_module_contract_spec.py",
       "tests/module_contract_candidate.py",
       "tests/test_module_contract_candidate.py",
-      "docs/research/2026-11-03-dependency-contract-paired-maintenance-result.md"
+      "docs/research/2026-11-03-dependency-contract-paired-maintenance-result.md",
+      "docs/research/2026-11-03-dependency-contract-instrumented-pair.md"
     ],
     "directories": [
       "tests/modules/contract_qualification"
