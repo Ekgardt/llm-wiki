@@ -849,6 +849,10 @@ step — under the ownership registry's `doctor` role scoped
 `repository:<repository_id>`. It is not a daemon: the process exits when the
 refresh does. Answers carry a `freshness` block naming both commits.
 
+The [reader-cache maintenance contract](modules/evidence-reader-cache.md) owns
+process-local leases, identity reuse and retirement. Graph selection, validation
+and refresh remain with their existing callers.
+
 The runtime starts a managed language server lazily within the owning MCP process,
 exposes only allowlisted read operations, reports readiness and capability
 limitations, and falls back to existing structural evidence when unavailable. The
