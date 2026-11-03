@@ -1923,7 +1923,7 @@ with those consumers and share the single timestamp setup helper. See
 
 Full owner contracts: [lsp-paths](modules/lsp-paths.md), [verified-artifacts](modules/verified-artifacts.md).
 
-The next planned queue-validation transfer covers pure capture input, descriptor,
+The queue-validation owner includes pure capture input, descriptor,
 path, fence-field and scan-cursor checks. Queue call sites keep their existing
 ordering and transaction boundaries; TaskFence identity and semantic-decision
 orchestration remain in the executor. The canonical dependency owners provide

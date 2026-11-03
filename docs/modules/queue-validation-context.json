@@ -26,7 +26,15 @@
     "scripts/llm_wiki/context_bundle.py",
     "scripts/llm_wiki/queue_contracts.py",
     "docs/modules/queue-contracts.md",
-    "docs/modules/context-bundle.md"
+    "docs/modules/context-bundle.md",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/formats/canonical.py",
+    "scripts/llm_wiki/formats/queue_payload.py",
+    "scripts/llm_wiki/restricted_paths.py",
+    "docs/modules/formats.md",
+    "docs/modules/restricted-paths.md",
+    "tests/module_boundaries.py",
+    "docs/research/2026-11-03-queue-capture-validation.md"
   ],
   "directories": [
     "tests/modules/queue_validation"
@@ -36,7 +44,8 @@
     "files": [
       "docs/modules/queue-validation-context.json",
       "docs/modules/queue-validation.md",
-      "scripts/llm_wiki/queue_validation.py"
+      "scripts/llm_wiki/queue_validation.py",
+      "docs/research/2026-11-03-queue-capture-validation.md"
     ],
     "directories": [
       "tests/modules/queue_validation"

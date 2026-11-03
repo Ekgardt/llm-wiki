@@ -142,7 +142,28 @@ from llm_wiki.queue_process_cleanup import (
 from llm_wiki.queue_process_cleanup import (
     _tracked_descendant_pids as _tracked_descendant_pids,
 )
+from llm_wiki.queue_validation import _capture_cursor_text as _capture_cursor_text
+from llm_wiki.queue_validation import (
+    _capture_decision_relative_path as _capture_decision_relative_path,
+)
+from llm_wiki.queue_validation import _capture_scan_cursor as _capture_scan_cursor
+from llm_wiki.queue_validation import (
+    _capture_terminal_disposition_fields as _capture_terminal_disposition_fields,
+)
+from llm_wiki.queue_validation import (
+    _check_capture_intent_descriptor as _check_capture_intent_descriptor,
+)
+from llm_wiki.queue_validation import _check_capture_intent_digest as _check_capture_intent_digest
+from llm_wiki.queue_validation import (
+    _check_capture_intent_relative_path as _check_capture_intent_relative_path,
+)
+from llm_wiki.queue_validation import _check_capture_intent_size as _check_capture_intent_size
+from llm_wiki.queue_validation import _check_consumer_id as _check_consumer_id
+from llm_wiki.queue_validation import _check_consumer_kind as _check_consumer_kind
 from llm_wiki.queue_validation import _check_policy_integer as _check_policy_integer
+from llm_wiki.queue_validation import _check_quarantine_names as _check_quarantine_names
+from llm_wiki.queue_validation import _check_ready_intent_identity as _check_ready_intent_identity
+from llm_wiki.queue_validation import _check_resolution_reason as _check_resolution_reason
 from llm_wiki.queue_validation import _check_result_bytes as _check_result_bytes
 from llm_wiki.queue_validation import _check_result_operation as _check_result_operation
 from llm_wiki.queue_validation import _check_result_request as _check_result_request
@@ -150,6 +171,20 @@ from llm_wiki.queue_validation import _check_retry_bounds as _check_retry_bounds
 from llm_wiki.queue_validation import _check_retry_window as _check_retry_window
 from llm_wiki.queue_validation import _is_positive_int as _is_positive_int
 from llm_wiki.queue_validation import _require_bounded_int as _require_bounded_int
+from llm_wiki.queue_validation import _require_bounded_intent_path as _require_bounded_intent_path
+from llm_wiki.queue_validation import (
+    _require_capture_decision_path as _require_capture_decision_path,
+)
+from llm_wiki.queue_validation import _require_capture_fence as _require_capture_fence
+from llm_wiki.queue_validation import _require_capture_identity as _require_capture_identity
+from llm_wiki.queue_validation import (
+    _require_capture_intent_descriptor as _require_capture_intent_descriptor,
+)
+from llm_wiki.queue_validation import _require_capture_intent_path as _require_capture_intent_path
+from llm_wiki.queue_validation import _require_capture_intent_size as _require_capture_intent_size
+from llm_wiki.queue_validation import (
+    _require_capture_terminal_path as _require_capture_terminal_path,
+)
 from llm_wiki.queue_validation import (
     _require_claim_owner_and_lease as _require_claim_owner_and_lease,
 )
@@ -160,10 +195,20 @@ from llm_wiki.queue_validation import _require_known_states as _require_known_st
 from llm_wiki.queue_validation import (
     _require_legacy_enqueue_arguments as _require_legacy_enqueue_arguments,
 )
+from llm_wiki.queue_validation import _require_lower_sha256 as _require_lower_sha256
+from llm_wiki.queue_validation import (
+    _require_matching_decision_owner as _require_matching_decision_owner,
+)
 from llm_wiki.queue_validation import _require_non_empty_string as _require_non_empty_string
 from llm_wiki.queue_validation import _require_positive_lease as _require_positive_lease
 from llm_wiki.queue_validation import _require_positive_task_lease as _require_positive_task_lease
+from llm_wiki.queue_validation import _require_repair_owner as _require_repair_owner
+from llm_wiki.queue_validation import (
+    _require_semantic_decision_shape as _require_semantic_decision_shape,
+)
+from llm_wiki.queue_validation import _require_task_identifier as _require_task_identifier
 from llm_wiki.queue_validation import _require_task_kind as _require_task_kind
+from llm_wiki.queue_validation import _require_worker_intent_fence as _require_worker_intent_fence
 from llm_wiki.queue_validation import _valid_heartbeat_interval as _valid_heartbeat_interval
 from llm_wiki.queue_validation import _validate_retry_policy as _validate_retry_policy
 from llm_wiki.queue_validation import _validate_worker_policy as _validate_worker_policy
@@ -319,16 +364,6 @@ _MAX_EXPORT_METADATA_BYTES = 64 * 1024 * 1024
 MAX_PROCESSOR_REASON_CHARS = 300
 _MAX_CLI_DETAIL_CHARS = 240
 _QUEUE_V3_CONTRACT = OperationalDatabaseContract(application_id=0x4C575133)
-_CAPTURE_TERMINAL_DISPOSITION_FIELDS = {
-    "markdown_committed": {
-        "kind",
-        "transaction_id",
-        "operation_id",
-        "decision_sha256",
-        "outputs",
-    },
-    "no_durable_content": {"kind", "decision_sha256"},
-}
 
 QUEUE_V3_SCHEMA_SHA256 = sha256_bytes(
     canonical_json_bytes(
@@ -872,47 +907,14 @@ class _RedactedArgumentParser(argparse.ArgumentParser):
         super().exit(status, message)
 
 
-def _require_capture_intent_path(value: str, state: Literal["pending", "ready"]) -> None:
-    restricted_relative_path(value, ("run/capture-intents",))
-    if len(value.encode("utf-8")) > 4096:
-        raise ValueError(f"{state} capture intent path is invalid")
-    pattern = rf"run/capture-intents/{state}/[0-9a-f]{{2}}/[0-9a-f]{{64}}\.json"
-    if re.fullmatch(pattern, value) is None:
-        raise ValueError(f"{state} capture intent path is invalid")
 
 
-def _require_lower_sha256(value: str, label: str) -> None:
-    if re.fullmatch(r"[0-9a-f]{64}", value) is None:
-        raise ValueError(f"{label} must be lowercase 64-hex")
 
 
-def _require_capture_intent_size(value: int) -> None:
-    if type(value) is not int:
-        raise ValueError("capture intent byte size is invalid")
-    if not 1 <= value <= _MAX_QUEUE_PAYLOAD_BYTES:
-        raise ValueError("capture intent byte size is invalid")
 
 
-def _require_capture_intent_descriptor(
-    intent_id: str,
-    pending_path: str,
-    intent_sha256: str,
-    byte_size: int,
-) -> None:
-    _require_lower_sha256(intent_id, "intent_id")
-    _require_lower_sha256(intent_sha256, "intent_sha256")
-    _require_capture_intent_size(byte_size)
-    _require_capture_intent_path(pending_path, "pending")
-    expected = f"run/capture-intents/pending/{intent_id[:2]}/{intent_id}.json"
-    if pending_path != expected:
-        raise ValueError("capture intent descriptor is invalid")
 
 
-def _require_capture_decision_path(value: str, intent_id: str, stage: str) -> None:
-    restricted_relative_path(value, ("run/queue-results",))
-    expected = _capture_decision_relative_path(intent_id, stage)
-    if value != expected:
-        raise ValueError("decision path is invalid")
 
 
 def _in_redrive_family(database: sqlite3.Connection, task_id: str) -> bool:
@@ -924,9 +926,6 @@ def _in_redrive_family(database: sqlite3.Connection, task_id: str) -> bool:
     return row is not None
 
 
-def _capture_decision_relative_path(intent_id: str, stage: str) -> str:
-    key = sha256_bytes(canonical_json_bytes({"intent_id": intent_id, "stage": stage}))
-    return f"run/queue-results/capture-decision-{key}.json"
 
 
 def _capture_semantic_seal_digest(
@@ -1122,17 +1121,8 @@ def _read_indexed_capture_decision(
     return decision_path, decision_sha256
 
 
-def _require_capture_terminal_path(value: str, intent_id: str) -> None:
-    restricted_relative_path(value, ("run/queue-results",))
-    expected = f"run/queue-results/capture-{intent_id}.json"
-    if value != expected:
-        raise ValueError("capture terminal path is invalid")
 
 
-def _capture_terminal_disposition_fields(kind: object) -> set[str] | None:
-    if not isinstance(kind, str):
-        return None
-    return _CAPTURE_TERMINAL_DISPOSITION_FIELDS.get(kind)
 
 
 def _existing_capture_publication_state(
@@ -1308,31 +1298,10 @@ def _legacy_payload_bytes(row: sqlite3.Row) -> bytes:
         return b""
 
 
-def _require_bounded_intent_path(intent_path: object) -> None:
-    if not isinstance(intent_path, str) or len(intent_path.encode("utf-8")) > 4096:
-        raise ValueError("intent_path is invalid")
 
 
-def _require_capture_identity(
-    intent_id: object, intent_sha256: object, intent_path: object
-) -> None:
-    if re.fullmatch(r"[0-9a-f]{64}", str(intent_id)) is None:
-        raise ValueError("intent_id must be lowercase 64-hex")
-    if re.fullmatch(r"[0-9a-f]{64}", str(intent_sha256)) is None:
-        raise ValueError("intent_sha256 must be lowercase 64-hex")
-    _require_bounded_intent_path(intent_path)
 
 
-def _require_capture_fence(
-    capture_fence: object, intent_id: str, owner: object, fence_type: type
-) -> None:
-    if (
-        not isinstance(capture_fence, fence_type)
-        or capture_fence.intent_id != intent_id
-        or capture_fence.mode != "capture"
-        or capture_fence.owner != owner
-    ):
-        raise ValueError("capture fence does not match the intent and owner")
 
 
 def _capture_link_record(
@@ -1395,11 +1364,6 @@ def _purge_selection_changed(
     )
 
 
-def _require_semantic_decision_shape(stage: str, decision_sha256: str) -> None:
-    if stage not in {"flush", "feedback", "feedback-verify"}:
-        raise ValueError("semantic decision stage is invalid")
-    if re.fullmatch(r"[0-9a-f]{64}", str(decision_sha256)) is None:
-        raise ValueError("decision_sha256 must be lowercase 64-hex")
 
 
 def _require_semantic_decision_fences(
@@ -1420,22 +1384,8 @@ def _require_semantic_decision_fences(
     _require_matching_decision_owner(owner, task_fence, intent_fence, owner_type)
 
 
-def _require_worker_intent_fence(
-    intent_fence: object, intent_id: str, fence_type: type
-) -> None:
-    if not isinstance(intent_fence, fence_type):
-        raise ValueError("intent fence does not match")
-    if intent_fence.intent_id != intent_id or intent_fence.mode != "worker":
-        raise ValueError("intent fence does not match")
 
 
-def _require_matching_decision_owner(
-    owner: object, task_fence: object, intent_fence: object, owner_type: type
-) -> None:
-    if not isinstance(owner, owner_type):
-        raise ValueError("semantic decision owner does not match fences")
-    if task_fence.owner != owner or intent_fence.owner != owner:
-        raise ValueError("semantic decision owner does not match fences")
 
 
 # The stored columns a semantic decision has to agree with, in argument order.
@@ -1549,16 +1499,8 @@ def _exported_bytes_match(
     )
 
 
-def _require_repair_owner(owner: object, owner_type: type, message: str) -> None:
-    if not isinstance(owner, owner_type) or owner.role != "repair":
-        raise ValueError(message)
 
 
-def _require_task_identifier(task_id: object) -> None:
-    if not isinstance(task_id, str):
-        raise ValueError("task ID is invalid")
-    if not 1 <= len(task_id.encode("utf-8")) <= 256:
-        raise ValueError("task ID is invalid")
 
 
 def _require_matching_purge_operation(
@@ -1588,12 +1530,6 @@ class _CorruptEvidence:
     lineage_generation: int
 
 
-def _check_quarantine_names(task_id: str, reason: str) -> None:
-    """A quarantine names one task and says why, both within bounds."""
-    if not isinstance(task_id, str) or not 1 <= len(task_id.encode("utf-8")) <= 256:
-        raise ValueError("task ID is invalid")
-    if not isinstance(reason, str) or not 1 <= len(reason.encode("utf-8")) <= 4096:
-        raise ValueError("quarantine reason is invalid")
 
 
 def _attempt_history_entry(item: Mapping[str, object]) -> dict[str, object]:
@@ -1866,65 +1802,18 @@ def _source_fence_row_matches(row: sqlite3.Row, fence: SourceFence) -> bool:
     return stored == expected and fence.owner_pid == os.getpid()
 
 
-def _check_capture_intent_digest(value: str, label: str) -> None:
-    if re.fullmatch(r"[0-9a-f]{64}", value) is None:
-        raise ValueError(f"{label} must be lowercase 64-hex")
 
 
-def _check_capture_intent_relative_path(intent_path: object) -> None:
-    """A published intent lives under the capture-intent directory, bounded."""
-    if (
-        not isinstance(intent_path, str)
-        or "\\" in intent_path
-        or not intent_path.startswith("run/capture-intents/")
-        or len(intent_path.encode("utf-8")) > 4096
-    ):
-        raise ValueError("intent_path is invalid")
 
 
-def _check_capture_intent_size(byte_size: object) -> None:
-    if isinstance(byte_size, bool) or not isinstance(byte_size, int):
-        raise ValueError("intent byte size is invalid")
-    if not 1 <= byte_size <= _MAX_QUEUE_PAYLOAD_BYTES:
-        raise ValueError("intent byte size is invalid")
 
 
-def _capture_scan_cursor(after: tuple[str, str] | None) -> tuple[str, str]:
-    if after is None:
-        return "", ""
-    if not isinstance(after, tuple) or len(after) != 2:
-        raise ValueError("capture scan cursor must contain timestamp and identity")
-    return _capture_cursor_text(after[0]), _capture_cursor_text(after[1])
 
 
-def _capture_cursor_text(value: object) -> str:
-    if not isinstance(value, str):
-        raise ValueError("capture scan cursor fields must be text")
-    return value
 
 
-def _check_capture_intent_descriptor(
-    intent_id: str, intent_path: str, intent_sha256: str, byte_size: int
-) -> None:
-    """Everything a publication has to name, before anything is written."""
-    _check_capture_intent_digest(intent_id, "intent_id")
-    _check_capture_intent_digest(intent_sha256, "intent_sha256")
-    _check_capture_intent_relative_path(intent_path)
-    _check_capture_intent_size(byte_size)
 
 
-def _check_ready_intent_identity(
-    existing: sqlite3.Row, intent_path: str, intent_sha256: str, byte_size: int
-) -> None:
-    """A republication has to name exactly the intent already recorded ready."""
-    stored = (
-        existing["relative_path"],
-        existing["intent_sha256"],
-        existing["byte_size"],
-        existing["publication_state"],
-    )
-    if stored != (intent_path, intent_sha256, byte_size, "ready"):
-        raise QueueOperationError("capture_intent_conflict")
 
 
 _CaptureLeaf = tuple[str, str | None, str | None, int]
@@ -2149,9 +2038,6 @@ def _quarantined_corrupt_progress(
     )
 
 
-def _check_resolution_reason(reason: object) -> None:
-    if not isinstance(reason, str) or not 1 <= len(reason.encode("utf-8")) <= 4096:
-        raise ValueError("resolution reason is invalid")
 
 
 def _insert_link_resolution(
@@ -2359,19 +2245,10 @@ def _write_purge_receipt(package: Path, receipt: Mapping[str, object]) -> bytes:
     return receipt_bytes
 
 
-_CONSUMER_KINDS = frozenset({"transaction", "terminal", "corrupt-disposition"})
 
 
-def _check_consumer_kind(consumer_kind: str) -> None:
-    if consumer_kind not in _CONSUMER_KINDS:
-        raise ValueError("consumer kind is invalid")
 
 
-def _check_consumer_id(consumer_id: object) -> None:
-    if not isinstance(consumer_id, str):
-        raise ValueError("consumer ID is invalid")
-    if not 1 <= len(consumer_id.encode("utf-8")) <= 4096:
-        raise ValueError("consumer ID is invalid")
 
 
 def _capture_seal_digest(

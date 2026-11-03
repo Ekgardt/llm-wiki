@@ -58,3 +58,32 @@ queue definitions, adversarial descriptor/fence tests, root alias compatibility,
 existing integrations, actual CCN/shape, complete source/guide manifest coverage,
 full serialized round-trip and Python3.10. Old duplicated implementations must
 not remain. Full regression6780ef23 runs separately and predates this change.
+
+Implementation baseline is now7854a031 after the independent LSP fixture repair.
+Fresh generation-18e46b1d294849a6-bf509fe1 indexes1851 sources/7145 chunks. Direct
+callers are index_capture_intent_pending/mark_capture_intent_ready, publication,
+pending/ready scans, and the retained semantic-fence orchestrator. Source search
+finds no outside consumers of the two private lookup constants or fault-injection
+patches on these helpers. Graph evidence: logs/queue-capture-validation-graph.json.
+
+Implementation preserves26 function bodies exactly; the27th is the documented
+identical digest alias. Both constant values and every remaining queue definition
+are unchanged.36 new adversarial checks first passed against the original root
+functions, then against their owner. The context guard reproduced the missing
+four new source dependencies; their full files and owner guides are now declared.
+The first ownership-guide run correctly refused the untracked new test file;
+after staging it, all68 source/guide guards pass. No guard was bypassed.
+
+Qualification:61 weighted owner tests,195 queue/capture/adoption integrations,
+85 checks onPython3.10, and1123 complete module/global guards pass (2 platform
+skips in the last group). Ruff and actual CCN/shape pass.48 emitted packets
+round-trip byte-for-byte; validation84463 tokens before this paragraph, global
+maximum96512. Overlapping totals3838219 serialized/4197692 raw. Registry380/3110
+files,2730 unassigned. Full7854a031 remains running and predates this production
+transfer; no current full pass or native platform qualification is claimed.
+
+Whole-source search additionally found an existing independent path-builder body
+in flush_memory, specialized to the flush stage. It is not a monkeypatch consumer
+of the moved function. Consolidation into a call to the now-shared pure path
+builder is the next source step after refresh; do not claim all duplicate cleanup
+finished until that producer is updated and its capture-terminal tests pass.
