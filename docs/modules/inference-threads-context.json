@@ -1,0 +1,49 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md",
+    "scripts/inference_threads.py",
+    "docs/modules/inference-threads.md",
+    "docs/modules/inference-threads-context.json",
+    "docs/research/2026-11-03-existing-leaf-owner-qualification.md",
+    "docs/research/2026-09-14-no-model-running-at-exit.md",
+    "docs/research/2026-09-25-every-process-settles-its-inference-at-exit.md",
+    "docs/research/2026-09-14-every-budget-inside-its-step.md",
+    "tests/test_every_process_settles_its_inference_at_exit.py"
+  ],
+  "directories": [
+    "tests/modules/inference_threads"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "scripts/inference_threads.py",
+      "docs/modules/inference-threads.md",
+      "docs/modules/inference-threads-context.json",
+      "tests/test_every_process_settles_its_inference_at_exit.py",
+      "docs/research/2026-09-14-no-model-running-at-exit.md",
+      "docs/research/2026-09-25-every-process-settles-its-inference-at-exit.md"
+    ],
+    "directories": [
+      "tests/modules/inference_threads"
+    ]
+  }
+}

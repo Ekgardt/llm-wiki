@@ -47,17 +47,3 @@ def test_a_directory_nobody_configured_is_still_refused(tmp_path):
 
     with pytest.raises(PermissionError):
         integration_adapter._capture_path_evidence(str(stray))
-
-
-def test_the_defaults_stay_and_the_configured_directories_are_added(tmp_path):
-    from host_transcripts import host_transcript_roots
-
-    home = tmp_path / "home"
-    environ = {"CLAUDE_CONFIG_DIR": str(tmp_path / "c"), "CODEX_HOME": str(tmp_path / "x")}
-
-    assert host_transcript_roots(environ, home) == (
-        home / ".claude" / "projects",
-        tmp_path / "c" / "projects",
-        home / ".codex" / "sessions",
-        tmp_path / "x" / "sessions",
-    )

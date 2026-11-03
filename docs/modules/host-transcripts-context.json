@@ -1,0 +1,44 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md",
+    "scripts/host_transcripts.py",
+    "docs/modules/host-transcripts.md",
+    "docs/modules/host-transcripts-context.json",
+    "docs/research/2026-11-03-existing-leaf-owner-qualification.md",
+    "docs/research/2026-09-17-a-moved-host-directory-is-still-the-host.md"
+  ],
+  "directories": [
+    "tests/modules/host_transcripts"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "scripts/host_transcripts.py",
+      "docs/modules/host-transcripts.md",
+      "docs/modules/host-transcripts-context.json",
+      "docs/research/2026-09-17-a-moved-host-directory-is-still-the-host.md"
+    ],
+    "directories": [
+      "tests/modules/host_transcripts"
+    ]
+  }
+}

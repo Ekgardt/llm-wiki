@@ -34,7 +34,8 @@
     "tests/test_module_contract_docs.py",
     "docs/research/2026-11-03-module-contract-documentation.md",
     "docs/research/2026-11-03-test-import-context-closure.md",
-    "docs/research/2026-11-03-canonical-module-qualification-context.md"
+    "docs/research/2026-11-03-canonical-module-qualification-context.md",
+    "docs/research/2026-11-03-existing-leaf-owner-qualification.md"
   ],
   "directories": [
     "tests/modules/context_tooling"
@@ -58,7 +59,8 @@
       "docs/research/2026-11-03-test-import-context-closure.md",
       "docs/research/2026-11-02-module-boundaries-and-token-budget.md",
       "docs/research/2026-11-02-module-boundaries-validation.md",
-      "docs/research/2026-11-03-canonical-module-qualification-context.md"
+      "docs/research/2026-11-03-canonical-module-qualification-context.md",
+      "docs/research/2026-11-03-existing-leaf-owner-qualification.md"
     ],
     "directories": [
       "tests/modules/context_tooling"

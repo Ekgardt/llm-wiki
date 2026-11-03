@@ -14,9 +14,7 @@ import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
 
-import ephemeral_paths
 import maintenance_helpers
 import markdown_transaction
 import memory_state
@@ -36,21 +34,6 @@ ROOT = Path(__file__).resolve().parent.parent
 # --- throwaway checkouts ----------------------------------------------------
 
 
-def test_the_temporary_and_job_directories_are_ephemeral(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "host"))
-    temporary = tmp_path / "system-temp"
-    permanent = tmp_path / "workspaces" / "vault"
-    monkeypatch.setattr(ephemeral_paths, "tempfile", SimpleNamespace(gettempdir=lambda: str(temporary)))
-    job = tmp_path / "host" / "jobs" / "abc" / "tmp" / "clean"
-
-    roots = ephemeral_paths.ephemeral_roots()
-    verdicts = (
-        ephemeral_paths.is_under(temporary / "x", roots),
-        ephemeral_paths.is_under(job, roots),
-        ephemeral_paths.is_under(permanent, roots),
-    )
-
-    assert verdicts == (True, True, False)
 
 
 def _job_checkout(tmp_path: Path, monkeypatch) -> Path:

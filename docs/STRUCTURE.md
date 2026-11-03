@@ -2068,3 +2068,14 @@ and shared strict UTF-8 prefix instead of its obsolete 200-character slice.
 Queue validation, schemas, source identity, deadlines and write-error propagation
 stay unchanged. The real producer failure is reproduced in a temporary v3 queue;
 see [research](research/2026-11-03-compile-source-error-byte-bound.md).
+
+### Existing leaf owners
+
+The existing `okf_types`, `host_transcripts`, `ephemeral_paths`,
+`embedding_model` and `inference_threads` files are qualified in place,
+with distinct complete packets and retained consumer tests. Their production
+paths, bytes, host configuration, model pins and process-local state ownership
+stay unchanged. See
+[research](research/2026-11-03-existing-leaf-owner-qualification.md).
+
+Full contracts: [okf types](modules/okf-types.md), [host transcripts](modules/host-transcripts.md), [ephemeral paths](modules/ephemeral-paths.md), [embedding model](modules/embedding-model.md), [inference threads](modules/inference-threads.md).
