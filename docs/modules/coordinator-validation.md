@@ -30,3 +30,11 @@ The initial105385-token context was rejected. Separating the actual runtime
 metadata validator from byte/Windows identity capture removes that unnecessary
 SQLite dependency; the complete corrected packet is measured again. No source
 closure exception or limit increase is permitted.
+
+## Native fixture permissions
+
+The database fixture applies the existing cross-platform owner-only hardener
+after constructing the real schema. `open_operational_db` alone applies file mode
+bits; it does not establish the Windows ACL required by certification. Native
+Windows run 41666666288 exposed six tests stopping at that earlier permission
+guard. No validator, ACL requirement or schema assertion is relaxed.

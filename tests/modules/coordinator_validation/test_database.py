@@ -6,6 +6,7 @@ from contextlib import closing
 import pytest
 from llm_wiki import coordinator_validation as validation
 from llm_wiki.coordinator_schema import _COORDINATOR_V3_CONTRACT, _COORDINATOR_V3_TABLE_SQL
+from llm_wiki.runtime_environment import _harden_runtime_owner_only
 from llm_wiki.sqlite_contracts import OperationalDatabaseContractError
 from llm_wiki.sqlite_io import open_operational_db
 
@@ -18,6 +19,7 @@ def database_path(tmp_path):
                                     initialize_contract=True)) as database:
         for _name, sql in _COORDINATOR_V3_TABLE_SQL:
             database.execute(sql)
+    _harden_runtime_owner_only(path, 0o600)
     return path
 
 
