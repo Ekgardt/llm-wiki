@@ -1,0 +1,56 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md",
+    "scripts/aggregation_pass.py",
+    "scripts/refusal_pass.py",
+    "docs/modules/answer-refinement.md",
+    "docs/modules/answer-refinement-context.json",
+    "docs/research/2026-09-08-a-refusal-searches-again.md",
+    "docs/research/2026-09-19-the-aggregation-pass-is-chosen-by-the-question.md",
+    "scripts/reply_json.py",
+    "docs/modules/reply-json.md",
+    "docs/research/2026-09-07-what-would-actually-put-us-ahead.md",
+    "docs/research/2026-09-07-is-each-plan-item-the-best-known.md",
+    "docs/research/2026-09-14-the-document-after-the-notes.md"
+  ],
+  "directories": [
+    "tests/modules/answer_refinement"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "scripts/aggregation_pass.py",
+      "scripts/refusal_pass.py",
+      "docs/modules/answer-refinement.md",
+      "docs/modules/answer-refinement-context.json",
+      "docs/research/2026-09-08-a-refusal-searches-again.md",
+      "docs/research/2026-09-19-the-aggregation-pass-is-chosen-by-the-question.md"
+    ],
+    "directories": [
+      "tests/modules/answer_refinement"
+    ]
+  }
+}

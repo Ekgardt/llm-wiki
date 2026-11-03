@@ -16,7 +16,6 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-import aggregation_pass  # noqa: E402
 import query_memory  # noqa: E402
 
 DOCUMENT = {"schema_version": "grounded-answer/v1", "status": "answered", "claims": []}
@@ -44,7 +43,3 @@ def test_prose_without_a_document_is_still_refused_with_its_excerpt():
         query_memory._parsed_answer("working: E1 says 3:1.\n\nclaims:\n- ratio is 3:1 (E1)")
 
 
-def test_the_passes_beside_the_answer_read_the_same_way():
-    reply = "Grouping the mentions.\n" + json.dumps({"groups": [[0, 1]]})
-
-    assert aggregation_pass._parsed_groups(reply, 2) == [[0, 1]]

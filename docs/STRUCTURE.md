@@ -2300,3 +2300,9 @@ frontmatter interpretation and mtime-based age facts. Complete taxonomy, status
 and provenance policy sources remain dependencies. MCP retains citation selection,
 quality aggregation and warnings. This reader provides no containment or entailment
 proof; its existing decoded-character head bound and production bytes are preserved.
+
+[Answer refinement](modules/answer-refinement.md) owns existing counting/refusal
+policies, prompt formation and interpretation of supplied callback replies.
+`query_memory` retains protected model execution, retrieval, deadlines, calendar
+precedence and second-answer adoption/fallback. Existing algorithms, prompts,
+limits and public imports remain unchanged; pure tests move with their policies.
