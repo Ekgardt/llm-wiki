@@ -37,7 +37,8 @@
     "files": [
       "docs/modules/path-ancestry-context.json",
       "docs/modules/path-ancestry.md",
-      "scripts/llm_wiki/path_ancestry.py"
+      "scripts/llm_wiki/path_ancestry.py",
+      "docs/research/2026-11-03-path-ancestry-boundary.md"
     ],
     "directories": [
       "tests/modules/path_ancestry"

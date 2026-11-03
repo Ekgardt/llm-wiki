@@ -37,7 +37,8 @@
     "files": [
       "scripts/interruption.py",
       "docs/modules/interruption.md",
-      "docs/modules/interruption-context.json"
+      "docs/modules/interruption-context.json",
+      "docs/research/2026-11-03-interruption-packet.md"
     ],
     "directories": [
       "tests/modules/interruption"

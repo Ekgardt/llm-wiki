@@ -36,7 +36,8 @@
     "files": [
       "docs/modules/sqlite-transactions-context.json",
       "docs/modules/sqlite-transactions.md",
-      "scripts/llm_wiki/sqlite_transactions.py"
+      "scripts/llm_wiki/sqlite_transactions.py",
+      "docs/research/2026-11-02-sqlite-transactions-boundary.md"
     ],
     "directories": [
       "tests/modules/sqlite_transactions"

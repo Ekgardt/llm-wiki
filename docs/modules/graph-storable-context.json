@@ -37,7 +37,8 @@
     "files": [
       "scripts/graph_storable.py",
       "docs/modules/graph-storable.md",
-      "docs/modules/graph-storable-context.json"
+      "docs/modules/graph-storable-context.json",
+      "docs/research/2026-11-03-graph-storable-packet.md"
     ],
     "directories": [
       "tests/modules/graph_storable"

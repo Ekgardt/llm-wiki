@@ -45,7 +45,8 @@
       "docs/modules/lsp-positions.md",
       "docs/modules/lsp-positions-context.json",
       "tests/test_lsp_positions.py",
-      "tests/fixtures/code_kernel/python/pkg/unicode_api.py"
+      "tests/fixtures/code_kernel/python/pkg/unicode_api.py",
+      "docs/research/2026-11-03-lsp-positions-packet.md"
     ],
     "directories": [
       "tests/modules/lsp_positions"

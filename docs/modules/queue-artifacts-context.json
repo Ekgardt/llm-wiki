@@ -53,7 +53,8 @@
     "files": [
       "docs/modules/queue-artifacts-context.json",
       "docs/modules/queue-artifacts.md",
-      "scripts/llm_wiki/queue_artifacts.py"
+      "scripts/llm_wiki/queue_artifacts.py",
+      "docs/research/2026-11-03-queue-artifact-io-boundary.md"
     ],
     "directories": [
       "tests/modules/queue_artifacts"

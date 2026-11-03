@@ -2255,6 +2255,8 @@ The converter retains trusted-profile input; graph ingestion and dynamic-evidenc
 publication remain separate responsibilities.
 
 Full owner contract: [transaction lineage](modules/transaction-lineage.md).
+The existing reader uses supplied SQLite connections; admission, snapshot control,
+pruning and stronger source-specific evidence retain their current owners.
 
 Full owner contract: [static knowledge-writer analysis](modules/knowledge-writer-scanner.md).
 The scanner reports source findings; transaction enforcement and the actual writer
@@ -2271,8 +2273,6 @@ installation publication and server lifecycle remain with their existing owners.
 Full owner contract: [MCP response values](modules/mcp-response-values.md).
 The pure schema/value rules have no runtime dependency; mcp_contract retains root,
 clock and Git observation plus public schema/constant reexports.
-The existing reader uses supplied SQLite connections; admission, snapshot control,
-pruning and stronger source-specific evidence retain their current owners.
 
 Full owner contract: [vault editorial policy](modules/vault-editorial.md).
 Existing editorial-name and private-log constants retain their source paths;
@@ -2285,3 +2285,8 @@ retains public object reexports and all operational state ownership.
 Full owner contract: [state JSON values](modules/state-json-values.md).
 The value layer receives the existing byte budget explicitly; memory_state keeps
 its public budget binding, locks, recovery and durable publication.
+
+Dated research about one module boundary belongs to that module when its complete
+record is already included in the packet. Other packets retain their full shared
+context. Historical versions and results stay dated evidence; assigning an owner
+does not rewrite them or qualify current runtime behavior.

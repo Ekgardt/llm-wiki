@@ -36,7 +36,8 @@
     "files": [
       "docs/modules/sqlite-contracts-context.json",
       "docs/modules/sqlite-contracts.md",
-      "scripts/llm_wiki/sqlite_contracts.py"
+      "scripts/llm_wiki/sqlite_contracts.py",
+      "docs/research/2026-11-02-sqlite-contracts-boundary.md"
     ],
     "directories": [
       "tests/modules/sqlite_contracts"

@@ -42,7 +42,8 @@
     "files": [
       "scripts/llm_wiki/lsp_wire.py",
       "docs/modules/lsp-wire.md",
-      "docs/modules/lsp-wire-context.json"
+      "docs/modules/lsp-wire-context.json",
+      "docs/research/2026-11-03-lsp-wire-boundary.md"
     ],
     "directories": [
       "tests/modules/lsp_wire"
