@@ -2153,3 +2153,13 @@ estimate and owns optional telemetry. Pure tests move unchanged; real recorder,
 reader and MCP integration assertions remain. The test import guard gains explicit
 benchmark roots without changing its scripts-only default. No production byte,
 public command, threshold, environment contract, provider call or runtime path changes.
+
+### Provider value records
+
+`scripts/llm_wiki/model_records.py` owns the five existing provider/result and
+planning identity dataclasses, independently of transport, DLP, model selection
+and executable verification. `llm_client` retains direct aliases and historical
+class module identities for existing imports and serialized objects. Fields,
+canonical JSON, defaults and shallow frozen semantics stay unchanged. The
+[model records contract](modules/model-records.md) and its complete context packet
+cover the data boundary; real provider and compile recovery tests remain required.

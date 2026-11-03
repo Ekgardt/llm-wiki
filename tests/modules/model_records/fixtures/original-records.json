@@ -1,0 +1,70 @@
+{
+  "ProviderDescriptor": {
+    "pickle_b64": "gASVGgEAAAAAAACMCmxsbV9jbGllbnSUjBJQcm92aWRlckRlc2NyaXB0b3KUk5QpgZR9lCiMCHByb3ZpZGVylIwEZmFrZZSMBW1vZGVslE6MDGNhcGFiaWxpdGllc5R9lIwRc3RydWN0dXJlZF9vdXRwdXSUjAZwcm9tcHSUc4wSaW5mZXJlbmNlX3NldHRpbmdzlH2UjAptYXhfdG9rZW5zlEslc4wPY2FuZGlkYXRlX2luZGV4lEsAjA1mYWxsYmFja19mcm9tlCmMCV9lbmRwb2ludJSMGGh0dHA6Ly9sb2NhbGhvc3QvZml4dHVyZZSME19yZXNvbHV0aW9uX2ZhaWx1cmWUjAdmaXh0dXJllIwMX2NvZGV4X2Jhc2lzlE51Yi4=",
+    "repr": "ProviderDescriptor(provider='fake', model=None, capabilities={'structured_output': 'prompt'}, inference_settings={'max_tokens': 37}, candidate_index=0, fallback_from=())",
+    "fields": [
+      "provider",
+      "model",
+      "capabilities",
+      "inference_settings",
+      "candidate_index",
+      "fallback_from",
+      "_endpoint",
+      "_resolution_failure",
+      "_codex_basis"
+    ],
+    "signature": "(provider: 'str', model: 'str | None', capabilities: 'Mapping[str, object]', inference_settings: 'Mapping[str, object]', candidate_index: 'int', fallback_from: 'tuple[str, ...]', _endpoint: 'str | None' = None, _resolution_failure: 'str | None' = None, _codex_basis: 'CodexPlanningBasis | None' = None) -> None"
+  },
+  "LLMResult": {
+    "pickle_b64": "gASVjAIAAAAAAACMCmxsbV9jbGllbnSUjAlMTE1SZXN1bHSUk5QpgZR9lCiMCmRlc2NyaXB0b3KUaACMElByb3ZpZGVyRGVzY3JpcHRvcpSTlCmBlH2UKIwIcHJvdmlkZXKUjARmYWtllIwFbW9kZWyUTowMY2FwYWJpbGl0aWVzlH2UjBFzdHJ1Y3R1cmVkX291dHB1dJSMBnByb21wdJRzjBJpbmZlcmVuY2Vfc2V0dGluZ3OUfZSMCm1heF90b2tlbnOUSyVzjA9jYW5kaWRhdGVfaW5kZXiUSwCMDWZhbGxiYWNrX2Zyb22UKYwJX2VuZHBvaW50lIwYaHR0cDovL2xvY2FsaG9zdC9maXh0dXJllIwTX3Jlc29sdXRpb25fZmFpbHVyZZSMB2ZpeHR1cmWUjAxfY29kZXhfYmFzaXOUTnVijAR0ZXh0lIwO0L7RgtCy0LXRgiBlzIGUjAlhdmFpbGFibGWUiIwNZmFpbHVyZV9jbGFzc5ROaA9oEIwFdXNhZ2WUjA5jb250ZXh0X2J1ZGdldJSMClRva2VuVXNhZ2WUk5QpgZR9lCiMDGlucHV0X3Rva2Vuc5RLDIwNb3V0cHV0X3Rva2Vuc5RLAIwRY2FjaGVfcmVhZF90b2tlbnOUTowSY2FjaGVfd3JpdGVfdG9rZW5zlE6MC2R1cmF0aW9uX21zlE6MDmVzdGltYXRlZF9jb3N0lE6MCWNvc3Rfa2luZJSMB3Vua25vd26UdWKMEWlucHV0X3Rva2VuX2NvdW50lGggjApUb2tlbkNvdW50lJOUKYGUfZQojAZ0b2tlbnOUSwyMBnNvdXJjZZSMCHJlcG9ydGVklHVijA5mYWlsdXJlX2RldGFpbJROdWIu",
+    "repr": "LLMResult(descriptor=ProviderDescriptor(provider='fake', model=None, capabilities={'structured_output': 'prompt'}, inference_settings={'max_tokens': 37}, candidate_index=0, fallback_from=()), text='ответ é', available=True, failure_class=None, structured_output='prompt', usage=TokenUsage(input_tokens=12, output_tokens=0, cache_read_tokens=None, cache_write_tokens=None, duration_ms=None, estimated_cost=None, cost_kind='unknown'), input_token_count=TokenCount(tokens=12, source='reported'), failure_detail=None)",
+    "fields": [
+      "descriptor",
+      "text",
+      "available",
+      "failure_class",
+      "structured_output",
+      "usage",
+      "input_token_count",
+      "failure_detail"
+    ],
+    "signature": "(descriptor: 'ProviderDescriptor', text: 'str | None', available: 'bool', failure_class: 'str | None', structured_output: 'str', usage: 'TokenUsage' = <factory>, input_token_count: 'TokenCount | None' = None, failure_detail: 'str | None' = None) -> None"
+  },
+  "BackendResponse": {
+    "pickle_b64": "gASV6gAAAAAAAACMCmxsbV9jbGllbnSUjA9CYWNrZW5kUmVzcG9uc2WUk5QpgZR9lCiMBHRleHSUjAPnrZSUjAV1c2FnZZSMDmNvbnRleHRfYnVkZ2V0lIwKVG9rZW5Vc2FnZZSTlCmBlH2UKIwMaW5wdXRfdG9rZW5zlE6MDW91dHB1dF90b2tlbnOUTowRY2FjaGVfcmVhZF90b2tlbnOUTowSY2FjaGVfd3JpdGVfdG9rZW5zlE6MC2R1cmF0aW9uX21zlE6MDmVzdGltYXRlZF9jb3N0lE6MCWNvc3Rfa2luZJSMB3Vua25vd26UdWJ1Yi4=",
+    "repr": "BackendResponse(text='答', usage=TokenUsage(input_tokens=None, output_tokens=None, cache_read_tokens=None, cache_write_tokens=None, duration_ms=None, estimated_cost=None, cost_kind='unknown'))",
+    "fields": [
+      "text",
+      "usage"
+    ],
+    "signature": "(text: 'str', usage: 'TokenUsage' = <factory>) -> None"
+  },
+  "_CodexExecutable": {
+    "pickle_b64": "gASVwAAAAAAAAACMCmxsbV9jbGllbnSUjBBfQ29kZXhFeGVjdXRhYmxllJOUKYGUfZQojARwYXRolIwML2ZpeHR1cmUvYmlulIwNcmVzb2x2ZWRfcGF0aJSMDS9maXh0dXJlL3JlYWyUjAhpZGVudGl0eZRLAUsCSwOHlIwGc2hhMjU2lIxAYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYZR1Yi4=",
+    "repr": "_CodexExecutable(path='/fixture/bin', resolved_path='/fixture/real', identity=(1, 2, 3), sha256='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')",
+    "fields": [
+      "path",
+      "resolved_path",
+      "identity",
+      "sha256"
+    ],
+    "signature": "(path: 'str', resolved_path: 'str', identity: 'tuple[int, ...]', sha256: 'str') -> None"
+  },
+  "CodexPlanningBasis": {
+    "pickle_b64": "gASVswMAAAAAAACMCmxsbV9jbGllbnSUjBJDb2RleFBsYW5uaW5nQmFzaXOUk5QpgZR9lCiME29yaWdpbmFsX2Rlc2NyaXB0b3KUaACMElByb3ZpZGVyRGVzY3JpcHRvcpSTlCmBlH2UKIwIcHJvdmlkZXKUjARmYWtllIwFbW9kZWyUTowMY2FwYWJpbGl0aWVzlH2UjBFzdHJ1Y3R1cmVkX291dHB1dJSMBnByb21wdJRzjBJpbmZlcmVuY2Vfc2V0dGluZ3OUfZSMCm1heF90b2tlbnOUSyVzjA9jYW5kaWRhdGVfaW5kZXiUSwCMDWZhbGxiYWNrX2Zyb22UKYwJX2VuZHBvaW50lIwYaHR0cDovL2xvY2FsaG9zdC9maXh0dXJllIwTX3Jlc29sdXRpb25fZmFpbHVyZZSMB2ZpeHR1cmWUjAxfY29kZXhfYmFzaXOUTnVijApleGVjdXRhYmxllGgAjBBfQ29kZXhFeGVjdXRhYmxllJOUKYGUfZQojARwYXRolIwML2ZpeHR1cmUvYmlulIwNcmVzb2x2ZWRfcGF0aJSMDS9maXh0dXJlL3JlYWyUjAhpZGVudGl0eZRLAUsCSwOHlIwGc2hhMjU2lIxAYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYZR1YmgMjA1maXh0dXJlLW1vZGVslIwObW9kZWxfcHJvdmlkZXKUjBBmaXh0dXJlLXByb3ZpZGVylIwPcGxhbm5pbmdfd2luZG93lEtkjA5jYXRhbG9nX3NoYTI1NpSMQGJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmKUjAxjb25maWdfZmlsZXOUjA8vZml4dHVyZS9jb25maWeUjEBjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjlIaUhZSMEmVudmlyb25tZW50X3NoYTI1NpSMQGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGSUjAtjbGlfdmVyc2lvbpSMD2ZpeHR1cmUtdmVyc2lvbpSMEG1jcF9zZXJ2ZXJfbmFtZXOUjAtmaXh0dXJlLW1jcJSFlHViLg==",
+    "repr": "CodexPlanningBasis(original_descriptor=ProviderDescriptor(provider='fake', model=None, capabilities={'structured_output': 'prompt'}, inference_settings={'max_tokens': 37}, candidate_index=0, fallback_from=()), executable=_CodexExecutable(path='/fixture/bin', resolved_path='/fixture/real', identity=(1, 2, 3), sha256='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'), model='fixture-model', model_provider='fixture-provider', planning_window=100, catalog_sha256='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', config_files=(('/fixture/config', 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'),), environment_sha256='dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd', cli_version='fixture-version', mcp_server_names=('fixture-mcp',))",
+    "fields": [
+      "original_descriptor",
+      "executable",
+      "model",
+      "model_provider",
+      "planning_window",
+      "catalog_sha256",
+      "config_files",
+      "environment_sha256",
+      "cli_version",
+      "mcp_server_names"
+    ],
+    "signature": "(original_descriptor: 'ProviderDescriptor', executable: '_CodexExecutable', model: 'str', model_provider: 'str', planning_window: 'int | None', catalog_sha256: 'str', config_files: 'tuple[tuple[str, str | None], ...]', environment_sha256: 'str', cli_version: 'str', mcp_server_names: 'tuple[str, ...]' = ()) -> None"
+  }
+}
