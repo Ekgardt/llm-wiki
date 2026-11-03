@@ -2290,3 +2290,11 @@ Dated research about one module boundary belongs to that module when its complet
 record is already included in the packet. Other packets retain their full shared
 context. Historical versions and results stay dated evidence; assigning an owner
 does not rewrite them or qualify current runtime behavior.
+
+### CI timing evidence
+
+The existing [CI timing report owner](modules/ci-timing-report.md) compiles retained
+workflow/JUnit measurements and owns its closed report schema. Its CLI, XML refusal
+policy and numerical acceptance rules are unchanged. Workflow execution and job
+configuration remain separate; complete workflow and contributor instructions are
+included as context. Own tests import the existing canonical schema validator.

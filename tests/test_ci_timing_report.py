@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 from ci_timing_report import _junit_root, compile_report, main, nearest_rank_p95
-from reliable_memory import SchemaValidationError, validate_schema
+from llm_wiki.formats.schema import SchemaValidationError, validate_schema
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA = ROOT / "benchmark" / "ci-timeout-evidence-v1.schema.json"
