@@ -78,3 +78,35 @@ def test_queue_evidence_aliases_and_serialized_identity_are_retained():
         assert getattr(memory_queue, name) is getattr(queue_evidence_records, name)
     value = queue_evidence_records._CorruptEvidence(b'a', b'b', b'c', 'd', 'e', 'f', 'g', 1)
     assert pickle.loads(pickle.dumps(value)) == value
+
+
+def _record_fixture(module):
+    path = ROOT / f'tests/modules/{module}/original-contract.json'
+    return json.loads(path.read_text(encoding='utf-8'))
+
+
+def _assert_record_serialization(module, facade):
+    import importlib
+
+    records = importlib.import_module(f'llm_wiki.{module}')
+    legacy = importlib.import_module(facade)
+    fixture = _record_fixture(module)
+    for name, encoded in fixture['classes'].items():
+        value = getattr(records, name)
+        assert getattr(legacy, name) is value
+        assert pickle.loads(base64.b64decode(encoded)) is value
+        assert pickle.dumps(value, protocol=4) == base64.b64decode(encoded)
+    for name, expected in fixture['errors'].items():
+        value = pickle.loads(base64.b64decode(expected['pickle']))
+        assert type(value) is getattr(records, name)
+        assert str(value) == expected['message']
+        assert json.loads(json.dumps(vars(value))) == expected['attributes']
+        assert pickle.dumps(value, protocol=4) == base64.b64decode(expected['pickle'])
+
+
+def test_ownership_records_retain_old_serialization():
+    _assert_record_serialization('ownership_contracts', 'operational_ownership')
+
+
+def test_markdown_records_retain_old_serialization():
+    _assert_record_serialization('markdown_records', 'markdown_transaction')

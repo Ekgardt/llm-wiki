@@ -21,7 +21,7 @@ import time
 import unicodedata
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass as dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple
@@ -62,6 +62,29 @@ from llm_wiki.coordinator_schema import _schema_objects as _schema_objects
 from llm_wiki.coordinator_schema import _tables_of as _tables_of
 from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from llm_wiki.formats.schema import validate_schema
+from llm_wiki.markdown_records import ChangeKind as ChangeKind
+from llm_wiki.markdown_records import CommittedWriteAuthority as CommittedWriteAuthority
+from llm_wiki.markdown_records import IntentFence as IntentFence
+from llm_wiki.markdown_records import MarkdownChange as MarkdownChange
+from llm_wiki.markdown_records import MarkdownOperation as MarkdownOperation
+from llm_wiki.markdown_records import OperationBoundElsewhereError as OperationBoundElsewhereError
+from llm_wiki.markdown_records import PreconditionChangedError as PreconditionChangedError
+from llm_wiki.markdown_records import ProjectCheckpointReservation as ProjectCheckpointReservation
+from llm_wiki.markdown_records import ProjectPendingPriorError as ProjectPendingPriorError
+from llm_wiki.markdown_records import RefusedArgument as RefusedArgument
+from llm_wiki.markdown_records import RefusedOperation as RefusedOperation
+from llm_wiki.markdown_records import TargetBoundaryFailure as TargetBoundaryFailure
+from llm_wiki.markdown_records import TargetPathBoundaryError as TargetPathBoundaryError
+from llm_wiki.markdown_records import TargetStateMismatch as TargetStateMismatch
+from llm_wiki.markdown_records import TargetTooLargeError as TargetTooLargeError
+from llm_wiki.markdown_records import TransactionAbortReceipt as TransactionAbortReceipt
+from llm_wiki.markdown_records import TransactionDriftError as TransactionDriftError
+from llm_wiki.markdown_records import TransactionFailure as TransactionFailure
+from llm_wiki.markdown_records import TransactionImageError as TransactionImageError
+from llm_wiki.markdown_records import TransactionRecord as TransactionRecord
+from llm_wiki.markdown_records import TransactionStateError as TransactionStateError
+from llm_wiki.markdown_records import WriterAdmissionTimeout as WriterAdmissionTimeout
+from llm_wiki.markdown_records import _require_bytes as _require_bytes
 from llm_wiki.reliability_defaults import DEFAULTS
 from llm_wiki.restricted_paths import restricted_relative_path
 from llm_wiki.sqlite_contracts import (
@@ -125,7 +148,6 @@ from reliable_memory import (
 )
 from transaction_lineage import quarantine_witnesses, resolved_quarantines
 
-ChangeKind = Literal["create", "replace", "delete"]
 Validator = Callable[[Mapping[str, object]], object]
 ABSENT = "absent"
 _OVERSIZED_TARGET = "oversized"
@@ -205,7 +227,6 @@ _SQLITE_INT64_MAX = (1 << 63) - 1
 _UINT64_MODULUS = 1 << 64
 
 
-
 _COORDINATOR_V2_COLUMNS = {
     "transaction": (
         "id",
@@ -272,30 +293,6 @@ _COORDINATOR_V2_SCHEMA_OBJECTS = {
     ("table", "writer_fences"),
     ("table", "writer_owners"),
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # How long a settled transaction keeps its before and after images.
@@ -1397,218 +1394,6 @@ def _decode_parent_identity(identity: tuple[object, object]) -> tuple[int, int]:
     )
 
 
-@dataclass(frozen=True)
-class MarkdownChange:
-    kind: ChangeKind
-    path: str
-    content: bytes | None
-    max_before_bytes: int | None = None
-
-    @classmethod
-    def create(
-        cls, path: str, content: bytes, *, max_before_bytes: int | None = None
-    ) -> MarkdownChange:
-        return cls("create", path, _require_bytes(content), max_before_bytes)
-
-    @classmethod
-    def replace(
-        cls, path: str, content: bytes, *, max_before_bytes: int | None = None
-    ) -> MarkdownChange:
-        return cls("replace", path, _require_bytes(content), max_before_bytes)
-
-    @classmethod
-    def delete(cls, path: str, *, max_before_bytes: int | None = None) -> MarkdownChange:
-        return cls("delete", path, None, max_before_bytes)
-
-
-@dataclass(frozen=True)
-class MarkdownOperation:
-    kind: ChangeKind
-    path: str
-    before_hash: str
-    after_hash: str
-
-
-@dataclass(frozen=True)
-class CommittedWriteAuthority:
-    """Recorded write evidence; does not claim to contain the complete transaction."""
-
-    id: str
-    operation_id: str
-    state: str
-    operations: tuple[MarkdownOperation, ...]
-
-
-@dataclass(frozen=True)
-class TransactionRecord:
-    id: str
-    operation_id: str
-    state: str
-    operations: tuple[MarkdownOperation, ...]
-    preconditions: Mapping[str, object]
-    created_at: str
-    updated_at: str
-    parent_transaction_id: str | None = None
-    error_code: str | None = None
-
-
-@dataclass(frozen=True)
-class IntentFence:
-    intent_id: str
-    mode: Literal["capture", "worker", "operator"]
-    token: str
-    epoch: int
-    owner: OwnerLease
-    expires_at: datetime
-
-
-@dataclass(frozen=True)
-class TransactionAbortReceipt:
-    transaction_id: str
-    intent_id: str
-    abort_operation_id: str
-    receipt_path: str
-    receipt_sha256: str
-    aborted_at: str
-
-
-@dataclass(frozen=True)
-class ProjectCheckpointReservation:
-    project: str
-    sequence: int
-    occurrence_id: str
-    idempotency_key: str
-    event_json: str
-    operation_id: str
-    attempt_number: int
-    state: str
-    transaction_id: str | None = None
-    parent_operation_id: str | None = None
-    duplicate: bool = False
-
-
-class OperationBoundElsewhereError(ValueError):
-    """Another request already owns this operation id; the event is retried."""
-
-
-class TransactionFailure(RuntimeError):
-    """An apply failure with a stable machine-readable disposition."""
-
-    def __init__(self, message: str, code: str, state: str):
-        super().__init__(message)
-        self.code = code
-        self.state = state
-
-    def __reduce__(self):
-        """Carry the disposition across a process boundary, not just the text."""
-        return (self.__class__, (str(self), self.code, self.state))
-
-
-class TransactionDriftError(RuntimeError):
-    """A committed operation no longer matches its persisted after-state."""
-
-    def __init__(self, transaction_id: str, paths: Sequence[str]):
-        self.transaction_id = transaction_id
-        self.paths = tuple(paths)
-        super().__init__(
-            "committed transaction target drift detected; use a new operation_id: "
-            + ", ".join(paths)
-        )
-
-    def __reduce__(self):
-        return (self.__class__, (self.transaction_id, self.paths))
-
-
-class WriterAdmissionTimeout(TimeoutError):
-    """The caller deadline expired before acquiring the Markdown writer gate."""
-
-
-class ProjectPendingPriorError(TransactionFailure):
-    """A project checkpoint is blocked by an unapplied lower sequence."""
-
-    status = "pending_prior"
-
-    def __init__(self, project: str, sequence: int, prior_sequence: int):
-        super().__init__(
-            f"project {project!r} sequence {sequence} waits for sequence {prior_sequence}",
-            "pending_prior",
-            "prepared",
-        )
-        self.project = project
-        self.sequence = sequence
-        self.prior_sequence = prior_sequence
-
-    def __reduce__(self):
-        """This subclass takes its own arguments, not the base three."""
-        return (self.__class__, (self.project, self.sequence, self.prior_sequence))
-
-
-class TargetBoundaryFailure(RuntimeError):
-    """A persisted target no longer has its prepared containment identity."""
-
-
-class TargetTooLargeError(ValueError):
-    """A transaction target exceeds the authoritative target-size contract."""
-
-
-class TargetPathBoundaryError(ValueError):
-    """A requested path is not a containable target inside the vault."""
-
-
-class PreconditionChangedError(ValueError):
-    """A target changed between the caller's read and its prepare."""
-
-
-class TransactionImageError(RuntimeError):
-    """A staged plan or after-image is not the one that was prepared."""
-
-
-class TransactionStateError(RuntimeError):
-    """A transaction cannot be applied from the state it is in."""
-
-    def __init__(self, state: str):
-        super().__init__(f"transaction cannot be applied from state {state}")
-        self.state = state
-
-    def __reduce__(self):
-        """Carry the state across a process boundary, not just the text."""
-        return (self.__class__, (self.state,))
-
-
-class TargetStateMismatch(RuntimeError):
-    """A target's bytes are not the ones the transaction recorded for it."""
-
-    def __init__(self, state_name: str, path: str):
-        super().__init__(f"{state_name} state mismatch for {path}")
-        self.state_name = state_name
-        self.path = path
-
-    def __reduce__(self):
-        return (self.__class__, (self.state_name, self.path))
-
-
-class RefusedOperation(RuntimeError):
-    """A refusal the CLI reports by its own code, never by its wording."""
-
-    def __init__(self, message: str, code: str):
-        super().__init__(message)
-        self.code = code
-
-    def __reduce__(self):
-        return (self.__class__, (str(self), self.code))
-
-
-class RefusedArgument(ValueError):
-    """An argument refusal the CLI reports by its own code."""
-
-    def __init__(self, message: str, code: str):
-        super().__init__(message)
-        self.code = code
-
-    def __reduce__(self):
-        return (self.__class__, (str(self), self.code))
-
-
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 _CLAIM_TARGET_FIELDS = {
     "page",
@@ -2379,12 +2164,6 @@ def _open_parent_directory(parent: Path) -> int:
         return os.open(parent, flags)
     except OSError as exc:
         raise _as_parent_boundary_failure(parent, exc) from exc
-
-
-def _require_bytes(content: bytes) -> bytes:
-    if not isinstance(content, bytes):
-        raise TypeError("Markdown content must be bytes")
-    return content
 
 
 class _TargetBoundaryChanged(Exception):

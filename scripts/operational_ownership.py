@@ -22,6 +22,12 @@ import markdown_transaction
 import process_liveness
 from iso_time import utc_text
 from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
+from llm_wiki.ownership_contracts import MarkerIdentity as MarkerIdentity
+from llm_wiki.ownership_contracts import OperationalOwnershipError as OperationalOwnershipError
+from llm_wiki.ownership_contracts import OwnerLease as OwnerLease
+from llm_wiki.ownership_contracts import OwnerRole as OwnerRole
+from llm_wiki.ownership_contracts import ProcessIdentity as ProcessIdentity
+from llm_wiki.ownership_contracts import ProcessState as ProcessState
 from llm_wiki.reliability_defaults import DEFAULTS
 from llm_wiki.restricted_paths import restricted_relative_path
 from llm_wiki.sqlite_contracts import OperationalDatabaseContract
@@ -33,22 +39,6 @@ from reliable_memory import (
     open_operational_db,
     read_runtime_bytes,
 )
-
-OwnerRole = Literal[
-    "capture",
-    "project",
-    "markdown-writer",
-    "queue-worker",
-    "compile",
-    "doctor",
-    "nightly",
-    "weekly",
-    "lsp",
-    "queue-operator",
-    "repair",
-    "runtime-deletion-check",
-]
-ProcessState = Literal["alive", "dead", "unknown"]
 
 _ROLES = frozenset(
     {
@@ -75,47 +65,6 @@ _COORDINATOR_CANDIDATE = "markdown-transactions-v3.candidate.sqlite3"
 # A marker identity is canonical JSON of a file identity and a pid, under 300 bytes; 4 KiB refuses
 # a marker that is not one.
 _MAX_MARKER_BYTES = 4096
-
-
-class OperationalOwnershipError(RuntimeError):
-    """Stable failure from canonical operational ownership."""
-
-    def __init__(self, code: str, message: str | None = None) -> None:
-        self.code = code
-        super().__init__(message or code)
-
-    def __reduce__(self):
-        return (self.__class__, (self.code, str(self)))
-
-
-@dataclass(frozen=True)
-class ProcessIdentity:
-    pid: int
-    start_identity: str
-
-
-@dataclass(frozen=True)
-class OwnerLease:
-    state_root: Path
-    role: OwnerRole
-    scope: str
-    actor_id: str
-    token: str
-    epoch: int
-    process: ProcessIdentity
-    acquired_at: datetime
-    heartbeat_at: datetime
-    expires_at: datetime
-    ttl_seconds: int
-    heartbeat_seconds: int
-
-
-@dataclass(frozen=True)
-class MarkerIdentity:
-    relative_path: str
-    sha256: str
-    file_identity: RuntimeFileIdentity
-    pid: int
 
 
 def utc_now() -> datetime:

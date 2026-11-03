@@ -2,7 +2,7 @@ name: tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, refactor/formats-module-20261102]
   pull_request:
     branches: [main]
   workflow_dispatch:

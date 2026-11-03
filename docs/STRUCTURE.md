@@ -2163,3 +2163,21 @@ constraints. Security updates remain applied; updating these four requires real
 paired remeasurement before replacing the frozen baseline. Navigation qualification
 uses the same Python 3.14 series and retains every existing metric/identity gate.
 See [qualification follow-up](research/2026-11-03-python314-qualification-followup.md).
+
+### Ownership and Markdown record boundaries
+
+`llm_wiki.ownership_contracts` owns the existing lease/process/marker value types
+and ownership error; registry policies and side effects stay in
+`operational_ownership`. `llm_wiki.markdown_records` owns public transaction values,
+byte-content constructors and exception dispositions. The coordinator retains
+execution, private staging records and transaction ownership. Both old modules
+re-export identical objects with preserved legacy pickle identities. A lease value
+alone grants no authority; registry validation remains required. Guides:
+[ownership contracts](modules/ownership-contracts.md) and
+[Markdown records](modules/markdown-records.md).
+
+The owner approved automatic `tests` pushes on the exact working branch
+`refactor/formats-module-20261102` on 2026-11-03. Existing main/PR/manual triggers,
+read-only workflow permissions and per-ref concurrency remain. Installer jobs use
+GitHub runners only; this grants no live-vault deployment or main merge. Retire
+this temporary branch trigger when the decomposition branch is retired.
