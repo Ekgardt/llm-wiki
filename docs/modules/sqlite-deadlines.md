@@ -15,3 +15,7 @@ refusal before access, recomputed waits and preserved existing controls.
 
 Run `uv run pytest tests/modules/sqlite_deadlines -q -s`.
 See ../research/2026-11-03-sqlite-control-boundaries.md.
+
+Tests replacing the entire clock object must patch sqlite_deadlines.time.
+Patching a shared stdlib time.monotonic attribute still reaches its importers;
+rebinding reliable_memory.time does not replace this owner's module binding.

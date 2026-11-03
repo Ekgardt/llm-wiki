@@ -106,7 +106,7 @@
   "test_a_changed_task_setting_reaches_an_installed_machine.py": 23.47,
   "test_a_changelog_line_belongs_to_one_release.py": 0.02,
   "test_a_check_is_judged_when_it_ends.py": 2.56,
-  "test_a_check_names_its_cause.py": 48.83,
+  "test_a_check_names_its_cause.py": 16.59,
   "test_a_checkpoint_records_what_was_done.py": 0.03,
   "test_a_checkpoint_that_fails_at_the_commit_puts_its_files_back.py": 3.06,
   "test_a_checkpoint_that_never_reached_the_database_is_seen.py": 0.04,

@@ -119,22 +119,24 @@ def test_expired_certification_sql_is_a_timeout_not_invalid_records(adopted, mon
     from types import SimpleNamespace
 
     import installed_memory_repair as repair
-    import reliable_memory
+    from llm_wiki import sqlite_deadlines
 
     expired = [False]
-    monkeypatch.setattr(reliable_memory, "time", SimpleNamespace(monotonic=lambda: 101.0 if expired[0] else 99.0))
+    monkeypatch.setattr(sqlite_deadlines, "time", SimpleNamespace(monotonic=lambda: 101.0 if expired[0] else 99.0))
 
     def certify(database_name, database):
         expired[0] = True
         database.execute(
             "WITH RECURSIVE work(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM work WHERE n<?) SELECT sum(n) FROM work",
-            (reliable_memory._OPERATIONAL_PROGRESS_VM_STEPS * 2,),
+            (sqlite_deadlines._OPERATIONAL_PROGRESS_VM_STEPS * 2,),
         ).fetchone()
 
     monkeypatch.setattr(repair, "_certify_active_database_contents", certify)
     root, state_root = adopted
-    with pytest.raises(TimeoutError):
+    with pytest.raises(TimeoutError) as raised:
         repair.require_reliability_v3_adopted(root=root, state_root=state_root, deadline=100.0)
+    assert expired[0], "the injected certification query must actually run"
+    assert isinstance(raised.value.__context__, sqlite3.OperationalError)
 
 
 @pytest.mark.parametrize("deadline,now,code,message", [
@@ -147,9 +149,9 @@ def test_sqlite_deadline_normalization_preserves_other_causes(monkeypatch, deadl
     from types import SimpleNamespace
 
     import installed_memory_repair as repair
-    import reliable_memory
+    from llm_wiki import sqlite_deadlines
 
-    monkeypatch.setattr(reliable_memory, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(sqlite_deadlines, "time", SimpleNamespace(monotonic=lambda: now))
     error = sqlite3.OperationalError(message)
     error.sqlite_errorcode = code
     with pytest.raises(sqlite3.OperationalError) as observed:
@@ -161,8 +163,8 @@ def test_sqlite_interrupt_without_structured_code_supports_python310(monkeypatch
     from types import SimpleNamespace
 
     import installed_memory_repair as repair
-    import reliable_memory
+    from llm_wiki import sqlite_deadlines
 
-    monkeypatch.setattr(reliable_memory, "time", SimpleNamespace(monotonic=lambda: 101.0))
+    monkeypatch.setattr(sqlite_deadlines, "time", SimpleNamespace(monotonic=lambda: 101.0))
     with pytest.raises(TimeoutError):
         repair._raise_adoption_sqlite_error(sqlite3.OperationalError("interrupted"), 100.0)
