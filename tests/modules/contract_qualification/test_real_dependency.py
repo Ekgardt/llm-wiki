@@ -11,7 +11,7 @@ from tests.module_contract_patches import require_test_public_calls
 from tests.module_contract_surface import require_declared_surface
 
 ROOT = Path(__file__).resolve().parents[3]
-read_source = context_reader(ROOT, ROOT / 'docs/modules/contract-identity-context.json')
+read_source = context_reader(ROOT, ROOT / 'docs/modules/contract-qualification-context.json')
 
 
 def test_actual_consumer_uses_only_checked_public_bindings():

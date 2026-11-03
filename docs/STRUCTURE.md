@@ -2263,3 +2263,10 @@ The default full-source gate remains unchanged. The first candidate boundary is
 answer_cost → answer_budget; adoption requires complete public semantics,
 verified access and runtime binding, real integration tests, bounded ownership
 and paired maintenance evidence under the approved proposal.
+
+[Contract qualification experiments](modules/contract-qualification.md) own fresh
+test execution and real consumer/provider binding evidence. Static checks remain
+in contract-identity. Both source implementations stay in the integration packet;
+experimental contexts do not replace canonical full-source packets before the
+approved paired maintenance comparison passes. No persistent success cache or
+product runtime location is added.

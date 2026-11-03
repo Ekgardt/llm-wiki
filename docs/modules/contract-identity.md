@@ -53,7 +53,7 @@ consumer shapes keep full source. It is not a Python sandbox or complete
 whole-program proof. Qualification must derive the traversed source set and
 member kinds, validate test patches separately, and retain every other dependency.
 
-The integration fixture keeps both actual source files. It checks checkout paths,
+The separate contract-qualification integration fixture keeps both actual source files. It checks checkout paths,
 function identity and actual UTF-8 estimates, TypeError and circular-reference
 behavior through the real consumer and provider. No mock can qualify these probes.
 A fresh subprocess, complete provider/consumer test selection, before/after byte
@@ -93,3 +93,7 @@ the consumer's ordinary context/boundary tests. The name guard instead rejects
 actual reflective namespaces (builtins, loader/spec and class cells) and dynamic
 call primitives; attribute introspection remains refused. All three original
 consumer test files now participate in the static pilot probe.
+
+Fresh execution and the actual consumer/provider fixture are owned by
+[contract qualification](contract-qualification.md). Static checks alone never
+authorize source omission or replace actual integration outcomes.

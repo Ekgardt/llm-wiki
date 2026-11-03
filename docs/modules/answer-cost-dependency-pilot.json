@@ -1,0 +1,19 @@
+{
+  "schema": "dependency-contract-pilot/v1",
+  "provider_context": "docs/modules/answer-budget-context.json",
+  "consumer_context": "docs/modules/answer-cost-context.json",
+  "integration_context": "docs/modules/contract-qualification-context.json",
+  "provider_module": "answer_budget",
+  "consumer_module": "answer_cost",
+  "provider_source": "scripts/answer_budget.py",
+  "consumer_source": "scripts/answer_cost.py",
+  "interface": "docs/modules/answer-budget-interface.pyi",
+  "semantics": "docs/modules/answer-budget-semantics.md",
+  "integration_tests": [
+    "tests/modules/contract_qualification/test_real_dependency.py"
+  ],
+  "bindings": {
+    "BYTES_PER_TOKEN": "BYTES_PER_TOKEN",
+    "estimate_tokens": "estimate_tokens"
+  }
+}

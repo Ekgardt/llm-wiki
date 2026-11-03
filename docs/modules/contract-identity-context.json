@@ -38,16 +38,10 @@
     "docs/modules/answer-budget-semantics.md",
     "tests/module_contract_access.py",
     "tests/test_module_contract_access.py",
-    "scripts/answer_cost.py",
-    "docs/modules/answer-cost.md",
     "tests/module_contract_calls.py",
     "tests/test_module_contract_calls.py",
     "tests/module_contract_patches.py",
-    "tests/test_module_contract_patches.py",
-    "tests/modules/answer_cost/test_contract.py",
-    "tests/modules/answer_cost/__init__.py",
-    "tests/modules/answer_cost/test_boundary.py",
-    "tests/modules/answer_cost/test_context_budget.py"
+    "tests/test_module_contract_patches.py"
   ],
   "directories": [
     "tests/modules/contract_identity"
