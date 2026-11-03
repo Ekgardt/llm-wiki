@@ -32,12 +32,18 @@ def test_receipt_rejects_path_replaced_after_bytes_read(tmp_path, monkeypatch):
     def replace_after_read(descriptor, count):
         data = original_read(descriptor, count)
         if replacement.exists():
+            # Windows permits renaming a delete-shared reader, but ordinary
+            # replacement of an open destination has no POSIX rename semantics.
+            # Both steps finish before the fingerprint resumes its checks.
+            path.rename(tmp_path / 'original-held-open')
             os.replace(replacement, path)
         return data
 
     monkeypatch.setattr(os, 'read', replace_after_read)
     with pytest.raises(PermissionError, match='changed'):
         repair._artifact_record(path, tmp_path, 1024)
+    assert path.read_bytes() == b'replaced'
+    assert (tmp_path / 'original-held-open').read_bytes() == b'original'
 
 
 def test_fingerprint_streams_beyond_the_old_database_ceiling(tmp_path, monkeypatch):

@@ -47,7 +47,8 @@
     "tests/module_record_context.py",
     "docs/modules/context-records.md",
     "docs/research/2026-11-03-path-and-descriptor-timestamps.md",
-    "tests/test_path_and_descriptor_timestamps.py"
+    "tests/test_path_and_descriptor_timestamps.py",
+    "docs/research/2026-11-03-windows-fingerprint-metadata-and-replacement.md"
   ],
   "directories": [
     "tests/modules/runtime_fingerprints"
@@ -58,7 +59,8 @@
       "docs/modules/runtime-fingerprints-context.json",
       "docs/modules/runtime-fingerprints.md",
       "scripts/llm_wiki/runtime_fingerprints.py",
-      "tests/test_path_and_descriptor_timestamps.py"
+      "tests/test_path_and_descriptor_timestamps.py",
+      "docs/research/2026-11-03-windows-fingerprint-metadata-and-replacement.md"
     ],
     "directories": [
       "tests/modules/runtime_fingerprints"

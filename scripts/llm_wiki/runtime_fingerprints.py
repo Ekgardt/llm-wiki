@@ -22,8 +22,17 @@ def _require_fingerprint_metadata(expected, actual) -> None:
         raise PermissionError("runtime file changed during fingerprint")
 
 
+def _path_descriptor_fingerprint_metadata(metadata):
+    mode = metadata.st_mode
+    if os.name == "nt":
+        # CPython adds name-derived execute bits to path stat, but not fstat.
+        # Same-API comparisons keep the original complete mode unchanged.
+        mode &= ~0o111
+    return (metadata.st_dev, metadata.st_ino, mode, metadata.st_size, metadata.st_mtime_ns)
+
+
 def _require_opened_fingerprint_metadata(expected, opened):
-    same_fields = _fingerprint_metadata(expected)[:-1] == _fingerprint_metadata(opened)[:-1]
+    same_fields = _path_descriptor_fingerprint_metadata(expected) == _path_descriptor_fingerprint_metadata(opened)
     if not same_fields or not path_descriptor_change_time_matches(expected, opened):
         raise PermissionError("runtime file changed during fingerprint")
 
