@@ -115,7 +115,7 @@ def curated_pages_first(intents: object) -> bool:
 
 def _code_roots() -> frozenset[str]:
     """The one list of code roots, read where the corpus already declares it."""
-    from corpus_snapshot import APPROVED_CODE_ROOTS
+    from llm_wiki.corpus_membership_policy import APPROVED_CODE_ROOTS
 
     return APPROVED_CODE_ROOTS
 

@@ -2283,3 +2283,9 @@ owns the complete Unreleased record. The original file remains unchanged and
 fully covered. [Release tag](modules/release-tag.md) owns existing tag orchestration
 and its workflow, sharing the complete declared-version record. Authority files
 and executable sources retain whole-file context requirements.
+
+[Corpus membership policy](modules/corpus-membership-policy.md) owns the six
+immutable code/vault/project/archive membership values. The collector keeps
+public aliases and all traversal/safety behavior; provenance reads policy
+directly, without importing corpus collection. Values, allowed paths and runtime
+roots are unchanged.
