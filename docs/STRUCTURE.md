@@ -1976,3 +1976,20 @@ directly. The existing stdlib-only `lsp_server_profile` is qualified in place.
 See [boundary research](research/2026-11-03-language-profile-data-boundaries.md).
 
 Full contracts: [Pyright data](modules/pyright-configuration.md), [Profile values](modules/lsp-server-profile.md).
+
+### Managed language registry
+
+`scripts/lsp_profiles.py` owns the existing complete server declarations and
+suffix/notification routing. It consumes path, profile-value and immutable Pyright
+data owners without runtime discovery. Registry-only tests moved intact;
+cross-owner session equivalence stays integrated. See
+[research](research/2026-11-03-language-registry-packet.md).
+
+### LSP text normalization
+
+`llm_wiki.lsp_text` owns the existing Unicode control policy and terminal-text
+scanner. `lsp_security` retains input bounds, redaction, path containment and output
+clipping, calling the same functions through aliases. See
+[research](research/2026-11-03-lsp-text-normalization.md).
+
+Full contracts: [Language registry](modules/lsp-profiles.md), [LSP text](modules/lsp-text.md).

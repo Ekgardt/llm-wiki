@@ -1,0 +1,58 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/research/2026-11-02-formats-module-pilot.md",
+    "docs/research/2026-11-02-module-boundaries-validation.md",
+    "docs/research/2026-11-02-module-boundaries-and-token-budget.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "scripts/lsp_profiles.py",
+    "docs/modules/lsp-profiles.md",
+    "docs/modules/lsp-profiles-context.json",
+    "docs/research/2026-11-03-language-registry-packet.md",
+    "scripts/lsp_paths.py",
+    "docs/modules/lsp-paths.md",
+    "scripts/lsp_server_profile.py",
+    "docs/modules/lsp-server-profile.md",
+    "scripts/llm_wiki/pyright_configuration.py",
+    "docs/modules/pyright-configuration.md",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/formats/canonical.py",
+    "docs/modules/formats.md",
+    "tests/modules/lsp_server_profile/__init__.py",
+    "tests/modules/lsp_server_profile/paths.py",
+    "tests/test_language_registry_has_no_discovery_dependency.py",
+    "docs/research/2026-11-03-language-profile-data-boundaries.md"
+  ],
+  "directories": [
+    "tests/modules/lsp_profiles"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "scripts/lsp_profiles.py",
+      "docs/modules/lsp-profiles.md",
+      "docs/modules/lsp-profiles-context.json",
+      "tests/test_language_registry_has_no_discovery_dependency.py"
+    ],
+    "directories": [
+      "tests/modules/lsp_profiles"
+    ]
+  }
+}
