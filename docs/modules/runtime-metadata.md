@@ -21,3 +21,14 @@ tests first ran against the old implementation. Real two-process SQLite exclusio
 and stranded-journal integrations remain required outside this leaf packet.
 
 See [research](../research/2026-11-03-runtime-metadata-boundary.md).
+
+## Windows fixture binding regression
+
+The complete 37248b32 regression found one platform simulation still patching
+`runtime_records._windows_reparse_point`, after metadata validation had moved.
+The fixture now patches the lookup in `runtime_metadata`, which actually executes
+the unchanged refusal. Its real directory-link input and PermissionError assertion
+remain unchanged. Include
+`tests/test_platform_fixture_controls_reach_their_real_guards.py` in integration
+checks; the full test depends on separate native/plugin integration owners.
+
