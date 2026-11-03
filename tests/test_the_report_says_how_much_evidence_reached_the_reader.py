@@ -18,6 +18,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from tests.modules.longmemeval_coverage.fixtures import _EVIDENCE, _QUESTION
+
 BENCHMARK_DIR = Path(__file__).resolve().parent.parent / "benchmark"
 if str(BENCHMARK_DIR) not in sys.path:
     sys.path.insert(0, str(BENCHMARK_DIR))
@@ -25,19 +27,6 @@ if str(BENCHMARK_DIR) not in sys.path:
 import longmemeval_coverage  # noqa: E402
 import longmemeval_score  # noqa: E402
 import longmemeval_vault  # noqa: E402
-
-_EVIDENCE = "the user upgraded to the paid tier of the editing suite on a friday"
-_OTHER = "the user asked about which microphone to buy for a podcast"
-
-_QUESTION = {
-    "answer_session_ids": ["s1"],
-    "haystack_sessions": [
-        [
-            {"role": "user", "content": _EVIDENCE, "has_answer": True},
-            {"role": "user", "content": _OTHER},
-        ]
-    ],
-}
 
 
 def _row(category: str, **fields: object) -> dict:
@@ -133,19 +122,8 @@ def test_an_abstentions_explanation_is_no_more_a_span_than_a_rubric_is() -> None
     assert report["gold_text_in_prompt_share"] is None
 
 
-def test_the_evidence_turns_of_a_prompt_are_read_from_the_dataset_labels() -> None:
-    """The flagged turn is found in the prompt; the unflagged one is not asked about."""
-    seen = longmemeval_coverage.evidence_in_text(_QUESTION, f"context: {_EVIDENCE.upper()}")
-
-    assert (seen["turns_labelled"], seen["turns_in_text"]) == (1, 1)
-    assert seen["all_turns"] is True
 
 
-def test_a_prompt_without_the_evidence_turn_says_so() -> None:
-    absent = longmemeval_coverage.evidence_in_text(_QUESTION, f"context: {_OTHER}")
-
-    assert (absent["turns_labelled"], absent["turns_in_text"]) == (1, 0)
-    assert absent["all_turns"] is False
 
 
 def test_the_worker_records_both_signals_from_the_prompt_it_sent() -> None:
@@ -169,15 +147,6 @@ def test_a_second_provider_call_never_unsees_what_the_first_one_carried() -> Non
     assert metrics["evidence_turns_in_prompt"] == 1
 
 
-def test_the_compiler_stage_has_its_own_name_and_its_own_counts() -> None:
-    """`evidence_requested`/`evidence_missed` is a different stage from retrieval."""
-    rows = [{"evidence_requested": 8, "evidence_missed": 2}, {"evidence_requested": 2}]
-
-    assert longmemeval_coverage.compile_evidence(rows) == {
-        "chunks_requested": 10,
-        "chunks_missed": 2,
-        "chunks_placed_share": 0.8,
-    }
 
 
 def test_the_printed_table_carries_both_figures_with_their_denominators() -> None:

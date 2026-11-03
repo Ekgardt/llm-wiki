@@ -2308,3 +2308,11 @@ current benchmark paths and execute no product or model workflow. Complete
 original assertions remain with their respective responsibilities; LongMemEval
 answer-cost assertions stay separate. Historical measurements are not requalified
 by these ownership changes.
+
+### Benchmark evidence coverage
+
+The existing [LongMemEval coverage owner](modules/longmemeval-coverage.md) computes
+session/turn coverage, prompt evidence and aggregate counts from supplied data.
+Benchmark execution, scoring, retrieval and report publication remain with callers.
+Existing matching rules and all original assertions are preserved; shared synthetic
+test fixtures have one owner. Historical measurements remain dated evidence.
