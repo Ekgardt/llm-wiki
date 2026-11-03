@@ -28,7 +28,7 @@ Four relevant dated history records are shared through the complete verified
 catalog; their broader controller history is not owned by this codec.
 
 Source: ../research/2026-11-03-compile-answer-record-boundary.md.
-Shared canonical contract: [Compile progress](compile-progress.md).
+Shared canonical contract: [Compile event records](compile-event-records.md).
 Shared canonical contract: [Model value records](model-records.md).
 Shared canonical contract: [Context budget values](context-budget.md).
 Shared canonical contract: [Canonical formats](formats.md).

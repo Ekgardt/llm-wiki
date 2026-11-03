@@ -1,0 +1,59 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md",
+    "scripts/llm_wiki/compile_event_records.py",
+    "docs/modules/compile-event-records.md",
+    "docs/modules/compile-event-records-context.json",
+    "docs/research/2026-11-03-compile-event-records-boundary.md",
+    "docs/modules/compile-progress-history-records.json",
+    "docs/modules/compile-progress.md",
+    "docs/modules/sqlite-deadlines.md",
+    "docs/modules/formats.md"
+  ],
+  "directories": [
+    "tests/modules/compile_event_records"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "scripts/llm_wiki/compile_event_records.py",
+      "docs/modules/compile-event-records.md",
+      "docs/modules/compile-event-records-context.json",
+      "docs/research/2026-11-03-compile-event-records-boundary.md"
+    ],
+    "directories": [
+      "tests/modules/compile_event_records"
+    ]
+  },
+  "records": [
+    {
+      "catalog": "docs/modules/compile-progress-history-records.json",
+      "ids": [
+        "storage-foundation"
+      ]
+    }
+  ]
+}

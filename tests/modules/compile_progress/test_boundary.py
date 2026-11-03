@@ -13,11 +13,11 @@ read_source = context_reader(ROOT, ROOT / 'docs/modules/compile-progress-context
 def test_storage_source_has_only_declared_lower_dependencies():
     source = read_source(ROOT / 'scripts/compile_progress.py')
     assert nonstdlib_imports(source) == {
-        'llm_wiki.sqlite_deadlines', 'llm_wiki.formats.source',
+        'llm_wiki.sqlite_deadlines', 'llm_wiki.formats.source', 'llm_wiki.compile_event_records',
     }
 
 
 def test_storage_import_does_not_load_queue_or_controller():
     assert_isolated_import(ROOT, 'compile_progress', dependencies=(
-        'llm_wiki', 'llm_wiki.sqlite_deadlines',
+        'llm_wiki', 'llm_wiki.sqlite_deadlines', 'llm_wiki.compile_event_records',
     ))

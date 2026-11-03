@@ -2097,3 +2097,8 @@ retain their owners. See the [call lifecycle contract](modules/compile-call-runt
 
 The CI-only [coverage verifier](modules/dependency-audit-coverage.md) compares every
 locked registry name/version with the universal OSV report; omitted variants fail.
+
+### Compile event values
+
+The [event record owner](modules/compile-event-records.md) holds pure compile values
+and validation; `compile_progress` retains journal storage and compatible exports.

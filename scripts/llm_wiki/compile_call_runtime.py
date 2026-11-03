@@ -4,8 +4,7 @@ from __future__ import annotations
 from dataclasses import replace
 from functools import partial
 
-import compile_progress as progress
-
+import llm_wiki.compile_event_records as progress
 from llm_wiki.compile_answer_records import (
     _answer_event,
     _decoded_answer,

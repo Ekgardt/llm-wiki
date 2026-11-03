@@ -32,9 +32,6 @@
     "docs/modules/formats.md",
     "docs/modules/model-records.md",
     "scripts/llm_wiki/compile_answer_records.py",
-    "scripts/compile_progress.py",
-    "scripts/llm_wiki/sqlite_deadlines.py",
-    "scripts/llm_wiki/formats/source.py",
     "docs/modules/sqlite-deadlines.md",
     "docs/modules/compile-progress.md",
     "docs/modules/compile-progress-history-records.json",
@@ -44,7 +41,9 @@
     "docs/modules/queue-contracts.md",
     "docs/modules/compile-call-runtime.md",
     "docs/modules/compile-call-runtime-context.json",
-    "docs/research/2026-11-03-compile-call-runtime-boundary.md"
+    "docs/research/2026-11-03-compile-call-runtime-boundary.md",
+    "scripts/llm_wiki/compile_event_records.py",
+    "docs/modules/compile-event-records.md"
   ],
   "directories": [
     "tests/modules/compile_call_runtime"

@@ -4,9 +4,9 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, replace
 
-import compile_progress as progress
 from context_budget import TokenCount, TokenUsage
 
+import llm_wiki.compile_event_records as progress
 from llm_wiki.formats.canonical import canonical_json_bytes
 from llm_wiki.model_records import BackendResponse, LLMResult, ProviderDescriptor
 

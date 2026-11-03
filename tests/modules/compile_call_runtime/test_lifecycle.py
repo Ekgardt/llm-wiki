@@ -5,10 +5,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock
 
-import compile_progress as progress
 import pytest
 from context_budget import TokenUsage
 from llm_wiki import compile_call_runtime as runtime
+from llm_wiki import compile_event_records as progress
 from llm_wiki.model_records import BackendResponse
 from llm_wiki.queue_contracts import QueueLease
 

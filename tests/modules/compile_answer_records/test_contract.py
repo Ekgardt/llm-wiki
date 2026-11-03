@@ -3,10 +3,10 @@ import json
 from dataclasses import asdict, replace
 from pathlib import Path
 
-import compile_progress as progress
 import pytest
 from context_budget import TokenCount, TokenUsage
 from llm_wiki import compile_answer_records as records
+from llm_wiki import compile_event_records as progress
 from llm_wiki.model_records import BackendResponse, LLMResult, ProviderDescriptor
 
 ORIGINAL = json.loads((Path(__file__).parent / 'fixtures/original-records.json').read_text(encoding='utf-8'))

@@ -34,7 +34,9 @@
     "scripts/llm_wiki/formats/__init__.py",
     "scripts/llm_wiki/formats/source.py",
     "docs/modules/sqlite-deadlines.md",
-    "docs/modules/formats.md"
+    "docs/modules/formats.md",
+    "scripts/llm_wiki/compile_event_records.py",
+    "docs/modules/compile-event-records.md"
   ],
   "directories": [
     "tests/modules/compile_progress"

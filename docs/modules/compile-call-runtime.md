@@ -29,5 +29,5 @@ remains effective. Historical records are context, not current validation claims
 
 Source: ../research/2026-11-03-compile-call-runtime-boundary.md.
 Shared canonical contract: [Saved answers](compile-answer-records.md).
-Shared canonical contract: [Compile progress](compile-progress.md).
+Shared canonical contract: [Compile event records](compile-event-records.md).
 Shared canonical contract: [Queue value contracts](queue-contracts.md).

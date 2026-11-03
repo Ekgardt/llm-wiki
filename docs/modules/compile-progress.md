@@ -55,3 +55,9 @@ historical design preserves all original bytes while the storage packet carries
 its necessary history. No schema, source implementation, public path or runtime
 behavior changes. Full contract: [compile progress](compile-progress.md);
 [qualification research](../research/2026-11-03-compile-progress-storage-packet.md).
+
+Pure event values and validation now belong to compile_event_records; this storage
+facade retains identical exports and historical class identity. SQL behavior is
+unchanged.
+
+Shared canonical contract: [Compile event records](compile-event-records.md).
