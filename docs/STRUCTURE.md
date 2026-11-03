@@ -1913,3 +1913,12 @@ by the approved autonomous decomposition mandate. Its complete packet passes the
 budget and focused Linux/Python 3.10 checks; native platform CI remains pending.
 
 Full process-tree owner contract: [lsp-process-tree](modules/lsp-process-tree.md).
+
+Existing `lsp_paths.py` and `verified_artifacts.py` remain separate leaf owners:
+path derivation without directory creation, and reuse of already verified digest
+or content-verdict evidence. Their runtime contracts and public paths stay intact.
+Pure cache tests move into their owner suite; graph/search integration tests stay
+with those consumers and share the single timestamp setup helper. See
+`research/2026-11-03-path-artifact-leaves.md` for the qualification boundary.
+
+Full owner contracts: [lsp-paths](modules/lsp-paths.md), [verified-artifacts](modules/verified-artifacts.md).

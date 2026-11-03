@@ -71,3 +71,7 @@ remain, the eight helper bodies are exact, and production source is byte-identic
 46 emitted packets round-trip exactly; process-tree is94484 tokens before this
 evidence paragraph, and the largest existing packet is96132. Ownership361/3095
 files,2734 unassigned: this is another module, not whole-project completion.
+
+The complete integration repeat finished:558 passed,46 platform skips. Checkpoint
+6780ef23 is committed/pushed; its full regression is now running separately in a
+pinned worktree. No full pass for that checkpoint is claimed yet.
