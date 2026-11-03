@@ -2125,3 +2125,13 @@ state transitions remain in the queue. Normal and corrupt history reuse the same
 single-row formatter in `queue_task_records`. Full contract:
 [queue evidence records](modules/queue-evidence-records.md);
 [research](research/2026-11-03-queue-evidence-record-boundary.md).
+
+### Existing retrieval leaf owners
+
+The existing production paths remain unchanged: [lane score](modules/lane-score.md)
+owns deterministic candidate scoring, [temporal anchor](modules/temporal-anchor.md)
+owns explicit day arithmetic, and [evidence sufficiency](modules/evidence-sufficiency.md)
+owns single-span coverage with a downward dependency on the date resolver. Pure tests
+move out of mixed integration files without changing assertions; real retrieval and
+answer checks stay. No ranking constants, date rules or thresholds change.
+See [qualification](research/2026-11-03-retrieval-leaf-owner-qualification.md).

@@ -13,7 +13,6 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-import lane_score  # noqa: E402
 import retrieval  # noqa: E402
 
 DAILY = "knowledge/daily/2023-05-26.md"
@@ -64,12 +63,3 @@ def test_a_compiled_page_keeps_the_place_the_trust_table_gave_it() -> None:
     ordered = retrieval._evidence_ordered([page, turn], meta)
 
     assert [item.candidate_id for item in ordered] == ["page", "turn"]
-
-
-def test_the_score_reads_a_silent_lane_as_slightly_for_the_candidate() -> None:
-    last = lane_score.score(lexical_rank=lane_score.FURTHEST_RANK, dense_rank=5, rerank_score=None,
-                            text="**assistant:** reply")
-    silent = lane_score.score(lexical_rank=None, dense_rank=5, rerank_score=None, text="**assistant:** reply")
-
-    assert silent > last
-    assert lane_score.is_user_turn("**user:** mine\n**assistant:** theirs") is True

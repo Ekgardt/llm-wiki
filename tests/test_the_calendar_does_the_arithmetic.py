@@ -25,29 +25,13 @@ if str(SCRIPTS) not in sys.path:
 
 from corpus_snapshot import collect_corpus  # noqa: E402
 from query_memory import _asked_on, grounded_qa  # noqa: E402
-from temporal_anchor import query_with_dates  # noqa: E402
 
 ASKED = date(2022, 4, 4)
-
-
-
-
-
-
 
 
 def test_the_day_asked_is_read_with_slashes_too() -> None:
     assert _asked_on("How long ago?\n(Current date: 2022/04/04 (Mon) 10:00)") == ASKED
     assert _asked_on("On 2022-04-04, how long ago?") == ASKED
-
-
-def test_weeks_ago_in_a_question_reach_the_days_around_the_resolved_day() -> None:
-    expanded = query_with_dates("What did I buy four weeks ago?", ASKED)
-
-    assert "2022-03-07" in expanded
-    assert "2022-03-04" in expanded and "2022-03-10" in expanded
-    assert "2022-03-03" not in expanded
-    assert "2022-03-31" not in query_with_dates("What did I buy three days ago?", ASKED)
 
 
 @pytest.fixture
