@@ -7,18 +7,20 @@ import pytest
 
 from tests.module_context import _contained, context_files
 from tests.module_ownership import ownership_report
+from tests.module_record_context import selected_entries
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFESTS = sorted((ROOT / 'docs/modules').glob('*-context.json'))
 
 
-def _source_owners(root, files, ownership):
-    names = {p.relative_to(root).as_posix() for p in files if p.is_relative_to(root / 'scripts')}
+def _context_owners(root, files, ownership, record_names):
+    names = {p.relative_to(root).as_posix() for p in files} | set(record_names)
     return {ownership[name] for name in names if name in ownership}
 
 
-def _required_guides(root, files, ownership):
-    pending = {root / 'docs/modules' / f'{owner}.md' for owner in _source_owners(root, files, ownership)}
+def _required_guides(root, files, ownership, *, record_names=()):
+    owners = _context_owners(root, files, ownership, record_names)
+    pending = {root / 'docs/modules' / f'{owner}.md' for owner in owners}
     return _guide_closure(root, pending)
 
 
@@ -42,13 +44,15 @@ def _guide_closure(root, pending):
 
 @pytest.fixture(scope='module')
 def ownership():
-    return ownership_report(ROOT)['ownership']
+    report = ownership_report(ROOT)
+    return {**report['ownership'], **report['record_ownership']}
 
 
 @pytest.mark.parametrize('manifest', MANIFESTS, ids=lambda p: p.stem)
 def test_packet_retains_full_guides_for_its_source_owners(manifest, ownership):
-    files = context_files(ROOT, json.loads(manifest.read_text()))
-    needed = _required_guides(ROOT, files, ownership)
+    data = json.loads(manifest.read_text())
+    files = context_files(ROOT, data)
+    needed = _required_guides(ROOT, files, ownership, record_names=selected_entries(ROOT, data))
     assert needed <= files, f'{manifest.name}: missing owner guides {sorted(needed - files)}'
 
 
@@ -58,14 +62,37 @@ def test_canonical_entry_point_links_each_owner_guide(ownership):
         assert f'(modules/{owner}.md)' in source, owner
 
 
-def test_dependency_guide_uses_declared_owner_not_source_filename(tmp_path):
-    source = tmp_path / 'scripts/unrelated_name.py'
-    ownership = {'scripts/unrelated_name.py': 'actual-owner'}
+@pytest.mark.parametrize('name', [
+    'scripts/unrelated_name.py', 'benchmark/tool.py', 'integrations/adapter.py',
+    'tests/support.py', 'root_tool.py', 'benchmark/results.json',
+    'docs/research/history.md', 'integrations/adapter.js',
+])
+def test_dependency_guide_uses_declared_owner_not_source_filename(tmp_path, name):
+    source = tmp_path / name
+    ownership = {name: 'actual-owner'}
     guide = tmp_path / 'docs/modules/actual-owner.md'
     guide.parent.mkdir(parents=True)
     guide.write_text('')
     assert _required_guides(tmp_path, {source}, ownership) == {
         tmp_path / 'docs/modules/actual-owner.md',
+    }
+
+
+def test_unowned_entries_do_not_invent_guides(tmp_path):
+    assert _required_guides(tmp_path, {tmp_path / 'benchmark/unowned.py'}, {}) == set()
+
+
+def test_selected_records_require_their_owner_not_only_the_catalog_owner(tmp_path):
+    catalog = 'docs/modules/history-records.json'
+    selected = '@record/docs/research/history.md#selected'
+    unselected = '@record/docs/research/history.md#other'
+    ownership = {catalog: 'catalog-owner', selected: 'selected-owner', unselected: 'other-owner'}
+    guides = tmp_path / 'docs/modules'
+    guides.mkdir(parents=True)
+    (guides / 'catalog-owner.md').write_text('')
+    (guides / 'selected-owner.md').write_text('')
+    assert _required_guides(tmp_path, {tmp_path / catalog}, ownership, record_names={selected}) == {
+        guides / 'catalog-owner.md', guides / 'selected-owner.md',
     }
 
 

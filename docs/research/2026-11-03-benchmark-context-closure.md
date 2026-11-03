@@ -72,3 +72,62 @@ not a promise about computed imports or a full-cycle LLM efficiency result.
 
 Global module, closure, ownership, documentation, structure, privacy and complexity
 gates: 1828 passed, 2 skipped. No production source changed in this correction.
+
+## Follow-up: complete owner guides outside scripts (2026-11-03)
+
+At d907b9f3, _required_guides returns an empty set for the owned
+benchmark/fit_lane_score.py because _source_owners filters to scripts/. The
+actual fitter manifest has its guide, but removing it would evade this guard.
+This is distinct from the earlier corrected Python implementation closure.
+Reproduction: logs/benchmark-guide-omission-reproduction.json.
+
+Use the explicit ownership registry for every owned context entry, not a directory
+or filename-extension guess. Each included owned source, test helper, fixture,
+resource, guide or historical document requires its owner's complete guide and
+recursive shared contracts. Unowned entries remain visible in the separate
+whole-project completeness report; this fix does not invent an owner. This also
+protects non-Python artifacts and avoids repairing benchmark alone while leaving
+integrations/root/test support with the same omission. No source/bootstrap or
+measurement exception changes.
+
+Preflight of the stronger ownership rule found five missing guide references in
+four existing packets: temporal-anchor needs evidence-sufficiency and lane-score,
+evidence-sufficiency needs lane-score, lsp-paths needs verified-artifacts, and
+context-tooling needs formats. These arise from shared owned historical/support
+material and are to be added in full. Existing files remain declared. Evidence:
+logs/all-owned-guide-preflight.json. Measure resulting complete packets rather
+than exempting these shared artifacts to keep old counts.
+
+The already checked primary Python import and pytest sources still govern source
+and test loading; the current Diataxis/Google/Microsoft documentation review in
+module-contract-documentation supplies the independent reference-organization
+basis. Full ownership determines the guide, not the incidental source directory.
+Add parameterized regressions for benchmark, integrations, root source, test
+helpers and non-Python data/docs, including an unowned-entry control. Confirm the
+original guard fails those cases before replacing its scripts-only filter.
+
+Selected logical records have their own ownership registry, so complete entry
+coverage must also include the names returned by the existing validated record
+selector. Merge the whole-file and record owner maps for guide lookup; keep
+selection validation in its current single implementation. A record's catalog
+owner is not a substitute for the selected record's semantic owner. Current
+record ownership adds no missing guide beyond the five preflight references.
+
+Guide correction qualification: fresh built-in index d907b9f3 and generation
+generation-18e47b776d6fc570-da88eedd; relevant graph edges were checked and
+supplemented with source. Seven path/type regressions failed under the original
+filter; the selected-record extension also failed because that input was absent
+(8 failed, 164 passed). With registry lookup enabled, the four real manifests
+then failed precisely for their missing guides (4 failed, 168 passed). Adding
+the five whole guides produced 172 passing contract checks. No existing assertion
+or context file was removed.
+
+Focused guide, source-dependency, ownership, record and tooling checks passed
+260 tests on Python 3.12 and 260 on Python 3.10. Actual CCN/shape and Ruff passed.
+The broad module/structure/policy selection passed 1965 tests with 2 skips. All
+79 actual bundles reconstruct every path and byte; largest is 98221 tokens.
+This strengthens detection of missing context, not a claimed cost reduction.
+Evidence: logs/owner-guide-completeness-{red,manifests-red,green,py310,global}.txt,
+owner-guide-completeness-graph.json and context-bundle-comparison.json.
+Whole-project ownership, native platform CI and measured full-cycle LLM benefit
+remain unfinished. The c43455da full regression is still running separately.

@@ -2058,7 +2058,8 @@ Packet source closure includes declared benchmark and other contained Python fil
 not just scripts and tests. Static absolute imports conservatively include local
 candidates in the repository, scripts, tests, benchmark and importing directory;
 relative imports and package initializers remain inside the repository. Runtime
-import paths are unchanged. See [closure correction](research/2026-11-03-benchmark-context-closure.md).
+import paths are unchanged. Owner-guide coverage follows whole-file and selected
+record ownership across all paths. See [closure correction](research/2026-11-03-benchmark-context-closure.md).
 
 ### Offline fitting and answer representation owners
 

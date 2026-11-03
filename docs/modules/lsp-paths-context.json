@@ -28,7 +28,8 @@
     "tests/module_context_paths.py",
     "tests/module_records.py",
     "tests/module_record_context.py",
-    "docs/modules/context-records.md"
+    "docs/modules/context-records.md",
+    "docs/modules/verified-artifacts.md"
   ],
   "directories": [
     "tests/modules/lsp_paths"

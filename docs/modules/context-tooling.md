@@ -52,7 +52,9 @@ scripts/, tests/, benchmark/ and root launch paths; ambiguous local names requir
 all candidates. Relative imports stay inside the repository. These paths reflect
 current Python entry points; a new launch root needs explicit qualification.
 Cycles terminate through visited paths. A dependency's full owner guide and recursively declared shared contracts
-are required. Every guide is reachable from STRUCTURE.md. Dynamic loading,
+are required. Every owned context file and selected owned logical record requires
+its full owner guide through the explicit ownership registries, regardless of
+directory, language or extension. A catalog owner does not replace record ownership. Every guide is reachable from STRUCTURE.md. Dynamic loading,
 config-selected providers, external processes, resources and side effects still
 need explicit investigation: the static graph is not a complete runtime oracle.
 

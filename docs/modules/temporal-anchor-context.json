@@ -31,7 +31,9 @@
     "tests/test_a_fact_is_stored_with_its_date.py",
     "tests/test_last_week_is_a_week_not_a_day.py",
     "docs/research/2026-11-03-retrieval-leaf-owner-qualification.md",
-    "docs/research/2026-09-22-quote-then-answer-and-a-refusal-calibrated-on-twins.md"
+    "docs/research/2026-09-22-quote-then-answer-and-a-refusal-calibrated-on-twins.md",
+    "docs/modules/evidence-sufficiency.md",
+    "docs/modules/lane-score.md"
   ],
   "directories": [
     "tests/modules/temporal_anchor"

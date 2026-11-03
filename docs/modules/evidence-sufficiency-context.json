@@ -31,7 +31,8 @@
     "docs/research/2026-11-03-retrieval-leaf-owner-qualification.md",
     "scripts/temporal_anchor.py",
     "docs/modules/temporal-anchor.md",
-    "docs/research/2026-09-17-last-week-is-a-week.md"
+    "docs/research/2026-09-17-last-week-is-a-week.md",
+    "docs/modules/lane-score.md"
   ],
   "directories": [
     "tests/modules/evidence_sufficiency"

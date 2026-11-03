@@ -41,7 +41,8 @@
     "tests/module_record_context.py",
     "docs/modules/context-records.md",
     "tests/module_record_ownership.py",
-    "docs/research/2026-11-03-benchmark-context-closure.md"
+    "docs/research/2026-11-03-benchmark-context-closure.md",
+    "docs/modules/formats.md"
   ],
   "directories": [
     "tests/modules/context_tooling"

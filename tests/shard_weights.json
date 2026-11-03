@@ -1046,7 +1046,7 @@
   "test_module_boundary_checks.py": 0.33,
   "test_module_context_bootstrap.py": 0.09,
   "test_module_context_dependencies.py": 4.34,
-  "test_module_contract_docs.py": 0.69,
+  "test_module_contract_docs.py": 1.39,
   "test_module_legacy_aliases.py": 0.12,
   "test_module_ownership.py": 0.27,
   "test_module_record_context.py": 0.02,
