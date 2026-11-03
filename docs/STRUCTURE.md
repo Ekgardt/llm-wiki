@@ -2323,3 +2323,10 @@ test fixtures have one owner. Historical measurements remain dated evidence.
 grading templates, label/accuracy calculations and hypothesis JSONL exporter.
 It performs no model calls. Judge execution and reports remain with consumers.
 Public paths, source bytes and all original assertions are preserved.
+
+### Benchmark question preparation
+
+[LongMemEval data](modules/longmemeval-data.md) owns the existing local loader,
+stratified selection, evidence labels, twins and tune/decide assignment. Runner,
+scorer and coverage integrations remain separate. Dataset paths, sample selection,
+source bytes and original assertions are preserved; no dataset is downloaded.
