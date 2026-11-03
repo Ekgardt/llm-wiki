@@ -2294,3 +2294,9 @@ roots are unchanged.
 weights and their pure behavior tests. It reads immutable corpus membership
 policy directly. Integrated retrieval, search and capture checks retain their
 original scenarios; shared link/prose fixtures have one test-data owner.
+
+[Cited page facts](modules/page-facts.md) owns the existing caller-path reader,
+frontmatter interpretation and mtime-based age facts. Complete taxonomy, status
+and provenance policy sources remain dependencies. MCP retains citation selection,
+quality aggregation and warnings. This reader provides no containment or entailment
+proof; its existing decoded-character head bound and production bytes are preserved.
