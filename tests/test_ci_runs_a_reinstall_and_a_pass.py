@@ -30,7 +30,7 @@ def test_each_installer_runs_twice_before_the_check() -> None:
 def test_a_nightly_pass_runs_on_the_installed_vault() -> None:
     commands = _end_to_end_commands()
 
-    assert commands[-1] == "uv run --locked --no-sync python scripts/scheduled_nightly.py"
+    assert commands[-1] == "uv run --locked --no-sync python -u scripts/scheduled_nightly.py"
 
 
 def test_failure_diagnostics_use_canonical_runtime_path_after_nightly():
