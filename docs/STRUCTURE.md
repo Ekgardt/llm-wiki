@@ -1950,3 +1950,19 @@ lifecycle. Existing imports remain aliases; wire limits and rejection behavior
 are preserved. See [boundary research](research/2026-11-03-lsp-wire-boundary.md).
 
 Full owner contract: [LSP wire](modules/lsp-wire.md).
+
+### Interruption propagation (qualified in place)
+
+The existing `scripts/interruption.py` remains the shared stdlib-only owner of
+exception-chain traversal and collected-error priority. Its immediate-link
+cleanup remains distinct from the protocol's deeper chain scrub. No runtime
+behavior or path change is planned. See [research](research/2026-11-03-interruption-packet.md).
+
+### LSP source positions (qualified in place)
+
+`scripts/lsp_positions.py` remains the owner of source-byte/UTF coordinate and
+file-URI conversion; `code_intelligence` owns the value contracts it consumes.
+URI conversion does not grant repository containment. Its source, tests and shared
+Unicode fixture remain in place. See [research](research/2026-11-03-lsp-positions-packet.md).
+
+Full owner contracts: [Interruption](modules/interruption.md), [LSP positions](modules/lsp-positions.md).
