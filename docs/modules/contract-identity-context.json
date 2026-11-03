@@ -35,7 +35,13 @@
     "scripts/answer_budget.py",
     "docs/modules/answer-budget.md",
     "docs/modules/answer-budget-interface.pyi",
-    "docs/modules/answer-budget-semantics.md"
+    "docs/modules/answer-budget-semantics.md",
+    "tests/module_contract_access.py",
+    "tests/test_module_contract_access.py",
+    "scripts/answer_cost.py",
+    "docs/modules/answer-cost.md",
+    "tests/module_contract_calls.py",
+    "tests/test_module_contract_calls.py"
   ],
   "directories": [
     "tests/modules/contract_identity"
@@ -50,7 +56,11 @@
       "docs/research/2026-11-03-qualified-dependency-contract-proposal.md",
       "docs/research/2026-11-03-composition-context-investigation.md",
       "tests/module_contract_surface.py",
-      "tests/test_module_contract_surface.py"
+      "tests/test_module_contract_surface.py",
+      "tests/module_contract_access.py",
+      "tests/test_module_contract_access.py",
+      "tests/module_contract_calls.py",
+      "tests/test_module_contract_calls.py"
     ],
     "directories": [
       "tests/modules/contract_identity"

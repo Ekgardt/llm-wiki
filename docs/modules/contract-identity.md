@@ -41,3 +41,28 @@ The checker does not execute stubs, assert semantic equivalence, validate consum
 access or prove runtime binding. Body-only edits deliberately leave the surface
 identity equal but invalidate the complete-byte identity. The real answer-budget
 surface fixture carries the full provider source and both draft contract artifacts.
+
+## Direct access and real binding pilot probes
+
+`tests/module_contract_access.py` checks top-level explicit named imports, direct
+function calls and immutable constant reads. Private/undeclared members, namespace
+imports, alternative module spellings, escaping function values, rebinding,
+shadowing and recognized reflection/loading forms refuse. This conservative
+grammar is a checker capability, not an application restriction: unsupported
+consumer shapes keep full source. It is not a Python sandbox or complete
+whole-program proof. Qualification must derive the traversed source set and
+member kinds, validate test patches separately, and retain every other dependency.
+
+The integration fixture keeps both actual source files. It checks checkout paths,
+function identity and actual UTF-8 estimates, TypeError and circular-reference
+behavior through the real consumer and provider. No mock can qualify these probes.
+A fresh subprocess, complete provider/consumer test selection, before/after byte
+identities, bounded alternative packet measurement and paired maintenance evidence
+are still needed before any provider implementation can be omitted.
+
+`tests/module_contract_calls.py` binds each directly imported function call to
+the checked interface's positional-only, positional/keyword, required/default,
+keyword-only and variadic parameter shapes. Defaults are not executed. Wrong
+arity, unknown/duplicate keywords and calls through constant exports refuse.
+Dynamic `*args`/`**kwargs` expansion retains full source because this checker
+cannot establish its actual call shape. This is not runtime type or value proof.

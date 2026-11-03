@@ -98,3 +98,13 @@ def require_declared_surface(provider: str, interface: str) -> set[str]:
     if actual != expected:
         raise ValueError('Public interface changed; requalification required')
     return set(actual)
+
+
+def declared_kinds(interface: str) -> dict[str, str]:
+    """Derive member kinds from the validated interface, not a caller allowlist."""
+    names = declared_surface(interface, interface=True)
+    functions = {node.name for node in ast.parse(interface).body
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    result = dict.fromkeys(names, 'constant')
+    result.update(dict.fromkeys(functions & names.keys(), 'function'))
+    return result

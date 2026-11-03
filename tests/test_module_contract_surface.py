@@ -1,7 +1,7 @@
 """An interface cannot omit or silently change a provider declaration."""
 import pytest
 
-from tests.module_contract_surface import declared_surface, require_declared_surface
+from tests.module_contract_surface import declared_kinds, declared_surface, require_declared_surface
 
 PROVIDER = '''from __future__ import annotations
 import json
@@ -73,3 +73,8 @@ def test_interface_cannot_import_hidden_implementation():
 def test_private_implementation_is_not_a_published_interface():
     source = PROVIDER + '\n_PRIVATE = 1\ndef _helper():\n    return 1\n'
     assert require_declared_surface(source, INTERFACE) == {'BYTES_PER_TOKEN', 'estimate'}
+
+
+def test_kinds_come_from_the_complete_checked_interface():
+    interface = INTERFACE + '\ndef _private():\n    ...\n'
+    assert declared_kinds(interface) == {'BYTES_PER_TOKEN': 'constant', 'estimate': 'function'}
