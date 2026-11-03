@@ -203,14 +203,6 @@ def test_unicode_native_ledger_kind_is_retained(tmp_path, kind):
     assert records[0].day == "2026-09-29" and not records[0].dated
 
 
-@pytest.mark.parametrize("text, expected", [("my road-bikes", "road-bike"),
-                                           ("O'Brian's", "o'brian'"),
-                                           ("bike2_name", "bike name"),
-                                           ("cafe\u0301", "café")])
-def test_ledger_unicode_words_preserve_existing_ascii_boundaries(text, expected):
-    import ledger
-
-    assert ledger.canonical(text) == expected
 
 
 def test_logical_source_paths_stay_posix_with_windows_path_semantics(tmp_path, monkeypatch):

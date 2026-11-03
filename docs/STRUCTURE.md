@@ -2293,3 +2293,10 @@ unchanged; no corpus download or model execution is introduced.
 parsing, conflict grouping and the complete derived fixture. Resolver/model
 execution and Parquet acquisition stay outside. Source, fixture bytes, public
 paths and original assertions are preserved.
+
+### Ledger rules and runtime coordination
+
+[Ledger core](modules/ledger-core.md) owns deterministic record/store/count rules
+and entity text. The existing ledger entry retains generation selection and
+transaction publication, with identical-object compatibility exports. The offline
+benchmark imports the core; SQL, page bytes and public runtime calls stay unchanged.

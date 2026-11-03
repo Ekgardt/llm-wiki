@@ -32,8 +32,8 @@ SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-import ledger  # noqa: E402
 from aggregation_pass import asks_to_aggregate, counted_kind  # noqa: E402
+from llm_wiki import ledger_core as ledger  # noqa: E402
 
 NUMBER_WORDS = {
     word: float(index)

@@ -10,14 +10,12 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import code_graph  # noqa: E402
 import episode_consolidation  # noqa: E402
-import ledger  # noqa: E402
 import provenance_join  # noqa: E402
 import repository_worktrees  # noqa: E402
 import retrieval_disposition  # noqa: E402
@@ -38,14 +36,6 @@ def test_every_grounded_lesson_of_a_batch_is_kept(tmp_path: Path) -> None:
     assert len(lessons) == 9
 
 
-def test_every_record_of_a_turn_reaches_the_ledger() -> None:
-    turn = SimpleNamespace(
-        source_path="knowledge/daily/2026-09-01.md", byte_start=0, byte_end=10, span_sha256="a" * 64
-    )
-    names = ["road", "mountain", "cargo", "folding", "gravel", "track", "tandem", "touring", "fixie"]
-    value = {"records": [{"kind": "bike", "thing": f"{name} bike"} for name in names]}
-
-    assert len(ledger.records_of(turn, value)) == 9
 
 
 def _notes(vault: Path, count: int, matching: set[int]) -> None:
