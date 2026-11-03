@@ -121,3 +121,10 @@ def test_registry_scan_guard_allows_synthetic_fixture_discovery():
 @pytest.mark.parametrize('name', TOOLING_UNITS)
 def test_tooling_units_do_not_discover_the_checkout_registry(name):
     assert not _checkout_scans((ROOT / 'tests' / name).read_text(encoding='utf-8')), name
+
+
+def test_module_test_namespaces_cannot_collide_during_full_collection():
+    """Repeated boundary-test basenames require package names in pytest prepend mode."""
+    paths = sorted((ROOT / 'tests/modules').glob('*/test_boundary.py'))
+    missing = [path.parent for path in paths if not (path.parent / '__init__.py').is_file()]
+    assert not missing, f'Module tests lack package namespaces: {missing}'

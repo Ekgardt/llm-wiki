@@ -139,3 +139,9 @@ The existing file inventory and its complete synthetic-repository tests now have
 [their own maintenance owner](context-ownership.md). Their original paths and
 commands above remain. Source/byte/token qualification stays here; no full-source
 closure or complete-project assertion is relaxed by that responsibility split.
+
+Module test directories using the shared boundary-test filenames must retain their
+package markers. The real registry guard checks this before a full pytest run:
+under the existing prepend import mode, unqualified duplicate basenames collide
+even when each owner passes alone. Both owner checks and whole-tree collection
+remain required after adding or moving a module's tests.

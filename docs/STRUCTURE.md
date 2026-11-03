@@ -2298,3 +2298,13 @@ workflow/JUnit measurements and owns its closed report schema. Its CLI, XML refu
 policy and numerical acceptance rules are unchanged. Workflow execution and job
 configuration remain separate; complete workflow and contributor instructions are
 included as context. Own tests import the existing canonical schema validator.
+
+### Offline benchmark report readers
+
+[Code parity aggregation](modules/code-parity-aggregate.md) retains ranges and
+paired token totals from supplied reports. [Benchmark arm comparison](modules/benchmark-arm-comparison.md)
+retains its existing category mean/spread decision rule. Both remain at their
+current benchmark paths and execute no product or model workflow. Complete
+original assertions remain with their respective responsibilities; LongMemEval
+answer-cost assertions stay separate. Historical measurements are not requalified
+by these ownership changes.
