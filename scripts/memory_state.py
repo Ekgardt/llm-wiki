@@ -25,7 +25,6 @@ import errno
 import hashlib
 import json
 import os
-import re
 import secrets
 import subprocess
 import sys
@@ -37,6 +36,15 @@ from pathlib import Path
 from typing import Any
 
 import process_liveness
+from llm_wiki.daily_log_selection import (
+    DAILY_LOG_NAME as DAILY_LOG_NAME,
+)
+from llm_wiki.daily_log_selection import (
+    closed_daily_logs as closed_daily_logs,
+)
+from llm_wiki.daily_log_selection import (
+    daily_logs as daily_logs,
+)
 from llm_wiki.formats.canonical import sha256_bytes
 from reliable_memory import durable_publish_file, fsync_directory
 
@@ -611,34 +619,6 @@ def _keep_previous(readable: bool) -> None:
         # When `.previous` already is this inode, POSIX rename "does nothing, and
         # returns a success status" (rename(2)) and the staged link stays behind.
         staged.unlink(missing_ok=True)
-
-
-# `knowledge/daily/` also holds a tracked `README.md`. It is not a daily log:
-# it has no date and is never compiled. Every reader of that directory asks
-# here, so the rule has one home and no reader can forget it.
-# Research: docs/research/2026-09-17-a-daily-log-is-named-by-its-date-everywhere.md
-DAILY_LOG_NAME = re.compile(r"\d{4}-\d{2}-\d{2}\.md")
-
-
-def daily_logs(daily_dir: Path) -> list[Path]:
-    """The `YYYY-MM-DD.md` files of a daily directory, oldest first; none if it is absent."""
-    if not daily_dir.is_dir():
-        return []
-    return sorted(
-        path for path in daily_dir.glob("*.md") if DAILY_LOG_NAME.fullmatch(path.name) is not None
-    )
-
-
-def closed_daily_logs(daily_dir: Path) -> list[Path]:
-    """Every daily log but the newest: the newest is the one still being appended to.
-
-    Compiling it at every session start sent the whole open day again after each
-    append, padded to the compile window each time (2026-09-11: 36 KB of day text in
-    six batches for a 10.6 KB day). Like a log's active segment, it is compiled when
-    it closes; the nightly and a manual run still take every day. See
-    `docs/research/2026-09-27-an-estimate-is-measured-and-an-open-day-waits.md`.
-    """
-    return daily_logs(daily_dir)[:-1]
 
 
 def file_hash(path: Path) -> str:

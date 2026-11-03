@@ -2277,3 +2277,7 @@ pruning and stronger source-specific evidence retain their current owners.
 Full owner contract: [vault editorial policy](modules/vault-editorial.md).
 Existing editorial-name and private-log constants retain their source paths;
 publication, migration and actual log writers remain consumer responsibilities.
+
+Full owner contract: [daily-log selection](modules/daily-log-selection.md).
+The supplied-directory selector has no runtime-state dependency; memory_state
+retains public object reexports and all operational state ownership.

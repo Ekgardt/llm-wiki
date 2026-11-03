@@ -300,3 +300,10 @@ def test_a_part_that_already_committed_is_not_offered_again() -> None:
         path, content, lambda _path, digest: digest in done
     )
     assert compile_memory.daily_is_compiled(path, content, lambda _path, _digest: True)
+def test_daily_selection_public_imports_keep_the_owned_objects():
+    import memory_state
+    from llm_wiki import daily_log_selection
+
+    assert memory_state.daily_logs is daily_log_selection.daily_logs
+    assert memory_state.closed_daily_logs is daily_log_selection.closed_daily_logs
+    assert memory_state.DAILY_LOG_NAME is daily_log_selection.DAILY_LOG_NAME
