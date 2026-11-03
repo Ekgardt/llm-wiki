@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import breadcrumb_evidence
 import flush_memory
@@ -13,7 +13,7 @@ from reliable_memory import sha256_bytes
 
 from tests.test_breadcrumb_terminal_proof import _committed, _complete, _delivery
 
-CUTOFF = datetime(2001, 1, 1, tzinfo=timezone.utc)
+CUTOFF = datetime(2001, 1, 1, tzinfo=UTC)
 
 
 def _completed(root):

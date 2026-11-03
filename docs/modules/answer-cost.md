@@ -12,7 +12,7 @@ and telemetry-failure fallback stay in their original integration file. No new
 OpenTelemetry implementation or claim of current-schema conformance is introduced.
 
 Qualification: [research](../research/2026-11-03-answer-budget-cost-owner-qualification.md).
-Run pure and real MCP tests, Python 3.10, actual complexity and complete context
+Run pure and real MCP tests, Python 3.14, actual complexity and complete context
 reconstruction. Production bytes and all public imports remain unchanged.
 
 Shared canonical contract: [Answer budget](answer-budget.md).

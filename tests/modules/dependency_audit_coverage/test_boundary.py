@@ -1,5 +1,4 @@
 """Audit verification has no product-executor or advisory-client dependency."""
-import sys
 from pathlib import Path
 
 from tests.module_boundaries import assert_isolated_import, nonstdlib_imports
@@ -11,8 +10,8 @@ read_source = context_reader(ROOT, ROOT / 'docs/modules/dependency-audit-coverag
 
 def test_only_python310_toml_fallback_is_external():
     source = read_source(ROOT / 'scripts/check_dependency_audit.py')
-    assert nonstdlib_imports(source) == {'tomli', 'tomllib'} - sys.stdlib_module_names
+    assert nonstdlib_imports(source) == set()
 
 
 def test_import_does_not_start_product_or_advisory_client():
-    assert_isolated_import(ROOT, 'check_dependency_audit', dependencies=('tomli',))
+    assert_isolated_import(ROOT, 'check_dependency_audit', dependencies=())

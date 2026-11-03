@@ -26,7 +26,7 @@ import sys
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 import install_control as control
@@ -75,7 +75,7 @@ def keep_changed_whole_files(
     """Keep and carry over each wholly owned file this update is about to replace."""
     retire_displaced_copies(Path(state_root))
     installed = _installed_values(Path(state_root))
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     found = (_changed(resource, installed) for resource in resources)
     return [
         _take_over(Path(state_root), stamp, resource, current, baseline)

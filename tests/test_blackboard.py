@@ -6,7 +6,7 @@ import multiprocessing
 import os
 import sqlite3
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import blackboard
@@ -114,7 +114,7 @@ def _completed_or_already(project: str, claim, label: str) -> bool:
     each retry a different request. Research:
     `docs/research/2026-09-13-a-retry-must-replay-the-same-request.md`.
     """
-    completed_at = datetime.now(timezone.utc)
+    completed_at = datetime.now(UTC)
     try:
         return _under_contention(
             blackboard.complete_task, project, claim, completed_at, label=label
@@ -428,7 +428,7 @@ def test_claim_is_all_or_none_when_one_resource_is_busy(
 def test_heartbeat_expiry_reclaim_and_stale_fencing(
     blackboard_vault: tuple[Path, Path],
 ) -> None:
-    now = datetime(2026, 8, 15, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 15, tzinfo=UTC)
     first = _claim(
         "demo",
         "own graph",
@@ -635,7 +635,7 @@ def test_a_replayed_completion_time_is_the_same_request(blackboard_vault):
     `docs/research/2026-09-13-a-retry-must-replay-the-same-request.md`.
     """
     claim = _one_claim()
-    when = datetime.now(timezone.utc)
+    when = datetime.now(UTC)
 
     first = blackboard._completion_record(claim, when)
     replayed = blackboard._completion_record(claim, when)
@@ -645,7 +645,7 @@ def test_a_replayed_completion_time_is_the_same_request(blackboard_vault):
 
 def test_a_fresh_clock_reading_is_a_different_request(blackboard_vault):
     claim = _one_claim()
-    when = datetime.now(timezone.utc)
+    when = datetime.now(UTC)
 
     later = blackboard._completion_record(claim, when + timedelta(seconds=1))
 
@@ -654,7 +654,7 @@ def test_a_fresh_clock_reading_is_a_different_request(blackboard_vault):
 
 def test_a_completion_without_a_time_records_the_moment_it_ran(blackboard_vault):
     claim = _one_claim()
-    before = datetime.now(timezone.utc) - timedelta(seconds=1)
+    before = datetime.now(UTC) - timedelta(seconds=1)
 
     assert blackboard.complete_task("demo", claim) is True
     records = blackboard._read_jsonl(blackboard._bb_dir("demo") / "completed.jsonl")

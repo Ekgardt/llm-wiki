@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 import re
 import sys
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -117,7 +117,7 @@ def _entry_text(entry: Path) -> str:
 def build(vault: Path | None = None, today: date | None = None) -> dict[str, dict[str, float]]:
     """The co-occurrence table, read from the daily entries of the vault."""
     root = Path(vault or ROOT)
-    when = today or datetime.now(timezone.utc).date()
+    when = today or datetime.now(UTC).date()
     table: dict[str, dict[str, float]] = {}
     for entry in daily_logs(root / "knowledge" / "daily"):
         accumulate(table, _entry_text(entry), entry.stem, when)

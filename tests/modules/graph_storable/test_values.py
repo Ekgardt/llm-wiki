@@ -1,5 +1,5 @@
 """Storage adapters preserve their existing finite, caller-qualified policy."""
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from types import MappingProxyType
 
 import pytest
@@ -34,7 +34,7 @@ def test_identity_threshold_does_not_truncate_distinct_suffixes():
     (1.5, '1.5'), (-0.0, '-0.0'), (float('nan'), None),
     (float('inf'), None), (-float('inf'), None),
     (date(2026, 11, 3), '2026-11-03'),
-    (datetime(2026, 11, 3, tzinfo=timezone.utc), '2026-11-03T00:00:00+00:00'),
+    (datetime(2026, 11, 3, tzinfo=UTC), '2026-11-03T00:00:00+00:00'),
     ('a\ud800b', 'a?b'), (True, True), (42, 42), (None, None),
 ])
 def test_scalar_conversion_contract(value, expected):

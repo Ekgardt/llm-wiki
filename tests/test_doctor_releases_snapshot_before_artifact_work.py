@@ -3,7 +3,7 @@ import sqlite3
 import threading
 import time
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import doctor
 import pytest
@@ -97,7 +97,7 @@ def test_default_busy_owner_heartbeat_and_release_during_artifact_work(tmp_path,
         return original(*args)
 
     monkeypatch.setattr(doctor, "_checked_artifacts", inspect)
-    result = doctor._transaction_check(state, datetime.now(timezone.utc), time.monotonic()+30, vault_root=root)
+    result = doctor._transaction_check(state, datetime.now(UTC), time.monotonic()+30, vault_root=root)
     assert failures == []
     assert result["status"] == "ok"
     assert result["details"]["live_maintenance_owners"] == 0
@@ -112,7 +112,7 @@ def test_changed_transaction_after_snapshot_is_unreadable_not_healthy(tmp_path, 
         return original(*args)
 
     monkeypatch.setattr(doctor, "_checked_artifacts", inspect)
-    result = doctor._transaction_check(state, datetime.now(timezone.utc), time.monotonic()+30, vault_root=root)
+    result = doctor._transaction_check(state, datetime.now(UTC), time.monotonic()+30, vault_root=root)
     assert result["status"] == "error"
     assert result["details"]["read_error"] is True
     assert "transaction_state_corrupt" not in result["details"]["deletion_codes"]
@@ -121,7 +121,7 @@ def test_changed_transaction_after_snapshot_is_unreadable_not_healthy(tmp_path, 
 
 def test_live_owner_is_still_reported_after_unlocked_inspection(tmp_path):
     root, state, _, registry, lease = _environment(tmp_path)
-    result = doctor._transaction_check(state, datetime.now(timezone.utc), time.monotonic()+30, vault_root=root)
+    result = doctor._transaction_check(state, datetime.now(UTC), time.monotonic()+30, vault_root=root)
     assert result["details"]["live_maintenance_owners"] == 1
     assert "maintenance_owner_live" in result["details"]["deletion_codes"]
     registry.release(lease)
@@ -134,7 +134,7 @@ def test_deadline_during_artifact_work_is_visible_and_owner_can_release(tmp_path
         raise TimeoutError("controlled artifact deadline")
 
     monkeypatch.setattr(doctor, "_checked_artifacts", inspect)
-    result = doctor._transaction_check(state, datetime.now(timezone.utc), time.monotonic()+30, vault_root=root)
+    result = doctor._transaction_check(state, datetime.now(UTC), time.monotonic()+30, vault_root=root)
     assert result["status"] == "error"
     assert result["details"]["read_error"] is True
     registry.release(lease)
@@ -146,7 +146,7 @@ def test_incomplete_artifact_inventory_never_permits_deletion(tmp_path, monkeypa
         return set(), True
 
     monkeypatch.setattr(doctor, "_transaction_artifacts", incomplete)
-    result = doctor._transaction_check(state, datetime.now(timezone.utc), time.monotonic()+30, vault_root=root)
+    result = doctor._transaction_check(state, datetime.now(UTC), time.monotonic()+30, vault_root=root)
     assert "transaction_artifact_state_unknown" in result["details"]["deletion_codes"]
     registry.release(lease)
 
@@ -168,7 +168,7 @@ def test_quarantine_filesystem_proof_has_no_live_sql_cursor(tmp_path, monkeypatc
         return False
 
     monkeypatch.setattr(doctor._CompiledDaySupersession, "resolves", proof)
-    result = doctor._transaction_check(state, datetime.now(timezone.utc), time.monotonic()+30, vault_root=root)
+    result = doctor._transaction_check(state, datetime.now(UTC), time.monotonic()+30, vault_root=root)
     assert observed == [prepared.id]
     assert result["details"]["quarantined_unresolved"] == 1
     assert result["details"]["read_error"] is False
@@ -189,7 +189,7 @@ def test_revalidation_catches_change_in_late_quarantine_proof(tmp_path, monkeypa
         return False
 
     monkeypatch.setattr(doctor._CompiledDaySupersession, "resolves", proof)
-    result = doctor._transaction_check(state, datetime.now(timezone.utc), time.monotonic()+30, vault_root=root)
+    result = doctor._transaction_check(state, datetime.now(UTC), time.monotonic()+30, vault_root=root)
     assert result["details"]["read_error"] is True
     assert "transaction_state_corrupt" not in result["details"]["deletion_codes"]
     registry.release(lease)

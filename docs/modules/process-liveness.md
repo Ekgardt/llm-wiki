@@ -84,7 +84,7 @@ owner boundary. Importing the state adapter keeps unrelated initialization in
 process cleanup. Copying OS probes would duplicate security policy. Changing the
 generic invalid-PID policy would alter other consumers. Adding a new adapter
 module or provider abstraction is unnecessary. No new limits or dependencies
-are introduced; Python 3.10 remains the compatibility baseline.
+are introduced; Python 3.14 is the approved runtime series.
 
 Primary references checked 2026-11-02:
 [Python imports](https://docs.python.org/3.10/reference/import.html) explains module

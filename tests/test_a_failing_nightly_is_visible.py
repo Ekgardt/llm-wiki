@@ -17,11 +17,13 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import UTC
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
+
 
 import session_start_context  # noqa: E402
 
@@ -100,9 +102,9 @@ def _stored_report(tmp_path, monkeypatch, written_at: str, status: str = "degrad
 
 def test_session_start_labels_the_historical_nightly_report(tmp_path, monkeypatch) -> None:
     """Issue #23.5: 'not measured' every morning on a healthy vault."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    written = datetime.now(timezone.utc) - timedelta(hours=6)
+    written = datetime.now(UTC) - timedelta(hours=6)
     _stored_report(tmp_path, monkeypatch, written.isoformat(timespec="seconds"))
 
     monkeypatch.setattr(session_start_context, "_measured_health_block", lambda: "")
@@ -114,18 +116,18 @@ def test_session_start_labels_the_historical_nightly_report(tmp_path, monkeypatc
 
 
 def test_a_healthy_nightly_report_says_nothing(tmp_path, monkeypatch) -> None:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    _stored_report(tmp_path, monkeypatch, datetime.now(timezone.utc).isoformat(), status="ok")
+    _stored_report(tmp_path, monkeypatch, datetime.now(UTC).isoformat(), status="ok")
 
     monkeypatch.setattr(session_start_context, "_measured_health_block", lambda: "")
     assert session_start_context.health_block() == ""
 
 
 def test_a_stale_nightly_report_is_not_trusted(tmp_path, monkeypatch) -> None:
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    written = datetime.now(timezone.utc) - timedelta(hours=40)
+    written = datetime.now(UTC) - timedelta(hours=40)
     _stored_report(tmp_path, monkeypatch, written.isoformat(timespec="seconds"))
 
     assert session_start_context._stored_health_report() is None

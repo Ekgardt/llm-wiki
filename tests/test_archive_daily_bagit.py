@@ -10,7 +10,7 @@ import stat
 import threading
 import time
 from contextlib import closing, contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,7 +23,7 @@ from tests.slow_machine import LONG_TIMEOUT
 
 class _LockedClock:
     def __init__(self) -> None:
-        self.value = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
+        self.value = datetime(2026, 7, 14, 12, tzinfo=UTC)
         self.lock = threading.Lock()
 
     def __call__(self) -> datetime:
@@ -90,7 +90,7 @@ def _archiver(root: Path, state_root: Path, **kwargs):
     return DailyArchiver(
         root,
         state_root,
-        clock=lambda: datetime(2026, 7, 14, 12, tzinfo=timezone.utc),
+        clock=lambda: datetime(2026, 7, 14, 12, tzinfo=UTC),
         **kwargs,
     )
 

@@ -6,7 +6,7 @@ import os
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -155,7 +155,7 @@ def test_compaction_is_oldest_first_and_bounded(tmp_path):
     import retrieval_telemetry
 
     database = tmp_path / "state/cache/evidence-graph/telemetry.sqlite3"
-    now = datetime(2026, 7, 17, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 17, tzinfo=UTC)
     events = []
     for age in (120, 110, 100, 10, 5, 1):
         events.append(

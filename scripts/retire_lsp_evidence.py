@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -70,7 +70,7 @@ def retire(state_root: Path, now: datetime | None = None) -> int:
     from lsp_process import _remove_dead_owner_root
 
     removed = 0
-    for root in retirable_roots(state_root, now or datetime.now(timezone.utc)):
+    for root in retirable_roots(state_root, now or datetime.now(UTC)):
         _remove_dead_owner_root(root)
         removed += int(not root.exists())
     return removed

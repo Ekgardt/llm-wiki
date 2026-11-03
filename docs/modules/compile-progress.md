@@ -37,7 +37,7 @@ checked; a small storage packet is not completion of the compiler's larger closu
 The packet retains exact selected history records and the complete provenance
 catalog. The original historical file is unchanged; selected records do not claim
 its unselected remainder. Run the storage packet, original journal tests and related
-queue/controller/health/migration checks on Python 3.10 and the primary interpreter.
+queue/controller/health/migration checks on Python 3.14 and the primary interpreter.
 Native Windows/macOS skips and unavailable useful-model-cycle evidence stay explicit.
 Source: ../research/2026-11-03-compile-progress-storage-packet.md.
 

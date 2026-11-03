@@ -10,7 +10,7 @@ import sqlite3
 import stat
 import time
 from collections.abc import Callable, Iterator
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple
@@ -1249,7 +1249,7 @@ def _parse_timestamp(value: object) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         raise ValueError("operational timestamp lacks a timezone")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 def _owner_matches(row: sqlite3.Row, owner: OwnerLease | None) -> bool:
@@ -1633,7 +1633,7 @@ def _transaction_blockers(
         'SELECT * FROM "transaction" WHERE state <> \'committed\' OR artifacts_pruned_at IS NULL',
         deadline=deadline,
     )
-    cutoff = now.astimezone(timezone.utc) - timedelta(days=_UNDO_RETENTION_DAYS)
+    cutoff = now.astimezone(UTC) - timedelta(days=_UNDO_RETENTION_DAYS)
     blockers: set[str] = set()
     known: set[str] = set()
     retained: set[str] = set()

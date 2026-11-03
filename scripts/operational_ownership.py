@@ -14,7 +14,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
 
@@ -119,7 +119,7 @@ class MarkerIdentity:
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _unsupported_platform() -> OperationalOwnershipError:
@@ -331,7 +331,7 @@ def _bounded_text(value: object, label: str, maximum: int) -> str:
 def _as_utc(value: datetime) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None:
         raise ValueError("ownership clock must return a timezone-aware datetime")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def _timestamp(value: datetime) -> str:

@@ -21,15 +21,11 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -373,7 +369,7 @@ def _hook_output(event_name: object, result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _claim_capture(state: dict[str, Any], raw: dict[str, Any], now: datetime) -> bool:

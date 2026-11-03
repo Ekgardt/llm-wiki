@@ -19,7 +19,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -344,10 +343,7 @@ def _pyproject(root: Path) -> dict:
     path = root / "pyproject.toml"
     if not path.is_file():
         return {}
-    if sys.version_info >= (3, 11):
-        import tomllib
-    else:  # pragma: no cover - Python 3.10 uses the provisioned TOML reader
-        import tomli as tomllib
+    import tomllib
     return tomllib.loads(path.read_text(encoding="utf-8"))
 
 

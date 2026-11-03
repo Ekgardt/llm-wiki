@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import os
+from datetime import UTC
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -238,7 +239,7 @@ def _lsp_records(identity):
 @pytest.mark.parametrize("with_lease", [True, False])
 def test_doctor_never_uses_lease_expiry_as_process_death(monkeypatch, with_lease):
     import time
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     import doctor
 
@@ -246,20 +247,20 @@ def test_doctor_never_uses_lease_expiry_as_process_death(monkeypatch, with_lease
     owner, lease = _lsp_records(_identity())
     if not with_lease:
         lease = None
-    now = datetime(2026, 9, 29, 12, 0, 3, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 29, 12, 0, 3, tzinfo=UTC)
     result = doctor._lsp_liveness(owner, lease, "a" * 32, now, time.monotonic() + SHORT_TIMEOUT)
     assert result.live
 
 
 def test_doctor_keeps_hidden_lsp_owners_unknown_after_expiry(monkeypatch):
     import time
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     import doctor
 
     _observe(monkeypatch, None)
     owner, lease = _lsp_records(_identity((HOST, BOOT, "4", "101", "4.200")))
-    now = datetime(2026, 9, 29, 12, 0, 3, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 29, 12, 0, 3, tzinfo=UTC)
     result = doctor._lsp_liveness(owner, lease, "a" * 32, now, time.monotonic() + SHORT_TIMEOUT)
     assert result.unreadable
 
@@ -275,13 +276,13 @@ def test_failure_retirement_requires_positive_death_evidence():
 
 def test_unknown_lsp_owner_is_not_reported_as_a_proven_crash(monkeypatch):
     import time
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     import doctor
 
     _observe(monkeypatch, None)
     owner, _lease = _lsp_records(_identity((HOST, BOOT, "4", "101", "4.200")))
-    now = datetime(2026, 9, 29, 12, 0, 3, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 29, 12, 0, 3, tzinfo=UTC)
     snapshot = ("a" * 32, {"owner.json"}, owner, None, None)
     result = doctor._read_lsp_owner(snapshot, now, time.monotonic() + SHORT_TIMEOUT)
     assert result.unreadable

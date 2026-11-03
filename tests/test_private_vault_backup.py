@@ -6,7 +6,7 @@ import shutil
 import sqlite3
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -119,7 +119,7 @@ def test_staged_backup_image_uses_online_databases_and_manifest(tmp_path: Path) 
         root=root,
         state_root=state_root,
         staging_parent=staging_parent,
-        now=datetime(2026, 8, 15, tzinfo=timezone.utc),
+        now=datetime(2026, 8, 15, tzinfo=UTC),
         deadline=time.monotonic() + SHORT_TIMEOUT,
     ) as image:
         facts = _staged_image_facts(backup, image, state_root)
@@ -213,7 +213,7 @@ def test_staged_backup_image_rejects_unknown_runtime_projection(tmp_path: Path) 
     root, state_root = _vault(tmp_path)
     build_adopted_reliability_v3(root, state_root)
     queue = state_root / "run/queue-v3.sqlite3"
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     with contextlib.closing(sqlite3.connect(queue)) as database:
         database.execute(
             """INSERT INTO queue_ownership(
@@ -283,7 +283,7 @@ def test_backup_private_vault_runs_exact_restic_backup_and_check(
         staging_parent=staging,
         restic_binary=restic,
         repository_file=repository_file,
-        now=datetime(2026, 8, 15, tzinfo=timezone.utc),
+        now=datetime(2026, 8, 15, tzinfo=UTC),
         deadline=time.monotonic() + SHORT_TIMEOUT,
     )
     backup_command = calls[1][0]
@@ -449,7 +449,7 @@ def _restic_restore_fixture(
         root=root,
         state_root=state_root,
         staging_parent=backup_staging,
-        now=datetime(2026, 8, 15, tzinfo=timezone.utc),
+        now=datetime(2026, 8, 15, tzinfo=UTC),
         deadline=time.monotonic() + SHORT_TIMEOUT,
     ) as image:
         shutil.copytree(image, snapshot, dirs_exist_ok=True, symlinks=True)
@@ -733,7 +733,7 @@ def _staged_image(tmp_path: Path):
         root=root,
         state_root=state_root,
         staging_parent=staging_parent,
-        now=datetime(2026, 8, 25, tzinfo=timezone.utc),
+        now=datetime(2026, 8, 25, tzinfo=UTC),
         deadline=time.monotonic() + LONG_TIMEOUT,
     ) as image:
         shutil.copytree(image, kept)

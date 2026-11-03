@@ -22,7 +22,7 @@ import traceback
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -1516,7 +1516,7 @@ def build_report(
         "executed_corpus_sizes": list(executed_corpus_sizes),
         "declared_selectivity": list(SELECTIVITY_FRACTIONS),
         "heavy_parallel": False,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "seed": seed,
         "dimensions": dimensions,
         "queries": queries,

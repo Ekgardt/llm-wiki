@@ -360,9 +360,9 @@ def test_ci_qualifies_real_pyright_on_all_supported_os_families():
 
     assert facts == (
         [
-            ("ubuntu-24.04", "linux", "3.10", "22.23.1"),
-            ("windows-2025", "windows", "3.10", "22.23.1"),
-            ("macos-15", "macos", "3.10", "22.23.1"),
+            ("ubuntu-24.04", "linux", "3.14", "22.23.1"),
+            ("windows-2025", "windows", "3.14", "22.23.1"),
+            ("macos-15", "macos", "3.14", "22.23.1"),
         ],
         [True, True, True],
         "${{ matrix.timeout }}",
@@ -386,9 +386,9 @@ def test_ci_runs_a_whole_installer_on_every_supported_os_family():
     job = workflow["jobs"]["pyright-navigation"]
     entries = job["strategy"]["matrix"]["include"]
     assert _matrix_rows(entries) == [
-        ("ubuntu-24.04", "linux", "3.10", "22.23.1"),
-        ("windows-2025", "windows", "3.10", "22.23.1"),
-        ("macos-15", "macos", "3.10", "22.23.1"),
+        ("ubuntu-24.04", "linux", "3.14", "22.23.1"),
+        ("windows-2025", "windows", "3.14", "22.23.1"),
+        ("macos-15", "macos", "3.14", "22.23.1"),
     ]
     # The budget is per platform, because the same suite takes about three
     # times longer on the hosted Windows image. Every family declares one.

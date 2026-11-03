@@ -26,7 +26,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -114,7 +114,7 @@ def _utc_now() -> str:
     compared them as strings (audit C-30,
     docs/research/2026-09-25-the-scheduler-state-keeps-one-clock.md).
     """
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _record_nightly_result(today: str, failures: int, error: str | None = None, *, deferred=()) -> None:
@@ -638,7 +638,7 @@ def _write_health_report(log) -> str:
         )
         payload = {
             "schema_version": "health-report/v1",
-            "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "written_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "report": report,
         }
         REPORTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -732,7 +732,7 @@ def update_record(outcome: dict) -> dict:
     See `docs/research/2026-09-25-the-scheduler-says-what-the-night-could-not-do.md`.
     """
     record = {field: outcome.get(field) for field in UPDATE_RECORD_FIELDS}
-    record["at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    record["at"] = datetime.now(UTC).isoformat(timespec="seconds")
     return record
 
 

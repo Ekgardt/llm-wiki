@@ -15,7 +15,7 @@ import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import markdown_transaction
@@ -945,7 +945,7 @@ def _write_image_manifest(
     now: datetime,
     deadline: float,
 ) -> None:
-    created_at = now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    created_at = now.astimezone(UTC).isoformat().replace("+00:00", "Z")
     manifest = {
         "schema_version": "private-vault-backup/v1",
         "created_at": created_at,
@@ -1057,7 +1057,7 @@ def staged_backup_image(
             root=vault,
             state_root=state,
             image=parent,
-            now=now or datetime.now(timezone.utc),
+            now=now or datetime.now(UTC),
             deadline=deadline,
         )
         yield parent
@@ -1497,7 +1497,7 @@ def _validate_restored_image(
     _require_runtime_valid(
         root=target / "vault",
         state_root=target / "state",
-        now=datetime.now(timezone.utc),
+        now=datetime.now(UTC),
         deadline=deadline,
         excluded_owner=None,
         code="restore_runtime_invalid",

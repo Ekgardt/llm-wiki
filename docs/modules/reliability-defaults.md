@@ -35,7 +35,7 @@ and checks facade identity and exact old/new pickle bytes for the class, default
 and customized instances. Fresh-interpreter tests reject reliable_memory, queue
 and state imports while constructing the owned defaults. IO/SQLite, queue,
 transactions, ownership, capture, archives, repair and backup scenarios provide
-additional integration evidence. Python 3.10 remains the compatibility floor.
+additional integration evidence. Python 3.14 is the approved runtime series.
 
 See docs/research/2026-11-02-queue-renewal-boundaries.md for approval, alternatives,
 sources and staged qualification. No runtime path, storage schema, limit value or

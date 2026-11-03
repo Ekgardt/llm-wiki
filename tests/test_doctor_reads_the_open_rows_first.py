@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import doctor
@@ -30,7 +30,7 @@ def test_a_conflict_is_judged_wherever_it_lies(tmp_path: Path, order: str) -> No
         database.execute("""UPDATE "transaction" SET state = 'conflicted' WHERE id = ?""", (chosen,))
 
     check = doctor._transaction_check(
-        tmp_path / "state", datetime.now(timezone.utc), time.monotonic() + 30, vault_root=tmp_path / "vault"
+        tmp_path / "state", datetime.now(UTC), time.monotonic() + 30, vault_root=tmp_path / "vault"
     )
 
     assert check["status"] != "ok"

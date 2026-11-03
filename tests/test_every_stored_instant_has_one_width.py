@@ -6,14 +6,14 @@ from __future__ import annotations
 
 import ast
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-WHOLE = datetime(2026, 9, 26, 10, 0, 0, tzinfo=timezone.utc)
+WHOLE = datetime(2026, 9, 26, 10, 0, 0, tzinfo=UTC)
 
 
 @pytest.mark.parametrize("module_name", ["iso_time", "markdown_transaction", "project_journal"])

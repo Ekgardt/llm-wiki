@@ -8,7 +8,7 @@ import stat
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
@@ -158,8 +158,8 @@ class BenchmarkMetrics:
 
 
 _OPEN_BOUNDS = (
-    datetime.min.replace(tzinfo=timezone.utc),
-    datetime.max.replace(tzinfo=timezone.utc),
+    datetime.min.replace(tzinfo=UTC),
+    datetime.max.replace(tzinfo=UTC),
 )
 
 

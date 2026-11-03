@@ -8,7 +8,7 @@ weekly check. See docs/research/2026-09-24-the-weekly-pass-has-its-own-record.md
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -28,7 +28,7 @@ from tests.test_doctor import (  # noqa: E402
     _qualified_pyright_check,
 )
 
-NOW = datetime(2026, 9, 27, 9, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 27, 9, 0, tzinfo=UTC)
 FRESH_NIGHTLY = {
     "last_nightly_status": "success",
     "last_nightly_date": "2026-09-27",

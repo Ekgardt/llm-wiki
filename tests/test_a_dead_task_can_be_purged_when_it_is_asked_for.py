@@ -10,7 +10,7 @@ exported; `quarantine-corrupt` is its route.
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import memory_queue
@@ -31,7 +31,7 @@ def _kill_and_age(state_root: Path, task_ids: tuple[str, ...]) -> None:
 
 def _purge(queue, tmp_path: Path, *, include_dead: bool, name: str):
     return queue.purge(
-        terminal_before=datetime.now(timezone.utc) - timedelta(days=1),
+        terminal_before=datetime.now(UTC) - timedelta(days=1),
         export_path=tmp_path / name,
         include_dead=include_dead,
     )

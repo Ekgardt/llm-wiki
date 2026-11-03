@@ -1,7 +1,7 @@
 """Pin value evidence and observable ordering at the call lifecycle boundary."""
 import json
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -20,7 +20,7 @@ def _event(name):
 
 
 def _lease():
-    now = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    now = datetime(2000, 1, 1, tzinfo=UTC)
     return QueueLease('delivery-task', 'compile', 1, {}, 'a' * 64, 'worker', 'token',
                       now, 1, now, now, 0)
 

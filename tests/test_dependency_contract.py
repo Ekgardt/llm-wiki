@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-import sys
+import re
+import tomllib
 from pathlib import Path
 
 import pytest
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
-
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -20,12 +15,13 @@ def project() -> dict[str, object]:
         return tomllib.load(stream)
 
 
-def test_production_baseline_owns_mcp_v1_and_python310_tomli(
+def test_production_baseline_owns_mcp_v1_and_stdlib_toml(
     project: dict[str, object],
 ) -> None:
     dependencies = project["project"]["dependencies"]
     assert "mcp>=1.30,<2" in dependencies
-    assert "tomli>=2.4.1,<3; python_version < '3.11'" in dependencies
+    assert project["project"]["requires-python"] == ">=3.14,<3.15"
+    assert not any(re.match(r"tomli(?:[<>=;\[]|$)", requirement) for requirement in dependencies)
     assert project["project"]["optional-dependencies"]["mcp-server"] == []
 
 

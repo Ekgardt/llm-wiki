@@ -5,7 +5,7 @@ See `docs/research/2026-09-17-a-session-is-filed-under-the-day-it-happened.md`.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -15,8 +15,8 @@ import episode_consolidation  # noqa: E402
 import flush_memory  # noqa: E402
 import integration_adapter  # noqa: E402
 
-YESTERDAY = datetime(2026, 9, 16, 22, 30, tzinfo=timezone.utc)
-THIS_MORNING = datetime(2026, 9, 17, 9, 0, tzinfo=timezone.utc)
+YESTERDAY = datetime(2026, 9, 16, 22, 30, tzinfo=UTC)
+THIS_MORNING = datetime(2026, 9, 17, 9, 0, tzinfo=UTC)
 
 
 def _record(occurred_at: object) -> dict[str, object]:

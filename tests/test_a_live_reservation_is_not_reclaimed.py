@@ -15,7 +15,7 @@ hook failures accumulated over a day, one per session end.
 
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -24,7 +24,7 @@ import repair_orphaned_checkpoint_names as repair  # noqa: E402
 
 BATCH = repair.BATCH_NAME_PREFIX + "32a76d16c2"
 LEGACY = "event:abcdef0123"
-NOW = datetime(2026, 9, 7, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
 
 
 def _stamp(when: datetime) -> str:
@@ -89,8 +89,8 @@ def test_only_unexpired_leases_count_as_live():
     database.executemany(
         "INSERT INTO project_leases VALUES (?, ?)",
         [
-            ("still-held", _stamp(datetime.now(timezone.utc) + timedelta(hours=1))),
-            ("long-gone", _stamp(datetime.now(timezone.utc) - timedelta(hours=1))),
+            ("still-held", _stamp(datetime.now(UTC) + timedelta(hours=1))),
+            ("long-gone", _stamp(datetime.now(UTC) - timedelta(hours=1))),
         ],
     )
 

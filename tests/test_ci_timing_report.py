@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -81,7 +81,7 @@ def test_compile_report_refuses_artifact_with_document_type(tmp_path):
 
 
 def _timestamp(value: datetime) -> str:
-    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _write_attempt(
@@ -92,7 +92,7 @@ def _write_attempt(
     head_sha: str = HEAD_SHA,
 ) -> tuple[Path, Path]:
     root.mkdir(parents=True, exist_ok=True)
-    started = datetime(2026, 8, attempt, tzinfo=timezone.utc)
+    started = datetime(2026, 8, attempt, tzinfo=UTC)
     jobs = []
     junit_root = root / f"junit-{attempt}"
     junit_root.mkdir()
@@ -157,7 +157,7 @@ def test_compile_report_emits_closed_schema_valid_evidence(tmp_path: Path) -> No
         run_jsons,
         junit_roots,
         head_sha=HEAD_SHA,
-        generated_at=datetime(2026, 8, 12, 12, 34, 56, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 8, 12, 12, 34, 56, tzinfo=UTC),
     )
 
     validate_schema(report, SCHEMA)

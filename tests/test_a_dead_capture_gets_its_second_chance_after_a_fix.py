@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -21,7 +21,7 @@ import memory_queue  # noqa: E402
 import operational_ownership  # noqa: E402
 import scheduled_nightly  # noqa: E402
 
-LONG_AGO = datetime.now(timezone.utc) - timedelta(days=60)
+LONG_AGO = datetime.now(UTC) - timedelta(days=60)
 
 
 def _queue(tmp_path: Path):
@@ -81,7 +81,7 @@ def _children(queue, task_id: str) -> list[tuple[str, str]]:
 def test_a_capture_that_died_before_the_change_is_redriven_once_with_its_intent(tmp_path: Path) -> None:
     queue = _queue(tmp_path)
     dead = _dead_capture(tmp_path, queue, "a" * 64)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     first = queue.redrive_dead_captures(changed_after=now)
     second = queue.redrive_dead_captures(changed_after=now)
@@ -114,7 +114,7 @@ def test_a_child_that_could_not_reach_the_worker_does_not_spend_the_second_chanc
     dead = _dead_capture(tmp_path, queue, "c" * 64)
     _unreachable_child(queue, dead)
 
-    outcome = queue.redrive_dead_captures(changed_after=datetime.now(timezone.utc))
+    outcome = queue.redrive_dead_captures(changed_after=datetime.now(UTC))
 
     assert [pair[0] for pair in outcome.redriven] == [dead]
 
@@ -124,7 +124,7 @@ def test_a_child_that_carried_the_link_spent_it_even_when_cancelled(tmp_path: Pa
     dead = _dead_capture(tmp_path, queue, "e" * 64)
     queue.cancel(queue.redrive(dead))
 
-    outcome = queue.redrive_dead_captures(changed_after=datetime.now(timezone.utc))
+    outcome = queue.redrive_dead_captures(changed_after=datetime.now(UTC))
 
     assert (outcome.redriven, outcome.refused) == ((), ())
 
@@ -139,7 +139,7 @@ def test_the_purge_keeps_a_capture_it_cannot_prove_and_takes_the_rest(tmp_path: 
     _age(queue, finished, "succeeded", None)
 
     receipt = queue.purge(
-        terminal_before=datetime.now(timezone.utc),
+        terminal_before=datetime.now(UTC),
         export_path=tmp_path / "export",
         include_dead=True,
     )

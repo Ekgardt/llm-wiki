@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 from contextlib import nullcontext
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -254,7 +254,7 @@ def test_worker_times_out_handler_without_result_or_live_lease(
 def test_worker_policy_overrides_claim_heartbeat_attempts_and_backoff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 14, 12, tzinfo=UTC)
     intervals: list[float] = []
 
     def heartbeat_wait(stop, interval: float) -> bool:
@@ -609,7 +609,7 @@ def test_cli_cancel_redrive_and_purge(
     assert set(redriven) == {"id", "state"}
     assert redriven["state"] == "ready"
 
-    before = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    before = (datetime.now(UTC) - timedelta(days=30)).isoformat()
     export_parent = tmp_path / "exports"
     export_parent.mkdir()
     memory_queue._harden_owner_only(export_parent, 0o700)

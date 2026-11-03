@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import breadcrumb_storage as storage
 import doctor
@@ -39,7 +39,7 @@ def retained(runtime):
 
 def _inspect(state):
     return installed_memory_repair.validate_queue_v3_runtime(
-        state_root=state, now=datetime.now(timezone.utc),
+        state_root=state, now=datetime.now(UTC),
         deadline=time.monotonic() + SHORT_TIMEOUT, excluded_owner=None,
     )
 
@@ -73,7 +73,7 @@ def test_doctor_names_a_missing_part_as_an_error(retained):
     state, identity = retained
     manifest = storage.protocol.read_manifest(_bundle(state, identity).manifest)
     storage.part_path(state, identity, manifest["last_part_sha256"]).unlink()
-    result = doctor._queue_check(state, datetime.now(timezone.utc), time.monotonic() + 30)
+    result = doctor._queue_check(state, datetime.now(UTC), time.monotonic() + 30)
     assert result["status"] == "error"
     assert "capture" in result["message"].lower()
     assert "FileNotFoundError" in result["details"]["capture_intent_error"]
@@ -101,7 +101,7 @@ def test_doctor_reports_a_complete_unindexed_publication(runtime, monkeypatch):
     publication = _publish(queue, coordinator)
     assert publication.registered is False
     before = _inventory(state)
-    result = doctor._queue_check(state, datetime.now(timezone.utc), time.monotonic() + 30)
+    result = doctor._queue_check(state, datetime.now(UTC), time.monotonic() + 30)
     assert _inventory(state) == before
     assert result["status"] == "degraded"
     assert result["details"]["capture_pending_complete"] == 1
@@ -118,7 +118,7 @@ def test_doctor_reports_partial_publication_without_accepting_it(runtime, monkey
     monkeypatch.setattr(storage, "_store_manifest", _manifest_write_failed)
     with pytest.raises(OSError, match="manifest publication interrupted"):
         _publish(queue, coordinator)
-    result = doctor._queue_check(state, datetime.now(timezone.utc), time.monotonic() + 30)
+    result = doctor._queue_check(state, datetime.now(UTC), time.monotonic() + 30)
     assert result["status"] == "degraded"
     assert result["details"]["capture_incomplete"] == 1
     assert "incomplete" in result["message"].lower()
@@ -133,7 +133,7 @@ def test_doctor_reports_an_unreadable_unindexed_shard(runtime, monkeypatch):
     relocated = state / "relocated"
     shard.rename(relocated)
     shard.symlink_to(relocated, target_is_directory=True)
-    result = doctor._queue_check(state, datetime.now(timezone.utc), time.monotonic() + 30)
+    result = doctor._queue_check(state, datetime.now(UTC), time.monotonic() + 30)
     assert result["status"] == "error"
     assert "capture intent directory is unsafe" in result["details"]["capture_intent_error"]
 

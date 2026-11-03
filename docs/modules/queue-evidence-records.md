@@ -24,7 +24,7 @@ actual queue/serialization consumers no longer need them.
 
 Run owner tests with existing capture-link, corruption/purge, queue and migration
 integration tests. Preserve original record/digest fixtures, schema bytes and all
-assertions. Check Python 3.10 and native platform limitations explicitly. A passing
+assertions. Check Python 3.14 and native platform limitations explicitly. A passing
 format packet does not establish complete queue isolation, authorized disposal or
 useful full-cycle token savings. Source: ../research/2026-11-03-queue-evidence-record-boundary.md.
 

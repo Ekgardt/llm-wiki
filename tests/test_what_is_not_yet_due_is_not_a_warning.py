@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -100,29 +100,29 @@ def _backup(machine: Path, now: datetime) -> dict:
 def test_the_install_records_when_it_began(installed: Path) -> None:
     began = install_control.installed_at(installed / "state")
     assert began is not None
-    assert abs((datetime.now(timezone.utc) - began).total_seconds()) < 600
+    assert abs((datetime.now(UTC) - began).total_seconds()) < 600
 
 
 def test_a_fresh_install_has_nothing_due_yet(installed: Path) -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     verdicts = (_scheduler(installed, now)["status"], _backup(installed, now)["status"])
     assert verdicts == ("ok", "ok")
 
 
 def test_a_nightly_that_never_ran_is_named_once_it_was_due(installed: Path) -> None:
-    later = datetime.now(timezone.utc) + timedelta(seconds=doctor.FIRST_NIGHTLY_DUE_SECONDS + 60)
+    later = datetime.now(UTC) + timedelta(seconds=doctor.FIRST_NIGHTLY_DUE_SECONDS + 60)
     check = _scheduler(installed, later)
     assert (check["status"], "never run" in check["message"]) == ("degraded", True)
 
 
 def test_a_snapshot_that_never_came_is_named_once_it_was_due(installed: Path) -> None:
-    later = datetime.now(timezone.utc) + timedelta(seconds=doctor.BACKUP_FRESH_SECONDS + 60)
+    later = datetime.now(UTC) + timedelta(seconds=doctor.BACKUP_FRESH_SECONDS + 60)
     assert _backup(installed, later)["status"] == "degraded"
 
 
 def test_without_an_install_record_the_old_answers_stand(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("LLM_WIKI_SNAPSHOT_ROOT", str(tmp_path / "snapshots"))
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     verdicts = (_scheduler(tmp_path, now)["status"], _backup(tmp_path, now)["status"])
     assert verdicts == ("skipped", "degraded")
 

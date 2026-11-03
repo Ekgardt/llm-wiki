@@ -9,7 +9,7 @@
 # Remote bootstrap requires LLM_WIKI_COMMIT to be a full commit OID.
 #
 # What this does:
-#   1. Checks prerequisites (Python 3.10+, uv, git)
+#   1. Checks prerequisites (Python 3.14, uv, git)
 #   2. Installs the locked production dependency baseline
 #   3. Runs a bounded production smoke
 #   4. Sets LLM_WIKI_ROOT environment variable (user-level)
@@ -393,14 +393,6 @@ Info "State root: $STATE_ROOT"
 
 Info "Checking prerequisites..."
 
-# Python
-$pyVersion = (python --version 2>&1) -replace "Python ", ""
-$pyParts = $pyVersion.Split(".")
-if ([int]$pyParts[0] -lt 3 -or ([int]$pyParts[0] -eq 3 -and [int]$pyParts[1] -lt 10)) {
-    Fail "Python 3.10+ required, found $pyVersion"
-}
-Ok "Python $pyVersion"
-
 # git
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Fail "git is required" }
 Ok "git installed"
@@ -415,6 +407,11 @@ if ($LASTEXITCODE -ne 0 -or $installedUvVersion -ne $UvVersion) {
 }
 Ok "uv $installedUvVersion"
 
+# One interpreter series for bootstrap and the project environment.
+$bootstrapPython = (& uv python find 3.14 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) { Fail "Python 3.14 is required. Run: uv python install 3.14" }
+Ok "Python $(& $bootstrapPython --version)"
+
 # --- 3. Install dependencies --------------------------------------
 
 Info "Installing locked production dependencies..."
@@ -422,7 +419,7 @@ $syncArguments = @((Join-Path $VAULT_ROOT "scripts\installer_config.py"), "sync-
 if (-not [string]::IsNullOrEmpty($env:UV_PROJECT_ENVIRONMENT)) {
     $syncArguments += @("--environment", $env:UV_PROJECT_ENVIRONMENT)
 }
-$syncPlanJson = Invoke-NativeCommand python $syncArguments -CaptureOutput
+$syncPlanJson = Invoke-NativeCommand $bootstrapPython $syncArguments -CaptureOutput
 $syncPlan = $syncPlanJson | ConvertFrom-Json
 if (-not [string]::IsNullOrEmpty($syncPlan.ignored_environment)) {
     # Timers, hooks and the MCP server run the vault from its own .venv (audit B-26).

@@ -14,7 +14,7 @@ import sqlite3
 import subprocess
 import sys
 from argparse import Namespace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -39,7 +39,7 @@ def _run_with_stdin(module_name: str, stdin_text: str) -> int:
         return mod.main()
 
 
-FIXED_TIME = datetime(2026, 7, 13, 12, 30, 45, tzinfo=timezone.utc)
+FIXED_TIME = datetime(2026, 7, 13, 12, 30, 45, tzinfo=UTC)
 
 
 @pytest.fixture

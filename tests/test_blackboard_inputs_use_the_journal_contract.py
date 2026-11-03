@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import blackboard
 import pytest
@@ -21,7 +21,7 @@ def test_claim_round_trip_preserves_inputs_past_former_bound(blackboard_vault, f
                'resources': {'resources': [f'src/{index}.py' for index in range(65)]},
                'claim_json': {'task': 'контекст ' * 2200}}
     values.update(updates[field])
-    now = datetime(2026, 10, 2, tzinfo=timezone.utc)
+    now = datetime(2026, 10, 2, tzinfo=UTC)
     claim = blackboard.claim_task('demo', **values, now=now)
     restored = blackboard._claim_from_json(json.dumps(blackboard._claim_payload(claim), ensure_ascii=False))
     assert restored == claim

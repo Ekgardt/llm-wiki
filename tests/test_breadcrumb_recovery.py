@@ -6,7 +6,7 @@ import subprocess
 import sys
 import threading
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import breadcrumb_storage as storage
@@ -56,7 +56,7 @@ def _wait_for_persisted_lease_expiry(root: Path) -> None:
     with closing(sqlite3.connect(root / "run/markdown-transactions-v3.candidate.sqlite3")) as database:
         row = database.execute("SELECT MAX(expires_at) FROM maintenance_owners WHERE role='capture'").fetchone()
     expiry = datetime.fromisoformat(row[0].replace("Z", "+00:00"))
-    remaining = (expiry - datetime.now(timezone.utc)).total_seconds()
+    remaining = (expiry - datetime.now(UTC)).total_seconds()
     threading.Event().wait(max(0, remaining))
 
 

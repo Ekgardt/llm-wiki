@@ -14,7 +14,7 @@ import os
 import sqlite3
 import sys
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -36,7 +36,7 @@ def _candidate(state_root: Path) -> Path:
 
 
 def _expire_owner(candidate: Path, lease: ownership.OwnerLease) -> None:
-    past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat().replace(
+    past = (datetime.now(UTC) - timedelta(seconds=1)).isoformat().replace(
         "+00:00", "Z"
     )
     with contextlib.closing(sqlite3.connect(candidate)) as database:

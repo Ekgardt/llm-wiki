@@ -123,57 +123,21 @@ jobs:
         # 50 s setup/cleanup overhead. Each runner keeps its own cores; every
         # test remains included. Requalify the weights and count on new costs.
         target:
-          - linux-py3.10
           - linux-py3.14
-          - windows-py3.10
-          - windows-py3.11
-          - windows-py3.12
-          - windows-py3.13
           - windows-py3.14
-          - macos-py3.10
           - macos-py3.14
         shard: [1, 2, 3, 4, 5]
         include:
-          - target: linux-py3.10
-            os: ubuntu-24.04
-            python: "3.10"
-            timeout: 20
-            class: linux_full
           - target: linux-py3.14
             os: ubuntu-24.04
             python: "3.14"
             timeout: 20
             class: linux_full
-          - target: windows-py3.10
-            os: windows-2025
-            python: "3.10"
-            timeout: 60
-            class: windows_full
-          - target: windows-py3.11
-            os: windows-2025
-            python: "3.11"
-            timeout: 60
-            class: windows_full
-          - target: windows-py3.12
-            os: windows-2025
-            python: "3.12"
-            timeout: 60
-            class: windows_full
-          - target: windows-py3.13
-            os: windows-2025
-            python: "3.13"
-            timeout: 60
-            class: windows_full
           - target: windows-py3.14
             os: windows-2025
             python: "3.14"
             timeout: 60
             class: windows_full
-          - target: macos-py3.10
-            os: macos-15
-            python: "3.10"
-            timeout: 20
-            class: macos_full
           - target: macos-py3.14
             os: macos-15
             python: "3.14"
@@ -237,19 +201,16 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
-            python: "3.10"
-            label: py3.10
-          - os: ubuntu-24.04
             python: "3.14"
             label: py3.14
           # A clean production install on the two other platforms the
           # contract names had no CI evidence (audit OPS-14, 2026-09-11).
           - os: windows-2025
-            python: "3.13"
-            label: windows-py3.13
+            python: "3.14"
+            label: windows-py3.14
           - os: macos-15
-            python: "3.13"
-            label: macos-py3.13
+            python: "3.14"
+            label: macos-py3.14
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     env:
@@ -277,7 +238,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.14"]
+        python: ["3.14"]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -342,7 +303,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.14"]
+        python: ["3.14"]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -394,8 +355,13 @@ jobs:
         with:
           version: "0.12.3"
           enable-cache: true
-      - run: uv python install 3.13
-      - run: uv python pin 3.13
+      - run: uv python install 3.14
+      - run: uv python pin 3.14
+      - name: Expose the selected interpreter before changing home
+        shell: bash
+        run: >
+          uv run --no-project --python 3.14 python -c
+          "import pathlib, sys; print(pathlib.Path(sys.executable).parent)" >> "$GITHUB_PATH"
       - run: uv sync --locked
       - run: uv run --locked --no-sync pytest tests/test_installer_bootstrap.py tests/test_installer_config.py tests/test_install_smoke.py -q
       - run: uv run --locked --no-sync pytest tests/test_integration_injection.py -q -k installer
@@ -446,8 +412,13 @@ jobs:
         with:
           version: "0.12.3"
           enable-cache: true
-      - run: uv python install 3.13
-      - run: uv python pin 3.13
+      - run: uv python install 3.14
+      - run: uv python pin 3.14
+      - name: Expose the selected interpreter before changing home
+        shell: bash
+        run: >
+          uv run --no-project --python 3.14 python -c
+          "import pathlib, sys; print(pathlib.Path(sys.executable).parent)" >> "$GITHUB_PATH"
       # Created before HOME moves: the steps above install into the runner's own home.
       - name: A home of its own, so nothing of the runner's is configured
         shell: bash
@@ -491,6 +462,13 @@ jobs:
           HOME: ${{ runner.temp }}/installer-home
           USERPROFILE: ${{ runner.temp }}\installer-home
         run: uv run --locked --no-sync python scripts/scheduled_nightly.py
+      - name: Retain the failed install's redacted capture diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: installer-capture-diagnostics-${{ matrix.platform }}-attempt-${{ github.run_attempt }}
+          path: ${{ env.LLM_WIKI_STATE_ROOT }}/logs/capture-failures.jsonl
+          if-no-files-found: warn
 
   # Tests whose dependency no job installed, so they skipped everywhere and a skip
   # is not a pass. `torch` stays out on purpose: the locked wheel pulls the CUDA
@@ -519,8 +497,13 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22.23.1"
-      - run: uv python install 3.13
-      - run: uv python pin 3.13
+      - run: uv python install 3.14
+      - run: uv python pin 3.14
+      - name: Expose the selected interpreter before changing home
+        shell: bash
+        run: >
+          uv run --no-project --python 3.14 python -c
+          "import pathlib, sys; print(pathlib.Path(sys.executable).parent)" >> "$GITHUB_PATH"
       - run: uv sync --locked --extra lexical-benchmark
       - run: uv run --locked --no-sync pytest tests/test_retrieval_v2_benchmark.py -q -k jieba
       # The explicit operator action, with its pinned tarballs and SRI hashes.
@@ -535,19 +518,19 @@ jobs:
         include:
           - os: ubuntu-24.04
             platform: linux
-            python: "3.10"
+            python: "3.14"
             node: "22.23.1"
             timeout: 15
           # The hosted Windows image runs this suite roughly three times slower
           # than Linux, and the correctness gate follows it inside the same job.
           - os: windows-2025
             platform: windows
-            python: "3.10"
+            python: "3.14"
             node: "22.23.1"
             timeout: 40
           - os: macos-15
             platform: macos
-            python: "3.10"
+            python: "3.14"
             node: "22.23.1"
             timeout: 25
     runs-on: ${{ matrix.os }}

@@ -1,7 +1,7 @@
 # LLM Wiki
 
 [![Tests](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml/badge.svg)](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
+[![Python](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](CHANGELOG.md)
 
@@ -54,7 +54,7 @@ A day at work, as the system sees it:
 
 ### Prerequisites
 
-- Python 3.10+ and git
+- Python 3.14 and git. The installer selects this Python series explicitly; `uv python install 3.14` provisions it.
 - [uv](https://docs.astral.sh/uv/) 0.12.3 exactly — both installers refuse any other version
 - An agent you already use: Claude Code, Codex or OpenCode
 - Node 22 only if you want precise TypeScript or Python navigation (see below)

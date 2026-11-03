@@ -7,7 +7,7 @@ from __future__ import annotations
 import shutil
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -76,7 +76,7 @@ def _compile_every_part(root: Path, state_root: Path, daily: Path) -> int:
 def _archive(root: Path, state_root: Path, daily_id: str):
     from archive_daily import DailyArchiver
 
-    clock = lambda: datetime(2026, 7, 14, 12, tzinfo=timezone.utc)  # noqa: E731
+    clock = lambda: datetime(2026, 7, 14, 12, tzinfo=UTC)  # noqa: E731
     return DailyArchiver(root, state_root, clock=clock).archive(daily_id)
 
 

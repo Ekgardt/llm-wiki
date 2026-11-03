@@ -9,7 +9,7 @@ corrupt` on every later call, for good.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import markdown_transaction
@@ -40,7 +40,7 @@ def test_the_header_is_written_again_after_the_file_was_rotated_away(
     (root / "knowledge/daily").mkdir(parents=True)
     coordinator = MarkdownCoordinator(root, tmp_path / "state")
     first = _append(coordinator)
-    pruned = coordinator.prune(now=datetime.now(timezone.utc) + timedelta(days=3))
+    pruned = coordinator.prune(now=datetime.now(UTC) + timedelta(days=3))
     (root / _LOG).unlink()
 
     second = _append(coordinator)
@@ -66,7 +66,7 @@ def test_pruning_undo_images_does_not_repeat_an_append_that_is_still_present(tmp
     first = _append_bytes(coordinator, "accepted-event", b"aaa")
     _append_bytes(coordinator, "later-event", b"\nlater entry\n")
     expected = (root / _LOG).read_bytes()
-    assert coordinator.prune(now=datetime.now(timezone.utc) + timedelta(days=3)) == 2
+    assert coordinator.prune(now=datetime.now(UTC) + timedelta(days=3)) == 2
 
     repeated = _append_bytes(coordinator, "accepted-event", b"aaa")
 
@@ -79,7 +79,7 @@ def test_a_pruned_create_is_not_repeated_while_its_original_file_remains(tmp_pat
     (root / "knowledge/daily").mkdir(parents=True)
     coordinator = MarkdownCoordinator(root, tmp_path / "state")
     first = _append(coordinator)
-    coordinator.prune(now=datetime.now(timezone.utc) + timedelta(days=3))
+    coordinator.prune(now=datetime.now(UTC) + timedelta(days=3))
 
     repeated = _append(coordinator)
 
@@ -93,7 +93,7 @@ def test_equal_text_from_distinct_operations_is_not_suppressed(tmp_path):
     coordinator = MarkdownCoordinator(root, tmp_path / "state")
     first = _append_bytes(coordinator, "first-event", b"same event text\n")
     second = _append_bytes(coordinator, "second-event", b"same event text\n")
-    coordinator.prune(now=datetime.now(timezone.utc) + timedelta(days=3))
+    coordinator.prune(now=datetime.now(UTC) + timedelta(days=3))
 
     assert _append_bytes(coordinator, "first-event", b"same event text\n").id == first.id
     assert _append_bytes(coordinator, "second-event", b"same event text\n").id == second.id
@@ -107,7 +107,7 @@ def test_pruned_append_does_not_duplicate_text_when_prefix_evidence_conflicts(tm
     target.write_bytes(b"original prefix\n")
     coordinator = MarkdownCoordinator(root, tmp_path / "state")
     _append_bytes(coordinator, "accepted-event", b"event text\n")
-    coordinator.prune(now=datetime.now(timezone.utc) + timedelta(days=3))
+    coordinator.prune(now=datetime.now(UTC) + timedelta(days=3))
     changed = b"changed prefix\nevent text\n"
     target.write_bytes(changed)
 

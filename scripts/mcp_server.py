@@ -453,7 +453,7 @@ def _busy_envelope_text() -> str:
 def _refused_envelope_text(error: str, warning: str) -> str:
     envelope = {
         "schema_version": "1.0",
-        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "generated_at": dt.datetime.now(dt.UTC).isoformat(),
         "index_timestamp": None,
         "source_commit": None,
         "freshness": "unknown",
@@ -524,7 +524,7 @@ def _tool_timeout_envelope_text(name: str, arguments: object) -> str:
     warning = "navigation_timeout"
     envelope = {
         "schema_version": "1.0",
-        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "generated_at": dt.datetime.now(dt.UTC).isoformat(),
         "index_timestamp": None,
         "source_commit": None,
         "freshness": "unknown",
@@ -1325,7 +1325,7 @@ def _closed_daily_files(root: Path) -> list[Path]:
 
 def _open_days() -> set[str]:
     """Today, locally and in UTC: a capture may name its day in either."""
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
     return {now.date().isoformat(), now.astimezone().date().isoformat()}
 
 
@@ -1493,7 +1493,7 @@ def _fitting_answer(answer, text_tokens: int, token_budget: int) -> dict | None:
 
 
 def _utc_now_seconds() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    return dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
 
 
 def _slug_exceeds_bound(slug) -> bool:
@@ -5647,7 +5647,7 @@ def _index_timestamp(name: str, data) -> str | None:
     built = _generation_built_ns(_answer_generation(name, data))
     if built is None:
         return None
-    return dt.datetime.fromtimestamp(built / 1e9, tz=dt.timezone.utc).isoformat(timespec="seconds")
+    return dt.datetime.fromtimestamp(built / 1e9, tz=dt.UTC).isoformat(timespec="seconds")
 
 
 def _context_components(data) -> dict:

@@ -35,7 +35,7 @@ import os
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -208,7 +208,7 @@ def take_snapshot(vault: Path | None = None, root: Path | None = None) -> dict:
     _require_separate_paths(vault or ROOT, source, destination_root)
     _initialised(destination_root)
     _mirrored(source, destination_root / SNAPSHOT_SUBTREE)
-    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    stamp = datetime.now(UTC).isoformat(timespec="seconds")
     commit = _committed(destination_root, f"snapshot {stamp}")
     _mark_checked(destination_root, stamp)
     return {"status": "ok", "commit": commit}

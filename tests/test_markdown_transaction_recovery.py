@@ -9,7 +9,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import markdown_transaction
@@ -453,7 +453,7 @@ def test_dead_preparing_never_owns_ambiguous_matching_after_bytes(
     target = vault / "knowledge/projects/demo/journal.md"
     if before is not None:
         target.write_bytes(before)
-    expires = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat().replace(
+    expires = (datetime.now(UTC) + timedelta(minutes=1)).isoformat().replace(
         "+00:00", "Z"
     )
     MarkdownCoordinator(vault, state_root)
@@ -514,7 +514,7 @@ c.prepare([change], operation_id=f'ambiguous:{kind}', preconditions={
 def test_dead_preparing_matching_after_rolls_forward_with_valid_precondition(
     vault: Path, state_root: Path
 ):
-    expires = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat().replace(
+    expires = (datetime.now(UTC) + timedelta(minutes=1)).isoformat().replace(
         "+00:00", "Z"
     )
     MarkdownCoordinator(vault, state_root)
@@ -825,7 +825,7 @@ def test_invalid_preparing_is_discarded_without_target_writes(
     vault: Path, state_root: Path
 ):
     coordinator = MarkdownCoordinator(vault, state_root)
-    timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
         database.execute(
             'INSERT INTO "transaction" '
@@ -843,7 +843,7 @@ def test_invalid_preparing_is_discarded_without_target_writes(
 
 def test_recovery_does_not_discard_a_live_preparer(vault: Path, state_root: Path):
     coordinator = MarkdownCoordinator(vault, state_root)
-    timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
         database.execute(
             'INSERT INTO "transaction" '
@@ -1062,7 +1062,7 @@ def test_project_lease_precondition_is_persisted_and_rechecked_before_apply(
     vault: Path, state_root: Path
 ):
     coordinator = MarkdownCoordinator(vault, state_root)
-    expires = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat().replace(
+    expires = (datetime.now(UTC) + timedelta(minutes=1)).isoformat().replace(
         "+00:00", "Z"
     )
     with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
@@ -1100,7 +1100,7 @@ def test_stale_prepared_transaction_does_not_rollback_external_after_hash_bytes(
     vault: Path, state_root: Path
 ):
     coordinator = MarkdownCoordinator(vault, state_root)
-    expires = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat().replace(
+    expires = (datetime.now(UTC) + timedelta(minutes=1)).isoformat().replace(
         "+00:00", "Z"
     )
     with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
@@ -1205,7 +1205,7 @@ def test_takeover_during_partial_checkpoint_is_blocked_until_commit(
     journal.write_bytes(b"old-event\n")
     projection = vault / "knowledge/index.md"
     coordinator = MarkdownCoordinator(vault, state_root)
-    expires = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat().replace(
+    expires = (datetime.now(UTC) + timedelta(minutes=1)).isoformat().replace(
         "+00:00", "Z"
     )
     with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
@@ -1267,7 +1267,7 @@ def test_project_takeover_is_locked_out_from_final_check_through_commit(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
     coordinator = MarkdownCoordinator(vault, state_root)
-    expires = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat().replace(
+    expires = (datetime.now(UTC) + timedelta(minutes=1)).isoformat().replace(
         "+00:00", "Z"
     )
     with sqlite3.connect(coordinator.database_path) as database:
@@ -1324,7 +1324,7 @@ def test_new_project_epoch_wins_before_final_fence_and_old_touches_nothing(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
     coordinator = MarkdownCoordinator(vault, state_root)
-    expires = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat().replace(
+    expires = (datetime.now(UTC) + timedelta(minutes=1)).isoformat().replace(
         "+00:00", "Z"
     )
     with sqlite3.connect(coordinator.database_path) as database:
@@ -1383,7 +1383,7 @@ def test_project_lease_expiry_during_apply_restores_all_targets(
     coordinator = MarkdownCoordinator(vault, state_root)
     journal = vault / "knowledge/projects/demo/journal.md"
     journal.write_bytes(b"old-event\n")
-    expires = (datetime.now(timezone.utc) + timedelta(seconds=0.5)).isoformat().replace(
+    expires = (datetime.now(UTC) + timedelta(seconds=0.5)).isoformat().replace(
         "+00:00", "Z"
     )
     with sqlite3.connect(coordinator.database_path) as database:
@@ -1437,7 +1437,7 @@ def test_partial_checkpoint_rollback_leaves_unknown_journal_bytes_untouched(
     journal = vault / "knowledge/projects/demo/journal.md"
     journal.write_bytes(b"old-event\n")
     coordinator = MarkdownCoordinator(vault, state_root)
-    expires = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat().replace(
+    expires = (datetime.now(UTC) + timedelta(minutes=1)).isoformat().replace(
         "+00:00", "Z"
     )
     with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
@@ -1921,7 +1921,7 @@ def test_undo_rejects_transaction_outside_thirty_day_window(
         operation_id="expired-undo",
     )
     coordinator.apply(original.id)
-    old = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat().replace(
+    old = (datetime.now(UTC) - timedelta(days=31)).isoformat().replace(
         "+00:00", "Z"
     )
     with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
@@ -1944,7 +1944,7 @@ def test_prune_retains_artifacts_for_the_window_then_removes_them(
         operation_id="prune-old",
     )
     coordinator.apply(transaction.id)
-    created = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    created = datetime(2026, 1, 1, tzinfo=UTC)
     with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
         database.execute(
             'UPDATE "transaction" SET updated_at = ? WHERE id = ?',
@@ -1968,7 +1968,7 @@ def test_prune_rolls_back_marker_when_cancelled_at_sql_commit(
         operation_id="prune-precommit-fence",
     )
     coordinator.apply(transaction.id)
-    old = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    old = datetime(2020, 1, 1, tzinfo=UTC)
     with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
         database.execute(
             'UPDATE "transaction" SET updated_at = ? WHERE id = ?',
@@ -2004,7 +2004,7 @@ def test_prune_rolls_back_marker_when_cancelled_at_sql_commit(
 
     with pytest.raises(TimeoutError, match="deadline"):
         coordinator.prune(
-            now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            now=datetime(2026, 1, 1, tzinfo=UTC),
             deadline=time.monotonic() + 5,
             cancelled=cancelled,
         )
@@ -2046,7 +2046,7 @@ def test_prune_honors_supplied_retention_longer_than_thirty_days(
         operation_id="prune-sixty",
     )
     coordinator.apply(transaction.id)
-    created = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    created = datetime(2026, 1, 1, tzinfo=UTC)
     with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
         database.execute(
             'UPDATE "transaction" SET updated_at = ? WHERE id = ?',
@@ -2070,7 +2070,7 @@ def test_prune_never_removes_protected_states(
         operation_id=f"protected:{state}",
     )
     _set_state(state_root, transaction.id, state)
-    old = datetime(2020, 1, 1, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+    old = datetime(2020, 1, 1, tzinfo=UTC).isoformat().replace("+00:00", "Z")
     with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
         database.execute(
             'UPDATE "transaction" SET updated_at = ? WHERE id = ?',
@@ -2078,7 +2078,7 @@ def test_prune_never_removes_protected_states(
         )
         database.commit()
 
-    assert coordinator.prune(now=datetime(2026, 1, 1, tzinfo=timezone.utc)) == 0
+    assert coordinator.prune(now=datetime(2026, 1, 1, tzinfo=UTC)) == 0
     assert (state_root / "run/transactions" / transaction.id).is_dir()
 
 

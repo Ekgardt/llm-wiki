@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import codex_turn_end as turns
 import memory_state
@@ -9,7 +9,7 @@ from tests.adopted_capture_vault import host_transcript, intent_records
 from tests.test_a_codex_turn_is_not_a_session import _stop
 from tests.test_a_codex_turn_is_not_a_session import codex as codex
 
-NOW = datetime(2026, 10, 3, 12, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 3, 12, tzinfo=UTC)
 
 
 def _pending(number):

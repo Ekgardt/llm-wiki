@@ -6,7 +6,7 @@ import json
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any
 
@@ -96,7 +96,7 @@ def _validate_checkpoint_signals(payload: Mapping[str, Any]) -> None:
 def _utc(value: datetime) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None:
         raise ValueError("event timestamps must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def _timestamp(value: datetime) -> str:
@@ -423,7 +423,7 @@ def build_event_envelope(
     source_fields = _require_source_strings(
         (agent, session, project, worktree, severity, parent_event_id, source_event_id)
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     occurred = _utc(occurred_at or now)
     captured = _utc(captured_at or now)
     redact_value = redact or (lambda value: value)

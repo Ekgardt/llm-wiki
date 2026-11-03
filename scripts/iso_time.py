@@ -8,7 +8,7 @@ docs/research/2026-09-26-one-iso-reading-for-every-python.md
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 _FRACTION = re.compile(r"(T\d{2}:\d{2}:\d{2})\.(\d+)")
 
@@ -24,7 +24,7 @@ def parse_instant(text: str) -> datetime:
     """An aware instant; a value with no zone is read as UTC. ValueError when not ISO."""
     parsed = datetime.fromisoformat(normalized_iso(text))
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
+        return parsed.replace(tzinfo=UTC)
     return parsed
 
 
@@ -35,7 +35,7 @@ def utc_text(value: datetime) -> str:
     second, and `Z` sorts after `.`, so `…:00Z` read as later than `…:00.5Z`.
     Research: docs/research/2026-09-26-every-stored-instant-has-one-width.md
     """
-    return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def local_now() -> datetime:
@@ -51,7 +51,7 @@ def local_now() -> datetime:
 def block_instant(day: str, block: str) -> str:
     """The UTC instant a daily block's local `HH:MM:SS` names, as `…Z` text."""
     local = datetime.fromisoformat(f"{day}T{block}").astimezone()
-    return local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return local.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # Real zone offsets: whole quarter hours from −12:00 to +14:00 (the IANA range).

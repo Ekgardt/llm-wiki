@@ -5,7 +5,7 @@ See `docs/research/2026-09-17-the-daily-excerpt-shows-the-entry-not-its-label.md
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -16,7 +16,7 @@ import flush_memory  # noqa: E402
 import session_start_context  # noqa: E402
 
 BODY = "**Decisions made**\n- chose the queue over the file\n- kept the old reader"
-CHOSEN_AT = datetime(2026, 9, 17, 10, 0, 0, tzinfo=timezone.utc)
+CHOSEN_AT = datetime(2026, 9, 17, 10, 0, 0, tzinfo=UTC)
 
 
 def _worker_block(event: str) -> list[str]:

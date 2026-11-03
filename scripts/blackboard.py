@@ -44,7 +44,7 @@ import time
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -322,10 +322,10 @@ def _require_ttl(ttl_seconds: int) -> int:
 
 
 def _utc_now(value: datetime | None) -> datetime:
-    current = datetime.now(timezone.utc) if value is None else value
+    current = datetime.now(UTC) if value is None else value
     if not isinstance(current, datetime) or current.tzinfo is None:
         raise ValueError("blackboard time must be timezone-aware")
-    return current.astimezone(timezone.utc)
+    return current.astimezone(UTC)
 
 
 def _timestamp(value: datetime) -> str:
@@ -335,7 +335,7 @@ def _timestamp(value: datetime) -> str:
 def _parse_timestamp(value: object) -> datetime:
     if not isinstance(value, str):
         raise ValueError("blackboard timestamp is invalid")
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
 
 
 def _claim_rows(

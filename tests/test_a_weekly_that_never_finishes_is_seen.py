@@ -4,11 +4,11 @@ docs/research/2026-09-27-a-weekly-that-never-finishes-is-seen.md
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import doctor
 
-NOW = datetime(2026, 9, 27, 12, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 27, 12, tzinfo=UTC)
 
 
 def _stamp(delta: timedelta) -> str:

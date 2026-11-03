@@ -1,6 +1,6 @@
 """Unattended checkpoint drain advances a quiet project's elapsed debounce."""
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -8,7 +8,7 @@ import integration_adapter as adapter
 import memory_state
 from project_journal import CheckpointReducer, ProjectStore
 
-AT = datetime(2026, 9, 29, 10, 3, 34, tzinfo=timezone.utc)
+AT = datetime(2026, 9, 29, 10, 3, 34, tzinfo=UTC)
 
 
 class _MaintenanceClock(datetime):

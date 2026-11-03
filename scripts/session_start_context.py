@@ -24,7 +24,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -126,7 +126,7 @@ def _nightly_attempted_today(state: dict, today: str) -> bool:
 def _claim_nightly_catchup(today: str | None = None, now: str | None = None) -> bool:
     """Atomically reserve today's catchup when no nightly attempt was recorded."""
     today = _today_iso(today)
-    claimed_at = _parse_iso_safe(now) or datetime.now(timezone.utc)
+    claimed_at = _parse_iso_safe(now) or datetime.now(UTC)
     claimed = False
 
     def _mutate(state: dict) -> None:
@@ -533,8 +533,8 @@ def _parse_iso_safe(raw: str | None) -> datetime | None:
     except (ValueError, TypeError):
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _compile_backlog_days(state: dict) -> int | None:
@@ -548,7 +548,7 @@ def _compile_backlog_days(state: dict) -> int | None:
     last = _parse_iso_safe(state.get("last_compile_at"))
     if last is None:
         return None
-    return max(0, (datetime.now(timezone.utc) - last).days)
+    return max(0, (datetime.now(UTC) - last).days)
 
 
 def _state_map(state: dict, key: str) -> dict:
@@ -851,7 +851,7 @@ def _stored_health_report() -> tuple[dict, str] | None:
             (STATE_ROOT / "logs" / HEALTH_REPORT_NAME).read_text(encoding="utf-8")
         )
         written = datetime.fromisoformat(str(payload["written_at"]))
-        age = (datetime.now(timezone.utc) - written).total_seconds()
+        age = (datetime.now(UTC) - written).total_seconds()
     except (OSError, ValueError, KeyError, TypeError):
         return None
     report = payload.get("report")

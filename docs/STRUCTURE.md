@@ -831,7 +831,7 @@ synchronization, session-manager capacity, the normalized navigation facade,
 deterministic rendering, MCP routing, doctor diagnostics, and qualification gates.
 
 The implemented Python/Pyright slice keeps the existing structural Evidence Graph
-and adds a Python 3.10-compatible, read-only LSP runtime owned by LLM Wiki. It serves
+and adds a Python 3.14 read-only LSP runtime owned by LLM Wiki. It serves
 precise live navigation through modes of the existing 12 task-shaped MCP tools. It
 adds no Serena runtime dependency, Rust rewrite, second graph, catalog, active
 pointer, runtime root, persistent daemon, semantic result cache, or MCP tool.
@@ -2114,3 +2114,14 @@ connections. File opening, migrations and transaction ownership remain unchanged
 The [schema text owner](modules/sqlite-schema-text.md) preserves SQL literal values,
 quoted identities and comments while normalizing outside-token ASCII formatting.
 Queue and coordinator schema validators share it; schema versions remain unchanged.
+
+### Unified Python runtime
+
+The supported runtime is Python 3.14.x for installation, development and CI, as
+approved on 2026-11-03. Metadata excludes 3.15 until required binary dependencies
+provide compatible builds; reassess that boundary when upstream support arrives.
+A project interpreter pin selects 3.14, and installers select that series for
+bootstrap and environment creation. Linux, Windows and macOS remain tested; the
+current native macOS lane is ARM64. Intel macOS full dependencies are not qualified:
+both the previous and updated ONNX Runtime locks lack its binary distribution.
+See [the approved plan](research/2026-11-03-python314-unified-runtime-proposal.md).

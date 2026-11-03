@@ -15,8 +15,8 @@ state owner, not by line count or a prescribed module quota. Keep public command
 formats, schemas, environment contracts, runtime roots, ownership fences and
 Markdown/Git authority. Do not add services, a second coordinator, generic buses
 or interface layers merely to obtain smaller files. Existing independent files
-can be qualified in place. Python >=3.10 remains a product requirement regardless
-of upstream support status; dependency or platform changes need separate evidence.
+can be qualified in place. Python 3.14 is the approved runtime series (2026-11-03); dependency and platform
+changes still need evidence and explicit authorization.
 
 Every implementation has one owner. Retain public aliases only for demonstrated
 consumers and serialization/patch compatibility, state their removal condition,

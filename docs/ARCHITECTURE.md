@@ -85,7 +85,7 @@ The slug system (5-step collision resolution) lets a single vault track unlimite
 ## Read-only precise navigation
 
 The implemented slice keeps structural discovery in the existing Evidence
-Graph and adds an owned, Python 3.10-compatible LSP path through four pinned managed
+Graph and adds an owned, Python 3.14-compatible LSP path through four pinned managed
 language servers: Pyright 1.1.411 for Python, `typescript-language-server` 6.0.0
 (tsserver 5.9.3) for TypeScript and JavaScript, gopls v0.23.0 for Go and
 rust-analyzer 1.98.1 for Rust. A query is routed to one of them by file suffix; a

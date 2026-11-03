@@ -23,7 +23,7 @@ import os
 import sys
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -57,7 +57,7 @@ QUEUE_ARCHIVE = ROOT / "knowledge" / "raw" / "queue-archive"
 def _queue_purge_command(script: Path) -> list[str]:
     from llm_wiki.reliability_defaults import DEFAULTS
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     before = now - timedelta(days=DEFAULTS.queue_result_retention_days)
     return [
         sys.executable,
@@ -257,7 +257,7 @@ def _build_tiers(log: StepLog) -> int:
 
 def record_weekly_result(failures: int, error: str | None = None) -> None:
     """The weekly's own terminal record; a failure never overwrites the nightly's."""
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
 
     def _mutate(state: dict) -> None:
         if not failures:
@@ -278,13 +278,13 @@ def record_weekly_result(failures: int, error: str | None = None) -> None:
 def record_weekly_start() -> None:
     """A weekly that starts says so: one killed before its record is then visible
     (audit 2026-09-27 B-15, docs/research/2026-09-27-a-weekly-that-never-finishes-is-seen.md)."""
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     update_state(lambda state: state.__setitem__("last_weekly_started_at", now))
 
 
 def record_weekly_skip(reason: str) -> None:
     """A weekly that did not run says so, so a stale weekly names why."""
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
 
     def _mutate(state: dict) -> None:
         state["last_weekly_skip"] = {"skipped_at": now, "reason": reason}

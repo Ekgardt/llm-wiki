@@ -23,7 +23,7 @@ import argparse
 import io
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Force utf-8 on stdout so the en-dash / em-dash don't mojibake on Windows cp1252.
@@ -104,7 +104,7 @@ def main() -> int:
         "wiki_pages": count,
         "search_mode": mode,
         "index": index,
-        "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "checked_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
     if args.json:
         print(json.dumps(payload, indent=2))

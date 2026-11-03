@@ -3,12 +3,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import tomllib
 from pathlib import Path
-
-try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib
 
 
 def _pair(record: dict) -> tuple[str, str]:

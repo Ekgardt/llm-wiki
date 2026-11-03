@@ -14,7 +14,7 @@ import uuid
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -193,7 +193,7 @@ class DailyArchiver:
         self.coordinator = active_or_legacy_coordinator(
             self.vault, self.state_root, deadline=deadline
         )
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.killpoint = killpoint or (lambda _point: None)
         self.queue = queue or active_or_legacy_memory_queue(
             self.vault, self.state_root, deadline=deadline
@@ -231,7 +231,7 @@ class DailyArchiver:
 
     def _retention_reasons(self, daily_date: date, hot_days: int) -> list[str]:
         """Today's log and anything inside the hot window stay where they are."""
-        today = self.clock().astimezone(timezone.utc).date()
+        today = self.clock().astimezone(UTC).date()
         reasons: list[str] = []
         if daily_date == today:
             reasons.append("today")
@@ -519,7 +519,7 @@ class DailyArchiver:
     def _transaction_within_retention(
         self, transaction: object, transaction_retention_days: int
     ) -> bool:
-        cutoff = self.clock().astimezone(timezone.utc) - timedelta(
+        cutoff = self.clock().astimezone(UTC) - timedelta(
             days=transaction_retention_days
         )
         try:
@@ -1133,7 +1133,7 @@ class DailyArchiver:
         *,
         hot_days: int,
     ) -> tuple[Path, Path]:
-        now = self.clock().astimezone(timezone.utc)
+        now = self.clock().astimezone(UTC)
         month = self._ensure_month_directory(daily_id)
         nonce = uuid.uuid4().hex
         stamp = now.strftime("%Y%m%dT%H%M%S%fZ")
@@ -1713,7 +1713,7 @@ class DailyArchiver:
         rows = self._transaction_rows(source_name)
         if rows is None:
             return True
-        cutoff = self.clock().astimezone(timezone.utc) - timedelta(
+        cutoff = self.clock().astimezone(UTC) - timedelta(
             days=transaction_retention_days
         )
         return any(

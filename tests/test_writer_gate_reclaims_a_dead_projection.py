@@ -15,7 +15,7 @@ import contextlib
 import os
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -52,7 +52,7 @@ def _dead_identity() -> ownership.ProcessIdentity:
 
 
 def _expire(database_path: Path, table: str) -> None:
-    when = datetime.now(timezone.utc) - timedelta(seconds=1)
+    when = datetime.now(UTC) - timedelta(seconds=1)
     stamp = when.isoformat().replace("+00:00", "Z")
     with contextlib.closing(sqlite3.connect(database_path)) as database:
         database.execute(f"UPDATE {table} SET expires_at=?", (stamp,))

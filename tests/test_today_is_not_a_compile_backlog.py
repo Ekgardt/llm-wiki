@@ -24,7 +24,7 @@ def _vault(tmp_path: Path, monkeypatch, *days: str) -> None:
 
 
 def test_todays_log_is_not_counted(tmp_path: Path, monkeypatch) -> None:
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
     _vault(tmp_path, monkeypatch, now.date().isoformat(), now.astimezone().date().isoformat())
 
     assert mcp_server._vault_status()["compile_backlog"] == 0

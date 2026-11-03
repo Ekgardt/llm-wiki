@@ -15,7 +15,7 @@ so.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -24,7 +24,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 import doctor  # noqa: E402
 
-NOW = datetime(2026, 8, 29, 21, 10, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 29, 21, 10, tzinfo=UTC)
 
 
 def _trail(state_root: Path, lines: list[str]) -> Path:

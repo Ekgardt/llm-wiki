@@ -9,6 +9,7 @@ from __future__ import annotations
 import sqlite3
 import sys
 import threading
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ import pytest
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
+
 
 import flush_memory  # noqa: E402
 import operational_ownership  # noqa: E402
@@ -110,9 +112,9 @@ def test_a_tier_keeps_its_meaning_through_punctuation_and_an_explanation():
 def _advance_at_write_admission(monkeypatch, module, seconds=31):
     """Model time spent opening/locking SQLite without a scheduler-dependent sleep."""
     from contextlib import contextmanager
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    clock = [datetime.now(timezone.utc)]
+    clock = [datetime.now(UTC)]
     original = module.begin_immediate
 
     class Clock(datetime):

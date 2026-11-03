@@ -16,7 +16,7 @@ from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import closing, contextmanager
 from dataclasses import InitVar, dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 from bounded_io import IO_CHUNK_BYTES
@@ -1817,7 +1817,7 @@ class GenerationCatalog:
         self.generations_path.mkdir(parents=True, exist_ok=True)
         fsync_directory(self.catalog_path.parent)
         fsync_directory(self.catalog_path.parent.parent)
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._monotonic = monotonic or time.monotonic
         self._candidate_issuer = object()
         # One validation per generation per process, re-checked by its cheap
@@ -1863,7 +1863,7 @@ class GenerationCatalog:
         )
         check_stop()
         catalog.generations_path = catalog.catalog_path.parent / "generations"
-        catalog._clock = clock or (lambda: datetime.now(timezone.utc))
+        catalog._clock = clock or (lambda: datetime.now(UTC))
         catalog._candidate_issuer = object()
         catalog._validated = {}
         catalog._held_code = {}

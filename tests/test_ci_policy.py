@@ -114,13 +114,6 @@ def test_full_suite_matrix_contains_every_supported_python_endpoint() -> None:
     assert job["strategy"]["fail-fast"] is False
     assert job["strategy"]["matrix"]["include"] == [
         {
-            "target": "linux-py3.10",
-            "os": "ubuntu-24.04",
-            "python": "3.10",
-            "timeout": 20,
-            "class": "linux_full",
-        },
-        {
             "target": "linux-py3.14",
             "os": "ubuntu-24.04",
             "python": "3.14",
@@ -131,46 +124,11 @@ def test_full_suite_matrix_contains_every_supported_python_endpoint() -> None:
         # took 45 on a slow runner, which the cap turned into a cancelled job
         # nobody can re-run — docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md.
         {
-            "target": "windows-py3.10",
-            "os": "windows-2025",
-            "python": "3.10",
-            "timeout": 60,
-            "class": "windows_full",
-        },
-        {
-            "target": "windows-py3.11",
-            "os": "windows-2025",
-            "python": "3.11",
-            "timeout": 60,
-            "class": "windows_full",
-        },
-        {
-            "target": "windows-py3.12",
-            "os": "windows-2025",
-            "python": "3.12",
-            "timeout": 60,
-            "class": "windows_full",
-        },
-        {
-            "target": "windows-py3.13",
-            "os": "windows-2025",
-            "python": "3.13",
-            "timeout": 60,
-            "class": "windows_full",
-        },
-        {
             "target": "windows-py3.14",
             "os": "windows-2025",
             "python": "3.14",
             "timeout": 60,
             "class": "windows_full",
-        },
-        {
-            "target": "macos-py3.10",
-            "os": "macos-15",
-            "python": "3.10",
-            "timeout": 20,
-            "class": "macos_full",
         },
         {
             "target": "macos-py3.14",
@@ -229,7 +187,6 @@ def _assert_clean_production(job: dict[str, object]) -> None:
     include = job["strategy"]["matrix"]["include"]
     assert {entry["os"] for entry in include} == RUNNERS
     assert _linux_entries(include) == [
-        {"os": "ubuntu-24.04", "python": "3.10", "label": "py3.10"},
         {"os": "ubuntu-24.04", "python": "3.14", "label": "py3.14"},
     ]
     assert len({entry["label"] for entry in include}) == len(include)
@@ -239,7 +196,7 @@ def _assert_clean_production(job: dict[str, object]) -> None:
 def _assert_clean_profile(job: dict[str, object], extra: str | None) -> None:
     assert job["runs-on"] == "ubuntu-24.04"
     assert job["timeout-minutes"] == 20
-    assert job["strategy"]["matrix"]["python"] == ["3.10", "3.14"]
+    assert job["strategy"]["matrix"]["python"] == ["3.14"]
     commands = _commands(job)
     assert "uv sync --locked --no-default-groups" in commands
     assert extra is None or f"--extra {extra}" in commands
@@ -427,8 +384,8 @@ def test_local_builds_are_audited_without_removing_the_pypi_pass() -> None:
 def test_end_to_end_installer_pins_python_before_changing_home():
     steps = _workflow()['jobs']['install-end-to-end']['steps']
     commands = [step.get('run', '') for step in steps]
-    install = commands.index('uv python install 3.13')
-    pin = commands.index('uv python pin 3.13')
+    install = commands.index('uv python install 3.14')
+    pin = commands.index('uv python pin 3.14')
     home = next(index for index, step in enumerate(steps) if 'HOME' in step.get('env', {}))
     assert install < pin < home
 

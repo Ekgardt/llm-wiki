@@ -1,9 +1,9 @@
 # Safe Python parsing
 
 `scripts/python_parse.py` is qualified in place: one existing responsibility, no
-production source change, new runtime path or wrapper. The module imports only
+new runtime path or wrapper. The module imports only
 stdlib and is imported in a fresh process that refuses other product modules.
-Its public functions/types and existing limits retain their original behavior.
+Its public parse function and failure types retain their behavior.
 
 The packet owns its source, the tests named in the manifest, its own boundary and
 budget guards, shared measurement/import helpers, pytest bootstrap, required
@@ -17,10 +17,10 @@ or a claim that all product callers have been independently modularized.
 
 Source: ../research/2026-11-02-existing-leaf-contracts.md.
 
-`parse_python` returns the ordinary AST and preserves `PARSE_FAILURES`. On Python
-3.10 the existing operator-chain preflight prevents a stack-killing expression;
-flat literals remain parseable. Newer Python uses its parser's own guard. The
-3000-operator safety boundary and small-stack regression are preserved.
+`parse_python` returns the ordinary AST and preserves `PARSE_FAILURES`. The
+approved Python 3.14 runtime provides its own compiler depth guard. The obsolete
+3.10 operator-chain preflight and its constants are removed; small-stack and flat
+literal regression scenarios remain, exercising the real parser.
 
 ## Canonical ownership reference
 

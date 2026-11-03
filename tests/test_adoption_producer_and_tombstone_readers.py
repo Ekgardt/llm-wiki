@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import doctor
@@ -67,7 +67,7 @@ def _adopted(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def test_a_changed_producer_does_not_invalidate_an_adopted_vault(tmp_path):

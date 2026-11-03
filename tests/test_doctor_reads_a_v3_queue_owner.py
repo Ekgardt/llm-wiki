@@ -10,7 +10,7 @@ the smoke carried doctor's stderr). A real worker lease stands in here.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import doctor
@@ -24,7 +24,7 @@ def test_a_live_v3_worker_is_counted_and_the_check_reports(adopted: tuple[Path, 
     queue = active_memory_queue(root, state_root)
 
     with queue.queue_owner(role="queue-worker", scope="worker:capture-recovery"):
-        check = doctor._queue_check(state_root, datetime.now(timezone.utc), time.monotonic() + 60)
+        check = doctor._queue_check(state_root, datetime.now(UTC), time.monotonic() + 60)
 
     assert (check["id"], check["details"]["live_workers"]) == ("queue", 1)
 

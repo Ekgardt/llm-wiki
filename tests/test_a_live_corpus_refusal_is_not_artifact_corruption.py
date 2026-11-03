@@ -2,7 +2,7 @@
 import hashlib
 import os
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -42,7 +42,7 @@ def test_live_ancestor_change_does_not_claim_artifact_corruption(tmp_path, monke
 
     monkeypatch.setattr(corpus_snapshot, "_open_sealed_root", race)
     result = doctor._generation_check(
-        root, state, datetime.now(timezone.utc), deadline=time.monotonic() + LONG_TIMEOUT
+        root, state, datetime.now(UTC), deadline=time.monotonic() + LONG_TIMEOUT
     )
     assert changed
     assert result["status"] == "error"
@@ -77,7 +77,7 @@ def test_unrelated_sibling_creation_keeps_the_sealed_corpus_valid(tmp_path, monk
 
     monkeypatch.setattr(corpus_snapshot, "_open_sealed_root", race)
     result = doctor._generation_check(
-        root, state, datetime.now(timezone.utc), deadline=time.monotonic() + LONG_TIMEOUT
+        root, state, datetime.now(UTC), deadline=time.monotonic() + LONG_TIMEOUT
     )
     assert changed
     assert result["status"] == "ok"
@@ -98,7 +98,7 @@ def test_invalid_live_settings_still_refuse_without_mislabeling_artifacts(tmp_pa
 
     monkeypatch.setattr(corpus_snapshot, "collect_corpus", unsupported_source)
     result = doctor._generation_check(
-        root, state, datetime.now(timezone.utc), deadline=time.monotonic() + LONG_TIMEOUT
+        root, state, datetime.now(UTC), deadline=time.monotonic() + LONG_TIMEOUT
     )
     assert result["status"] == "error"
     assert result["details"]["live_corpus_state"] == "unverified"
@@ -112,7 +112,7 @@ def test_damaged_immutable_manifest_keeps_corruption_handling(tmp_path):
     root, state, _built_result, directory = _built(tmp_path)
     (directory / "manifest.json").write_bytes(b"not a valid manifest")
     result = doctor._generation_check(
-        root, state, datetime.now(timezone.utc), deadline=time.monotonic() + LONG_TIMEOUT
+        root, state, datetime.now(UTC), deadline=time.monotonic() + LONG_TIMEOUT
     )
     assert result["status"] == "error"
     assert "artifacts are invalid" in result["message"]

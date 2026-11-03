@@ -7,7 +7,7 @@ import subprocess
 import sys
 from argparse import Namespace
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import daily_log_append
@@ -23,7 +23,7 @@ from tests.adopted_capture_vault import adopted_capture_vault, host_transcript, 
 from tests.slow_machine import LONG_TIMEOUT
 from tests.test_capture_terminal import _FakeNoContentProvider, _TimedCaptureProcessor
 
-OCCURRED = datetime(2026, 10, 2, 23, 59, 58, tzinfo=timezone.utc)
+OCCURRED = datetime(2026, 10, 2, 23, 59, 58, tzinfo=UTC)
 
 
 def _event(project, transcript=None):
@@ -47,7 +47,7 @@ def _work(state, monkeypatch):
     coordinator = active_markdown_coordinator(adapter.ROOT, state)
     provider = _FakeNoContentProvider()
     processor = _TimedCaptureProcessor(
-        queue, coordinator, provider, datetime(2026, 10, 3, 12, tzinfo=timezone.utc)
+        queue, coordinator, provider, datetime(2026, 10, 3, 12, tzinfo=UTC)
     )
     result = flush_memory.run_capture_worker_once(queue, coordinator, process_missing=processor)
     return queue, result, provider

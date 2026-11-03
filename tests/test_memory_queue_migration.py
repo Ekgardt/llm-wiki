@@ -6,7 +6,7 @@ import json
 import sqlite3
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -264,7 +264,7 @@ def _statements_starting(prefix: str, statements: list[str]) -> list[str]:
 def test_purge_requires_cutoff_and_export_then_verifies_before_deleting(
     tmp_path: Path,
 ) -> None:
-    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 14, tzinfo=UTC)
     queue = MemoryQueue(tmp_path, clock=lambda: now)
     task_id = queue.enqueue("query", 1, {"prompt": "done"})
     lease = queue.claim("worker")
@@ -304,7 +304,7 @@ def test_purge_requires_cutoff_and_export_then_verifies_before_deleting(
 def test_purge_expired_deadline_creates_no_export_and_deletes_nothing(
     tmp_path: Path,
 ) -> None:
-    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 14, tzinfo=UTC)
     queue = MemoryQueue(tmp_path, clock=lambda: now)
     task_id = queue.enqueue("query", 1, {})
     lease = queue.claim("worker")
@@ -334,7 +334,7 @@ def test_purge_rolls_back_when_deadline_expires_after_delete_before_commit(
 ) -> None:
     from contextlib import contextmanager
 
-    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 14, tzinfo=UTC)
     queue = MemoryQueue(tmp_path, clock=lambda: now)
     task_id = queue.enqueue("query", 1, {})
     lease = queue.claim("worker")
@@ -395,7 +395,7 @@ def test_purge_rolls_back_when_deadline_expires_after_delete_before_commit(
 def test_purge_build_failure_cleans_staging_and_retry_is_atomic(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 14, tzinfo=UTC)
     queue = MemoryQueue(tmp_path, clock=lambda: now)
     task_id = queue.enqueue("query", 1, {})
     lease = queue.claim("worker")
@@ -451,7 +451,7 @@ def test_purge_rejects_unsafe_existing_export_parent(
 
     with pytest.raises(memory_queue.QueueOperationError) as raised:
         queue.purge(
-            terminal_before=datetime.now(timezone.utc),
+            terminal_before=datetime.now(UTC),
             export_path=parent / "purge",
         )
 
@@ -459,7 +459,7 @@ def test_purge_rejects_unsafe_existing_export_parent(
 
 
 def test_default_retention_excludes_recent_terminal_and_all_dead(tmp_path: Path) -> None:
-    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 14, tzinfo=UTC)
     queue = MemoryQueue(tmp_path, clock=lambda: now)
     succeeded = queue.enqueue("query", 1, {})
     lease = queue.claim("worker")
@@ -507,7 +507,7 @@ def test_a_dead_task_is_retained_by_default_and_purged_only_when_asked(
     tmp_path: Path,
 ) -> None:
     """Attempts-exhausted work is evidence; retiring it is an explicit action."""
-    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 14, tzinfo=UTC)
     queue = MemoryQueue(tmp_path, clock=lambda: now)
     task_id = _dead_task(queue, now, "never finished")
     cutoff = now - timedelta(days=30)
@@ -533,7 +533,7 @@ def test_a_dead_task_is_retained_by_default_and_purged_only_when_asked(
 
 def test_a_purged_task_can_be_restored_from_its_verified_export(tmp_path: Path) -> None:
     """Deletion without a way back would lose the work, not just its record."""
-    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 14, tzinfo=UTC)
     queue = MemoryQueue(tmp_path, clock=lambda: now)
     task_id = _dead_task(queue, now, "restore me")
     export = tmp_path / "exports" / "restorable"
@@ -553,7 +553,7 @@ def test_a_purged_task_can_be_restored_from_its_verified_export(tmp_path: Path) 
 
 
 def test_a_tampered_export_restores_nothing(tmp_path: Path) -> None:
-    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 14, tzinfo=UTC)
     queue = MemoryQueue(tmp_path, clock=lambda: now)
     _dead_task(queue, now, "tampered")
     export = tmp_path / "exports" / "tampered"

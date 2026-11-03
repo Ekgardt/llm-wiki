@@ -28,7 +28,7 @@ Both run as integration checks and remain visible ownership obligations. They ar
 not replaced by the packet's fake child or silently counted as owned here.
 
 Run the owner packet together with those two original test files. Verify Python
-3.10 compatibility and actual subprocess behavior; Linux results do not qualify
+3.14 qualification and actual subprocess behavior; Linux results do not qualify
 native Windows/macOS. Boundaries, source hashes, moved AST checks and primary
 sources are recorded in ../research/2026-11-03-mcp-supervisor-owner-qualification.md.
 

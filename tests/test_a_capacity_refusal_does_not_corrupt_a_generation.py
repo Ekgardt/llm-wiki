@@ -3,7 +3,7 @@
 import hashlib
 import time
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -33,7 +33,7 @@ def test_capacity_refusal_keeps_a_valid_generation_explicitly_unverified(
         (root / "llm-wiki.toml").write_text(f"[corpus]\nmax_total_bytes = {total_bytes}\n")
 
     result = doctor._generation_check(
-        root, state, datetime.now(timezone.utc),
+        root, state, datetime.now(UTC),
         deadline=time.monotonic() + LONG_TIMEOUT, max_sources=max_sources,
     )
 
@@ -84,7 +84,7 @@ def test_ignored_entries_report_capacity_not_corrupt_sources(tmp_path):
     (notes / "ignored.txt").write_text("not a source")
     (root / "llm-wiki.toml").write_text("[corpus]\nmax_files = 1\n")
     result = doctor._generation_check(
-        root, state, datetime.now(timezone.utc),
+        root, state, datetime.now(UTC),
         deadline=time.monotonic() + LONG_TIMEOUT,
     )
     assert result["status"] == "degraded"
@@ -121,7 +121,7 @@ def test_generation_reports_its_actual_scope_without_an_extra_collection(tmp_pat
 
     monkeypatch.setattr(doctor, "_collect_generation_live_corpus", observe)
     result = doctor._generation_check(
-        root, state, datetime.now(timezone.utc),
+        root, state, datetime.now(UTC),
         deadline=time.monotonic() + LONG_TIMEOUT,
     )
     usage = result["details"]["capacity_usage"]

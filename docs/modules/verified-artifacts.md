@@ -23,4 +23,4 @@ Run `pytest tests/modules/verified_artifacts
  tests/test_the_verdict_cache_forgets_the_oldest.py -q`; related graph/search
 suites remain required integration evidence. Source/guide coverage, stdlib-only
 and isolated import checks, and the complete serialized token budget apply.
-Python 3.10 is retained; native OS qualification is recorded separately.
+Python 3.14 is the approved runtime; native OS qualification is recorded separately.

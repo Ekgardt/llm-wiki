@@ -5,13 +5,13 @@ docs/research/2026-09-26-a-checkpoint-that-never-reached-the-database-is-seen.md
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import doctor
 import pytest
 
-NOW = datetime(2026, 9, 26, 12, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 26, 12, tzinfo=UTC)
 
 
 def _queue(state_root: Path, occurred_at: datetime) -> None:

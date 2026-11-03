@@ -22,7 +22,7 @@ import unicodedata
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
@@ -1173,7 +1173,7 @@ def _require_no_v2_ownership(source: sqlite3.Connection) -> None:
     Fail closed on doubt: an expiry that is absent or unreadable counts as live,
     because it is not proof that the owner is gone.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if any(_v2_ownership_is_live(source, table, now) for table in _V2_OWNERSHIP_TABLES):
         raise _coordinator_migration_error(
             "coordinator_v2_ambiguous_ownership",
@@ -1214,7 +1214,7 @@ def _expiry_is_live(value: object, now: datetime) -> bool:
 def _as_utc(value: datetime) -> datetime:
     """A v2 row may carry a naive stamp; every writer of these tables meant UTC."""
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
+        return value.replace(tzinfo=UTC)
     return value
 
 
@@ -3556,7 +3556,7 @@ def _prune_cutoff(retention_days: int, now: datetime | None) -> datetime:
             f"retention_days must be at least {UNDO_RETENTION_DAYS}",
             "retention_too_short",
         )
-    current = now or datetime.now(timezone.utc)
+    current = now or datetime.now(UTC)
     if current.tzinfo is None:
         raise ValueError("now must be timezone-aware")
     return current - timedelta(days=retention_days)
@@ -3709,7 +3709,7 @@ def _lease_row_matches(row: object, expected: Mapping[str, object]) -> bool:
         or row["fencing_epoch"] != expected["fencing_epoch"]
     ):
         return False
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return (
         _parse_timestamp(row["expires_at"]) > now
         and _parse_timestamp(str(expected["expires_at"])) > now
@@ -3855,7 +3855,7 @@ def _retire_strays_before_validation(state_root: Path, *, deadline: float | None
     run = Path(state_root) / "run"
     if not any(os.path.lexists(run / name) for name in STRAY_CANDIDATE_NAMES):
         return
-    retire_stray_candidates(state_root, datetime.now(timezone.utc), deadline=deadline)
+    retire_stray_candidates(state_root, datetime.now(UTC), deadline=deadline)
 
 
 def _validate_adoption_with_retry(vault: Path, state_root: Path, *, deadline: float | None = None) -> None:
@@ -5007,11 +5007,11 @@ def append_captured_knowledge(
 
 
 def _now() -> str:
-    return utc_text(datetime.now(timezone.utc))
+    return utc_text(datetime.now(UTC))
 
 
 def _future_timestamp(seconds: float) -> str:
-    return utc_text(datetime.now(timezone.utc) + timedelta(seconds=seconds))
+    return utc_text(datetime.now(UTC) + timedelta(seconds=seconds))
 
 
 def _timestamp(value: datetime) -> str:
@@ -5261,7 +5261,7 @@ class MarkdownCoordinator:
         token = uuid.uuid4().hex
         with self._connect() as database, begin_immediate(database):
             # Judge authority after SQLite has admitted this write transaction.
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             expires_at = min(owner.expires_at, now + timedelta(seconds=INTENT_FENCE_SECONDS))
             registry.require(database, owner)
             self._reclaim_dead_intent_fence(database, registry, intent_id)
@@ -5398,7 +5398,7 @@ class MarkdownCoordinator:
         registry = self._ownership_registry()
         with self._connect() as database, begin_immediate(database):
             # Judge authority after SQLite has admitted this write transaction.
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             expires_at = min(owner.expires_at, now + timedelta(seconds=INTENT_FENCE_SECONDS))
             registry.require(database, owner)
             renewed = database.execute(
@@ -5433,7 +5433,7 @@ class MarkdownCoordinator:
         _require_matching_intent(binding, intent_fence)
         with self._connect() as database, begin_immediate(database):
             # Judge authority after SQLite has admitted this write transaction.
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             _require_live_intent_fence(database, intent_fence, now)
             _project_binding_row(database, binding, intent_fence, now)
 
@@ -7100,7 +7100,7 @@ class MarkdownCoordinator:
                 database,
                 intent_fence,
                 active_link_digest,
-                utc_text(datetime.now(timezone.utc)),
+                utc_text(datetime.now(UTC)),
                 "aborting",
                 "abort_final_verification_failed",
                 "abort final verification failed",
@@ -7147,7 +7147,7 @@ class MarkdownCoordinator:
         before_manifest = self._abort_before_manifest(transaction_id)
         manifest_sha256 = sha256_bytes(canonical_json_bytes(before_manifest))
         chosen_at = (
-            utc_text(datetime.now(timezone.utc))
+            utc_text(datetime.now(UTC))
         )
         direction = _AbortDirection(
             _abort_identity(
@@ -7207,7 +7207,7 @@ class MarkdownCoordinator:
             "ORDER BY CASE state WHEN 'aborting' THEN 0 WHEN 'aborted' THEN 2 ELSE 1 END, "
             "created_at, id"
         )
-        cutoff = datetime.now(timezone.utc) - timedelta(days=UNDO_RETENTION_DAYS)
+        cutoff = datetime.now(UTC) - timedelta(days=UNDO_RETENTION_DAYS)
         with self._connect() as database:
             selected = [
                 (row["id"], row["state"], row["owner_pid"])
@@ -8139,7 +8139,7 @@ class MarkdownCoordinator:
             )
 
     def deletion_blockers(self) -> list[dict[str, str]]:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with self._connect() as database:
             rows = list(
                 database.execute(
@@ -8700,7 +8700,7 @@ class MarkdownCoordinator:
 
     def _writer_owner_reclaimable(self, row: sqlite3.Row) -> bool:
         expires_at = row["expires_at"]
-        expired = not expires_at or _parse_timestamp(expires_at) <= datetime.now(timezone.utc)
+        expired = not expires_at or _parse_timestamp(expires_at) <= datetime.now(UTC)
         return expired or not process_liveness.owner_alive(row["process_id"], _row_start_identity(row))
 
     def _heartbeat_writer_gate(
@@ -9295,7 +9295,7 @@ class MarkdownCoordinator:
                 "transaction_not_committed",
             )
         if _parse_timestamp(original.updated_at) < datetime.now(
-            timezone.utc
+            UTC
         ) - timedelta(days=UNDO_RETENTION_DAYS):
             raise RefusedOperation(
                 f"transaction is outside the {UNDO_RETENTION_DAYS}-day undo window",
@@ -9507,7 +9507,7 @@ class MarkdownCoordinator:
                 "precondition_failed",
                 "quarantined",
             )
-        now = utc_text(datetime.now(timezone.utc))
+        now = utc_text(datetime.now(UTC))
         row = database.execute(
             """SELECT 1 FROM intent_fences AS fence
                JOIN capture_binding_projections AS binding

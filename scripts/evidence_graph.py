@@ -32,7 +32,7 @@ GRAPH_SCHEMA_VERSION = "evidence-graph/v2"
 
 
 @unique
-class GraphSchema(str, Enum):
+class GraphSchema(str, Enum):  # noqa: UP042 - preserve existing Enum string and format behavior
     """The one published generation schema.
 
     `evidence-graph/v3` -- the analyzer-run, claim and slice tables of the

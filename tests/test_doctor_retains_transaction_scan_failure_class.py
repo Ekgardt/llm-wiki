@@ -1,7 +1,7 @@
 """Incomplete transaction inspection retains its cause and deletion refusal."""
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import doctor
 import pytest
@@ -18,7 +18,7 @@ def test_transaction_scan_failure_keeps_its_class_without_exception_content(tmp_
         raise error_type(private_detail)
 
     monkeypatch.setattr(doctor, '_scan_transaction_database', fail_scan)
-    result = doctor._transaction_check(state, datetime.now(timezone.utc), time.monotonic() + 30, vault_root=root)
+    result = doctor._transaction_check(state, datetime.now(UTC), time.monotonic() + 30, vault_root=root)
     assert result['details']['read_error_class'] == error_type.__name__
     assert result['status'] == 'error'
     assert result['details']['read_error'] is True

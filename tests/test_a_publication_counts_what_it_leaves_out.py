@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import shutil
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -35,7 +35,7 @@ def _image_with_a_link_and_an_empty_directory(tmp_path: Path) -> tuple[Path, str
         root=root,
         state_root=state_root,
         staging_parent=staging_parent,
-        now=datetime(2026, 8, 25, tzinfo=timezone.utc),
+        now=datetime(2026, 8, 25, tzinfo=UTC),
         deadline=time.monotonic() + LONG_TIMEOUT,
     ) as image:
         shutil.copytree(image, kept, symlinks=True)

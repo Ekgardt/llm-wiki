@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from functools import partial
 
 import breadcrumb_storage
@@ -75,10 +75,10 @@ def test_real_publication_outlives_its_original_lease(tmp_path, monkeypatch):
 
     def slow_storage(state_root, intent_id, parts):
         original = _intent_expiry(coordinator, intent_id)
-        while datetime.now(timezone.utc) < original:
-            remaining = (original - datetime.now(timezone.utc)).total_seconds()
+        while datetime.now(UTC) < original:
+            remaining = (original - datetime.now(UTC)).total_seconds()
             threading.Event().wait(max(0.0, remaining))  # The recorded lease boundary, not a synchronization guess.
-        assert datetime.now(timezone.utc) >= original
+        assert datetime.now(UTC) >= original
         assert _intent_expiry(coordinator, intent_id) > original
         store(state_root, intent_id, parts)
 

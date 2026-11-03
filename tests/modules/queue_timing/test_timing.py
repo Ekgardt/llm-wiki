@@ -2,14 +2,14 @@
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from llm_wiki import queue_timing as timing
 
-NOW = datetime(2026, 11, 2, 12, 34, 56, 123456, tzinfo=timezone.utc)
+NOW = datetime(2026, 11, 2, 12, 34, 56, 123456, tzinfo=UTC)
 
 
 @pytest.mark.parametrize('offset', [-7, 0, 9])

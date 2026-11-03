@@ -4,7 +4,7 @@ docs/research/2026-09-27-both-recovery-passes-look-past-a-bad-head.md
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from tests.test_a_publication_that_stopped_half_way_is_finished import (
@@ -32,6 +32,6 @@ def test_a_head_of_broken_pending_records_does_not_hide_the_intact_one(tmp_path:
 def test_the_cutoff_is_written_in_the_queue_s_own_width() -> None:
     import capture_adoption
 
-    whole_second = datetime(2026, 9, 27, 10, 0, 0, tzinfo=timezone.utc)
+    whole_second = datetime(2026, 9, 27, 10, 0, 0, tzinfo=UTC)
 
     assert capture_adoption._stale_pending_cutoff(whole_second) == "2026-09-27T09:59:00.000000+00:00"

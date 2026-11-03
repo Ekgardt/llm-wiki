@@ -1,13 +1,13 @@
 """Observed event identities share the state byte budget, without count eviction."""
 import hashlib
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import integration_adapter
 import memory_state
 from project_journal import CheckpointReducer
 
-AT = datetime(2026, 10, 1, tzinfo=timezone.utc)
+AT = datetime(2026, 10, 1, tzinfo=UTC)
 
 
 def _observed_reducer(count):

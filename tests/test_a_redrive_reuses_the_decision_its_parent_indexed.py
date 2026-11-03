@@ -8,7 +8,7 @@ row with its own task id and link and failed its one second chance with
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import flush_memory
@@ -33,7 +33,7 @@ def _crash_after_decision(*_args, **_kwargs):
 
 def _major_processor(queue, coordinator):
     provider = _FakeNoContentProvider("FLUSH_MAJOR\n- **Decisions made** - keep this")
-    chosen_at = datetime(2026, 8, 16, 12, 34, 56, tzinfo=timezone.utc)
+    chosen_at = datetime(2026, 8, 16, 12, 34, 56, tzinfo=UTC)
     return _TimedCaptureProcessor(queue, coordinator, provider, chosen_at)
 
 

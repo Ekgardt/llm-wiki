@@ -246,10 +246,11 @@ def test_dependency_action_checks_lock_and_baseline_environment(tmp_path):
     assert commands[0][1]["timeout"] <= sync_memory.DEPENDENCY_TIMEOUT_SECONDS
 
 
-def test_production_baseline_declares_python310_tomli_parser():
+def test_production_baseline_uses_stdlib_toml():
     project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-    assert 'tomli>=2.4.1,<3; python_version < \'3.11\'' in project
+    assert 'requires-python = ">=3.14,<3.15"' in project
+    assert '"tomli>=' not in project
 
 
 def test_importable_wrong_mcp_version_is_planned_and_repaired(tmp_path, monkeypatch):

@@ -1,6 +1,6 @@
 """Full health and backup certification include intermediate compile evidence."""
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import compile_progress as progress
 import doctor
@@ -39,7 +39,7 @@ def test_full_certification_rejects_missing_intermediate_answer(stored):
 def test_full_doctor_names_corrupt_compile_evidence(stored):
     queue, saved = stored
     (queue.state_root / saved.details['artifact']['reference']).unlink()
-    result = doctor._queue_v2_check(queue.state_root, datetime.now(timezone.utc), math.inf)
+    result = doctor._queue_v2_check(queue.state_root, datetime.now(UTC), math.inf)
     assert result['status'] == 'error'
     assert 'compile' in result['message'].lower()
     assert result['details']['compile_progress_error']
@@ -47,7 +47,7 @@ def test_full_doctor_names_corrupt_compile_evidence(stored):
 
 def test_full_doctor_retains_compile_history(stored):
     queue, saved = stored
-    result = doctor._queue_v2_check(queue.state_root, datetime.now(timezone.utc), math.inf)
+    result = doctor._queue_v2_check(queue.state_root, datetime.now(UTC), math.inf)
     assert 'queue_compile_progress_retained' in result['details']['deletion_codes']
     assert result['details']['compile_progress']['events'] == 1
 
@@ -109,7 +109,7 @@ def test_page_based_coordinator_scan_does_not_use_whole_file_read_cap(stored, mo
     queue, _ = stored
     monkeypatch.setattr(repair, '_MAX_OPERATIONAL_DB_BYTES', 1)
     blockers, known, retained = repair._coordinator_database_blockers(
-        queue.state_root, datetime.now(timezone.utc), math.inf, None,
+        queue.state_root, datetime.now(UTC), math.inf, None,
     )
     assert 'transaction_state_unreadable' not in blockers
 
@@ -118,7 +118,7 @@ def test_page_based_blackboard_scan_does_not_use_whole_file_read_cap(stored, mon
     queue, _ = stored
     monkeypatch.setattr(repair, '_MAX_OPERATIONAL_DB_BYTES', 1)
     assert repair._blackboard_claim_blockers(
-        state_root=queue.state_root, now=datetime.now(timezone.utc), deadline=math.inf,
+        state_root=queue.state_root, now=datetime.now(UTC), deadline=math.inf,
     ) == []
 
 
@@ -139,5 +139,5 @@ def test_backup_and_doctor_certify_streamed_artifact_above_small_result_cap(stor
         lease, replace(saved, sequence=1, details={}), (block for _ in range(20)))
     _, report = private_vault_backup._validated_databases(queue.state_root)
     assert report['compile_progress']['artifacts'] == 2
-    result = doctor._queue_v2_check(queue.state_root, datetime.now(timezone.utc), math.inf)
+    result = doctor._queue_v2_check(queue.state_root, datetime.now(UTC), math.inf)
     assert result['details']['compile_progress']['artifacts'] == 2

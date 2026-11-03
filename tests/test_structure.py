@@ -252,7 +252,7 @@ def test_code_navigation_python_slice_is_reported_as_current() -> None:
         "not written into an active generation",
         "cache/code-tools/pyright/1.1.411/",
         "run/lsp/<owner-nonce>/",
-        "Python 3.10",
+        "Python 3.14",
     ):
         assert value in navigation_words
     for text in (agents, claude):

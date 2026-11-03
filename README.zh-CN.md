@@ -1,7 +1,7 @@
 # LLM Wiki
 
 [![Tests](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml/badge.svg)](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
+[![Python](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](CHANGELOG.md)
 
@@ -51,7 +51,7 @@ Claude Code、Codex 和 OpenCode 在会话结束时都会忘掉一切。LLM Wiki
 
 ### 前提条件
 
-- Python 3.10+ 和 git
+- Python 3.14 和 git。安装程序会明确选择此 Python 系列；可通过 `uv python install 3.14` 安装。
 - [uv](https://docs.astral.sh/uv/) 恰好 0.12.3——两个安装程序都会拒绝其他版本
 - 你已在使用的代理：Claude Code、Codex 或 OpenCode
 - Node 22——仅在需要精确的 TypeScript 或 Python 导航时（见下文）

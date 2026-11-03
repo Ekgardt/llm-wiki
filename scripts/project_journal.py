@@ -13,7 +13,7 @@ import unicodedata
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -465,7 +465,7 @@ def _observation_time(event: Mapping[str, object], now: datetime | None) -> date
     current_time = now or _utc_now()
     if current_time.tzinfo is None or current_time.utcoffset() is None:
         raise ValueError("checkpoint observation time must be timezone-aware")
-    return current_time.astimezone(timezone.utc)
+    return current_time.astimezone(UTC)
 
 
 def _observation_outcome(decision: CheckpointDecision) -> str:
@@ -701,7 +701,7 @@ def recover_project_handoff(
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _timestamp(value: datetime) -> str:

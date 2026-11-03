@@ -15,7 +15,7 @@ from both. Static closure includes lazy imports and the full score implementatio
 
 Qualification: [research](../research/2026-11-03-offline-lane-fit-owner-qualification.md).
 Run synthetic CLI, negative refusal, fold-isolation, retained recorder/reader checks,
-Python 3.10, complexity and complete packet reconstruction. No live refit or deployment.
+Python 3.14, complexity and complete packet reconstruction. No live refit or deployment.
 
 Shared canonical contract: [Lane score](lane-score.md).
 

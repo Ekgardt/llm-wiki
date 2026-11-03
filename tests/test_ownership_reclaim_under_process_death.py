@@ -18,7 +18,7 @@ from __future__ import annotations
 import contextlib
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -74,7 +74,7 @@ def _run_as_this_process(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _expire(database_path: Path, table: str, *, seconds: int = 1) -> None:
     """Move a lease deadline into the past — timestamps only, never rows."""
-    when = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    when = datetime.now(UTC) - timedelta(seconds=seconds)
     stamp = when.isoformat().replace("+00:00", "Z")
     with contextlib.closing(sqlite3.connect(database_path)) as database:
         database.execute(f"UPDATE {table} SET expires_at=?", (stamp,))

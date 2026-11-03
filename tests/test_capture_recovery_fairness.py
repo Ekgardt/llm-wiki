@@ -1,7 +1,7 @@
 """Missing older records cannot permanently hide a valid later capture."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import capture_adoption
 import pytest
@@ -27,7 +27,7 @@ def test_more_than_the_old_skip_cap_cannot_starve_valid_work(tmp_path, monkeypat
     good = publishers[state](tmp_path, queue, coordinator, b"after-missing-prefix")
     _missing_prefix(queue, state, 257)  # One beyond the former 256-skip cutoff.
     monkeypatch.setattr(capture_adoption, "_stale_pending_cutoff", lambda _now: (
-        datetime.now(timezone.utc) + timedelta(minutes=2)
+        datetime.now(UTC) + timedelta(minutes=2)
     ).isoformat(timespec="microseconds"))
     sweeps = {
         "ready": (capture_adoption.adopt_orphaned_capture_intents, "adopted"),

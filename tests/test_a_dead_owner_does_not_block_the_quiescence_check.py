@@ -9,7 +9,7 @@ from __future__ import annotations
 import contextlib
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import markdown_transaction  # noqa: E402
 import operational_ownership as ownership  # noqa: E402
 
-START = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)
+START = datetime(2026, 9, 17, 12, tzinfo=UTC)
 
 
 def _registry(state_root: Path, *, at: datetime, probe: str) -> ownership.OwnershipRegistry:

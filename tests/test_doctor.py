@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -394,7 +394,7 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path, monkeypatch
     root, state_root, home = _build_root(tmp_path)
     _adopt(root, state_root)
     monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
-    now = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 13, 12, tzinfo=UTC)
     (state_root / "run" / "state.json").write_text(
         json.dumps({"last_nightly_date": "2026-07-13", "last_nightly_status": "success"}),
         encoding="utf-8",
@@ -716,7 +716,7 @@ def test_scheduler_uses_local_state_only(tmp_path, state, expected):
             root=root,
             state_root=state_root,
             home=home,
-            now=datetime(2026, 7, 13, tzinfo=timezone.utc),
+            now=datetime(2026, 7, 13, tzinfo=UTC),
         ),
         "scheduler",
     )
@@ -1258,7 +1258,7 @@ def test_maintenance_owner_is_exclusive_heartbeated_released_and_fenced(tmp_path
     import doctor
 
     root, state_root, _ = _build_root(tmp_path)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     first = doctor._acquire_maintenance_owner(root, state_root, now)
     assert first is not None
@@ -1279,7 +1279,7 @@ def test_live_pid_prevents_expired_maintenance_owner_reclaim(tmp_path, monkeypat
     import doctor
 
     root, state_root, _ = _build_root(tmp_path)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     first = doctor._acquire_maintenance_owner(root, state_root, now)
     assert first is not None
     coordinator, lease = first
@@ -1300,7 +1300,7 @@ def test_a_lost_fence_names_the_check_and_the_owner_it_found(tmp_path):
     import doctor
 
     root, state_root, _ = _build_root(tmp_path)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     acquired = doctor._acquire_maintenance_owner(root, state_root, now)
     assert acquired is not None
     coordinator, lease = acquired
@@ -1335,7 +1335,7 @@ def test_maintenance_heartbeat_runs_during_long_operation(tmp_path, monkeypatch)
     import doctor
 
     root, state_root, _ = _build_root(tmp_path)
-    acquired = doctor._acquire_maintenance_owner(root, state_root, datetime.now(timezone.utc))
+    acquired = doctor._acquire_maintenance_owner(root, state_root, datetime.now(UTC))
     assert acquired is not None
     coordinator, lease = acquired
     beats = []
@@ -1375,7 +1375,7 @@ def test_a_busy_database_is_not_a_lost_fence(tmp_path, monkeypatch):
     import doctor
 
     root, state_root, _ = _build_root(tmp_path)
-    acquired = doctor._acquire_maintenance_owner(root, state_root, datetime.now(timezone.utc))
+    acquired = doctor._acquire_maintenance_owner(root, state_root, datetime.now(UTC))
     assert acquired is not None
     coordinator, lease = acquired
     guard = doctor._MaintenanceHeartbeat(
@@ -1461,7 +1461,7 @@ def test_cli_returns_zero_for_healthy_report(tmp_path, monkeypatch, capsys):
 
     root, state_root, home = _build_root(tmp_path)
     _adopt(root, state_root)
-    today = datetime.now(timezone.utc).date().isoformat()
+    today = datetime.now(UTC).date().isoformat()
     (state_root / "run" / "state.json").write_text(
         json.dumps({"last_nightly_date": today, "last_nightly_status": "success"}),
         encoding="utf-8",
@@ -2196,13 +2196,13 @@ def test_doctor_reports_mismatched_pyright(tmp_path, monkeypatch) -> None:
 def test_doctor_lsp_check_reports_no_owners_when_absent(tmp_path) -> None:
     import doctor
 
-    check = doctor._lsp_runtime_check(tmp_path, datetime.now(timezone.utc), deadline=float("inf"))
+    check = doctor._lsp_runtime_check(tmp_path, datetime.now(UTC), deadline=float("inf"))
     assert check["status"] == "ok"
     assert check["details"]["owners"] == []
 
 
 def _lsp_timestamp(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _write_lsp_owner(
@@ -2281,7 +2281,7 @@ def _write_lsp_failure(
 def test_doctor_lsp_explains_missing_identity_without_allowing_cleanup(tmp_path) -> None:
     import doctor
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     owner = _write_lsp_owner(
         tmp_path, owner_nonce="a" * 32, generation_nonce="b" * 32,
         started_at=now - timedelta(days=32), owner_pid=os.getpid(),
@@ -2367,7 +2367,7 @@ def test_doctor_lsp_record_read_checks_absolute_deadline_around_handle_io(
 def test_doctor_lsp_record_disappearing_after_scan_fails_closed(tmp_path, monkeypatch) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     _write_lsp_owner(
         tmp_path,
         owner_nonce="a" * 32,
@@ -2403,7 +2403,7 @@ def test_doctor_lsp_path_swap_reads_only_retained_tree(tmp_path, monkeypatch) ->
     import doctor
     import windows_workspace
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     state_root = tmp_path / "state"
     old_nonce = "a" * 32
     replacement_nonce = "b" * 32
@@ -2467,7 +2467,7 @@ def test_doctor_lsp_path_swap_reads_only_retained_tree(tmp_path, monkeypatch) ->
 def test_doctor_lsp_production_live_lease_blocks_deletion(tmp_path, monkeypatch) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     owner_nonce = "a" * 32
     generation_nonce = "1" * 32
     owner = _write_lsp_owner(
@@ -2505,7 +2505,7 @@ def test_doctor_lsp_production_live_lease_blocks_deletion(tmp_path, monkeypatch)
 def test_doctor_lsp_pid_probe_deadline_crossing_fails_closed(tmp_path, monkeypatch) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     owner_nonce = "a" * 32
     generation_nonce = "1" * 32
     owner = _write_lsp_owner(
@@ -2548,7 +2548,7 @@ def test_doctor_lsp_pid_probe_deadline_crossing_fails_closed(tmp_path, monkeypat
 def test_doctor_lsp_unknown_pid_probe_fails_closed(tmp_path, monkeypatch) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     owner_nonce = "a" * 32
     generation_nonce = "1" * 32
     owner = _write_lsp_owner(
@@ -2599,7 +2599,7 @@ def test_doctor_lsp_posix_eperm_pid_probe_is_unknown(monkeypatch) -> None:
 def test_doctor_lsp_dead_owner_uses_last_heartbeat_as_crash_evidence(tmp_path, monkeypatch) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     owner_nonce = "a" * 32
     generation_nonce = "1" * 32
     owner = _write_lsp_owner(
@@ -2631,7 +2631,7 @@ def test_doctor_lsp_crash_evidence_expires_at_exact_seven_day_boundary(
 ) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     owner_nonce = "a" * 32
     generation_nonce = "1" * 32
     owner = _write_lsp_owner(
@@ -2671,7 +2671,7 @@ def test_doctor_lsp_failure_retention_exact_seven_day_boundary(
 ) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     owner_nonce = "a" * 32
     generation_nonce = "1" * 32
     owner = _write_lsp_owner(
@@ -2701,7 +2701,7 @@ def test_doctor_lsp_failure_only_owner_without_owner_record_fails_closed(
 ) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     owner_nonce = "a" * 32
     owner = tmp_path / "run" / "lsp" / owner_nonce
     owner.mkdir(parents=True)
@@ -2724,7 +2724,7 @@ def test_doctor_lsp_failure_only_owner_without_owner_record_fails_closed(
 def test_doctor_lsp_dead_owner_without_lease_uses_owner_start_time(tmp_path, monkeypatch) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     _write_lsp_owner(
         tmp_path,
         owner_nonce="a" * 32,
@@ -2743,7 +2743,7 @@ def test_doctor_lsp_dead_owner_without_lease_uses_owner_start_time(tmp_path, mon
 def test_doctor_lsp_malformed_record_fails_closed(tmp_path) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     owner = _write_lsp_owner(
         tmp_path,
         owner_nonce="a" * 32,
@@ -2764,7 +2764,7 @@ def test_doctor_lsp_malformed_record_fails_closed(tmp_path) -> None:
 def test_doctor_lsp_rejects_duplicate_json_keys(tmp_path, duplicate_key) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     owner_nonce = "a" * 32
     generation_nonce = "1" * 32
     owner = _write_lsp_owner(
@@ -2831,7 +2831,7 @@ def test_doctor_lsp_deep_valid_size_json_fails_closed(tmp_path, monkeypatch) -> 
         sys.setrecursionlimit(max(original_recursion_limit, 3_000))
         check = doctor._lsp_runtime_check(
             tmp_path,
-            datetime(2026, 7, 31, 12, tzinfo=timezone.utc),
+            datetime(2026, 7, 31, 12, tzinfo=UTC),
             deadline=float("inf"),
         )
     finally:
@@ -2863,7 +2863,7 @@ def test_doctor_lsp_json_depth_accepts_exact_limit() -> None:
 def test_doctor_lsp_rejects_nonproduction_record_schema(tmp_path, monkeypatch, record_name) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     owner_nonce = "a" * 32
     generation_nonce = "1" * 32
     owner = _write_lsp_owner(
@@ -2910,7 +2910,7 @@ def test_doctor_lsp_rejects_nonproduction_record_schema(tmp_path, monkeypatch, r
 def test_doctor_lsp_rejects_non_integer_lease_schema_version(tmp_path, monkeypatch) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     owner_nonce = "a" * 32
     generation_nonce = "1" * 32
     owner = _write_lsp_owner(
@@ -2951,7 +2951,7 @@ def test_doctor_reads_a_restarted_owner_as_live(tmp_path, monkeypatch) -> None:
     """
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     owner_nonce = "a" * 32
     owner = _write_lsp_owner(
         tmp_path,
@@ -2987,7 +2987,7 @@ def test_doctor_rejects_a_lease_belonging_to_another_owner(
 ) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     owner_nonce = "a" * 32
     owner = _write_lsp_owner(
         tmp_path,
@@ -3020,7 +3020,7 @@ def test_doctor_accepts_failure_evidence_from_a_later_generation(tmp_path, monke
 
     monkeypatch.setattr(doctor, "_lsp_pid_state", lambda _pid, _identity=None: "dead")
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     owner_nonce = "a" * 32
     owner = _write_lsp_owner(
         tmp_path,
@@ -3045,7 +3045,7 @@ def test_doctor_accepts_failure_evidence_from_a_later_generation(tmp_path, monke
 def test_doctor_lsp_rejects_lease_heartbeat_before_owner_start(tmp_path, monkeypatch) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     owner_nonce = "a" * 32
     generation_nonce = "1" * 32
     owner = _write_lsp_owner(
@@ -3075,7 +3075,7 @@ def test_doctor_lsp_rejects_lease_heartbeat_before_owner_start(tmp_path, monkeyp
 def test_doctor_lsp_rejects_failure_before_owner_start(tmp_path) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     owner_nonce = "a" * 32
     generation_nonce = "1" * 32
     owner = _write_lsp_owner(
@@ -3101,7 +3101,7 @@ def test_doctor_lsp_rejects_failure_before_owner_start(tmp_path) -> None:
 def test_doctor_lsp_rejects_future_owner_start(tmp_path) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     _write_lsp_owner(
         tmp_path,
         owner_nonce="a" * 32,
@@ -3123,7 +3123,7 @@ def test_doctor_lsp_unknown_owner_entry_fails_closed(tmp_path) -> None:
 
     check = doctor._lsp_runtime_check(
         tmp_path,
-        datetime(2026, 7, 31, 12, tzinfo=timezone.utc),
+        datetime(2026, 7, 31, 12, tzinfo=UTC),
         deadline=float("inf"),
     )
 
@@ -3141,7 +3141,7 @@ def test_doctor_lsp_129th_owner_entry_marks_scan_truncated(tmp_path) -> None:
 
     check = doctor._lsp_runtime_check(
         tmp_path,
-        datetime(2026, 7, 31, 12, tzinfo=timezone.utc),
+        datetime(2026, 7, 31, 12, tzinfo=UTC),
         deadline=float("inf"),
     )
 
@@ -3158,7 +3158,7 @@ def test_doctor_lsp_preexpired_deadline_fails_closed(tmp_path) -> None:
 
     check = doctor._lsp_runtime_check(
         tmp_path,
-        datetime(2026, 7, 31, 12, tzinfo=timezone.utc),
+        datetime(2026, 7, 31, 12, tzinfo=UTC),
         deadline=time.monotonic() - 1,
     )
 
@@ -3175,7 +3175,7 @@ def test_doctor_lsp_absent_with_expired_deadline_fails_before_lstat(tmp_path, mo
         "lstat",
         lambda self: (_ for _ in ()).throw(AssertionError("lstat after deadline")),
     )
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
 
     check = doctor._lsp_runtime_check(
         tmp_path / "absent-state",
@@ -3358,7 +3358,7 @@ def test_doctor_lsp_deadline_expiring_during_scan_fails_closed(tmp_path, monkeyp
 
     check = doctor._lsp_runtime_check(
         tmp_path,
-        datetime(2026, 7, 31, 12, tzinfo=timezone.utc),
+        datetime(2026, 7, 31, 12, tzinfo=UTC),
         deadline=1.0,
     )
 
@@ -3382,7 +3382,7 @@ def test_doctor_lsp_linked_root_fails_closed(tmp_path, link_kind) -> None:
 
     check = doctor._lsp_runtime_check(
         tmp_path,
-        datetime(2026, 7, 31, 12, tzinfo=timezone.utc),
+        datetime(2026, 7, 31, 12, tzinfo=UTC),
         deadline=float("inf"),
     )
 
@@ -3403,7 +3403,7 @@ def test_doctor_lsp_external_run_junction_fails_closed(tmp_path) -> None:
     else:
         _symlink_or_skip(run_root, external_run, directory=True)
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     check = doctor._lsp_runtime_check(state_root, now, deadline=float("inf"))
     deletion = doctor._run_deletion_check(state_root, now, collected={"lsp": check})
 
@@ -3427,7 +3427,7 @@ def test_doctor_lsp_linked_owner_fails_closed(tmp_path, link_kind) -> None:
 
     check = doctor._lsp_runtime_check(
         tmp_path,
-        datetime(2026, 7, 31, 12, tzinfo=timezone.utc),
+        datetime(2026, 7, 31, 12, tzinfo=UTC),
         deadline=float("inf"),
     )
 
@@ -3438,7 +3438,7 @@ def test_doctor_lsp_linked_owner_fails_closed(tmp_path, link_kind) -> None:
 def test_doctor_lsp_symlink_record_entry_fails_closed(tmp_path) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     owner = _write_lsp_owner(
         tmp_path,
         owner_nonce="a" * 32,
@@ -3459,7 +3459,7 @@ def test_doctor_lsp_symlink_record_entry_fails_closed(tmp_path) -> None:
 def test_doctor_lsp_linked_cancellation_directory_fails_closed(tmp_path, link_kind) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     owner = _write_lsp_owner(
         tmp_path,
         owner_nonce="a" * 32,
@@ -3514,7 +3514,7 @@ def _is_owner_handle(path, owner) -> bool:
 def test_doctor_lsp_owner_child_scan_stops_at_fifth_entry(tmp_path, monkeypatch) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     owner = _write_lsp_owner(
         tmp_path,
         owner_nonce="a" * 32,
@@ -3566,7 +3566,7 @@ def test_doctor_lsp_owner_child_scan_stops_at_fifth_entry(tmp_path, monkeypatch)
 def test_doctor_lsp_unknown_owner_child_fails_closed(tmp_path) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     owner = _write_lsp_owner(
         tmp_path,
         owner_nonce="a" * 32,
@@ -3584,7 +3584,7 @@ def test_doctor_lsp_unknown_owner_child_fails_closed(tmp_path) -> None:
 def test_doctor_lsp_live_owner_and_failure_block_deletion(tmp_path, monkeypatch) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     live_owner_nonce = "a" * 32
     live_generation_nonce = "1" * 32
     live_owner = _write_lsp_owner(
@@ -3635,7 +3635,7 @@ def test_doctor_lsp_live_owner_and_failure_block_deletion(tmp_path, monkeypatch)
 def test_doctor_lsp_expired_failure_does_not_block(tmp_path, monkeypatch) -> None:
     import doctor
 
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     owner_nonce = "c" * 32
     generation_nonce = "3" * 32
     owner = _write_lsp_owner(
@@ -3663,7 +3663,7 @@ def test_doctor_repair_preserves_lsp_runtime_bytes(tmp_path, monkeypatch) -> Non
     import doctor
 
     root, state_root, home = _build_root(tmp_path)
-    now = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 31, 12, tzinfo=UTC)
     owner_nonce = "a" * 32
     generation_nonce = "1" * 32
     owner = _write_lsp_owner(
@@ -3975,7 +3975,6 @@ def test_the_doctor_reads_the_z_suffix_this_runtime_writes():
     rows `transaction_metadata_corrupt`. CI run 32579866020 failed exactly that
     way on py3.10 while every 3.11+ job passed.
     """
-    from datetime import timezone
 
     import doctor
 
@@ -3988,7 +3987,7 @@ def test_the_doctor_reads_the_z_suffix_this_runtime_writes():
     assert (
         parsed is not None,
         parsed.tzinfo is not None,
-        parsed.utcoffset() == timezone.utc.utcoffset(parsed),
+        parsed.utcoffset() == UTC.utcoffset(parsed),
     ) == (True, True, True)
 
 
@@ -4275,7 +4274,7 @@ def test_a_nightly_that_ran_last_night_is_current_before_tonight_runs(
 
     root, state_root, home = _build_root(tmp_path)
     monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
-    now = datetime(2026, 8, 22, 0, 6, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 22, 0, 6, tzinfo=UTC)
     _nightly_state(
         state_root,
         {
@@ -4299,7 +4298,7 @@ def test_a_nightly_that_missed_its_window_is_still_stale(tmp_path, monkeypatch):
 
     root, state_root, home = _build_root(tmp_path)
     monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
-    now = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
     _nightly_state(
         state_root,
         {
@@ -4325,7 +4324,7 @@ def test_state_without_a_nightly_timestamp_keeps_the_old_day_rule(
 
     root, state_root, home = _build_root(tmp_path)
     monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
-    now = datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 22, 12, 0, tzinfo=UTC)
     _nightly_state(
         state_root,
         {"last_nightly_status": "success", "last_nightly_date": "2026-08-22"},
@@ -4354,7 +4353,7 @@ def _deferrable_check_names(doctor) -> list:
     return [
         name
         for name, _operation in doctor._deferrable_checks(
-            Path("."), Path("."), Path("."), datetime.now(timezone.utc)
+            Path("."), Path("."), Path("."), datetime.now(UTC)
         )
     ]
 
@@ -4389,7 +4388,7 @@ def test_the_corpus_wide_check_runs_after_the_cheap_ones(monkeypatch):
         Path("."),
         Path("."),
         Path("."),
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         time.monotonic() + 8.0,
     )
 
@@ -4518,7 +4517,7 @@ def test_a_stale_nightly_that_skipped_names_its_reason():
 
 @pytest.mark.parametrize("deadline", [99.0, 100.0])
 def test_expired_deletion_observation_does_not_start_adoption_validation(tmp_path, monkeypatch, deadline):
-    from datetime import datetime, timezone
+    from datetime import datetime
     from unittest.mock import Mock
 
     import doctor
@@ -4527,7 +4526,7 @@ def test_expired_deletion_observation_does_not_start_adoption_validation(tmp_pat
     validation = Mock(side_effect=AssertionError("expired observation started database validation"))
     monkeypatch.setattr(installed_memory_repair, "require_reliability_v3_adopted", validation)
     monkeypatch.setattr(doctor.time, "monotonic", lambda: 100.0)
-    result = doctor._run_deletion_check(tmp_path, datetime.now(timezone.utc), deadline=deadline)
+    result = doctor._run_deletion_check(tmp_path, datetime.now(UTC), deadline=deadline)
     assert result["quiescent"] is False
     assert result["blockers"] == [{"code": "run_deletion_state_unknown"}]
     validation.assert_not_called()
@@ -4543,7 +4542,7 @@ def test_adoption_diagnostic_receives_the_collector_deadline(monkeypatch):
     diagnostic = Mock(return_value=doctor._result("adoption", "ok", "ok", {}))
     monkeypatch.setattr(doctor, "_adoption_check", diagnostic)
     deadline = time.monotonic() + LONG_TIMEOUT
-    doctor._collect_checks(Path("."), Path("."), Path("."), datetime.now(timezone.utc), deadline)
+    doctor._collect_checks(Path("."), Path("."), Path("."), datetime.now(UTC), deadline)
     diagnostic.assert_called_once_with(Path("."), Path("."), deadline=deadline)
 
 
@@ -4601,7 +4600,7 @@ def test_deletion_certification_uses_the_deadline_and_retains_unknown_state(tmp_
     validation = Mock(side_effect=TimeoutError("validation timed out"))
     monkeypatch.setattr(installed_memory_repair, "require_reliability_v3_adopted", validation)
     deadline = time.monotonic() + LONG_TIMEOUT
-    result = doctor._run_deletion_check(tmp_path, datetime.now(timezone.utc), deadline=deadline)
+    result = doctor._run_deletion_check(tmp_path, datetime.now(UTC), deadline=deadline)
     validation.assert_called_once_with(root=tmp_path, state_root=tmp_path, deadline=deadline)
     assert result["quiescent"] is False
     assert result["permit"] is False

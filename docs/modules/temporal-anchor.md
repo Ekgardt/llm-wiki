@@ -13,7 +13,7 @@ query/window tests move unchanged from mixed integration files. Actual writing,
 retrieval and answer paths remain integration consumers with all assertions.
 
 Qualification: [research](../research/2026-11-03-retrieval-leaf-owner-qualification.md).
-Run owner and retained integration tests, Python 3.10 compatibility, actual complexity
+Run owner and retained integration tests, Python 3.14 compatibility, actual complexity
 and full-context reconstruction. No useful-cost or native-platform claim follows
 from a packet-size check.
 

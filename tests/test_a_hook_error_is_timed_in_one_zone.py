@@ -5,7 +5,7 @@ docs/research/2026-09-26-a-hook-error-is-timed-in-one-zone.md
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import doctor
 import integration_adapter
@@ -27,7 +27,7 @@ pytestmark = pytest.mark.skipif(not hasattr(time, "tzset"), reason="the zone is 
 def test_a_line_written_now_without_an_offset_is_live(new_york) -> None:
     written = datetime.now().isoformat(timespec="seconds")
 
-    assert doctor._hook_error_is_live(written, datetime.now(timezone.utc)) is True
+    assert doctor._hook_error_is_live(written, datetime.now(UTC)) is True
 
 
 def test_a_line_written_now_carries_its_offset(new_york, tmp_path, monkeypatch) -> None:

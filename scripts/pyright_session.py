@@ -1091,7 +1091,7 @@ def _reraise_startup_interruption(
 
 
 def _progress_handler(
-    session: "LanguageServerSession", method: str
+    session: LanguageServerSession, method: str
 ) -> Callable[[object], None]:
     """One notification handler bound to the progress method it reports."""
     return lambda params: session._progress(method, params)
@@ -1853,7 +1853,7 @@ class _LaunchServerGuard:
             (launch_descriptor,),
         )
 
-    def __enter__(self) -> "_LaunchServerGuard | GenerationLaunch":
+    def __enter__(self) -> _LaunchServerGuard | GenerationLaunch:
         _require_startup_deadline(self._deadline)
         before = _path_identity(self._path)
         if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_SERVER_BYTES:

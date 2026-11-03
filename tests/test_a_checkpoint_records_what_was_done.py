@@ -20,7 +20,7 @@ See `docs/research/2026-08-29-what-a-project-checkpoint-should-record.md`.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -29,7 +29,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 import integration_adapter  # noqa: E402
 
-AT = datetime(2026, 8, 29, 21, 57, tzinfo=timezone.utc)
+AT = datetime(2026, 8, 29, 21, 57, tzinfo=UTC)
 
 
 def _edit_event(**overrides):

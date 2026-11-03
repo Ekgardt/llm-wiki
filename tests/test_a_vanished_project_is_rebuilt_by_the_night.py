@@ -11,7 +11,7 @@ from __future__ import annotations
 import shutil
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -86,7 +86,7 @@ def _checkpoint_database(path: Path, attempts: list[str]) -> None:
 def test_doctor_ages_a_stuck_sequence_from_its_first_attempt(tmp_path: Path) -> None:
     path = tmp_path / "markdown-transactions-v3.sqlite3"
     _checkpoint_database(path, ["2026-09-23T21:18:00Z", "2026-09-24T03:09:20Z"])
-    now = datetime(2026, 9, 24, 3, 9, 37, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 24, 3, 9, 37, tzinfo=UTC)
 
     rows = doctor._checkpoint_head_rows(path)
 
@@ -98,6 +98,6 @@ def test_an_unreadable_checkpoint_database_is_not_ok(tmp_path: Path) -> None:
     run.mkdir()
     (run / "markdown-transactions-v3.sqlite3").write_bytes(b"not a database" * 100)
 
-    check = doctor._checkpoint_check(tmp_path, datetime.now(timezone.utc))
+    check = doctor._checkpoint_check(tmp_path, datetime.now(UTC))
 
     assert check["status"] == "degraded"

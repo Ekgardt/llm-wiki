@@ -47,7 +47,7 @@ from workspace_revision import (
 )
 
 
-class NavigationStatus(str, Enum):
+class NavigationStatus(str, Enum):  # noqa: UP042 - preserve existing Enum string and format behavior
     OK = "ok"
     PARTIAL = "partial"
     UNSUPPORTED = "unsupported"
@@ -57,7 +57,7 @@ class NavigationStatus(str, Enum):
     ERROR = "error"
 
 
-class ResolutionLabel(str, Enum):
+class ResolutionLabel(str, Enum):  # noqa: UP042 - preserve existing Enum string and format behavior
     LSP_CONFIRMED = "lsp_confirmed"
     GRAPH_CONFIRMED = "graph_confirmed"
     LSP_AND_GRAPH = "lsp_and_graph"
@@ -123,7 +123,7 @@ def _index_revision_entries(
     return entries
 
 
-def _bounded_callback_values(
+def _bounded_callback_values(  # noqa: UP047 - preserve runtime TypeVar annotations
     values: Iterable[_T],
     *,
     deadline: float | None,
@@ -1970,7 +1970,7 @@ def _location_outcome(
     )
 
 
-def _guarded_provider_call(
+def _guarded_provider_call(  # noqa: UP047 - preserve runtime TypeVar annotations
     call: Callable[[], _T],
     fallback: Callable[[], _T],
     deadline: float,

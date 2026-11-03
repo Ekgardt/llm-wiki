@@ -8,7 +8,7 @@ docs/research/2026-09-25-a-weekly-pass-counts-what-failed.md.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import ModuleType
 
 import doctor
@@ -36,7 +36,7 @@ def test_a_failing_tier_build_is_a_counted_failure(monkeypatch) -> None:
 
 
 def test_a_stale_weekly_names_its_skip() -> None:
-    now = datetime(2026, 9, 25, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 25, tzinfo=UTC)
     state = {
         "last_weekly_at": (now - timedelta(days=10)).isoformat(),
         "last_weekly_skip": {"skipped_at": (now - timedelta(days=3)).isoformat(), "reason": "fence held"},

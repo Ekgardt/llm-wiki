@@ -18,7 +18,7 @@ regressions are owned in place. Full historical rationale travels with the packe
 its dated measurements are not new performance results.
 
 Qualification: [research](../research/2026-11-03-answer-budget-cost-owner-qualification.md).
-Run restoration/cycle/budget and actual MCP consumer checks, Python 3.10, complexity
+Run restoration/cycle/budget and actual MCP consumer checks, Python 3.14, complexity
 and full maintenance-packet reconstruction. Runtime estimation and maintenance
 packet tokenization remain separate contracts.
 

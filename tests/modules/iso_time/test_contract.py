@@ -1,10 +1,10 @@
 """Timestamp reading remains identical across supported Python versions."""
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from iso_time import parse_instant
 
-EXPECTED = datetime(2026, 9, 26, 10, 0, 0, 123400, tzinfo=timezone.utc)
+EXPECTED = datetime(2026, 9, 26, 10, 0, 0, 123400, tzinfo=UTC)
 
 @pytest.mark.parametrize(
     "text",

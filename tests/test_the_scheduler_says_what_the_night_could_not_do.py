@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import doctor
@@ -116,7 +116,7 @@ def test_deferred_maintenance_is_not_reported_as_complete(tmp_path, compile_stat
     path.write_text(before, encoding="utf-8")
 
     result = doctor._scheduler_check(
-        root, state_root, datetime(2026, 9, 29, tzinfo=timezone.utc),
+        root, state_root, datetime(2026, 9, 29, tzinfo=UTC),
         time.monotonic() + 10, home,
     )
 
@@ -137,6 +137,6 @@ def test_deferred_diagnostics_preserve_failure_and_completed_run_status(status, 
         "nightly_deferred_compile": deferred,
     }
 
-    result = doctor._nightly_result(state, datetime(2026, 9, 29, tzinfo=timezone.utc), {})
+    result = doctor._nightly_result(state, datetime(2026, 9, 29, tzinfo=UTC), {})
 
     assert result["status"] == expected

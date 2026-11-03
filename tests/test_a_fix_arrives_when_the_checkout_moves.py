@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import scheduled_nightly
 
@@ -28,4 +28,4 @@ def test_a_commit_made_long_ago_arrives_when_head_moves(tmp_path) -> None:
 
     arrived = datetime.fromisoformat(scheduled_nightly.head_arrival_time(tmp_path))
 
-    assert datetime.now(timezone.utc) - arrived < timedelta(minutes=5)
+    assert datetime.now(UTC) - arrived < timedelta(minutes=5)

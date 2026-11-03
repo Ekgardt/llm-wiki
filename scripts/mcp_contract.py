@@ -5,7 +5,7 @@ import json
 import math
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -90,7 +90,7 @@ def build_envelope(
     """
     coverage = _bounded("coverage", coverage)
     confidence = _bounded("confidence", confidence)
-    generated_at = _as_utc(now or datetime.now(timezone.utc))
+    generated_at = _as_utc(now or datetime.now(UTC))
     vault_root, runtime_root = _roots(root, state_root)
     response_warnings = [str(item) for item in warnings or []]
 
@@ -145,8 +145,8 @@ def _bounded(name: str, value: float) -> float:
 
 def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _components(value: dict[str, dict[str, Any]] | None) -> dict[str, dict[str, Any]]:

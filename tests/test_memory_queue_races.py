@@ -7,7 +7,7 @@ import random
 import sqlite3
 import sys
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -59,7 +59,7 @@ class _SeventhBeatWait:
 
 class LockedClock:
     def __init__(self) -> None:
-        self._now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+        self._now = datetime(2026, 7, 14, tzinfo=UTC)
         self._lock = threading.Lock()
 
     def __call__(self) -> datetime:

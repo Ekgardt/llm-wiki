@@ -22,12 +22,12 @@ import memory_state  # noqa: E402
 def test_a_context_answer_carries_the_moment_its_corpus_was_collected(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "knowledge/notes").mkdir(parents=True)
     monkeypatch.setattr(memory_state, "ROOT", tmp_path)
-    before = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    before = dt.datetime.now(dt.UTC).replace(microsecond=0)
 
     data = mcp_server._get_context(["page"])
     stamp = mcp_server._index_timestamp("get_context", data)
 
-    after = dt.datetime.now(dt.timezone.utc)
+    after = dt.datetime.now(dt.UTC)
     assert before <= dt.datetime.fromisoformat(stamp) <= after
 
 

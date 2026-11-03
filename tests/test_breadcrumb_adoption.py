@@ -1,7 +1,7 @@
 """Recovery must select the format's worker and verify every durable part."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import breadcrumb_storage as storage
 import capture_adoption
@@ -28,7 +28,7 @@ def test_database_recovery_preserves_the_breadcrumb_handler(tmp_path, monkeypatc
     queue, coordinator, identity = _orphan(tmp_path, monkeypatch, stage)
     capture_adoption.complete_pending_capture_intents(
         queue, coordinator, state_root=tmp_path,
-        now=datetime.now(timezone.utc) + timedelta(minutes=2),
+        now=datetime.now(UTC) + timedelta(minutes=2),
     )
     result = capture_adoption.adopt_orphaned_capture_intents(queue, coordinator, state_root=tmp_path)
     assert result["skipped"] == []
@@ -46,7 +46,7 @@ def test_database_recovery_refuses_missing_parts(tmp_path, monkeypatch, stage):
     storage.part_path(tmp_path, identity, digest).unlink()
     pending = capture_adoption.complete_pending_capture_intents(
         queue, coordinator, state_root=tmp_path,
-        now=datetime.now(timezone.utc) + timedelta(minutes=2),
+        now=datetime.now(UTC) + timedelta(minutes=2),
     )
     ready = capture_adoption.adopt_orphaned_capture_intents(queue, coordinator, state_root=tmp_path)
     assert pending["skipped"] or ready["skipped"]

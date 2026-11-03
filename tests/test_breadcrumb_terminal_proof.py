@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import breadcrumb_decision
 import breadcrumb_evidence
@@ -155,7 +155,7 @@ def test_later_append_and_pruned_undo_do_not_invalidate_committed_evidence(tmp_p
         transaction = _committed(arguments)
         journal = tmp_path / arguments[-1]["operation_plan"][0]["path"]
         journal.write_bytes(journal.read_bytes() + b"\n## Later entry\n\nlater evidence\n")
-        arguments[1].prune(now=datetime.now(timezone.utc) + timedelta(days=3))
+        arguments[1].prune(now=datetime.now(UTC) + timedelta(days=3))
         disposition = flush_memory._capture_markdown_disposition(transaction, arguments[7])
         assert _complete(arguments, disposition)
 

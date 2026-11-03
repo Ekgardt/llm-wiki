@@ -22,7 +22,7 @@ from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
@@ -1140,7 +1140,7 @@ class _OwnerDirectory:
                 raise first_error
 
 
-class ProcessState(str, Enum):
+class ProcessState(str, Enum):  # noqa: UP042 - preserve existing Enum string and format behavior
     PROCESS_RUNNING = "process_running"
     PROTOCOL_INITIALIZED = "protocol_initialized"
     WORKSPACE_READY = "workspace_ready"
@@ -1173,7 +1173,7 @@ def _unconfigured_generation() -> _GenerationConfiguration:
     )
 
 
-class _LifecyclePhase(str, Enum):
+class _LifecyclePhase(str, Enum):  # noqa: UP042 - preserve existing Enum string and format behavior
     STARTING = "starting"
     RUNNING = "running"
     RECOVERY_PENDING = "recovery_pending"
@@ -2172,7 +2172,7 @@ def _write_generation_lease(
     if server_pid is None:
         raise RuntimeError("LSP generation process is unavailable")
     heartbeat_monotonic = time.monotonic()
-    heartbeat = datetime.now(timezone.utc)
+    heartbeat = datetime.now(UTC)
     expires = heartbeat + timedelta(seconds=_LEASE_EXPIRY_SECONDS)
     record: dict[str, object] = {
             "expires_at": expires.isoformat().replace("+00:00", "Z"),
@@ -2715,7 +2715,7 @@ def _start_lsp_process_impl(
     owner_nonce = _validated_owner_root(owner_root)
     generation_nonce = _new_generation_nonce()
     started_monotonic = time.monotonic()
-    started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    started_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     coordinator = _LifecycleCoordinator(
         None,
         generation_configuration=generation_configuration,
@@ -6683,7 +6683,7 @@ def _fresh_cleanup_deadline() -> float:
 _CallbackResult = TypeVar("_CallbackResult")
 
 
-def _wrap_protocol_callback(
+def _wrap_protocol_callback(  # noqa: UP047 - preserve runtime TypeVar annotations
     coordinator: _LifecycleCoordinator,
     handler: Callable[[object], _CallbackResult],
 ) -> Callable[[object], _CallbackResult]:
@@ -7242,7 +7242,7 @@ def _write_failure_record(
         "code": code,
         "generation_nonce": generation_nonce,
         "owner_nonce": owner_nonce,
-        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
     }
     if pid is not None:
         failure_record["server_pid"] = pid
@@ -7307,7 +7307,7 @@ def _rendered_utc_timestamp(timestamp: str) -> str | None:
         parsed = datetime.fromisoformat(timestamp[:-1] + "+00:00")
     except ValueError:
         return None
-    if parsed.tzinfo != timezone.utc:
+    if parsed.tzinfo != UTC:
         return None
     return parsed.isoformat().replace("+00:00", "Z")
 

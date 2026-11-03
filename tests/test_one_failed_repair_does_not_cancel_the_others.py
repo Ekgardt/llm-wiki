@@ -6,7 +6,7 @@ Finding M-A10 of the third audit. See
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -22,7 +22,7 @@ def _context(tmp_path: Path) -> doctor._RepairContext:
     return doctor._RepairContext(
         root_path=tmp_path,
         state_path=tmp_path / "state",
-        generated_at=datetime(2026, 9, 17, tzinfo=timezone.utc),
+        generated_at=datetime(2026, 9, 17, tzinfo=UTC),
         deadline=float("inf"),
         rebuild_generation=False,
         selected_repairs={"runtime", "generations", "queue", "indexes", "archives"},

@@ -1,7 +1,7 @@
 """Queue health judges all retained facts within its deadline, beyond the old cap."""
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import doctor
@@ -22,7 +22,7 @@ def queue_database(state: Path) -> Path:
 
 
 def health(state: Path):
-    return doctor._queue_check(state, datetime.now(timezone.utc), time.monotonic()+LONG_TIMEOUT)
+    return doctor._queue_check(state, datetime.now(UTC), time.monotonic()+LONG_TIMEOUT)
 
 
 def test_every_healthy_task_is_counted_past_the_old_ceiling(tmp_path: Path):
@@ -79,7 +79,7 @@ def test_every_modern_result_artifact_is_counted(tmp_path: Path):
 
 def test_expired_deadline_preserves_unknown_state_without_alleging_corruption(tmp_path: Path):
     queue_database(tmp_path)
-    result = doctor._queue_check(tmp_path, datetime.now(timezone.utc), time.monotonic())
+    result = doctor._queue_check(tmp_path, datetime.now(UTC), time.monotonic())
     assert result["details"]["read_error"] is True
     assert "queue_state_unreadable" in result["details"]["deletion_codes"]
     assert "queue_state_corrupt" not in result["details"]["deletion_codes"]
@@ -110,7 +110,7 @@ def test_result_artifacts_outside_the_vault_are_still_refused(tmp_path: Path):
 def test_a_dead_task_answered_by_a_retained_redrive_is_not_unresolved(tmp_path: Path):
     path = queue_database(tmp_path)
     with sqlite3.connect(path) as database:
-        database.execute("UPDATE tasks SET state='dead', error_code='attempts_exhausted', updated_at=? WHERE rowid=1", (datetime.now(timezone.utc).isoformat(),))
+        database.execute("UPDATE tasks SET state='dead', error_code='attempts_exhausted', updated_at=? WHERE rowid=1", (datetime.now(UTC).isoformat(),))
         database.execute("UPDATE tasks SET redrive_of='task-0' WHERE rowid=2")
     result = health(tmp_path)
     assert result["details"]["states"]["dead"] == 1

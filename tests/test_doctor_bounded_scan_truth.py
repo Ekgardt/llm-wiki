@@ -14,7 +14,7 @@ from __future__ import annotations
 import sqlite3
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -115,7 +115,7 @@ def _check(state_root: Path, now: datetime) -> dict:
 
 @pytest.fixture(name="now")
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def test_an_operation_table_over_the_ceiling_is_not_called_corrupt(

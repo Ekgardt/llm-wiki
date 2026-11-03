@@ -1,7 +1,7 @@
 """A real BagIt archive remains proof of an already committed journal append."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from functools import partial
 
 import archive_daily
@@ -54,7 +54,7 @@ def _archived_delivery(tmp_path, monkeypatch, *, complete=True):
     daily = root / arguments[-1]["operation_plan"][0]["path"]
     _compile_for_archive(coordinator, daily)
     archiver = archive_daily.DailyArchiver(
-        root, state, queue=queue, clock=lambda: datetime(2027, 2, 1, tzinfo=timezone.utc),
+        root, state, queue=queue, clock=lambda: datetime(2027, 2, 1, tzinfo=UTC),
     )
     receipt = archiver.archive(daily.stem)
     assert receipt.state == "archived"

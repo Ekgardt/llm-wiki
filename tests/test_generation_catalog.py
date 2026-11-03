@@ -12,7 +12,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -24,7 +24,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 
-NOW = datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
 
 
 def _initialize_repository(repository: Path) -> None:

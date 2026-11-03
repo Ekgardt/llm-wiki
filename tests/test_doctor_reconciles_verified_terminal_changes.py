@@ -1,7 +1,7 @@
 """Concurrent terminal commits require fresh proof, not a false unreadable verdict."""
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import doctor
 import flush_memory
@@ -19,7 +19,7 @@ from tests.test_doctor_releases_snapshot_before_artifact_work import _environmen
 
 
 def _check(root, state):
-    return doctor._transaction_check(state, datetime.now(timezone.utc), time.monotonic() + LONG_TIMEOUT, vault_root=root)
+    return doctor._transaction_check(state, datetime.now(UTC), time.monotonic() + LONG_TIMEOUT, vault_root=root)
 
 
 def test_committed_adopted_capture_is_reconciled_after_filesystem_inspection(tmp_path, monkeypatch):

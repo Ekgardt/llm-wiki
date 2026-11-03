@@ -12,7 +12,7 @@ import os
 import re
 import sqlite3
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import maintenance_helpers
@@ -86,8 +86,8 @@ def test_settled_rows_past_the_window_are_dropped_and_recent_ones_kept(tmp_path:
     coordinator = MarkdownCoordinator(root, tmp_path / "state")
     _append(coordinator, "2026-01-01")
     _append(coordinator, "2026-01-02")
-    later = datetime.now(timezone.utc) + timedelta(days=markdown_transaction.HISTORY_RETENTION_DAYS + 1)
-    soon = datetime.now(timezone.utc) + timedelta(days=3)
+    later = datetime.now(UTC) + timedelta(days=markdown_transaction.HISTORY_RETENTION_DAYS + 1)
+    soon = datetime.now(UTC) + timedelta(days=3)
 
     unpruned = coordinator.prune_history(now=later)
     coordinator.prune(now=soon)
@@ -105,9 +105,9 @@ def test_a_row_something_reads_back_is_never_pruned(tmp_path: Path) -> None:
     coordinator = MarkdownCoordinator(root, tmp_path / "state")
     _append(coordinator, "2026-01-01", family="compile")
     _append(coordinator, "2026-01-02", family="user-prompt")
-    coordinator.prune(now=datetime.now(timezone.utc) + timedelta(days=3))
+    coordinator.prune(now=datetime.now(UTC) + timedelta(days=3))
 
-    later = datetime.now(timezone.utc) + timedelta(days=markdown_transaction.HISTORY_RETENTION_DAYS + 1)
+    later = datetime.now(UTC) + timedelta(days=markdown_transaction.HISTORY_RETENTION_DAYS + 1)
     dropped = coordinator.prune_history(now=later)
 
     assert (dropped["transactions"], _transaction_count(coordinator)) == (1, 1)
@@ -171,7 +171,7 @@ def test_the_weekly_purges_finished_queue_work_into_the_private_archive() -> Non
     export = Path(command[command.index("--export") + 1])
 
     assert (command[2], "--include-dead" in command) == ("purge", True)
-    assert datetime.now(timezone.utc) - before > timedelta(days=29)
+    assert datetime.now(UTC) - before > timedelta(days=29)
     assert export.parent == ROOT / "knowledge" / "raw" / "queue-archive"
 
 

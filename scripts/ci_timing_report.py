@@ -10,7 +10,7 @@ import re
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +53,7 @@ def _positive_integer(value: object, label: str) -> int:
 def _utc_timestamp(value: object, label: str) -> tuple[datetime, str]:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{label} must be a UTC timestamp")
-    parsed = _parsed_utc(value, label).astimezone(timezone.utc)
+    parsed = _parsed_utc(value, label).astimezone(UTC)
     return parsed, parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -62,7 +62,7 @@ def _parsed_utc(value: str, label: str) -> datetime:
         parsed = datetime.fromisoformat(_with_numeric_offset(value))
     except ValueError as exc:
         raise ValueError(f"{label} must be a UTC timestamp") from exc
-    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+    if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
         raise ValueError(f"{label} must be a UTC timestamp")
     return parsed
 
@@ -248,7 +248,7 @@ def _require_head_and_success(payload: dict[str, Any], head_sha: str) -> None:
 
 
 def _generated_at(generated_at: datetime | None) -> datetime:
-    generated = generated_at or datetime.now(timezone.utc).replace(microsecond=0)
+    generated = generated_at or datetime.now(UTC).replace(microsecond=0)
     if generated.tzinfo is None:
         raise ValueError("generated_at must be timezone-aware")
     return generated
@@ -366,7 +366,7 @@ class _TimingEvidence:
         return {
             "schema_version": "ci-timeout-evidence/v1",
             "head_sha": self.head_sha,
-            "generated_at": generated.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "generated_at": generated.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "workflow_attempts": sorted(self.workflow_attempts, key=lambda item: item["run_attempt"]),
             "jobs": sorted(self.jobs, key=lambda item: (item["run_attempt"], item["job_id"])),
             "classes": classes,

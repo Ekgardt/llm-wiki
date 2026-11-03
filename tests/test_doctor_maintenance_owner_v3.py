@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -111,7 +111,7 @@ def test_a_live_v3_owner_defers_the_refresh_as_busy(tmp_path: Path) -> None:
 
 def test_the_v3_lease_survives_heartbeat_require_and_release(tmp_path: Path) -> None:
     root, state_root = _adopted_vault(tmp_path)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     acquired = doctor._acquire_maintenance_owner(root, state_root, now)
     assert acquired is not None
@@ -126,7 +126,7 @@ def test_the_v3_lease_survives_heartbeat_require_and_release(tmp_path: Path) -> 
 def test_a_lost_v3_fence_raises_the_named_fence_loss(tmp_path: Path) -> None:
     """Downstream `_fence_lost_outcome` keys on this exact message."""
     root, state_root = _adopted_vault(tmp_path)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     coordinator, lease = doctor._acquire_maintenance_owner(root, state_root, now)
     doctor._release_maintenance_owner(coordinator, lease)
 
@@ -150,7 +150,7 @@ def test_a_legacy_root_still_writes_the_owner_name_row(tmp_path: Path) -> None:
     """The pre-adoption path keeps its schema, lease shape, and lifecycle."""
     root = tmp_path / "vault"
     (root / "knowledge" / "notes").mkdir(parents=True)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     acquired = doctor._acquire_maintenance_owner(root, root, now)
     assert acquired is not None

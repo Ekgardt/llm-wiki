@@ -11,7 +11,7 @@ trimmer only knows the dedupe and reducer maps.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -21,7 +21,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 import integration_adapter  # noqa: E402
 from project_journal import CheckpointReducer  # noqa: E402
 
-NOW = datetime(2026, 8, 26, 21, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 26, 21, 0, tzinfo=UTC)
 
 
 def _items(count: int) -> list[dict[str, object]]:

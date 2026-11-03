@@ -1,6 +1,6 @@
 """Ordinary retention must not break durable compile recovery evidence."""
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import compile_progress as progress
 import memory_queue
@@ -29,7 +29,7 @@ def _shared_answer(queue):
 
 
 def _age(queue, task_id):
-    before = datetime.now(timezone.utc) - timedelta(
+    before = datetime.now(UTC) - timedelta(
         days=memory_queue.DEFAULTS.queue_result_retention_days + 1,
     )
     with queue.connection() as database:

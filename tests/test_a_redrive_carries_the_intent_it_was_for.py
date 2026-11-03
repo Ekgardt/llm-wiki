@@ -17,7 +17,7 @@ See `docs/research/2026-09-07-how-many-second-chances-an-intent-gets.md`.
 
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import memory_queue  # noqa: E402
 from memory_queue import QueueOperationError  # noqa: E402
 
-NOW = datetime(2026, 9, 7, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
 
 
 def _database() -> sqlite3.Connection:

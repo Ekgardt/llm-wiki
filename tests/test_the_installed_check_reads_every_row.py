@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import installed_memory_repair
@@ -18,7 +18,7 @@ import installed_memory_repair
 from tests.slow_machine import LONG_TIMEOUT
 from tests.test_reliability_v3_adoption import _vault, build_adopted_reliability_v3
 
-NOW = datetime(2026, 9, 27, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)
 PAST_THE_OLD_CAP = 10_050
 _INSERT = (
     'INSERT INTO "transaction"(id, operation_id, request_hash, state, preconditions_json,'

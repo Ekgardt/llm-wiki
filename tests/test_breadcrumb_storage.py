@@ -1,7 +1,7 @@
 """Publication preserves complete evidence across contention and queue failure."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import breadcrumb_protocol as protocol
@@ -13,7 +13,7 @@ from reliable_memory import canonical_json_bytes
 from tests.test_capture_publication_with_busy_writer import _other_process_writer
 from tests.test_queue_v3_capture_links import _coordinator, _queue
 
-MOMENT = datetime(2026, 9, 29, tzinfo=timezone.utc)
+MOMENT = datetime(2026, 9, 29, tzinfo=UTC)
 SCOPE = {"host": "claude", "session": "test", "kind": "user_prompt", "occurrence": "one"}
 
 

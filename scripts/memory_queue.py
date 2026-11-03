@@ -18,7 +18,7 @@ import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from types import MappingProxyType
@@ -1185,7 +1185,7 @@ class _OrdinaryPurgePlan:
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _validated_payload_bytes(payload: Mapping[str, object]) -> tuple[bytes, str]:

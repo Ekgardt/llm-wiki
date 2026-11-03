@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import breadcrumb_decision as decision
 import breadcrumb_protocol as protocol
@@ -14,7 +14,7 @@ from reliable_memory import MAX_CAPTURE_DECISION_BYTES, canonical_json_bytes
 
 def _bundle(prompt: str) -> BreadcrumbBundle:
     content = canonical_json_bytes({"prompt": prompt})
-    moment = datetime(2026, 9, 29, 23, 59, 59, tzinfo=timezone.utc)
+    moment = datetime(2026, 9, 29, 23, 59, 59, tzinfo=UTC)
     anchor = protocol.make_anchor(
         "a" * 64, content, occurred_at=moment, accepted_at=moment, time_origin="host",
     )

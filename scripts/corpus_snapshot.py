@@ -14,7 +14,7 @@ import unicodedata
 from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from datetime import time as datetime_time
 from functools import partial
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -1823,8 +1823,8 @@ def _collectable_content(path: Path, relative: str, kind: str) -> bool:
 
 def _utc_text(value: datetime) -> str:
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _dated_metadata_text(value: date | datetime) -> str:
@@ -2037,8 +2037,8 @@ def _as_datetime(value: str | date | datetime | None) -> datetime | None:
         return None
     result = _naive_datetime(value)
     if result.tzinfo is None:
-        result = result.replace(tzinfo=timezone.utc)
-    return result.astimezone(timezone.utc)
+        result = result.replace(tzinfo=UTC)
+    return result.astimezone(UTC)
 
 
 def _readable_bound(value: str | None) -> datetime | None:

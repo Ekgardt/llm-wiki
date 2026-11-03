@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -144,9 +143,8 @@ def test_production_import_probe_has_no_pytest_dependency() -> None:
     imports = install_smoke._production_imports()
     source = Path(install_smoke.__file__).read_text(encoding="utf-8")
 
-    needs_tomli = sys.version_info < (3, 11)
     assert (imports["mcp"], imports["mcp_server"], "import pytest" in source) == (True, True, False)
-    assert imports.get("tomli", False) is True or not needs_tomli
+    assert "tomli" not in imports
 
 
 def test_cli_emits_one_json_object_or_bounded_failure(

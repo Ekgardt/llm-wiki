@@ -4,7 +4,7 @@ from __future__ import annotations
 import email.utils
 import math
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from llm_wiki.reliability_defaults import DEFAULTS
 
@@ -14,8 +14,8 @@ _MAX_RETRY_AFTER_SECONDS = 7 * 24 * 60 * 60
 
 def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 def _timestamp(value: datetime) -> str:
     return _as_utc(value).isoformat(timespec="microseconds")

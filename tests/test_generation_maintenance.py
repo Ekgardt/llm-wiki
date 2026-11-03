@@ -8,7 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -144,7 +144,7 @@ def test_generation_check_reports_graph_only_v1_as_degraded_and_repairable(tmp_p
 
     root, state = _vault(tmp_path)
     _empty_generation(state, "gen-1", root=root)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     healthy = doctor._generation_check(
         root, state, now, deadline=time.monotonic() + LONG_TIMEOUT, max_sources=10
@@ -195,7 +195,7 @@ def test_generation_check_reports_complete_v2_as_healthy(tmp_path):
     result = doctor._generation_check(
         root,
         state,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         deadline=time.monotonic() + LONG_TIMEOUT,
         max_sources=10,
     )
@@ -224,7 +224,7 @@ def test_generation_check_reports_invalid_v2_search_index_as_error(tmp_path, dam
     result = doctor._generation_check(
         root,
         state,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         deadline=time.monotonic() + LONG_TIMEOUT,
         max_sources=10,
     )
@@ -268,7 +268,7 @@ def test_generation_check_degrades_noncurrent_scope_or_extraction_identity(tmp_p
     result = doctor._generation_check(
         root,
         state,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         deadline=time.monotonic() + LONG_TIMEOUT,
         max_sources=10,
     )
@@ -288,7 +288,7 @@ def test_generation_check_distinguishes_not_built_from_invalid_active(tmp_path):
     missing = doctor._generation_check(
         root,
         state,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         deadline=time.monotonic() + LONG_TIMEOUT,
         max_sources=10,
     )
@@ -306,7 +306,7 @@ def test_generation_check_distinguishes_not_built_from_invalid_active(tmp_path):
     empty = doctor._generation_check(
         root,
         state,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         deadline=time.monotonic() + LONG_TIMEOUT,
         max_sources=10,
     )
@@ -326,7 +326,7 @@ def test_generation_check_distinguishes_not_built_from_invalid_active(tmp_path):
     invalid = doctor._generation_check(
         root,
         state,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         deadline=time.monotonic() + LONG_TIMEOUT,
         max_sources=10,
     )
@@ -2090,7 +2090,7 @@ def test_a_vault_with_generations_but_none_active_is_degraded(tmp_path):
     report = doctor._generation_check(
         root,
         state,
-        datetime.now(timezone.utc),
+        datetime.now(UTC),
         deadline=time.monotonic() + LONG_TIMEOUT,
         max_sources=10,
     )

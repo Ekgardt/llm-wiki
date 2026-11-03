@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -128,7 +128,7 @@ def test_a_candidate_with_a_live_maintenance_owner_is_kept(tmp_path: Path) -> No
 def test_a_candidate_whose_owners_have_expired_is_retired(tmp_path: Path) -> None:
     root, state_root, home = _adopted_vault(tmp_path)
     candidate = _stray(state_root)
-    past = datetime.now(timezone.utc) - timedelta(days=6)
+    past = datetime.now(UTC) - timedelta(days=6)
     registry = operational_ownership.OwnershipRegistry(state_root, clock=lambda: past)
     registry.acquire("project", scope="project:a", actor_id="actor-a")
 

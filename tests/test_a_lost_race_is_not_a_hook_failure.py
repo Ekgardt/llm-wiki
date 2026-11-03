@@ -13,7 +13,7 @@ they no longer decide the status.
 """
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import doctor  # noqa: E402
 import integration_adapter  # noqa: E402
 
-NOW = datetime(2026, 9, 7, 16, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 7, 16, 0, tzinfo=UTC)
 JUST_NOW = (NOW - timedelta(seconds=30)).isoformat()
 
 

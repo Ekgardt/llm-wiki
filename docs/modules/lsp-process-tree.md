@@ -21,6 +21,6 @@ their original suite. No old assertion or subprocess behavior is removed.
 The manifest includes full instructions, pytest bootstrap, implementation, tests,
 fixture, source rationale and measurement code. Source-closure, owner-guide,
 standard-library import and actual isolated-import guards apply. Windows skips
-on Linux remain unqualified until native CI executes them. Python 3.10 remains
+on Linux remain unqualified until native CI executes them. Python 3.14 is now
 the compatibility floor. Run `pytest tests/modules/lsp_process_tree
  tests/test_lsp_process_tree.py -q` and the dependent LSP integration suites.

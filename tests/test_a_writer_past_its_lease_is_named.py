@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import doctor
@@ -44,18 +44,18 @@ def _check(tmp_path: Path, expires_at: datetime) -> dict:
     coordinator = MarkdownCoordinator(tmp_path / "vault", tmp_path / "state")
     _append(coordinator, "2026-01-01")
     _writer_row(coordinator.database_path, expires_at)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return doctor._transaction_check(tmp_path / "state", now, time.monotonic() + 30, vault_root=tmp_path / "vault")
 
 
 def test_a_live_writer_past_its_lease_degrades_and_is_named(tmp_path: Path) -> None:
-    check = _check(tmp_path, datetime.now(timezone.utc) - timedelta(minutes=70))
+    check = _check(tmp_path, datetime.now(UTC) - timedelta(minutes=70))
 
     assert (check["status"], check["details"].get("overdue_writers")) == ("degraded", 1)
     assert "past its lease" in check["message"]
 
 
 def test_a_live_writer_inside_its_lease_is_not_a_finding(tmp_path: Path) -> None:
-    check = _check(tmp_path, datetime.now(timezone.utc) + timedelta(seconds=30))
+    check = _check(tmp_path, datetime.now(UTC) + timedelta(seconds=30))
 
     assert (check["status"], check["details"].get("overdue_writers")) == ("ok", 0)

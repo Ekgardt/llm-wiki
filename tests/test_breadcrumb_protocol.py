@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import breadcrumb_protocol as protocol
 import pytest
@@ -11,7 +11,7 @@ from reliable_memory import canonical_json_bytes, sha256_bytes
 
 
 def _encoded(content: bytes, intent_id: str = "a" * 64):
-    moment = datetime(2026, 9, 29, tzinfo=timezone.utc)
+    moment = datetime(2026, 9, 29, tzinfo=UTC)
     anchor = protocol.make_anchor(
         intent_id, content, occurred_at=moment, accepted_at=moment, time_origin="host",
     )

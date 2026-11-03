@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -31,7 +31,7 @@ _DIGEST = "d" * 64
 
 
 def _stamp(offset: timedelta) -> str:
-    return memory_queue._timestamp(datetime.now(timezone.utc) + offset)
+    return memory_queue._timestamp(datetime.now(UTC) + offset)
 
 
 def _queue_with_fence(tmp_path: Path, offset: timedelta) -> MemoryQueue:

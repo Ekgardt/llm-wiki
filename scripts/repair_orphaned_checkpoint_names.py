@@ -31,6 +31,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from datetime import UTC
+
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
 from project_journal import (  # noqa: E402
     ProjectJournalRebuildRequired,
@@ -86,11 +88,11 @@ def _is_orphaned(row: object, now: float, live_tokens: frozenset[str]) -> bool:
 
 def live_lease_tokens(database) -> frozenset[str]:
     """The lease tokens a project writer still holds, by the coordinator's clock."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from iso_time import utc_text
 
-    now = utc_text(datetime.now(timezone.utc))
+    now = utc_text(datetime.now(UTC))
     rows = database.execute(
         "SELECT lease_token FROM project_leases WHERE expires_at > ?", (now,)
     ).fetchall()
@@ -99,9 +101,9 @@ def live_lease_tokens(database) -> frozenset[str]:
 
 def orphaned_rows(store: ProjectStore) -> list[tuple[str, int, str, str]]:
     """Unsettled sequences no request is going to settle on its own."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    now = datetime.now(timezone.utc).timestamp()
+    now = datetime.now(UTC).timestamp()
     with store.coordinator._connect() as database:  # noqa: SLF001
         rows = database.execute(
             "SELECT c.project, c.sequence, c.state, c.occurrence_id, "

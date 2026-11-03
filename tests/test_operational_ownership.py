@@ -5,7 +5,7 @@ import os
 import sqlite3
 import threading
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import markdown_transaction
@@ -69,7 +69,7 @@ def _registry(
     _initialize_candidate(state_root)
     current = ownership.ProcessIdentity(pid=31001, start_identity="test-process:1")
     monkeypatch.setattr(ownership, "current_process_identity", lambda: current)
-    selected_clock = clock or _Clock(datetime(2026, 8, 12, 12, tzinfo=timezone.utc))
+    selected_clock = clock or _Clock(datetime(2026, 8, 12, 12, tzinfo=UTC))
     kwargs = {"clock": selected_clock}
     if process_probe is not None:
         kwargs["process_probe"] = process_probe

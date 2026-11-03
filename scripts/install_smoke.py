@@ -62,9 +62,6 @@ def _production_imports() -> dict[str, bool]:
     if not bool(getattr(mcp_server, "MCP_AVAILABLE", False)):
         raise SmokeFailure("MCP server capability is unavailable")
     result = {"mcp": True, "mcp_server": True}
-    if sys.version_info < (3, 11):
-        importlib.import_module("tomli")
-        result["tomli"] = True
     return result
 
 

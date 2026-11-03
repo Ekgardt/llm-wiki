@@ -8,7 +8,7 @@ import io
 import json
 import sys
 from argparse import Namespace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -21,7 +21,7 @@ from tests.adopted_capture_vault import (  # noqa: E402
     intent_records,
 )
 
-START = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc)
+START = datetime(2026, 9, 17, 12, 0, tzinfo=UTC)
 
 
 @pytest.fixture

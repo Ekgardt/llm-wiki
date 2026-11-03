@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -81,7 +81,7 @@ def test_the_state_bound_admits_what_the_writer_can_produce() -> None:
 def test_pending_checkpoint_events_older_than_thirty_days_are_dropped_and_noted(monkeypatch) -> None:
     noted: list[tuple[str, int]] = []
     monkeypatch.setattr(integration_adapter, "_note_expired_events", lambda slug, n: noted.append((slug, n)))
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     old = (now - timedelta(days=45)).isoformat()
     young = (now - timedelta(days=2)).isoformat()
     pending = {
@@ -162,7 +162,7 @@ def _failure_root(state_root: Path, index: int, age_days: float, now: datetime) 
 
 def test_old_failure_roots_beyond_the_newest_twenty_are_retired(tmp_path) -> None:
     state_root = tmp_path / "state"
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     roots = [_failure_root(state_root, index, 30.0 - index * 0.1, now) for index in range(25)]
     young = _failure_root(state_root, 99, 1.0, now)
 
@@ -173,7 +173,7 @@ def test_old_failure_roots_beyond_the_newest_twenty_are_retired(tmp_path) -> Non
 
 def test_young_evidence_is_kept_even_beyond_twenty(tmp_path) -> None:
     state_root = tmp_path / "state"
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     roots = [_failure_root(state_root, index, 2.0, now) for index in range(25)]
 
     assert (retire_lsp_evidence.retire(state_root, now), all(r.exists() for r in roots)) == (0, True)

@@ -1,7 +1,7 @@
 """Foreground selection must preserve every ordinary queue admission fence."""
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from threading import Barrier
 
 import memory_queue
@@ -85,7 +85,7 @@ def test_target_selection_cannot_override_task_state(tmp_path, state):
 
 def test_target_selection_keeps_future_availability(tmp_path):
     queue = _queue(tmp_path)
-    target = queue.enqueue('query', 1, {}, available_at=datetime.now(timezone.utc) + timedelta(days=1))
+    target = queue.enqueue('query', 1, {}, available_at=datetime.now(UTC) + timedelta(days=1))
     unrelated = queue.enqueue('query', 1, {'unrelated': True})
     assert queue.claim('foreground', task_id=target) is None
     assert [queue.get(item).attempts for item in (target, unrelated)] == [0, 0]

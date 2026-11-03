@@ -15,7 +15,7 @@ import time
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -1814,7 +1814,7 @@ def _drain_one_backlog(slug: str, deadline: float, failed: dict[str, str]) -> in
             slug,
             state_lock_seconds=BACKLOG_STATE_LOCK_SECONDS,
             deadline=deadline,
-            now=datetime.now(timezone.utc),
+            now=datetime.now(UTC),
         )
     except Exception as error:  # noqa: BLE001
         failed[slug] = _bounded_checkpoint_error(error)
@@ -3151,7 +3151,7 @@ class _CapturePublicationKeepAlive:
 
         with self._coordinator._connect() as database:
             self._registry.require(database, self._owner)
-            _require_live_intent_fence(database, self._fence, datetime.now(timezone.utc))
+            _require_live_intent_fence(database, self._fence, datetime.now(UTC))
 
     def _renew(self) -> None:
         self._owner = self._registry.heartbeat(self._owner)
@@ -3201,7 +3201,7 @@ def _require_capture_registration_owner(coordinator, intent_id, owner, fence) ->
                  AND canonical_role=? AND canonical_scope=? AND canonical_actor_id=?
                  AND canonical_owner_token=? AND canonical_fencing_epoch=? AND expires_at>?""",
             (intent_id, fence.token, fence.epoch, owner.role, owner.scope,
-             owner.actor_id, owner.token, owner.epoch, utc_text(datetime.now(timezone.utc))),
+             owner.actor_id, owner.token, owner.epoch, utc_text(datetime.now(UTC))),
         ).fetchone()
     if row is None:
         raise RuntimeError("intent_fence_lost")

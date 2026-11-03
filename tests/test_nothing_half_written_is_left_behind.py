@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import sys
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -57,7 +57,7 @@ def test_the_images_of_a_killed_prune_are_put_back_and_then_pruned(
     coordinator = _coordinator(tmp_path)
     transaction_id = _committed(coordinator)
     staged = _kill_a_prune(coordinator, transaction_id)
-    later = datetime.now(timezone.utc) + timedelta(days=30)
+    later = datetime.now(UTC) + timedelta(days=30)
 
     pruned = coordinator.prune(now=later)
 
@@ -72,7 +72,7 @@ def test_a_live_image_directory_wins_over_a_staged_copy(tmp_path: Path) -> None:
     staged = _kill_a_prune(coordinator, transaction_id)
     (coordinator.transaction_root / transaction_id).mkdir()
 
-    coordinator.prune(now=datetime.now(timezone.utc) + timedelta(days=30))
+    coordinator.prune(now=datetime.now(UTC) + timedelta(days=30))
 
     assert not staged.exists()
 

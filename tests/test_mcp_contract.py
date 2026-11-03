@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -31,7 +31,7 @@ MANDATORY_FIELDS = {
 def test_build_envelope_has_all_mandatory_fields_and_utc_timestamp(tmp_path):
     from mcp_contract import build_envelope
 
-    now = datetime(2026, 7, 13, 12, 30, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 13, 12, 30, tzinfo=UTC)
     envelope = build_envelope({"answer": 42}, root=tmp_path, now=now)
 
     assert set(envelope) == MANDATORY_FIELDS
@@ -78,7 +78,7 @@ def test_build_envelope_rejects_unbounded_quality_values(tmp_path, coverage, con
 def test_freshness_uses_explicit_component_generations_not_fts_mtime(tmp_path):
     from mcp_contract import build_envelope
 
-    now = datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
     index = tmp_path / "cache" / "index.sqlite"
     index.parent.mkdir()
     index.touch()
@@ -110,7 +110,7 @@ def test_freshness_uses_explicit_component_generations_not_fts_mtime(tmp_path):
 def test_freshness_ignores_old_or_missing_legacy_index(tmp_path):
     from mcp_contract import build_envelope
 
-    now = datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
     index = tmp_path / "cache" / "index.sqlite"
     index.parent.mkdir()
     index.touch()
@@ -186,7 +186,7 @@ def test_legacy_index_timestamp_is_not_read(
     envelope = mcp_contract.build_envelope(
         {},
         root=tmp_path,
-        now=real_datetime(2026, 7, 13, tzinfo=timezone.utc),
+        now=real_datetime(2026, 7, 13, tzinfo=UTC),
     )
 
     assert envelope["index_timestamp"] is None

@@ -6,7 +6,7 @@ Research: docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import markdown_transaction
@@ -34,7 +34,7 @@ def _registry(state_root: Path, monkeypatch: pytest.MonkeyPatch, clock: _Clock):
 def test_a_lease_taken_on_a_whole_second_is_lost_half_a_second_after_it_expires(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    clock = _Clock(datetime(2026, 9, 17, 12, tzinfo=timezone.utc))
+    clock = _Clock(datetime(2026, 9, 17, 12, tzinfo=UTC))
     registry = _registry(tmp_path, monkeypatch, clock)
     lease = registry.acquire("doctor", scope="global", actor_id="actor-a", token="a" * 32)
     clock.value = lease.expires_at + timedelta(milliseconds=500)
@@ -46,7 +46,7 @@ def test_a_lease_taken_on_a_whole_second_is_lost_half_a_second_after_it_expires(
 
 
 def test_both_timestamp_shapes_are_read_and_one_is_written() -> None:
-    whole = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)
+    whole = datetime(2026, 9, 17, 12, tzinfo=UTC)
     written = ownership._timestamp(whole)
     read = (
         ownership._parse_timestamp("2026-09-17T12:00:00Z"),

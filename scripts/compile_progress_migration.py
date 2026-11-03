@@ -6,7 +6,7 @@ maintenance fence. This is not an online migration of already-open SQL handles.
 from __future__ import annotations
 
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 
@@ -168,7 +168,7 @@ def _prepare_upgrade(root, state, image, previous, registry, lease, emit):
     root, state, image = backup._resolve_roots(root, state, image)
     repair.require_reliability_v3_adopted(root=root, state_root=state)
     backup._build_image(root=root, state_root=state, image=image, lease=lease,
-                        now=datetime.now(timezone.utc), deadline=float('inf'))
+                        now=datetime.now(UTC), deadline=float('inf'))
     emit('after_backup')
     record = _upgrade_envelope(state, previous, image)
     _require_owner(registry, lease)

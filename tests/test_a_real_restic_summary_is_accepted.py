@@ -10,7 +10,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -112,7 +112,7 @@ def test_a_real_restic_backs_up_and_restores_the_vault(tmp_path, monkeypatch):
         staging_parent=staging,
         restic_binary=binary,
         repository_file=repository_file,
-        now=datetime(2026, 8, 15, tzinfo=timezone.utc),
+        now=datetime(2026, 8, 15, tzinfo=UTC),
         deadline=time.monotonic() + LONG_TIMEOUT,
     )
     receipt = backup.restore_private_vault(

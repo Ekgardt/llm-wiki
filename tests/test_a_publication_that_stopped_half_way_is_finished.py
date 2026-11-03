@@ -5,7 +5,7 @@ See `docs/research/2026-09-17-a-publication-that-stopped-half-way-is-finished.md
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from reliable_memory import canonical_json_bytes, publish_runtime_file, sha256_bytes
@@ -18,7 +18,7 @@ from tests.test_capture_intent_adoption import (
     _skipped_ids,
 )
 
-LATER = datetime.now(timezone.utc) + timedelta(hours=1)
+LATER = datetime.now(UTC) + timedelta(hours=1)
 
 
 def _publish_pending_intent(tmp_path: Path, queue, coordinator, seed: bytes) -> dict:

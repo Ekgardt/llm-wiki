@@ -2,15 +2,10 @@ from __future__ import annotations
 
 import json
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib
-
 from installer_config import resolve_uv_project_environment, uv_sync_arguments
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -42,7 +37,7 @@ def test_semantic_extra_owns_every_import_of_the_encoder() -> None:
     names = {re.split(r"[<>=!~;\s\[]", value, maxsplit=1)[0].casefold() for value in semantic}
 
     assert names == {"huggingface-hub", "numpy", "onnxruntime", "tokenizers"}
-    assert sum(value.startswith("onnxruntime") for value in semantic) == 2
+    assert [value for value in semantic if value.startswith("onnxruntime")] == ["onnxruntime>=1.18,<2"]
 
 
 @pytest.mark.parametrize("override", [None, "relative environment"])

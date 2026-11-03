@@ -197,7 +197,7 @@ the sealed code workspace, the `code_capture` manifest section, the verified-ana
 records and the `evidence-graph/v3` schema they filled -- was removed from the code
 (`docs/research/2026-09-18-the-superseded-plan-a-seam-leaves-the-code.md`).
 The replacement plan implements the production-quality,
-Python 3.10-compatible read-only LSP path through four pinned managed language
+Python 3.14 read-only LSP path through four pinned managed language
 servers: paths, positions, bounded protocol, startup evidence, leased
 platform-qualified lifecycle ownership, repository containment, safe log redaction,
 explicit profile installation, document synchronization, session-manager capacity,

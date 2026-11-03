@@ -25,15 +25,10 @@ from __future__ import annotations
 
 import hashlib
 import os
-import sys
+import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # pragma: no cover - exercised on the Python 3.10 CI job
-    import tomli as tomllib
 
 from bounded_io import read_stable_bytes
 

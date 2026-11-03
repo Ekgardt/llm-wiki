@@ -4,7 +4,7 @@ docs/research/2026-09-26-a-page-belongs-to-the-project-its-evidence-names.md
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import compile_memory
 import flush_memory
@@ -14,7 +14,7 @@ RECORD = {"event": "session_end", "session": "s1", "trigger": "session-end", "ho
 
 def _block(project: str | None) -> bytes:
     record = {**RECORD, "project_slug": project}
-    return flush_memory._capture_daily_block(record, "major", "## Decisions made\n- x\n", datetime.now(timezone.utc)).encode()
+    return flush_memory._capture_daily_block(record, "major", "## Decisions made\n- x\n", datetime.now(UTC)).encode()
 
 
 def test_a_captured_block_names_its_project() -> None:

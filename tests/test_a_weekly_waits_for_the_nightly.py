@@ -4,7 +4,7 @@ docs/research/2026-09-26-a-weekly-waits-for-the-nightly.md
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import doctor
 import install_control
@@ -28,6 +28,6 @@ def test_the_wait_fits_under_the_scheduler_limit() -> None:
 def test_a_weekly_that_only_ever_skipped_is_named() -> None:
     state = {"last_weekly_skip": {"skipped_at": "2026-09-20T03:00:00+00:00", "reason": "owner_busy"}}
 
-    verdict = doctor._weekly_verdict(state, datetime.now(timezone.utc))
+    verdict = doctor._weekly_verdict(state, datetime.now(UTC))
 
     assert verdict is not None and verdict[0] == "degraded"

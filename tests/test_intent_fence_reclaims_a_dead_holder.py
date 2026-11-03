@@ -26,7 +26,7 @@ import contextlib
 import os
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -120,7 +120,7 @@ def _dead_identity() -> ownership.ProcessIdentity:
 
 
 def _expire(state_root: Path, table: str) -> None:
-    when = datetime.now(timezone.utc) - timedelta(seconds=1)
+    when = datetime.now(UTC) - timedelta(seconds=1)
     stamp = when.isoformat().replace("+00:00", "Z")
     with contextlib.closing(sqlite3.connect(_coordinator_path(state_root))) as database:
         database.execute(f"UPDATE {table} SET expires_at=?", (stamp,))
@@ -213,7 +213,7 @@ def test_the_reclaim_takes_the_binding_projection_with_the_fence(
                 "task-wedged",
                 "b" * 64,
                 "c" * 64,
-                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                datetime.now(UTC).isoformat().replace("+00:00", "Z"),
                 fence["token"],
                 fence["fencing_epoch"],
             ),

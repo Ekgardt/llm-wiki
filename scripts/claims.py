@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -221,7 +221,7 @@ def _canonical_timestamp_text(text: str, *, label: str) -> str:
         parsed = datetime.fromisoformat(
             _six_digit_fraction(text[:-1] + "+00:00" if text.endswith("Z") else text)
         )
-        if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
             raise ValueError
     except ValueError as exc:
         raise ValueError(f"{label} must be a canonical UTC date or timestamp") from exc
@@ -235,7 +235,7 @@ def _strict_rfc3339_utc(value: object, *, label: str) -> str:
         parsed = datetime.fromisoformat(_six_digit_fraction(value[:-1] + "+00:00"))
     except ValueError as exc:
         raise ValueError(f"{label} is not a real RFC3339 date/time") from exc
-    if parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+    if parsed.utcoffset() != UTC.utcoffset(parsed):
         raise ValueError(f"{label} must be UTC")
     return value
 

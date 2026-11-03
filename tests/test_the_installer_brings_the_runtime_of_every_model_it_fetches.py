@@ -12,12 +12,8 @@ See docs/research/2026-09-28-a-check-names-its-cause.md.
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib
 
 from install_models import EMBEDDING_MODEL, pinned_models
 from installer_config import uv_sync_arguments

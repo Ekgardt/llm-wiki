@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -2928,7 +2928,7 @@ class TestHandleToolCall:
             index = tmp_path / "cache" / "index.sqlite"
             index.parent.mkdir()
             index.touch()
-            old = datetime.now(timezone.utc) - timedelta(days=2)
+            old = datetime.now(UTC) - timedelta(days=2)
             os.utime(index, (old.timestamp(), old.timestamp()))
         real_build = mcp_contract.build_envelope
         monkeypatch.setattr(
@@ -3317,7 +3317,7 @@ class TestResources:
             mcp_server,
             "_vault_status",
             lambda: {
-                "last_compile": datetime.now(timezone.utc).isoformat(),
+                "last_compile": datetime.now(UTC).isoformat(),
                 "last_compile_status": "ok",
                 "compile_backlog": 2,
             },
@@ -3355,7 +3355,7 @@ class TestResources:
         index = tmp_path / "cache" / "index.sqlite"
         index.parent.mkdir()
         index.touch()
-        old = datetime.now(timezone.utc) - timedelta(days=2)
+        old = datetime.now(UTC) - timedelta(days=2)
         os.utime(index, (old.timestamp(), old.timestamp()))
         real_build = mcp_contract.build_envelope
         monkeypatch.setattr(
@@ -3367,7 +3367,7 @@ class TestResources:
             mcp_server,
             "_vault_status",
             lambda: {
-                "last_compile": datetime.now(timezone.utc).isoformat(),
+                "last_compile": datetime.now(UTC).isoformat(),
                 "last_compile_status": "ok",
                 "compile_backlog": 0,
             },

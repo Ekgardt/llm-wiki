@@ -35,7 +35,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -405,7 +405,7 @@ def build_corpus(directory: Path, limit: int, report=print) -> dict:
         "corpus_id": "flush-classification-live",
         "schema_version": "flush-classification/v3",
         "source": str(directory),
-        "built_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "built_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "agreement": agreement(cases),
         "thresholds": {
             "tier_accuracy": 0.8,

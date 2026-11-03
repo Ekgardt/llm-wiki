@@ -1,6 +1,8 @@
 """Only complete linked breadcrumb evidence joins the authoritative corpus."""
 from __future__ import annotations
 
+from datetime import UTC
+
 import breadcrumb_evidence
 import corpus_snapshot
 import pytest
@@ -207,13 +209,13 @@ def test_fallback_respects_an_already_elapsed_deadline(tmp_path, monkeypatch):
 
 def _write_numbered_event(root, number, text):
     import hashlib
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     import breadcrumb_protocol as protocol
 
     content = text.encode()
     identity = hashlib.sha256(str(number).encode()).hexdigest()
-    moment = datetime(2026, 9, 29, tzinfo=timezone.utc)
+    moment = datetime(2026, 9, 29, tzinfo=UTC)
     anchor = protocol.make_anchor(identity, content, occurred_at=moment,
                                   accepted_at=moment, time_origin='host')
     parts = protocol.encode_parts(identity, content)

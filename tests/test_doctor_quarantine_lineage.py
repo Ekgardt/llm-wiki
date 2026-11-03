@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -233,7 +233,7 @@ def test_the_maintenance_owner_opens_the_adoption_aware_coordinator(
 
     with pytest.raises(Routed):
         doctor._acquire_maintenance_owner(
-            tmp_path, tmp_path, datetime.now(timezone.utc)
+            tmp_path, tmp_path, datetime.now(UTC)
         )
 
     assert asked == [(tmp_path, tmp_path)]

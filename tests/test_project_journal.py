@@ -7,7 +7,7 @@ import threading
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import markdown_transaction
@@ -242,7 +242,7 @@ def _parse_test_timestamp(value: str) -> datetime:
 def test_lease_uses_random_token_monotonic_epoch_and_default_timing(
     vault: Path, state_root: Path
 ):
-    now = datetime(2026, 7, 13, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 13, tzinfo=UTC)
     store = ProjectStore(vault, state_root, clock=lambda: now)
 
     first = store.acquire_lease("demo", "agent-a")
@@ -298,7 +298,7 @@ def test_coordinator_reserves_idempotency_sequence_and_preparation_binding(
 def test_active_lease_is_exclusive_and_heartbeat_extends_it(
     vault: Path, state_root: Path
 ):
-    now = datetime(2026, 7, 13, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 13, tzinfo=UTC)
     store = ProjectStore(vault, state_root, clock=lambda: now)
     lease = store.acquire_lease("demo", "agent-a")
 
@@ -314,7 +314,7 @@ def test_active_lease_is_exclusive_and_heartbeat_extends_it(
 def test_same_owner_cannot_alias_active_lease_and_exact_token_can_renew(
     vault: Path, state_root: Path
 ):
-    now = datetime(2026, 7, 13, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 13, tzinfo=UTC)
     store = ProjectStore(vault, state_root, clock=lambda: now)
     lease = store.acquire_lease("demo", "agent-a")
 
@@ -959,7 +959,7 @@ def test_existing_journal_line_is_validated_once_per_checkpoint(
 def test_slow_checkpoint_phases_renew_lease_before_apply(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     store = ProjectStore(vault, state_root, clock=lambda: now)
     heartbeat = store.heartbeat
     heartbeats: list[datetime] = []
@@ -2078,7 +2078,7 @@ def test_successful_checkpoint_releases_lease_once(
 def test_post_prepare_heartbeat_refreshes_persisted_lease_precondition(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     store = ProjectStore(vault, state_root, clock=lambda: now)
     real_prepare = store.coordinator.prepare
     initial_expiry = ""
@@ -2163,7 +2163,7 @@ def test_prepared_lease_refresh_rejects_successor_token(
                 "lease_token": "successor",
                 "fencing_epoch": 2,
                 "expires_at": (
-                    datetime.now(timezone.utc) + timedelta(minutes=1)
+                    datetime.now(UTC) + timedelta(minutes=1)
                 ).isoformat().replace("+00:00", "Z"),
             },
         )

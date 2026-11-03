@@ -45,6 +45,7 @@ def _shell_script(state, image, confirmed):
     functions = "\n".join(_shell_function(source, name) for name in SHELL_NAMES)
     return f"""
 set -euo pipefail
+BOOTSTRAP_PYTHON={shlex.quote(sys.executable)}
 VAULT_ROOT={shlex.quote(str(ROOT))}
 STATE_ROOT={shlex.quote(str(state))}
 ADOPTION_ERR="$STATE_ROOT/logs/install-adoption.err.log"

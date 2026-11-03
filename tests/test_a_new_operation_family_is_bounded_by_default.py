@@ -7,7 +7,7 @@ from __future__ import annotations
 import shutil
 import sqlite3
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import markdown_transaction
@@ -39,7 +39,7 @@ def _append(coordinator: MarkdownCoordinator, family: str) -> None:
 
 
 def _prune_past_window(coordinator: MarkdownCoordinator) -> dict[str, int]:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     coordinator.prune(now=now + timedelta(days=3))
     return coordinator.prune_history(now=now + LATER)
 

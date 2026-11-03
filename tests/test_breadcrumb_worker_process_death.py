@@ -6,7 +6,7 @@ import subprocess
 import sys
 import threading
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -97,7 +97,7 @@ def test_real_worker_death_recovers_every_committed_boundary(tmp_path, monkeypat
     expiry = max(_persisted_expiry(root) for root in roots)
     # The recorded real deadlines govern recovery; no lease, clock, owner or
     # process identity is edited to make recovery pass. All four waits overlap.
-    threading.Event().wait(max(0, (expiry - datetime.now(timezone.utc)).total_seconds()))
+    threading.Event().wait(max(0, (expiry - datetime.now(UTC)).total_seconds()))
     monkeypatch.setattr(llm_client, "call_llm_result", _no_model)
     for root in roots:
         _recover(root)

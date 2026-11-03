@@ -14,7 +14,7 @@ from __future__ import annotations
 import random
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -34,7 +34,7 @@ _UNRELATED = {"page": "knowledge/notes/a-page.md", "written_at": f"{_DAY}T09:00:
 
 class _Clock:
     def __init__(self) -> None:
-        self.now = datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc)
+        self.now = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
 
     def __call__(self) -> datetime:
         return self.now

@@ -40,8 +40,8 @@ from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
+from datetime import UTC, datetime
 from datetime import date as calendar_date
-from datetime import datetime, timezone
 from functools import partial
 from itertools import groupby
 from pathlib import Path
@@ -6142,7 +6142,7 @@ def _published(
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _require_paired_batch(

@@ -2,7 +2,7 @@
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from llm_wiki import queue_attempts as attempts
@@ -12,7 +12,7 @@ from llm_wiki.queue_schema import _QUEUE_V3_TABLE_SQL
 from llm_wiki.queue_timing import _timestamp
 from llm_wiki.sqlite_transactions import begin_immediate
 
-NOW = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 1, 12, tzinfo=UTC)
 EXPIRES = NOW + timedelta(seconds=60)
 
 

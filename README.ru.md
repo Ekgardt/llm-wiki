@@ -1,7 +1,7 @@
 # LLM Wiki
 
 [![Tests](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml/badge.svg)](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
+[![Python](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](CHANGELOG.md)
 
@@ -55,7 +55,7 @@ OpenCode, Codex, Claude, OpenAI и Ollama. Локальна только Ollama,
 
 ### Что нужно
 
-- Python 3.10+ и git
+- Python 3.14 и git. Установщик выбирает эту версию явно; установить её можно командой `uv python install 3.14`.
 - [uv](https://docs.astral.sh/uv/) ровно 0.12.3 — оба установщика отказываются от любой другой версии
 - Агент, которым вы уже пользуетесь: Claude Code, Codex или OpenCode
 - Node 22 — только для точной навигации по TypeScript и Python (см. ниже)

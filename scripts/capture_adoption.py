@@ -42,7 +42,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -239,7 +239,7 @@ PENDING_INTENT_RECOVERY_SECONDS = 60
 
 def _stale_pending_cutoff(now: datetime | None = None) -> str:
     """The queue's own stored width (microseconds, `+00:00`), so text order is time order."""
-    moment = now or datetime.now(timezone.utc)
+    moment = now or datetime.now(UTC)
     return (moment - timedelta(seconds=PENDING_INTENT_RECOVERY_SECONDS)).isoformat(timespec="microseconds")
 
 

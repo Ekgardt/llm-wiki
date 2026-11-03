@@ -5,7 +5,7 @@ import dataclasses
 import hashlib
 import os
 import stat
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -194,7 +194,7 @@ def test_as_of_uses_validity_and_an_unreadable_frontmatter_costs_only_its_page(v
     assert "knowledge/notes/bad.md" in {source.record.relative_path for source in tolerated.sources}
 
     (vault / "knowledge/notes/bad.md").unlink()
-    past = collect_corpus(vault, as_of=datetime(2025, 6, 1, tzinfo=timezone.utc))
+    past = collect_corpus(vault, as_of=datetime(2025, 6, 1, tzinfo=UTC))
     future = collect_corpus(vault, as_of="2027-01-01T00:00:00Z")
     assert [source.record.relative_path for source in past.sources] == [
         "knowledge/notes/old.md"

@@ -1,5 +1,6 @@
 """A complete transaction inventory is bounded by time, not record count."""
 import time
+from datetime import UTC
 
 import doctor
 import pytest
@@ -47,9 +48,9 @@ def test_staged_prune_is_not_a_transaction_or_damage(tmp_path):
 
 @pytest.mark.parametrize('present', [True, False])
 def test_complete_inventory_does_not_repeat_filesystem_inspection(tmp_path, monkeypatch, present):
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     row = {'id': 'retained', 'artifacts_pruned_at': None, 'updated_at': now.isoformat()}
     calls = []
 
@@ -65,9 +66,9 @@ def test_complete_inventory_does_not_repeat_filesystem_inspection(tmp_path, monk
 
 @pytest.mark.parametrize('kind,expected', [('directory', True), ('symlink', False), ('missing', False)])
 def test_incomplete_inventory_still_inspects_undo_directory(tmp_path, monkeypatch, kind, expected):
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     row = {'id': 'retained', 'artifacts_pruned_at': None, 'updated_at': now.isoformat()}
     calls = []
 

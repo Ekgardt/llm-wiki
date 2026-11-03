@@ -20,7 +20,7 @@ fails closed — an expiry that is absent or unreadable counts as live.
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import markdown_transaction
@@ -42,7 +42,7 @@ def state_root(tmp_path: Path) -> Path:
 
 
 def _stamp(offset: timedelta) -> str:
-    moment = datetime.now(timezone.utc) + offset
+    moment = datetime.now(UTC) + offset
     return moment.isoformat().replace("+00:00", "Z")
 
 
@@ -178,10 +178,10 @@ def test_an_owner_row_without_an_expiry_column_still_blocks(
 
 def test_a_naive_expiry_is_read_as_utc(vault: Path, state_root: Path) -> None:
     """Some v2 rows carry no offset; every writer of these tables meant UTC."""
-    naive = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(tzinfo=None)
+    naive = (datetime.now(UTC) - timedelta(hours=1)).replace(tzinfo=None)
 
     live = markdown_transaction._expiry_is_live(
-        naive.isoformat(), datetime.now(timezone.utc)
+        naive.isoformat(), datetime.now(UTC)
     )
 
     assert live is False

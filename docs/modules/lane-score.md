@@ -13,7 +13,7 @@ retrieval ordering remain integration consumers. Preserve their pins and asserti
 The pure score test moves unchanged into this owner; production bytes stay identical.
 
 Qualification: [research](../research/2026-11-03-retrieval-leaf-owner-qualification.md).
-Run owner and retained integration tests, Python 3.10 compatibility, actual complexity
+Run owner and retained integration tests, Python 3.14 compatibility, actual complexity
 and full-context reconstruction. No useful-cost or native-platform claim follows
 from a packet-size check.
 

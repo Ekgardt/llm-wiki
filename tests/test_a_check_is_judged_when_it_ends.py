@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import doctor
 
@@ -25,7 +25,7 @@ def test_a_corrupt_queue_stays_an_error_when_a_later_check_runs_late(tmp_path, m
     monkeypatch.setattr(doctor, "_claim_check", late_claims)
     deadline = time.monotonic() + budget
 
-    checks = doctor._collect_checks(root, state, tmp_path, datetime.now(timezone.utc), deadline)
+    checks = doctor._collect_checks(root, state, tmp_path, datetime.now(UTC), deadline)
 
     queue = next(check for check in checks if check["id"] == "queue")
     assert queue["status"] == "error"

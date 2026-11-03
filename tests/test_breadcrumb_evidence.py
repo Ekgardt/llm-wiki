@@ -1,7 +1,7 @@
 """Permanent sources retain every input byte and cannot validate partial copies."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import breadcrumb_evidence as evidence
@@ -11,7 +11,7 @@ from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES
 
 
 def _source(content: bytes):
-    moment = datetime(2026, 9, 29, tzinfo=timezone.utc)
+    moment = datetime(2026, 9, 29, tzinfo=UTC)
     anchor = protocol.make_anchor(
         "a" * 64, content, occurred_at=moment, accepted_at=moment, time_origin="host",
     )

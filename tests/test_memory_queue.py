@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from inspect import signature
 from pathlib import Path
 
@@ -37,7 +37,7 @@ from reliable_memory import canonical_json_bytes, sha256_bytes, validate_schema 
 
 class FakeClock:
     def __init__(self) -> None:
-        self.now = datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc)
+        self.now = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
 
     def __call__(self) -> datetime:
         return self.now
@@ -921,7 +921,7 @@ def test_v3_ordinary_purge_uses_transactional_authorization_without_schema_mutat
     export = tmp_path / "exports" / "ordinary"
 
     receipt = queue.purge(
-        terminal_before=datetime(2001, 1, 1, tzinfo=timezone.utc),
+        terminal_before=datetime(2001, 1, 1, tzinfo=UTC),
         export_path=export,
     )
 
@@ -1557,7 +1557,7 @@ def test_retry_uses_full_jitter_and_longer_retry_after(
         (10**400, 604800.0),
         (-10**400, None),
         ("²", None),
-        (datetime.max.replace(tzinfo=timezone.utc), 604800.0),
+        (datetime.max.replace(tzinfo=UTC), 604800.0),
     ],
 )
 def test_retry_after_is_finite_nonnegative_and_safely_bounded(

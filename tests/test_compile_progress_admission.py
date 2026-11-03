@@ -7,7 +7,7 @@ import json
 import math
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import compile_progress as progress
 import compile_progress_migration as migration
@@ -85,7 +85,7 @@ def test_health_backup_and_deletion_accept_the_same_contract(upgraded):
     )['user_version'] == 4
     assert private_vault_backup._validated_databases(state)[1]['user_version'] == 4
     assert 'queue_task_retained' in repair._queue_database_blockers(state, math.inf)
-    result = doctor._queue_v2_check(state, datetime.now(timezone.utc), math.inf)
+    result = doctor._queue_v2_check(state, datetime.now(UTC), math.inf)
     assert 'queue_state_unreadable' not in result['details']['deletion_codes']
 
 

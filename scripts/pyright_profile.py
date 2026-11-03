@@ -13,14 +13,10 @@ import stat
 import subprocess as _subprocess
 import threading
 import time
+import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path, PureWindowsPath
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib
+from pathlib import Path
 
 import lsp_process_tree as _lsp_process_tree
 from bounded_io import read_stable_bytes
@@ -1775,12 +1771,7 @@ def _expected_source_server(
 
 def _windows_name_is_reserved(raw: str) -> bool:
     """Windows rules for one path text; a pure function, so it runs anywhere."""
-    is_reserved = getattr(ntpath, "isreserved", None)
-    if is_reserved is not None:
-        return bool(is_reserved(raw))
-    # Below 3.13 only: from 3.13 the branch above answers, and the pathlib
-    # method is removed in 3.15.
-    return PureWindowsPath(raw).is_reserved()
+    return bool(ntpath.isreserved(raw))
 
 
 def _path_is_reserved(raw: str) -> bool:

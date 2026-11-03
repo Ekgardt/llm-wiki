@@ -8,7 +8,7 @@ Nothing else can move a finished row, so every later purge failed as well.
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import memory_queue
@@ -40,7 +40,7 @@ def test_the_purge_takes_the_healthy_task_and_demotes_the_corrupt_one(
     tamper_payload(state_root, corrupt)
 
     receipt = queue.purge(
-        terminal_before=datetime.now(timezone.utc) - timedelta(days=1),
+        terminal_before=datetime.now(UTC) - timedelta(days=1),
         export_path=tmp_path / "export",
     )
 

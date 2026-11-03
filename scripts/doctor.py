@@ -22,7 +22,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, NamedTuple
@@ -55,16 +55,6 @@ from transaction_lineage import (
     outcome_was_written,
     resolved_by_lineage,
 )
-
-try:
-    import tomllib as STDLIB_TOML
-except ModuleNotFoundError:  # Python 3.10
-    STDLIB_TOML = None
-
-try:
-    import tomli as TOMLI
-except ModuleNotFoundError:  # Python 3.11+ does not install the backport
-    TOMLI = None
 
 SCHEMA_VERSION = "1.0"
 # The degraded-health summary injected into a session's context: past it the text is
@@ -207,10 +197,10 @@ OPERATION_REQUIRED_COLUMNS = {
 
 
 def _as_utc(value: datetime | None) -> datetime:
-    value = value or datetime.now(timezone.utc)
+    value = value or datetime.now(UTC)
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _result(check_id: str, status: str, message: str, details: dict) -> dict:
@@ -218,7 +208,7 @@ def _result(check_id: str, status: str, message: str, details: dict) -> dict:
 
 
 def _environment_check(root: Path, state_root: Path) -> dict:
-    python_ok = tuple(sys.version_info[:2]) >= (3, 10)
+    python_ok = tuple(sys.version_info[:2]) == (3, 14)
     root_ok = root.is_dir()
     state_parent_ok = state_root.is_dir()
     layout = {
@@ -717,8 +707,8 @@ def _parse_utc(value: object) -> datetime | None:
     except (TypeError, ValueError):
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _row_value(row: sqlite3.Row, column: str) -> object:
@@ -1121,7 +1111,7 @@ def _streamed_rows(
 
 
 def _lease_live(value: object, now: datetime) -> bool:
-    return (_parse_utc(value) or datetime.max.replace(tzinfo=timezone.utc)) > now
+    return (_parse_utc(value) or datetime.max.replace(tzinfo=UTC)) > now
 
 
 def _count_project_leases(
@@ -2698,7 +2688,7 @@ def _task_lease_live(
     if state != "leased" or "lease_expires_at" not in row_columns:
         return False
     expires = _parse_utc(row["lease_expires_at"]) or datetime.min.replace(
-        tzinfo=timezone.utc
+        tzinfo=UTC
     )
     return expires > now
 
@@ -3894,7 +3884,7 @@ def _parse_lsp_timestamp(value: object) -> datetime | None:
 
 
 def _lsp_timestamp_round_trips(parsed: datetime, value: str) -> bool:
-    if parsed.tzinfo != timezone.utc:
+    if parsed.tzinfo != UTC:
         return False
     return parsed.isoformat().replace("+00:00", "Z") == value
 
@@ -8112,7 +8102,7 @@ def _release_maintenance_owner(coordinator: Any, lease: dict[str, object]) -> No
         return
     with coordinator._connect() as database:
         database.execute("BEGIN IMMEDIATE")
-        released_at = datetime.min.replace(tzinfo=timezone.utc).isoformat()
+        released_at = datetime.min.replace(tzinfo=UTC).isoformat()
         changed = database.execute(
             """UPDATE maintenance_owners
                SET owner_token='',process_id=0,heartbeat_at=?,expires_at=?
@@ -9311,7 +9301,7 @@ def run_generation_maintenance(
     if unusable is not None:
         return unusable
     acquired = _acquire_maintenance_owner(
-        root_path, state_path, datetime.now(timezone.utc)
+        root_path, state_path, datetime.now(UTC)
     )
     if acquired is None:
         return _maintenance_outcome(
@@ -9833,7 +9823,7 @@ def _last_snapshot_at(root: Path) -> datetime | None:
     stamp = completed.stdout.strip()
     if completed.returncode != 0 or not stamp.isdigit():
         return None
-    return datetime.fromtimestamp(int(stamp), tz=timezone.utc)
+    return datetime.fromtimestamp(int(stamp), tz=UTC)
 
 
 def _no_snapshot_result(installed: datetime | None, now: datetime, details: dict) -> dict:

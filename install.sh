@@ -9,7 +9,7 @@
 # Remote bootstrap requires LLM_WIKI_COMMIT to be a full commit OID.
 #
 # What this does:
-#   1. Checks prerequisites (Python 3.10+, uv, git)
+#   1. Checks prerequisites (Python 3.14, uv, git)
 #   2. Installs the locked production dependency baseline
 #   3. Runs a bounded production smoke
 #   4. Persists roots through the resumable install control plane
@@ -343,18 +343,6 @@ fi
 
 info "Checking prerequisites..."
 
-# Python 3.10+
-if ! command -v python3 &>/dev/null; then
-  fail "Python 3 is required but not installed. Install from https://python.org"
-fi
-PY_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-PY_MAJOR=$(echo "$PY_VERSION" | cut -d. -f1)
-PY_MINOR=$(echo "$PY_VERSION" | cut -d. -f2)
-if [[ "$PY_MAJOR" -lt 3 ]] || { [[ "$PY_MAJOR" -eq 3 ]] && [[ "$PY_MINOR" -lt 10 ]]; }; then
-  fail "Python 3.10+ required, found $PY_VERSION"
-fi
-ok "Python $PY_VERSION"
-
 # git
 if ! command -v git &>/dev/null; then
   fail "git is required but not installed."
@@ -371,17 +359,23 @@ if [ "$installedUvVersion" != "$UV_VERSION" ]; then
 fi
 ok "uv ${installedUvVersion}"
 
+# One interpreter series for bootstrap and the project environment.
+if ! BOOTSTRAP_PYTHON="$(uv python find 3.14)"; then
+  fail "Python 3.14 is required. Run: uv python install 3.14"
+fi
+ok "Python $("$BOOTSTRAP_PYTHON" --version)"
+
 # ─── 3. Install dependencies ───────────────────────────────────────
 
 info "Installing locked production dependencies..."
-SYNC_PLAN="$(python3 "$VAULT_ROOT/scripts/installer_config.py" sync-args \
+SYNC_PLAN="$("$BOOTSTRAP_PYTHON" "$VAULT_ROOT/scripts/installer_config.py" sync-args \
   --root "$VAULT_ROOT" --environment "${UV_PROJECT_ENVIRONMENT:-}")"
-PROJECT_ENVIRONMENT="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["environment"])' "$SYNC_PLAN")"
+PROJECT_ENVIRONMENT="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1])["environment"])' "$SYNC_PLAN")"
 SYNC_ARGS=()
 while IFS= read -r sync_argument; do
   SYNC_ARGS+=("$sync_argument")
-done < <(python3 -c 'import json, sys; print(*json.loads(sys.argv[1])["arguments"], sep="\n")' "$SYNC_PLAN")
-IGNORED_ENVIRONMENT="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["ignored_environment"] or "")' "$SYNC_PLAN")"
+done < <("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(*json.loads(sys.argv[1])["arguments"], sep="\n")' "$SYNC_PLAN")
+IGNORED_ENVIRONMENT="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1])["ignored_environment"] or "")' "$SYNC_PLAN")"
 if [ -n "$IGNORED_ENVIRONMENT" ]; then
   # Timers, hooks and the MCP server run the vault from its own .venv (audit B-26).
   warn "UV_PROJECT_ENVIRONMENT=$IGNORED_ENVIRONMENT is not used: the vault runs from $PROJECT_ENVIRONMENT"
@@ -612,7 +606,7 @@ info "Choosing the model the memory pipeline calls..."
 MODEL_CHOICE="$(uv run --locked --no-sync --directory "$VAULT_ROOT" python \
   "$VAULT_ROOT/scripts/choose_model.py" --home "$HOME" \
   ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"})" || fail "Model choice failed"
-MODEL_VALUE="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["model"])' "$MODEL_CHOICE")"
+MODEL_VALUE="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1])["model"])' "$MODEL_CHOICE")"
 if [ -n "$MODEL_VALUE" ]; then
   ok "Memory model saved in llm-wiki.toml: $MODEL_VALUE"
 fi
@@ -632,7 +626,7 @@ INSTALL_CONTROL_RESULT="$(uv run --locked --no-sync --directory "$VAULT_ROOT" py
   --profile "$PROFILE" \
   ${IDE_HOOK_ARGS[@]+"${IDE_HOOK_ARGS[@]}"} \
   ${ADOPT_ARGS[@]+"${ADOPT_ARGS[@]}"})" || fail "Install ownership transaction failed"
-SCHEDULER_BACKEND="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["scheduler_backend"])' "$INSTALL_CONTROL_RESULT")"
+SCHEDULER_BACKEND="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1])["scheduler_backend"])' "$INSTALL_CONTROL_RESULT")"
 case "$SCHEDULER_BACKEND" in
   launchd|systemd_user|cron) ;;
   *) fail "Install control returned an invalid scheduler backend" ;;
@@ -644,13 +638,13 @@ ok "Environment roots and $SCHEDULER_BACKEND maintenance are verified"
 info "Detecting installed agents..."
 
 AGENT_STATUSES=()
-VAULT_JSON=$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$VAULT_ROOT")
+VAULT_JSON=$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$VAULT_ROOT")
 
 # OpenCode configuration is merged structurally and verified after all precedence layers.
 OPENCODE_RESULT="$(uv run --locked --no-sync --directory "$VAULT_ROOT" python \
   "$VAULT_ROOT/scripts/installer_config.py" opencode \
   --root "$VAULT_ROOT" --state-root "$STATE_ROOT" --cwd "$CALLER_CWD")"
-OPENCODE_STATUS="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["status"])' "$OPENCODE_RESULT")"
+OPENCODE_STATUS="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1])["status"])' "$OPENCODE_RESULT")"
 case "$OPENCODE_STATUS" in
   active)
     AGENT_STATUSES+=("OpenCode: active automatic")
@@ -787,7 +781,7 @@ mkdir -p "$STATE_ROOT/logs"
 adoption_state_of() {
   local report
   report="$(uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --check --json 2>>"$ADOPTION_ERR" || true)"
-  printf '%s' "$report" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("details", {}).get("adoption_state", "unknown"))' 2>>"$ADOPTION_ERR" || echo unknown
+  printf '%s' "$report" | "$BOOTSTRAP_PYTHON" -c 'import json,sys; print(json.load(sys.stdin).get("details", {}).get("adoption_state", "unknown"))' 2>>"$ADOPTION_ERR" || echo unknown
 }
 ADOPTION_STATE="$(adoption_state_of)"
 adoption_tail() {
@@ -846,7 +840,7 @@ esac
 compile_progress_state_of() {
   local report
   report="$(uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --check --json 2>>"$ADOPTION_ERR" || true)"
-  printf '%s' "$report" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("details", {}).get("compile_progress", "unknown"))' 2>>"$ADOPTION_ERR" || echo unknown
+  printf '%s' "$report" | "$BOOTSTRAP_PYTHON" -c 'import json,sys; print(json.load(sys.stdin).get("details", {}).get("compile_progress", "unknown"))' 2>>"$ADOPTION_ERR" || echo unknown
 }
 apply_compile_progress_upgrade() {
   if uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --apply --upgrade-compile-progress --backup-image "$COMPILE_BACKUP_IMAGE" --confirm-all-agents-stopped >>"$ADOPTION_ERR" 2>&1; then

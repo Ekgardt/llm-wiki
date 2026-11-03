@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -793,7 +793,7 @@ def test_capture_worker_commits_major_daily_block_and_terminal(tmp_path: Path) -
     provider = _FakeNoContentProvider(
         "FLUSH_MAJOR\n- **Decisions made** - keep this"
     )
-    chosen_at = datetime(2026, 8, 16, 12, 34, 56, tzinfo=timezone.utc)
+    chosen_at = datetime(2026, 8, 16, 12, 34, 56, tzinfo=UTC)
     processor = _TimedCaptureProcessor(queue, coordinator, provider, chosen_at)
 
     relative = flush_memory.run_capture_worker_once(
@@ -823,7 +823,7 @@ def test_capture_worker_reuses_markdown_after_terminal_publish_crash(
     provider = _FakeNoContentProvider(
         "FLUSH_MAJOR\n- **Decisions made** - keep this"
     )
-    chosen_at = datetime(2026, 8, 16, 12, 34, 56, tzinfo=timezone.utc)
+    chosen_at = datetime(2026, 8, 16, 12, 34, 56, tzinfo=UTC)
     processor = _TimedCaptureProcessor(queue, coordinator, provider, chosen_at)
     real_publish_terminal = flush_memory._publish_capture_terminal
     monkeypatch.setattr(
@@ -865,7 +865,7 @@ def test_capture_worker_commits_minor_daily_block_and_terminal(tmp_path: Path) -
     provider = _FakeNoContentProvider(
         "FLUSH_MINOR\n- **Gotchas / debugging** - keep this"
     )
-    chosen_at = datetime(2026, 8, 16, 12, 34, 56, tzinfo=timezone.utc)
+    chosen_at = datetime(2026, 8, 16, 12, 34, 56, tzinfo=UTC)
     processor = _TimedCaptureProcessor(queue, coordinator, provider, chosen_at)
 
     relative = flush_memory.run_capture_worker_once(
@@ -960,7 +960,7 @@ def test_ordinary_purge_removes_terminal_proven_capture_sources_but_retains_term
     export = tmp_path / "exports" / "capture"
 
     receipt = queue.purge(
-        terminal_before=datetime(2001, 1, 1, tzinfo=timezone.utc),
+        terminal_before=datetime(2001, 1, 1, tzinfo=UTC),
         export_path=export,
     )
 
@@ -989,7 +989,7 @@ def test_ordinary_purge_rejects_capture_terminal_without_exact_task_binding(
         memory_queue.QueueOperationError, match="capture_terminal_unbound"
     ):
         queue.purge(
-            terminal_before=datetime(2001, 1, 1, tzinfo=timezone.utc),
+            terminal_before=datetime(2001, 1, 1, tzinfo=UTC),
             export_path=export,
         )
 
@@ -1016,7 +1016,7 @@ def test_ordinary_purge_resumes_after_export_publication_crash(
     monkeypatch.setattr(queue, "_commit_ordinary_purge", crash_before_commit)
     with pytest.raises(RuntimeError, match="injected crash before purge commit"):
         queue.purge(
-            terminal_before=datetime(2001, 1, 1, tzinfo=timezone.utc),
+            terminal_before=datetime(2001, 1, 1, tzinfo=UTC),
             export_path=export,
         )
 
@@ -1027,7 +1027,7 @@ def test_ordinary_purge_resumes_after_export_publication_crash(
     )
 
     receipt = resumed.purge(
-        terminal_before=datetime(2001, 1, 1, tzinfo=timezone.utc),
+        terminal_before=datetime(2001, 1, 1, tzinfo=UTC),
         export_path=export,
     )
 
@@ -1054,7 +1054,7 @@ def test_ordinary_purge_resumes_partial_cleanup_after_database_commit(
     monkeypatch.setattr(queue, "_cleanup_ordinary_purge_artifacts", crash_during_cleanup)
     with pytest.raises(RuntimeError, match="injected crash during purge cleanup"):
         queue.purge(
-            terminal_before=datetime(2001, 1, 1, tzinfo=timezone.utc),
+            terminal_before=datetime(2001, 1, 1, tzinfo=UTC),
             export_path=export,
         )
 
@@ -1069,7 +1069,7 @@ def test_ordinary_purge_resumes_partial_cleanup_after_database_commit(
         queue.db_path, state_root=tmp_path
     )
     receipt = resumed.purge(
-        terminal_before=datetime(2001, 1, 1, tzinfo=timezone.utc),
+        terminal_before=datetime(2001, 1, 1, tzinfo=UTC),
         export_path=export,
     )
 

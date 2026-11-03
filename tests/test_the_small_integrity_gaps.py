@@ -5,7 +5,7 @@ Research: `docs/research/2026-09-14-the-small-integrity-gaps.md`.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -64,7 +64,7 @@ def test_the_compile_lock_is_created_with_its_content(tmp_path, monkeypatch):
 def test_a_v3_task_going_back_to_ready_waits_before_it_is_claimed_again():
     import memory_queue
 
-    now = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 14, 12, tzinfo=UTC)
     delays = {memory_queue._retry_available_at("ready", 3, now) > now for _ in range(20)}
     immediate = [memory_queue._retry_available_at(state, 3, now) for state in ("blocked", "dead")]
 

@@ -5,7 +5,7 @@ See `docs/research/2026-09-17-a-queued-entry-resolves-its-dates-too.md`.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -23,7 +23,7 @@ from tests.test_capture_terminal import (  # noqa: E402
 from tests.test_queue_v3_capture_links import _coordinator, _queue  # noqa: E402
 
 # A Sunday, so "last Thursday" is the 13th.
-CHOSEN_AT = datetime(2026, 8, 16, 12, 34, 56, tzinfo=timezone.utc)
+CHOSEN_AT = datetime(2026, 8, 16, 12, 34, 56, tzinfo=UTC)
 WIRE_OUTPUT = "FLUSH_MAJOR\n- **Decisions made** - I met her last Thursday."
 INTENT = {
     "event": "session_end",

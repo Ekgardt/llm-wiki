@@ -2,7 +2,7 @@
 import copy
 import time
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import compile_memory as compiler
 import doctor
@@ -340,7 +340,7 @@ def test_existing_compile_family_retains_current_v4_authority_after_pruning(exac
     committed = _publish_current(history, record)
     with _reader(history) as (database, _reader_instance):
         assert committed.id not in quarantine_witnesses(database)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     assert history[2].prune(now=now + timedelta(days=3)) == 1
     removed = history[2].prune_history(now=now + timedelta(days=markdown_transaction.HISTORY_RETENTION_DAYS + 1))
     assert removed["transactions"] == 0

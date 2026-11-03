@@ -5,7 +5,7 @@ docs/research/2026-09-26-a-failure-in-the-night-is-named.md
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import doctor
 import reclaim_runtime_state
@@ -48,7 +48,7 @@ def _rows(*updated: datetime) -> list[sqlite3.Row]:
 
 def test_every_dead_task_counts_and_the_oldest_age_is_shown() -> None:
     """An old dead task is still unresolved (audit 2026-09-27 B-13)."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     assert doctor._dead_backlog(_rows(now - timedelta(days=1), now - timedelta(days=30)), now) == (2, 30)
 
@@ -58,7 +58,7 @@ def _lineage(*children: str) -> list[sqlite3.Row]:
     database = sqlite3.connect(":memory:")
     database.row_factory = sqlite3.Row
     database.execute("CREATE TABLE tasks(id TEXT, state TEXT, updated_at TEXT, redrive_of TEXT)")
-    moment = datetime(2026, 9, 8, tzinfo=timezone.utc).isoformat()
+    moment = datetime(2026, 9, 8, tzinfo=UTC).isoformat()
     database.execute("INSERT INTO tasks VALUES ('parent', 'dead', ?, NULL)", (moment,))
     database.executemany(
         "INSERT INTO tasks VALUES (?, ?, ?, 'parent')",
@@ -69,7 +69,7 @@ def _lineage(*children: str) -> list[sqlite3.Row]:
 
 def test_a_dead_task_a_redrive_answered_is_not_counted_again() -> None:
     """25 live dead captures, every one redriven, were named unresolved (2026-09-28)."""
-    now = datetime(2026, 9, 28, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 28, tzinfo=UTC)
 
     assert [
         doctor._dead_backlog(_lineage(*children), now)[0]

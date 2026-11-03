@@ -2,7 +2,7 @@
 import os
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -16,7 +16,7 @@ def _observed(tmp_path, monkeypatch, scan):
     root, state = _vault(tmp_path)
     build_adopted_reliability_v3(root, state)
     monkeypatch.setattr(installed_memory_repair, "validate_reliability_v3_runtime", scan(state))
-    result = doctor._run_deletion_check(state, datetime.now(timezone.utc), root=root)
+    result = doctor._run_deletion_check(state, datetime.now(UTC), root=root)
     assert result["quiescent"] is False
     assert result["permit"] is False
     assert {item["code"] for item in result["blockers"]} == {"run_deletion_state_unknown"}

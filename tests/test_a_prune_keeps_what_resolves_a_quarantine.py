@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import doctor
@@ -64,10 +64,10 @@ def test_pruning_history_never_reopens_a_resolved_quarantine(tmp_path: Path) -> 
     coordinator = _vault(tmp_path)
     _each_kind_of_resolution(coordinator)
     _append(coordinator, "post-tool:unrelated", "2026-01-04")
-    coordinator.prune(now=datetime.now(timezone.utc) + timedelta(days=3))
+    coordinator.prune(now=datetime.now(UTC) + timedelta(days=3))
     before = _unresolved(coordinator)
 
-    pruned = coordinator.prune_history(now=datetime.now(timezone.utc) + LATER)
+    pruned = coordinator.prune_history(now=datetime.now(UTC) + LATER)
 
     assert (before, _unresolved(coordinator), pruned["transactions"]) == (0, 0, 1)
 
@@ -76,10 +76,10 @@ def test_a_prune_past_its_deadline_keeps_what_it_did_and_says_so(tmp_path: Path)
     coordinator = _vault(tmp_path)
     for day in ("2026-01-01", "2026-01-02", "2026-01-03"):
         _append(coordinator, f"post-tool:{day}", day)
-    coordinator.prune(now=datetime.now(timezone.utc) + timedelta(days=3))
+    coordinator.prune(now=datetime.now(UTC) + timedelta(days=3))
 
-    expired = coordinator.prune_history(now=datetime.now(timezone.utc) + LATER, deadline=time.monotonic() - 1)
-    sliced = coordinator.prune_history(now=datetime.now(timezone.utc) + LATER, deadline=time.monotonic() + 60,
+    expired = coordinator.prune_history(now=datetime.now(UTC) + LATER, deadline=time.monotonic() - 1)
+    sliced = coordinator.prune_history(now=datetime.now(UTC) + LATER, deadline=time.monotonic() + 60,
                                        slice_seconds=0.0)
 
     assert (expired["transactions"], expired["unfinished"], sliced["transactions"], sliced["unfinished"]) == (

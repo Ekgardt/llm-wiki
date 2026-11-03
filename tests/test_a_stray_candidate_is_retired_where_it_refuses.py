@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import stat
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -42,7 +42,7 @@ def _queue_stray(state_root: Path) -> Path:
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def test_a_writer_retires_an_empty_coordinator_stray_and_is_admitted(tmp_path: Path) -> None:

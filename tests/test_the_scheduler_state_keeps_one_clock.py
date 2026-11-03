@@ -6,7 +6,7 @@ docs/research/2026-09-25-the-scheduler-state-keeps-one-clock.md.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import doctor
 import scheduled_nightly
@@ -17,7 +17,7 @@ def test_every_written_instant_carries_its_offset() -> None:
 
 
 def test_a_skip_is_compared_with_the_run_as_instants() -> None:
-    ran = datetime(2026, 9, 25, 3, 0, tzinfo=timezone.utc)
+    ran = datetime(2026, 9, 25, 3, 0, tzinfo=UTC)
     skipped_before = (ran - timedelta(hours=1)).astimezone(timezone(timedelta(hours=-5)))
     skipped_after = (ran + timedelta(minutes=5)).astimezone(timezone(timedelta(hours=9)))
     state = {"last_nightly_at": ran.isoformat()}

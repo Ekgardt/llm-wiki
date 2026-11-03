@@ -7,7 +7,7 @@ import sqlite3
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from iso_time import utc_text
@@ -89,7 +89,7 @@ def _parsed_timestamp_text(value: str) -> datetime:
 
 def _parsed_timestamp(value: datetime | str | None) -> datetime:
     if value is None:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
     return _given_timestamp(value)
 
 
@@ -676,7 +676,7 @@ def _require_compact_limits(retention_days: int, max_rows: int, max_delete: int)
 
 
 def _compact_cutoff(now: datetime | None, retention_days: int) -> datetime:
-    current = now or datetime.now(timezone.utc)
+    current = now or datetime.now(UTC)
     if current.tzinfo is None or current.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
     return current - timedelta(days=retention_days)
