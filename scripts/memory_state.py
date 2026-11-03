@@ -44,6 +44,7 @@ from llm_wiki.daily_log_selection import (
     daily_logs as daily_logs,
 )
 from llm_wiki.formats.canonical import sha256_bytes
+from llm_wiki.reliability_defaults import MAX_CAPTURE_INTENT_BYTES as MAX_CAPTURE_INTENT_BYTES
 from llm_wiki.state_json_values import (
     _decoded_state,
 )
@@ -112,9 +113,6 @@ CODE_TOOLS_DIR = STATE_ROOT / "cache/code-tools"
 LSP_RUN_DIR = STATE_ROOT / "run/lsp"
 STATE_FILE = STATE_DIR / "state.json"
 LOCK_FILE = STATE_DIR / "state.json.lock"
-# One capture intent on disk; the hook that writes it and the worker that
-# reads it bound the same file (`docs/research/2026-09-23-one-limit-one-place.md`).
-MAX_CAPTURE_INTENT_BYTES = 1024 * 1024
 # How long a hook waits for `state.json`: the host is waiting on the hook.
 HOOK_STATE_LOCK_TIMEOUT = 0.1
 

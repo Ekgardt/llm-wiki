@@ -45,3 +45,10 @@ assert not {'reliable_memory', 'memory_queue', 'memory_state'}.intersection(sys.
                             capture_output=True, check=False,
                             env={**os.environ, 'PYTHONPATH': str(ROOT / 'scripts')})
     assert result.returncode == 0, result.stderr
+
+
+def test_capture_file_bounds_keep_their_original_values():
+    from llm_wiki.reliability_defaults import MAX_CAPTURE_DECISION_BYTES, MAX_CAPTURE_INTENT_BYTES
+
+    assert MAX_CAPTURE_INTENT_BYTES == 1024 * 1024
+    assert MAX_CAPTURE_DECISION_BYTES == 1024 * 1024

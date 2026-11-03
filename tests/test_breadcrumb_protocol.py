@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import breadcrumb_protocol as protocol
 import pytest
-from reliable_memory import canonical_json_bytes, sha256_bytes
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 
 
 def _encoded(content: bytes, intent_id: str = "a" * 64):

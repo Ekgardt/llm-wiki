@@ -38,3 +38,20 @@ class ReliableMemoryDefaults:
 
 ReliableMemoryDefaults.__module__ = "reliable_memory"
 DEFAULTS = ReliableMemoryDefaults()
+
+
+# One capture intent on disk; the hook that writes it and the worker that
+# reads it bound the same file (`docs/research/2026-09-23-one-limit-one-place.md`).
+# The largest installed intent measured 2026-09-27 was 977 392 bytes (93%);
+# revisit this transport policy if intents approach it. Repair uses this same bound.
+MAX_CAPTURE_INTENT_BYTES = 1024 * 1024
+
+
+# The one bound on a capture decision file, for the writer and every reader. The
+# indexer read it with 64 KiB while the writer allowed 1 MiB, so a verbose classifier
+# answer (43 KB, stored twice: the wire answer and the plan) failed every retry and
+# the day's summary was lost (audit 2026-09-27 B-3,
+# docs/research/2026-09-27-one-file-one-bound.md). 1 MiB is the writer's bound, kept:
+# about 170 times the 1 500-token answer the classifier asks for, so it refuses only an
+# answer no summary needs, and CLI providers do not enforce the request's token cap.
+MAX_CAPTURE_DECISION_BYTES = 1024 * 1024

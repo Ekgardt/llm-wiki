@@ -26,7 +26,9 @@
     "tests/module_context_paths.py",
     "tests/module_records.py",
     "tests/module_record_context.py",
-    "docs/modules/context-records.md"
+    "docs/modules/context-records.md",
+    "docs/research/2026-09-23-one-limit-one-place.md",
+    "docs/research/2026-09-27-one-file-one-bound.md"
   ],
   "directories": [
     "tests/modules/reliability_defaults"

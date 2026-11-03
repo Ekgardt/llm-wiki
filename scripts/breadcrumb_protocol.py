@@ -15,7 +15,7 @@ from pathlib import Path
 
 from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from llm_wiki.formats.schema import SchemaValidationError, validate_schema
-from memory_state import MAX_CAPTURE_INTENT_BYTES
+from llm_wiki.reliability_defaults import MAX_CAPTURE_INTENT_BYTES
 
 SCHEMAS = Path(__file__).with_name("schemas")
 MANIFEST_VERSION = "capture-intent/v2"

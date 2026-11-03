@@ -2352,3 +2352,7 @@ behavior, queue admission and publication contracts stay unchanged.
 The [classification benchmark metrics](modules/flush-classification-metrics.md)
 owner grades confirmed cases through the shared protocol and evaluates the
 existing gates. Provider adapters, corpus IO and CLI remain with the runner.
+
+Capture byte policies belong to [reliability-defaults](modules/reliability-defaults.md),
+with unchanged legacy aliases. [breadcrumb-protocol](modules/breadcrumb-protocol.md)
+owns complete linked-record syntax and its schemas; storage and execution remain separate.

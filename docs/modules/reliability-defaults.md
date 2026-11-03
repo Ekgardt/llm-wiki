@@ -27,7 +27,7 @@ Consumer scanning is an architecture gate over the checkout; consumer integratio
 is additional context and qualification, not an isolated unit task.
 
 ```sh
-PYTHONPATH=scripts uv run pytest --noconftest tests/modules/reliability_defaults -q -s
+uv run pytest tests/modules/reliability_defaults -q -s
 ```
 
 tests/test_reliable_memory.py retains the original explicit expected-value test
@@ -62,3 +62,20 @@ Each has own tests under `tests/modules/<module_name>/` and a guide/context
 manifest under `docs/modules/` using the hyphenated name. Complete packets obey
 the 100,000-token ceiling. No runtime path, schema, daemon or numeric policy
 changes. Approval: `knowledge/notes/queue-renewal-boundaries-decision-20261102.md`.
+
+## Capture transport policy — 2026-11-03
+
+The same dependency-free owner now holds MAX_CAPTURE_INTENT_BYTES and
+MAX_CAPTURE_DECISION_BYTES, each still 1024 * 1024. They bound different physical
+records; neither limits complete logical breadcrumb input. Original comments and
+full September 23/27 rationale remain in the owner packet. memory_state and
+reliable_memory keep direct old-name aliases. installed_memory_repair imports the
+intent value under its existing private name: its duplicate existed only to avoid
+memory_state's live-root initialization, which this leaf does not perform.
+DEFAULTS fields, pickle metadata and values do not change. The breadcrumb protocol
+imports policy directly and keeps its existing path, algorithms and schemas.
+
+Alternatives and current research: [breadcrumb-protocol](breadcrumb-protocol.md).
+That guide documents the independent wire boundary; it is not a dependency of
+this policy leaf. Tests pin values, facade aliases and repair agreement, and refuse
+runtime imports. There is no second mutable policy store or new operator setting.

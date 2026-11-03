@@ -25,6 +25,7 @@ from llm_wiki.formats.schema import (
     validate_schema_object as validate_schema_object,
 )
 from llm_wiki.reliability_defaults import DEFAULTS as DEFAULTS
+from llm_wiki.reliability_defaults import MAX_CAPTURE_DECISION_BYTES as MAX_CAPTURE_DECISION_BYTES
 from llm_wiki.reliability_defaults import ReliableMemoryDefaults as ReliableMemoryDefaults
 from llm_wiki.restricted_paths import _is_posix_relative_text as _is_posix_relative_text
 from llm_wiki.restricted_paths import _require_inside_a_root as _require_inside_a_root
@@ -224,12 +225,3 @@ from llm_wiki.sqlite_pragmas import (
     _validate_or_initialize_operational_contract as _validate_or_initialize_operational_contract,
 )
 from llm_wiki.sqlite_transactions import begin_immediate as begin_immediate
-
-# The one bound on a capture decision file, for the writer and every reader. The
-# indexer read it with 64 KiB while the writer allowed 1 MiB, so a verbose classifier
-# answer (43 KB, stored twice: the wire answer and the plan) failed every retry and
-# the day's summary was lost (audit 2026-09-27 B-3,
-# docs/research/2026-09-27-one-file-one-bound.md). 1 MiB is the writer's bound, kept:
-# about 170 times the 1 500-token answer the classifier asks for, so it refuses only an
-# answer no summary needs, and CLI providers do not enforce the request's token cap.
-MAX_CAPTURE_DECISION_BYTES = 1024 * 1024

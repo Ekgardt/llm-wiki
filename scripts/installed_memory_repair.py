@@ -23,6 +23,7 @@ from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from llm_wiki.formats.queue_payload import validate_payload_blob
 from llm_wiki.formats.schema import validate_schema
 from llm_wiki.reliability_defaults import DEFAULTS
+from llm_wiki.reliability_defaults import MAX_CAPTURE_INTENT_BYTES as _MAX_CAPTURE_INTENT_BYTES
 from llm_wiki.sqlite_contracts import OperationalDatabaseContract
 from llm_wiki.sqlite_deadlines import operational_deadline_active, refresh_operational_deadline
 from reliable_memory import (
@@ -64,11 +65,7 @@ _MAX_OPERATION_ARTIFACTS = 32
 # Runtime entry traversal keeps the same bound as doctor.MAX_RUNTIME_ENTRIES.
 _MAX_OPERATIONAL_DB_BYTES = 256 * 1024 * 1024
 _MAX_RUNTIME_ENTRIES = 10_000
-# The same bound as memory_state.MAX_CAPTURE_INTENT_BYTES (the hook writes intents
-# under it); not imported because memory_state resolves the live state root at
-# import time. The largest intent on the installed vault on 2026-09-27 was 977 392
-# bytes — 93% of this bound; review the pair if intents approach it.
-_MAX_CAPTURE_INTENT_BYTES = 1024 * 1024
+
 from markdown_transaction import UNDO_RETENTION_DAYS as _UNDO_RETENTION_DAYS  # noqa: E402
 
 _QUEUE_CONTRACT = OperationalDatabaseContract(application_id=0x4C575133)

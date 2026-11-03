@@ -74,3 +74,14 @@ def test_every_decision_reader_uses_the_one_bound() -> None:
         "memory_queue.py": {"MAX_CAPTURE_DECISION_BYTES"},
         "flush_memory.py": {"MAX_CAPTURE_DECISION_BYTES"},
     }
+
+
+def test_capture_policy_aliases_and_repair_reader_share_the_leaf_values():
+    import installed_memory_repair
+    import memory_state
+    import reliable_memory
+    from llm_wiki import reliability_defaults
+
+    assert memory_state.MAX_CAPTURE_INTENT_BYTES is reliability_defaults.MAX_CAPTURE_INTENT_BYTES
+    assert reliable_memory.MAX_CAPTURE_DECISION_BYTES is reliability_defaults.MAX_CAPTURE_DECISION_BYTES
+    assert installed_memory_repair._MAX_CAPTURE_INTENT_BYTES is reliability_defaults.MAX_CAPTURE_INTENT_BYTES
