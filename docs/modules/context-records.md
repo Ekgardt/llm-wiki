@@ -1,7 +1,7 @@
 # Exact record contexts
 
 Record catalogs are test-only maintenance metadata for large documentation,
-benchmark JSON and uv.lock. They never rewrite the source, replace executable
+benchmark JSON, uv.lock and the root CHANGELOG.md. They never rewrite the source, replace executable
 imports, or waive full instructions/owner contracts. Each catalog binds the
 original tracked path, byte length and SHA-256 and a complete ordered partition
 of named logical records. Offsets are UTF-8 bytes, not character or UTF-16 indexes.

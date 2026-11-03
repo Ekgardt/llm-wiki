@@ -45,6 +45,7 @@ def test_selection_keeps_original_bytes_and_source_identity(catalog):
     '../outside.md', '/docs/history.md', 'docs/../scripts/source.py',
     'docs\\history.md', './docs/history.md', 'scripts/source.py',
     'tests/test_source.py', 'knowledge/notes/private.md', 'docs/source.py', '', '.',
+    'AGENTS.md', 'CLAUDE.md', 'README.md', 'rules/development-laws.md',
 ])
 def test_record_views_cannot_hide_code_or_escape_artifact_classes(catalog, source):
     catalog['source'] = source
@@ -52,7 +53,7 @@ def test_record_views_cannot_hide_code_or_escape_artifact_classes(catalog, sourc
         validated_records(catalog, SOURCE)
 
 
-@pytest.mark.parametrize('source', ['docs/history.md', 'benchmark/cases.json', 'uv.lock'])
+@pytest.mark.parametrize('source', ['docs/history.md', 'benchmark/cases.json', 'uv.lock', 'CHANGELOG.md'])
 def test_approved_artifact_classes_are_explicit(catalog, source):
     catalog['source'] = source
     assert b''.join(validated_records(catalog, SOURCE).values()) == SOURCE

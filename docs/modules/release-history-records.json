@@ -1,0 +1,92 @@
+{
+  "schema": "module-records/v1",
+  "source": "CHANGELOG.md",
+  "bytes": 210008,
+  "sha256": "2ffc53ad63e6c5876aa2d4393cffd478c7ec0255f2c551f609a21c132e5966fe",
+  "records": [
+    {
+      "id": "preamble",
+      "label": "Changelog conventions",
+      "start": 0,
+      "end": 208,
+      "sha256": "0e773ba22cd5153b425c2cd3ce40c7c3417ab0282ee9907ef84a9b137eeeea36"
+    },
+    {
+      "id": "unreleased",
+      "label": "## [Unreleased]",
+      "start": 208,
+      "end": 83011,
+      "sha256": "78d82768f784cbca4e2c2ed9d3b7a75bc0f5c55721cfe326826e99c88ea6bb69"
+    },
+    {
+      "id": "v5-0-0",
+      "label": "## [5.0.0] \u2014 2026-09-24",
+      "start": 83011,
+      "end": 166547,
+      "sha256": "2843152d97988a969c45768b37526e2d0aa4cbd0729e799462b379d6bfdd963e"
+    },
+    {
+      "id": "v4-0-0",
+      "label": "## [4.0.0] \u2014 2026-08-25",
+      "start": 166547,
+      "end": 191728,
+      "sha256": "5b29185997bc4a8f708b61cb3b429b8416cd10770031b08e93661d4fe6efecb3"
+    },
+    {
+      "id": "v3-4-0",
+      "label": "## [3.4.0] \u2014 2026-07-11",
+      "start": 191728,
+      "end": 199419,
+      "sha256": "65121143f109916e704fe00914ec68675c2da9b32ef938440ee03616ac11a584"
+    },
+    {
+      "id": "v3-3-3",
+      "label": "## [3.3.3] \u2014 2026-07-10",
+      "start": 199419,
+      "end": 200041,
+      "sha256": "0275077cd20a4aee05653f9c4365b8436f5ad2d695d6f0d5ed51a6bd50c59309"
+    },
+    {
+      "id": "v3-3-2",
+      "label": "## [3.3.2] \u2014 2026-07-09",
+      "start": 200041,
+      "end": 204138,
+      "sha256": "a8cc24d453ea78f1646c84b5be7cf64c471b20931067ad969ae2c4f6077b000e"
+    },
+    {
+      "id": "v3-3-1",
+      "label": "## [3.3.1] \u2014 2026-07-09",
+      "start": 204138,
+      "end": 205823,
+      "sha256": "30bea719db2a4e9662a37191dbc22e1198cc8674d404068f812a037a19164222"
+    },
+    {
+      "id": "v3-3-0",
+      "label": "## [3.3.0] \u2014 2026-07-04",
+      "start": 205823,
+      "end": 206276,
+      "sha256": "6f43fcac3e2acce05956401d99256e521b5694f36e71cbb4e8f92d5cf6684a28"
+    },
+    {
+      "id": "v3-2-0",
+      "label": "## [3.2.0] \u2014 2026-07-03 \u2014 \"Proactive Intelligence + Multi-Agent Coordination\"",
+      "start": 206276,
+      "end": 209110,
+      "sha256": "a4787e89898df26892dba614afb4b9bc180e3ea511ff699f30f04c56b72d96c4"
+    },
+    {
+      "id": "v2-1",
+      "label": "## [2.1] \u2014 2026-07-03 \u2014 \"Multi-tool, zero ops\"",
+      "start": 209110,
+      "end": 209603,
+      "sha256": "c3d0c6f0bb89da193a0f3c1102a31daf2fa9e6b616fe8903e947d9416321c265"
+    },
+    {
+      "id": "v1-0",
+      "label": "## [1.0] \u2014 2026-04 \u2014 \"Karpathy-style vault with session memory\"",
+      "start": 209603,
+      "end": 210008,
+      "sha256": "24c69cbb9f7d53eb02add7d1e2c6292b9470fb295ff924e2737557ea88964548"
+    }
+  ]
+}

@@ -2276,3 +2276,10 @@ commit/blob digest and release-note rendering helper. Tag creation remains a
 separate consumer. Qualification changes neither release commands nor publication
 permissions; opaque committed file contents are inputs to hashing, not executed
 dependencies.
+
+[Release history](modules/release-history.md) owns exact published CHANGELOG
+version records and their complete byte catalog; [pending release history](modules/release-pending.md)
+owns the complete Unreleased record. The original file remains unchanged and
+fully covered. [Release tag](modules/release-tag.md) owns existing tag orchestration
+and its workflow, sharing the complete declared-version record. Authority files
+and executable sources retain whole-file context requirements.

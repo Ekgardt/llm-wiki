@@ -1,0 +1,81 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md",
+    "docs/modules/release-history.md",
+    "docs/modules/release-history-context.json",
+    "docs/modules/release-history-records.json"
+  ],
+  "directories": [
+    "tests/modules/release_history"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "records": [
+    {
+      "catalog": "docs/modules/release-history-records.json",
+      "ids": [
+        "preamble",
+        "v5-0-0",
+        "v4-0-0",
+        "v3-4-0",
+        "v3-3-3",
+        "v3-3-2",
+        "v3-3-1",
+        "v3-3-0",
+        "v3-2-0",
+        "v2-1",
+        "v1-0"
+      ]
+    }
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/release-history.md",
+      "docs/modules/release-history-context.json",
+      "docs/modules/release-history-records.json"
+    ],
+    "directories": [
+      "tests/modules/release_history"
+    ],
+    "records": [
+      {
+        "catalog": "docs/modules/release-history-records.json",
+        "ids": [
+          "preamble",
+          "v5-0-0",
+          "v4-0-0",
+          "v3-4-0",
+          "v3-3-3",
+          "v3-3-2",
+          "v3-3-1",
+          "v3-3-0",
+          "v3-2-0",
+          "v2-1",
+          "v1-0"
+        ]
+      }
+    ]
+  }
+}

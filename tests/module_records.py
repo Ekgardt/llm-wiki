@@ -26,7 +26,7 @@ def _fields(value, expected):
 
 
 def _supported_source(path):
-    if path == PurePosixPath('uv.lock'):
+    if path in {PurePosixPath('uv.lock'), PurePosixPath('CHANGELOG.md')}:
         return True
     return path.suffix == {'docs': '.md', 'benchmark': '.json'}.get(path.parts[0])
 

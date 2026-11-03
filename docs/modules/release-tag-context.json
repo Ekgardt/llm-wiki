@@ -1,0 +1,64 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md",
+    "docs/modules/release-tag.md",
+    "docs/modules/release-tag-context.json",
+    "scripts/release_tag.py",
+    "tests/test_a_green_main_tags_its_version.py",
+    ".github/workflows/release-tag.yml",
+    "docs/research/2026-09-24-a-green-main-tags-its-version.md",
+    "scripts/release_manifest.py",
+    "docs/modules/release-manifest.md",
+    "docs/modules/release-history-records.json",
+    "docs/modules/release-history.md"
+  ],
+  "directories": [
+    "tests/modules/release_tag"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "records": [
+    {
+      "catalog": "docs/modules/release-history-records.json",
+      "ids": [
+        "preamble",
+        "v5-0-0"
+      ]
+    }
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/release-tag.md",
+      "docs/modules/release-tag-context.json",
+      "scripts/release_tag.py",
+      "tests/test_a_green_main_tags_its_version.py",
+      ".github/workflows/release-tag.yml",
+      "docs/research/2026-09-24-a-green-main-tags-its-version.md"
+    ],
+    "directories": [
+      "tests/modules/release_tag"
+    ]
+  }
+}
