@@ -33,5 +33,15 @@
   "directories": [
     "tests/modules/queue_schema_operations"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/queue-schema-operations-context.json",
+      "docs/modules/queue-schema-operations.md",
+      "scripts/llm_wiki/queue_schema_operations.py"
+    ],
+    "directories": [
+      "tests/modules/queue_schema_operations"
+    ]
+  }
 }

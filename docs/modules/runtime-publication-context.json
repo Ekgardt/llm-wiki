@@ -48,5 +48,15 @@
   "directories": [
     "tests/modules/runtime_publication"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/runtime-publication-context.json",
+      "docs/modules/runtime-publication.md",
+      "scripts/llm_wiki/runtime_publication.py"
+    ],
+    "directories": [
+      "tests/modules/runtime_publication"
+    ]
+  }
 }

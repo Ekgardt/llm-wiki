@@ -33,5 +33,15 @@
   "directories": [
     "tests/modules/runtime_sync"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/runtime-sync-context.json",
+      "docs/modules/runtime-sync.md",
+      "scripts/llm_wiki/runtime_sync.py"
+    ],
+    "directories": [
+      "tests/modules/runtime_sync"
+    ]
+  }
 }

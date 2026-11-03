@@ -28,5 +28,15 @@
   "directories": [
     "tests/modules/sqlite_contracts"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/sqlite-contracts-context.json",
+      "docs/modules/sqlite-contracts.md",
+      "scripts/llm_wiki/sqlite_contracts.py"
+    ],
+    "directories": [
+      "tests/modules/sqlite_contracts"
+    ]
+  }
 }

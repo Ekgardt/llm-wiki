@@ -26,10 +26,31 @@
     "docs/research/2026-11-03-context-source-closure.md",
     "tests/test_module_context_bootstrap.py",
     "tests/test_module_context_dependencies.py",
-    "tests/test_module_boundary_checks.py"
+    "tests/test_module_boundary_checks.py",
+    "tests/module_ownership.py",
+    "tests/test_module_ownership.py",
+    "docs/research/2026-11-03-module-file-ownership.md"
   ],
   "directories": [
     "tests/modules/context_tooling"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/context-tooling-context.json",
+      "docs/modules/context-tooling.md",
+      "docs/research/2026-11-03-context-source-closure.md",
+      "docs/research/2026-11-03-module-file-ownership.md",
+      "tests/module_boundaries.py",
+      "tests/module_context.py",
+      "tests/module_ownership.py",
+      "tests/test_module_boundary_checks.py",
+      "tests/test_module_context_bootstrap.py",
+      "tests/test_module_context_dependencies.py",
+      "tests/test_module_ownership.py"
+    ],
+    "directories": [
+      "tests/modules/context_tooling"
+    ]
+  }
 }

@@ -32,5 +32,16 @@
   "directories": [
     "tests/modules/reply_json"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/reply-json-context.json",
+      "docs/modules/reply-json.md",
+      "scripts/reply_json.py",
+      "tests/test_one_answer_or_none.py"
+    ],
+    "directories": [
+      "tests/modules/reply_json"
+    ]
+  }
 }

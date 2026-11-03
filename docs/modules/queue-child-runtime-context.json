@@ -38,5 +38,15 @@
   "directories": [
     "tests/modules/queue_child_runtime"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/queue-child-runtime-context.json",
+      "docs/modules/queue-child-runtime.md",
+      "scripts/llm_wiki/queue_child_runtime.py"
+    ],
+    "directories": [
+      "tests/modules/queue_child_runtime"
+    ]
+  }
 }

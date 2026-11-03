@@ -27,5 +27,14 @@
     "scripts/llm_wiki/context_bundle.py",
     "scripts/llm_wiki/__init__.py"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/lease-renewal-context.json",
+      "docs/modules/lease-renewal.md",
+      "scripts/lease_renewal.py",
+      "tests/test_a_busy_database_is_not_a_lost_lease.py"
+    ],
+    "directories": []
+  }
 }

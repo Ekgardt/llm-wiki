@@ -28,5 +28,15 @@
   "directories": [
     "tests/modules/reliability_defaults"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/reliability-defaults-context.json",
+      "docs/modules/reliability-defaults.md",
+      "scripts/llm_wiki/reliability_defaults.py"
+    ],
+    "directories": [
+      "tests/modules/reliability_defaults"
+    ]
+  }
 }

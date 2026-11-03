@@ -33,5 +33,16 @@
   "directories": [
     "tests/modules/windows_acl"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/windows-acl-context.json",
+      "docs/modules/windows-acl.md",
+      "scripts/llm_wiki/windows_acl.py",
+      "tests/test_a_windows_owner_with_a_non_ascii_name_is_verified.py"
+    ],
+    "directories": [
+      "tests/modules/windows_acl"
+    ]
+  }
 }

@@ -36,5 +36,15 @@
   "directories": [
     "tests/modules/queue_migration_plan"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/queue-migration-plan-context.json",
+      "docs/modules/queue-migration-plan.md",
+      "scripts/llm_wiki/queue_migration_plan.py"
+    ],
+    "directories": [
+      "tests/modules/queue_migration_plan"
+    ]
+  }
 }

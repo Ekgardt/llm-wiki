@@ -32,5 +32,15 @@
   "directories": [
     "tests/modules/iso_time"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/iso-time-context.json",
+      "docs/modules/iso-time.md",
+      "scripts/iso_time.py"
+    ],
+    "directories": [
+      "tests/modules/iso_time"
+    ]
+  }
 }

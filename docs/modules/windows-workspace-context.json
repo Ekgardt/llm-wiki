@@ -30,5 +30,16 @@
   "directories": [
     "tests/modules/windows_workspace"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/windows-workspace-context.json",
+      "docs/modules/windows-workspace.md",
+      "scripts/windows_workspace.py",
+      "tests/test_windows_workspace.py"
+    ],
+    "directories": [
+      "tests/modules/windows_workspace"
+    ]
+  }
 }

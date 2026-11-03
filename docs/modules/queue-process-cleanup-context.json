@@ -33,5 +33,15 @@
   "directories": [
     "tests/modules/queue_process_cleanup"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/queue-process-cleanup-context.json",
+      "docs/modules/queue-process-cleanup.md",
+      "scripts/llm_wiki/queue_process_cleanup.py"
+    ],
+    "directories": [
+      "tests/modules/queue_process_cleanup"
+    ]
+  }
 }

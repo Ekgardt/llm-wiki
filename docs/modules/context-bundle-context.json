@@ -28,5 +28,15 @@
   "directories": [
     "tests/modules/context_bundle"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/context-bundle-context.json",
+      "docs/modules/context-bundle.md",
+      "scripts/llm_wiki/context_bundle.py"
+    ],
+    "directories": [
+      "tests/modules/context_bundle"
+    ]
+  }
 }

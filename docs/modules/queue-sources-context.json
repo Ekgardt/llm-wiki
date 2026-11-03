@@ -32,5 +32,15 @@
   "directories": [
     "tests/modules/queue_sources"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/queue-sources-context.json",
+      "docs/modules/queue-sources.md",
+      "scripts/llm_wiki/queue_sources.py"
+    ],
+    "directories": [
+      "tests/modules/queue_sources"
+    ]
+  }
 }

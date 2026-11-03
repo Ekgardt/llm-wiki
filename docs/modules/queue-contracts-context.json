@@ -28,5 +28,15 @@
   "directories": [
     "tests/modules/queue_contracts"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/queue-contracts-context.json",
+      "docs/modules/queue-contracts.md",
+      "scripts/llm_wiki/queue_contracts.py"
+    ],
+    "directories": [
+      "tests/modules/queue_contracts"
+    ]
+  }
 }

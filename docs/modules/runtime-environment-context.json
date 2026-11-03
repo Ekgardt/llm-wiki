@@ -35,5 +35,15 @@
   "directories": [
     "tests/modules/runtime_environment"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/runtime-environment-context.json",
+      "docs/modules/runtime-environment.md",
+      "scripts/llm_wiki/runtime_environment.py"
+    ],
+    "directories": [
+      "tests/modules/runtime_environment"
+    ]
+  }
 }

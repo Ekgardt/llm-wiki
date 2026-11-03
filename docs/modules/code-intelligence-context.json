@@ -31,5 +31,16 @@
   "directories": [
     "tests/modules/code_intelligence"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/code-intelligence-context.json",
+      "docs/modules/code-intelligence.md",
+      "scripts/code_intelligence.py",
+      "tests/test_code_intelligence.py"
+    ],
+    "directories": [
+      "tests/modules/code_intelligence"
+    ]
+  }
 }

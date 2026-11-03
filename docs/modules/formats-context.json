@@ -31,5 +31,15 @@
     "tests/module_context.py",
     "scripts/llm_wiki/context_bundle.py"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/formats-context.json",
+      "docs/modules/formats.md"
+    ],
+    "directories": [
+      "scripts/llm_wiki/formats",
+      "tests/modules/formats"
+    ]
+  }
 }

@@ -28,5 +28,15 @@
   "directories": [
     "tests/modules/sqlite_deadlines"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/sqlite-deadlines-context.json",
+      "docs/modules/sqlite-deadlines.md",
+      "scripts/llm_wiki/sqlite_deadlines.py"
+    ],
+    "directories": [
+      "tests/modules/sqlite_deadlines"
+    ]
+  }
 }

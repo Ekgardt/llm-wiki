@@ -32,5 +32,15 @@
   "directories": [
     "tests/modules/queue_timing"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/queue-timing-context.json",
+      "docs/modules/queue-timing.md",
+      "scripts/llm_wiki/queue_timing.py"
+    ],
+    "directories": [
+      "tests/modules/queue_timing"
+    ]
+  }
 }

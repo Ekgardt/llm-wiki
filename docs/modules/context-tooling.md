@@ -29,3 +29,13 @@ Run `uv run pytest tests/test_module_context_bootstrap.py
  tests/test_module_context_dependencies.py tests/test_module_boundary_checks.py
  tests/modules/context_tooling -q` as a single command.
 Source: ../research/2026-11-03-context-source-closure.md.
+
+Unique ownership is declared separately in each manifest's `ownership` object.
+`tests/module_ownership.py` validates claims against the tracked Git index and
+measured context, refusing duplicates or missing/untracked/outside claims.
+Run `uv run python -m tests.module_ownership` for the full registry, and add
+`--check-complete` to require zero unassigned tracked files. The CLI initializes
+this repository's existing scripts import path in its own process. Its normal
+report can succeed while honestly reporting `complete: false`; the completion
+gate returns failure in that case. No file class is silently excluded.
+See ../research/2026-11-03-module-file-ownership.md.

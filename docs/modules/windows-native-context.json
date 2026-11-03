@@ -29,5 +29,15 @@
   "directories": [
     "tests/modules/windows_native"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/windows-native-context.json",
+      "docs/modules/windows-native.md",
+      "scripts/llm_wiki/windows_native.py"
+    ],
+    "directories": [
+      "tests/modules/windows_native"
+    ]
+  }
 }

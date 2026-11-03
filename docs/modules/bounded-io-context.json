@@ -31,5 +31,15 @@
     "tests/module_boundaries.py",
     "scripts/llm_wiki/__init__.py"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/bounded-io-context.json",
+      "docs/modules/bounded-io.md",
+      "scripts/bounded_io.py",
+      "tests/test_bounded_io.py",
+      "tests/test_stable_source_ranges.py"
+    ],
+    "directories": []
+  }
 }

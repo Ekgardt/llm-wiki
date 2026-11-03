@@ -26,5 +26,15 @@
     "scripts/llm_wiki/context_bundle.py",
     "scripts/llm_wiki/__init__.py"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/context-budget-context.json",
+      "docs/modules/context-budget.md",
+      "scripts/context_budget.py",
+      "tests/test_context_budget.py",
+      "tests/test_context_packing.py"
+    ],
+    "directories": []
+  }
 }

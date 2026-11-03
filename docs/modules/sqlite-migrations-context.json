@@ -32,5 +32,15 @@
   "directories": [
     "tests/modules/sqlite_migrations"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/sqlite-migrations-context.json",
+      "docs/modules/sqlite-migrations.md",
+      "scripts/llm_wiki/sqlite_migrations.py"
+    ],
+    "directories": [
+      "tests/modules/sqlite_migrations"
+    ]
+  }
 }

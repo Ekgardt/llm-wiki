@@ -27,5 +27,14 @@
     "scripts/llm_wiki/context_bundle.py",
     "scripts/llm_wiki/__init__.py"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/process-liveness-context.json",
+      "docs/modules/process-liveness.md",
+      "scripts/process_liveness.py",
+      "tests/test_process_liveness.py"
+    ],
+    "directories": []
+  }
 }

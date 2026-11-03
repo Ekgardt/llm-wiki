@@ -39,5 +39,15 @@
   "directories": [
     "tests/modules/runtime_records"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/runtime-records-context.json",
+      "docs/modules/runtime-records.md",
+      "scripts/llm_wiki/runtime_records.py"
+    ],
+    "directories": [
+      "tests/modules/runtime_records"
+    ]
+  }
 }

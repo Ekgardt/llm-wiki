@@ -32,5 +32,16 @@
   "directories": [
     "tests/modules/python_parse"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/python-parse-context.json",
+      "docs/modules/python-parse.md",
+      "scripts/python_parse.py",
+      "tests/test_python_3_10_does_not_crash_on_a_deep_expression.py"
+    ],
+    "directories": [
+      "tests/modules/python_parse"
+    ]
+  }
 }

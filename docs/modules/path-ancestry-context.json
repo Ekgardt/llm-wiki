@@ -29,5 +29,15 @@
   "directories": [
     "tests/modules/path_ancestry"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/path-ancestry-context.json",
+      "docs/modules/path-ancestry.md",
+      "scripts/llm_wiki/path_ancestry.py"
+    ],
+    "directories": [
+      "tests/modules/path_ancestry"
+    ]
+  }
 }

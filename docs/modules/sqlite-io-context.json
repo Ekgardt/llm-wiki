@@ -49,5 +49,15 @@
   "directories": [
     "tests/modules/sqlite_io"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/sqlite-io-context.json",
+      "docs/modules/sqlite-io.md",
+      "scripts/llm_wiki/sqlite_io.py"
+    ],
+    "directories": [
+      "tests/modules/sqlite_io"
+    ]
+  }
 }

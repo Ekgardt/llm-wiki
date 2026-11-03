@@ -30,5 +30,15 @@
   "directories": [
     "tests/modules/page_status"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/page-status-context.json",
+      "docs/modules/page-status.md",
+      "scripts/page_status.py"
+    ],
+    "directories": [
+      "tests/modules/page_status"
+    ]
+  }
 }

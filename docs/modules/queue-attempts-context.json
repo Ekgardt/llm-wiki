@@ -40,5 +40,15 @@
   "directories": [
     "tests/modules/queue_attempts"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/queue-attempts-context.json",
+      "docs/modules/queue-attempts.md",
+      "scripts/llm_wiki/queue_attempts.py"
+    ],
+    "directories": [
+      "tests/modules/queue_attempts"
+    ]
+  }
 }

@@ -30,5 +30,15 @@
   "directories": [
     "tests/modules/runtime_contracts"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/runtime-contracts-context.json",
+      "docs/modules/runtime-contracts.md",
+      "scripts/llm_wiki/runtime_contracts.py"
+    ],
+    "directories": [
+      "tests/modules/runtime_contracts"
+    ]
+  }
 }

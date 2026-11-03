@@ -47,5 +47,15 @@
   "directories": [
     "tests/modules/runtime_fingerprints"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/runtime-fingerprints-context.json",
+      "docs/modules/runtime-fingerprints.md",
+      "scripts/llm_wiki/runtime_fingerprints.py"
+    ],
+    "directories": [
+      "tests/modules/runtime_fingerprints"
+    ]
+  }
 }

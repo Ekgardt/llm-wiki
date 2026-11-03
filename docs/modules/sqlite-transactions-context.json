@@ -28,5 +28,15 @@
   "directories": [
     "tests/modules/sqlite_transactions"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/sqlite-transactions-context.json",
+      "docs/modules/sqlite-transactions.md",
+      "scripts/llm_wiki/sqlite_transactions.py"
+    ],
+    "directories": [
+      "tests/modules/sqlite_transactions"
+    ]
+  }
 }

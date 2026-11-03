@@ -45,5 +45,15 @@
   "directories": [
     "tests/modules/queue_artifacts"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/queue-artifacts-context.json",
+      "docs/modules/queue-artifacts.md",
+      "scripts/llm_wiki/queue_artifacts.py"
+    ],
+    "directories": [
+      "tests/modules/queue_artifacts"
+    ]
+  }
 }

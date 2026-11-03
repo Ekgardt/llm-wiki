@@ -28,5 +28,15 @@
   "directories": [
     "tests/modules/queue_schema"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/queue-schema-context.json",
+      "docs/modules/queue-schema.md",
+      "scripts/llm_wiki/queue_schema.py"
+    ],
+    "directories": [
+      "tests/modules/queue_schema"
+    ]
+  }
 }

@@ -40,5 +40,15 @@
   "directories": [
     "tests/modules/queue_heartbeat"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/queue-heartbeat-context.json",
+      "docs/modules/queue-heartbeat.md",
+      "scripts/llm_wiki/queue_heartbeat.py"
+    ],
+    "directories": [
+      "tests/modules/queue_heartbeat"
+    ]
+  }
 }

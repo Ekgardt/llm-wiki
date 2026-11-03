@@ -30,5 +30,16 @@
   "directories": [
     "tests/modules/repository_scope"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/repository-scope-context.json",
+      "docs/modules/repository-scope.md",
+      "scripts/repository_scope.py",
+      "tests/test_repository_scope.py"
+    ],
+    "directories": [
+      "tests/modules/repository_scope"
+    ]
+  }
 }

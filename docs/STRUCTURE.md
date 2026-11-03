@@ -1843,7 +1843,8 @@ See `docs/modules/lease-renewal.md` and `lease-renewal-context.json`.
 existing shared byte limits. It does not own publication, transactions or ACL
 writes. Its own tests remain `tests/test_bounded_io.py` and
 `tests/test_stable_source_ranges.py`; see `docs/modules/bounded-io.md` and
-`bounded-io-context.json`. Both modules use only stdlib. Their manifests count
+`bounded-io-context.json`. Renewal uses only stdlib; bounded IO also imports the
+shared path_ancestry policy. Their manifests count
 complete maintenance packets under 100,000 o200k_base tokens. Related integration
 tests remain with their existing owners. No runtime or source-path changes occur.
 
@@ -1970,8 +1971,8 @@ Daily-only failure identities and general task source links retain distinct rule
 
 `llm_wiki.sqlite_contracts` owns the existing operational database contract,
 migration statement and contract error types, their value validators, and exact
-SQLite identifier quoting. It imports only stdlib. reliable_memory retains all
-connection lifetime and filesystem behavior; sqlite_pragmas, sqlite_migrations
+SQLite identifier quoting. It imports only stdlib. reliable_memory retains identity aliases; sqlite_io owns connection lifetime and
+the runtime filesystem owners own file behavior. sqlite_pragmas, sqlite_migrations
 and sqlite_deadlines own their named control policies, with direct aliases for
 the old names. Class pickle names remain reliable_memory for existing
 serialized callers. Consumers import values directly from sqlite_contracts.
@@ -2012,8 +2013,8 @@ that round trip before counting. Source files and runtime formats are unchanged.
 
 `llm_wiki.restricted_paths` owns lexical POSIX relative-path and allowed-root
 validation. `llm_wiki.sqlite_pragmas` owns settings and contract-header readback on
-supplied SQLite connections. Filesystem containment, ownership, opening and
-closing remain in reliable_memory; old APIs retain identity aliases.
+supplied SQLite connections. Filesystem containment and ownership remain with the runtime filesystem owners;
+SQLite opening and closing belong to sqlite_io. Old APIs retain identity aliases.
 
 `llm_wiki.queue_attempts` owns attempt-history and lease/failure SQL steps on
 caller-supplied connections and timestamps. `llm_wiki.queue_validation` owns pure
@@ -2022,8 +2023,9 @@ shared base filter states and the unchanged attempt bound live in queue_contract
 
 Existing `windows_workspace.py` and `lsp_process_tree.py` remain separate platform
 owners: handle-relative filesystem operations and process-tree lifetime,
-respectively. Their qualification packets retain existing focused tests and
-subprocess fixture dependencies; no public path or runtime ownership changes.
+respectively. Windows workspace is qualified with its focused tests. The complete
+LSP process-tree packet exceeds the token ceiling and is not yet qualified; its
+subprocess fixture must not be omitted to fit. No public path or runtime ownership changes.
 See `research/2026-11-03-existing-platform-boundaries.md`.
 
 `secret_redact.py` and `repository_scope.py` are independent stdlib-only owners
@@ -2083,3 +2085,11 @@ initializers. It reports omitted paths before counting; it neither imports the
 product nor silently adds files. Dynamic/configuration/subprocess dependencies
 remain explicit research and integration obligations. See
 `research/2026-11-03-context-source-closure.md`.
+
+Each module context manifest has a separate `ownership` declaration for its
+unique tracked files/directories. Shared context may overlap; ownership may not.
+`tests/module_ownership.py` derives a registry against `git ls-files -z`, validates
+that claims are tracked/present/contained and included in the owner's packet,
+and reports every unassigned tracked file. Its explicit `--check-complete` gate
+fails until none remain; successful partial inventory is never decomposition
+completion. See `research/2026-11-03-module-file-ownership.md`.

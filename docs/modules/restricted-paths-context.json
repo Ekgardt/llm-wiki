@@ -28,5 +28,15 @@
   "directories": [
     "tests/modules/restricted_paths"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/restricted-paths-context.json",
+      "docs/modules/restricted-paths.md",
+      "scripts/llm_wiki/restricted_paths.py"
+    ],
+    "directories": [
+      "tests/modules/restricted_paths"
+    ]
+  }
 }

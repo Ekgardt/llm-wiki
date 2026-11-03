@@ -30,5 +30,15 @@
   "directories": [
     "tests/modules/calendar_pass"
   ],
-  "serialization": "exact-duplicates/v1"
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "docs/modules/calendar-pass-context.json",
+      "docs/modules/calendar-pass.md",
+      "scripts/calendar_pass.py"
+    ],
+    "directories": [
+      "tests/modules/calendar_pass"
+    ]
+  }
 }
