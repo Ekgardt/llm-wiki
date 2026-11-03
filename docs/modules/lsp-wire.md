@@ -29,3 +29,14 @@ import guard denies transport, profile and process modules. Run
 This packet does not introduce a newer protocol, a dependency, a minimum-Python
 change, or a native-platform qualification claim. See the dated boundary research
 for alternatives, primary sources and measured evidence.
+
+## Structural reference retained from the overview
+
+### LSP wire codec
+
+`llm_wiki.lsp_wire` owns strict JSON and byte framing, consuming a caller-owned
+binary stream. `lsp_protocol` retains transport threads, cancellation and stream
+lifecycle. Existing imports remain aliases; wire limits and rejection behavior
+are preserved. See [boundary research](../research/2026-11-03-lsp-wire-boundary.md).
+
+Full owner contract: [LSP wire](lsp-wire.md).

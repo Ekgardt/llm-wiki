@@ -17,3 +17,16 @@ Run `pytest tests/modules/host_transcripts
  tests/test_a_moved_host_directory_is_still_the_host.py -q` as one command.
 
 Shared canonical contract: [Maintenance qualification](context-tooling.md).
+
+## Structural reference retained from the overview
+
+### Existing leaf owners
+
+The existing `okf_types`, `host_transcripts`, `ephemeral_paths`,
+`embedding_model` and `inference_threads` files are qualified in place,
+with distinct complete packets and retained consumer tests. Their production
+paths, bytes, host configuration, model pins and process-local state ownership
+stay unchanged. See
+[research](../research/2026-11-03-existing-leaf-owner-qualification.md).
+
+Full contracts: [okf types](okf-types.md), [host transcripts](host-transcripts.md), [ephemeral paths](ephemeral-paths.md), [embedding model](embedding-model.md), [inference threads](inference-threads.md).

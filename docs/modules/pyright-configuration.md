@@ -26,3 +26,15 @@ independent mutable copies and the restricted value domain. Run
  tests/test_language_registry_has_no_discovery_dependency.py -q`. Installer and
 session suites remain required integration checks. The complete owner packet
 includes canonical implementation/guide, instructions, bootstrap and measurement.
+
+## Structural reference retained from the overview
+
+### Language profile data
+
+`llm_wiki.pyright_configuration` owns immutable Pyright package/configuration
+constants and their existing freeze/thaw implementation. `pyright_profile` keeps
+runtime discovery and compatibility aliases; `lsp_profiles` reads the data owner
+directly. The existing stdlib-only `lsp_server_profile` is qualified in place.
+See [boundary research](../research/2026-11-03-language-profile-data-boundaries.md).
+
+Full contracts: [Pyright data](pyright-configuration.md), [Profile values](lsp-server-profile.md).

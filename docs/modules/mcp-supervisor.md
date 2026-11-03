@@ -31,3 +31,13 @@ Run the owner packet together with those two original test files. Verify Python
 3.10 compatibility and actual subprocess behavior; Linux results do not qualify
 native Windows/macOS. Boundaries, source hashes, moved AST checks and primary
 sources are recorded in ../research/2026-11-03-mcp-supervisor-owner-qualification.md.
+
+## Structural reference retained from the overview
+
+### Existing MCP supervisor qualification
+
+The stdio supervisor remains in `scripts/mcp_supervisor.py` with unchanged worker
+command, process ownership and wire behavior. Pure protocol/harness tests move
+into its owner packet; actual-server and worker-timeout integration checks remain
+in their existing files with all assertions. Full contract:
+[MCP supervisor](mcp-supervisor.md); [qualification research](../research/2026-11-03-mcp-supervisor-owner-qualification.md).

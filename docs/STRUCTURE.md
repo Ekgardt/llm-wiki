@@ -1944,79 +1944,39 @@ paths and bytes are unchanged.
 
 ### LSP wire codec
 
-`llm_wiki.lsp_wire` owns strict JSON and byte framing, consuming a caller-owned
-binary stream. `lsp_protocol` retains transport threads, cancellation and stream
-lifecycle. Existing imports remain aliases; wire limits and rejection behavior
-are preserved. See [boundary research](research/2026-11-03-lsp-wire-boundary.md).
-
-Full owner contract: [LSP wire](modules/lsp-wire.md).
+Full owner contracts: [lsp-wire](modules/lsp-wire.md).
 
 ### Interruption propagation (qualified in place)
 
-The existing `scripts/interruption.py` remains the shared stdlib-only owner of
-exception-chain traversal and collected-error priority. Its immediate-link
-cleanup remains distinct from the protocol's deeper chain scrub. No runtime
-behavior or path change is planned. See [research](research/2026-11-03-interruption-packet.md).
+Full owner contracts: [interruption](modules/interruption.md).
 
 ### LSP source positions (qualified in place)
 
-`scripts/lsp_positions.py` remains the owner of source-byte/UTF coordinate and
-file-URI conversion; `code_intelligence` owns the value contracts it consumes.
-URI conversion does not grant repository containment. Its source, tests and shared
-Unicode fixture remain in place. See [research](research/2026-11-03-lsp-positions-packet.md).
-
-Full owner contracts: [Interruption](modules/interruption.md), [LSP positions](modules/lsp-positions.md).
+Full owner contracts: [lsp-positions](modules/lsp-positions.md).
 
 ### Language profile data
 
-`llm_wiki.pyright_configuration` owns immutable Pyright package/configuration
-constants and their existing freeze/thaw implementation. `pyright_profile` keeps
-runtime discovery and compatibility aliases; `lsp_profiles` reads the data owner
-directly. The existing stdlib-only `lsp_server_profile` is qualified in place.
-See [boundary research](research/2026-11-03-language-profile-data-boundaries.md).
-
-Full contracts: [Pyright data](modules/pyright-configuration.md), [Profile values](modules/lsp-server-profile.md).
+Full owner contracts: [pyright-configuration](modules/pyright-configuration.md), [lsp-server-profile](modules/lsp-server-profile.md).
 
 ### Managed language registry
 
-`scripts/lsp_profiles.py` owns the existing complete server declarations and
-suffix/notification routing. It consumes path, profile-value and immutable Pyright
-data owners without runtime discovery. Registry-only tests moved intact;
-cross-owner session equivalence stays integrated. See
-[research](research/2026-11-03-language-registry-packet.md).
+Full owner contracts: [lsp-profiles](modules/lsp-profiles.md).
 
 ### LSP text normalization
 
-`llm_wiki.lsp_text` owns the existing Unicode control policy and terminal-text
-scanner. `lsp_security` retains input bounds, redaction, path containment and output
-clipping, calling the same functions through aliases. See
-[research](research/2026-11-03-lsp-text-normalization.md).
-
-Full contracts: [Language registry](modules/lsp-profiles.md), [LSP text](modules/lsp-text.md).
+Full owner contracts: [lsp-text](modules/lsp-text.md).
 
 ### LSP credential text
 
-`llm_wiki.lsp_credentials` owns the existing assignment, standalone-token,
-URL-userinfo and multiline private-key transformations. Admission, normalization,
-path redaction and clipping remain with their current callers; aliases preserve
-stage instrumentation. See [research](research/2026-11-03-lsp-credential-boundary.md).
-
-Full contract: [LSP credential masking](modules/lsp-credentials.md).
+Full owner contracts: [lsp-credentials](modules/lsp-credentials.md).
 
 ### Code classification and named repository refusal
 
-The existing `code_languages` and `repository_refusal` owners remain independent,
-with their present imports and behavior. Separate packets will own suffix-map
-identity and named refusal values; corpus/index/CLI integration remains with
-callers. See [research](research/2026-11-03-code-classification-refusal-packets.md).
+Full owner contracts: [code-languages](modules/code-languages.md), [repository-refusal](modules/repository-refusal.md).
 
 ### Graph storage values
 
-The existing `graph_storable` owner keeps shared text, identity and metadata
-adaptation without graph writers or database imports. See
-[research](research/2026-11-03-graph-storable-packet.md).
-
-Full contracts: [Code languages](modules/code-languages.md), [Repository refusal](modules/repository-refusal.md), [Graph storage values](modules/graph-storable.md).
+Full owner contracts: [graph-storable](modules/graph-storable.md).
 
 ### Maintenance test dependency completeness
 
@@ -2028,28 +1988,15 @@ pytest bootstrap remains infrastructure, with no new exception lists. See
 
 ### Queue worker values
 
-`llm_wiki.queue_worker_state` owns retry configuration values, processor
-outcomes, progress counters and reason-code conversion. Queue SQL, clocks and
-execution remain with current callers. Capture consumes the reason helper
-directly, and root aliases retain compatibility. See
-[research](research/2026-11-03-queue-worker-state-boundary.md).
+Full owner contracts: [queue-worker-state](modules/queue-worker-state.md).
 
 ### Strict UTF-8 prefix
 
-The existing renderer prefix helper moved unchanged into `llm_wiki.utf8_text`,
-with the renderer retaining an alias. It will support the separately qualified
-queue byte-bound correction without introducing a duplicate algorithm. See
-[research](research/2026-11-03-utf8-prefix-boundary.md).
-
-Full contracts: [Queue worker values](modules/queue-worker-state.md), [UTF-8 prefixes](modules/utf8-text.md).
+Full owner contracts: [utf8-text](modules/utf8-text.md).
 
 ### Processor reason byte bound
 
-Generic worker reason codes use the shared strict UTF-8 prefix to obey the
-existing 64-byte SQLite constraint. ASCII and explicit QueueOperationError codes,
-retry policy and schemas stay unchanged. The reproduced failure and correction
-are separate from the preceding transfer; see
-[research](research/2026-11-03-processor-error-code-byte-bound.md).
+Full owner contracts: [queue-worker-state](modules/queue-worker-state.md).
 
 ### Canonical maintenance qualification context
 
@@ -2071,14 +2018,7 @@ see [research](research/2026-11-03-compile-source-error-byte-bound.md).
 
 ### Existing leaf owners
 
-The existing `okf_types`, `host_transcripts`, `ephemeral_paths`,
-`embedding_model` and `inference_threads` files are qualified in place,
-with distinct complete packets and retained consumer tests. Their production
-paths, bytes, host configuration, model pins and process-local state ownership
-stay unchanged. See
-[research](research/2026-11-03-existing-leaf-owner-qualification.md).
-
-Full contracts: [okf types](modules/okf-types.md), [host transcripts](modules/host-transcripts.md), [ephemeral paths](modules/ephemeral-paths.md), [embedding model](modules/embedding-model.md), [inference threads](modules/inference-threads.md).
+Full owner contracts: [okf-types](modules/okf-types.md), [host-transcripts](modules/host-transcripts.md), [ephemeral-paths](modules/ephemeral-paths.md), [embedding-model](modules/embedding-model.md), [inference-threads](modules/inference-threads.md).
 
 ### Exact maintenance record infrastructure
 
@@ -2094,47 +2034,23 @@ Full contract: [exact record contexts](modules/context-records.md).
 
 ### Existing compile-progress storage qualification
 
-The existing append-only SQLite checkpoint owner remains at
-`scripts/compile_progress.py`. A complete exact-record catalog of the mixed
-historical design preserves all original bytes while the storage packet carries
-its necessary history. No schema, source implementation, public path or runtime
-behavior changes. Full contract: [compile progress](modules/compile-progress.md);
-[qualification research](research/2026-11-03-compile-progress-storage-packet.md).
+Full owner contracts: [compile-progress](modules/compile-progress.md).
 
 ### Existing MCP supervisor qualification
 
-The stdio supervisor remains in `scripts/mcp_supervisor.py` with unchanged worker
-command, process ownership and wire behavior. Pure protocol/harness tests move
-into its owner packet; actual-server and worker-timeout integration checks remain
-in their existing files with all assertions. Full contract:
-[MCP supervisor](modules/mcp-supervisor.md); [qualification research](research/2026-11-03-mcp-supervisor-owner-qualification.md).
+Full owner contracts: [mcp-supervisor](modules/mcp-supervisor.md).
 
 ### Queue task record boundary
 
-Task/history row conversion and legacy/v3 export representation move to
-`llm_wiki.queue_task_records`; SQL reads, payload checks and transactional ownership
-remain in `memory_queue`. The existing v3 schema and public record identities stay
-unchanged. Full contract: [queue task records](modules/queue-task-records.md);
-[research](research/2026-11-03-queue-task-record-boundary.md).
+Full owner contracts: [queue-task-records](modules/queue-task-records.md).
 
 ### Queue evidence representation
 
-Canonical corrupt-export, disposition, capture-resolution, purge and seal records
-move to `llm_wiki.queue_evidence_records`; all SQL, file IO, authorization and live
-state transitions remain in the queue. Normal and corrupt history reuse the same
-single-row formatter in `queue_task_records`. Full contract:
-[queue evidence records](modules/queue-evidence-records.md);
-[research](research/2026-11-03-queue-evidence-record-boundary.md).
+Full owner contracts: [queue-evidence-records](modules/queue-evidence-records.md), [queue-task-records](modules/queue-task-records.md).
 
 ### Existing retrieval leaf owners
 
-The existing production paths remain unchanged: [lane score](modules/lane-score.md)
-owns deterministic candidate scoring, [temporal anchor](modules/temporal-anchor.md)
-owns explicit day arithmetic, and [evidence sufficiency](modules/evidence-sufficiency.md)
-owns single-span coverage with a downward dependency on the date resolver. Pure tests
-move out of mixed integration files without changing assertions; real retrieval and
-answer checks stay. No ranking constants, date rules or thresholds change.
-See [qualification](research/2026-11-03-retrieval-leaf-owner-qualification.md).
+Full owner contracts: [lane-score](modules/lane-score.md), [temporal-anchor](modules/temporal-anchor.md), [evidence-sufficiency](modules/evidence-sufficiency.md).
 
 ### Python maintenance context across launch roots
 
@@ -2146,29 +2062,12 @@ import paths are unchanged. See [closure correction](research/2026-11-03-benchma
 
 ### Offline fitting and answer representation owners
 
-Existing paths remain: [offline lane fitting](modules/fit-lane-score.md) reads saved
-results and depends on lane_score; [answer budget](modules/answer-budget.md) owns
-answer shaping and estimates; [answer cost](modules/answer-cost.md) depends on that
-estimate and owns optional telemetry. Pure tests move unchanged; real recorder,
-reader and MCP integration assertions remain. The test import guard gains explicit
-benchmark roots without changing its scripts-only default. No production byte,
-public command, threshold, environment contract, provider call or runtime path changes.
+Full owner contracts: [fit-lane-score](modules/fit-lane-score.md), [answer-budget](modules/answer-budget.md), [answer-cost](modules/answer-cost.md).
 
 ### Provider value records
 
-`scripts/llm_wiki/model_records.py` owns the five existing provider/result and
-planning identity dataclasses, independently of transport, DLP, model selection
-and executable verification. `llm_client` retains direct aliases and historical
-class module identities for existing imports and serialized objects. Fields,
-canonical JSON, defaults and shallow frozen semantics stay unchanged. The
-[model records contract](modules/model-records.md) and its complete context packet
-cover the data boundary; real provider and compile recovery tests remain required.
+Full owner contracts: [model-records](modules/model-records.md).
 
 ### Saved compile answer records
 
-`scripts/llm_wiki/compile_answer_records.py` owns existing saved model/candidate
-answer bytes and their call binding. The queue's retained-answer verifier imports
-this owner directly; the controller retains four used function aliases and the
-shared completed-refusal set. No transport, SQL, artifact IO, repeat authorization
-or settlement moves into the record owner. Remaining queue/controller dependencies
-are separate work. See the [compile answer record contract](modules/compile-answer-records.md).
+Full owner contracts: [compile-answer-records](modules/compile-answer-records.md).

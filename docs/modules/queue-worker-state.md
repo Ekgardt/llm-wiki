@@ -29,3 +29,21 @@ Run `pytest tests/modules/queue_worker_state tests/test_worker_text_compatibilit
  tests/test_a_dead_task_names_its_reason.py tests/test_memory_queue.py -q`.
 The complete packet includes exact sources, lower guides, unit tests, golden
 fixtures, instructions, research and lossless measurement code.
+
+## Structural reference retained from the overview
+
+### Queue worker values
+
+`llm_wiki.queue_worker_state` owns retry configuration values, processor
+outcomes, progress counters and reason-code conversion. Queue SQL, clocks and
+execution remain with current callers. Capture consumes the reason helper
+directly, and root aliases retain compatibility. See
+[research](../research/2026-11-03-queue-worker-state-boundary.md).
+
+### Processor reason byte bound
+
+Generic worker reason codes use the shared strict UTF-8 prefix to obey the
+existing 64-byte SQLite constraint. ASCII and explicit QueueOperationError codes,
+retry policy and schemas stay unchanged. The reproduced failure and correction
+are separate from the preceding transfer; see
+[research](../research/2026-11-03-processor-error-code-byte-bound.md).

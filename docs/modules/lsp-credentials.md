@@ -32,3 +32,14 @@ contracts, tests, instructions, bootstrap and lossless measurement tooling.
 Cross-owner alias/pickle checks live in `tests/test_module_legacy_aliases.py`,
 an integration obligation outside this pure owner packet. Their assertions are
 preserved; the packet guard now follows imports from test/support files too.
+
+## Structural reference retained from the overview
+
+### LSP credential text
+
+`llm_wiki.lsp_credentials` owns the existing assignment, standalone-token,
+URL-userinfo and multiline private-key transformations. Admission, normalization,
+path redaction and clipping remain with their current callers; aliases preserve
+stage instrumentation. See [research](../research/2026-11-03-lsp-credential-boundary.md).
+
+Full contract: [LSP credential masking](lsp-credentials.md).

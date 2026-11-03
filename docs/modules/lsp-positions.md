@@ -21,3 +21,14 @@ Run `pytest tests/modules/lsp_positions tests/test_lsp_positions.py -q`.
 Only code_intelligence is permitted by the isolated product-import guard.
 Instruction, bootstrap, measurement and source/guide closure checks apply.
 Cross-platform pure path cases are not native Windows/macOS execution evidence.
+
+## Structural reference retained from the overview
+
+### LSP source positions (qualified in place)
+
+`scripts/lsp_positions.py` remains the owner of source-byte/UTF coordinate and
+file-URI conversion; `code_intelligence` owns the value contracts it consumes.
+URI conversion does not grant repository containment. Its source, tests and shared
+Unicode fixture remain in place. See [research](../research/2026-11-03-lsp-positions-packet.md).
+
+Full owner contracts: [Interruption](interruption.md), [LSP positions](lsp-positions.md).

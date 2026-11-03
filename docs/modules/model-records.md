@@ -30,3 +30,15 @@ are included; no source-closure exemption is added.
 Source: ../research/2026-11-03-model-value-record-boundary.md.
 Shared canonical contract: [Token values and context budgets](context-budget.md).
 Shared canonical contract: [Closed formats](formats.md).
+
+## Structural reference retained from the overview
+
+### Provider value records
+
+`scripts/llm_wiki/model_records.py` owns the five existing provider/result and
+planning identity dataclasses, independently of transport, DLP, model selection
+and executable verification. `llm_client` retains direct aliases and historical
+class module identities for existing imports and serialized objects. Fields,
+canonical JSON, defaults and shallow frozen semantics stay unchanged. The
+[model records contract](model-records.md) and its complete context packet
+cover the data boundary; real provider and compile recovery tests remain required.

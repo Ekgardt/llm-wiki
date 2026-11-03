@@ -23,3 +23,13 @@ complete <=100000-token packet. Run `pytest tests/modules/lsp_profiles
 Declarations and pure platform-path cases are not proof of installed artifact
 identity, native startup or semantic answer quality; those consumers retain their
 existing checks. This qualification changes no supported server or version.
+
+## Structural reference retained from the overview
+
+### Managed language registry
+
+`scripts/lsp_profiles.py` owns the existing complete server declarations and
+suffix/notification routing. It consumes path, profile-value and immutable Pyright
+data owners without runtime discovery. Registry-only tests moved intact;
+cross-owner session equivalence stays integrated. See
+[research](../research/2026-11-03-language-registry-packet.md).

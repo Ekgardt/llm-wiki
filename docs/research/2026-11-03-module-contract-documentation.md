@@ -78,3 +78,52 @@ measurements, not paired task-cycle savings. Ownership is 351 of 3087 tracked
 files; the whole-project decomposition remains incomplete. The pinned c8036cde
 full regression completed separately: 15608 passed, 244 skipped, 5 warnings.
 No Windows/macOS run or live installation is claimed.
+
+## Follow-up for the subsequent owners (2026-11-03, c43455da)
+
+The same approved organization is needed again: 79 packets fit, but the newest
+compile-answer packet is 99312 tokens. Per-owner descriptions appended after the
+first consolidation again occupy every unrelated maintenance packet. Rechecked
+Diataxis reference, Google large-doc organization and Microsoft scannable content
+at the same primary URLs today; all retain the relevant guidance.
+
+Transfer the subsequent module-only sections beginning with LSP wire into their
+existing guides. Keep every heading/anchor and explicit owner navigation at root,
+all preceding global text, and full maintenance-policy sections. Keep the compile
+source-failure producer contract globally until that producer has its own owner.
+Shared blocks conservatively stay in each affected guide. Relative Markdown links
+change only to retain the identical destination from the new directory; reverse
+that mechanical rewrite when verifying exact text preservation. No source, test,
+fixture, historical record, instruction or guide disappears from a manifest.
+No ownership, complexity, source-closure or budget gate changes.
+
+The existing full-owner/dependency-guide guard verifies every applicable packet.
+Keep a per-block hash and reverse-link byte-equivalence proof, measure all actual
+bundles before/after, run guide/structure/ownership and module checks on both Python
+versions, and preserve the distinction between packet bytes and useful LLM cost.
+
+Follow-up evidence: 21 complete blocks are preserved in 30 owner guides. The
+first 134071 bytes and five global-policy sections remain unchanged, as do all
+root headings. Reverse-link conversion reproduces each original block exactly;
+every affected owner's actual context entries contain the full moved body. All
+prior guide text remains. The one-time proof script initially lacked scripts on
+its import path; after correcting only that invocation it completed successfully.
+An extra terminal blank line was removed before the final whitespace check.
+
+Focused guide/ownership/structure/dependency checks: 362 passed. The combined
+module and documentation selection passed 1751 tests with 1 skip on Python 3.12
+and the same on Python 3.10. All 79 actual bundles round-trip; largest answer
+packet decreased from 99312 to 98166 tokens. The overlapping packet sum before
+this evidence paragraph decreased from 5642631 to 5530855 tokens; these totals
+are not unique project size or provider usage. Production sources and manifests
+are unchanged. Proof: logs/module-contract-followup-proof.json, corresponding
+focused/green/py310 logs and context-bundle-comparison.json.
+
+Separate remaining guard defect reproduced during review: _required_guides with
+a benchmark/fit_lane_score.py owner returns no guide because _source_owners only
+considers scripts. The actual fitter packet does contain its full guide, and this
+transfer's direct packet proof verifies that. The missing-guide detection gap
+still requires its own red regression and shared fix; this documentation change
+does not claim to fix it. Evidence: logs/benchmark-guide-omission-reproduction.json.
+The complete prior db6baf57 suite finished with 16339 passed, 244 skipped and
+5 warnings; the latest production c43455da full run is now in progress.

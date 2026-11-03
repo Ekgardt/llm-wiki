@@ -35,3 +35,22 @@ Shared canonical contract: [Closed formats](formats.md).
 The normal export and corruption-history paths share `_attempt_history_entry`.
 Its five-field dictionary was AST-identical in both former implementations; the
 list mapper now calls the same function and the queue retains its required alias.
+
+## Structural reference retained from the overview
+
+### Queue task record boundary
+
+Task/history row conversion and legacy/v3 export representation move to
+`llm_wiki.queue_task_records`; SQL reads, payload checks and transactional ownership
+remain in `memory_queue`. The existing v3 schema and public record identities stay
+unchanged. Full contract: [queue task records](queue-task-records.md);
+[research](../research/2026-11-03-queue-task-record-boundary.md).
+
+### Queue evidence representation
+
+Canonical corrupt-export, disposition, capture-resolution, purge and seal records
+move to `llm_wiki.queue_evidence_records`; all SQL, file IO, authorization and live
+state transitions remain in the queue. Normal and corrupt history reuse the same
+single-row formatter in `queue_task_records`. Full contract:
+[queue evidence records](queue-evidence-records.md);
+[research](../research/2026-11-03-queue-evidence-record-boundary.md).

@@ -18,3 +18,12 @@ exception identity, ordering, cycles, traceback and cleanup-context behavior.
 Run `pytest tests/modules/interruption -q`. Full instructions, source, tests,
 bootstrap, measurement codec and research are in the context manifest. No move,
 alias, dependency, new limit or compatibility-floor change is introduced.
+
+## Structural reference retained from the overview
+
+### Interruption propagation (qualified in place)
+
+The existing `scripts/interruption.py` remains the shared stdlib-only owner of
+exception-chain traversal and collected-error priority. Its immediate-link
+cleanup remains distinct from the protocol's deeper chain scrub. No runtime
+behavior or path change is planned. See [research](../research/2026-11-03-interruption-packet.md).

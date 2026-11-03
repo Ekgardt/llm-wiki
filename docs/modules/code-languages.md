@@ -18,3 +18,12 @@ Run `pytest tests/modules/code_languages tests/test_corpus_snapshot.py
  tests/test_code_graph.py tests/test_generation_maintenance.py -q`.
 The packet includes exact source/tests, independent fixture, bootstrap and
 measurement tooling. Source classification does not promise parser availability.
+
+## Structural reference retained from the overview
+
+### Code classification and named repository refusal
+
+The existing `code_languages` and `repository_refusal` owners remain independent,
+with their present imports and behavior. Separate packets will own suffix-map
+identity and named refusal values; corpus/index/CLI integration remains with
+callers. See [research](../research/2026-11-03-code-classification-refusal-packets.md).

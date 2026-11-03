@@ -18,3 +18,15 @@ Run synthetic CLI, negative refusal, fold-isolation, retained recorder/reader ch
 Python 3.10, complexity and complete packet reconstruction. No live refit or deployment.
 
 Shared canonical contract: [Lane score](lane-score.md).
+
+## Structural reference retained from the overview
+
+### Offline fitting and answer representation owners
+
+Existing paths remain: [offline lane fitting](fit-lane-score.md) reads saved
+results and depends on lane_score; [answer budget](answer-budget.md) owns
+answer shaping and estimates; [answer cost](answer-cost.md) depends on that
+estimate and owns optional telemetry. Pure tests move unchanged; real recorder,
+reader and MCP integration assertions remain. The test import guard gains explicit
+benchmark roots without changing its scripts-only default. No production byte,
+public command, threshold, environment contract, provider call or runtime path changes.

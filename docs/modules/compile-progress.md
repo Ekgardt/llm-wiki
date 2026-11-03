@@ -44,3 +44,14 @@ Source: ../research/2026-11-03-compile-progress-storage-packet.md.
 Shared canonical contract: [SQLite deadlines](sqlite-deadlines.md).
 Shared canonical contract: [Source formats](formats.md).
 Shared canonical contract: [Exact record contexts](context-records.md).
+
+## Structural reference retained from the overview
+
+### Existing compile-progress storage qualification
+
+The existing append-only SQLite checkpoint owner remains at
+`scripts/compile_progress.py`. A complete exact-record catalog of the mixed
+historical design preserves all original bytes while the storage packet carries
+its necessary history. No schema, source implementation, public path or runtime
+behavior changes. Full contract: [compile progress](compile-progress.md);
+[qualification research](../research/2026-11-03-compile-progress-storage-packet.md).

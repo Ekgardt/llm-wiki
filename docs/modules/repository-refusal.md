@@ -19,3 +19,12 @@ Run `pytest tests/modules/repository_refusal
  tests/test_a_ceiling_is_a_named_refusal.py
  tests/test_a_slow_worktree_does_not_end_the_pass.py -q`.
 The complete packet retains source, tests, instructions, bootstrap and codec.
+
+## Structural reference retained from the overview
+
+### Code classification and named repository refusal
+
+The existing `code_languages` and `repository_refusal` owners remain independent,
+with their present imports and behavior. Separate packets will own suffix-map
+identity and named refusal values; corpus/index/CLI integration remains with
+callers. See [research](../research/2026-11-03-code-classification-refusal-packets.md).

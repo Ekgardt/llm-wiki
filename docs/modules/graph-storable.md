@@ -23,3 +23,13 @@ Run `pytest tests/modules/graph_storable
  tests/test_the_rest_of_the_readers_before_the_writer.py -q`.
 The full packet includes exact source/tests, instructions, research, bootstrap and
 lossless measurement code. No source schema, authoritative data or runtime moves.
+
+## Structural reference retained from the overview
+
+### Graph storage values
+
+The existing `graph_storable` owner keeps shared text, identity and metadata
+adaptation without graph writers or database imports. See
+[research](../research/2026-11-03-graph-storable-packet.md).
+
+Full contracts: [Code languages](code-languages.md), [Repository refusal](repository-refusal.md), [Graph storage values](graph-storable.md).

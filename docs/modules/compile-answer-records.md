@@ -34,3 +34,14 @@ Shared canonical contract: [Context budget values](context-budget.md).
 Shared canonical contract: [Canonical formats](formats.md).
 Shared canonical contract: [SQLite deadlines](sqlite-deadlines.md).
 Shared canonical contract: [Exact record contexts](context-records.md).
+
+## Structural reference retained from the overview
+
+### Saved compile answer records
+
+`scripts/llm_wiki/compile_answer_records.py` owns existing saved model/candidate
+answer bytes and their call binding. The queue's retained-answer verifier imports
+this owner directly; the controller retains four used function aliases and the
+shared completed-refusal set. No transport, SQL, artifact IO, repeat authorization
+or settlement moves into the record owner. Remaining queue/controller dependencies
+are separate work. See the [compile answer record contract](compile-answer-records.md).

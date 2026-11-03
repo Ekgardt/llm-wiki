@@ -31,3 +31,14 @@ useful full-cycle token savings. Source: ../research/2026-11-03-queue-evidence-r
 Shared canonical contract: [Canonical and schema formats](formats.md).
 Shared canonical contract: [Queue contracts](queue-contracts.md).
 Shared canonical contract: [Queue timing](queue-timing.md).
+
+## Structural reference retained from the overview
+
+### Queue evidence representation
+
+Canonical corrupt-export, disposition, capture-resolution, purge and seal records
+move to `llm_wiki.queue_evidence_records`; all SQL, file IO, authorization and live
+state transitions remain in the queue. Normal and corrupt history reuse the same
+single-row formatter in `queue_task_records`. Full contract:
+[queue evidence records](queue-evidence-records.md);
+[research](../research/2026-11-03-queue-evidence-record-boundary.md).

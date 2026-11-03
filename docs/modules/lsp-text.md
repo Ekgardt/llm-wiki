@@ -24,3 +24,14 @@ The complete packet includes instructions, source, tests, bootstrap, source
 research and measurement codec. No file, process, repository, clock or native
 platform dependency is permitted. This stage is not a terminal emulator and
 makes no new protocol-conformance promise.
+
+## Structural reference retained from the overview
+
+### LSP text normalization
+
+`llm_wiki.lsp_text` owns the existing Unicode control policy and terminal-text
+scanner. `lsp_security` retains input bounds, redaction, path containment and output
+clipping, calling the same functions through aliases. See
+[research](../research/2026-11-03-lsp-text-normalization.md).
+
+Full contracts: [Language registry](lsp-profiles.md), [LSP text](lsp-text.md).
