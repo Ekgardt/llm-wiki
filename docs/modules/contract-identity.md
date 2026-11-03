@@ -26,3 +26,18 @@ Full packet: `docs/modules/contract-identity-context.json`. The user ceiling rem
 100000 o200k_base tokens, including this guide and full tooling source.
 
 Source: approved `docs/research/2026-11-03-qualified-dependency-contract-proposal.md`.
+
+## Explicit public surface identity
+
+`tests/module_contract_surface.py` compares every locally declared public function
+header and simple constant assignment with the complete interface artifact.
+Defaults, parameter kinds, annotations, async shape and constant expressions
+are retained. It refuses duplicate names, decorated functions and unsupported
+top-level declaration shapes. Unsupported means full implementation context stays
+required; this is an experimental checker capability, not a product API limit.
+Imported implementation helpers are outside this explicitly declared API.
+
+The checker does not execute stubs, assert semantic equivalence, validate consumer
+access or prove runtime binding. Body-only edits deliberately leave the surface
+identity equal but invalidate the complete-byte identity. The real answer-budget
+surface fixture carries the full provider source and both draft contract artifacts.

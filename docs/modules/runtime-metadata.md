@@ -31,4 +31,3 @@ the unchanged refusal. Its real directory-link input and PermissionError asserti
 remain unchanged. Include
 `tests/test_platform_fixture_controls_reach_their_real_guards.py` in integration
 checks; the full test depends on separate native/plugin integration owners.
-

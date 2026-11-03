@@ -29,7 +29,13 @@
     "docs/modules/contract-identity.md",
     "docs/modules/contract-identity-context.json",
     "docs/research/2026-11-03-qualified-dependency-contract-proposal.md",
-    "docs/research/2026-11-03-composition-context-investigation.md"
+    "docs/research/2026-11-03-composition-context-investigation.md",
+    "tests/module_contract_surface.py",
+    "tests/test_module_contract_surface.py",
+    "scripts/answer_budget.py",
+    "docs/modules/answer-budget.md",
+    "docs/modules/answer-budget-interface.pyi",
+    "docs/modules/answer-budget-semantics.md"
   ],
   "directories": [
     "tests/modules/contract_identity"
@@ -42,7 +48,9 @@
       "docs/modules/contract-identity.md",
       "docs/modules/contract-identity-context.json",
       "docs/research/2026-11-03-qualified-dependency-contract-proposal.md",
-      "docs/research/2026-11-03-composition-context-investigation.md"
+      "docs/research/2026-11-03-composition-context-investigation.md",
+      "tests/module_contract_surface.py",
+      "tests/test_module_contract_surface.py"
     ],
     "directories": [
       "tests/modules/contract_identity"

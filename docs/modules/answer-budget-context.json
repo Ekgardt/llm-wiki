@@ -35,7 +35,9 @@
     "docs/research/2026-09-27-an-estimate-is-measured-and-an-open-day-waits.md",
     "docs/research/2026-11-03-answer-budget-cost-owner-qualification.md",
     "tests/test_an_answer_is_shaped_beyond_six_levels.py",
-    "tests/test_a_shared_prefix_is_chosen_by_its_cost.py"
+    "tests/test_a_shared_prefix_is_chosen_by_its_cost.py",
+    "docs/modules/answer-budget-interface.pyi",
+    "docs/modules/answer-budget-semantics.md"
   ],
   "directories": [
     "tests/modules/answer_budget"
@@ -54,7 +56,9 @@
       "docs/research/2026-09-27-an-estimate-is-measured-and-an-open-day-waits.md",
       "docs/research/2026-11-03-answer-budget-cost-owner-qualification.md",
       "tests/test_an_answer_is_shaped_beyond_six_levels.py",
-      "tests/test_a_shared_prefix_is_chosen_by_its_cost.py"
+      "tests/test_a_shared_prefix_is_chosen_by_its_cost.py",
+      "docs/modules/answer-budget-interface.pyi",
+      "docs/modules/answer-budget-semantics.md"
     ],
     "directories": [
       "tests/modules/answer_budget"
