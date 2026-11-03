@@ -41,5 +41,3 @@ def test_a_fenced_document_still_wins():
 def test_prose_without_a_document_is_still_refused_with_its_excerpt():
     with pytest.raises(query_memory.GroundedQAError, match="invalid JSON .*claims:"):
         query_memory._parsed_answer("working: E1 says 3:1.\n\nclaims:\n- ratio is 3:1 (E1)")
-
-

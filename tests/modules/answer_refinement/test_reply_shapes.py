@@ -22,4 +22,3 @@ def test_the_passes_beside_the_answer_read_the_same_way():
     reply = "Grouping the mentions.\n" + json.dumps({"groups": [[0, 1]]})
 
     assert aggregation_pass._parsed_groups(reply, 2) == [[0, 1]]
-

@@ -113,5 +113,3 @@ def test_the_note_beside_the_question_names_the_unit() -> None:
 
     assert "name one and the same bike" in note
     assert "name one and the same thing" in aggregation_pass.entity_note([["a", "b"]])
-
-

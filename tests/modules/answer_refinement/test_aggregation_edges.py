@@ -86,5 +86,3 @@ def test_the_note_is_empty_without_groups_and_data_with_them() -> None:
     note = aggregation_pass.entity_note([["Domino's", "Domino's Pizza"]])
     assert note.startswith("<entity_groups>\n")
     assert "- Domino's; Domino's Pizza" in note
-
-
