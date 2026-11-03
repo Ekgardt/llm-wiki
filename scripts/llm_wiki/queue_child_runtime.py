@@ -95,6 +95,8 @@ class _ChildRun:
         )
 
 
+# How often a waiting parent looks at its lease. See
+# `docs/research/2026-09-14-a-lost-lease-stops-its-child.md`.
 CHILD_LEASE_CHECK_SECONDS = 1.0
 
 

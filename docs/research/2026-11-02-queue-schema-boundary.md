@@ -71,7 +71,7 @@ recreation, row counts и repair. Проверки source-identity и durable ar
 рассмотрены: первая связана с методом MemoryQueue и ошибками миграции, вторая —
 с filesystem durability/permissions/deadlines. Их перенос не входит в предложение.
 
-Живая установка /home/user/llm-wiki остаётся на e95f6a4a; работаем только
+Живая установка LLM Wiki остаётся на e95f6a4a; работаем только
 в /tmp/llm-wiki-compile-progress. Известные проблемы nightly/capture не исправлены
 этим рефакторингом. Частный memory index актуален; private knowledge не публикуется.
 
