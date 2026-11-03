@@ -2014,3 +2014,8 @@ that round trip before counting. Source files and runtime formats are unchanged.
 validation. `llm_wiki.sqlite_pragmas` owns settings and contract-header readback on
 supplied SQLite connections. Filesystem containment, ownership, opening and
 closing remain in reliable_memory; old APIs retain identity aliases.
+
+`llm_wiki.queue_attempts` owns attempt-history and lease/failure SQL steps on
+caller-supplied connections and timestamps. `llm_wiki.queue_validation` owns pure
+argument/policy checks. Transactions, clocks and admission remain in the queue;
+shared base filter states and the unchanged attempt bound live in queue_contracts.

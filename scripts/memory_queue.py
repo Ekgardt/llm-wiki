@@ -27,6 +27,21 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, NoReturn
 
+from llm_wiki.queue_attempts import _PERMANENT_CODES as _PERMANENT_CODES
+from llm_wiki.queue_attempts import _apply_failure_state as _apply_failure_state
+from llm_wiki.queue_attempts import _attempt_histories as _attempt_histories
+from llm_wiki.queue_attempts import _failure_is_terminal as _failure_is_terminal
+from llm_wiki.queue_attempts import _failure_state as _failure_state
+from llm_wiki.queue_attempts import _lease_row_holds as _lease_row_holds
+from llm_wiki.queue_attempts import _record_acknowledged_attempt as _record_acknowledged_attempt
+from llm_wiki.queue_attempts import _record_cancelled_attempt as _record_cancelled_attempt
+from llm_wiki.queue_attempts import _record_failed_attempt as _record_failed_attempt
+from llm_wiki.queue_attempts import _require_lease_input as _require_lease_input
+from llm_wiki.queue_attempts import _require_leased_row as _require_leased_row
+from llm_wiki.queue_attempts import _retire_exhausted_history as _retire_exhausted_history
+from llm_wiki.queue_attempts import _retire_exhausted_ready as _retire_exhausted_ready
+from llm_wiki.queue_attempts import _take_task_lease as _take_task_lease
+from llm_wiki.queue_attempts import _take_v3_task_lease as _take_v3_task_lease
 from llm_wiki.queue_child_runtime import (
     _await_child_message as _await_child_message,
 )
@@ -50,6 +65,8 @@ from llm_wiki.queue_child_runtime import (
     run_processor_child as _run_child_runtime,
 )
 from llm_wiki.queue_contracts import _MAX_RESULT_BYTES
+from llm_wiki.queue_contracts import _MAX_RUNTIME_ATTEMPTS as _MAX_RUNTIME_ATTEMPTS
+from llm_wiki.queue_contracts import _STATES as _STATES
 from llm_wiki.queue_migration_plan import _QUEUE_V2_FAILURE_COLUMNS as _QUEUE_V2_FAILURE_COLUMNS
 from llm_wiki.queue_migration_plan import _QUEUE_V2_HISTORY_COLUMNS as _QUEUE_V2_HISTORY_COLUMNS
 from llm_wiki.queue_migration_plan import _QUEUE_V2_MIGRATED_TABLES as _QUEUE_V2_MIGRATED_TABLES
@@ -105,6 +122,31 @@ from llm_wiki.queue_process_cleanup import (
 from llm_wiki.queue_process_cleanup import (
     _tracked_descendant_pids as _tracked_descendant_pids,
 )
+from llm_wiki.queue_validation import _check_policy_integer as _check_policy_integer
+from llm_wiki.queue_validation import _check_result_bytes as _check_result_bytes
+from llm_wiki.queue_validation import _check_result_operation as _check_result_operation
+from llm_wiki.queue_validation import _check_result_request as _check_result_request
+from llm_wiki.queue_validation import _check_retry_bounds as _check_retry_bounds
+from llm_wiki.queue_validation import _check_retry_window as _check_retry_window
+from llm_wiki.queue_validation import _is_positive_int as _is_positive_int
+from llm_wiki.queue_validation import _require_bounded_int as _require_bounded_int
+from llm_wiki.queue_validation import (
+    _require_claim_owner_and_lease as _require_claim_owner_and_lease,
+)
+from llm_wiki.queue_validation import _require_dedupe_key as _require_dedupe_key
+from llm_wiki.queue_validation import _require_enqueue_arguments as _require_enqueue_arguments
+from llm_wiki.queue_validation import _require_error_code as _require_error_code
+from llm_wiki.queue_validation import _require_known_states as _require_known_states
+from llm_wiki.queue_validation import (
+    _require_legacy_enqueue_arguments as _require_legacy_enqueue_arguments,
+)
+from llm_wiki.queue_validation import _require_non_empty_string as _require_non_empty_string
+from llm_wiki.queue_validation import _require_positive_lease as _require_positive_lease
+from llm_wiki.queue_validation import _require_positive_task_lease as _require_positive_task_lease
+from llm_wiki.queue_validation import _require_task_kind as _require_task_kind
+from llm_wiki.queue_validation import _valid_heartbeat_interval as _valid_heartbeat_interval
+from llm_wiki.queue_validation import _validate_retry_policy as _validate_retry_policy
+from llm_wiki.queue_validation import _validate_worker_policy as _validate_worker_policy
 
 if TYPE_CHECKING:
     from markdown_transaction import IntentFence
@@ -251,12 +293,8 @@ from secret_redact import redact_secrets, redact_structure
 # A task fence's own length; a holder doing slow work renews it
 # (`heartbeat_task_fence`).
 TASK_FENCE_SECONDS = 120
-_STATES = ("ready", "leased", "blocked", "succeeded", "dead", "cancelled")
 _TERMINAL_STATES = ("succeeded", "dead", "cancelled")
-_PERMANENT_CODES = {"invalid_input", "unsupported_version"}
 _MAX_EXPORT_METADATA_BYTES = 64 * 1024 * 1024
-# Ceiling on a task's configured attempts and on its attempt history. basis unknown — value predates measurement; review when a task reaches it in normal operation.
-_MAX_RUNTIME_ATTEMPTS = 100
 # One trail line per failed processor. The trail is read by a person at
 # session start, so the reason has to fit a line, not carry a stack.
 MAX_PROCESSOR_REASON_CHARS = 300
@@ -294,16 +332,6 @@ _QUEUE_COMPILE_CONTRACT = OperationalDatabaseContract(
     application_id=_QUEUE_V3_CONTRACT.application_id,
     user_version=compile_progress.QUEUE_SCHEMA_VERSION,
 )
-
-
-
-
-
-
-
-
-
-
 
 
 def _ordinary_purge_operation_id(manifest_sha256: str) -> str:
@@ -383,60 +411,7 @@ def _queue_v3_purge_authorizations_valid(database: sqlite3.Connection) -> bool:
     return all(_queue_v3_purge_authorization_valid(row) for row in rows)
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # Which bucket each payload key contributes a source-identity string to.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _still_held(source: sqlite3.Connection, table: str, where: str) -> bool:
@@ -472,43 +447,7 @@ def _require_unambiguous_v2_owners(
         )
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # The tables a queue v2 migration fills, and the ones it must leave empty.
-
-
-
-
 
 
 def _queue_v3_row_counts(database: sqlite3.Connection) -> dict[str, int]:
@@ -597,8 +536,6 @@ def _queue_v2_migration_plan(
     )
     _reject_queue_source_alias(candidate, source_path)
     return statements, summary
-
-
 
 
 def _require_empty_queue_v3(database: sqlite3.Connection) -> None:
@@ -1270,60 +1207,6 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _require_task_kind(kind: object) -> None:
-    if not isinstance(kind, str) or not kind:
-        raise ValueError("kind must be a non-empty bounded string")
-    if len(kind.encode("utf-8")) > 64:
-        raise ValueError("kind must be a non-empty bounded string")
-
-
-def _require_bounded_int(value: object, low: int, high: int, message: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(message)
-    if not low <= value <= high:
-        raise ValueError(message)
-
-
-def _require_dedupe_key(dedupe_key: object) -> None:
-    if dedupe_key is None:
-        return
-    if (
-        not isinstance(dedupe_key, str)
-        or not dedupe_key
-        or len(dedupe_key.encode("utf-8")) > 512
-    ):
-        raise ValueError("dedupe_key must be a non-empty bounded string")
-
-
-
-
-
-
-
-
-
-
-
-
-def _require_enqueue_arguments(
-    kind: object,
-    handler_version: object,
-    priority: object,
-    dedupe_key: object,
-) -> None:
-    _require_task_kind(kind)
-    _require_bounded_int(
-        handler_version,
-        1,
-        2_147_483_647,
-        "handler_version must be a positive bounded integer",
-    )
-    _require_bounded_int(
-        priority, -100, 100, "priority must be an integer from -100 to 100"
-    )
-    _require_dedupe_key(dedupe_key)
-
-
 def _validated_payload_bytes(payload: Mapping[str, object]) -> tuple[bytes, str]:
     payload_bytes = canonical_json_bytes(redact_structure(dict(payload)))
     input_hash = sha256_bytes(payload_bytes)
@@ -1346,30 +1229,6 @@ def _same_enqueued_task(
     if existing["input_hash"] != input_hash:
         return False
     return existing_bytes == payload_bytes
-
-
-def _require_non_empty_string(value: object, message: str) -> None:
-    """Refuse anything that is not a non-empty string."""
-    if not isinstance(value, str) or not value:
-        raise ValueError(message)
-
-
-def _require_legacy_enqueue_arguments(
-    kind: object, handler_version: object, priority: object, dedupe_key: object
-) -> None:
-    _require_non_empty_string(kind, "kind must be a non-empty string")
-    _require_bounded_int(
-        handler_version,
-        1,
-        2_147_483_647,
-        "handler_version must be a positive integer",
-    )
-    _require_bounded_int(
-        priority, -100, 100, "priority must be an integer from -100 to 100"
-    )
-    if dedupe_key is None:
-        return
-    _require_non_empty_string(dedupe_key, "dedupe_key must be a non-empty string")
 
 
 def _v3_dedupe_match(
@@ -1718,80 +1577,6 @@ def _is_owner_only(path: Path) -> bool:
     if os.name == "nt":
         return _is_owner_only_windows(path)
     return _is_owner_only_posix(path)
-
-
-def _validate_retry_policy(
-    max_attempts: int, retry_base_seconds: int, retry_cap_seconds: int
-) -> None:
-    for name, value in (
-        ("max_attempts", max_attempts),
-        ("retry_base_seconds", retry_base_seconds),
-        ("retry_cap_seconds", retry_cap_seconds),
-    ):
-        _check_policy_integer(name, value)
-    if not 1 <= max_attempts <= _MAX_RUNTIME_ATTEMPTS:
-        raise ValueError(
-            f"max_attempts must be between 1 and {_MAX_RUNTIME_ATTEMPTS}"
-        )
-    _check_retry_window(retry_base_seconds, retry_cap_seconds)
-
-
-def _check_policy_integer(name: str, value: object) -> None:
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ValueError(f"{name} must be an integer")
-
-
-def _check_retry_bounds(retry_base_seconds: int, retry_cap_seconds: int) -> None:
-    if retry_base_seconds <= 0:
-        raise ValueError("retry_base_seconds must be positive")
-    if retry_cap_seconds <= 0:
-        raise ValueError("retry_cap_seconds must be positive")
-
-
-def _check_retry_window(retry_base_seconds: int, retry_cap_seconds: int) -> None:
-    """Both ends of the backoff window are positive, and it is a window."""
-    _check_retry_bounds(retry_base_seconds, retry_cap_seconds)
-    if retry_base_seconds > retry_cap_seconds:
-        raise ValueError("retry_base_seconds must not exceed retry_cap_seconds")
-
-
-def _validate_worker_policy(
-    lease_seconds: int,
-    heartbeat_seconds: int,
-    max_attempts: int,
-    retry_base_seconds: int,
-    retry_cap_seconds: int,
-) -> None:
-    _validate_retry_policy(max_attempts, retry_base_seconds, retry_cap_seconds)
-    for name, value in (
-        ("lease_seconds", lease_seconds),
-        ("heartbeat_seconds", heartbeat_seconds),
-    ):
-        if not _is_positive_int(value):
-            raise ValueError(f"{name} must be a positive integer")
-    if heartbeat_seconds >= lease_seconds:
-        raise ValueError("heartbeat_seconds must be less than lease_seconds")
-
-
-def _check_result_bytes(result: bytes) -> None:
-    if not isinstance(result, bytes):
-        raise TypeError("result must be bytes")
-    if len(result) > _MAX_RESULT_BYTES:
-        raise ValueError("result exceeds maximum queue result size")
-
-
-def _check_result_request(operation_id: str, result: bytes) -> None:
-    """What a caller has to hand over before anything is written."""
-    if not operation_id:
-        raise ValueError("operation_id must be non-empty")
-    _check_result_bytes(result)
-
-
-def _check_result_operation(row: Mapping[str, object], operation_id: str) -> None:
-    """A lease publishes for exactly one operation."""
-    existing = row["result_operation_id"]
-    if existing is not None and existing != operation_id:
-        raise ResultConflictError("lease already published a different operation")
 
 
 def _write_result_file(path: Path, payload: bytes) -> None:
@@ -2821,111 +2606,6 @@ def _require_adopted_attempt_limit(max_attempts: int) -> None:
         _refuse_legacy_only_api("claim(max_attempts_override)")
 
 
-def _attempt_histories(
-    connection: sqlite3.Connection, rows: Sequence[sqlite3.Row]
-) -> dict[str, list[sqlite3.Row]]:
-    """Every listed task's attempt history, read in one query."""
-    histories: dict[str, list[sqlite3.Row]] = {}
-    if not rows:
-        return histories
-    ids = [row["id"] for row in rows]
-    placeholders = ",".join("?" for _ in ids)
-    for history in connection.execute(
-        f"""SELECT * FROM attempt_history WHERE task_id IN ({placeholders})
-            ORDER BY sequence""",  # noqa: S608 - generated placeholders
-        ids,
-    ):
-        histories.setdefault(str(history["task_id"]), []).append(history)
-    return histories
-
-
-def _record_failed_attempt(
-    database: sqlite3.Connection,
-    lease: QueueLease,
-    row: sqlite3.Row,
-    failure: QueueFailure,
-    now: datetime,
-) -> None:
-    """Append the attempt this failure ends."""
-    outcome = "blocked" if failure.blocked_capability else "failed"
-    database.execute(
-        """INSERT INTO attempt_history(
-               task_id,attempt,started_at,finished_at,outcome,error_code
-           ) VALUES (?,?,?,?,?,?)""",
-        (
-            lease.id,
-            row["attempts"],
-            row["attempt_started_at"] or _timestamp(now),
-            _timestamp(now),
-            outcome,
-            failure.error_code,
-        ),
-    )
-
-
-def _failure_state(
-    row: sqlite3.Row, failure: QueueFailure, attempt_limit: int
-) -> tuple[str, int]:
-    """Where a failed task goes, and what its attempt count becomes.
-
-    A task that has used every attempt it is allowed is dead, not ready. This
-    path used to check only whether the failure was permanent, so an ordinary
-    failure on the last attempt left the task `ready` with `attempts` at the
-    limit — which the worker will not claim, because the budget is spent, and
-    `redrive` will not take, because it requires a dead task. Twenty-three
-    session classifications sat in that gap on this vault, each one eight
-    failed attempts old and reachable by nothing. The lease-expiry path had
-    the rule from the start; this one did not.
-    """
-    attempts = int(row["attempts"])
-    if failure.blocked_capability:
-        return "blocked", attempts - 1
-    if _failure_is_terminal(row, failure, attempt_limit):
-        return "dead", attempts
-    return "ready", attempts
-
-
-def _apply_failure_state(
-    database: sqlite3.Connection,
-    lease: QueueLease,
-    row: sqlite3.Row,
-    failure: QueueFailure,
-    now: datetime,
-    attempt_limit: int = DEFAULTS.queue_max_attempts,
-) -> None:
-    """Move the task out of its lease, under the lease's own fence."""
-    state, attempts = _failure_state(row, failure, attempt_limit)
-    available_at = _retry_available_at(state, attempts, now, failure.retry_after)
-    changed = database.execute(
-        """UPDATE tasks SET state=?,attempts=?,error_code=?,
-               blocked_capability=?,updated_at=?,available_at=?,
-               lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,
-               lease_heartbeat_at=NULL,attempt_started_at=NULL
-           WHERE id=? AND lease_token=? AND state='leased'""",
-        (
-            state,
-            attempts,
-            failure.error_code,
-            failure.blocked_capability,
-            _timestamp(now),
-            _timestamp(available_at),
-            lease.id,
-            lease.token,
-        ),
-    ).rowcount
-    if changed != 1:
-        raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
-
-
-def _failure_is_terminal(
-    row: sqlite3.Row, failure: QueueFailure, attempt_limit: int
-) -> bool:
-    """This failure ends the task: it is permanent, or attempts ran out."""
-    if failure.permanent or failure.error_code in _PERMANENT_CODES:
-        return True
-    return int(row["attempts"]) >= attempt_limit
-
-
 def _delete_ordinary_purge_authorizations(
     database: sqlite3.Connection, task_ids: Sequence[str], placeholders: str
 ) -> None:
@@ -2973,22 +2653,6 @@ def _require_exported_results(
             raise QueueOperationError("export_verification_failed")
 
 
-def _require_error_code(failure: QueueFailure) -> None:
-    if not failure.error_code:
-        raise ValueError("error_code must be non-empty")
-
-
-def _require_positive_task_lease(lease_seconds: int) -> None:
-    if lease_seconds <= 0:
-        raise ValueError("lease must be positive")
-
-
-def _require_claim_owner_and_lease(owner: str, lease_seconds: int) -> None:
-    if not owner:
-        raise ValueError("owner must be non-empty")
-    _require_positive_task_lease(lease_seconds)
-
-
 def _check_claim_arguments(
     owner: str, lease_seconds: int, max_attempts: int
 ) -> None:
@@ -2997,66 +2661,6 @@ def _check_claim_arguments(
         max_attempts, DEFAULTS.retry_base_seconds, DEFAULTS.retry_cap_seconds
     )
     _require_adopted_attempt_limit(max_attempts)
-
-
-def _retire_exhausted_history(
-    database: sqlite3.Connection, row: sqlite3.Row, now: datetime
-) -> bool:
-    """Retire a task whose attempt history is full; True when it was retired."""
-    history_count = database.execute(
-        "SELECT COUNT(*) FROM attempt_history WHERE task_id=?",
-        (row["id"],),
-    ).fetchone()[0]
-    if int(history_count) < _MAX_RUNTIME_ATTEMPTS:
-        return False
-    changed = database.execute(
-        """UPDATE tasks SET state='dead',
-               error_code='attempt_history_exhausted',updated_at=?
-           WHERE id=? AND state='ready'""",
-        (_timestamp(now), row["id"]),
-    ).rowcount
-    if changed != 1:
-        raise QueueOperationError("attempt_history_demotion_failed")
-    return True
-
-
-def _retire_exhausted_ready(database: sqlite3.Connection, now: datetime) -> None:
-    """A ready task no claim can take any more is dead, so a redrive can reach it."""
-    database.execute(
-        """UPDATE tasks SET state='dead',error_code='attempts_exhausted',updated_at=?
-           WHERE state='ready' AND attempts>=?""",
-        (_timestamp(now), DEFAULTS.queue_max_attempts),
-    )
-
-
-def _take_task_lease(
-    database: sqlite3.Connection,
-    row: sqlite3.Row,
-    *,
-    owner: str,
-    token: str,
-    now: datetime,
-    expires_at: datetime,
-    max_attempts: int,
-) -> bool:
-    """Move the task into a lease; False when someone else got there first."""
-    changed = database.execute(
-        """UPDATE tasks SET state='leased', attempts=attempts+1,
-               lease_owner=?, lease_token=?, lease_expires_at=?,
-               lease_heartbeat_at=?, attempt_started_at=?, updated_at=?
-           WHERE id=? AND state='ready' AND attempts < ?""",
-        (
-            owner,
-            token,
-            _timestamp(expires_at),
-            _timestamp(now),
-            _timestamp(now),
-            _timestamp(now),
-            row["id"],
-            max_attempts,
-        ),
-    ).rowcount
-    return changed == 1
 
 
 # What the legacy queue's claim may take, and therefore what its count names:
@@ -3109,37 +2713,6 @@ def _next_unfenced_ready_task(
            ORDER BY priority DESC, available_at, created_at, rowid LIMIT 1""",
         (attempt_limit, _timestamp(now)),
     ).fetchone()
-
-
-def _take_v3_task_lease(
-    connection: sqlite3.Connection,
-    row: sqlite3.Row,
-    *,
-    owner: str,
-    token: str,
-    now: datetime,
-    expires: datetime,
-    attempt_limit: int,
-) -> bool:
-    """Move the task into a lease; False when someone else got there first."""
-    changed = connection.execute(
-        """UPDATE tasks SET state='leased', attempts=attempts+1,
-               lease_owner=?, lease_token=?, lease_expires_at=?, lease_heartbeat_at=?,
-               attempt_started_at=?, updated_at=?, error_code=NULL,
-               blocked_capability=NULL
-           WHERE id=? AND state='ready' AND attempts < ?""",
-        (
-            owner,
-            token,
-            _timestamp(expires),
-            _timestamp(now),
-            _timestamp(now),
-            _timestamp(now),
-            row["id"],
-            attempt_limit,
-        ),
-    ).rowcount
-    return changed == 1
 
 
 def _exported_lease(row: sqlite3.Row) -> dict[str, object] | None:
@@ -3409,36 +2982,6 @@ def _directory_holds_anything(path: Path) -> bool:
         return True
 
 
-def _is_positive_int(value: object) -> bool:
-    """A real positive integer; `True` is not one."""
-    if not isinstance(value, int) or isinstance(value, bool):
-        return False
-    return value > 0
-
-
-def _require_positive_lease(lease_seconds: object) -> None:
-    """Refuse a fence lease that is not a positive number of seconds."""
-    if not _is_positive_int(lease_seconds):
-        raise ValueError("source fence lease must be a positive integer")
-
-
-def _valid_heartbeat_interval(heartbeat_seconds: object, lease_seconds: object) -> bool:
-    """A heartbeat interval that is strictly shorter than the lease it renews."""
-    if not _is_positive_int(heartbeat_seconds):
-        return False
-    if not isinstance(lease_seconds, int) or isinstance(lease_seconds, bool):
-        return False
-    return lease_seconds > heartbeat_seconds
-
-
-def _require_known_states(states: tuple[str, ...]) -> None:
-    """Refuse a state filter that names something the queue cannot hold."""
-    if not states or any(state not in _STATES for state in states):
-        raise ValueError("invalid queue state")
-
-
-
-
 def _insert_source_fence(
     connection: sqlite3.Connection, values: tuple[object, ...]
 ) -> None:
@@ -3501,56 +3044,6 @@ def _task_payload_text(row: sqlite3.Row) -> str:
     every fenced source, which is the conservative answer at both call sites.
     """
     return _stored_payload_text(bytes(row["payload_blob"]))
-
-
-def _record_cancelled_attempt(
-    database: sqlite3.Connection, row: sqlite3.Row, now: datetime
-) -> None:
-    """The attempt_history row for a lease that an operator cancelled."""
-    database.execute(
-        """INSERT INTO attempt_history(
-               task_id,attempt,started_at,finished_at,outcome,error_code
-           ) VALUES (?,?,?,?,?,?)""",
-        (
-            row["id"],
-            row["attempts"],
-            row["attempt_started_at"] or _timestamp(now),
-            _timestamp(now),
-            "cancelled",
-            "cancelled",
-        ),
-    )
-
-
-def _lease_row_holds(
-    row: sqlite3.Row | None, lease: QueueLease, now: datetime
-) -> bool:
-    """Whether this row is still the leased task this lease owns, unexpired."""
-    if row is None or row["state"] != "leased":
-        return False
-    if (row["lease_owner"], row["lease_token"]) != (lease.owner, lease.token):
-        return False
-    return row["lease_expires_at"] > _timestamp(now)
-
-
-def _require_leased_row(
-    connection: sqlite3.Connection, lease: QueueLease, now: datetime
-) -> sqlite3.Row:
-    """The leased task row, or a fence refusal naming the lease."""
-    row = connection.execute("SELECT * FROM tasks WHERE id=?", (lease.id,)).fetchone()
-    if not _lease_row_holds(row, lease, now):
-        raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
-    return row
-
-
-def _require_lease_input(row: sqlite3.Row, lease: QueueLease) -> None:
-    """Bind caller input to the stored intent, without redacting it a second time."""
-    actual = [lease.kind, lease.handler_version, lease.input_hash]
-    expected = [row["kind"], row["handler_version"], row["input_hash"]]
-    if canonical_json_bytes(actual) != canonical_json_bytes(expected):
-        raise LeaseFenceError("lease input identity differs from stored task")
-    if sha256_bytes(canonical_json_bytes(dict(lease.payload))) != row["input_hash"]:
-        raise LeaseFenceError("lease input payload differs from stored task")
 
 
 # What the v3 `source_failures.error_code` CHECK stores: bytes, not characters.
@@ -5413,31 +4906,6 @@ _ACKNOWLEDGED_OUTCOMES = {
     True: ("succeeded", None, "succeeded"),
     False: ("dead", "result_corrupt", "failed"),
 }
-
-
-def _record_acknowledged_attempt(
-    database: sqlite3.Connection,
-    row: sqlite3.Row,
-    now: datetime,
-    *,
-    lease: QueueLease,
-    outcome: str,
-    error_code: str | None,
-) -> None:
-    """Close the attempt history row this acknowledgement ends."""
-    database.execute(
-        """INSERT INTO attempt_history(
-               task_id,attempt,started_at,finished_at,outcome,error_code
-           ) VALUES (?,?,?,?,?,?)""",
-        (
-            lease.id,
-            row["attempts"],
-            row["attempt_started_at"] or _timestamp(now),
-            _timestamp(now),
-            outcome,
-            error_code,
-        ),
-    )
 
 
 _LeaseAction = Callable[[sqlite3.Connection, sqlite3.Row, datetime], object]

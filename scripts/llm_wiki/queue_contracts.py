@@ -9,6 +9,12 @@ from typing import Literal
 # Shared existing result ceiling for queue storage and child byte transport.
 _MAX_RESULT_BYTES = 16 * 1024 * 1024
 
+# Existing base filter states; v3 schema also has quarantine/purge states.
+_STATES = ("ready", "leased", "blocked", "succeeded", "dead", "cancelled")
+
+# Ceiling on a task's configured attempts and on its attempt history. basis unknown — value predates measurement; review when a task reaches it in normal operation.
+_MAX_RUNTIME_ATTEMPTS = 100
+
 
 class LeaseFenceError(RuntimeError):
     """Raised when a lease token no longer owns an unexpired task."""

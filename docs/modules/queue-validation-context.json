@@ -1,0 +1,34 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/research/2026-11-02-formats-module-pilot.md",
+    "docs/research/2026-11-02-module-boundaries-validation.md",
+    "docs/research/2026-11-02-module-boundaries-and-token-budget.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "docs/modules/queue-validation-context.json",
+    "docs/research/2026-11-03-queue-attempt-and-validation-boundaries.md",
+    "scripts/llm_wiki/queue_validation.py",
+    "docs/modules/queue-validation.md",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/queue_contracts.py",
+    "docs/modules/queue-contracts.md"
+  ],
+  "directories": [
+    "tests/modules/queue_validation"
+  ],
+  "serialization": "exact-duplicates/v1"
+}

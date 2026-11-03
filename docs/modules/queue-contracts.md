@@ -55,3 +55,8 @@ See the implementation evidence in
 
 This extraction does not finish modularizing memory_queue, whose source still
 exceeds 100,000 tokens. The candidate branch is not installed into the live vault.
+
+The existing base _STATES filter and _MAX_RUNTIME_ATTEMPTS ceiling also have
+one owner here. The base filter is not the full v3 quarantine/purge state set.
+The ceiling remains 100, retaining its original explicitly unmeasured historical
+basis. This refactor neither changes the bound nor claims new measurements.
