@@ -419,6 +419,12 @@ jobs:
         run: >
           uv run --no-project --python 3.14 python -c
           "import pathlib, sys; print(pathlib.Path(sys.executable).parent)" >> "$GITHUB_PATH"
+      - name: Canonicalize the install runtime path for artifact upload
+        shell: bash
+        run: >
+          uv run --no-project --python 3.14 python -c
+          "import os, pathlib; print('LLM_WIKI_STATE_ROOT=' +
+          str(pathlib.Path(os.environ['LLM_WIKI_STATE_ROOT']).resolve()))" >> "$GITHUB_ENV"
       # Created before HOME moves: the steps above install into the runner's own home.
       - name: A home of its own, so nothing of the runner's is configured
         shell: bash

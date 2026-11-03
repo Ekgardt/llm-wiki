@@ -93,6 +93,15 @@ audit = [
 ]
 
 [tool.uv]
+# Preserve the measured retrieval baseline until paired remeasurement replaces it.
+# These versions support Python 3.14 and pass both advisory services; security
+# updates remain unconstrained. See docs/research/2026-11-03-python314-qualification-followup.md.
+constraint-dependencies = [
+    "numpy==2.5.1",
+    "sentence-transformers==5.6.0",
+    "torch==2.13.0",
+    "transformers==5.13.0",
+]
 required-version = "==0.12.3"
 
 # The reranker runs torch on the CPU; PyPI's Linux torch carries CUDA (about 800 MB

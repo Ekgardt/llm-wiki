@@ -2156,3 +2156,10 @@ contracts; existing navigation/installation integration obligations remain visib
 
 Owner guides: [current positions](modules/fresh-positions.md) and
 [pinned transfers](modules/pinned-download.md).
+
+The Python 3.14 dependency set retains the measured retrieval-baseline versions
+of numpy, sentence-transformers, torch and transformers through explicit uv
+constraints. Security updates remain applied; updating these four requires real
+paired remeasurement before replacing the frozen baseline. Navigation qualification
+uses the same Python 3.14 series and retains every existing metric/identity gate.
+See [qualification follow-up](research/2026-11-03-python314-qualification-followup.md).

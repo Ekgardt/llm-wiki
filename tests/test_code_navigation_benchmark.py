@@ -766,7 +766,7 @@ def test_manifest_is_fully_pinned_and_bound_to_generated_source_and_gold(
         "schema_version": "code-navigation-python/v1",
         "fixture_seed": 411,
         "fixture_lines": 100_000,
-        "python_min": "3.10",
+        "python_min": "3.14",
         "pyright_version": "1.1.411",
         "pyright_package_sha256": PACKAGE_SHA256,
         "node_major": 22,
@@ -1068,7 +1068,7 @@ def _measured_report(mode: str = "qualification") -> dict[str, object]:
             "source_manifest_sha256": "30f0b042afc971426f9e0c8e6fa8f1c9446976de82a427acda3d1ec9eb0e31e8",
             "gold_sha256": "da2ddb5b6ef245a388b7fa4142770aa25e0580319df16af6ac7475a3c0455a5f",
             "git_commit": "c" * 40,
-            "python_version": "3.10.14",
+            "python_version": "3.14.14",
             "pyright_version": "1.1.411",
             "pyright_package_sha256": PACKAGE_SHA256,
             "node_version": "v22.15.0",
@@ -1211,15 +1211,18 @@ def test_gates_require_schema_valid_measured_complete_evidence() -> None:
 @pytest.mark.parametrize(
     ("os_name", "python_version"),
     [
-        ("Windows", "3.10.14"),
-        ("Darwin", "3.10.14"),
+        ("Windows", "3.14.14"),
+        ("Darwin", "3.14.14"),
         ("Linux", "3.9.19"),
         ("Linux", "3.11.9"),
-        ("Linux", "3.10"),
-        ("Linux", "3.10.14 (qualification build)"),
+        ("Linux", "3.10.14"),
+        ("Linux", "3.13.9"),
+        ("Linux", "3.15.0"),
+        ("Linux", "3.14"),
+        ("Linux", "3.14.14 (qualification build)"),
     ],
 )
-def test_qualification_gates_require_linux_and_machine_readable_python_3_10(
+def test_qualification_gates_require_linux_and_machine_readable_python_3_14(
     os_name: str,
     python_version: str,
 ) -> None:
@@ -1239,7 +1242,7 @@ def test_report_records_machine_readable_platform_python_version(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(benchmark_runner.platform, "python_version", lambda: "3.10.42")
+    monkeypatch.setattr(benchmark_runner.platform, "python_version", lambda: "3.14.42")
 
     report = run_fixture_benchmark(
         tmp_path / "python-version-identity",
@@ -1253,7 +1256,7 @@ def test_report_records_machine_readable_platform_python_version(
         ),
     )
 
-    assert report["identity"]["python_version"] == "3.10.42"
+    assert report["identity"]["python_version"] == "3.14.42"
 
 
 def test_schema_valid_metric_edge_cases_fail_closed_without_raising() -> None:

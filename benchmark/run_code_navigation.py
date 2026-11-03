@@ -106,7 +106,7 @@ _OWNERSHIP_SCENARIOS = (
     "cancellation",
 )
 _HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
-_PYTHON_310_VERSION = re.compile(r"3\.10\.(?:0|[1-9][0-9]*)\Z")
+_PYTHON_314_VERSION = re.compile(r"3\.14\.(?:0|[1-9][0-9]*)\Z")
 
 GATE_THRESHOLDS: dict[str, float | int] = {
     "definition_accuracy": 0.99,
@@ -3249,9 +3249,9 @@ def _resources_complete(resources: Mapping[str, object]) -> bool:
     return resources["available"] is True and _finite_number(resources["client_peak_rss_mib"]) and resources["method"] != "unavailable"
 
 
-def _python_310(identity: Mapping[str, object]) -> bool:
+def _python_314(identity: Mapping[str, object]) -> bool:
     version = identity["python_version"]
-    return isinstance(version, str) and _PYTHON_310_VERSION.fullmatch(version) is not None
+    return isinstance(version, str) and _PYTHON_314_VERSION.fullmatch(version) is not None
 
 
 def _qualification_complete(report: Mapping[str, object]) -> bool:
@@ -3259,7 +3259,7 @@ def _qualification_complete(report: Mapping[str, object]) -> bool:
         return True
     return (
         report["environment"]["os"] == "Linux"
-        and _python_310(report["identity"])
+        and _python_314(report["identity"])
         and _performance_complete(report["performance"])
         and _resources_complete(report["resources"])
     )
