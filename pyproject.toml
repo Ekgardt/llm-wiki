@@ -57,7 +57,7 @@ reranker = [
     "torch>=2.2,<3",
     "transformers>=4.44,<6",
 ]
-# Convenience: install everything.
+# Convenience: install every product component; benchmark-only extras stay explicit.
 full = [
     "llm-wiki[semantic,hybrid,code-graph,mcp-server,reranker]",
 ]

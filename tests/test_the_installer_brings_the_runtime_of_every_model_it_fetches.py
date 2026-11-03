@@ -65,7 +65,8 @@ def test_every_pinned_model_has_its_runtime_in_one_declared_extra() -> None:
 
 
 # Development tools, not components of the product: they stay out of `full`.
-_BENCHMARK_EXTRAS = {"lexical-benchmark", "retrieval-benchmark"}
+# benchmark-data was approved as a separate optional stand dependency on 2026-11-03.
+_BENCHMARK_EXTRAS = {"lexical-benchmark", "retrieval-benchmark", "benchmark-data"}
 
 
 def test_full_brings_every_component_extra() -> None:
@@ -81,4 +82,13 @@ def test_full_brings_every_component_extra() -> None:
         for name in SELF_REFERENCE.match(requirement)["extras"].split(",")
     }
 
+    assert _BENCHMARK_EXTRAS <= extras
+    assert reachable.isdisjoint(_BENCHMARK_EXTRAS)
     assert extras - _BENCHMARK_EXTRAS - {"full"} - reachable == set()
+
+
+def test_parquet_stays_explicitly_optional_for_the_benchmark(tmp_path: Path) -> None:
+    assert _extra_distributions("benchmark-data") == {"pyarrow"}
+    assert "pyarrow" not in {_distribution(item) for item in PROJECT["dependencies"]}
+    assert "pyarrow" not in _extra_distributions("full")
+    assert "pyarrow" not in _planned_distributions(tmp_path)
