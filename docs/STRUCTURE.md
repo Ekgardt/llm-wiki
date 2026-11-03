@@ -8,6 +8,11 @@
 
 ## Three-zone layout
 
+The [cross-service fixture owner](modules/cross-service-fixture.md) qualifies
+the existing two-repository Git fixture builder and its task/gold JSON in place.
+The parity runner remains a separate consumer; fixture checks do not run a
+model or establish comparative performance.
+
 CI shard costs remain in `tests/shard_weights.json`, maintained by
 `tests/shard_plan.py`. Incremental measurements preserve the slower recorded
 cost; an explicit `--refresh` replaces costs from a reviewed complete
