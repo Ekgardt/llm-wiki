@@ -54,3 +54,10 @@ checked before transfer. Run this owner, the four original mixed test files,
 retrieval/search integration, and the complete ownership/source/budget gates.
 Every full packet still must fit 100000 o200k_base tokens. No full-cycle LLM cost
 saving, product completion, release or live installation is implied.
+
+## Structural reference retained from the overview
+
+[Provenance](provenance.md) owns existing authority/type/intent/substance
+weights and their pure behavior tests. It reads immutable corpus membership
+policy directly. Integrated retrieval, search and capture checks retain their
+original scenarios; shared link/prose fixtures have one test-data owner.

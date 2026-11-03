@@ -59,3 +59,11 @@ inspected before edits. Run the pure owner tests, original corpus/foreign-root
 and retrieval integration tests, source/ownership gates and every packet budget.
 The complete packet retains the unchanged 100000 o200k_base ceiling. Broad caller
 integration ownership remains part of unfinished whole-project decomposition.
+
+## Structural reference retained from the overview
+
+[Corpus membership policy](corpus-membership-policy.md) owns the six
+immutable code/vault/project/archive membership values. The collector keeps
+public aliases and all traversal/safety behavior; provenance reads policy
+directly, without importing corpus collection. Values, allowed paths and runtime
+roots are unchanged.

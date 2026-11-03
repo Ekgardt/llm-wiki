@@ -31,3 +31,12 @@ the unchanged refusal. Its real directory-link input and PermissionError asserti
 remain unchanged. Include
 `tests/test_platform_fixture_controls_reach_their_real_guards.py` in integration
 checks; the full test depends on separate native/plugin integration owners.
+
+## Structural reference retained from the overview
+
+[Runtime metadata](runtime-metadata.md), in
+`scripts/llm_wiki/runtime_metadata.py`, validates existing file metadata without
+opening/closing a second descriptor. SQLite IO imports this owner directly;
+runtime_records retains byte reads and platform file-identity capture, along with
+historical metadata aliases. This preserves live SQLite locks while removing an
+unrelated dependency on Windows workspace operations.

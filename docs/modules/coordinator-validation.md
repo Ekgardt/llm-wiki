@@ -38,3 +38,12 @@ after constructing the real schema. `open_operational_db` alone applies file mod
 bits; it does not establish the Windows ACL required by certification. Native
 Windows run 41666666288 exposed six tests stopping at that earlier permission
 guard. No validator, ACL requirement or schema assertion is relaxed.
+
+## Structural reference retained from the overview
+
+Coordinator database admission and full certification belong to
+[coordinator validation](coordinator-validation.md), implemented in
+`scripts/llm_wiki/coordinator_validation.py`. They retain existing containment,
+owner-only SQLite IO, schema, deadlines and full invariant checks. Ordinary
+admission does not scan retained history; migration/publication remain with the
+coordinator. The underlying SQLite IO retains stranded-journal recovery.

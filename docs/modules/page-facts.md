@@ -55,3 +55,11 @@ and Unicode head length. Existing MCP grounded-recall integration remains intact
 and is still separate unfinished integration ownership. Static and isolated-import
 checks reject upward dependencies. Every complete packet must fit 100000 tokens;
 packet qualification does not establish whole-task LLM savings.
+
+## Structural reference retained from the overview
+
+[Cited page facts](page-facts.md) owns the existing caller-path reader,
+frontmatter interpretation and mtime-based age facts. Complete taxonomy, status
+and provenance policy sources remain dependencies. MCP retains citation selection,
+quality aggregation and warnings. This reader provides no containment or entailment
+proof; its existing decoded-character head bound and production bytes are preserved.

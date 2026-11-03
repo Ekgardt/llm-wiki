@@ -60,3 +60,11 @@ Evidence: built-in checkout graph generation
 `generation-18e49761e7127892-6a1d4f1f`, supplemented by actual source, callers,
 tests and `.github/workflows/release-tag.yml`; original release tests: 8 passed.
 This qualification itself performs no release, tag publication or installation.
+
+## Structural reference retained from the overview
+
+[Release manifest](release-manifest.md) owns the existing read-only Git
+commit/blob digest and release-note rendering helper. Tag creation remains a
+separate consumer. Qualification changes neither release commands nor publication
+permissions; opaque committed file contents are inputs to hashing, not executed
+dependencies.

@@ -32,3 +32,11 @@ remain explicit integration obligations and are run without weakened assertions.
 This packet alone does not qualify the coordinator's larger composition closure.
 
 See [research](../research/2026-11-03-coordinator-invariants-boundary.md).
+
+## Structural reference retained from the overview
+
+[Coordinator invariants](coordinator-invariants.md) owns the existing
+supplied-connection SQLite integrity, foreign-key, operation-shape, projection,
+epoch and blackboard consistency checks and row counts. It opens no database and
+settles no transaction. `markdown_transaction.py` retains aliases, file admission,
+schema validation, migration, publication and recovery; SQL and errors are unchanged.

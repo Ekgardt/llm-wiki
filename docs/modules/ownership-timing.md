@@ -22,3 +22,11 @@ integration separately. This packet does not qualify the larger registry closure
 
 See [research](../research/2026-11-03-ownership-timing-boundary.md) and
 `ownership-timing-context.json` for the complete bounded maintenance context.
+
+## Structural reference retained from the overview
+
+Ownership lease-time values are isolated in `scripts/llm_wiki/ownership_timing.py`:
+UTC normalization, persisted timestamp reading/writing, existing role durations and
+supplied-lease timing validation. The registry retains current-time reads, epochs,
+SQL and heartbeat execution. Historical helpers remain identical aliases; see
+[ownership timing](ownership-timing.md) and its complete context manifest.

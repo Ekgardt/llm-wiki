@@ -32,3 +32,11 @@ integration obligations; they are run without weakening their assertions.
 No registry implementation is hidden in this packet or declared complete by it.
 
 See [research](../research/2026-11-03-windows-actor-boundary.md).
+
+## Structural reference retained from the overview
+
+[Windows actor identity](windows-actor.md) isolates the existing process
+access-token/SID probe from `operational_ownership.py`. The registry keeps the old
+aliases and platform dispatch; SQL, leases, process identity and role/scope actor
+derivation retain their owners. Exact ctypes signatures, token closing, SID buffer
+release, native errors and existing identity bounds are preserved.

@@ -2182,12 +2182,7 @@ read-only workflow permissions and per-ref concurrency remain. Installer jobs us
 GitHub runners only; this grants no live-vault deployment or main merge. Retire
 this temporary branch trigger when the decomposition branch is retired.
 
-[Ownership input validation](modules/ownership-validation.md) owns the existing
-process/role/text and marker representation checks. It decodes supplied SQLite
-rows and compares supplied identities/bytes without opening databases, observing
-processes or touching files. Registry admission, timing, clock reads, SQL and
-marker publication/removal remain in operational_ownership. Legacy aliases retain
-one implementation and the current failures, role sets and size bounds.
+Full owner contract: [ownership-validation](modules/ownership-validation.md).
 
 Windows compile-runtime identity resolves the loaded Python DLL from `sys.dllhandle`
 through the existing lazy Windows API owner. It fingerprints that actual file;
@@ -2195,26 +2190,11 @@ missing handles and native lookup errors refuse qualification. Unix configured
 shared/static-library handling remains distinct. Buffer growth handles long paths
 without a guessed DLL name or silently omitted runtime dependency.
 
-[Context ownership](modules/context-ownership.md) qualifies the existing Git file
-ownership inventory and its whole synthetic-repository test suite in place.
-Measurement/source-closure tooling retains its own owner. Both packets include
-full dependencies; whole-repository integration assertions and the explicit
-completion gate remain unchanged. This introduces no contract-only dependency
-exception or production behavior change.
+Full owner contract: [context-ownership](modules/context-ownership.md).
 
-[Codex turn policy](modules/codex-turn-policy.md) owns the existing in-memory
-capture-window and pending-tail decisions in `scripts/codex_turn_end.py`.
-It receives state and time; `codex_memory.py` retains locking, durable state,
-ingress and failed-capture restoration. The four original pure regressions move
-to its packet; disk/ingress integration assertions remain intact. Historical
-September17 count-based trimming is superseded by protection of pending/unknown
-entries, not reinstated. No cadence, runtime path or hook registration changes.
+Full owner contract: [codex-turn-policy](modules/codex-turn-policy.md).
 
-[Windows actor identity](modules/windows-actor.md) isolates the existing process
-access-token/SID probe from `operational_ownership.py`. The registry keeps the old
-aliases and platform dispatch; SQL, leases, process identity and role/scope actor
-derivation retain their owners. Exact ctypes signatures, token closing, SID buffer
-release, native errors and existing identity bounds are preserved.
+Full owner contract: [windows-actor](modules/windows-actor.md).
 
 [ONNX encoder](modules/onnx-encoder.md) owns the existing local-cache-only CPU
 encoder in place: token padding, masked pooling, normalization and row ordering.
@@ -2224,37 +2204,15 @@ query/context assembly retains clocks, publication and citation checks. Both
 packets preserve production bytes and original unit assertions. Their whole-product
 policy and context/query integrations remain separate explicit obligations.
 
-[Coordinator invariants](modules/coordinator-invariants.md) owns the existing
-supplied-connection SQLite integrity, foreign-key, operation-shape, projection,
-epoch and blackboard consistency checks and row counts. It opens no database and
-settles no transaction. `markdown_transaction.py` retains aliases, file admission,
-schema validation, migration, publication and recovery; SQL and errors are unchanged.
+Full owner contract: [coordinator-invariants](modules/coordinator-invariants.md).
 
-Ownership lease-time values are isolated in `scripts/llm_wiki/ownership_timing.py`:
-UTC normalization, persisted timestamp reading/writing, existing role durations and
-supplied-lease timing validation. The registry retains current-time reads, epochs,
-SQL and heartbeat execution. Historical helpers remain identical aliases; see
-[ownership timing](modules/ownership-timing.md) and its complete context manifest.
+Full owner contract: [ownership-timing](modules/ownership-timing.md).
 
-Coordinator database admission and full certification belong to
-[coordinator validation](modules/coordinator-validation.md), implemented in
-`scripts/llm_wiki/coordinator_validation.py`. They retain existing containment,
-owner-only SQLite IO, schema, deadlines and full invariant checks. Ordinary
-admission does not scan retained history; migration/publication remain with the
-coordinator. The underlying SQLite IO retains stranded-journal recovery.
+Full owner contract: [coordinator-validation](modules/coordinator-validation.md).
 
-[Runtime metadata](modules/runtime-metadata.md), in
-`scripts/llm_wiki/runtime_metadata.py`, validates existing file metadata without
-opening/closing a second descriptor. SQLite IO imports this owner directly;
-runtime_records retains byte reads and platform file-identity capture, along with
-historical metadata aliases. This preserves live SQLite locks while removing an
-unrelated dependency on Windows workspace operations.
+Full owner contract: [runtime-metadata](modules/runtime-metadata.md).
 
-[Ownership rows](modules/ownership-rows.md), in
-`scripts/llm_wiki/ownership_rows.py`, owns acquisition row values, epoch allocation,
-row insertion and exact-fence projection cleanup on a supplied SQLite connection.
-The registry retains transaction control and proof that an owner may be reclaimed;
-SQL, counter scope and binding-before-fence deletion order remain unchanged.
+Full owner contract: [ownership-rows](modules/ownership-rows.md).
 
 The approved dependency-contract pilot uses separate test-only
 [contract identity tooling](modules/contract-identity.md). Its full-byte and explicit public-surface fingerprints
@@ -2271,11 +2229,7 @@ experimental contexts do not replace canonical full-source packets before the
 approved paired maintenance comparison passes. No persistent success cache or
 product runtime location is added.
 
-[Release manifest](modules/release-manifest.md) owns the existing read-only Git
-commit/blob digest and release-note rendering helper. Tag creation remains a
-separate consumer. Qualification changes neither release commands nor publication
-permissions; opaque committed file contents are inputs to hashing, not executed
-dependencies.
+Full owner contract: [release-manifest](modules/release-manifest.md).
 
 [Release history](modules/release-history.md) owns exact published CHANGELOG
 version records and their complete byte catalog; [pending release history](modules/release-pending.md)
@@ -2284,25 +2238,10 @@ fully covered. [Release tag](modules/release-tag.md) owns existing tag orchestra
 and its workflow, sharing the complete declared-version record. Authority files
 and executable sources retain whole-file context requirements.
 
-[Corpus membership policy](modules/corpus-membership-policy.md) owns the six
-immutable code/vault/project/archive membership values. The collector keeps
-public aliases and all traversal/safety behavior; provenance reads policy
-directly, without importing corpus collection. Values, allowed paths and runtime
-roots are unchanged.
+Full owner contract: [corpus-membership-policy](modules/corpus-membership-policy.md).
 
-[Provenance](modules/provenance.md) owns existing authority/type/intent/substance
-weights and their pure behavior tests. It reads immutable corpus membership
-policy directly. Integrated retrieval, search and capture checks retain their
-original scenarios; shared link/prose fixtures have one test-data owner.
+Full owner contract: [provenance](modules/provenance.md).
 
-[Cited page facts](modules/page-facts.md) owns the existing caller-path reader,
-frontmatter interpretation and mtime-based age facts. Complete taxonomy, status
-and provenance policy sources remain dependencies. MCP retains citation selection,
-quality aggregation and warnings. This reader provides no containment or entailment
-proof; its existing decoded-character head bound and production bytes are preserved.
+Full owner contract: [page-facts](modules/page-facts.md).
 
-[Answer refinement](modules/answer-refinement.md) owns existing counting/refusal
-policies, prompt formation and interpretation of supplied callback replies.
-`query_memory` retains protected model execution, retrieval, deadlines, calendar
-precedence and second-answer adoption/fallback. Existing algorithms, prompts,
-limits and public imports remain unchanged; pure tests move with their policies.
+Full owner contract: [answer-refinement](modules/answer-refinement.md).

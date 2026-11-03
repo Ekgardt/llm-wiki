@@ -56,3 +56,11 @@ transfer, unchanged production digests, focused and original integration tests,
 actual CCN/shape checks, complete source/ownership gates and a full byte-reversible
 packet of at most 100000 tokens. Whole-project integration ownership remains
 unfinished; no release or live installation is implied.
+
+## Structural reference retained from the overview
+
+[Answer refinement](answer-refinement.md) owns existing counting/refusal
+policies, prompt formation and interpretation of supplied callback replies.
+`query_memory` retains protected model execution, retrieval, deadlines, calendar
+precedence and second-answer adoption/fallback. Existing algorithms, prompts,
+limits and public imports remain unchanged; pure tests move with their policies.

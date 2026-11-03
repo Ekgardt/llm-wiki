@@ -22,3 +22,12 @@ research were removed by this ownership reassignment.
 
 Sources: [original inventory research](../research/2026-11-03-module-file-ownership.md),
 [in-place qualification](../research/2026-11-03-context-ownership-owner.md).
+
+## Structural reference retained from the overview
+
+[Context ownership](context-ownership.md) qualifies the existing Git file
+ownership inventory and its whole synthetic-repository test suite in place.
+Measurement/source-closure tooling retains its own owner. Both packets include
+full dependencies; whole-repository integration assertions and the explicit
+completion gate remain unchanged. This introduces no contract-only dependency
+exception or production behavior change.

@@ -127,3 +127,29 @@ still requires its own red regression and shared fix; this documentation change
 does not claim to fix it. Evidence: logs/benchmark-guide-omission-reproduction.json.
 The complete prior db6baf57 suite finished with 16339 passed, 244 skipped and
 5 warnings; the latest production c43455da full run is now in progress.
+
+## Follow-up after 111 packets (2026-11-03, 010acd8b)
+
+Apply the same approved model to 14 recent single-owner paragraphs. They belong
+to ownership-validation, context-ownership, codex-turn-policy, windows-actor,
+coordinator-invariants, ownership-timing, coordinator-validation, runtime-metadata,
+ownership-rows, release-manifest, corpus-membership-policy, provenance, page-facts
+and answer-refinement. Each moves whole into its existing guide; root navigation
+stays in its original position. Reverse only relative-link rebasing to recover the
+original paragraph byte for byte. All headings, unselected/global paragraphs and
+previous guide text remain. Manifests, instructions and code do not change.
+
+Diataxis, Google Technical Writing and Microsoft Style Guide were rechecked at
+the primary URLs above. The rationale and rejected alternatives remain the same.
+Before this transfer the largest full packet is 98134 tokens. The one-time proof
+records each original body, destination and digest in
+logs/module-contract-111-transfer-proof.json; full-guide coverage, all packet
+measurements and byte reconstruction must pass before qualification is claimed.
+
+Qualification: all 14 bodies retain reverse-link byte equivalence, every unselected
+paragraph and root heading stays unchanged, and every applicable actual packet
+contains its full moved body. Full module/guide checks: 1884 passed, 3 platform skips,
+1 existing warning; global source/ownership/structure gates: 130 passed. All 111 bundles
+reconstruct exact paths/bytes. Largest packet falls from 98134 to 97276 tokens before
+this evidence paragraph. These are maintenance-packet measurements, not paired
+LLM task-cost results. No production or manifest change and no live installation.

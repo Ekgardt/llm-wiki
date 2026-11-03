@@ -20,3 +20,12 @@ outcomes, actual SQLite rows and isolated imports qualify this packet; registry 
 recovery integration remain separately visible obligations.
 
 Source: [boundary research](../research/2026-11-03-ownership-validation-boundary.md).
+
+## Structural reference retained from the overview
+
+[Ownership input validation](ownership-validation.md) owns the existing
+process/role/text and marker representation checks. It decodes supplied SQLite
+rows and compares supplied identities/bytes without opening databases, observing
+processes or touching files. Registry admission, timing, clock reads, SQL and
+marker publication/removal remain in operational_ownership. Legacy aliases retain
+one implementation and the current failures, role sets and size bounds.

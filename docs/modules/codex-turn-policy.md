@@ -33,3 +33,13 @@ Run `python -m pytest tests/modules/codex_turn_policy
  tests/test_a_codex_turn_is_not_a_session.py` (join as one shell command).
 No new API, facade, dependency, state path or installation.
 See [research](../research/2026-11-03-codex-turn-policy-owner.md).
+
+## Structural reference retained from the overview
+
+[Codex turn policy](codex-turn-policy.md) owns the existing in-memory
+capture-window and pending-tail decisions in `scripts/codex_turn_end.py`.
+It receives state and time; `codex_memory.py` retains locking, durable state,
+ingress and failed-capture restoration. The four original pure regressions move
+to its packet; disk/ingress integration assertions remain intact. Historical
+September17 count-based trimming is superseded by protection of pending/unknown
+entries, not reinstated. No cadence, runtime path or hook registration changes.
