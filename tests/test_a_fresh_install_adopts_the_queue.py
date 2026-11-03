@@ -7,6 +7,7 @@ state became two lines, and no fresh install ever adopted the queue. Research:
 from __future__ import annotations
 
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -31,7 +32,7 @@ def _state(tmp_path: Path, report: str, exit_code: int) -> str:
     uv.write_text(FAKE_UV, encoding="utf-8")
     uv.chmod(uv.stat().st_mode | stat.S_IEXEC)
     function = _shell_function((ROOT / "install.sh").read_text(encoding="utf-8"), "adoption_state_of")
-    script = f"set -euo pipefail\nVAULT_ROOT=/nowhere\nADOPTION_ERR={tmp_path / 'err.log'}\n{function}\nadoption_state_of\n"
+    script = f"set -euo pipefail\nBOOTSTRAP_PYTHON={shlex.quote(sys.executable)}\nVAULT_ROOT=/nowhere\nADOPTION_ERR={tmp_path / 'err.log'}\n{function}\nadoption_state_of\n"
     env = {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
            "FAKE_REPORT": report, "FAKE_EXIT": str(exit_code)}
     result = subprocess.run([_bash(), "-c", script], capture_output=True, text=True, env=env, check=False)
