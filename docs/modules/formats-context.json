@@ -42,7 +42,8 @@
     "files": [
       "docs/modules/formats-context.json",
       "docs/modules/formats.md",
-      "docs/research/2026-11-02-formats-module-pilot.md"
+      "docs/research/2026-11-02-formats-module-pilot.md",
+      "docs/research/2026-11-02-queue-payload-boundary.md"
     ],
     "directories": [
       "scripts/llm_wiki/formats",

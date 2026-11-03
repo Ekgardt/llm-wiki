@@ -51,7 +51,8 @@
       "scripts/lsp_profiles.py",
       "docs/modules/lsp-profiles.md",
       "docs/modules/lsp-profiles-context.json",
-      "tests/test_language_registry_has_no_discovery_dependency.py"
+      "tests/test_language_registry_has_no_discovery_dependency.py",
+      "docs/research/2026-11-03-language-registry-packet.md"
     ],
     "directories": [
       "tests/modules/lsp_profiles"

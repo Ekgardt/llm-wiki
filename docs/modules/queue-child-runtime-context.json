@@ -46,7 +46,8 @@
     "files": [
       "docs/modules/queue-child-runtime-context.json",
       "docs/modules/queue-child-runtime.md",
-      "scripts/llm_wiki/queue_child_runtime.py"
+      "scripts/llm_wiki/queue_child_runtime.py",
+      "docs/research/2026-11-02-queue-child-runtime-boundary.md"
     ],
     "directories": [
       "tests/modules/queue_child_runtime"

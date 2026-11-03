@@ -44,7 +44,9 @@
     "files": [
       "scripts/llm_wiki/queue_worker_state.py",
       "docs/modules/queue-worker-state.md",
-      "docs/modules/queue-worker-state-context.json"
+      "docs/modules/queue-worker-state-context.json",
+      "docs/research/2026-11-03-queue-worker-state-boundary.md",
+      "docs/research/2026-11-03-processor-error-code-byte-bound.md"
     ],
     "directories": [
       "tests/modules/queue_worker_state"

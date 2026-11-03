@@ -40,7 +40,8 @@
     "files": [
       "docs/modules/queue-timing-context.json",
       "docs/modules/queue-timing.md",
-      "scripts/llm_wiki/queue_timing.py"
+      "scripts/llm_wiki/queue_timing.py",
+      "docs/research/2026-11-02-queue-timing-boundary.md"
     ],
     "directories": [
       "tests/modules/queue_timing"

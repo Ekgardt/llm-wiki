@@ -40,7 +40,8 @@
     "files": [
       "docs/modules/queue-sources-context.json",
       "docs/modules/queue-sources.md",
-      "scripts/llm_wiki/queue_sources.py"
+      "scripts/llm_wiki/queue_sources.py",
+      "docs/research/2026-11-02-queue-sources-boundary.md"
     ],
     "directories": [
       "tests/modules/queue_sources"
