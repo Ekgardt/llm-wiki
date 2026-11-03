@@ -14,6 +14,7 @@ from code_navigation import (
     NavigationStatus,
     Provenance,
 )
+from llm_wiki.utf8_text import _utf8_prefix as _utf8_prefix
 
 # Default row count of a rendered navigation answer; `graph_query` pages 50 by default.
 DEFAULT_LIMIT = 10
@@ -91,17 +92,6 @@ def _validate_result_integers(result: NavigationResult) -> None:
         )
         for location in diagnostic.related:
             _validate_location_integers(location)
-
-
-def _utf8_prefix(value: str, ceiling: int) -> str:
-    encoded = value.encode("utf-8", errors="strict")
-    if len(encoded) <= ceiling:
-        return value
-    prefix = encoded[:ceiling]
-    try:
-        return prefix.decode("utf-8", errors="strict")
-    except UnicodeDecodeError as exc:
-        return prefix[: exc.start].decode("utf-8", errors="strict")
 
 
 def _strip_signature(

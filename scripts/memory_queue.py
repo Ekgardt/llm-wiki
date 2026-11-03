@@ -212,6 +212,11 @@ from llm_wiki.queue_validation import _require_worker_intent_fence as _require_w
 from llm_wiki.queue_validation import _valid_heartbeat_interval as _valid_heartbeat_interval
 from llm_wiki.queue_validation import _validate_retry_policy as _validate_retry_policy
 from llm_wiki.queue_validation import _validate_worker_policy as _validate_worker_policy
+from llm_wiki.queue_worker_state import PROCESSOR_ERROR_CODE_BYTES as PROCESSOR_ERROR_CODE_BYTES
+from llm_wiki.queue_worker_state import QueueRetryPolicy as QueueRetryPolicy
+from llm_wiki.queue_worker_state import _ProcessorOutcome as _ProcessorOutcome
+from llm_wiki.queue_worker_state import _WorkerProgress as _WorkerProgress
+from llm_wiki.queue_worker_state import processor_error_code as processor_error_code
 
 if TYPE_CHECKING:
     from markdown_transaction import IntentFence
@@ -907,16 +912,6 @@ class _RedactedArgumentParser(argparse.ArgumentParser):
         super().exit(status, message)
 
 
-
-
-
-
-
-
-
-
-
-
 def _in_redrive_family(database: sqlite3.Connection, task_id: str) -> bool:
     """The task was redriven, or is itself a redrive."""
     row = database.execute(
@@ -924,8 +919,6 @@ def _in_redrive_family(database: sqlite3.Connection, task_id: str) -> bool:
         (task_id, task_id),
     ).fetchone()
     return row is not None
-
-
 
 
 def _capture_semantic_seal_digest(
@@ -1121,10 +1114,6 @@ def _read_indexed_capture_decision(
     return decision_path, decision_sha256
 
 
-
-
-
-
 def _existing_capture_publication_state(
     row: sqlite3.Row | None,
     *,
@@ -1298,12 +1287,6 @@ def _legacy_payload_bytes(row: sqlite3.Row) -> bytes:
         return b""
 
 
-
-
-
-
-
-
 def _capture_link_record(
     task_id: str, intent_id: str, intent_sha256: str, handler_version: int
 ) -> dict[str, object]:
@@ -1362,8 +1345,6 @@ def _purge_selection_changed(
         row["state"] not in states or row["updated_at"] >= cutoff_stamp
         for row in current
     )
-
-
 
 
 def _require_semantic_decision_fences(
@@ -1499,10 +1480,6 @@ def _exported_bytes_match(
     )
 
 
-
-
-
-
 def _require_matching_purge_operation(
     existing_operation: sqlite3.Row, task: sqlite3.Row, operation_id: str
 ) -> None:
@@ -1528,8 +1505,6 @@ class _CorruptEvidence:
     metadata_sha256: str
     disposition_key: str
     lineage_generation: int
-
-
 
 
 def _attempt_history_entry(item: Mapping[str, object]) -> dict[str, object]:
@@ -1802,20 +1777,6 @@ def _source_fence_row_matches(row: sqlite3.Row, fence: SourceFence) -> bool:
     return stored == expected and fence.owner_pid == os.getpid()
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 _CaptureLeaf = tuple[str, str | None, str | None, int]
 
 
@@ -2038,8 +1999,6 @@ def _quarantined_corrupt_progress(
     )
 
 
-
-
 def _insert_link_resolution(
     database: sqlite3.Connection,
     *,
@@ -2243,12 +2202,6 @@ def _write_purge_receipt(package: Path, receipt: Mapping[str, object]) -> bytes:
     if written != receipt_bytes:
         raise QueueOperationError("corrupt_purge_receipt_invalid")
     return receipt_bytes
-
-
-
-
-
-
 
 
 def _capture_seal_digest(
@@ -11372,14 +11325,6 @@ def _adopted_queue_contract(adoption: dict) -> OperationalDatabaseContract:
     return _QUEUE_V3_CONTRACT
 
 
-class QueueRetryPolicy(NamedTuple):
-    """Retry bounds only the legacy queue takes; the adopted one settles its own."""
-
-    max_attempts: int = DEFAULTS.queue_max_attempts
-    retry_base_seconds: int = DEFAULTS.retry_base_seconds
-    retry_cap_seconds: int = DEFAULTS.retry_cap_seconds
-
-
 def _json_queue_entries(state_root: Path, *, deadline: float | None = None) -> int:
     """Entries under `run/queue/`, the file-per-task queue of v3.3.0–v3.4.0.
 
@@ -11808,33 +11753,6 @@ def _claim_when_reachable(
     return None
 
 
-PROCESSOR_ERROR_CODE_BYTES = 64  # `attempt_history.error_code` CHECK in the v3 schema
-_CODE_SHAPED_MESSAGE = re.compile(r"[a-z][a-z0-9_]{0,62}")
-
-
-def processor_error_code(error: BaseException) -> str:
-    """The stable code a failed processor leaves in the attempt history.
-
-    A queue error carries its own code. Any other exception names its type, or
-    its message when the message is itself a code (`RuntimeError("intent_fence_lost")`
-    from the transaction layer). Never the message text: it may carry paths or
-    content. On the live vault every one of 225 failed attempts said only
-    `processor_failed` (2026-09-23, audit C3).
-    """
-    if isinstance(error, QueueOperationError):
-        return error.code
-    message = str(error)
-    reason = message if _CODE_SHAPED_MESSAGE.fullmatch(message) else type(error).__name__
-    return f"processor_failed:{reason}"[:PROCESSOR_ERROR_CODE_BYTES]
-
-
-class _ProcessorOutcome(NamedTuple):
-    outcome: bool | DeferredResult
-    timed_out: bool
-    cleanup_failed: bool
-    error_code: str | None = None
-
-
 def _adopted_counts(
     queue: MemoryQueue, lease: QueueLease, counts: dict[str, int]
 ) -> bool:
@@ -12158,24 +12076,6 @@ def _run_and_settle(
     )
 
 
-@dataclass
-class _WorkerProgress:
-    """What a worker has done, and when it last had something to do."""
-
-    totals: dict[str, int]
-    processed: int = 0
-    idle_started: float | None = None
-
-    def advance(self, counts: Mapping[str, int]) -> str:
-        """`worked`, `halted` or `idle` after recording one turn."""
-        handled = counts["ok"] + counts["failed"]
-        for key in self.totals:
-            self.totals[key] += counts[key]
-        if not handled:
-            return "idle"
-        self.processed += handled
-        self.idle_started = None
-        return "halted" if counts.get("halted") else "worked"
 
 
 # A worker claims no task with less than this left: one provider call (90 s by default)

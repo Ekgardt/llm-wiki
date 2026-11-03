@@ -2025,3 +2025,20 @@ production sources. Mixed facade/serialization checks remain integration tests;
 they do not enter a leaf packet without their consumer context. Existing full
 pytest bootstrap remains infrastructure, with no new exception lists. See
 [research](research/2026-11-03-test-import-context-closure.md).
+
+### Queue worker values
+
+`llm_wiki.queue_worker_state` owns retry configuration values, processor
+outcomes, progress counters and reason-code conversion. Queue SQL, clocks and
+execution remain with current callers. Capture consumes the reason helper
+directly, and root aliases retain compatibility. See
+[research](research/2026-11-03-queue-worker-state-boundary.md).
+
+### Strict UTF-8 prefix
+
+The existing renderer prefix helper moved unchanged into `llm_wiki.utf8_text`,
+with the renderer retaining an alias. It will support the separately qualified
+queue byte-bound correction without introducing a duplicate algorithm. See
+[research](research/2026-11-03-utf8-prefix-boundary.md).
+
+Full contracts: [Queue worker values](modules/queue-worker-state.md), [UTF-8 prefixes](modules/utf8-text.md).
