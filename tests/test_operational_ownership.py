@@ -526,3 +526,19 @@ def test_marker_release_clears_canonical_before_exact_marker(
     ownership.release_marker_owner(lease, marker)
 
     assert observed == [0]
+
+
+@pytest.mark.parametrize('name', [
+    '_WindowsTokenApi', '_windows_token_api', '_windows_open_token',
+    '_windows_token_information', '_windows_token_sid_text',
+    '_validated_windows_actor', '_windows_actor_identity',
+])
+def test_windows_actor_aliases_retain_original_serialized_identity(name):
+    import pickle
+
+    from llm_wiki import windows_actor
+
+    value = getattr(windows_actor, name)
+    assert getattr(ownership, name) is value
+    assert value.__module__ == 'operational_ownership'
+    assert pickle.loads(pickle.dumps(value, protocol=4)) is value

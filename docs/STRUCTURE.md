@@ -2209,3 +2209,9 @@ ingress and failed-capture restoration. The four original pure regressions move
 to its packet; disk/ingress integration assertions remain intact. Historical
 September17 count-based trimming is superseded by protection of pending/unknown
 entries, not reinstated. No cadence, runtime path or hook registration changes.
+
+[Windows actor identity](modules/windows-actor.md) isolates the existing process
+access-token/SID probe from `operational_ownership.py`. The registry keeps the old
+aliases and platform dispatch; SQL, leases, process identity and role/scope actor
+derivation retain their owners. Exact ctypes signatures, token closing, SID buffer
+release, native errors and existing identity bounds are preserved.
