@@ -2245,3 +2245,6 @@ Full owner contract: [provenance](modules/provenance.md).
 Full owner contract: [page-facts](modules/page-facts.md).
 
 Full owner contract: [answer-refinement](modules/answer-refinement.md).
+Full owner contract: [trusted profile collection](modules/trace-collector.md).
+The converter retains trusted-profile input; graph ingestion and dynamic-evidence
+publication remain separate responsibilities.
