@@ -2092,11 +2092,19 @@ of the approved completion plan; see
 
 Full contract: [exact record contexts](modules/context-records.md).
 
-### Existing compile-progress storage qualification (in progress)
+### Existing compile-progress storage qualification
 
 The existing append-only SQLite checkpoint owner remains at
 `scripts/compile_progress.py`. A complete exact-record catalog of the mixed
-historical design will preserve all original bytes while the storage packet carries
+historical design preserves all original bytes while the storage packet carries
 its necessary history. No schema, source implementation, public path or runtime
 behavior changes. Full contract: [compile progress](modules/compile-progress.md);
 [qualification research](research/2026-11-03-compile-progress-storage-packet.md).
+
+### Existing MCP supervisor qualification
+
+The stdio supervisor remains in `scripts/mcp_supervisor.py` with unchanged worker
+command, process ownership and wire behavior. Pure protocol/harness tests move
+into its owner packet; actual-server and worker-timeout integration checks remain
+in their existing files with all assertions. Full contract:
+[MCP supervisor](modules/mcp-supervisor.md); [qualification research](research/2026-11-03-mcp-supervisor-owner-qualification.md).
