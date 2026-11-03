@@ -6,7 +6,6 @@ import contextlib
 import ctypes
 import errno
 import hashlib
-import math
 import os
 import platform
 import re
@@ -47,6 +46,24 @@ from llm_wiki.sqlite_contracts import (
 from llm_wiki.sqlite_contracts import _require_migration_text as _require_migration_text
 from llm_wiki.sqlite_contracts import _require_positive_int as _require_positive_int
 from llm_wiki.sqlite_contracts import quote_sqlite_identifier as quote_sqlite_identifier
+from llm_wiki.sqlite_deadlines import (
+    _OPERATIONAL_PROGRESS_VM_STEPS as _OPERATIONAL_PROGRESS_VM_STEPS,
+)
+from llm_wiki.sqlite_deadlines import (
+    configure_operational_deadline as configure_operational_deadline,
+)
+from llm_wiki.sqlite_deadlines import operational_busy_ms as operational_busy_ms
+from llm_wiki.sqlite_deadlines import operational_deadline_active as operational_deadline_active
+from llm_wiki.sqlite_deadlines import refresh_operational_deadline as refresh_operational_deadline
+from llm_wiki.sqlite_migrations import (
+    _apply_one_migration_statement as _apply_one_migration_statement,
+)
+from llm_wiki.sqlite_migrations import _migration_incomplete as _migration_incomplete
+from llm_wiki.sqlite_migrations import _require_final_invariant as _require_final_invariant
+from llm_wiki.sqlite_migrations import (
+    _require_unique_statement_names as _require_unique_statement_names,
+)
+from llm_wiki.sqlite_migrations import run_resumable_migration as run_resumable_migration
 from llm_wiki.sqlite_transactions import begin_immediate as begin_immediate
 
 # The one bound on a capture decision file, for the writer and every reader. The
@@ -450,47 +467,14 @@ def _harden_runtime_owner_only(path: Path, mode: int) -> None:
     _set_owner_only(Path(path), mode)
 
 
-def operational_deadline_active(deadline: float | None) -> None:
-    """Refuse an expired caller budget without creating runtime state."""
-    if deadline is not None and time.monotonic() >= deadline:
-        raise TimeoutError("operational database deadline expired")
 
 
-def operational_busy_ms(busy_ms: int, deadline: float | None) -> int:
-    operational_deadline_active(deadline)
-    if deadline is None or math.isinf(deadline):
-        return busy_ms
-    return min(busy_ms, max(0, int((deadline - time.monotonic()) * 1_000)))
 
 
-# Cooperative SQL checks every 1 000 VM instructions. Measured 2026-10-03:
-# a 100 000-row recursive aggregate took 0.384 s at interval 1 versus 0.0194 s
-# here, with a 20 ms interruption overshoot below 16 microseconds. A retained
-# authority fallback read was 0.153 s at 1 versus 0.0387 s here (same result).
-# At 10 000, cost barely improved while overshoot grew; this is instrumentation
-# granularity, never a row/data/work ceiling. Requalify on SQLite/workload changes;
-# UDFs and filesystem/OS scheduling remain cooperative, not hard real-time.
-_OPERATIONAL_PROGRESS_VM_STEPS = 1_000
 
 
-def configure_operational_deadline(database: sqlite3.Connection, deadline: float | None) -> None:
-    operational_deadline_active(deadline)
-    if deadline is None or math.isinf(deadline):
-        return
-
-    def interrupted() -> int:
-        return int(time.monotonic() >= deadline)
-
-    database.set_progress_handler(interrupted, _OPERATIONAL_PROGRESS_VM_STEPS)
 
 
-def refresh_operational_deadline(database: sqlite3.Connection, busy_ms: int, deadline: float | None) -> None:
-    """Recompute lock waiting before the next transaction or commit."""
-    operational_deadline_active(deadline)
-    if deadline is None or math.isinf(deadline):
-        return
-    remaining_ms = operational_busy_ms(busy_ms, deadline)
-    database.execute(f"PRAGMA busy_timeout={remaining_ms:d}")
 
 
 def open_operational_db(
@@ -656,56 +640,14 @@ def _initialized_contract_identity(
     return identity
 
 
-def _migration_incomplete(message: str) -> OperationalDatabaseContractError:
-    error = OperationalDatabaseContractError(message)
-    error.code = "operational_migration_incomplete"
-    return error
 
 
-def _require_unique_statement_names(statements: Sequence[MigrationStatement]) -> None:
-    names = [statement.name for statement in statements]
-    if any(not name for name in names):
-        raise ValueError("migration statement name must be non-empty")
-    if len(names) != len(set(names)):
-        raise ValueError("migration statement names must be unique")
 
 
-def _apply_one_migration_statement(
-    connection: sqlite3.Connection, statement: MigrationStatement, emit
-) -> None:
-    """One statement in one transaction, skipped when its invariant already holds."""
-    if statement.completed(connection):
-        return
-    emit(f"before:{statement.name}")
-    with begin_immediate(connection):
-        connection.execute(statement.sql, tuple(statement.parameters))
-        if not statement.completed(connection):
-            raise _migration_incomplete(
-                f"migration statement invariant is incomplete: {statement.name}"
-            )
-        emit(f"after_execute:{statement.name}")
-    emit(f"after_commit:{statement.name}")
 
 
-def _require_final_invariant(connection: sqlite3.Connection, final_invariant) -> None:
-    if final_invariant(connection):
-        return
-    raise _migration_incomplete("operational migration final invariant is incomplete")
 
 
-def run_resumable_migration(
-    connection: sqlite3.Connection,
-    statements: Sequence[MigrationStatement],
-    *,
-    final_invariant: Callable[[sqlite3.Connection], bool],
-    killpoint: Callable[[str], None] | None = None,
-) -> None:
-    """Apply incomplete migration statements one transaction at a time."""
-    _require_unique_statement_names(statements)
-    emit = killpoint or (lambda _event: None)
-    for statement in statements:
-        _apply_one_migration_statement(connection, statement, emit)
-    _require_final_invariant(connection, final_invariant)
 
 
 def _contained_runtime_metadata(path: Path, state_root: Path) -> os.stat_result:

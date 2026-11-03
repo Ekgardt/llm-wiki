@@ -224,6 +224,12 @@ from llm_wiki.sqlite_contracts import (
     quote_sqlite_identifier,
 )
 from llm_wiki.sqlite_contracts import _migration_error as _migration_error
+from llm_wiki.sqlite_deadlines import (
+    configure_operational_deadline,
+    operational_deadline_active,
+    refresh_operational_deadline,
+)
+from llm_wiki.sqlite_migrations import run_resumable_migration
 from llm_wiki.sqlite_transactions import begin_immediate
 from llm_wiki.windows_acl import _acl_is_owner_only as _acl_is_owner_only
 from llm_wiki.windows_acl import _acl_owner_lines as _acl_owner_lines
@@ -233,16 +239,12 @@ from reliable_memory import (
     MAX_CAPTURE_DECISION_BYTES,
     _set_owner_only,
     _validate_or_initialize_operational_contract,
-    configure_operational_deadline,
     fsync_directory,
     fsync_file,
     open_operational_db,
     open_readonly_operational_db,
-    operational_deadline_active,
     read_runtime_bytes,
-    refresh_operational_deadline,
     restricted_relative_path,
-    run_resumable_migration,
 )
 from secret_redact import redact_secrets, redact_structure
 

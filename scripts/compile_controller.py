@@ -32,7 +32,8 @@ from bounded_io import (
 from context_budget import TokenCount, TokenUsage
 from llm_client import BackendResponse, LLMResult, ProviderDescriptor
 from llm_wiki.formats.canonical import canonical_json_bytes
-from reliable_memory import fingerprint_regular_file, operational_deadline_active
+from llm_wiki.sqlite_deadlines import operational_deadline_active
+from reliable_memory import fingerprint_regular_file
 
 _COMPLETED_REFUSALS = frozenset({'empty_response', 'dlp_output_blocked', 'dlp_scan_error'})
 

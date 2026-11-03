@@ -37,6 +37,7 @@ from evidence_resolver import (  # noqa: E402
 from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes  # noqa: E402
 from llm_wiki.queue_contracts import QueueOperationError, SourceFence
 from llm_wiki.reliability_defaults import DEFAULTS  # noqa: E402
+from llm_wiki.sqlite_deadlines import operational_deadline_active
 from llm_wiki.windows_acl import (  # noqa: E402
     _acl_lines_naming,
     _acl_output_text,
@@ -50,12 +51,7 @@ from markdown_transaction import (  # noqa: E402
 )
 from memory_queue import MemoryQueue, active_or_legacy_memory_queue
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
-from reliable_memory import (  # noqa: E402
-    _set_owner_only,
-    fsync_directory,
-    fsync_file,
-    operational_deadline_active,
-)
+from reliable_memory import _set_owner_only, fsync_directory, fsync_file
 
 # The Stage 2 contract's 90 hot days (CLAUDE.md: "Archives keep 90 hot days"), from
 # its one definition rather than a second literal.

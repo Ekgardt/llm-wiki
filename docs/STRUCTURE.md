@@ -1997,3 +1997,8 @@ import the transaction owner directly, preserving callbacks and rollback semanti
 `llm_wiki.queue_migration_plan` owns v2 migration statement planning and exact
 reconciliation on supplied connections. The queue supplies its unchanged owner
 check explicitly; source opening, clock reads, transactions and adoption stay there.
+
+`llm_wiki.sqlite_deadlines` owns cooperative SQLite deadline/progress control;
+`llm_wiki.sqlite_migrations` owns resumable statement execution. Both use supplied
+connections. reliable_memory retains API aliases; connection and file ownership,
+transaction boundaries, callback order and existing limits are unchanged.

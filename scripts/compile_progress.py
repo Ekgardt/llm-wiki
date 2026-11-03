@@ -14,7 +14,7 @@ import sqlite3
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from reliable_memory import operational_deadline_active
+from llm_wiki.sqlite_deadlines import operational_deadline_active
 
 QUEUE_SCHEMA_VERSION = 4
 

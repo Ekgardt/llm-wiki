@@ -1,0 +1,34 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/research/2026-11-02-formats-module-pilot.md",
+    "docs/research/2026-11-02-module-boundaries-validation.md",
+    "docs/research/2026-11-02-module-boundaries-and-token-budget.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "docs/modules/sqlite-migrations-context.json",
+    "docs/research/2026-11-03-sqlite-control-boundaries.md",
+    "scripts/llm_wiki/sqlite_migrations.py",
+    "docs/modules/sqlite-migrations.md",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "scripts/llm_wiki/sqlite_contracts.py",
+    "scripts/llm_wiki/sqlite_transactions.py",
+    "docs/modules/sqlite-contracts.md",
+    "docs/modules/sqlite-transactions.md"
+  ],
+  "directories": [
+    "tests/modules/sqlite_migrations"
+  ]
+}

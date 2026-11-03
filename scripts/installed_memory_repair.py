@@ -24,6 +24,7 @@ from llm_wiki.formats.queue_payload import validate_payload_blob
 from llm_wiki.formats.schema import validate_schema
 from llm_wiki.reliability_defaults import DEFAULTS
 from llm_wiki.sqlite_contracts import OperationalDatabaseContract
+from llm_wiki.sqlite_deadlines import operational_deadline_active, refresh_operational_deadline
 from reliable_memory import (
     OPERATIONAL_SCAN_BATCH_ROWS,
     capture_operational_database_identity,
@@ -31,10 +32,8 @@ from reliable_memory import (
     durable_publish_file,
     fingerprint_runtime_file,
     open_readonly_operational_db,
-    operational_deadline_active,
     publish_runtime_file,
     read_runtime_bytes,
-    refresh_operational_deadline,
     streamed_rows,
     sync_runtime_directory,
     validate_state_root,
