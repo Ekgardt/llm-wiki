@@ -38,3 +38,9 @@ Primary sources checked: [bounded contexts](https://martinfowler.com/bliki/Bound
 [import contracts](https://import-linter.readthedocs.io/en/stable/contract_types/),
 [temporary-file tests](https://docs.pytest.org/en/stable/how-to/tmp_path.html).
 These support boundary and IO verification, not the historical benchmark outcomes.
+
+## Canonical structure contract — 2026-11-03
+
+The existing [offline ledger stand](ledger-offline.md) owns deterministic
+counting evaluation and its file interface; its packet retains full product dependency
+source. It measures a deterministic extractor, not model record quality.

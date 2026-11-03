@@ -59,3 +59,10 @@ Separating the facade exposed that gap. The constant now states compatibility an
 the need for separate workload-based recalibration explicitly; neither the value
 nor the guard changes. This is documentation of an existing uncalibrated default,
 not a claim that 20 is an optimal throughput or safety limit.
+
+## Canonical structure contract — 2026-11-03
+
+[Ledger core](ledger-core.md) owns deterministic record/store/count rules
+and entity text. The existing ledger entry retains generation selection and
+transaction publication, with identical-object compatibility exports. The offline
+benchmark imports the core; SQL, page bytes and public runtime calls stay unchanged.

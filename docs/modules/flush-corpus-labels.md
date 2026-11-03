@@ -50,3 +50,10 @@ and [Python 3.14 dataclasses](https://docs.python.org/3.14/library/dataclasses.h
 They support explicit boundaries, isolated qualification and preserving dataclass
 identity/fields. They do not validate the historical labels or introduce new
 thresholds. The runtime remains the qualified locked Python 3.14 environment.
+
+## Canonical structure contract — 2026-11-03
+
+The [classification corpus labels](flush-corpus-labels.md) module owns
+pure reading interpretation, case construction and agreement measures. The
+existing builder retains IO, provider orchestration and CLI, re-exporting moved
+names as direct compatibility aliases without duplicate implementations.

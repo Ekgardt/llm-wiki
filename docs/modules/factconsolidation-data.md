@@ -37,3 +37,10 @@ Sources checked: [bounded contexts](https://martinfowler.com/bliki/BoundedContex
 [import contracts](https://import-linter.readthedocs.io/en/stable/contract_types/),
 [JSON semantics](https://docs.python.org/3.14/library/json.html).
 These support the boundary and interchange mechanism, not fresh effectiveness claims.
+
+## Canonical structure contract — 2026-11-03
+
+[FactConsolidation data](factconsolidation-data.md) owns existing frame
+parsing, conflict grouping and the complete derived fixture. Resolver/model
+execution and Parquet acquisition stay outside. Source, fixture bytes, public
+paths and original assertions are preserved.

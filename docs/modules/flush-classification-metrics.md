@@ -42,3 +42,9 @@ Sources reviewed this session: [bounded contexts](https://martinfowler.com/bliki
 and [Python 3.14 dataclasses](https://docs.python.org/3.14/library/dataclasses.html).
 They support the boundary, real consumer tests and class identity preservation;
 no fresh classifier quality claim follows from this refactor.
+
+## Canonical structure contract — 2026-11-03
+
+The [classification benchmark metrics](flush-classification-metrics.md)
+owner grades confirmed cases through the shared protocol and evaluates the
+existing gates. Provider adapters, corpus IO and CLI remain with the runner.

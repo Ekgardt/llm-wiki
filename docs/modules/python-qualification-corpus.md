@@ -49,3 +49,9 @@ Primary sources checked: [bounded contexts](https://martinfowler.com/bliki/Bound
 [import contracts](https://import-linter.readthedocs.io/en/stable/contract_types/),
 [temporary-file verification](https://docs.pytest.org/en/stable/how-to/tmp_path.html).
 These support responsibility/import/IO checks, not historical benchmark scores.
+
+## Canonical structure contract — 2026-11-03
+
+The [deterministic corpus generator](python-qualification-corpus.md) owns
+fixture creation and gold bytes. Navigation execution, sampling and acceptance
+gates remain with the runner; original integration assertions stay intact.

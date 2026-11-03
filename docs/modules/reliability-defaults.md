@@ -79,3 +79,9 @@ Alternatives and current research: [breadcrumb-protocol](breadcrumb-protocol.md)
 That guide documents the independent wire boundary; it is not a dependency of
 this policy leaf. Tests pin values, facade aliases and repair agreement, and refuse
 runtime imports. There is no second mutable policy store or new operator setting.
+
+## Canonical structure contract — 2026-11-03
+
+Capture byte policies belong to [reliability-defaults](reliability-defaults.md),
+with unchanged legacy aliases. [breadcrumb-protocol](breadcrumb-protocol.md)
+owns complete linked-record syntax and its schemas; storage and execution remain separate.

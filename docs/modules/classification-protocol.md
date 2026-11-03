@@ -41,3 +41,10 @@ and [Python string operations](https://docs.python.org/3.14/library/stdtypes.htm
 The sources inform responsibility boundaries and faithful parsing tests, not a
 new classification-quality claim. Actual CCN/shape <=5, exact reconstruction
 within100000 o200k_base tokens, consumer tests and native CI remain required.
+
+## Canonical structure contract — 2026-11-03
+
+The [classification protocol](classification-protocol.md) owns the shared
+prompt and response grammar independently of capture runtime. flush_memory keeps
+old-path aliases; the benchmark imports the same leaf. Prompt bytes, parser
+behavior, queue admission and publication contracts stay unchanged.

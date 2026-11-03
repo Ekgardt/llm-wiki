@@ -38,3 +38,9 @@ Existing Python 3.14 syntax and dependencies are unchanged. Qualification is exa
 packet reconstruction <=100000 tokens, import isolation, original integration tests,
 actual function CCN/shape and Ruff. No live installation or full-task token saving
 is inferred from this module alone.
+
+## Canonical structure contract — 2026-11-03
+
+Capture byte policies belong to [reliability-defaults](reliability-defaults.md),
+with unchanged legacy aliases. [breadcrumb-protocol](breadcrumb-protocol.md)
+owns complete linked-record syntax and its schemas; storage and execution remain separate.

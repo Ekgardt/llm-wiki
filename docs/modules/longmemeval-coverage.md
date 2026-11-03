@@ -42,3 +42,11 @@ Primary sources checked: [bounded contexts](https://martinfowler.com/bliki/Bound
 [Python container interfaces](https://docs.python.org/3.14/library/collections.abc.html).
 These support explicit responsibilities and container semantics, not new claims
 about the historical retrieval measurements or full-cycle token efficiency.
+
+## Canonical structure contract — 2026-11-03
+
+The existing [LongMemEval coverage owner](longmemeval-coverage.md) computes
+session/turn coverage, prompt evidence and aggregate counts from supplied data.
+Benchmark execution, scoring, retrieval and report publication remain with callers.
+Existing matching rules and all original assertions are preserved; shared synthetic
+test fixtures have one owner. Historical measurements remain dated evidence.

@@ -34,3 +34,11 @@ Sources checked: [bounded contexts](https://martinfowler.com/bliki/BoundedContex
 [import contracts](https://import-linter.readthedocs.io/en/stable/contract_types/),
 [JSON semantics](https://docs.python.org/3.14/library/json.html).
 They support responsibilities and interchange checks, not new empirical claims.
+
+## Canonical structure contract — 2026-11-03
+
+[LoCoMo](locomo-data.md), [RefusalBench](refusalbench-data.md)
+and [LIT-RAGBench](litragbench-data.md) each own their existing local
+loader/converter and original tests. Full real preparation dependencies remain in
+their packets. Public paths, source bytes, dates and normalization rules stay
+unchanged; no corpus download or model execution is introduced.

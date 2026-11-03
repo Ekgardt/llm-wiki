@@ -36,3 +36,10 @@ Sources checked: [bounded contexts](https://martinfowler.com/bliki/BoundedContex
 [upstream evaluator](https://github.com/xiaowu0162/LongMemEval/blob/main/src/evaluation/evaluate_qa.py).
 These support explicit ownership and unchanged interchange semantics. This work
 neither runs the upstream judge nor claims that different judges yield equal scores.
+
+## Canonical structure contract — 2026-11-03
+
+[LongMemEval protocol](longmemeval-protocol.md) owns the existing local
+grading templates, label/accuracy calculations and hypothesis JSONL exporter.
+It performs no model calls. Judge execution and reports remain with consumers.
+Public paths, source bytes and all original assertions are preserved.

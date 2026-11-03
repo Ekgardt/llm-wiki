@@ -2255,104 +2255,54 @@ does not rewrite them or qualify current runtime behavior.
 
 ### Offline benchmark report readers
 
-[Code parity aggregation](modules/code-parity-aggregate.md) retains ranges and
-paired token totals from supplied reports. [Benchmark arm comparison](modules/benchmark-arm-comparison.md)
-retains its existing category mean/spread decision rule. Both remain at their
-current benchmark paths and execute no product or model workflow. Complete
-original assertions remain with their respective responsibilities; LongMemEval
-answer-cost assertions stay separate. Historical measurements are not requalified
-by these ownership changes.
+Full owner contracts: [Code parity aggregation](modules/code-parity-aggregate.md), [Benchmark arm comparison](modules/benchmark-arm-comparison.md).
 
 ### Benchmark evidence coverage
 
-The existing [LongMemEval coverage owner](modules/longmemeval-coverage.md) computes
-session/turn coverage, prompt evidence and aggregate counts from supplied data.
-Benchmark execution, scoring, retrieval and report publication remain with callers.
-Existing matching rules and all original assertions are preserved; shared synthetic
-test fixtures have one owner. Historical measurements remain dated evidence.
+Full owner contracts: [LongMemEval coverage owner](modules/longmemeval-coverage.md).
 
 ### Benchmark grading protocol and interchange
 
-[LongMemEval protocol](modules/longmemeval-protocol.md) owns the existing local
-grading templates, label/accuracy calculations and hypothesis JSONL exporter.
-It performs no model calls. Judge execution and reports remain with consumers.
-Public paths, source bytes and all original assertions are preserved.
+Full owner contracts: [LongMemEval protocol](modules/longmemeval-protocol.md).
 
 ### Benchmark question preparation
 
-[LongMemEval data](modules/longmemeval-data.md) owns the existing local loader,
-stratified selection, evidence labels, twins and tune/decide assignment. Runner,
-scorer and coverage integrations remain separate. Dataset paths, sample selection,
-source bytes and original assertions are preserved; no dataset is downloaded.
+Full owner contracts: [LongMemEval data](modules/longmemeval-data.md).
 
 ### Deterministic benchmark scoring
 
-[LongMemEval scoring](modules/longmemeval-score.md) owns existing text metrics,
-applicability/denominators, costs and refusal calibration. Model judging and report
-execution remain outside. Its reviewed September19 history catalog partitions the
-unchanged document by topic; only selected records enter the packet, and unowned
-records remain visible in project inventory. No metric or public path changes.
+Full owner contracts: [LongMemEval scoring](modules/longmemeval-score.md).
 
 ### Paired consolidation reports
 
-[Consolidation scoring](modules/consolidation-score.md) owns existing paired
-statistics, arm-row projection and cost summaries. Real worker execution, vault
-changes and stream publication stay with callers. Full source, original assertions
-and numerical behavior are preserved.
+Full owner contracts: [Consolidation scoring](modules/consolidation-score.md).
 
 ### Local benchmark question adapters
 
-[LoCoMo](modules/locomo-data.md), [RefusalBench](modules/refusalbench-data.md)
-and [LIT-RAGBench](modules/litragbench-data.md) each own their existing local
-loader/converter and original tests. Full real preparation dependencies remain in
-their packets. Public paths, source bytes, dates and normalization rules stay
-unchanged; no corpus download or model execution is introduced.
+Full owner contracts: [LoCoMo](modules/locomo-data.md), [RefusalBench](modules/refusalbench-data.md), [LIT-RAGBench](modules/litragbench-data.md).
 
 ### FactConsolidation preparation
 
-[FactConsolidation data](modules/factconsolidation-data.md) owns existing frame
-parsing, conflict grouping and the complete derived fixture. Resolver/model
-execution and Parquet acquisition stay outside. Source, fixture bytes, public
-paths and original assertions are preserved.
+Full owner contracts: [FactConsolidation data](modules/factconsolidation-data.md).
 
 ### Ledger rules and runtime coordination
 
-[Ledger core](modules/ledger-core.md) owns deterministic record/store/count rules
-and entity text. The existing ledger entry retains generation selection and
-transaction publication, with identical-object compatibility exports. The offline
-benchmark imports the core; SQL, page bytes and public runtime calls stay unchanged.
+Full owner contracts: [Ledger core](modules/ledger-core.md).
 
 ### Offline ledger benchmark owner
 
-The existing [offline ledger stand](modules/ledger-offline.md) owns deterministic
-counting evaluation and its file interface; its packet retains full product dependency
-source. It measures a deterministic extractor, not model record quality.
+Full owner contracts: [offline ledger stand](modules/ledger-offline.md).
 
 ### Python qualification corpus owner
 
-The [deterministic corpus generator](modules/python-qualification-corpus.md) owns
-fixture creation and gold bytes. Navigation execution, sampling and acceptance
-gates remain with the runner; original integration assertions stay intact.
+Full owner contracts: [deterministic corpus generator](modules/python-qualification-corpus.md).
 
-The [conflict fixture builder](modules/conflict-fixture-builder.md) owns the
-existing Parquet-to-fixture CLI, delegates pure interpretation to
-factconsolidation-data and uses the optional benchmark-data extra for real file
-qualification. Its source, output format and installation behavior are unchanged.
+Full owner contracts: [conflict fixture builder](modules/conflict-fixture-builder.md).
 
-The [classification corpus labels](modules/flush-corpus-labels.md) module owns
-pure reading interpretation, case construction and agreement measures. The
-existing builder retains IO, provider orchestration and CLI, re-exporting moved
-names as direct compatibility aliases without duplicate implementations.
+Full owner contracts: [classification corpus labels](modules/flush-corpus-labels.md).
 
-The [classification protocol](modules/classification-protocol.md) owns the shared
-prompt and response grammar independently of capture runtime. flush_memory keeps
-old-path aliases; the benchmark imports the same leaf. Prompt bytes, parser
-behavior, queue admission and publication contracts stay unchanged.
+Full owner contracts: [classification protocol](modules/classification-protocol.md).
 
-The [classification benchmark metrics](modules/flush-classification-metrics.md)
-owner grades confirmed cases through the shared protocol and evaluates the
-existing gates. Provider adapters, corpus IO and CLI remain with the runner.
+Full owner contracts: [classification benchmark metrics](modules/flush-classification-metrics.md).
 
-Capture byte policies belong to [reliability-defaults](modules/reliability-defaults.md),
-with unchanged legacy aliases. [breadcrumb-protocol](modules/breadcrumb-protocol.md)
-owns complete linked-record syntax and its schemas; storage and execution remain separate.
+Full owner contracts: [reliability-defaults](modules/reliability-defaults.md), [breadcrumb-protocol](modules/breadcrumb-protocol.md).

@@ -153,3 +153,25 @@ contains its full moved body. Full module/guide checks: 1884 passed, 3 platform 
 reconstruct exact paths/bytes. Largest packet falls from 98134 to 97276 tokens before
 this evidence paragraph. These are maintenance-packet measurements, not paired
 LLM task-cost results. No production or manifest change and no live installation.
+
+## Follow-up after 144 packets (2026-11-03, 22846c9c)
+
+The same approved transfer now covers 16 module-only paragraphs from the final
+benchmark and capture boundaries, copied whole to 20 existing guides. Every
+preceding byte, heading, anchor, global paragraph and manifest stays unchanged.
+Root navigation retains all owner links. Relative links are rebased reversibly;
+logs/module-contract-144-transfer-proof.json records original bodies, hashes and
+destinations, and verifies full guide inclusion in each actual owner packet.
+The preceding maximum was 99299 tokens; the new artifact measurement remains the
+acceptance gate. No source implementation or authority file is omitted from a
+packet. Diataxis reference and Google large-document guidance were rechecked at
+the primary URLs above, together with Fowler's bounded-context discussion:
+https://martinfowler.com/bliki/BoundedContext.html. Exact transfer avoids lossy
+summaries; existing registry guards still require every dependency owner's full
+guide. Runtime behavior, deployment and scientific benchmark claims are unchanged.
+
+The 696 guide/structure/ownership/dependency checks passed. All 144 serialized
+artifacts round-trip exactly; the largest packet decreased to 98933 tokens.
+Two redundant EOF blank lines in transferred guides were removed before final
+whitespace/reconstruction verification; every original body remains present.
+This is maintenance-context size evidence, not a complete LLM task-cost result.

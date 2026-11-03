@@ -44,3 +44,10 @@ and [write_table](https://arrow.apache.org/docs/python/generated/pyarrow.parquet
 The initial generic Arrow documentation URL returned404; the versioned API
 pages were checked instead. These support the boundary and real file checks,
 not new benchmark quality claims. Native results are reported only after CI.
+
+## Canonical structure contract — 2026-11-03
+
+The [conflict fixture builder](conflict-fixture-builder.md) owns the
+existing Parquet-to-fixture CLI, delegates pure interpretation to
+factconsolidation-data and uses the optional benchmark-data extra for real file
+qualification. Its source, output format and installation behavior are unchanged.

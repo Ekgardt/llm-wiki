@@ -36,3 +36,10 @@ Sources checked: [bounded contexts](https://martinfowler.com/bliki/BoundedContex
 [exact binomial test](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.binomtest.html).
 The statistical references describe the existing binomial interpretation; they do
 not validate the historical run, add dependencies or justify changing its formula.
+
+## Canonical structure contract — 2026-11-03
+
+[Consolidation scoring](consolidation-score.md) owns existing paired
+statistics, arm-row projection and cost summaries. Real worker execution, vault
+changes and stream publication stay with callers. Full source, original assertions
+and numerical behavior are preserved.

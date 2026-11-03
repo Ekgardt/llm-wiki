@@ -34,3 +34,13 @@ Primary sources checked: [bounded contexts](https://martinfowler.com/bliki/Bound
 [Python JSON behavior](https://docs.python.org/3.14/library/json.html).
 These support explicit responsibility and preserving parsing/serialization behavior,
 not any new claim about the historical benchmark's statistical validity.
+
+## Canonical structure contract — 2026-11-03
+
+[Code parity aggregation](code-parity-aggregate.md) retains ranges and
+paired token totals from supplied reports. [Benchmark arm comparison](benchmark-arm-comparison.md)
+retains its existing category mean/spread decision rule. Both remain at their
+current benchmark paths and execute no product or model workflow. Complete
+original assertions remain with their respective responsibilities; LongMemEval
+answer-cost assertions stay separate. Historical measurements are not requalified
+by these ownership changes.

@@ -40,3 +40,10 @@ Sources checked: [bounded contexts](https://martinfowler.com/bliki/BoundedContex
 [JSON semantics](https://docs.python.org/3.14/library/json.html).
 The sources justify explicit responsibilities and interchange behavior, not the
 historical dataset-version claims or fresh benchmark/token-efficiency results.
+
+## Canonical structure contract — 2026-11-03
+
+[LongMemEval data](longmemeval-data.md) owns the existing local loader,
+stratified selection, evidence labels, twins and tune/decide assignment. Runner,
+scorer and coverage integrations remain separate. Dataset paths, sample selection,
+source bytes and original assertions are preserved; no dataset is downloaded.

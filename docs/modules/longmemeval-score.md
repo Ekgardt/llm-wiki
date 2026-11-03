@@ -50,3 +50,11 @@ Sources checked: [bounded contexts](https://martinfowler.com/bliki/BoundedContex
 These support boundaries/interchange, not fresh scientific validation of historical
 metrics. Python3.14, dependencies, benchmark datasets and live installation stay as
 previously approved. No new benchmark efficacy or full-cycle token savings claim.
+
+## Canonical structure contract — 2026-11-03
+
+[LongMemEval scoring](longmemeval-score.md) owns existing text metrics,
+applicability/denominators, costs and refusal calibration. Model judging and report
+execution remain outside. Its reviewed September19 history catalog partitions the
+unchanged document by topic; only selected records enter the packet, and unowned
+records remain visible in project inventory. No metric or public path changes.
