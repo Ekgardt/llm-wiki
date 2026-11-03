@@ -1,16 +1,9 @@
 """Moving owner contracts out of the global reference cannot drop needed guides."""
-import json
 import re
-from pathlib import Path
 
 import pytest
 
-from tests.module_context import _contained, context_files
-from tests.module_ownership import ownership_report
-from tests.module_record_context import selected_entries
-
-ROOT = Path(__file__).resolve().parents[1]
-MANIFESTS = sorted((ROOT / 'docs/modules').glob('*-context.json'))
+from tests.module_context import _contained
 
 
 def _context_owners(root, files, ownership, record_names):
@@ -40,26 +33,6 @@ def _guide_closure(root, pending):
         seen.add(guide)
         pending.update(_shared_targets(root, guide) - seen)
     return seen
-
-
-@pytest.fixture(scope='module')
-def ownership():
-    report = ownership_report(ROOT)
-    return {**report['ownership'], **report['record_ownership']}
-
-
-@pytest.mark.parametrize('manifest', MANIFESTS, ids=lambda p: p.stem)
-def test_packet_retains_full_guides_for_its_source_owners(manifest, ownership):
-    data = json.loads(manifest.read_text(encoding='utf-8'))
-    files = context_files(ROOT, data)
-    needed = _required_guides(ROOT, files, ownership, record_names=selected_entries(ROOT, data))
-    assert needed <= files, f'{manifest.name}: missing owner guides {sorted(needed - files)}'
-
-
-def test_canonical_entry_point_links_each_owner_guide(ownership):
-    source = (ROOT / 'docs/STRUCTURE.md').read_text(encoding='utf-8')
-    for owner in set(ownership.values()):
-        assert f'(modules/{owner}.md)' in source, owner
 
 
 @pytest.mark.parametrize('name', [
@@ -117,9 +90,3 @@ def test_shared_contract_cannot_escape_the_repository(tmp_path):
     guide.write_text('Shared canonical contract: [outside](../outside.md).')
     with pytest.raises(ValueError):
         _guide_closure(tmp_path, {guide})
-
-
-@pytest.mark.parametrize('manifest', MANIFESTS, ids=lambda p: p.stem)
-def test_every_packet_retains_current_qualification_contract(manifest):
-    files = context_files(ROOT, json.loads(manifest.read_text(encoding='utf-8')))
-    assert ROOT / 'docs/modules/context-tooling.md' in files

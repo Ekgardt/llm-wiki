@@ -1986,6 +1986,9 @@ they do not enter a leaf packet without their consumer context. Existing full
 pytest bootstrap remains infrastructure, with no new exception lists. See
 [research](research/2026-11-03-test-import-context-closure.md).
 
+Whole-registry assertions live in `tests/test_module_registry_integration.py`,
+a separately measured integration obligation, outside the tooling unit packet.
+
 ### Queue worker values
 
 Full owner contracts: [queue-worker-state](modules/queue-worker-state.md).

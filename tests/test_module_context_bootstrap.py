@@ -5,13 +5,6 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-MANIFESTS = sorted((ROOT / 'docs/modules').glob('*-context.json'))
-
-
-@pytest.mark.parametrize('path', MANIFESTS, ids=lambda p: p.stem)
-def test_existing_packets_include_actual_pytest_bootstrap(path):
-    manifest = json.loads(path.read_text(encoding='utf-8'))
-    assert {'tests/conftest.py', 'tests/code_kernel_helpers.py'} <= set(manifest['files'])
 
 
 def _write(root, name, text):

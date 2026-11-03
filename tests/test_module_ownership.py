@@ -1,7 +1,6 @@
 """Context overlap never masquerades as unique whole-project ownership."""
 import json
 import subprocess
-from pathlib import Path
 
 import pytest
 
@@ -118,15 +117,6 @@ def test_cli_complete_gate_fails_while_partial_report_is_valid(tmp_path, capsys)
     assert json.loads(capsys.readouterr().out)['complete'] is False
     assert main(['--root', str(tmp_path), '--check-complete']) == 1
     assert json.loads(capsys.readouterr().out)['unassigned'] == ['unassigned.py']
-
-
-def test_real_registry_does_not_confuse_packets_with_project_completion():
-    root = Path(__file__).resolve().parents[1]
-    report = ownership_report(root)
-    assert report['owned_count'] > 0
-    assert report['owned_count'] + len(report['unassigned']) == report['tracked_count']
-    assert set(report['ownership']).isdisjoint(report['unassigned'])
-    assert report['complete'] is (not report['unassigned'])
 
 
 def test_git_inventory_refuses_a_subdirectory_view_of_the_project(tmp_path):

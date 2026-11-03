@@ -130,7 +130,7 @@ not claim arbitrary IO or subprocess string analysis. Existing subprocess
 fixture reads use declared fixtures; isolated imports remain separately guarded.
 
 Consumer source assertions live in `tests/test_{queue,runtime,windows,lsp,renderer,formats}_module_consumer_boundaries.py`.
-Run all six integration files together with `tests/test_module_context_reads.py`
+Run all six integration files together with `tests/test_module_registry_integration.py`
 and the packet checks; they preserve the former assertions and are still part of
 the full suite. Their context is not silently charged to a leaf owner or declared
 complete: whole-project integration ownership remains outstanding.

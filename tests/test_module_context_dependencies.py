@@ -1,6 +1,5 @@
 """Local source imports cannot disappear behind a small declared packet."""
 import json
-from pathlib import Path
 
 import pytest
 
@@ -188,14 +187,6 @@ def test_local_dependency_symlink_outside_root_is_refused(tmp_path):
         pytest.skip(f'symlink unavailable: {exc}')
     with pytest.raises(ValueError):
         measure_context(root, manifest)
-
-
-def test_actual_declared_packets_have_complete_local_source_closure():
-    from tests.module_context import context_files, required_source_context
-    root = Path(__file__).resolve().parents[1]
-    for manifest in (root / 'docs/modules').glob('*-context.json'):
-        files = context_files(root, json.loads(manifest.read_text(encoding='utf-8')))
-        assert required_source_context(root, files) <= files, manifest.name
 
 
 def test_declared_source_own_package_initializer_is_required(tmp_path):

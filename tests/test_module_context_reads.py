@@ -1,13 +1,10 @@
 """Source inspection must not use files omitted from the maintenance packet."""
 import ast
 import json
-from pathlib import Path
 
 import pytest
 
 from tests import module_context
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def _reader(tmp_path):
@@ -62,12 +59,6 @@ def test_raw_read_guard_detects_original_failure(source):
 
 def test_raw_read_guard_accepts_checked_reader():
     assert not _unchecked_reads('read_source(path)')
-
-
-@pytest.mark.parametrize('path', sorted((ROOT / 'tests/modules').glob('*/test_boundary.py')) + [ROOT / 'tests/module_boundaries.py'],
-                         ids=lambda p: p.parent.name)
-def test_module_boundary_sources_use_checked_reads(path):
-    assert not _unchecked_reads(path.read_text(encoding='utf-8')), path.relative_to(ROOT)
 
 
 def test_shared_boundary_helper_cannot_read_an_undeclared_source(tmp_path):
