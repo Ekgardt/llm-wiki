@@ -2273,3 +2273,7 @@ The pure schema/value rules have no runtime dependency; mcp_contract retains roo
 clock and Git observation plus public schema/constant reexports.
 The existing reader uses supplied SQLite connections; admission, snapshot control,
 pruning and stronger source-specific evidence retain their current owners.
+
+Full owner contract: [vault editorial policy](modules/vault-editorial.md).
+Existing editorial-name and private-log constants retain their source paths;
+publication, migration and actual log writers remain consumer responsibilities.
