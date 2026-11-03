@@ -1,7 +1,7 @@
 # One Python minor version for development, installation and CI
 
 Date: 2026-11-03. Approved by the owner: «Да, перейти на Python 3.14 по плану».
-Implementation and runtime qualification are in progress; no live installation.
+Implementation and native qualification are recorded below; no live installation.
 
 The owner asked why the project cannot use one recent Python version. It can:
 use the Python 3.14 maintenance series consistently in project metadata, a project
@@ -80,3 +80,18 @@ E2E job now uploads that existing file on failure. This adds evidence without
 changing the failed step's result or any timeout. Other native fixture failures
 (owner-only ACL setup, oversized parameter IDs and executable shim portability)
 are separately investigated; Python unification does not claim to fix them.
+
+## Native qualification checkpoint — 2026-11-03
+
+[Workflow 41705010766](https://github.com/Ekgardt/llm-wiki/actions/runs/41705010766)
+completed successfully at 4723050f: all 34 jobs, including the five full-suite
+shards on each Linux, Windows and macOS lane, installer/end-to-end jobs and the
+all-green aggregation. The isolated local Python 3.14.7 run at that same commit
+reported 17573 passed, 247 skipped and 8 warnings in 1767.14 seconds. Local skips
+are not counted as native-platform evidence. Intel macOS remains outside the
+established qualification stated above.
+
+Later ownership/test-packaging changes through 00d38f78 have been pushed and are
+being checked by workflow 41713078655. They do not change scripts/ or benchmark/
+production bytes. These results qualify the named commits and tested environments;
+they are neither a live-vault installation nor completion of project decomposition.
