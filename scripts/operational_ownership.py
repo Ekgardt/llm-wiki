@@ -20,7 +20,7 @@ from typing import Literal, cast
 
 import markdown_transaction
 import process_liveness
-from iso_time import utc_text
+from iso_time import utc_text as utc_text
 from llm_wiki.formats.canonical import canonical_json_bytes as canonical_json_bytes
 from llm_wiki.formats.canonical import sha256_bytes
 from llm_wiki.ownership_contracts import MarkerIdentity as MarkerIdentity
@@ -29,6 +29,12 @@ from llm_wiki.ownership_contracts import OwnerLease as OwnerLease
 from llm_wiki.ownership_contracts import OwnerRole as OwnerRole
 from llm_wiki.ownership_contracts import ProcessIdentity as ProcessIdentity
 from llm_wiki.ownership_contracts import ProcessState as ProcessState
+from llm_wiki.ownership_timing import _LONG_LEASE_ROLES as _LONG_LEASE_ROLES
+from llm_wiki.ownership_timing import _as_utc as _as_utc
+from llm_wiki.ownership_timing import _parse_timestamp as _parse_timestamp
+from llm_wiki.ownership_timing import _require_lease_timing as _require_lease_timing
+from llm_wiki.ownership_timing import _timestamp as _timestamp
+from llm_wiki.ownership_timing import _timing as _timing
 from llm_wiki.ownership_validation import _MARKER_ROLES as _MARKER_ROLES
 from llm_wiki.ownership_validation import _MAX_MARKER_BYTES as _MAX_MARKER_BYTES
 from llm_wiki.ownership_validation import _ROLES as _ROLES
@@ -74,9 +80,6 @@ from reliable_memory import (
     read_runtime_bytes,
 )
 
-_LONG_LEASE_ROLES = frozenset(
-    {"queue-worker", "compile", "nightly", "weekly", "queue-operator", "repair"}
-)
 _COORDINATOR_CONTRACT = OperationalDatabaseContract(application_id=0x4C575433)
 _COORDINATOR_CANDIDATE = "markdown-transactions-v3.candidate.sqlite3"
 
@@ -155,36 +158,6 @@ def ownership_actor_identity(role: str, scope: str) -> str:
     return f"{current_actor_identity()}#agent:{digest}"
 
 
-def _as_utc(value: datetime) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise ValueError("ownership clock must return a timezone-aware datetime")
-    return value.astimezone(UTC)
-
-
-def _timestamp(value: datetime) -> str:
-    """Always six fractional digits, so the text order SQL compares is time order.
-
-    `isoformat()` drops the fraction on a whole second, and `Z` sorts after `.`:
-    `…:00Z` compared greater than `…:00.500000Z`. The reader takes both shapes.
-    Research: docs/research/2026-09-17-a-lock-names-the-process-not-only-its-number.md
-    """
-    return utc_text(_as_utc(value))
-
-
-def _parse_timestamp(value: object) -> datetime:
-    if not isinstance(value, str):
-        raise OperationalOwnershipError("owner_record_invalid")
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise OperationalOwnershipError("owner_record_invalid") from exc
-    return _as_utc(parsed)
-
-
-def _timing(role: OwnerRole) -> tuple[int, int]:
-    return (120, 40) if role in _LONG_LEASE_ROLES else (30, 10)
-
-
 @dataclass(frozen=True)
 class _AcquireRequest:
     """One validated acquisition, so the steps below share one vocabulary."""
@@ -208,11 +181,6 @@ def _row_process(row: sqlite3.Row) -> ProcessIdentity:
 def _require_lease_epoch(epoch: object) -> None:
     if not _is_plain_int(epoch) or epoch < 1:
         raise ValueError("lease epoch must be positive")
-
-
-def _require_lease_timing(lease: OwnerLease, role: OwnerRole) -> None:
-    if (lease.ttl_seconds, lease.heartbeat_seconds) != _timing(role):
-        raise ValueError("lease timing does not match its role")
 
 
 def _next_owner_epoch(database: sqlite3.Connection, request: _AcquireRequest) -> int:

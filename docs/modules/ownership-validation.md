@@ -10,8 +10,8 @@ Dependencies: [ownership values](ownership-contracts.md),
 [runtime identity values](runtime-contracts.md), [restricted paths](restricted-paths.md),
 [canonical formats](formats.md) and [process value helpers](process-liveness.md).
 Only the existing integer predicate and identity-length constant are used from the
-process module; probes are not called. All process checks, lease timing, clocks,
-registry SQL, filesystem operations and heartbeats remain with the registry.
+process module; probes are not called. Lease time values belong to ownership-timing. Process checks, clocks, registry
+SQL, filesystem operations and heartbeats remain with the registry.
 
 operational_ownership re-exports identical helpers/constants, retaining serialized
 callable names. Aliases remain for registry and historical callers until a separately

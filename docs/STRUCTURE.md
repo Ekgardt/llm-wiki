@@ -2229,3 +2229,9 @@ supplied-connection SQLite integrity, foreign-key, operation-shape, projection,
 epoch and blackboard consistency checks and row counts. It opens no database and
 settles no transaction. `markdown_transaction.py` retains aliases, file admission,
 schema validation, migration, publication and recovery; SQL and errors are unchanged.
+
+Ownership lease-time values are isolated in `scripts/llm_wiki/ownership_timing.py`:
+UTC normalization, persisted timestamp reading/writing, existing role durations and
+supplied-lease timing validation. The registry retains current-time reads, epochs,
+SQL and heartbeat execution. Historical helpers remain identical aliases; see
+[ownership timing](modules/ownership-timing.md) and its complete context manifest.

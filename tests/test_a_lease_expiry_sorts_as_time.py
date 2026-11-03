@@ -45,11 +45,14 @@ def test_a_lease_taken_on_a_whole_second_is_lost_half_a_second_after_it_expires(
     assert refusal.value.code == "owner_fence_lost"
 
 
-def test_both_timestamp_shapes_are_read_and_one_is_written() -> None:
-    whole = datetime(2026, 9, 17, 12, tzinfo=UTC)
-    written = ownership._timestamp(whole)
-    read = (
-        ownership._parse_timestamp("2026-09-17T12:00:00Z"),
-        ownership._parse_timestamp(written),
-    )
-    assert (written, read) == ("2026-09-17T12:00:00.000000Z", (whole, whole))
+@pytest.mark.parametrize('name', [
+    '_as_utc', '_timestamp', '_parse_timestamp', '_timing', '_require_lease_timing',
+])
+def test_historical_helpers_share_identity_and_serialization(name):
+    import pickle
+
+    from llm_wiki import ownership_timing
+
+    helper = getattr(ownership_timing, name)
+    assert getattr(ownership, name) is helper
+    assert pickle.loads(pickle.dumps(helper)) is helper
