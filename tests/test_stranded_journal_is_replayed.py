@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from llm_wiki import sqlite_io
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
@@ -79,8 +80,8 @@ def test_a_healthy_database_is_never_opened_read_write(tmp_path: Path) -> None:
     path = _database(tmp_path)
     calls: list[Path] = []
 
-    original = reliable_memory._replayed_hot_journal
-    reliable_memory._replayed_hot_journal = lambda target, *, deadline=None: (
+    original = sqlite_io._replayed_hot_journal
+    sqlite_io._replayed_hot_journal = lambda target, *, deadline=None: (
         calls.append(target) or original(target, deadline=deadline)
     )
     try:
@@ -89,7 +90,7 @@ def test_a_healthy_database_is_never_opened_read_write(tmp_path: Path) -> None:
         )
         connection.close()
     finally:
-        reliable_memory._replayed_hot_journal = original
+        sqlite_io._replayed_hot_journal = original
 
     assert calls == []
 
@@ -116,7 +117,7 @@ def test_a_journal_that_will_not_clear_keeps_the_original_refusal(
     """A live writer holds a hot journal legitimately; refusing is right there."""
     path = _database(tmp_path)
     _strand_a_journal(path)
-    monkeypatch.setattr(reliable_memory, "_replayed_hot_journal", lambda target, *, deadline=None: False)
+    monkeypatch.setattr(sqlite_io, "_replayed_hot_journal", lambda target, *, deadline=None: False)
     error = sqlite3.OperationalError("attempt to write a readonly database")
 
     with pytest.raises(sqlite3.OperationalError, match="readonly database"):
@@ -133,7 +134,7 @@ def test_the_recovery_is_attempted_at_most_once(tmp_path: Path, monkeypatch) -> 
         attempts.append(1)
         return True
 
-    monkeypatch.setattr(reliable_memory, "_replayed_hot_journal", never_clears)
+    monkeypatch.setattr(sqlite_io, "_replayed_hot_journal", never_clears)
 
     with pytest.raises(sqlite3.OperationalError):
         reliable_memory.open_readonly_operational_db(

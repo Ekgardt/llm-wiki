@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import ast
 import io
 import json
 import os
-import sys
 from pathlib import Path
 
 import pytest
+
+from tests.module_boundaries import nonstdlib_imports as _nonstdlib_imports
 
 
 def test_parent_swap_to_outside_target_is_rejected_before_bytes_return(
@@ -109,7 +109,7 @@ def test_system_owned_symlink_ancestor_is_accepted(tmp_path, monkeypatch) -> Non
     except (NotImplementedError, OSError) as exc:
         pytest.skip(f"symlink creation unavailable: {exc}")
 
-    monkeypatch.setattr(bounded_io, "_system_symlink", lambda candidate: candidate == link)
+    monkeypatch.setattr("llm_wiki.path_ancestry._system_symlink", lambda candidate: candidate == link)
 
     assert bounded_io.read_stable_bytes(
         link / "page.md", 1024, label="linked target"
@@ -134,7 +134,7 @@ def test_windows_reparse_point_ancestor_is_refused(tmp_path, monkeypatch) -> Non
     except (NotImplementedError, OSError) as exc:
         pytest.skip(f"symlink creation unavailable: {exc}")
 
-    monkeypatch.setattr(bounded_io, "_system_symlink", lambda candidate: True)
+    monkeypatch.setattr("llm_wiki.path_ancestry._system_symlink", lambda candidate: True)
 
     with pytest.raises(PermissionError, match="parent must be a regular directory"):
         bounded_io.read_stable_bytes(link / "page.md", 1024, label="linked target")
@@ -232,22 +232,9 @@ def test_verified_newline_index_is_immutable_and_utf8_is_checked():
 _ROOT = Path(__file__).resolve().parents[1]
 
 
-def _import_roots(node):
-    if isinstance(node, ast.Import):
-        return {alias.name.split('.')[0] for alias in node.names}
-    if isinstance(node, ast.ImportFrom):
-        return {('.' * node.level + (node.module or '')).split('.')[0]}
-    return set()
-
-
-def _nonstdlib_imports(source):
-    roots = set().union(*(_import_roots(node) for node in ast.walk(ast.parse(source))))
-    return roots - sys.stdlib_module_names
-
-
 def test_bounded_io_has_no_executor_dependencies():
     source = (_ROOT / 'scripts/bounded_io.py').read_text(encoding='utf-8')
-    assert not _nonstdlib_imports(source)
+    assert _nonstdlib_imports(source) <= {"llm_wiki.path_ancestry"}
 
 
 @pytest.mark.parametrize('source', [
@@ -273,3 +260,10 @@ def test_complete_bounded_io_context_fits_user_ceiling():
     from tests.module_context import measure_context
     total, files = measure_context(_ROOT, _ROOT / 'docs/modules/bounded-io-context.json')
     print(f'bounded-io: {total} tokens; {files} files')
+
+
+def test_boundary_only_allows_the_exact_ancestry_owner():
+    allowed = {"llm_wiki.path_ancestry"}
+    assert _nonstdlib_imports('from llm_wiki.path_ancestry import _acceptable_ancestor') <= allowed
+    assert not _nonstdlib_imports('from llm_wiki import memory_queue') <= allowed
+    assert not _nonstdlib_imports('from llm_wiki.runtime_publication import publish_runtime_file') <= allowed

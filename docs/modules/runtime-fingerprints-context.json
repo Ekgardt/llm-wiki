@@ -40,7 +40,9 @@
     "scripts/windows_workspace.py",
     "docs/modules/windows-workspace.md",
     "scripts/llm_wiki/runtime_records.py",
-    "docs/modules/runtime-records.md"
+    "docs/modules/runtime-records.md",
+    "scripts/llm_wiki/path_ancestry.py",
+    "docs/modules/path-ancestry.md"
   ],
   "directories": [
     "tests/modules/runtime_fingerprints"

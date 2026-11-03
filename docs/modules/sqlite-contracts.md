@@ -4,7 +4,7 @@
 OperationalDatabaseContractError, MigrationStatement, their validators, coded migration-error construction and exact
 SQLite identifier quoting. It imports only standard library modules and opens no
 files or databases. There is one definition of every type, default and validator.
-reliable_memory owns SQLite connection lifetime and lock probes. Runtime filesystem
+sqlite_io owns SQLite connection lifetime and lock probes. Runtime filesystem
 policy, records, fingerprints, checked sync and publication have separate owners.
 sqlite_pragmas owns settings/header policy; sqlite_migrations owns resumable
 statement execution; sqlite_deadlines owns cooperative deadline control. These

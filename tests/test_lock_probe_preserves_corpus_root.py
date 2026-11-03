@@ -7,6 +7,7 @@ from pathlib import Path
 import corpus_snapshot
 import pytest
 import reliable_memory
+from llm_wiki import sqlite_io
 
 from tests.slow_machine import SHORT_TIMEOUT
 
@@ -99,7 +100,7 @@ def test_replaced_probe_directory_is_refused_and_foreign_files_remain(tmp_path, 
         foreign.append(probe)
         return True
 
-    monkeypatch.setattr(reliable_memory, "_run_lock_probe", replace_directory)
+    monkeypatch.setattr(sqlite_io, "_run_lock_probe", replace_directory)
     assert reliable_memory._sqlite_lock_probe(tmp_path) is None
     assert foreign[0].read_bytes() == b"foreign file"
 
@@ -123,7 +124,6 @@ def test_revalidation_does_not_chmod_an_already_private_root(tmp_path, monkeypat
 
 @pytest.mark.skipif(os.name == "nt", reason="system-owned ancestors are POSIX policy")
 def test_probe_reuses_the_approved_system_owned_ancestor_policy(tmp_path, monkeypatch):
-    import bounded_io
 
     real = tmp_path / "real"
     real.mkdir()
@@ -134,13 +134,12 @@ def test_probe_reuses_the_approved_system_owned_ancestor_policy(tmp_path, monkey
         link.symlink_to(real, target_is_directory=True)
     except OSError:
         pytest.skip("directory symlinks unavailable")
-    monkeypatch.setattr(bounded_io, "_system_symlink", lambda candidate: candidate == link)
+    monkeypatch.setattr("llm_wiki.path_ancestry._system_symlink", lambda candidate: candidate == link)
     assert reliable_memory._sqlite_lock_probe(link / "vault") is True
     assert list((root / "run").iterdir()) == []
 
 
 def test_probe_refuses_an_ancestor_the_shared_policy_does_not_trust(tmp_path, monkeypatch):
-    import bounded_io
 
     real = tmp_path / "real"
     real.mkdir()
@@ -151,7 +150,7 @@ def test_probe_refuses_an_ancestor_the_shared_policy_does_not_trust(tmp_path, mo
         link.symlink_to(real, target_is_directory=True)
     except OSError:
         pytest.skip("directory symlinks unavailable")
-    monkeypatch.setattr(bounded_io, "_system_symlink", lambda candidate: False)
+    monkeypatch.setattr("llm_wiki.path_ancestry._system_symlink", lambda candidate: False)
     assert reliable_memory._sqlite_lock_probe(link / "vault") is None
     assert list((root / "run").iterdir()) == []
 

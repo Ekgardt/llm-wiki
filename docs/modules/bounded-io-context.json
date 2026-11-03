@@ -25,7 +25,11 @@
     "tests/conftest.py",
     "tests/code_kernel_helpers.py",
     "tests/module_context.py",
-    "scripts/llm_wiki/context_bundle.py"
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/path_ancestry.py",
+    "docs/modules/path-ancestry.md",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/__init__.py"
   ],
   "serialization": "exact-duplicates/v1"
 }

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 import reliable_memory
-from llm_wiki import runtime_environment
+from llm_wiki import runtime_environment, sqlite_io
 from reliable_memory import (
     DEFAULTS,
     UnsafeStateRoot,
@@ -651,7 +651,7 @@ def test_unsupported_owner_bits_skip_chmod_explicitly(tmp_path, monkeypatch):
         "chmod",
         lambda self, mode: pytest.fail("chmod must not run when modes are unsupported"),
     )
-    monkeypatch.setattr(reliable_memory, "_sqlite_lock_probe", lambda path: True)
+    monkeypatch.setattr(sqlite_io, "_sqlite_lock_probe", lambda path: True)
     validate_state_root(tmp_path / "state")
 
 
@@ -666,7 +666,7 @@ def test_state_root_rejects_windows_reparse_point(tmp_path, monkeypatch):
 
 
 def test_state_root_rejects_abnormal_sqlite_lock_probe(tmp_path, monkeypatch):
-    monkeypatch.setattr("reliable_memory._sqlite_lock_probe", lambda path: False)
+    monkeypatch.setattr("llm_wiki.sqlite_io._sqlite_lock_probe", lambda path: False)
     with pytest.raises(UnsafeStateRoot, match="locking"):
         validate_state_root(tmp_path)
 
@@ -705,8 +705,8 @@ def test_concurrent_state_root_validation_uses_unique_probe_databases(tmp_path, 
 
     monkeypatch.setattr(reliable_memory.sqlite3, "connect", recording_connect)
     monkeypatch.setattr(runtime_environment, "_known_network_path", lambda path: False)
-    monkeypatch.setattr(reliable_memory, "_windows_reparse_point", lambda path: False)
-    monkeypatch.setattr(reliable_memory, "_set_owner_only", lambda path, mode: True)
+    monkeypatch.setattr(sqlite_io, "_windows_reparse_point", lambda path: False)
+    monkeypatch.setattr(sqlite_io, "_set_owner_only", lambda path, mode: True)
     with ThreadPoolExecutor(max_workers=24) as executor:
         results = list(executor.map(lambda _index: validate_state_root(root), range(64)))
 

@@ -2038,7 +2038,7 @@ The redactor's pure tests embedded in audit/security/structure suites move into
 imports the single original-pattern test helper from the redactor's test owner.
 
 Runtime filesystem decomposition keeps the public `reliable_memory` entry points
-and SQLite lifecycle there. `llm_wiki.runtime_contracts` owns values/errors;
+as compatibility aliases; SQLite lifecycle belongs to `llm_wiki.sqlite_io`. `llm_wiki.runtime_contracts` owns values/errors;
 `runtime_environment` owns locality and permissions; `runtime_records` owns
 metadata, reads and file identity; `runtime_sync` owns checked flushes;
 `runtime_publication` owns sibling-file staging/publication and replacement proof.
@@ -2049,3 +2049,19 @@ See `research/2026-11-03-runtime-io-boundaries.md`.
 their streaming/deadline policy. `runtime_records` supplies metadata/read/identity
 only; publication does not depend on fingerprinting. This removes an unnecessary
 source dependency while retaining all required context in each measured packet.
+
+`llm_wiki.sqlite_io` owns the remaining operational SQLite connection lifecycle,
+locking probes, database-directory preparation, stranded-journal recovery and
+streamed scans. `reliable_memory` retains identical public compatibility aliases
+and the existing capture-decision size constant; no database format, runtime
+location, transaction semantics or public command changes. See
+`research/2026-11-03-sqlite-io-boundary.md`.
+
+`llm_wiki.path_ancestry` owns the shared filesystem ancestry predicates used by
+bounded reads and SQLite lock probes: real-directory/reparse checks and the
+existing administrator-owned symlink exception. It imports only the standard
+library and performs no mutation. `bounded_io` keeps identity aliases for existing
+callers; neither reader nor SQLite imports the other's implementation for this
+policy. This predicate is not an atomic traversal sandbox. Caller no-follow and
+identity checks remain mandatory. See
+`research/2026-11-03-path-ancestry-boundary.md`.

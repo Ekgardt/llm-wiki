@@ -1,8 +1,9 @@
 # Bounded input module
 
 Qualified in its existing location on 2026-11-02. `scripts/bounded_io.py` remains
-its sole implementation; production code, consumer imports, runtime paths, byte
-limits and error contracts are unchanged. This qualification does not move ACL
+its reader implementation; the shared ancestry predicates now have their sole
+owner in llm_wiki.path_ancestry. Consumer imports, runtime paths, byte limits and
+error contracts are preserved. This qualification does not move ACL
 or publication code into this reader.
 
 ## Responsibility
@@ -43,7 +44,8 @@ from the user's 100,000-token maintenance-context ceiling.
 `bounded-io-context.json` lists complete source, both own test files and inline
 data, required instructions, canonical structure, modularity design and relevant
 reader history. Tests are not sliced or omitted to fit the cap. Static import
-checks reject product and relative imports, including imports inside functions;
+checks allow only the named path_ancestry dependency and reject other product
+and relative imports, including imports inside functions;
 negative examples demonstrate the guard. It does not detect arbitrary dynamic
 code execution or replace behavioral tests.
 
@@ -66,7 +68,8 @@ source reconstruction remain integration scenarios under their existing owners.
 Their dependencies are not presented as part of the isolated reader, and changes
 to those workflows require their own context and tests as well.
 
-Existing production source bytes are preserved. This establishes a bounded
+The original qualification preserved source bytes; the later ancestry extraction
+preserves function ASTs and identity aliases. This establishes a bounded
 maintenance unit and a guard against future executor coupling; it does not prove
 repository-wide modularity, live-install qualification or reduced LLM task cost.
 Evidence: local logs/bounded-io-baseline.txt, logs/bounded-io-graph.json,
@@ -78,3 +81,5 @@ complexity checks: 273 passed, 1 skipped. Source bytes match 1e3e5d89; Ruff pass
 The initial mutation fixture moved the shared stream cursor as well as changing
 bytes and therefore tested truncation; the fixture now restores its cursor before
 asserting hash rejection. No production behavior or assertion was weakened.
+
+Ancestry refinement: ../research/2026-11-03-path-ancestry-boundary.md.

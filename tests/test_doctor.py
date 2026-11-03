@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from llm_wiki import runtime_environment
+from llm_wiki import runtime_environment, sqlite_io
 
 from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
 
@@ -4615,7 +4615,7 @@ def test_filesystem_probe_uses_doctor_budget_after_slow_sqlite_open(tmp_path, mo
 
     (tmp_path / "run").mkdir()
     clock = [100.0]
-    real_open = reliable_memory._opened_probe
+    real_open = sqlite_io._opened_probe
 
     def slow_open(path, deadline, connections):
         result = real_open(path, deadline, connections)
@@ -4624,7 +4624,7 @@ def test_filesystem_probe_uses_doctor_budget_after_slow_sqlite_open(tmp_path, mo
 
     monkeypatch.setattr(doctor.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(reliable_memory, "_known_network_path", lambda path: False)
-    monkeypatch.setattr(reliable_memory, "_opened_probe", slow_open)
+    monkeypatch.setattr(sqlite_io, "_opened_probe", slow_open)
     kwargs = {} if budget is None else {"deadline": clock[0] + budget}
     result = doctor._filesystem_check(tmp_path, **kwargs)
 
@@ -4638,7 +4638,7 @@ def test_filesystem_probe_keeps_caller_deadline_during_slow_sqlite_open(tmp_path
 
     (tmp_path / "run").mkdir()
     clock = [100.0]
-    real_open = reliable_memory._opened_probe
+    real_open = sqlite_io._opened_probe
 
     def slow_open(path, deadline, connections):
         result = real_open(path, deadline, connections)
@@ -4647,7 +4647,7 @@ def test_filesystem_probe_keeps_caller_deadline_during_slow_sqlite_open(tmp_path
 
     monkeypatch.setattr(doctor.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(reliable_memory, "_known_network_path", lambda path: False)
-    monkeypatch.setattr(reliable_memory, "_opened_probe", slow_open)
+    monkeypatch.setattr(sqlite_io, "_opened_probe", slow_open)
     result = doctor._filesystem_check(tmp_path, deadline=clock[0] + SHORT_TIMEOUT)
 
     assert result["status"] == "degraded", result
