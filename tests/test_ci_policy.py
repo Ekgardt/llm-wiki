@@ -246,6 +246,20 @@ def test_native_installer_matrix_covers_every_platform_the_contract_names() -> N
         assert path in commands
 
 
+def test_optional_beam_parquet_is_required_on_all_supported_platforms():
+    jobs = _workflow()['jobs']
+    job = jobs['benchmark-data']
+    assert _runner_values(job) == RUNNERS
+    assert job['strategy']['fail-fast'] is False
+    assert 'benchmark-data' in jobs['all-green']['needs']
+    commands = _commands(job)
+    assert 'uv sync --locked --extra benchmark-data' in commands
+    assert 'tests/modules/beam_data/parquet_qualification.py' in commands
+    assert 'pytest tests/modules/beam_data/parquet_qualification.py -q' in commands
+    assert 'tests/test_beam_becomes_a_question_this_stand_can_read.py' in commands
+    assert '--junitxml=beam-parquet.xml' in commands
+
+
 def test_job_timeouts_names_and_timing_artifacts_match_approved_classes() -> None:
     jobs = _workflow()["jobs"]
     assert jobs["lint"]["timeout-minutes"] == 15

@@ -8,6 +8,12 @@
 
 ## Three-zone layout
 
+The [BEAM data owner](modules/beam-data.md) keeps the existing Parquet converter
+and its seven original tests. The optional `benchmark-data` extra supplies
+PyArrow 26.0.1; an explicitly selected Parquet suite and a three-OS CI job test
+real file decoding. Base installation and ordinary base-test discovery remain
+unchanged. No benchmark corpus or model is downloaded by these fixture checks.
+
 The [cross-service fixture owner](modules/cross-service-fixture.md) qualifies
 the existing two-repository Git fixture builder and its task/gold JSON in place.
 The parity runner remains a separate consumer; fixture checks do not run a

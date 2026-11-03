@@ -517,6 +517,56 @@ jobs:
       - run: uv run --locked --no-sync python scripts/install_language_server.py --state-root "${{ env.LLM_WIKI_LSP_TEST_STATE_ROOT }}" --profile typescript
       - run: uv run --locked --no-sync pytest tests/test_typescript_navigation.py -q
 
+  benchmark-data:
+    name: timing::focused::benchmark-data-${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux
+          - os: windows-2025
+            platform: windows
+          - os: macos-15
+            platform: macos
+    runs-on: ${{ matrix.os }}
+    # Existing focused-job ceiling; revise from retained native timing evidence.
+    timeout-minutes: 15
+    env:
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/../llm-wiki-benchmark-data
+      LLM_WIKI_ROOT: ${{ github.workspace }}
+      LLM_WIKI_STATE_ROOT: ${{ github.workspace }}/../llm-wiki-benchmark-data-state
+      LLM_WIKI_TEST_USE_EXTERNAL_STATE: "1"
+      MEMORY_LLM_PROVIDER: fake
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.12.3"
+          enable-cache: true
+      - run: uv python install 3.14
+      - run: uv python pin 3.14
+      - run: uv sync --locked --extra benchmark-data
+      - name: Normalize the external state root
+        shell: bash
+        run: >
+          uv run --locked --no-sync python -c
+          "import os, pathlib;
+          print('LLM_WIKI_STATE_ROOT=' + str(pathlib.Path(os.environ['LLM_WIKI_STATE_ROOT']).resolve()))"
+          >> "$GITHUB_ENV"
+      - run: uv run --locked --no-sync pytest tests/test_beam_becomes_a_question_this_stand_can_read.py tests/modules/beam_data -q
+      # Selecting this nonstandard filename together with its parent directory
+      # can deduplicate it out of collection. Keep the explicit suite separate.
+      - run: uv run --locked --no-sync pytest tests/modules/beam_data/parquet_qualification.py -q --junitxml=beam-parquet.xml
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.6.2
+        if: always()
+        with:
+          name: beam-parquet-${{ matrix.platform }}-attempt-${{ github.run_attempt }}
+          path: beam-parquet.xml
+          if-no-files-found: error
+
   pyright-navigation:
     name: timing::focused::pyright-${{ matrix.platform }}
     strategy:
@@ -603,6 +653,7 @@ jobs:
       - installer
       - install-end-to-end
       - lexical-and-typescript
+      - benchmark-data
       - pyright-navigation
     runs-on: ubuntu-24.04
     timeout-minutes: 5
