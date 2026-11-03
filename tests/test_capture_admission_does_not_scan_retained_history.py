@@ -8,6 +8,7 @@ import markdown_transaction as transactions
 import memory_queue
 import pytest
 import reliable_memory
+from llm_wiki import coordinator_validation
 
 from tests.test_doctor import _adopt, _build_root
 
@@ -37,7 +38,7 @@ def _restrict_history_reads(monkeypatch):
         database.set_authorizer(_history_authorizer)
         return database
 
-    for module in (repair, transactions, memory_queue):
+    for module in (repair, transactions, memory_queue, coordinator_validation):
         monkeypatch.setattr(module, "open_readonly_operational_db", opened)
 
 
@@ -112,3 +113,15 @@ def test_complete_coordinator_certification_still_refuses_corrupt_retained_opera
         transactions.validate_coordinator_v3_database(coordinator.database_path, state_root=state)
     with pytest.raises(repair.ReliabilityV3ValidationError, match="invariant"):
         repair.require_reliability_v3_adopted(root=root, state_root=state)
+
+
+@pytest.mark.parametrize('name', [
+    '_require_inside_state_root', 'require_coordinator_v3_openable',
+    'validate_coordinator_v3_database',
+])
+def test_historical_validation_aliases_preserve_serialization(name):
+    import pickle
+
+    helper = getattr(coordinator_validation, name)
+    assert getattr(transactions, name) is helper
+    assert pickle.loads(pickle.dumps(helper)) is helper

@@ -16,4 +16,4 @@ def test_owner_has_only_declared_lower_dependencies():
 
 
 def test_import_never_reaches_the_facade_or_executor():
-    assert_isolated_import(ROOT, 'llm_wiki.runtime_publication', dependencies=('bounded_io', 'llm_wiki', 'llm_wiki.formats', 'llm_wiki.formats.canonical', 'llm_wiki.runtime_contracts', 'llm_wiki.runtime_environment', 'llm_wiki.runtime_records', 'llm_wiki.runtime_sync', 'llm_wiki.sqlite_contracts', 'llm_wiki.sqlite_deadlines', 'llm_wiki.windows_acl', 'llm_wiki.windows_native', 'windows_workspace'))
+    assert_isolated_import(ROOT, 'llm_wiki.runtime_publication', dependencies=('llm_wiki.runtime_metadata', 'bounded_io', 'llm_wiki', 'llm_wiki.formats', 'llm_wiki.formats.canonical', 'llm_wiki.runtime_contracts', 'llm_wiki.runtime_environment', 'llm_wiki.runtime_records', 'llm_wiki.runtime_sync', 'llm_wiki.sqlite_contracts', 'llm_wiki.sqlite_deadlines', 'llm_wiki.windows_acl', 'llm_wiki.windows_native', 'windows_workspace'))

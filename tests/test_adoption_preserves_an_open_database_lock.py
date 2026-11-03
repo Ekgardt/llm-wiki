@@ -95,3 +95,21 @@ def test_mutable_identity_still_refuses_a_replaced_file(tmp_path):
     replacement.replace(path)
     with pytest.raises(ValueError, match="artifact identity changed"):
         _adoption_check(record, path, tmp_path)
+
+
+@pytest.mark.parametrize('name', [
+    '_contained_runtime_metadata', '_require_runtime_parent_containment',
+    '_require_bounded_regular_file', '_require_file_size_budget',
+    '_require_nonnegative_file_budget', '_validated_runtime_metadata',
+    'validate_operational_db_file',
+])
+def test_metadata_aliases_preserve_serialized_identity(name):
+    import pickle
+
+    import reliable_memory
+    from llm_wiki import runtime_metadata, runtime_records
+
+    helper = getattr(runtime_metadata, name)
+    assert getattr(runtime_records, name) is helper
+    assert getattr(reliable_memory, name) is helper
+    assert pickle.loads(pickle.dumps(helper)) is helper

@@ -20,3 +20,8 @@ is also covered by test_adoption_preserves_an_open_database_lock.py.
 
 Shared canonical contract: [runtime-contracts](runtime-contracts.md).
 The complete guide is included in this owner's maintenance packet.
+
+Metadata-only helpers now live in [runtime metadata](runtime-metadata.md). This
+owner retains identical aliases while byte reads and platform identity capture
+continue here. SQLite IO imports the metadata owner directly and does not load
+this module or Windows workspace for a metadata check.

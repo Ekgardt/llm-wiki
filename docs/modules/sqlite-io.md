@@ -35,3 +35,8 @@ location, transaction semantics or public command changes. See
 Cross-owner alias/pickle checks live in `tests/test_module_legacy_aliases.py`,
 an integration obligation outside this pure owner packet. Their assertions are
 preserved; the packet guard now follows imports from test/support files too.
+
+The metadata-only file validator is imported from
+[runtime metadata](runtime-metadata.md), independent of runtime_records byte reads
+and Windows workspace identity capture. Connection, recovery and locking algorithms
+are unchanged; full required provider source remains in the context packet.

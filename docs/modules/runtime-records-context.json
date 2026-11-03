@@ -37,7 +37,9 @@
     "tests/module_context_paths.py",
     "tests/module_records.py",
     "tests/module_record_context.py",
-    "docs/modules/context-records.md"
+    "docs/modules/context-records.md",
+    "scripts/llm_wiki/runtime_metadata.py",
+    "docs/modules/runtime-metadata.md"
   ],
   "directories": [
     "tests/modules/runtime_records"

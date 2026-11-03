@@ -17,7 +17,7 @@ from llm_wiki.runtime_environment import (
     _warn_if_cloud_synchronized,
     _windows_reparse_point,
 )
-from llm_wiki.runtime_records import validate_operational_db_file
+from llm_wiki.runtime_metadata import validate_operational_db_file
 from llm_wiki.sqlite_contracts import OperationalDatabaseContract
 from llm_wiki.sqlite_deadlines import (
     configure_operational_deadline,

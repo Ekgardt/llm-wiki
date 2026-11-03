@@ -2235,3 +2235,17 @@ UTC normalization, persisted timestamp reading/writing, existing role durations 
 supplied-lease timing validation. The registry retains current-time reads, epochs,
 SQL and heartbeat execution. Historical helpers remain identical aliases; see
 [ownership timing](modules/ownership-timing.md) and its complete context manifest.
+
+Coordinator database admission and full certification belong to
+[coordinator validation](modules/coordinator-validation.md), implemented in
+`scripts/llm_wiki/coordinator_validation.py`. They retain existing containment,
+owner-only SQLite IO, schema, deadlines and full invariant checks. Ordinary
+admission does not scan retained history; migration/publication remain with the
+coordinator. The underlying SQLite IO retains stranded-journal recovery.
+
+[Runtime metadata](modules/runtime-metadata.md), in
+`scripts/llm_wiki/runtime_metadata.py`, validates existing file metadata without
+opening/closing a second descriptor. SQLite IO imports this owner directly;
+runtime_records retains byte reads and platform file-identity capture, along with
+historical metadata aliases. This preserves live SQLite locks while removing an
+unrelated dependency on Windows workspace operations.

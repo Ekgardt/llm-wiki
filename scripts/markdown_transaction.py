@@ -76,6 +76,13 @@ from llm_wiki.coordinator_schema import _normalized_coordinator_sql as _normaliz
 from llm_wiki.coordinator_schema import _only_known_indexes as _only_known_indexes
 from llm_wiki.coordinator_schema import _schema_objects as _schema_objects
 from llm_wiki.coordinator_schema import _tables_of as _tables_of
+from llm_wiki.coordinator_validation import _require_inside_state_root as _require_inside_state_root
+from llm_wiki.coordinator_validation import (
+    require_coordinator_v3_openable as require_coordinator_v3_openable,
+)
+from llm_wiki.coordinator_validation import (
+    validate_coordinator_v3_database as validate_coordinator_v3_database,
+)
 from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from llm_wiki.formats.schema import validate_schema
 from llm_wiki.markdown_records import ChangeKind as ChangeKind
@@ -1181,56 +1188,6 @@ def _publish_coordinator_v3_candidate(candidate: Path) -> None:
         pass
     _harden_owner_only(candidate, 0o600)
     validate_coordinator_v3_database(candidate, state_root=candidate.parent.parent)
-
-
-def _require_inside_state_root(path: Path, state_root: Path) -> None:
-    try:
-        path.resolve(strict=True).relative_to(state_root.resolve(strict=True))
-    except (OSError, ValueError) as exc:
-        raise PermissionError(
-            "coordinator v3 database is outside the state root"
-        ) from exc
-
-
-def require_coordinator_v3_openable(path: Path, *, state_root: Path, deadline: float | None = None) -> None:
-    """Check the adopted file's place, connection contract and complete schema."""
-    _require_inside_state_root(Path(path), Path(state_root))
-    with contextlib.closing(open_readonly_operational_db(Path(path), Path(state_root), max_bytes=1 << 50, owner_only=True, busy_ms=DEFAULTS.markdown_busy_ms, contract=_COORDINATOR_V3_CONTRACT, deadline=deadline)) as database:
-        if not _coordinator_v3_schema_complete(database):
-            raise _coordinator_migration_error("coordinator_v3_schema_incomplete", "coordinator v3 schema is incomplete")
-
-
-def validate_coordinator_v3_database(
-    path: Path, *, state_root: Path
-) -> dict[str, object]:
-    """Validate one unpublished or active coordinator v3 database fail-closed."""
-    _require_inside_state_root(Path(path), Path(state_root))
-    with contextlib.closing(
-        open_readonly_operational_db(
-            Path(path),
-            Path(state_root),
-            max_bytes=1 << 50,
-            owner_only=True,
-            busy_ms=DEFAULTS.markdown_busy_ms,
-            contract=_COORDINATOR_V3_CONTRACT,
-        )
-    ) as database:
-        if not _coordinator_v3_schema_complete(database):
-            raise _coordinator_migration_error(
-                "coordinator_v3_schema_incomplete",
-                "coordinator v3 schema is incomplete",
-            )
-        _require_v3_invariants(database)
-        return {
-            "application_id": database.execute("PRAGMA application_id").fetchone()[0],
-            "foreign_key_check": [],
-            "integrity_check": "ok",
-            "journal_mode": database.execute("PRAGMA journal_mode").fetchone()[0],
-            "row_counts": _coordinator_v3_row_counts(database),
-            "synchronous": database.execute("PRAGMA synchronous").fetchone()[0],
-            "trusted_schema": database.execute("PRAGMA trusted_schema").fetchone()[0],
-            "user_version": database.execute("PRAGMA user_version").fetchone()[0],
-        }
 
 
 def _unsigned_filesystem_id(value: object) -> int:
