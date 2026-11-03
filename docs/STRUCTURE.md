@@ -2254,5 +2254,9 @@ The converter retains trusted-profile input; graph ingestion and dynamic-evidenc
 publication remain separate responsibilities.
 
 Full owner contract: [transaction lineage](modules/transaction-lineage.md).
+
+Full owner contract: [static knowledge-writer analysis](modules/knowledge-writer-scanner.md).
+The scanner reports source findings; transaction enforcement and the actual writer
+behavioral matrix remain separate responsibilities.
 The existing reader uses supplied SQLite connections; admission, snapshot control,
 pruning and stronger source-specific evidence retain their current owners.
