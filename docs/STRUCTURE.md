@@ -2262,5 +2262,9 @@ behavioral matrix remain separate responsibilities.
 Full owner contract: [Python import resolution](modules/import-resolver.md).
 Lexical/workspace resolution retains its parser dependency; generation publication
 and live language-server navigation remain separate.
+
+Full owner contract: [managed Go source builds](modules/go-source-build.md).
+The staging-directory compiler step retains its profile dependency; downloads,
+installation publication and server lifecycle remain with their existing owners.
 The existing reader uses supplied SQLite connections; admission, snapshot control,
 pruning and stronger source-specific evidence retain their current owners.
