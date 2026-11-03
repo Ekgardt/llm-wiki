@@ -1,0 +1,48 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/research/2026-11-02-formats-module-pilot.md",
+    "docs/research/2026-11-02-module-boundaries-validation.md",
+    "docs/research/2026-11-02-module-boundaries-and-token-budget.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "scripts/llm_wiki/lsp_wire.py",
+    "scripts/bounded_io.py",
+    "scripts/llm_wiki/path_ancestry.py",
+    "docs/modules/bounded-io.md",
+    "docs/modules/path-ancestry.md",
+    "docs/modules/lsp-wire.md",
+    "docs/modules/lsp-wire-context.json",
+    "docs/research/2026-11-03-lsp-wire-boundary.md"
+  ],
+  "directories": [
+    "tests/modules/lsp_wire"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "scripts/llm_wiki/lsp_wire.py",
+      "docs/modules/lsp-wire.md",
+      "docs/modules/lsp-wire-context.json"
+    ],
+    "directories": [
+      "tests/modules/lsp_wire"
+    ]
+  }
+}

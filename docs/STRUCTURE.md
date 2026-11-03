@@ -1941,3 +1941,12 @@ to the same pure queue-validation builder that validates the path. Its one-argum
 entry point remains for existing callers; the second JSON/hash implementation is
 removed. The producer seam regression protects this shared ownership; runtime
 paths and bytes are unchanged.
+
+### LSP wire codec
+
+`llm_wiki.lsp_wire` owns strict JSON and byte framing, consuming a caller-owned
+binary stream. `lsp_protocol` retains transport threads, cancellation and stream
+lifecycle. Existing imports remain aliases; wire limits and rejection behavior
+are preserved. See [boundary research](research/2026-11-03-lsp-wire-boundary.md).
+
+Full owner contract: [LSP wire](modules/lsp-wire.md).
