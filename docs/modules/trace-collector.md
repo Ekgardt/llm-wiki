@@ -56,3 +56,8 @@ trace-ingestion regressions remain intact. Import guards prohibit upward product
 dependencies. Full instructions, implementation, tests and historical documents
 must fit 100000 tokens and reconstruct exactly. No live installation or paired
 LLM task-cost reduction is implied.
+
+CI run 41691722619 found that the new profile fixture read its UTF-8 source
+without declaring the encoding. The existing repository encoding guard reproduced
+the failure locally. The fixture now uses the same explicit UTF-8 encoding for
+writing and reading; the guard and production converter remain unchanged.

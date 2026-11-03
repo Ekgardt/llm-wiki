@@ -33,7 +33,7 @@ def _profile(tmp_path):
     outside = tmp_path / 'outside.py'
     outside.write_text('def outside():\n    return 2\n', encoding='utf-8')
     external = {}
-    exec(compile(outside.read_text(), str(outside), 'exec'), external, external)
+    exec(compile(outside.read_text(encoding='utf-8'), str(outside), 'exec'), external, external)
     namespace = {'outside': external['outside']}
     profiler = cProfile.Profile()
     profiler.runctx(compile(SOURCE, str(source), 'exec'), namespace, namespace)
