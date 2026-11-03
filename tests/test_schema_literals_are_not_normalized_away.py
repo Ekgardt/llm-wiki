@@ -34,3 +34,20 @@ def test_queue_rejects_changed_ready_constraint():
         for _, sql in queue_schema._QUEUE_V3_INDEX_SQL + queue_schema._QUEUE_V3_TRIGGER_SQL:
             database.execute(sql)
         assert not queue_schema_operations._queue_v3_schema_complete(database)
+
+
+def test_coordinator_schema_facade_preserves_object_identity():
+    import markdown_transaction as coordinator
+    from llm_wiki import coordinator_schema as schema
+
+    names = (
+        '_COORDINATOR_V3_CONTRACT', '_COORDINATOR_V3_TABLE_SQL',
+        'COORDINATOR_V3_SCHEMA_SHA256', '_COORDINATOR_V3_INDEX_SQL',
+        '_COORDINATOR_V3_INDEXES', '_COORDINATOR_V3_TABLES',
+        '_normalized_coordinator_sql', '_coordinator_v3_object_matches',
+        '_known_coordinator_index', '_ensure_coordinator_v3_indexes',
+        '_schema_objects', '_coordinator_v3_tables_match', '_tables_of',
+        '_only_known_indexes', '_coordinator_v3_schema_complete', '_coordinator_v3_statements',
+    )
+    for name in names:
+        assert getattr(coordinator, name) is getattr(schema, name)

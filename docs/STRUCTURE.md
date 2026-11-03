@@ -2134,3 +2134,12 @@ fixture path, allowing the original identity guard assertions to run after a rea
 replacement. Production descriptor sharing and permission checks remain intact;
 a separate native test checks ordinary open-file replacement refusal. This helper
 remains an explicit integration dependency, not a qualified leaf module.
+
+### Coordinator schema owner
+
+`llm_wiki.coordinator_schema` owns the existing v3 table/header contract, historical
+schema hash, optional checkpoint indexes and supplied-connection schema inspection.
+`markdown_transaction` re-exports the same objects for existing callers. Connection
+opening, transaction settlement, migration execution and row invariants remain with
+the coordinator. Optional indexes do not change the adoption hash. See
+[the owner guide](modules/coordinator-schema.md).
