@@ -67,7 +67,7 @@ def _stat_says_reaped(payload: str) -> bool:
 def _proc_stat(pid: int) -> str | None:
     try:
         return (Path("/proc") / str(pid) / "stat").read_text(encoding="ascii")
-    except (FileNotFoundError, OSError):
+    except (FileNotFoundError, ProcessLookupError):
         return None
 
 
@@ -1115,11 +1115,8 @@ def test_linux_orphan_zombie_does_not_strand_owned_process_group(
     state: str | None = None
     settle_deadline = time.monotonic() + 2
     while time.monotonic() < settle_deadline:
-        try:
-            payload = (Path("/proc") / str(descendant_pid) / "stat").read_text(
-                encoding="ascii"
-            )
-        except FileNotFoundError:
+        payload = _proc_stat(descendant_pid)
+        if payload is None:
             state = None
             break
         closing = payload.rfind(")")
@@ -1536,3 +1533,42 @@ def test_windows_close_queries_job_when_direct_child_observation_fails(
 
     assert calls == ["poll", "query-job"]
     assert tree.windows_job == 31
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError(2, "gone"), ProcessLookupError(3, "reaped")])
+def test_proc_test_reader_accepts_only_proven_disappearance(monkeypatch, error) -> None:
+    def read(_path, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(Path, "read_text", read)
+    assert _proc_stat(4242) is None
+
+
+@pytest.mark.parametrize("error", [PermissionError(13, "denied"), OSError(5, "IO failure")])
+def test_proc_test_reader_does_not_hide_unreadable_evidence(monkeypatch, error) -> None:
+    def read(_path, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(Path, "read_text", read)
+    with pytest.raises(type(error)) as caught:
+        _proc_stat(4242)
+    assert caught.value is error
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux /proc contract")
+def test_proc_test_reader_handles_reaping_after_open(monkeypatch) -> None:
+    with subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+        stdin=subprocess.PIPE,
+    ) as process:
+        with open(f"/proc/{process.pid}/stat", "rb", buffering=0) as stream:
+            process.stdin.close()
+            process.wait(timeout=SHORT_TIMEOUT)
+
+            def read(_path, **_kwargs):
+                return stream.read().decode("ascii")
+
+            with pytest.raises(ProcessLookupError):
+                read(None)
+            monkeypatch.setattr(Path, "read_text", read)
+            assert _proc_stat(process.pid) is None

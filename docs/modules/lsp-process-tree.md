@@ -24,3 +24,14 @@ standard-library import and actual isolated-import guards apply. Windows skips
 on Linux remain unqualified until native CI executes them. Python 3.14 is now
 the compatibility floor. Run `pytest tests/modules/lsp_process_tree
  tests/test_lsp_process_tree.py -q` and the dependent LSP integration suites.
+
+The Linux test observer accepts ENOENT and ESRCH as process disappearance. A
+process may be reaped between opening and reading its procfs stat file: an open
+procfs descriptor does not keep the task alive. The observer uses one reader for
+both the orphan-settle loop and the final liveness assertion, and propagates
+permission and IO failures. The regression opens a real child's stat descriptor,
+reaps that child, then reads the retained descriptor; no timing delay is needed.
+Production evidence readers keep their conservative unknown result on unreadable
+metadata. This test correction changes no process ownership or cleanup policy.
+Evidence: Linux CI job 126085901978 at 09922834 and the
+[Linux procfs descriptor contract](https://www.kernel.org/doc/html/v6.8/filesystems/proc.html#process-specific-subdirectories).
