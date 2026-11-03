@@ -10,7 +10,7 @@ from llm_wiki import queue_evidence_records as records
 from llm_wiki.formats.schema import SchemaValidationError
 from llm_wiki.queue_contracts import QueueOperationError
 
-CASES = json.loads((Path(__file__).parent / 'fixtures/existing-records.json').read_text())
+CASES = json.loads((Path(__file__).parent / 'fixtures/existing-records.json').read_text(encoding='utf-8'))
 
 
 def arguments(case):

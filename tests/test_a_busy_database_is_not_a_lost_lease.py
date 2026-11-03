@@ -265,7 +265,7 @@ def test_boundary_accepts_standard_library():
 
 
 def test_complete_lease_renewal_context_fits_user_ceiling():
-    manifest = json.loads((_ROOT / 'docs/modules/lease-renewal-context.json').read_text())
+    manifest = json.loads((_ROOT / 'docs/modules/lease-renewal-context.json').read_text(encoding='utf-8'))
     paths = manifest['files']
     assert {'scripts/lease_renewal.py', 'tests/test_a_busy_database_is_not_a_lost_lease.py',
             'docs/modules/lease-renewal.md', 'docs/modules/lease-renewal-context.json'} <= set(paths)

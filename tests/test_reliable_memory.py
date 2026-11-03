@@ -37,7 +37,7 @@ def test_defaults_facade_and_legacy_serialization_remain_identical():
     from llm_wiki.reliability_defaults import ReliableMemoryDefaults
 
     baseline = Path(__file__).parent / 'modules/reliability_defaults/fixtures/legacy-pickle.json'
-    samples = json.loads(baseline.read_text())['samples']
+    samples = json.loads(baseline.read_text(encoding='utf-8'))['samples']
     objects = {'class': ReliableMemoryDefaults, 'defaults': owned_defaults,
                'custom': replace(owned_defaults, dead_task_retention_days=60, queue_busy_ms=2500)}
     assert reliable_memory.DEFAULTS is owned_defaults

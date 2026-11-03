@@ -106,7 +106,7 @@ def test_a_block_without_a_marker_is_matched_by_its_bytes(tmp_path):
 
 def test_a_journal_append_is_left_to_the_journal(tmp_path):
     directory = _transaction(tmp_path / "txn-1", BEFORE, BEFORE + BLOCK)
-    plan = json.loads((directory / "plan.json").read_text())
+    plan = json.loads((directory / "plan.json").read_text(encoding='utf-8'))
     plan["operations"][0]["path"] = "knowledge/projects/demo/journal.md"
     (directory / "plan.json").write_text(json.dumps(plan))
 

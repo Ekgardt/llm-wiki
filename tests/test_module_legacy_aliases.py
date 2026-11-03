@@ -36,7 +36,7 @@ def test_legacy_aliases_are_the_only_reader_implementation():
 
 def test_public_aliases_preserve_pickle_bytes():
     fixture = ROOT / 'tests/modules/sqlite_io/legacy-pickle.json'
-    for name, encoded in json.loads(fixture.read_text()).items():
+    for name, encoded in json.loads(fixture.read_text(encoding='utf-8')).items():
         value = getattr(sqlite_io, name)
         assert getattr(reliable_memory, name) is value
         assert pickle.dumps(value, protocol=4) == base64.b64decode(encoded)

@@ -74,7 +74,7 @@ def test_a_change_in_any_identity_field_still_refuses(field):
 def test_duplicate_after_many_members_still_refuses(tmp_path):
     _snapshot, directory = _parent(tmp_path)
     path = directory / "vectors.json"
-    metadata = json.loads(path.read_text())
+    metadata = json.loads(path.read_text(encoding='utf-8'))
     metadata["chunk_ids"][-1] = metadata["chunk_ids"][0]
     path.write_text(json.dumps(metadata))
     with pytest.raises(ValueError, match="repeated"):

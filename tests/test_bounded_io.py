@@ -251,7 +251,7 @@ def test_boundary_accepts_standard_library():
 
 
 def test_complete_bounded_io_context_fits_user_ceiling():
-    manifest = json.loads((_ROOT / 'docs/modules/bounded-io-context.json').read_text())
+    manifest = json.loads((_ROOT / 'docs/modules/bounded-io-context.json').read_text(encoding='utf-8'))
     paths = manifest['files']
     assert {'scripts/bounded_io.py', 'tests/test_bounded_io.py', 'tests/test_stable_source_ranges.py',
             'docs/modules/bounded-io.md', 'docs/modules/bounded-io-context.json'} <= set(paths)

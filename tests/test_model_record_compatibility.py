@@ -9,7 +9,7 @@ import pytest
 from llm_wiki import model_records
 
 FIXTURE = Path(__file__).parent / 'modules/model_records/fixtures/original-records.json'
-ORIGINAL = json.loads(FIXTURE.read_text())
+ORIGINAL = json.loads(FIXTURE.read_text(encoding='utf-8'))
 
 
 @pytest.mark.parametrize('name', tuple(ORIGINAL))

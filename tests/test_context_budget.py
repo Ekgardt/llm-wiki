@@ -162,7 +162,7 @@ def test_budget_boundary_accepts_standard_library_imports():
 
 
 def test_complete_context_budget_module_fits_user_ceiling():
-    manifest = json.loads((_ROOT / 'docs/modules/context-budget-context.json').read_text())
+    manifest = json.loads((_ROOT / 'docs/modules/context-budget-context.json').read_text(encoding='utf-8'))
     paths = manifest['files']
     assert {'scripts/context_budget.py', 'tests/test_context_budget.py',
             'tests/test_context_packing.py', 'docs/modules/context-budget.md',

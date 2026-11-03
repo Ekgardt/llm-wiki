@@ -78,7 +78,7 @@ def test_sqlite_transactions_filesystem_module_no_longer_defines_transaction_con
     assert 'begin_immediate' not in {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
 
 
-_reliability_defaults_NAMES = frozenset(json.loads(((ROOT / 'tests/modules/reliability_defaults/test_boundary.py').parent / 'fixtures/legacy-pickle.json').read_text())['names'])
+_reliability_defaults_NAMES = frozenset(json.loads(((ROOT / 'tests/modules/reliability_defaults/test_boundary.py').parent / 'fixtures/legacy-pickle.json').read_text(encoding='utf-8'))['names'])
 
 
 def _reliability_defaults_legacy_import(node):

@@ -25,7 +25,7 @@ def _digest(raw):
 
 def _record(action):
     fixture = Path(__file__).parent / "fixtures/compile-receipt-v3-bag.json"
-    raw = json.loads(fixture.read_text())["files"]["compile-receipt.md"]
+    raw = json.loads(fixture.read_text(encoding='utf-8'))["files"]["compile-receipt.md"]
     record = json.loads(raw.split("```json\n", 1)[1].split("\n```", 1)[0])
     record["action_key"] = _digest(action.encode())
     return _reidentify(record)
@@ -63,7 +63,7 @@ def history(tmp_path):
         (root / relative).mkdir(parents=True, exist_ok=True)
     old = _record("refused")
     daily = root / old["source"]["logical_path"]
-    fixture = json.loads((Path(__file__).parent / "fixtures/compile-receipt-v3-bag.json").read_text())
+    fixture = json.loads((Path(__file__).parent / "fixtures/compile-receipt-v3-bag.json").read_text(encoding='utf-8'))
     original = fixture["files"]["data/2026-01-01.md"].encode()
     assert _digest(original) == old["source"]["sha256"]
     daily.write_bytes(original + b"\n# Current whole day has new content\n")

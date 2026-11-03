@@ -10,7 +10,7 @@ import pytest
 from llm_wiki.reliability_defaults import DEFAULTS, ReliableMemoryDefaults
 
 ROOT = Path(__file__).resolve().parents[3]
-BASELINE = json.loads((Path(__file__).parent / 'fixtures/legacy-pickle.json').read_text())
+BASELINE = json.loads((Path(__file__).parent / 'fixtures/legacy-pickle.json').read_text(encoding='utf-8'))
 
 
 def test_values_and_field_order_match_the_original_contract():

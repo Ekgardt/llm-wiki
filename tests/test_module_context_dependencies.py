@@ -194,7 +194,7 @@ def test_actual_declared_packets_have_complete_local_source_closure():
     from tests.module_context import context_files, required_source_context
     root = Path(__file__).resolve().parents[1]
     for manifest in (root / 'docs/modules').glob('*-context.json'):
-        files = context_files(root, json.loads(manifest.read_text()))
+        files = context_files(root, json.loads(manifest.read_text(encoding='utf-8')))
         assert required_source_context(root, files) <= files, manifest.name
 
 
@@ -273,7 +273,7 @@ def test_bootstrap_infrastructure_does_not_hide_explicit_test_imports(tmp_path):
 
 def test_current_qualification_contract_cannot_be_omitted(tmp_path):
     manifest = _packet(tmp_path, {}, [])
-    packet = json.loads(manifest.read_text())
+    packet = json.loads(manifest.read_text(encoding='utf-8'))
     packet['files'].remove('docs/modules/context-tooling.md')
     manifest.write_text(json.dumps(packet))
     with pytest.raises(AssertionError, match='docs/modules/context-tooling.md'):
@@ -286,7 +286,7 @@ def test_current_qualification_contract_cannot_be_omitted(tmp_path):
 ])
 def test_complete_authority_files_cannot_be_replaced_by_record_views(tmp_path, name):
     manifest = _packet(tmp_path, {}, [])
-    packet = json.loads(manifest.read_text())
+    packet = json.loads(manifest.read_text(encoding='utf-8'))
     packet['files'] = [item for item in packet['files'] if item != name]
     manifest.write_text(json.dumps(packet))
     with pytest.raises(AssertionError, match=name):

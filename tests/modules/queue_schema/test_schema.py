@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from llm_wiki import queue_schema
 
-BASELINE = json.loads((Path(__file__).parent / 'fixtures/baseline.json').read_text())
+BASELINE = json.loads((Path(__file__).parent / 'fixtures/baseline.json').read_text(encoding='utf-8'))
 GROUPS = tuple(BASELINE['counts'])
 
 

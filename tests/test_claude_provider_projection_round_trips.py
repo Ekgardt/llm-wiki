@@ -57,7 +57,7 @@ def test_each_supported_provider_key_is_owned_but_secrets_and_foreign_values_are
     resource.write_owned(resource.desired)
     assert json.loads(resource.read_owned())['env'][key] == 'selected'
     resource.write_owned(None)
-    assert json.loads(path.read_text())['env'] == {'OPENAI_API_KEY': 'private-fixture', 'FOREIGN': 'keep'}
+    assert json.loads(path.read_text(encoding='utf-8'))['env'] == {'OPENAI_API_KEY': 'private-fixture', 'FOREIGN': 'keep'}
 
 
 def test_legacy_four_key_update_and_rollback_keep_complete_previous_bundle(tmp_path, monkeypatch):
@@ -85,7 +85,7 @@ def test_historical_reader_update_preserves_unrecorded_existing_provider_values(
         finish=hooks._claude_finish(hooks.claude_settings_template(Path(__file__).resolve().parents[1])))
     _install(tmp_path, legacy)
     path = tmp_path / 'settings.json'
-    config = json.loads(path.read_text())
+    config = json.loads(path.read_text(encoding='utf-8'))
     config['env'].update(MEMORY_CODEX_MODEL='previous-codex', MEMORY_CODEX_REASONING='low')
     path.write_text(json.dumps(config))
     _choice(monkeypatch, CHOICE)
@@ -98,7 +98,7 @@ def test_historical_reader_update_preserves_unrecorded_existing_provider_values(
     _install(tmp_path, adopted)
     assert adopted.read_owned() == adopted.desired
     control.rollback_resources(state_root=tmp_path / 'state', resources=[adopted])
-    restored = json.loads(path.read_text())['env']
+    restored = json.loads(path.read_text(encoding='utf-8'))['env']
     assert restored['MEMORY_CODEX_MODEL'] == 'previous-codex'
     assert restored['MEMORY_CODEX_REASONING'] == 'low'
 

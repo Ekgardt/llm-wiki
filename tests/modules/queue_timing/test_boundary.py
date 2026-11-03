@@ -7,6 +7,8 @@ from tests.module_context import context_reader
 ROOT = Path(__file__).resolve().parents[3]
 
 
+NAMES = {'_as_utc', '_no_retry_after', '_retry_after_number', '_bounded_retry_until', '_retry_after_deadline', '_retry_after_from_text', '_bounded_retry_number', '_retry_available_at', '_timestamp', '_retry_after_text', '_parse_timestamp', '_retry_after_seconds'}
+
 read_source = context_reader(ROOT, ROOT / 'docs/modules/queue-timing-context.json')
 
 

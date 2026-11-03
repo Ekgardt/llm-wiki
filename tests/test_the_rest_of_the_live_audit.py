@@ -153,7 +153,7 @@ def _failure_root(state_root: Path, index: int, age_days: float, now: datetime) 
         state_root, owner_nonce=nonce, generation_nonce="f" * 32, started_at=started, owner_pid=pid
     )
     owner_path = owner / "owner.json"
-    record = json.loads(owner_path.read_text())
+    record = json.loads(owner_path.read_text(encoding='utf-8'))
     record["owner_start_identity"] = identity
     owner_path.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")))
     _write_lsp_failure(owner, owner_nonce=nonce, generation_nonce="f" * 32, timestamp=now - timedelta(days=age_days), server_pid=pid)

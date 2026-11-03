@@ -231,7 +231,7 @@ def test_bounded_node_and_edge_lookup_supports_store_facades(tmp_path):
 def test_manifest_schema_is_closed_and_bounded():
     from reliable_memory import validate_schema
 
-    schema = json.loads((SCRIPTS / "schemas/evidence-graph-manifest-v1.json").read_text())
+    schema = json.loads((SCRIPTS / "schemas/evidence-graph-manifest-v1.json").read_text(encoding='utf-8'))
     valid = {
         "generation_id": "gen-1",
         "schema_version": "corpus-generation/v1",

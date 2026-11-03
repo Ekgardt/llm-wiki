@@ -12,7 +12,7 @@ from llm_wiki import compile_call_runtime as runtime
 from llm_wiki.model_records import BackendResponse
 from llm_wiki.queue_contracts import QueueLease
 
-ORIGINAL = json.loads((Path(__file__).parent / 'fixtures/checkpoints.json').read_text())
+ORIGINAL = json.loads((Path(__file__).parent / 'fixtures/checkpoints.json').read_text(encoding='utf-8'))
 
 
 def _event(name):

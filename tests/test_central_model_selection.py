@@ -133,7 +133,7 @@ def test_switching_adapter_removes_inapplicable_reasoning(editable):
     chosen = model_selection.selection('claude/sonnet')
     model_selection.save(chosen, expected=path.read_bytes(), root=path.parent)
     assert model_selection.current(path.parent) == chosen
-    assert 'reasoning' not in settings.tomllib.loads(path.read_text())['llm']
+    assert 'reasoning' not in settings.tomllib.loads(path.read_text(encoding='utf-8'))['llm']
 
 
 def test_hidden_codex_models_are_not_offered(monkeypatch):

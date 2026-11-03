@@ -21,7 +21,7 @@ def _exclusive_write_available(writer):
 
 
 def _database_record(state_root, name):
-    adoption = json.loads((state_root / "run/reliability-v3-adopted.json").read_text())
+    adoption = json.loads((state_root / "run/reliability-v3-adopted.json").read_text(encoding='utf-8'))
     return next(record for record in adoption["databases"] if record["database"] == name)
 
 

@@ -93,7 +93,7 @@ def test_only_the_tool_capture_hooks_run_in_the_background() -> None:
 
 
 def _shipped_hooks() -> list[tuple[str, dict]]:
-    hooks = json.loads((ROOT / "integrations" / "claude-code" / "settings.json").read_text())["hooks"]
+    hooks = json.loads((ROOT / "integrations" / "claude-code" / "settings.json").read_text(encoding='utf-8'))["hooks"]
     return [(event, hook) for event, blocks in hooks.items() for block in blocks for hook in block["hooks"]]
 
 

@@ -27,7 +27,7 @@ def _installed_command(root: Path) -> str:
 
 
 def _template(root: Path) -> Path:
-    template = json.loads((ROOT / "integrations/codex/hooks.json").read_text())
+    template = json.loads((ROOT / "integrations/codex/hooks.json").read_text(encoding='utf-8'))
     destination = root / "integrations/codex/hooks.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(template))

@@ -32,7 +32,7 @@ CASES = [('codex', 'UserPromptSubmit', 600), ('codex', 'PostToolUse', 600),
 def _handler(host, event):
     path = {'codex': 'integrations/codex/hooks.json',
             'claude-code': 'integrations/claude-code/settings.json'}[host]
-    groups = json.loads((ROOT / path).read_text())['hooks'][event]
+    groups = json.loads((ROOT / path).read_text(encoding='utf-8'))['hooks'][event]
     handlers = [handler for group in groups for handler in group['hooks']]
     return next(handler for handler in handlers if 'integration_adapter.py' in handler['command'])
 

@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_old_import_and_historical_pickle_are_identical():
-    record = json.loads((ROOT / 'tests/modules/sqlite_transactions/fixtures/function-pickle.json').read_text())
+    record = json.loads((ROOT / 'tests/modules/sqlite_transactions/fixtures/function-pickle.json').read_text(encoding='utf-8'))
     assert reliable_memory.begin_immediate is begin_immediate
     encoded = base64.b64decode(record['pickle'])
     assert pickle.loads(encoded) is begin_immediate

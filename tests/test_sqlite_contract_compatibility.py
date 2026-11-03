@@ -9,7 +9,7 @@ import pytest
 import reliable_memory
 from llm_wiki import sqlite_contracts
 
-BASELINE = json.loads((Path(__file__).parent / 'modules/sqlite_contracts/fixtures/baseline.json').read_text())
+BASELINE = json.loads((Path(__file__).parent / 'modules/sqlite_contracts/fixtures/baseline.json').read_text(encoding='utf-8'))
 
 
 @pytest.mark.parametrize('name', ['OperationalDatabaseContract', 'OperationalDatabaseContractError', 'MigrationStatement', 'quote_sqlite_identifier'])

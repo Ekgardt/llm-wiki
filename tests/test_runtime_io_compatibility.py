@@ -8,7 +8,7 @@ import pytest
 import reliable_memory
 from llm_wiki import runtime_contracts
 
-FIXTURE = json.loads((Path(__file__).parent / 'modules/runtime_contracts/fixtures/legacy-pickle.json').read_text())
+FIXTURE = json.loads((Path(__file__).parent / 'modules/runtime_contracts/fixtures/legacy-pickle.json').read_text(encoding='utf-8'))
 
 
 def _instance(name):

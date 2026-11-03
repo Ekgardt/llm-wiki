@@ -42,7 +42,7 @@ def _adopted_vault(tmp_path: Path) -> tuple[Path, Path]:
         confirm_all_agents_stopped=True,
     )
     assert report["overall_status"] == "ok"
-    tombstone = json.loads((state_root / "run/queue.sqlite3").read_text())
+    tombstone = json.loads((state_root / "run/queue.sqlite3").read_text(encoding='utf-8'))
     assert tombstone["schema_version"] == _ADOPTION_TOMBSTONE_SCHEMA
     return root, state_root
 

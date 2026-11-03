@@ -8,7 +8,7 @@ import pytest
 from llm_wiki import queue_task_records as records
 from llm_wiki.formats.schema import SchemaValidationError
 
-FIXTURE = json.loads((Path(__file__).parent / 'fixtures/existing-records.json').read_text())
+FIXTURE = json.loads((Path(__file__).parent / 'fixtures/existing-records.json').read_text(encoding='utf-8'))
 
 
 @pytest.mark.parametrize('case', FIXTURE['cases'], ids=lambda case: case['label'])

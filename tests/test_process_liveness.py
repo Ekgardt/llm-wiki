@@ -215,7 +215,7 @@ def test_boundary_accepts_standard_library():
 
 
 def test_complete_process_liveness_context_fits_user_ceiling():
-    manifest = json.loads((_ROOT / 'docs/modules/process-liveness-context.json').read_text())
+    manifest = json.loads((_ROOT / 'docs/modules/process-liveness-context.json').read_text(encoding='utf-8'))
     paths = manifest['files']
     assert {'scripts/process_liveness.py', 'tests/test_process_liveness.py',
             'docs/modules/process-liveness.md', 'docs/modules/process-liveness-context.json'} <= set(paths)

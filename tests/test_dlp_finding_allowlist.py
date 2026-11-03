@@ -127,7 +127,7 @@ def test_a_tampered_finding_list_is_refused(
         tmp_path,
         {"version": 1, "literals": [], "allow_fingerprints": []},
     )
-    document = json.loads(path.read_text())
+    document = json.loads(path.read_text(encoding='utf-8'))
     document["allow_finding_fingerprints"] = ["c" * 64]
     path.write_text(json.dumps(document))
     monkeypatch.setenv("LLM_WIKI_DLP_POLICY", str(path))

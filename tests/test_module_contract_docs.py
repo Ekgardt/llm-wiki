@@ -50,7 +50,7 @@ def ownership():
 
 @pytest.mark.parametrize('manifest', MANIFESTS, ids=lambda p: p.stem)
 def test_packet_retains_full_guides_for_its_source_owners(manifest, ownership):
-    data = json.loads(manifest.read_text())
+    data = json.loads(manifest.read_text(encoding='utf-8'))
     files = context_files(ROOT, data)
     needed = _required_guides(ROOT, files, ownership, record_names=selected_entries(ROOT, data))
     assert needed <= files, f'{manifest.name}: missing owner guides {sorted(needed - files)}'
@@ -121,5 +121,5 @@ def test_shared_contract_cannot_escape_the_repository(tmp_path):
 
 @pytest.mark.parametrize('manifest', MANIFESTS, ids=lambda p: p.stem)
 def test_every_packet_retains_current_qualification_contract(manifest):
-    files = context_files(ROOT, json.loads(manifest.read_text()))
+    files = context_files(ROOT, json.loads(manifest.read_text(encoding='utf-8')))
     assert ROOT / 'docs/modules/context-tooling.md' in files

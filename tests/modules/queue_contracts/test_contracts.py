@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'scripts'))
 from llm_wiki import queue_contracts as contracts  # noqa: E402
 
-NAMES = json.loads((Path(__file__).parent / 'fixtures/legacy-pickle.json').read_text())['names']
+NAMES = json.loads((Path(__file__).parent / 'fixtures/legacy-pickle.json').read_text(encoding='utf-8'))['names']
 
 
 @pytest.mark.parametrize('name', NAMES)

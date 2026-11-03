@@ -134,7 +134,7 @@ def test_build_never_allocates_the_full_matrix_in_numpy_heap(tmp_path, monkeypat
         model_revision="rev-1", dimensions=4,
     )
     assert (257, 4) not in requested
-    assert json.loads((destination / "vectors.json").read_text())["chunk_ids"]
+    assert json.loads((destination / "vectors.json").read_text(encoding='utf-8'))["chunk_ids"]
 
 
 def test_private_parent_copy_survives_original_truncation_and_is_removed(tmp_path):
@@ -156,7 +156,7 @@ def test_metadata_uses_exact_copied_bytes_even_if_original_changes(tmp_path, mon
 
     def change_original_then_parse(path, check_stop):
         original = directory / "vectors.json"
-        value = json.loads(original.read_text())
+        value = json.loads(original.read_text(encoding='utf-8'))
         value["model_id"] = "different/model"
         original.write_text(json.dumps(value))
         return parse(path, check_stop)
@@ -191,7 +191,7 @@ def test_metadata_trailing_or_truncated_json_is_refused(tmp_path, suffix):
 def test_duplicate_ids_and_parallel_array_mismatch_are_refused(tmp_path):
     _snapshot, directory = _parent(tmp_path)
     path = directory / "vectors.json"
-    value = json.loads(path.read_text())
+    value = json.loads(path.read_text(encoding='utf-8'))
     original_id = value["chunk_ids"][1]
     value["chunk_ids"][1] = value["chunk_ids"][0]
     path.write_text(json.dumps(value))
@@ -224,7 +224,7 @@ def test_expired_metadata_clock_and_cancelled_builder_keep_no_artifacts(tmp_path
 def test_missing_legacy_extractor_keeps_only_exact_id_reuse(tmp_path):
     snapshot, directory = _parent(tmp_path)
     path = directory / "vectors.json"
-    value = json.loads(path.read_text())
+    value = json.loads(path.read_text(encoding='utf-8'))
     del value["extractor_version"]
     path.write_text(json.dumps(value))
     _seal_like_a_published_generation(directory)
@@ -363,7 +363,7 @@ def test_cancelled_dense_copy_removes_owned_scratch_and_preserves_source(tmp_pat
 def test_reader_copied_metadata_must_match_the_manifest_digest(tmp_path):
     _snapshot, directory = _parent(tmp_path)
     expected = search._artifact_descriptor(directory / "vectors.json", "vectors.json")
-    value = json.loads((directory / "vectors.json").read_text())
+    value = json.loads((directory / "vectors.json").read_text(encoding='utf-8'))
     value["model_id"] = "altered/model"
     (directory / "vectors.json").write_text(json.dumps(value))
     with pytest.raises(ValueError, match="manifest"):

@@ -11,7 +11,7 @@ from llm_wiki import model_records as records
 
 NAMES = ('ProviderDescriptor', 'LLMResult', 'BackendResponse',
          '_CodexExecutable', 'CodexPlanningBasis')
-ORIGINAL = json.loads((Path(__file__).parent / 'fixtures/original-records.json').read_text())
+ORIGINAL = json.loads((Path(__file__).parent / 'fixtures/original-records.json').read_text(encoding='utf-8'))
 
 
 def _descriptor():

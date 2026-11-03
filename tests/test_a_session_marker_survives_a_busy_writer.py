@@ -71,7 +71,7 @@ def test_failed_foreground_marker_is_restored_before_no_content_terminal(tmp_pat
     daily = adapter.ROOT / "knowledge/daily/2026-10-02.md"
     assert "[23:59:58] session-end | marker-replay" in daily.read_text()
     intent_id = intent_records(state)[0]["intent_id"]
-    terminal = json.loads((state / f"run/queue-results/capture-{intent_id}.json").read_text())
+    terminal = json.loads((state / f"run/queue-results/capture-{intent_id}.json").read_text(encoding='utf-8'))
     assert terminal["disposition"]["kind"] == "no_durable_content"
     assert queue.claim_capture("marker-check") is None
 

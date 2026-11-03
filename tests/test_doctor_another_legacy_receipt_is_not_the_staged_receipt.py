@@ -19,7 +19,7 @@ from transaction_lineage import committed_created_paths
 @pytest.fixture
 def race(tmp_path):
     fixture_path = Path(__file__).parent/'fixtures/compile-receipt-v3-foreign-body.json'
-    fixture = json.loads(fixture_path.read_text())
+    fixture = json.loads(fixture_path.read_text(encoding='utf-8'))
     assert fixture['encoding'] == 'base64+zlib'
     assert fixture['files'].keys() == fixture['sha256'].keys()
     for relative, encoded in fixture['files'].items():

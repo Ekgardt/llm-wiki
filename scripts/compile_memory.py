@@ -7206,7 +7206,7 @@ def _daily_file_identity(path):
 def _require_saved_context_source(source):
     from llm_wiki.formats.schema import validate_schema_object
 
-    document = json.loads(COMPILE_RECEIPT_V4_SCHEMA.read_text())
+    document = json.loads(COMPILE_RECEIPT_V4_SCHEMA.read_text(encoding='utf-8'))
     schema = {"$defs": document["$defs"], **document["$defs"]["source_descriptor"]}
     validate_schema_object(source, schema)
     _require_v4_descriptor(source)

@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.modules.queue_timing.test_boundary import NAMES as _queue_timing_NAMES
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 
@@ -89,7 +91,6 @@ def test_queue_task_records_required_queue_calls_use_aliases_not_duplicate_imple
     assert '_read_exported_rows' in names
 
 
-_queue_timing_NAMES = {'_as_utc', '_no_retry_after', '_retry_after_number', '_bounded_retry_until', '_retry_after_deadline', '_retry_after_from_text', '_bounded_retry_number', '_retry_available_at', '_timestamp', '_retry_after_text', '_parse_timestamp', '_retry_after_seconds'}
 
 
 def test_queue_timing_executor_does_not_define_timing_functions():
@@ -123,7 +124,7 @@ def test_queue_worker_state_capture_reason_conversion_does_not_import_queue_exec
     assert 'llm_wiki.queue_worker_state' in imports
 
 
-_queue_contracts_NAMES = frozenset(json.loads(((ROOT / 'tests/modules/queue_contracts/test_boundary.py').parent / 'fixtures/legacy-pickle.json').read_text())['names'])
+_queue_contracts_NAMES = frozenset(json.loads(((ROOT / 'tests/modules/queue_contracts/test_boundary.py').parent / 'fixtures/legacy-pickle.json').read_text(encoding='utf-8'))['names'])
 
 
 def _queue_contracts_legacy_import(node):

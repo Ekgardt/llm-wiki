@@ -7,6 +7,8 @@ from tests.module_context import context_reader
 ROOT = Path(__file__).resolve().parents[3]
 
 
+NAMES = {'_acl_lines_naming', '_acl_is_owner_only', '_windows_acl_lines', '_acl_line_names_owner', '_acl_output_text', '_acl_owner_lines', '_acl_failure', '_windows_acl_identity', '_verify_no_other_acl', '_read_windows_acl', '_acl_entry_lines', '_verified_owner_acl_line', '_run_acl_command', '_acl_output_encodings', '_names_identity', '_is_owner_only_windows', '_apply_windows_acl', '_harden_windows_acl', '_console_code_page', '_verify_windows_owner_acl', '_acl_permission', '_require_verified_windows_owner_acl'}
+
 read_source = context_reader(ROOT, ROOT / 'docs/modules/windows-acl-context.json')
 
 
