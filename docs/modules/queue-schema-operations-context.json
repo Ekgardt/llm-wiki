@@ -44,7 +44,8 @@
     "files": [
       "docs/modules/queue-schema-operations-context.json",
       "docs/modules/queue-schema-operations.md",
-      "scripts/llm_wiki/queue_schema_operations.py"
+      "scripts/llm_wiki/queue_schema_operations.py",
+      "docs/research/2026-11-02-queue-schema-operations-boundary.md"
     ],
     "directories": [
       "tests/modules/queue_schema_operations"

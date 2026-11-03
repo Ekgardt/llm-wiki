@@ -36,7 +36,8 @@
     "files": [
       "docs/modules/queue-schema-context.json",
       "docs/modules/queue-schema.md",
-      "scripts/llm_wiki/queue_schema.py"
+      "scripts/llm_wiki/queue_schema.py",
+      "docs/research/2026-11-02-queue-schema-boundary.md"
     ],
     "directories": [
       "tests/modules/queue_schema"

@@ -36,7 +36,8 @@
     "files": [
       "docs/modules/queue-contracts-context.json",
       "docs/modules/queue-contracts.md",
-      "scripts/llm_wiki/queue_contracts.py"
+      "scripts/llm_wiki/queue_contracts.py",
+      "docs/research/2026-11-02-queue-contracts-boundary.md"
     ],
     "directories": [
       "tests/modules/queue_contracts"
