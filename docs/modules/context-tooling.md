@@ -153,3 +153,10 @@ and normal guarded pytest environment, then include
 Do not invent weights or discard slower platform measurements. The existing
 full-suite guard rejects omissions; passing isolated owner tests alone does not
 satisfy this repository-wide CI requirement.
+
+JSON fixtures and source-inspection text reads must name UTF-8 explicitly (or
+read bytes for the JSON decoder). Include
+`tests/test_json_reads_use_explicit_encoding.py` in checkout qualification,
+including after adding baseline fixtures. Its repository-wide guard caught two
+implicit reads that isolated packet checks did not detect; keep this guard and
+its assertions unchanged rather than relying on the host's default encoding.

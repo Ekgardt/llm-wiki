@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from llm_wiki import pyright_metadata_json as codec
 
-BASELINE = json.loads(Path(__file__).with_name('baseline.json').read_text())
+BASELINE = json.loads(Path(__file__).with_name('baseline.json').read_text(encoding='utf-8'))
 
 
 def _normalize(case, raw):

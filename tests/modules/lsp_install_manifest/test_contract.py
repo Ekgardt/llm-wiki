@@ -8,7 +8,7 @@ from lsp_server_profile import RuntimeOption, freeze_profile_value
 
 from tests.modules.lsp_server_profile.test_values import _profile
 
-BASELINE = json.loads(Path(__file__).with_name('baseline.json').read_text())
+BASELINE = json.loads(Path(__file__).with_name('baseline.json').read_text(encoding='utf-8'))
 CASES = BASELINE['cases']
 
 
