@@ -13,7 +13,7 @@ import pytest
          "8f990ba0b577b51cf009ea049368c16bbda1b21e1b93be07a824758bb253c39b",
          "38e7096ec5e58df2b4275fdb3e2b11d8fdbe329549e883f9464bce55201b4264",
      )),
-    ("test_breadcrumb_evidence",
+    ("modules.breadcrumb_documents.test_contract",
      "test_permanent_markdown_reconstructs_the_complete_source_without_runtime", (
          "0c1b31f9e677de6de49b5995dba7fabebc4f7e9a87181a5494102c1ee76b76be",
          "58747b68e92afd2029fa4ba88d06d5390c15c6da877c6f3d0a81c7bd6c61bbfe",

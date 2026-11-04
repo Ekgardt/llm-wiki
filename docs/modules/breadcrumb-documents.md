@@ -8,10 +8,10 @@ No function body, marker, frontmatter, schema version or digest algorithm change
 The reader callback must return contained, stable, bounded Markdown bytes; the
 codec validates every requested document and its regenerated path and encoding.
 
-breadcrumb_evidence keeps filesystem containment, deadlines, archive fallback,
-transaction retries, DLP and publication. It reexports the same codec objects for
-capture, compile, fact and archive callers. Its read/restore instrumentation points
-remain at their existing lookup sites. A rendered source or complete chain alone
+llm_wiki.breadcrumb_reader owns filesystem containment, deadlines and archive
+fallback; breadcrumb_evidence retains transaction retries, DLP and publication.
+Both retain the same codec objects for capture, compile, fact and archive callers.
+Readonly tests instrument the reader owner; publication retains its old aliases. A rendered source or complete chain alone
 does not grant publication, terminal disposition, queue completion or cleanup.
 Compatibility aliases remain until those consumers deliberately migrate.
 

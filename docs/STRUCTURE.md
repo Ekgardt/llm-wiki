@@ -2314,3 +2314,7 @@ Full owner contract: [breadcrumb-documents](modules/breadcrumb-documents.md).
 
 Full owner contract: [breadcrumb-decision](modules/breadcrumb-decision.md).
 The protocol owns BreadcrumbBundle values; storage retains publication results.
+
+### Permanent breadcrumb source reader
+
+Full owner contract: [breadcrumb-reader](modules/breadcrumb-reader.md).
