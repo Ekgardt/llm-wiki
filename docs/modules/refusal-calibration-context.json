@@ -1,0 +1,69 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md",
+    "scripts/evidence_sufficiency.py",
+    "docs/modules/evidence-sufficiency.md",
+    "docs/research/2026-09-22-quote-then-answer-and-a-refusal-calibrated-on-twins.md",
+    "scripts/temporal_anchor.py",
+    "docs/modules/temporal-anchor.md",
+    "docs/modules/lane-score.md",
+    "scripts/mcp_supervisor.py",
+    "docs/modules/mcp-supervisor.md",
+    "benchmark/longmemeval_data.py",
+    "docs/modules/longmemeval-data.md",
+    "benchmark/longmemeval_score.py",
+    "docs/modules/longmemeval-score.md",
+    "docs/modules/longmemeval-report-history-records.json",
+    "docs/modules/benchmark-arm-comparison.md",
+    "benchmark/calibrate_refusal_gates.py",
+    "docs/modules/refusal-calibration.md",
+    "docs/modules/refusal-calibration-context.json"
+  ],
+  "directories": [
+    "tests/modules/refusal_calibration"
+  ],
+  "records": [
+    {
+      "catalog": "docs/modules/longmemeval-report-history-records.json",
+      "ids": [
+        "introduction",
+        "refusal-calibration",
+        "sources"
+      ]
+    }
+  ],
+  "ownership": {
+    "files": [
+      "benchmark/calibrate_refusal_gates.py",
+      "docs/modules/refusal-calibration.md",
+      "docs/modules/refusal-calibration-context.json"
+    ],
+    "directories": [
+      "tests/modules/refusal_calibration"
+    ]
+  }
+}

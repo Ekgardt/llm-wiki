@@ -2365,3 +2365,9 @@ and scope/dispatch rules: [value references](modules/value-references.md).
 safeguards as one qualified owner. It imports the shared repository-scope Git
 policy; no runtime root or deletion policy changes. Full source, original tests,
 non-atomic refusal behavior and context gates: [worktree cleanup](modules/cleanup-worktrees.md).
+
+### Offline refusal calibration
+
+Full owner contract: [refusal calibration](modules/refusal-calibration.md).
+The existing offline CLI retains its path; no-threshold report semantics match
+the existing non-firing gate. It does not change installed thresholds.
