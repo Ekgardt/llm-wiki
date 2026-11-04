@@ -3419,3 +3419,18 @@ def test_configuration_facade_preserves_public_object_and_pickle_identity():
     assert thaw_pyright_profile_value is pyright_configuration.thaw_pyright_profile_value
     assert thaw_pyright_profile_value.__module__ == 'pyright_profile'
     assert pickle.loads(pickle.dumps(thaw_pyright_profile_value)) is thaw_pyright_profile_value
+
+
+@pytest.mark.parametrize('name', [
+    '_MetadataError', '_reject_duplicate_keys', '_reject_json_number', '_strict_json_object',
+    '_blank_unless_newline', '_CommentStripper', '_TrailingCommaPass', '_normalize_jsonc',
+])
+def test_metadata_json_facade_preserves_objects_and_serialization(name):
+    import pickle
+
+    from llm_wiki import pyright_metadata_json
+
+    value = getattr(pyright_metadata_json, name)
+    assert getattr(pyright_profile, name) is value
+    assert value.__module__ == 'pyright_profile'
+    assert pickle.loads(pickle.dumps(value)) is value

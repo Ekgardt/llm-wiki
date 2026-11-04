@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import atexit
-import json
+import json as json
 import math
 import ntpath
 import os
@@ -54,6 +54,30 @@ from llm_wiki.pyright_configuration import (
 from llm_wiki.pyright_configuration import (
     thaw_pyright_profile_value as thaw_pyright_profile_value,
 )
+from llm_wiki.pyright_metadata_json import (
+    _blank_unless_newline as _blank_unless_newline,
+)
+from llm_wiki.pyright_metadata_json import (
+    _CommentStripper as _CommentStripper,
+)
+from llm_wiki.pyright_metadata_json import (
+    _MetadataError as _MetadataError,
+)
+from llm_wiki.pyright_metadata_json import (
+    _normalize_jsonc as _normalize_jsonc,
+)
+from llm_wiki.pyright_metadata_json import (
+    _reject_duplicate_keys as _reject_duplicate_keys,
+)
+from llm_wiki.pyright_metadata_json import (
+    _reject_json_number as _reject_json_number,
+)
+from llm_wiki.pyright_metadata_json import (
+    _strict_json_object as _strict_json_object,
+)
+from llm_wiki.pyright_metadata_json import (
+    _TrailingCommaPass as _TrailingCommaPass,
+)
 from lsp_paths import PYRIGHT_VERSION, managed_pyright_root
 from reliable_memory import _known_network_path
 from repository_scope import RepositoryScope
@@ -69,18 +93,6 @@ ProcessTree = _lsp_process_tree.ProcessTree
 PYRIGHT_EXECUTED_TREE_RELATIVE = Path("package/dist")
 MAX_EXECUTED_TREE_FILES = 64
 MAX_EXECUTED_TREE_BYTES = 32 * 1024 * 1024
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # Files read while qualifying a Pyright install (sizes measured 2026-09-27): package.json 1.4 KB,
@@ -213,12 +225,6 @@ class PyrightCandidates:
     project_local: tuple[Path, ...]
     managed: tuple[Path, ...]
     system: tuple[Path, ...]
-
-
-class _MetadataError(ValueError):
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
-        self.code = code
 
 
 class _ManifestValidationError(ValueError):
@@ -363,201 +369,6 @@ def _node_environment() -> dict[str, str]:
         _require_environment_entry(name, value)
     _require_windows_system_root(values)
     return {name: values[name] for name in sorted(_NODE_ENV_ALLOWLIST) if name in values}
-
-
-def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate JSON key")
-        result[key] = value
-    return result
-
-
-def _reject_json_number(_value: str) -> object:
-    raise ValueError("non-integral JSON number")
-
-
-def _strict_json_object(
-    raw: bytes,
-    malformed_code: str,
-    *,
-    recursion_code: str | None = None,
-) -> dict[str, object]:
-    try:
-        text = raw.decode("utf-8", errors="strict")
-        value = json.loads(
-            text,
-            object_pairs_hook=_reject_duplicate_keys,
-            parse_float=_reject_json_number,
-            parse_constant=_reject_json_number,
-        )
-    except RecursionError as exc:
-        raise _MetadataError(recursion_code or malformed_code) from exc
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        raise _MetadataError(malformed_code) from exc
-    if not isinstance(value, dict):
-        raise _MetadataError(malformed_code)
-    return value
-
-
-def _blank_unless_newline(character: str) -> str:
-    if character in "\r\n":
-        return character
-    return " "
-
-
-class _CommentStripper:
-    """Replace JSONC comments with spaces (newlines kept) outside strings."""
-
-    def __init__(self, text: str, malformed_code: str) -> None:
-        self.text = text
-        self.code = malformed_code
-        self.out: list[str] = []
-        self.index = 0
-        self.in_string = False
-        self.escaped = False
-
-    def run(self) -> list[str]:
-        while self.index < len(self.text):
-            self._step()
-        return self.out
-
-    def _keep(self, character: str) -> None:
-        self.out.append(character)
-        self.index += 1
-
-    def _advance_string_state(self, character: str) -> None:
-        if self.escaped:
-            self.escaped = False
-            return
-        self._unescaped_string_character(character)
-
-    def _unescaped_string_character(self, character: str) -> None:
-        if character == "\\":
-            self.escaped = True
-            return
-        if character == '"':
-            self.in_string = False
-
-    def _step(self) -> None:
-        character = self.text[self.index]
-        if self.in_string:
-            self._advance_string_state(character)
-            self._keep(character)
-            return
-        self._step_outside_string(character)
-
-    def _step_outside_string(self, character: str) -> None:
-        if character == '"':
-            self.in_string = True
-            self._keep(character)
-            return
-        if character != "/" or self.index + 1 >= len(self.text):
-            self._keep(character)
-            return
-        self._comment_or_slash(self.text[self.index + 1], character)
-
-    def _comment_or_slash(self, marker: str, character: str) -> None:
-        if marker == "/":
-            self._skip_line_comment()
-            return
-        if marker != "*":
-            self._keep(character)
-            return
-        self._skip_block_comment()
-
-    def _skip_line_comment(self) -> None:
-        self.out.extend((" ", " "))
-        self.index += 2
-        while self.index < len(self.text) and self.text[self.index] not in "\r\n":
-            self.out.append(" ")
-            self.index += 1
-
-    def _at_block_end(self) -> bool:
-        return self.text[self.index] == "*" and self.text[self.index + 1 : self.index + 2] == "/"
-
-    def _skip_block_comment(self) -> None:
-        self.out.extend((" ", " "))
-        self.index += 2
-        while self.index < len(self.text):
-            if self._at_block_end():
-                self.out.extend((" ", " "))
-                self.index += 2
-                return
-            self.out.append(_blank_unless_newline(self.text[self.index]))
-            self.index += 1
-        raise _MetadataError(self.code)
-
-
-class _TrailingCommaPass:
-    """Blank a comma that directly precedes `}` or `]` outside strings."""
-
-    def __init__(self, normalized: list[str]) -> None:
-        self.normalized = normalized
-        self.pending_comma: int | None = None
-        self.previous: str | None = None
-        self.in_string = False
-        self.escaped = False
-
-    def run(self) -> list[str]:
-        for index, character in enumerate(self.normalized):
-            self._step(index, character)
-        return self.normalized
-
-    def _string_character(self, character: str) -> None:
-        if self.escaped:
-            self.escaped = False
-            return
-        self._unescaped_string_character(character)
-
-    def _unescaped_string_character(self, character: str) -> None:
-        if character == "\\":
-            self.escaped = True
-            return
-        if character == '"':
-            self.in_string = False
-            self.previous = character
-
-    def _comma(self, index: int) -> None:
-        if self.previous in {None, "{", "[", ",", ":"}:
-            self.pending_comma = None
-        else:
-            self.pending_comma = index
-        self.previous = ","
-
-    def _significant(self, character: str) -> None:
-        if character in "}]" and self.pending_comma is not None:
-            self.normalized[self.pending_comma] = " "
-        self.pending_comma = None
-        self.previous = character
-
-    def _step(self, index: int, character: str) -> None:
-        if self.in_string:
-            self._string_character(character)
-            return
-        if character == '"':
-            self.pending_comma = None
-            self.previous = character
-            self.in_string = True
-            return
-        self._step_outside_string(index, character)
-
-    def _step_outside_string(self, index: int, character: str) -> None:
-        if character == ",":
-            self._comma(index)
-            return
-        if character not in " \t\r\n":
-            self._significant(character)
-
-
-def _normalize_jsonc(raw: bytes, malformed_code: str) -> bytes:
-    try:
-        text = raw.decode("utf-8", errors="strict")
-    except UnicodeDecodeError as exc:
-        raise _MetadataError(malformed_code) from exc
-    normalized = _CommentStripper(text, malformed_code).run()
-    return "".join(_TrailingCommaPass(normalized).run()).encode("utf-8")
 
 
 def _read_json_object(

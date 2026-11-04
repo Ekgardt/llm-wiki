@@ -2349,3 +2349,9 @@ with the session caller. Runtime layout and launch strategies are unchanged.
 [Language-server install manifest values](modules/lsp-install-manifest.md) owns
 the pure builder/validator boundary. Discovery retains filesystem and
 executable qualification; old imports remain direct aliases after the transfer.
+
+### Pyright metadata JSON values
+
+[Pyright metadata JSON values](modules/pyright-metadata-json.md) owns the
+strict-object/JSONC value boundary. Configuration reads, inheritance, resource
+bounds and server discovery remain with existing callers; old names stay aliases.
