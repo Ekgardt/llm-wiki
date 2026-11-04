@@ -2321,47 +2321,28 @@ Full owner contract: [breadcrumb-reader](modules/breadcrumb-reader.md).
 
 ### Event envelope values
 
-The pure construction/identity/immutable-value contract belongs to
-[Event envelope values](modules/event-envelope-values.md); physical native-frame
-reading stays in `event_envelope`, with direct compatibility aliases for producers.
+Full owner contract: [event-envelope-values](modules/event-envelope-values.md).
 
 ### Breadcrumb protocol history
 
-[Breadcrumb history](modules/breadcrumb-history.md) owns the unchanged complete
-research document and its verified section catalog. Consumer packets include exact
-relevant records; executable dependencies and whole instructions remain complete.
+Full owner contract: [breadcrumb-history](modules/breadcrumb-history.md).
 
 ### Native event reader
 
-[Native event reader](modules/native-event-reader.md) owns the existing physical
-native-frame decoder in `event_envelope`; constructor aliases and source-authority
-integration keep their existing behavior and public paths.
+Full owner contract: [native-event-reader](modules/native-event-reader.md).
 
 ### Verified package launch tree
 
-[Verified package launch tree](modules/lsp-launch-package.md) owns the existing
-`lsp_launch_package` implementation in place. Its complete dependency sources and
-security history accompany pure tree tests; process/profile integration remains
-with the session caller. Runtime layout and launch strategies are unchanged.
+Full owner contract: [lsp-launch-package](modules/lsp-launch-package.md).
 
 ### Language-server install manifest values
 
-[Language-server install manifest values](modules/lsp-install-manifest.md) owns
-the pure builder/validator boundary. Discovery retains filesystem and
-executable qualification; old imports remain direct aliases after the transfer.
+Full owner contract: [lsp-install-manifest](modules/lsp-install-manifest.md).
 
 ### Pyright metadata JSON values
 
-[Pyright metadata JSON values](modules/pyright-metadata-json.md) owns the
-strict-object/JSONC value boundary. Configuration reads, inheritance, resource
-bounds and server discovery remain with existing callers; old names stay aliases.
+Full owner contract: [pyright-metadata-json](modules/pyright-metadata-json.md).
 
 ### Installed launch values boundary (2026-11-04)
 
-`llm_wiki.integration_launch_values` owns the existing nonsecret provider payload,
-exact emitted bootstrap, command parsing and platform quoting. Together with
-`codex_hook_identity`, it recognizes owned commands without importing installation
-configuration. `integration_hook_config` retains direct compatibility aliases and
-its environment-reading launch wrapper; installation/configuration IO stays there.
-The lazy native Windows dependency, legacy matching and emitted bytes are preserved.
-Complete source, baseline and boundary gates: [module guide](modules/integration-launch-values.md).
+Full owner contract: [integration-launch-values](modules/integration-launch-values.md).

@@ -44,3 +44,13 @@ Qualification requires native Windows CI, actual function complexity including t
 emitted program, unchanged original assertions, measured weights and complete
 packet reconstruction within 100000 tokens. Packet qualification is not deployment
 or whole-project completion, nor evidence of full-cycle LLM savings.
+
+## Canonical structural contract
+
+`llm_wiki.integration_launch_values` owns the existing nonsecret provider payload,
+exact emitted bootstrap, command parsing and platform quoting. Together with
+`codex_hook_identity`, it recognizes owned commands without importing installation
+configuration. `integration_hook_config` retains direct compatibility aliases and
+its environment-reading launch wrapper; installation/configuration IO stays there.
+The lazy native Windows dependency, legacy matching and emitted bytes are preserved.
+Complete source, baseline and boundary gates: [module guide](integration-launch-values.md).

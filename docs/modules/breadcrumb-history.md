@@ -45,3 +45,9 @@ semantic sufficiency. This applies the existing approved
 selection and full packet limits. Rewriting history, quota-sized fragments and
 omitting all history were rejected. Catalogs are maintenance metadata only;
 product imports, runtime formats, dependencies, installation and data stay intact.
+
+## Canonical structural contract
+
+[Breadcrumb history](breadcrumb-history.md) owns the unchanged complete
+research document and its verified section catalog. Consumer packets include exact
+relevant records; executable dependencies and whole instructions remain complete.

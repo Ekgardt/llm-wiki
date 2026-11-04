@@ -35,3 +35,9 @@ AST equality, facade identity, isolated dependency imports, related installer an
 session regression, actual complexity/shape, full packet <=100000 o200k_base tokens
 and byte-exact reconstruction. A successful value test is not native execution
 qualification or whole-project completion. Qualification status is recorded separately from this boundary contract.
+
+## Canonical structural contract
+
+[Language-server install manifest values](lsp-install-manifest.md) owns
+the pure builder/validator boundary. Discovery retains filesystem and
+executable qualification; old imports remain direct aliases after the transfer.

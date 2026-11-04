@@ -175,3 +175,21 @@ artifacts round-trip exactly; the largest packet decreased to 98933 tokens.
 Two redundant EOF blank lines in transferred guides were removed before final
 whitespace/reconstruction verification; every original body remains present.
 This is maintenance-context size evidence, not a complete LLM task-cost result.
+
+## Follow-up after 154 packets (2026-11-04, ca697eb8)
+
+The latest maximum is 99610 tokens. Move seven recent owner-only structural
+bodies to the full event-envelope-values, breadcrumb-history, native-event-reader,
+lsp-launch-package, lsp-install-manifest, pyright-metadata-json and
+integration-launch-values guides. Every preceding byte and root heading remains;
+root navigation links to each complete guide. Rebase relative links mechanically
+and verify reverse-link byte equivalence. No source, test, manifest, authority file
+or global runtime/security rule is removed. The existing full-guide dependency
+guard remains mandatory. One-time proof: logs/module-contract-154-transfer-proof.json.
+
+Diataxis reference, Google large-document organization and Microsoft scannable
+content were rechecked on 2026-11-04 at the original primary URLs above. The
+established rationale still applies: place whole owner contracts with their code,
+retain central navigation and global authority, and reject lossy summaries or a
+new unmeasured compression layer. This is maintenance-packet organization, not
+evidence of complete LLM task-cycle savings or completion of the whole project.

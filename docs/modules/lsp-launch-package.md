@@ -42,3 +42,10 @@ Qualification requires a full packet <=100000 o200k_base tokens, byte-exact bund
 reconstruction, isolated imports, actual complexity/shape measurement, original
 assertions and related integration checks. Linux/macOS native behavior is required;
 Windows skips of POSIX-only tests do not establish POSIX behavior.
+
+## Canonical structural contract
+
+[Verified package launch tree](lsp-launch-package.md) owns the existing
+`lsp_launch_package` implementation in place. Its complete dependency sources and
+security history accompany pure tree tests; process/profile integration remains
+with the session caller. Runtime layout and launch strategies are unchanged.

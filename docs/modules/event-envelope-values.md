@@ -43,3 +43,9 @@ and full required dependencies. No version change is inferred from online docs.
 Actual complexity/shape, Ruff, unchanged ASTs, original tests, isolated imports,
 measured CI weights and exact <=100000-token packet reconstruction are required.
 Packet size alone does not establish full-cycle LLM savings or project completion.
+
+## Canonical structural contract
+
+The pure construction/identity/immutable-value contract belongs to
+[Event envelope values](event-envelope-values.md); physical native-frame
+reading stays in `event_envelope`, with direct compatibility aliases for producers.

@@ -40,3 +40,9 @@ rewriting physical evidence or splitting helpers individually adds no needed
 capability. This is ownership qualification in place, not a format migration.
 Full source context, byte-exact reconstruction, <=100000 tokens, isolated imports,
 actual complexity, original integration and measured test weights remain gates.
+
+## Canonical structural contract
+
+[Native event reader](native-event-reader.md) owns the existing physical
+native-frame decoder in `event_envelope`; constructor aliases and source-authority
+integration keep their existing behavior and public paths.

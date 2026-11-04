@@ -51,3 +51,9 @@ regression. The caller-selected recursion-error mapping is checked by explicit
 fault injection at json.loads. The fifteen real-input before/after cases remain,
 as do all original configuration integration assertions. No numeric nesting limit
 is invented or changed to make that test pass.
+
+## Canonical structural contract
+
+[Pyright metadata JSON values](pyright-metadata-json.md) owns the
+strict-object/JSONC value boundary. Configuration reads, inheritance, resource
+bounds and server discovery remain with existing callers; old names stay aliases.
