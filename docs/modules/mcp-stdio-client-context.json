@@ -26,7 +26,8 @@
     "docs/modules/context-records.md",
     "benchmark/mcp_stdio_client.py",
     "docs/modules/mcp-stdio-client.md",
-    "docs/modules/mcp-stdio-client-context.json"
+    "docs/modules/mcp-stdio-client-context.json",
+    "docs/research/2026-11-04-mcp-stdio-utf8-output.md"
   ],
   "directories": [
     "tests/modules/mcp_stdio_client"
@@ -36,7 +37,8 @@
     "files": [
       "benchmark/mcp_stdio_client.py",
       "docs/modules/mcp-stdio-client.md",
-      "docs/modules/mcp-stdio-client-context.json"
+      "docs/modules/mcp-stdio-client-context.json",
+      "docs/research/2026-11-04-mcp-stdio-utf8-output.md"
     ],
     "directories": [
       "tests/modules/mcp_stdio_client"

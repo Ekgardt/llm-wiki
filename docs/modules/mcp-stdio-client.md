@@ -1,7 +1,8 @@
 # Benchmark MCP stdio client
 
 Owns the existing `benchmark/mcp_stdio_client.py` at its current path. Its full
-source stays byte-identical during ownership qualification. This is a synchronous,
+source stayed byte-identical during initial ownership qualification; the later
+UTF-8 repair is recorded below. This is a synchronous,
 one-shot benchmark adapter, not the product MCP server or a general MCP SDK.
 Initialize, initialized notification, tool call/list, response extraction and
 cleanup retain their existing command/API, protocol version and output shapes.
@@ -43,3 +44,15 @@ Qualification uses finite real local subprocesses, independent wire examples,
 error/result cases, isolated imports, source hash identity, actual complexity,
 measured test weights and exact complete maintenance context. Whole-project
 completion, corrected transport limits and full-cycle token savings are not claimed.
+
+
+## UTF-8 CLI repair (2026-11-04)
+
+Windows CI55eb6f95 exposed a non-UTF-8 finite-server fixture; a separate old-source
+probe reproduced the benchmark CLI's UnicodeEncodeError under cp1252 even with
+a valid UTF-8 server. The fixture explicitly reads/writes UTF-8, and the CLI entrypoint explicitly
+configures stdout as UTF-8. Library call_tool/list_tools behavior and binary wire
+encoding are unchanged. Real Unicode requests, replies and tool descriptions are
+checked with both normal and forced-cp1252 process defaults. Original assertions
+remain; this is an encoding repair, not deadline/tree-cleanup qualification.
+Full evidence and primary references: ../research/2026-11-04-mcp-stdio-utf8-output.md.

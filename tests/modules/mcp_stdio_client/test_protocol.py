@@ -12,6 +12,8 @@ from benchmark import mcp_stdio_client as client
 ROOT = Path(__file__).resolve().parents[3]
 SERVER = '''
 import json,sys
+sys.stdin.reconfigure(encoding='utf-8')
+sys.stdout.reconfigure(encoding='utf-8')
 mode=sys.argv[1]
 def read():
     return json.loads(sys.stdin.readline())
@@ -29,10 +31,12 @@ results={
  'answered':{'result':{'content':[{'type':'text','text':'Привет'},{'type':'image','data':'ignored'},{'type':'text','text':'second'}]}},
  'tool_error':{'result':{'isError':True,'content':[{'type':'text','text':'refused'}]}},
  'rpc_error':{'error':{'code':-32000,'message':'failed'}},
- 'list':{'result':{'tools':[{'name':'echo','description':'local tool'}]}},
+ 'list':{'result':{'tools':[{'name':'echo','description':'локальный инструмент'}]}},
 }
 expected={'list':'tools/list'}.get(mode,'tools/call')
 assert request['method']==expected
+if expected=='tools/call':
+    assert request['params']['arguments']=={'value':'Привет'}
 send({'jsonrpc':'2.0','id':2,**results[mode]})
 assert sys.stdin.read()==''
 '''
@@ -40,7 +44,7 @@ assert sys.stdin.read()==''
 
 def _cli(mode):
     command = [sys.executable, '-u', '-c', SERVER, mode]
-    options = ['--tool', 'echo', '--arguments', '{"value":"hello"}']
+    options = ['--tool', 'echo', '--arguments', '{"value":"Привет"}']
     if mode == 'list':
         options = ['--list']
     return subprocess.run(
@@ -63,7 +67,19 @@ def test_real_finite_server_handshake_call_and_output(mode, status, text):
 
 
 def test_real_finite_server_lists_tools():
-    assert _cli('list').stdout.strip() == 'echo: local tool'
+    assert _cli('list').stdout.strip() == 'echo: локальный инструмент'
+
+
+def test_unicode_call_survives_a_non_utf8_stdio_default(monkeypatch):
+    monkeypatch.setenv('PYTHONIOENCODING', 'cp1252')
+    outcome = json.loads(_cli('answered').stdout)
+    assert outcome['status'] == 'answered'
+    assert outcome['text'] == 'Привет\nsecond'
+
+
+def test_unicode_listing_survives_a_non_utf8_stdio_default(monkeypatch):
+    monkeypatch.setenv('PYTHONIOENCODING', 'cp1252')
+    assert _cli('list').stdout.strip() == 'echo: локальный инструмент'
 
 
 def test_request_and_notification_are_independent_json_lines():

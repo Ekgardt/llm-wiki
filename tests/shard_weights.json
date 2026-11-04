@@ -261,7 +261,7 @@
   "modules/mcp_response_values/test_values.py": 0.02,
   "modules/mcp_stdio_client/test_boundary.py": 0.06,
   "modules/mcp_stdio_client/test_context_budget.py": 0.35,
-  "modules/mcp_stdio_client/test_protocol.py": 0.32,
+  "modules/mcp_stdio_client/test_protocol.py": 0.53,
   "modules/mcp_supervisor/test_boundary.py": 0.14,
   "modules/mcp_supervisor/test_context_budget.py": 0.15,
   "modules/mcp_supervisor/test_protocol.py": 0.52,
