@@ -2354,3 +2354,10 @@ Python source bytes; repository/generation IO and verdict rendering stay outside
 The existing implementation is qualified in place, including its corrected
 spelling prefilter. Complete parsing dependencies, original research, pure tests
 and scope/dispatch rules: [value references](modules/value-references.md).
+
+### Worktree cleanup CLI
+
+`cleanup_worktrees` retains its existing dry-run/apply interface and native Git
+safeguards as one qualified owner. It imports the shared repository-scope Git
+policy; no runtime root or deletion policy changes. Full source, original tests,
+non-atomic refusal behavior and context gates: [worktree cleanup](modules/cleanup-worktrees.md).

@@ -1,0 +1,58 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/repository_scope.py",
+    "docs/modules/repository-scope.md",
+    "docs/modules/repository-scope-context.json",
+    "docs/research/2026-11-03-redaction-and-repository-scope-boundaries.md",
+    "tests/test_repository_scope.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md",
+    "scripts/cleanup_worktrees.py",
+    "tests/test_cleanup_worktrees.py",
+    "tests/test_worktree_merge_is_asked_of_the_integration_branch.py",
+    "docs/modules/cleanup-worktrees.md",
+    "docs/modules/cleanup-worktrees-context.json",
+    "docs/research/2026-09-14-a-repository-read-runs-no-config-command.md",
+    "docs/research/2026-09-27-every-child-a-script-waits-for-has-a-deadline.md"
+  ],
+  "directories": [
+    "tests/modules/cleanup_worktrees"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "scripts/cleanup_worktrees.py",
+      "tests/test_cleanup_worktrees.py",
+      "tests/test_worktree_merge_is_asked_of_the_integration_branch.py",
+      "docs/modules/cleanup-worktrees.md",
+      "docs/modules/cleanup-worktrees-context.json",
+      "docs/research/2026-09-14-a-repository-read-runs-no-config-command.md",
+      "docs/research/2026-09-27-every-child-a-script-waits-for-has-a-deadline.md"
+    ],
+    "directories": [
+      "tests/modules/cleanup_worktrees"
+    ]
+  }
+}
