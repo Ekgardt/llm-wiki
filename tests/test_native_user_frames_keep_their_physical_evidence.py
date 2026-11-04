@@ -12,15 +12,8 @@ from breadcrumb_decision import _journal_block
 from corpus_snapshot import collect_corpus
 from event_envelope import native_user_text
 
+from tests.modules.native_event_reader.test_contract import _frame as _frame
 from tests.test_breadcrumb_evidence import _source
-
-
-def _frame(prompt, **changes):
-    event = dict(schema_version="1.0", event_type="user_prompt", payload={"prompt": prompt},
-                 agent="codex", session="s", project=None, worktree=None,
-                 severity=None, parent_event_id=None, source_event_id=None)
-    event.update(changes)
-    return json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 def _captured_vault(root, frame, *, daily=True):

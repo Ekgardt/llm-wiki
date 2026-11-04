@@ -2330,3 +2330,9 @@ reading stays in `event_envelope`, with direct compatibility aliases for produce
 [Breadcrumb history](modules/breadcrumb-history.md) owns the unchanged complete
 research document and its verified section catalog. Consumer packets include exact
 relevant records; executable dependencies and whole instructions remain complete.
+
+### Native event reader
+
+[Native event reader](modules/native-event-reader.md) owns the existing physical
+native-frame decoder in `event_envelope`; constructor aliases and source-authority
+integration keep their existing behavior and public paths.
