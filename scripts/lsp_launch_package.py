@@ -131,7 +131,8 @@ def _write_sealed_file(path: Path, payload: bytes) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     descriptor = os.open(path, flags, SEALED_FILE_MODE)
     try:
-        os.write(descriptor, payload)
+        with os.fdopen(descriptor, "wb", closefd=False) as output:
+            output.write(payload)
     finally:
         os.close(descriptor)
 

@@ -223,3 +223,51 @@ def test_a_profile_without_a_package_launch_still_gets_a_descriptor(
         assert list((tmp_path / "owner").iterdir()) == []
     finally:
         guard.close()
+
+
+def _file_size_limit(limit: int) -> None:
+    import resource
+    import signal
+
+    _soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (limit, hard))
+    signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+
+
+def _limited_launch_outcome(owner: Path, snapshot: Path, descriptor: int) -> dict:
+    try:
+        tree = lsp_launch_package.create_launch_tree(
+            owner, _launch(), snapshot_path=snapshot, snapshot_descriptor=descriptor,
+            expected_sha256=_digest(), checkpoint=_nothing,
+        )
+    except OSError as error:
+        return {'errno': error.errno, 'remaining': [p.name for p in owner.iterdir()]}
+    return {'errno': None, 'manifest_bytes': (tree.root / 'package.json').stat().st_size}
+
+
+def _limited_manifest_probe() -> None:
+    root = Path(sys.argv[1])
+    owner = root / 'owner'
+    owner.mkdir()
+    snapshot, descriptor = _snapshot(root)
+    try:
+        _file_size_limit(int(sys.argv[2]))
+        outcome = _limited_launch_outcome(owner, snapshot, descriptor)
+        print(json.dumps(outcome))
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.parametrize('limit', [0, 3, 51])
+def test_incomplete_manifest_refuses_launch_and_removes_its_tree(tmp_path, limit):
+    import errno
+    import subprocess
+
+    root = Path(__file__).resolve().parents[1]
+    command = 'from tests.test_lsp_launch_package import _limited_manifest_probe; _limited_manifest_probe()'
+    result = subprocess.run(
+        [sys.executable, '-c', command, str(tmp_path), str(limit)],
+        cwd=root, env={**os.environ, 'PYTHONPATH': os.pathsep.join((str(root / 'scripts'), str(root)))},
+        capture_output=True, text=True, check=True, timeout=LONG_TIMEOUT,
+    )
+    assert json.loads(result.stdout) == {'errno': errno.EFBIG, 'remaining': []}

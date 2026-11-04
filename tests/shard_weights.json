@@ -1250,7 +1250,7 @@
   "test_locomo_becomes_a_question_this_stand_can_read.py": 0.01,
   "test_longmemeval_benchmark.py": 0.02,
   "test_longmemeval_coverage.py": 0.01,
-  "test_lsp_launch_package.py": 0.02,
+  "test_lsp_launch_package.py": 0.54,
   "test_lsp_module_consumer_boundaries.py": 0.1,
   "test_lsp_paths.py": 0.02,
   "test_lsp_positions.py": 0.09,
