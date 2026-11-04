@@ -43,7 +43,9 @@
     "tests/module_contract_patches.py",
     "tests/test_module_contract_patches.py",
     "tests/module_contract_environment.py",
-    "tests/test_module_contract_environment.py"
+    "tests/test_module_contract_environment.py",
+    "tests/module_contract_layout.py",
+    "tests/test_module_contract_layout.py"
   ],
   "directories": [
     "tests/modules/contract_identity"
@@ -66,7 +68,9 @@
       "tests/module_contract_patches.py",
       "tests/test_module_contract_patches.py",
       "tests/module_contract_environment.py",
-      "tests/test_module_contract_environment.py"
+      "tests/test_module_contract_environment.py",
+      "tests/module_contract_layout.py",
+      "tests/test_module_contract_layout.py"
     ],
     "directories": [
       "tests/modules/contract_identity"

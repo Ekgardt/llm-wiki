@@ -207,6 +207,7 @@ def compact_bundle(root: Path, files: set[Path]) -> str:
 
 
 def _manifest_bundle(root: Path, files: set[Path], manifest: dict) -> str:
+    assert 'qualified_dependencies' not in manifest, 'Qualified dependencies require fresh qualification'
     serializers = {'raw/v1': _raw_entries, 'exact-duplicates/v1': _packed_entries}
     kind = manifest.get('serialization', 'raw/v1')
     assert kind in serializers, f'Unknown maintenance serialization: {kind}'
@@ -218,9 +219,7 @@ def relative_context_names(root, paths):
     return sorted(path.relative_to(root).as_posix() for path in paths)
 
 
-def measure_context(root: Path, manifest_path: Path) -> tuple[int, int]:
-    root = root.resolve()
-    manifest = json.loads(manifest_path.read_bytes())
+def validate_context(root: Path, manifest_path: Path, manifest: dict) -> set[Path]:
     assert manifest['max_tokens'] == 100000, 'Owner limit cannot be changed'
     assert manifest['encoding'] == 'o200k_base', 'Measurement encoding cannot drift'
     files = context_files(root, manifest)
@@ -230,6 +229,13 @@ def measure_context(root: Path, manifest_path: Path) -> tuple[int, int]:
                                                        root / 'scripts/llm_wiki/context_bundle.py',
                                                        root / 'docs/modules/context-tooling.md'}
     assert needed <= files, f'Missing required context: {relative_context_names(root, needed - files)}'
+    return files
+
+
+def measure_context(root: Path, manifest_path: Path) -> tuple[int, int]:
+    root = root.resolve()
+    manifest = json.loads(manifest_path.read_bytes())
+    files = validate_context(root, manifest_path, manifest)
     total = len(tiktoken.get_encoding(manifest['encoding']).encode_ordinary(_manifest_bundle(root, files, manifest)))
     assert total <= manifest['max_tokens'], f'{manifest_path.name}: {total} tokens'
     return total, len(files)

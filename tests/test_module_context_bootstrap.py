@@ -146,3 +146,9 @@ def test_record_measurement_helpers_cannot_import_product_executors(name):
     nodes = [n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))]
     roots = set().union(*(_import_roots(node) for node in nodes))
     assert all(_allowed_measurement_import(item) for item in roots)
+@pytest.mark.parametrize('declaration', [[], ['dependency.json'], None])
+def test_full_source_serializer_cannot_ignore_qualified_declaration(tmp_path, declaration):
+    from tests.module_context import _manifest_bundle
+
+    with pytest.raises(AssertionError, match='fresh qualification'):
+        _manifest_bundle(tmp_path, set(), {'qualified_dependencies': declaration})

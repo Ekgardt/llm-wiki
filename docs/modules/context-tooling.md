@@ -160,3 +160,6 @@ read bytes for the JSON decoder). Include
 including after adding baseline fixtures. Its repository-wide guard caught two
 implicit reads that isolated packet checks did not detect; keep this guard and
 its assertions unchanged rather than relying on the host's default encoding.
+
+Explicit qualified dependencies require fresh publication through contract qualification.
+The full-source serializer refuses them; a static qualified layout is never a passing receipt.

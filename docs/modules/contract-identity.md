@@ -123,3 +123,20 @@ whose external sources are not completely inventoried. This is a checker capabil
 not a new product installation restriction: unsupported environments cannot produce
 qualified omission evidence. Source modification times and inode identity detect
 changes during hashing; access-time updates from reading do not count as mutation.
+
+
+## Canonical layout boundary (approved rollout, implementation in progress)
+
+The explicit qualified_dependencies manifest list names checked dependency
+specifications. The existing pilot declaration is retained as the exact boundary
+specification; its name alone never grants qualification. Manifest files continue
+to enumerate complete verification inputs, including provider source. Only the
+emitted qualified packet substitutes a provider implementation with its complete
+interface and semantics. All consumer-owned files and other source closure remain.
+Static layout/size measurement is explicitly unqualified and does not run tests.
+The legacy full-source serializer refuses an explicit qualified declaration rather
+than ignoring it. Fresh publication belongs to the qualification owner, executes
+real tests, binds source/helper/environment identities and measures the final
+serialized evidence record. A persisted pass is never an input to publication.
+This split prevents budget tests recursively launching their own qualification.
+Provider/integration chains that are not independently qualified remain full source.

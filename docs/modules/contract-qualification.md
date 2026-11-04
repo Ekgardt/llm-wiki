@@ -1,100 +1,37 @@
-# Fresh dependency-contract qualification experiments
+# Fresh dependency-contract qualification
 
-Status: experimental pilot under the owner's explicit approval. The canonical
-full-source gate and 100000 o200k_base ceiling are unchanged. A candidate packet is
-not accepted merely because these checks pass; paired maintenance correctness and
-full-cycle token/verification cost remain required before adoption.
+The approved pilot executes and validates real answer-cost/answer-budget tests.
+Canonical omission is pending the remaining Nov4 rollout gates. Full source is the
+default; every provider, consumer and integration packet must fit100000 o200k_base
+tokens. A passing experiment alone is neither adoption nor full-cycle savings.
 
-This owner contains execution, evidence validation and the real answer-cost /
-answer-budget integration fixture. The static byte/surface/access/call/patch
-checks remain with [contract identity](contract-identity.md). The integration
-packet includes both complete production sources and every local tooling import.
+Every call runs complete provider/consumer owned test selections plus explicitly
+owned real integration tests. No cached passing record is accepted. The declaration
+names provider, consumer, full interface/semantics and integration owner. Both
+production implementations and local helper sources remain in this packet.
+[Contract identity](contract-identity.md) owns static byte/surface/access/call/patch
+checks; [contract packets](contract-packets.md) owns bundle construction and paired
+maintenance history.
 
-Every experiment executes real tests anew. It does not accept a previous passing
-record as authority. Provider and consumer test files derive from their ownership
-manifests. Explicit integration tests must belong to this integration owner.
-Both existing complete packets and this integration packet must fit the original
-limit. Required artifact membership and full bytes are checked before and after
-execution, including implementation, contracts, tests, manifests and helper code.
+Before and after execution, verify required membership and actual bytes of source,
+contracts, tests, manifests and helpers. Also hash interpreter/environment trees and
+installed RECORD-listed files: versions, lockfiles and recorded hashes alone cannot
+identify installed code. Changed inputs reject publication. These are local records,
+not a portable OS image, sandbox or proof of arbitrary Python behavior.
 
-A fresh Python subprocess uses an empty bytecode-cache location. The standard
-project LONG_TIMEOUT bounds test execution and remains configurable through the
-existing test timeout scale. Test filtering/deselection, missing tests or runtime
-probe evidence, skipped/xfail cases, nonzero exits and changed source refuse the
-experiment. The probe verifies actual module origins, imported function identity,
-constant values, pytest fixture identity and restoration after test teardown.
-Independent unmocked assertions check actual estimator results and errors.
+A fresh Python subprocess uses an empty bytecode-cache prefix. Existing LONG_TIMEOUT
+and its configured test-timeout scale bound execution. Filtering/deselection, missing
+tests or probe evidence, skips/xfails, nonzero exits and changed inputs refuse.
+The probe checks actual module origins, imported function identity, constant values,
+pytest fixture identity and restoration after teardown. Independent unmocked tests
+check actual estimator results and errors. Records retain runtime/test versions,
+selected/observed cases, all phases, outcomes and artifact identities.
 
-Records include actual runtime/test version, selected and observed tests, outcome
-counts and artifact identities. They describe that execution, not a portable
-promise or a cache entry. Installed-dependency or compiler changes cannot reuse a
-prior pass because every new experiment runs the real tests again. Finite tests
-and the supported static grammar are not a sandbox or a proof of arbitrary
-Python behavior. Other dependency implementations remain full source.
+Qualified composition must preserve all consumer-owned bytes and substitute only
+an explicitly verified provider with its full interface and semantics. Other missing
+source refuses. Reports/bundles are derived analysis artifacts; no service, persistent
+runtime root, installation or silent source-closure exemption is introduced.
 
-The pilot manifest identifies the real provider, consumer, interface, semantics
-and integration owner. Experimental bundle construction preserves all consumer
-own files and byte reconstruction. Only a verified explicit provider boundary may
-be represented by its full interface and semantics. Any other missing dependency
-refuses. Reports and candidate bundles are reproducible derived test artifacts;
-no product service, installation, persistent runtime root or default source-closure
-exception is introduced.
-
-The full-source workflow remains the control for the paired task. Measure all
-context reads, replies, retries, corrections and verification, and report any
-missing usage instrumentation. A smaller first prompt alone is not an efficiency
-result.
-
-The [first independent pair](../research/2026-11-03-dependency-contract-paired-maintenance-result.md)
-passed real tests on both arms and cross-checks, but complete model usage was
-not exposed. It supplies limited correctness evidence; full-cycle savings remain
-unknown and the source-omission gate remains unadopted.
-
-The [instrumented repeat](../research/2026-11-03-dependency-contract-instrumented-pair.md)
-completed both arms, including the initial tokenizer-cache failure and a fresh
-verification phase. Participant input plus output was 1526320 versus 1353352
-tokens. Root coordination costs were not allocated, so project-wide full-cycle
-savings remain unproven and canonical source omission remains unadopted.
-
-Source: approved `docs/research/2026-11-03-qualified-dependency-contract-proposal.md`;
-private fresh-runner boundary decision 2026-11-03; existing project test-timeout
-contract and the primary sources recorded in the approved proposal.
-
-## Reproduce the experiment
-
-From the checkout, use its locked Python 3.14 base/dev environment. Supply a new
-output directory for every invocation; existing evidence is never overwritten.
-
-```python
-from pathlib import Path
-from tests.module_contract_candidate import build_candidate
-
-root = Path.cwd()
-result = build_candidate(
-    root,
-    root / 'docs/modules/answer-cost-dependency-pilot.json',
-    root / 'logs/contract-pilot-new-run',
-)
-print(result)
-```
-
-The invocation needs the project's usual `scripts` Python import root, as pytest
-does. It writes fresh test logs, JUnit and per-phase runtime observations, a full
-input identity, and a byte-reconstructable `candidate.bundle`. The comparison
-explicitly reports `full_cycle_savings: null` until a real paired task supplies
-that measurement. These generated records are analysis artifacts, not new live
-installation state. This initial candidate builder refuses additional missing
-transitive implementations; a more complex boundary needs its own qualified
-dependency chain before this restriction can be widened.
-
-
-## Actual environment binding (2026-11-04)
-
-Fresh execution now hashes actual interpreter/environment trees and installed
-RECORD-listed dependency files before and after tests through the contract-identity
-owner. Environment changes reject the execution before an experiment record is
-published. This includes the qualifier's helper bytes via complete owner packets;
-version strings, lockfiles and recorded package hashes are insufficient on their
-own. The environment identity is descriptive local evidence, not an OS sandbox.
-Canonical dependency omission remains pending until the other approved rollout
-checks are implemented and qualified; this extension alone does not activate it.
+Source: approved docs/research/2026-11-03-qualified-dependency-contract-proposal.md
+and Nov4 conditional rollout; private fresh-runner boundary decision2026-11-03;
+existing configurable project timeout contract and the proposals' primary sources.

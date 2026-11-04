@@ -1,9 +1,10 @@
 """An experimental cut preserves the consumer and refuses other missing sources."""
 import json
+from pathlib import Path
 
 import pytest
 
-from tests.module_contract_candidate import candidate_files
+from tests.module_contract_candidate import _builder_identity, candidate_files
 
 
 @pytest.fixture
@@ -63,3 +64,10 @@ def test_provider_transitive_implementation_is_not_silently_cut(candidate):
     (root / 'scripts/provider.py').write_text('import another\n', encoding='utf-8')
     with pytest.raises(ValueError, match='another source'):
         candidate_files(root, inputs)
+
+
+def test_real_builder_identity_includes_own_and_qualification_helpers():
+    identity = _builder_identity(Path(__file__).resolve().parents[1])
+    required = {'tests/module_contract_candidate.py', 'tests/module_contract_layout.py',
+                'tests/module_contract_qualification.py', 'tests/module_contract_environment.py'}
+    assert required <= identity['files'].keys()
