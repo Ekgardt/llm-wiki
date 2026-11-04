@@ -76,3 +76,10 @@ def test_source_authority_also_decodes_its_native_input_once(method, monkeypatch
     getattr(authority, method)('verified-head')
     assert decode.call_count == 1
     authority._input.assert_called_once_with('verified-head')
+
+
+def test_constructor_facade_keeps_identical_public_objects():
+    from llm_wiki import event_envelope_values
+
+    for name in ('EventEnvelope', 'build_event_envelope', 'canonical_agent', '_canonical', '_require_payload_fields'):
+        assert getattr(envelope, name) is getattr(event_envelope_values, name)

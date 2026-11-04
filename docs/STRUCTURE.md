@@ -2318,3 +2318,9 @@ The protocol owns BreadcrumbBundle values; storage retains publication results.
 ### Permanent breadcrumb source reader
 
 Full owner contract: [breadcrumb-reader](modules/breadcrumb-reader.md).
+
+### Event envelope values
+
+The pure construction/identity/immutable-value contract belongs to
+[Event envelope values](modules/event-envelope-values.md); physical native-frame
+reading stays in `event_envelope`, with direct compatibility aliases for producers.

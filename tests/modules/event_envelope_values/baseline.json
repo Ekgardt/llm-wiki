@@ -1,0 +1,27 @@
+{
+  "input_payloads": [
+    {
+      "prompt": "Complete ☃\r\n第二行",
+      "metadata": {
+        "a": [
+          1,
+          true,
+          null
+        ]
+      }
+    },
+    {
+      "prompt": "safe",
+      "PASSWORD": "secret",
+      "metadata": {
+        "api_key": "hidden"
+      }
+    }
+  ],
+  "complete_json": [
+    "{\"agent\":\"codex\",\"captured_at\":\"2026-07-13T12:30:45Z\",\"content_hash\":\"7fdbd70f9d48e0d58dd3d7a6ce2a399a1dc73809dd218d705688a8121fdfc4df\",\"event_id\":\"a81a13dd2760a223da2b457173376aa35983ec37f55e7cd242e523d52eb22560\",\"event_type\":\"user_prompt\",\"occurred_at\":\"2026-07-13T12:30:45Z\",\"parent_event_id\":null,\"payload\":{\"metadata\":{\"a\":[1,true,null]},\"prompt\":\"Complete ☃\\r\\n第二行\"},\"project\":null,\"schema_version\":\"1.0\",\"session\":null,\"severity\":null,\"source_event_id\":\"host-1\",\"worktree\":null}",
+    "{\"agent\":\"codex\",\"captured_at\":\"2026-07-13T12:30:45Z\",\"content_hash\":\"c31ba9cecf1ea1d7ca5112b90b2be199c8e94f1f2677b5e035e243227a21cb5f\",\"event_id\":\"f6968fceee26c288c87b05cb5122a800972cd9c8c5affeb08ac957c848c59a12\",\"event_type\":\"user_prompt\",\"occurred_at\":\"2026-07-13T12:30:45Z\",\"parent_event_id\":null,\"payload\":{\"PASSWORD\":\"[REDACTED]\",\"metadata\":{\"api_key\":\"[REDACTED]\"},\"prompt\":\"safe\"},\"project\":null,\"schema_version\":\"1.0\",\"session\":null,\"severity\":null,\"source_event_id\":\"host-1\",\"worktree\":null}"
+  ],
+  "signature": "(*, event_type: 'str', payload: 'Mapping[str, Any]', occurred_at: 'datetime | None' = None, captured_at: 'datetime | None' = None, agent: 'str | None' = None, session: 'str | None' = None, project: 'str | None' = None, worktree: 'str | None' = None, severity: 'str | None' = None, parent_event_id: 'str | None' = None, source_event_id: 'str | None' = None, redact: 'Callable[[str], str] | None' = None) -> 'EventEnvelope'",
+  "class_module": "event_envelope"
+}

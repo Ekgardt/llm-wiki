@@ -1,0 +1,50 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md",
+    "scripts/llm_wiki/event_envelope_values.py",
+    "tests/test_event_envelope.py",
+    "docs/modules/event-envelope-values.md",
+    "docs/modules/event-envelope-values-context.json",
+    "scripts/secret_redact.py",
+    "docs/modules/secret-redact.md",
+    "docs/research/2026-09-27-a-secret-in-structure-is-redacted-as-structure.md"
+  ],
+  "directories": [
+    "tests/modules/event_envelope_values"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "scripts/llm_wiki/event_envelope_values.py",
+      "tests/test_event_envelope.py",
+      "docs/modules/event-envelope-values.md",
+      "docs/modules/event-envelope-values-context.json"
+    ],
+    "directories": [
+      "tests/modules/event_envelope_values"
+    ]
+  }
+}

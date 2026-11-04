@@ -7,7 +7,7 @@ from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 
 import pytest
-from event_envelope import EventEnvelope, build_event_envelope
+from llm_wiki.event_envelope_values import EventEnvelope, build_event_envelope
 
 FIXED_TIME = datetime(2026, 7, 13, 12, 30, 45, tzinfo=UTC)
 
