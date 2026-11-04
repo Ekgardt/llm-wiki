@@ -1,9 +1,13 @@
 """Consumer integration assertions retained from leaf module qualification."""
 import ast
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+from tests.slow_machine import LONG_TIMEOUT
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -126,3 +130,25 @@ def test_reliability_defaults_guard_detects_executor_dependency(source):
 @pytest.mark.parametrize('source', ['from reliable_memory import open_operational_db', 'import reliable_memory as queue; queue.open_operational_db()', 'from llm_wiki.reliability_defaults import DEFAULTS'])
 def test_reliability_defaults_guard_allows_operations_and_owned_types(source):
     assert not _reliability_defaults_violations(source)
+
+
+def test_state_io_uses_existing_owners_without_loading_the_facade(tmp_path):
+    program = """
+import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+import memory_state
+from llm_wiki.runtime_publication import durable_publish_file
+from llm_wiki.runtime_sync import fsync_directory
+assert 'reliable_memory' not in sys.modules
+assert memory_state.durable_publish_file is durable_publish_file
+assert memory_state.fsync_directory is fsync_directory
+path = pathlib.Path(sys.argv[2]) / 'written.txt'
+memory_state.atomic_write(path, 'complete state')
+assert path.read_text(encoding='utf-8') == 'complete state'
+assert 'reliable_memory' not in sys.modules
+"""
+    result = subprocess.run(
+        [sys.executable, '-c', program, str(SCRIPTS), str(tmp_path)],
+        capture_output=True, text=True, timeout=LONG_TIMEOUT,
+    )
+    assert result.returncode == 0, result.stderr

@@ -24,3 +24,16 @@ Run `uv run pytest tests/modules/runtime_publication -q`.
 
 Shared canonical contract: [runtime-contracts](runtime-contracts.md).
 The complete guide is included in this owner's maintenance packet.
+
+## State consumer — 2026-11-04
+
+`memory_state` imports the identical `durable_publish_file` object directly from
+this owner and `fsync_directory` from runtime_sync. Local names remain available
+for existing callers and fault injection. Function bodies, root resolution and
+reload semantics stay unchanged. This removes the reliable_memory import without
+adding a forwarding layer. Research: [Python import bindings](https://docs.python.org/3.14/reference/import.html),
+[pytest monkeypatch](https://docs.pytest.org/en/stable/how-to/monkeypatch.html),
+[Google import guidance](https://google.github.io/styleguide/pyguide.html#22-imports).
+Preserving the existing local bindings takes precedence over switching to module-qualified
+call sites. Regression verifies fresh-process import, object identity and a real
+atomic write; full consumer tests retain lock, error and permission checks.

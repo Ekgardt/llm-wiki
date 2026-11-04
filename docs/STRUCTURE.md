@@ -1895,6 +1895,8 @@ See `research/2026-11-03-existing-platform-boundaries.md`.
 [secret-redact](modules/secret-redact.md), [repository-scope](modules/repository-scope.md).
 
 [runtime-contracts](modules/runtime-contracts.md), [runtime-environment](modules/runtime-environment.md), [runtime-records](modules/runtime-records.md), [runtime-sync](modules/runtime-sync.md), [runtime-publication](modules/runtime-publication.md), [runtime-fingerprints](modules/runtime-fingerprints.md).
+`memory_state` imports its identical publication and sync functions directly from
+these owners; its local bindings, root selection and locking behavior remain unchanged.
 
 [sqlite-io](modules/sqlite-io.md).
 

@@ -45,6 +45,8 @@ from llm_wiki.daily_log_selection import (
 )
 from llm_wiki.formats.canonical import sha256_bytes
 from llm_wiki.reliability_defaults import MAX_CAPTURE_INTENT_BYTES as MAX_CAPTURE_INTENT_BYTES
+from llm_wiki.runtime_publication import durable_publish_file
+from llm_wiki.runtime_sync import fsync_directory
 from llm_wiki.state_json_values import (
     _decoded_state,
 )
@@ -57,7 +59,6 @@ from llm_wiki.state_json_values import (
 from llm_wiki.state_json_values import (
     trim_state_to_budget as _trim_state_values,
 )
-from reliable_memory import durable_publish_file, fsync_directory
 
 # Every hook imports this module, and the probe below runs at import. A hook's
 # whole budget is seconds; `rev-parse` answers in milliseconds.
