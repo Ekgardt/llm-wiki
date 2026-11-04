@@ -145,3 +145,11 @@ package markers. The real registry guard checks this before a full pytest run:
 under the existing prepend import mode, unqualified duplicate basenames collide
 even when each owner passes alone. Both owner checks and whole-tree collection
 remain required after adding or moving a module's tests.
+
+New test files also require measured CI weights before checkout qualification.
+Run `python -m tests.shard_plan --weigh <new test files>` with the qualified Python
+and normal guarded pytest environment, then include
+`tests/test_every_test_file_has_a_weight.py` in the checkout-level checks.
+Do not invent weights or discard slower platform measurements. The existing
+full-suite guard rejects omissions; passing isolated owner tests alone does not
+satisfy this repository-wide CI requirement.
