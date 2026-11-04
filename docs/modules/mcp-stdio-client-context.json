@@ -1,0 +1,45 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md",
+    "benchmark/mcp_stdio_client.py",
+    "docs/modules/mcp-stdio-client.md",
+    "docs/modules/mcp-stdio-client-context.json"
+  ],
+  "directories": [
+    "tests/modules/mcp_stdio_client"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "benchmark/mcp_stdio_client.py",
+      "docs/modules/mcp-stdio-client.md",
+      "docs/modules/mcp-stdio-client-context.json"
+    ],
+    "directories": [
+      "tests/modules/mcp_stdio_client"
+    ]
+  }
+}

@@ -2371,3 +2371,9 @@ non-atomic refusal behavior and context gates: [worktree cleanup](modules/cleanu
 Full owner contract: [refusal calibration](modules/refusal-calibration.md).
 The existing offline CLI retains its path; no-threshold report semantics match
 the existing non-firing gate. It does not change installed thresholds.
+
+### Benchmark MCP stdio client
+
+Full owner contract: [MCP stdio client](modules/mcp-stdio-client.md).
+Existing timeout/readline/child-tree limitations remain explicitly unresolved;
+maintenance ownership does not certify transport deadlines.
