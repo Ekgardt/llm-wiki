@@ -2377,3 +2377,8 @@ the existing non-firing gate. It does not change installed thresholds.
 Full owner contract: [MCP stdio client](modules/mcp-stdio-client.md).
 Existing timeout/readline/child-tree limitations remain explicitly unresolved;
 maintenance ownership does not certify transport deadlines.
+
+### Selective-forgetting calculations
+
+Full owner contract: [selective-forgetting metrics](modules/selective-forgetting-metrics.md).
+The runner retains process, clock and file operations and its existing callable names.
