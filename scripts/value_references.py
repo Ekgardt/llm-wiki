@@ -33,7 +33,10 @@ Sources: `docs/research/2026-08-29-a-name-loaded-is-a-name-used.md`.
 from __future__ import annotations
 
 import ast
+import io
 import re
+import tokenize
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -264,12 +267,69 @@ def _add_source(
     return True
 
 
+_STRING_START = frozenset({tokenize.FSTRING_START, tokenize.TSTRING_START})
+_STRING_END = frozenset({tokenize.FSTRING_END, tokenize.TSTRING_END})
+_STRING_MIDDLE = frozenset({tokenize.FSTRING_MIDDLE, tokenize.TSTRING_MIDDLE})
+_INTERPOLATED_PREFIX = str.maketrans("", "", "fFtT")
+_PREFILTER_FAILURES = (*PARSE_FAILURES, tokenize.TokenError, IndexError)
+
+
+def _literal_string(source: str) -> str:
+    value = ast.literal_eval(source)
+    return value if isinstance(value, str) else ""
+
+
+def _token_literal(token, stack) -> str:
+    if token.type in _STRING_MIDDLE:
+        opening, closing = stack[-1]
+        return _literal_string(opening + token.string + closing)
+    if token.type == tokenize.STRING:
+        return _literal_string(token.string)
+    return ""
+
+
+def _token_text(token, stack) -> str:
+    if token.type in _STRING_START:
+        opening = token.string.translate(_INTERPOLATED_PREFIX)
+        stack.append((opening, opening.lstrip("rR")))
+        return ""
+    if token.type in _STRING_END:
+        stack.pop()
+        return ""
+    return _token_literal(token, stack)
+
+
+def _token_names_value(token, names: frozenset[str]) -> bool:
+    return token.type == tokenize.NAME and unicodedata.normalize("NFKC", token.string) in names
+
+
+def _tokens_may_name(tokens, names: frozenset[str]) -> bool:
+    strings: list[str] = []
+    stack: list[tuple[str, str]] = []
+    for token in tokens:
+        if token.type == tokenize.ERRORTOKEN:
+            return True
+        if _token_names_value(token, names):
+            return True
+        strings.append(_token_text(token, stack))
+    # Over-approximate concatenation. Only the subsequent AST can prove a use.
+    joined = "".join(strings)
+    return any(name in joined for name in names)
+
+
 def _mentions_any(content: bytes, names: frozenset[str]) -> bool:
-    return any(name.encode() in content for name in names)
+    if any(name.encode() in content for name in names):
+        return True
+    if not names:
+        return False
+    try:
+        return _tokens_may_name(tokenize.tokenize(io.BytesIO(content).readline), names)
+    except _PREFILTER_FAILURES:
+        return True
 
 
 def _skips_source(content: bytes, names: frozenset[str] | None) -> bool:
-    """A source whose bytes carry none of the names cannot reference one."""
+    """Skip only when neither raw spelling nor Python tokens can name a value."""
     if names is None:
         return False
     return not _mentions_any(content, names)
@@ -282,9 +342,9 @@ def build_reference_index(
 ) -> ReferenceIndex:
     """Read the stored Python sources once and answer both questions from them.
 
-    `names` narrows the read to the sources whose bytes mention one of them,
-    which is sound because a name absent from a file's bytes cannot be loaded in
-    its syntax tree. A question about one symbol used to parse and walk every
+    `names` narrows the read using raw positive matches and a conservative
+    Python-token check for encoded/normalized names and concatenated literals.
+    A missing byte substring alone is not proof that the syntax tree omits it. A question about one symbol used to parse and walk every
     source in the repository — 551 files, 2 070 516 node visits, 11 s of a single
     `find_dead_code` answer, measured 2026-09-12 — and now parses the few that
     could matter. The resulting index knows only those names and says so, both in

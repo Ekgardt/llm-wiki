@@ -1364,7 +1364,7 @@
   "test_one_second_chance_and_no_stuck_task.py": 14.06,
   "test_one_source_does_not_take_the_window.py": 0.01,
   "test_one_stealer_at_a_time.py": 0.13,
-  "test_one_symbol_is_not_the_whole_repository.py": 0.0,
+  "test_one_symbol_is_not_the_whole_repository.py": 0.08,
   "test_open_active_scope_identity.py": 1.92,
   "test_opencode_only_with_its_password.py": 2.97,
   "test_opening_the_legacy_queue_takes_no_write_lock.py": 0.29,
