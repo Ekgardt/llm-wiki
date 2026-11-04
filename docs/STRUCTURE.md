@@ -2346,3 +2346,11 @@ Full owner contract: [pyright-metadata-json](modules/pyright-metadata-json.md).
 ### Installed launch values boundary (2026-11-04)
 
 Full owner contract: [integration-launch-values](modules/integration-launch-values.md).
+
+### Python value references
+
+`value_references` owns conservative semantic reference analysis over supplied
+Python source bytes; repository/generation IO and verdict rendering stay outside.
+The existing implementation is qualified in place, including its corrected
+spelling prefilter. Complete parsing dependencies, original research, pure tests
+and scope/dispatch rules: [value references](modules/value-references.md).

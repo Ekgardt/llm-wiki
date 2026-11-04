@@ -1,0 +1,60 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/python_parse.py",
+    "docs/modules/python-parse.md",
+    "docs/modules/python-parse-context.json",
+    "docs/research/2026-11-02-existing-leaf-contracts.md",
+    "tests/test_python_3_10_does_not_crash_on_a_deep_expression.py",
+    "docs/research/2026-09-25-one-hard-python-file-does-not-freeze-the-index.md",
+    "docs/research/2026-09-26-python-3-10-does-not-crash-on-a-deep-expression.md",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md",
+    "scripts/value_references.py",
+    "tests/test_one_symbol_is_not_the_whole_repository.py",
+    "docs/modules/value-references.md",
+    "docs/modules/value-references-context.json",
+    "docs/research/2026-08-29-a-name-loaded-is-a-name-used.md",
+    "docs/research/2026-09-12-sixteen-of-sixteen.md",
+    "docs/research/2026-11-04-reference-prefilter-keeps-python-spelling.md"
+  ],
+  "directories": [
+    "tests/modules/value_references"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "scripts/value_references.py",
+      "tests/test_one_symbol_is_not_the_whole_repository.py",
+      "docs/modules/value-references.md",
+      "docs/modules/value-references-context.json",
+      "docs/research/2026-08-29-a-name-loaded-is-a-name-used.md",
+      "docs/research/2026-09-12-sixteen-of-sixteen.md",
+      "docs/research/2026-11-04-reference-prefilter-keeps-python-spelling.md"
+    ],
+    "directories": [
+      "tests/modules/value_references"
+    ]
+  }
+}
