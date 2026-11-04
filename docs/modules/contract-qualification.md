@@ -86,3 +86,15 @@ that measurement. These generated records are analysis artifacts, not new live
 installation state. This initial candidate builder refuses additional missing
 transitive implementations; a more complex boundary needs its own qualified
 dependency chain before this restriction can be widened.
+
+
+## Actual environment binding (2026-11-04)
+
+Fresh execution now hashes actual interpreter/environment trees and installed
+RECORD-listed dependency files before and after tests through the contract-identity
+owner. Environment changes reject the execution before an experiment record is
+published. This includes the qualifier's helper bytes via complete owner packets;
+version strings, lockfiles and recorded package hashes are insufficient on their
+own. The environment identity is descriptive local evidence, not an OS sandbox.
+Canonical dependency omission remains pending until the other approved rollout
+checks are implemented and qualified; this extension alone does not activate it.

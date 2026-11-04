@@ -8,6 +8,7 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from tests.module_contract_environment import environment_identity
 from tests.module_contract_spec import pilot_inputs
 from tests.slow_machine import LONG_TIMEOUT
 
@@ -74,10 +75,14 @@ def _execute(root: Path, plan: Path, selected: list[str]) -> None:
         raise ValueError(f'Fresh tests failed: {plan.with_name("pytest.txt")}')
 
 
+def _qualification_inputs(root: Path, pilot: Path) -> dict:
+    return {**pilot_inputs(root, pilot), 'environment': environment_identity()}
+
+
 def qualify(root: Path, pilot: Path, output: Path) -> dict:
     """An experiment record is descriptive only; each invocation executes tests."""
     root = root.resolve()
-    before = pilot_inputs(root, pilot)
+    before = _qualification_inputs(root, pilot)
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     plan = output / 'plan.json'
@@ -86,7 +91,7 @@ def qualify(root: Path, pilot: Path, output: Path) -> dict:
     report = json.loads((output / 'probe-result.json').read_bytes())
     require_observed_tests(report, before['tests'])
     _require_junit(output / 'tests.xml', len(report['collected']))
-    after = pilot_inputs(root, pilot)
+    after = _qualification_inputs(root, pilot)
     if before != after:
         raise ValueError('Inputs changed during qualification; a new experiment is required')
     result = {'status': 'experiment-passed-not-adopted', 'inputs': before, 'execution': report}

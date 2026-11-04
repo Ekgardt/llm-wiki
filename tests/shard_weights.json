@@ -1331,6 +1331,7 @@
   "test_module_contract_calls.py": 0.02,
   "test_module_contract_candidate.py": 0.04,
   "test_module_contract_docs.py": 0.04,
+  "test_module_contract_environment.py": 2.33,
   "test_module_contract_identity.py": 0.29,
   "test_module_contract_patches.py": 0.05,
   "test_module_contract_qualification.py": 7.38,

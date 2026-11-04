@@ -160,3 +160,27 @@ def test_real(monkeypatch):
 ''')
     assert result.returncode != 0
     assert 'Substituted monkeypatch fixture' in result.stdout + result.stderr
+
+
+def test_environment_byte_change_during_execution_refuses(tmp_path, monkeypatch):
+    """Unit probe isolates the rejection gate; it is not provider qualification."""
+    from tests import module_contract_qualification as runner
+    from tests.module_contract_environment import _tree
+
+    environment = tmp_path / 'environment'
+    environment.mkdir()
+    dependency = environment / 'installed.py'
+    dependency.write_bytes(b'old source')
+    monkeypatch.setattr(runner, 'pilot_inputs', lambda *_: {'tests': ['test_example.py']})
+    monkeypatch.setattr(runner, 'environment_identity', lambda: _tree(environment))
+
+    def execute(_root, plan, _selected):
+        (plan.parent / 'probe-result.json').write_text(json.dumps(_report()), encoding='utf-8')
+        (plan.parent / 'tests.xml').write_text(
+            '<testsuites><testsuite><testcase/></testsuite></testsuites>', encoding='utf-8')
+        dependency.write_bytes(b'new source')
+
+    monkeypatch.setattr(runner, '_execute', execute)
+    with pytest.raises(ValueError, match='Inputs changed'):
+        runner.qualify(tmp_path, tmp_path / 'pilot.json', tmp_path / 'output')
+    assert not (tmp_path / 'output/experiment.json').exists()

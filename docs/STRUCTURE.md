@@ -2390,3 +2390,4 @@ and [native Python 3.14 annotations](research/2026-11-04-moved-classes-annotatio
 Full source remains the default; every contracted boundary must pass the stated
 qualification gates. Native annotations preserve fields and historical pickle
 paths while changing raw annotation/signature representation. No live install is authorized.
+Runtime/dependency byte identity belongs to the existing contract-identity owner.

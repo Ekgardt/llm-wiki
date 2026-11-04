@@ -97,3 +97,29 @@ consumer test files now participate in the static pilot probe.
 Fresh execution and the actual consumer/provider fixture are owned by
 [contract qualification](contract-qualification.md). Static checks alone never
 authorize source omission or replace actual integration outcomes.
+
+
+## Approved environment identity extension (2026-11-04)
+
+Under the accepted conditional rollout, tests/module_contract_environment.py identifies
+actual runtime and installed dependency bytes before and after fresh
+qualification. This belongs to this static identity owner; execution remains with
+the qualification owner. Hash the interpreter installation and active environment
+(including their non-distribution startup files), plus each distribution's actual
+recorded files. Ignore only derived bytecode: the runner uses a new empty bytecode
+prefix and disables writes. Version strings and RECORD claims alone are insufficient.
+Missing/unidentifiable distributions or changed bytes refuse qualification. This
+identity is local evidence, not a portable OS/container digest or sandbox guarantee;
+external system libraries and arbitrary external data remain outside its scope.
+No prior success can bypass real execution. Full-source mode remains the default.
+Source: approved 2026-11-04-qualified-contract-rollout-proposal.md.
+
+
+The implementation follows directory aliases with cycle detection and hashes their
+resolved targets, so ordinary virtualenv lib64 aliases do not block qualification.
+Distribution.files was experimentally shown to hide missing files on Python3.14;
+read RECORD directly and reject missing/malformed inventories and editable installs
+whose external sources are not completely inventoried. This is a checker capability,
+not a new product installation restriction: unsupported environments cannot produce
+qualified omission evidence. Source modification times and inode identity detect
+changes during hashing; access-time updates from reading do not count as mutation.
