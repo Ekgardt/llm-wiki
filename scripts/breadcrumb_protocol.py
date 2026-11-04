@@ -10,6 +10,7 @@ import re
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -22,6 +23,18 @@ MANIFEST_VERSION = "capture-intent/v2"
 PART_VERSION = "breadcrumb-part/v1"
 ANCHOR_VERSION = "breadcrumb-occurrence/v1"
 _RECORD_PARSING = ContextVar("breadcrumb_pure_record_parsing", default=None)
+
+
+@dataclass(frozen=True)
+class BreadcrumbBundle:
+    manifest: bytes
+    anchor: bytes
+    parts: tuple[bytes, ...]
+    content: bytes
+
+
+# Preserve existing Python serialization and the storage compatibility alias.
+BreadcrumbBundle.__module__ = "breadcrumb_storage"
 
 
 def require_digest(value: object) -> str:

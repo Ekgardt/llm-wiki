@@ -16,6 +16,7 @@ from pathlib import Path
 
 import breadcrumb_protocol as protocol
 from bounded_io import _check_deadline
+from breadcrumb_protocol import BreadcrumbBundle as BreadcrumbBundle
 from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from memory_state import MAX_CAPTURE_INTENT_BYTES
 from model_dlp import require_safe_publication
@@ -25,13 +26,6 @@ from secret_redact import describe_error
 # A distinct handler dispatch version; existing session captures keep version 1.
 HANDLER_VERSION = 2
 
-
-@dataclass(frozen=True)
-class BreadcrumbBundle:
-    manifest: bytes
-    anchor: bytes
-    parts: tuple[bytes, ...]
-    content: bytes
 
 
 @dataclass(frozen=True)

@@ -2309,3 +2309,8 @@ Full owner contracts: [reliability-defaults](modules/reliability-defaults.md), [
 ### Permanent breadcrumb document format
 
 Full owner contract: [breadcrumb-documents](modules/breadcrumb-documents.md).
+
+### Deterministic breadcrumb receipt
+
+Full owner contract: [breadcrumb-decision](modules/breadcrumb-decision.md).
+The protocol owns BreadcrumbBundle values; storage retains publication results.

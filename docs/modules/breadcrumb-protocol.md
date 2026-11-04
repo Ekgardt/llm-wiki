@@ -44,3 +44,13 @@ is inferred from this module alone.
 Capture byte policies belong to [reliability-defaults](reliability-defaults.md),
 with unchanged legacy aliases. [breadcrumb-protocol](breadcrumb-protocol.md)
 owns complete linked-record syntax and its schemas; storage and execution remain separate.
+
+## Complete bundle value — 2026-11-04
+
+The existing frozen BreadcrumbBundle dataclass belongs to this wire protocol:
+manifest, anchor, parts and content retain their exact field types/order and
+constructor semantics. breadcrumb_storage keeps the identical class alias and
+its legacy __module__ remains breadcrumb_storage. Protocol construction does not
+import storage; pickle can load the old facade and is not claimed to be isolated.
+Baseline protocol-4/5 bytes, frozen values and facade identity are qualified.
+BreadcrumbPublication and handler dispatch version remain storage concerns.

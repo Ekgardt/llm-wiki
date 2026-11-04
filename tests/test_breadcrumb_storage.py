@@ -267,3 +267,22 @@ def test_two_equal_host_actions_at_one_time_survive_durable_publication(tmp_path
     assert queue.claim_capture("first", handler_versions=(2,)) is not None
     assert queue.claim_capture("second", handler_versions=(2,)) is not None
     assert queue.claim_capture("third", handler_versions=(2,)) is None
+
+
+@pytest.mark.parametrize('pickle_protocol', [4, 5])
+def test_bundle_keeps_storage_identity_and_original_pickle_bytes(pickle_protocol):
+    import json
+    import pickle
+    from pathlib import Path
+
+    from breadcrumb_protocol import BreadcrumbBundle
+    from breadcrumb_storage import BreadcrumbBundle as StorageBundle
+
+    fixture = Path(__file__).parent / 'modules/breadcrumb_protocol/bundle_pickle_baseline.json'
+    baseline = json.loads(fixture.read_text(encoding='utf-8'))
+    value = BreadcrumbBundle(b'manifest', b'anchor', (b'one', b'two'), b'content')
+    assert StorageBundle is BreadcrumbBundle
+    assert pickle.dumps(BreadcrumbBundle, protocol=pickle_protocol).hex() == baseline['class'][str(pickle_protocol)]
+    assert pickle.dumps(value, protocol=pickle_protocol).hex() == baseline['value'][str(pickle_protocol)]
+    assert pickle.loads(bytes.fromhex(baseline['class'][str(pickle_protocol)])) is BreadcrumbBundle
+    assert pickle.loads(bytes.fromhex(baseline['value'][str(pickle_protocol)])) == value

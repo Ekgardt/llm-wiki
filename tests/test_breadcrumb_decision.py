@@ -8,8 +8,9 @@ from datetime import UTC, datetime
 import breadcrumb_decision as decision
 import breadcrumb_protocol as protocol
 import pytest
-from breadcrumb_storage import BreadcrumbBundle
-from reliable_memory import MAX_CAPTURE_DECISION_BYTES, canonical_json_bytes
+from breadcrumb_protocol import BreadcrumbBundle
+from llm_wiki.formats.canonical import canonical_json_bytes
+from llm_wiki.reliability_defaults import MAX_CAPTURE_DECISION_BYTES
 
 
 def _bundle(prompt: str) -> BreadcrumbBundle:
