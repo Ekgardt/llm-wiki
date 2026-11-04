@@ -107,3 +107,21 @@ def test_nonfake_bundle_values_keep_their_exact_original_bytes(tmp_path):
     result = _launch_result(tmp_path, _host_environment(), payload)
     assert result.returncode == 0
     assert json.loads(result.stdout) == bundle
+
+
+@pytest.mark.parametrize('name', [
+    'codex_provider_bootstrap', '_require_codex_provider_bundle', '_require_persistable_provider',
+    'codex_provider_payload', 'codex_provider_from_payload', 'codex_launch_bundle',
+    '_codex_target_bundle', '_codex_windows_argument', '_codex_windows_command',
+    '_codex_command_words', '_codex_windows_words', '_codex_windows_word',
+    '_codex_parsed_launch', '_require_codex_hook_tail', 'codex_command_launch',
+])
+def test_existing_callable_paths_are_direct_aliases(name):
+    import pickle
+
+    from llm_wiki import integration_launch_values as codec
+
+    value = getattr(codec, name)
+    assert getattr(hooks, name) is value
+    assert value.__module__ == 'integration_hook_config'
+    assert pickle.loads(pickle.dumps(value)) is value

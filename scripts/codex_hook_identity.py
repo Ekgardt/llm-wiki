@@ -10,13 +10,12 @@ the prompt and edit capture (docs/research/2026-09-11-codex-leaves-breadcrumbs-t
 
 from __future__ import annotations
 
-OUR_CODEX_COMMANDS = (
-    ("codex_memory.py", " hook"),
-    ("graph_hint.py", " --source codex"),
-    ("integration_adapter.py", " --source codex --event user_prompt"),
-    ("integration_adapter.py", " --source codex --event post_tool_use"),
+from llm_wiki.integration_launch_values import (
+    OUR_CODEX_COMMANDS as OUR_CODEX_COMMANDS,
 )
-OUR_CODEX_SCRIPTS = tuple(dict.fromkeys(script for script, _ending in OUR_CODEX_COMMANDS))
+from llm_wiki.integration_launch_values import (
+    OUR_CODEX_SCRIPTS as OUR_CODEX_SCRIPTS,
+)
 
 
 def is_our_codex_command(command: object) -> bool:
@@ -29,7 +28,7 @@ def is_our_codex_command(command: object) -> bool:
 
 
 def _owned_bootstrap_command(command: str) -> bool:
-    from integration_hook_config import codex_command_launch
+    from llm_wiki.integration_launch_values import codex_command_launch
 
     try:
         codex_command_launch(command)

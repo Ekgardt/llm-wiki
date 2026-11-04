@@ -2355,3 +2355,13 @@ executable qualification; old imports remain direct aliases after the transfer.
 [Pyright metadata JSON values](modules/pyright-metadata-json.md) owns the
 strict-object/JSONC value boundary. Configuration reads, inheritance, resource
 bounds and server discovery remain with existing callers; old names stay aliases.
+
+### Installed launch values boundary (2026-11-04)
+
+`llm_wiki.integration_launch_values` owns the existing nonsecret provider payload,
+exact emitted bootstrap, command parsing and platform quoting. Together with
+`codex_hook_identity`, it recognizes owned commands without importing installation
+configuration. `integration_hook_config` retains direct compatibility aliases and
+its environment-reading launch wrapper; installation/configuration IO stays there.
+The lazy native Windows dependency, legacy matching and emitted bytes are preserved.
+Complete source, baseline and boundary gates: [module guide](modules/integration-launch-values.md).
