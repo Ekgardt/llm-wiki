@@ -1,64 +1,12 @@
 """Permanent sources retain every input byte and cannot validate partial copies."""
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import breadcrumb_evidence as evidence
-import breadcrumb_protocol as protocol
 import pytest
-from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES
 
-
-def _source(content: bytes):
-    moment = datetime(2026, 9, 29, tzinfo=UTC)
-    anchor = protocol.make_anchor(
-        "a" * 64, content, occurred_at=moment, accepted_at=moment, time_origin="host",
-    )
-    parts = protocol.encode_parts("a" * 64, content)
-    manifest = protocol.make_manifest(anchor, parts)
-    documents = dict(evidence.source_documents(manifest, anchor, parts))
-    return evidence.source_path(anchor), documents
-
-
-@pytest.mark.parametrize("content", [
-    b"a complete prompt", ('```\n---\n# quoted heading\n"\\\u2028\u65e5' * 1000).encode(),
-    b"x" * (2 * 1_048_576),
-], ids=["small", "quoted-unicode", "ascii-2-mib"])
-def test_permanent_markdown_reconstructs_the_complete_source_without_runtime(content):
-    head, documents = _source(content)
-
-    assert evidence.restore_source(head, documents.__getitem__) == content
-    assert next(reversed(documents)) == head
-    assert all(len(document) <= MAX_KNOWLEDGE_PAGE_BYTES for document in documents.values())
-    assert all(document.startswith(b"---\ntype: raw-source\n") for document in documents.values())
-
-
-def test_a_missing_permanent_part_cannot_prove_completion():
-    head, documents = _source(b"x" * (2 * 1_048_576))
-    del documents[next(iter(documents))]
-
-    with pytest.raises(KeyError):
-        evidence.restore_source(head, documents.__getitem__)
-
-
-@pytest.mark.parametrize("target", ["head", "part"])
-def test_editing_a_permanent_record_invalidates_the_proof(target):
-    head, documents = _source(b"complete prompt")
-    path = head if target == "head" else next(iter(documents))
-    documents[path] += b"unverified change\n"
-
-    with pytest.raises((ValueError, TypeError)):
-        evidence.restore_source(head, documents.__getitem__)
-
-
-def test_a_complete_source_moved_to_another_day_does_not_prove_the_original_path():
-    head, documents = _source(b"complete prompt")
-    changed = head.replace("2026-09-29", "2026-09-30")
-    documents[changed] = documents.pop(head)
-
-    with pytest.raises(ValueError, match="conflicts"):
-        evidence.restore_source(changed, documents.__getitem__)
+from tests.modules.breadcrumb_documents.test_contract import _source as _source
 
 
 def _disk_source(root, content, *, archived=False):
@@ -193,3 +141,16 @@ def _assert_source_retry_witness(coordinator, refused_id, operation, document, s
     assert [row[1] for row in rows] == [sha256_bytes(document)]
     if source_restored:
         assert [row[0] for row in rows] == [sha256_bytes(document)]
+
+
+def test_evidence_facade_keeps_identical_document_objects():
+    from llm_wiki import breadcrumb_documents
+
+    assert evidence.source_path is breadcrumb_documents.source_path
+    assert evidence.source_part_path is breadcrumb_documents.source_part_path
+    assert evidence.source_documents is breadcrumb_documents.source_documents
+    assert evidence.render_head is breadcrumb_documents.render_head
+    assert evidence.render_part is breadcrumb_documents.render_part
+    assert evidence.restore_source is breadcrumb_documents.restore_source
+    assert evidence._read_head is breadcrumb_documents._read_head
+    assert evidence.archived_source_path is breadcrumb_documents.archived_source_path

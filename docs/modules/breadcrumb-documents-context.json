@@ -1,0 +1,65 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "files": [
+    "tests/__init__.py",
+    "tests/slow_machine.py",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rules/development-laws.md",
+    "pyproject.toml",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    ".gitattributes",
+    "scripts/llm_wiki/__init__.py",
+    "tests/modules/__init__.py",
+    "tests/conftest.py",
+    "tests/code_kernel_helpers.py",
+    "tests/module_context.py",
+    "tests/module_boundaries.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-tooling.md",
+    "tests/module_context_paths.py",
+    "tests/module_records.py",
+    "tests/module_record_context.py",
+    "docs/modules/context-records.md",
+    "scripts/llm_wiki/breadcrumb_documents.py",
+    "docs/modules/breadcrumb-documents.md",
+    "docs/modules/breadcrumb-documents-context.json",
+    "scripts/breadcrumb_protocol.py",
+    "scripts/schemas/breadcrumb-occurrence-v1.json",
+    "scripts/schemas/breadcrumb-part-v1.json",
+    "scripts/schemas/capture-intent-v2.json",
+    "docs/modules/breadcrumb-protocol.md",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/formats/canonical.py",
+    "scripts/llm_wiki/formats/schema.py",
+    "docs/modules/formats.md",
+    "scripts/llm_wiki/reliability_defaults.py",
+    "docs/modules/reliability-defaults.md",
+    "scripts/bounded_io.py",
+    "docs/modules/bounded-io.md",
+    "scripts/llm_wiki/path_ancestry.py",
+    "docs/modules/path-ancestry.md",
+    "scripts/llm_wiki/windows_native.py",
+    "docs/modules/windows-native.md",
+    "docs/research/2026-09-10-one-page-ceiling-for-every-reader-of-knowledge.md",
+    "docs/research/2026-09-23-one-limit-one-place.md",
+    "docs/research/2026-09-27-one-file-one-bound.md"
+  ],
+  "directories": [
+    "tests/modules/breadcrumb_documents"
+  ],
+  "serialization": "exact-duplicates/v1",
+  "ownership": {
+    "files": [
+      "scripts/llm_wiki/breadcrumb_documents.py",
+      "docs/modules/breadcrumb-documents.md",
+      "docs/modules/breadcrumb-documents-context.json"
+    ],
+    "directories": [
+      "tests/modules/breadcrumb_documents"
+    ]
+  }
+}

@@ -2306,3 +2306,6 @@ Full owner contracts: [classification protocol](modules/classification-protocol.
 Full owner contracts: [classification benchmark metrics](modules/flush-classification-metrics.md).
 
 Full owner contracts: [reliability-defaults](modules/reliability-defaults.md), [breadcrumb-protocol](modules/breadcrumb-protocol.md).
+### Permanent breadcrumb document format
+
+Full owner contract: [breadcrumb-documents](modules/breadcrumb-documents.md).
