@@ -2336,3 +2336,10 @@ relevant records; executable dependencies and whole instructions remain complete
 [Native event reader](modules/native-event-reader.md) owns the existing physical
 native-frame decoder in `event_envelope`; constructor aliases and source-authority
 integration keep their existing behavior and public paths.
+
+### Verified package launch tree
+
+[Verified package launch tree](modules/lsp-launch-package.md) owns the existing
+`lsp_launch_package` implementation in place. Its complete dependency sources and
+security history accompany pure tree tests; process/profile integration remains
+with the session caller. Runtime layout and launch strategies are unchanged.

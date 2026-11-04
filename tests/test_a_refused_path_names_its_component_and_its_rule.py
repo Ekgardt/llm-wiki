@@ -5,9 +5,6 @@ See `docs/research/2026-09-18-lsp-a-refusal-names-its-component-and-its-rule.md`
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import lsp_launch_package
 import lsp_security
 import pytest
 from lsp_security import PathContainmentError
@@ -35,16 +32,3 @@ def test_an_oversized_component_is_still_refused_everywhere() -> None:
         lsp_security._validate_relative_path(
             "src/" + "x" * (lsp_security._MAX_COMPONENT_CHARACTERS + 1)
         )
-
-
-def test_a_launch_tree_that_cannot_be_built_leaves_nothing_behind(
-    tmp_path: Path,
-) -> None:
-    """The root is made before the nested directory that fails; it must not stay."""
-    root = tmp_path / f"{lsp_launch_package.LAUNCH_PREFIX}fixed"
-    unmakeable = Path("x" * 5000) / "server.js"
-
-    with pytest.raises(OSError):
-        lsp_launch_package._created_directories(root, unmakeable)
-
-    assert not root.exists()
