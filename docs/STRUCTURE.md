@@ -2343,3 +2343,9 @@ integration keep their existing behavior and public paths.
 `lsp_launch_package` implementation in place. Its complete dependency sources and
 security history accompany pure tree tests; process/profile integration remains
 with the session caller. Runtime layout and launch strategies are unchanged.
+
+### Language-server install manifest values
+
+[Language-server install manifest values](modules/lsp-install-manifest.md) owns
+the pure builder/validator boundary. Discovery retains filesystem and
+executable qualification; old imports remain direct aliases after the transfer.

@@ -478,3 +478,25 @@ def test_an_answer_without_provenance_keeps_its_shape() -> None:
         dict(data), _StubSession(PYRIGHT_PROFILE, ())
     )
     assert "provenance" not in named
+
+
+@pytest.mark.parametrize('name', [
+    'INSTALL_MANIFEST_NAME', 'ManifestError', 'build_install_manifest',
+    'validate_install_manifest', 'profile_configuration_sha256',
+    'profile_initialization_options_sha256',
+])
+def test_install_manifest_facade_retains_identical_objects(name):
+    from llm_wiki import lsp_install_manifest
+
+    assert getattr(lsp_identity, name) is getattr(lsp_install_manifest, name)
+
+
+def test_install_manifest_public_serialization_paths_are_preserved():
+    import pickle
+
+    for value in (lsp_identity.ManifestError, lsp_identity.build_install_manifest,
+                  lsp_identity.validate_install_manifest,
+                  lsp_identity.profile_initialization_options_sha256,
+                  lsp_identity.profile_configuration_sha256):
+        assert value.__module__ == 'lsp_identity'
+        assert pickle.loads(pickle.dumps(value)) is value

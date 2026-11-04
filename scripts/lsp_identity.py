@@ -29,8 +29,53 @@ import json
 from pathlib import Path
 
 from bounded_io import read_stable_bytes
-from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
-from lsp_server_profile import LanguageServerProfile, is_sha256, thaw_profile_value
+from llm_wiki.formats.canonical import canonical_json_bytes as canonical_json_bytes
+from llm_wiki.formats.canonical import sha256_bytes
+from llm_wiki.lsp_install_manifest import (
+    _MANIFEST_FIELD_CODES as _MANIFEST_FIELD_CODES,
+)
+from llm_wiki.lsp_install_manifest import (
+    _MANIFEST_KEYS as _MANIFEST_KEYS,
+)
+from llm_wiki.lsp_install_manifest import (
+    INSTALL_MANIFEST_NAME as INSTALL_MANIFEST_NAME,
+)
+from llm_wiki.lsp_install_manifest import (
+    ManifestError as ManifestError,
+)
+from llm_wiki.lsp_install_manifest import (
+    _manifest_shape_ok as _manifest_shape_ok,
+)
+from llm_wiki.lsp_install_manifest import (
+    _require_manifest_field as _require_manifest_field,
+)
+from llm_wiki.lsp_install_manifest import (
+    _require_manifest_fields as _require_manifest_fields,
+)
+from llm_wiki.lsp_install_manifest import (
+    _require_manifest_shape as _require_manifest_shape,
+)
+from llm_wiki.lsp_install_manifest import (
+    _runtime_field as _runtime_field,
+)
+from llm_wiki.lsp_install_manifest import (
+    _runtime_relative_text as _runtime_relative_text,
+)
+from llm_wiki.lsp_install_manifest import (
+    build_install_manifest as build_install_manifest,
+)
+from llm_wiki.lsp_install_manifest import (
+    profile_configuration_sha256 as profile_configuration_sha256,
+)
+from llm_wiki.lsp_install_manifest import (
+    profile_initialization_options_sha256 as profile_initialization_options_sha256,
+)
+from llm_wiki.lsp_install_manifest import (
+    validate_install_manifest as validate_install_manifest,
+)
+from lsp_server_profile import LanguageServerProfile
+from lsp_server_profile import is_sha256 as is_sha256
+from lsp_server_profile import thaw_profile_value as thaw_profile_value
 from pyright_profile import (
     MAX_INSTALL_MANIFEST_BYTES,
     MAX_SERVER_BYTES,
@@ -40,8 +85,6 @@ from pyright_profile import (
     _validated_deadline,
 )
 from repository_scope import RepositoryScope
-
-INSTALL_MANIFEST_NAME = "install-manifest.json"
 
 # The repository-side configuration whose bytes take part in a profile's
 # identity. A changed project configuration is a changed session, the same way
@@ -60,148 +103,6 @@ MAX_REPOSITORY_CONFIG_BYTES = 256 * 1024
 # it has ever had. Its checks -- node present, safe, probeable, right major --
 # are not Pyright's, so the codes are re-prefixed rather than duplicated.
 _PYRIGHT_CODE_PREFIX = "pyright_"
-
-_MANIFEST_KEYS = frozenset(
-    {
-        "configuration_sha256",
-        "initialization_options_sha256",
-        "package_integrity",
-        "package_url",
-        "runtime_integrity",
-        "runtime_relative_path",
-        "runtime_sha256",
-        "runtime_url",
-        "schema_version",
-        "server_relative_path",
-        "server_sha256",
-        "version",
-    }
-)
-
-
-class ManifestError(ValueError):
-    """The install receipt does not describe the artifact the profile pins."""
-
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
-        self.code = code
-
-
-def profile_initialization_options_sha256(profile: LanguageServerProfile) -> str:
-    """Digest of the options as the profile declares them, before substitution.
-
-    Deliberately the template rather than the wire form: the wire form carries
-    an absolute managed path for profiles with a runtime option, which would
-    make the digest a property of where the vault happens to live rather than of
-    what this build sends.
-    """
-    return sha256_bytes(
-        canonical_json_bytes(thaw_profile_value(profile.initialization_options))
-    )
-
-
-def profile_configuration_sha256(profile: LanguageServerProfile) -> str:
-    return sha256_bytes(canonical_json_bytes(profile.wire_configuration()))
-
-
-def _runtime_relative_text(profile: LanguageServerProfile) -> str:
-    runtime = profile.runtime_option
-    if runtime is None:
-        return ""
-    return runtime.sibling_relative.as_posix()
-
-
-def _runtime_field(profile: LanguageServerProfile, attribute: str) -> str:
-    runtime = profile.runtime_option
-    if runtime is None:
-        return ""
-    return getattr(runtime, attribute) or ""
-
-
-def build_install_manifest(
-    profile: LanguageServerProfile,
-    *,
-    server_sha256: str,
-    runtime_sha256: str = "",
-) -> dict[str, str]:
-    """The closed canonical receipt the explicit installer writes."""
-    if not is_sha256(server_sha256):
-        raise ValueError("server_sha256 must be a lowercase SHA-256 digest")
-    return {
-        "configuration_sha256": profile_configuration_sha256(profile),
-        "initialization_options_sha256": profile_initialization_options_sha256(profile),
-        "package_integrity": profile.package_integrity,
-        "package_url": profile.package_url,
-        "runtime_integrity": _runtime_field(profile, "package_integrity"),
-        "runtime_relative_path": _runtime_relative_text(profile),
-        "runtime_sha256": runtime_sha256,
-        "runtime_url": _runtime_field(profile, "package_url"),
-        "schema_version": profile.install_manifest_schema,
-        "server_relative_path": profile.server_relative.as_posix(),
-        "server_sha256": server_sha256,
-        "version": profile.version,
-    }
-
-
-def _manifest_shape_ok(value: object) -> bool:
-    """A closed set of string keys, one of which is a real digest."""
-    if not isinstance(value, dict) or set(value) != _MANIFEST_KEYS:
-        return False
-    if any(not isinstance(item, str) for item in value.values()):
-        return False
-    return is_sha256(value["server_sha256"])
-
-
-def _require_manifest_shape(value: object) -> None:
-    if not _manifest_shape_ok(value):
-        raise ManifestError("manifest_malformed")
-
-
-_MANIFEST_FIELD_CODES = (
-    ("schema_version", "manifest_schema_mismatch"),
-    ("version", "version_mismatch"),
-    ("package_url", "package_url_mismatch"),
-    ("package_integrity", "integrity_mismatch"),
-    ("server_relative_path", "server_relative_mismatch"),
-    ("runtime_relative_path", "runtime_relative_mismatch"),
-    ("runtime_url", "runtime_url_mismatch"),
-    ("runtime_integrity", "runtime_integrity_mismatch"),
-    ("configuration_sha256", "configuration_mismatch"),
-    ("initialization_options_sha256", "initialization_options_mismatch"),
-)
-
-
-def _require_manifest_field(
-    profile: LanguageServerProfile,
-    value: dict,
-    expected: dict,
-    field: str,
-    reason: str,
-) -> None:
-    if value[field] != expected[field]:
-        raise ManifestError(profile.degradation_code(reason))
-
-
-def _require_manifest_fields(
-    profile: LanguageServerProfile, value: dict, expected: dict
-) -> None:
-    for field, reason in _MANIFEST_FIELD_CODES:
-        _require_manifest_field(profile, value, expected, field, reason)
-
-
-def validate_install_manifest(
-    profile: LanguageServerProfile, value: object
-) -> dict[str, str]:
-    """Check the receipt against the pins this build carries."""
-    _require_manifest_shape(value)
-    assert isinstance(value, dict)
-    expected = build_install_manifest(
-        profile,
-        server_sha256=value["server_sha256"],
-        runtime_sha256=value["runtime_sha256"],
-    )
-    _require_manifest_fields(profile, value, expected)
-    return {field: value[field] for field in sorted(_MANIFEST_KEYS)}
 
 
 def _read_json_document(path: Path, max_bytes: int, deadline: float | None) -> object:
