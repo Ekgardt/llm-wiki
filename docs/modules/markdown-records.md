@@ -3,7 +3,7 @@
 `llm_wiki.markdown_records` owns seven existing transaction records, ChangeKind,
 fourteen failure classes and the bytes-only change-content guard. It depends on
 [ownership values](ownership-contracts.md), which use [runtime identities](runtime-contracts.md).
-The ownership annotation import is type-only. No SQL, path checks, writer admission,
+The ownership value dependency is imported at runtime for native type resolution. No SQL, path checks, writer admission,
 lease refresh, filesystem mutation, recovery or transaction transition occurs here.
 A record is evidence data, not authorization. Frozen fields do not recursively freeze
 nested mappings. The coordinator retains every authority and validation check.
@@ -19,3 +19,9 @@ Source: [boundary research](../research/2026-11-03-ownership-and-markdown-record
 
 PreconditionChangedError also identifies a target snapshot lost during capture or
 staging. It remains a ValueError subtype; the coordinator decides whether to retry.
+
+## Approved annotation compatibility — 2026-11-04
+
+Native Python 3.14 annotations resolve without loading historical facades. Fields,
+defaults and pickle paths are retained; raw annotation/signature representation
+changes as explicitly approved. Cold-process tests cover ordinary get_type_hints.

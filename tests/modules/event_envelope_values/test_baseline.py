@@ -1,4 +1,5 @@
 """Whole original encoded values and public signature survive extraction."""
+import annotationlib
 import inspect
 import json
 from datetime import datetime
@@ -20,5 +21,5 @@ def test_original_complete_json_and_signature():
         agent='codex', source_event_id='host-1',
     ).to_json() for payload in baseline['input_payloads']]
     assert encoded == baseline['complete_json']
-    assert str(inspect.signature(values.build_event_envelope)) == baseline['signature']
+    assert str(inspect.signature(values.build_event_envelope, annotation_format=annotationlib.Format.STRING)) == baseline['signature']
     assert values.EventEnvelope.__module__ == baseline['class_module']

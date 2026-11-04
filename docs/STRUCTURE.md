@@ -2382,3 +2382,11 @@ maintenance ownership does not certify transport deadlines.
 
 Full owner contract: [selective-forgetting metrics](modules/selective-forgetting-metrics.md).
 The runner retains process, clock and file operations and its existing callable names.
+
+### Approved dependency and annotation compatibility (2026-11-04)
+
+The owner approved [qualified dependency contracts](research/2026-11-04-qualified-contract-rollout-proposal.md)
+and [native Python 3.14 annotations](research/2026-11-04-moved-classes-annotation-compatibility.md).
+Full source remains the default; every contracted boundary must pass the stated
+qualification gates. Native annotations preserve fields and historical pickle
+paths while changing raw annotation/signature representation. No live install is authorized.

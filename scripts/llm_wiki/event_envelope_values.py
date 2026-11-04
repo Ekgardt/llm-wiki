@@ -1,5 +1,4 @@
 """Pure construction, identity and immutable values for native events."""
-from __future__ import annotations
 
 import hashlib
 import json

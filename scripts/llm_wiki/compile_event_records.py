@@ -1,5 +1,4 @@
 """Pure compile event values, canonical bytes and validation; no journal IO."""
-from __future__ import annotations
 
 import hashlib
 import json

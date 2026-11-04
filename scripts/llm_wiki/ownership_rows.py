@@ -1,5 +1,4 @@
 """Fenced ownership rows on a supplied connection; transaction control stays outside."""
-from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass

@@ -1,4 +1,5 @@
 """The existing nominal records retain their values and representation."""
+import annotationlib
 import inspect
 import json
 from dataclasses import FrozenInstanceError, fields, replace
@@ -23,14 +24,16 @@ def _descriptor():
 def test_original_fields_and_signatures_are_unchanged(name):
     kind = getattr(records, name)
     assert [field.name for field in fields(kind)] == ORIGINAL[name]['fields']
-    assert str(inspect.signature(kind)) == ORIGINAL[name]['signature']
+    assert inspect.signature(kind).return_annotation is None
+    signature = inspect.signature(kind, annotation_format=annotationlib.Format.STRING)
+    assert str(signature.replace(return_annotation=None)) == ORIGINAL[name]['signature']
     assert kind.__module__ == 'llm_client'
 
 
 @pytest.mark.parametrize('name', NAMES)
 def test_runtime_annotations_resolve_without_a_client_import(name):
     kind = getattr(records, name)
-    hints = get_type_hints(kind, vars(records))
+    hints = get_type_hints(kind)
     assert set(hints) == {field.name for field in fields(kind)}
 
 

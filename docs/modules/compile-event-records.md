@@ -34,3 +34,9 @@ tests and affected answer/call/controller integration. Compare old JSON/hash/pic
 fixtures and unchanged storage ASTs. The packet retains necessary historical
 context through the exact-record mechanism; it does not summarize away evidence.
 Source: [boundary research](../research/2026-11-03-compile-event-records-boundary.md).
+
+## Approved annotation compatibility — 2026-11-04
+
+Native Python 3.14 annotations resolve without loading historical facades. Fields,
+defaults and pickle paths are retained; raw annotation/signature representation
+changes as explicitly approved. Cold-process tests cover ordinary get_type_hints.

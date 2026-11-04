@@ -1,14 +1,11 @@
 """Public Markdown transaction values and failures, independent of execution."""
-from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
-if TYPE_CHECKING:
-    from llm_wiki.ownership_contracts import OwnerLease
-
+from llm_wiki.ownership_contracts import OwnerLease
 
 ChangeKind = Literal["create", "replace", "delete"]
 
