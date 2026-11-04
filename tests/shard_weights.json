@@ -23,6 +23,8 @@
   "modules/breadcrumb_documents/test_context_budget.py": 0.11,
   "modules/breadcrumb_documents/test_contract.py": 0.31,
   "modules/breadcrumb_documents/test_rendering.py": 0.01,
+  "modules/breadcrumb_history/test_catalog.py": 0.03,
+  "modules/breadcrumb_history/test_context_budget.py": 0.3,
   "modules/breadcrumb_protocol/test_boundary.py": 0.05,
   "modules/breadcrumb_protocol/test_bundle.py": 0.04,
   "modules/breadcrumb_protocol/test_context_budget.py": 0.09,

@@ -49,7 +49,9 @@
     "scripts/breadcrumb_decision.py",
     "tests/test_breadcrumb_decision.py",
     "docs/modules/breadcrumb-decision.md",
-    "docs/modules/breadcrumb-decision-context.json"
+    "docs/modules/breadcrumb-decision-context.json",
+    "docs/modules/breadcrumb-history-records.json",
+    "docs/modules/breadcrumb-history.md"
   ],
   "directories": [
     "tests/modules/breadcrumb_decision"
@@ -65,5 +67,27 @@
     "directories": [
       "tests/modules/breadcrumb_decision"
     ]
-  }
+  },
+  "records": [
+    {
+      "catalog": "docs/modules/breadcrumb-history-records.json",
+      "ids": [
+        "overview",
+        "original-proposal-status",
+        "problem-and-evidence",
+        "proposed-contract",
+        "alternatives-and-tradeoffs",
+        "qualification-before-installation",
+        "current-primary-research",
+        "rechecked-system-and-dependency-boundary",
+        "identity-time-ordering-and-failures",
+        "compatibility-and-limits",
+        "publication-qualification-and-the-boundary-size-correction",
+        "evidence-required-by-each-development-law",
+        "implementation-checkpoint-2026-09-29",
+        "permanent-source-and-deterministic-receipt-checkpoint",
+        "completion-gate-qualification-2026-09-29-before-activation"
+      ]
+    }
+  ]
 }

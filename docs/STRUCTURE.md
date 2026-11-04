@@ -2324,3 +2324,9 @@ Full owner contract: [breadcrumb-reader](modules/breadcrumb-reader.md).
 The pure construction/identity/immutable-value contract belongs to
 [Event envelope values](modules/event-envelope-values.md); physical native-frame
 reading stays in `event_envelope`, with direct compatibility aliases for producers.
+
+### Breadcrumb protocol history
+
+[Breadcrumb history](modules/breadcrumb-history.md) owns the unchanged complete
+research document and its verified section catalog. Consumer packets include exact
+relevant records; executable dependencies and whole instructions remain complete.

@@ -50,7 +50,9 @@
     "docs/modules/breadcrumb-reader.md",
     "docs/modules/breadcrumb-reader-context.json",
     "tests/modules/breadcrumb_documents/__init__.py",
-    "tests/modules/breadcrumb_documents/test_contract.py"
+    "tests/modules/breadcrumb_documents/test_contract.py",
+    "docs/modules/breadcrumb-history-records.json",
+    "docs/modules/breadcrumb-history.md"
   ],
   "directories": [
     "tests/modules/breadcrumb_reader"
@@ -65,5 +67,28 @@
     "directories": [
       "tests/modules/breadcrumb_reader"
     ]
-  }
+  },
+  "records": [
+    {
+      "catalog": "docs/modules/breadcrumb-history-records.json",
+      "ids": [
+        "overview",
+        "original-proposal-status",
+        "problem-and-evidence",
+        "proposed-contract",
+        "alternatives-and-tradeoffs",
+        "qualification-before-installation",
+        "current-primary-research",
+        "rechecked-system-and-dependency-boundary",
+        "identity-time-ordering-and-failures",
+        "compatibility-and-limits",
+        "publication-qualification-and-the-boundary-size-correction",
+        "evidence-required-by-each-development-law",
+        "implementation-checkpoint-2026-09-29",
+        "permanent-source-and-deterministic-receipt-checkpoint",
+        "completion-gate-qualification-2026-09-29-before-activation",
+        "retrieval-preparation-and-shared-read-deadline-2026-09-30"
+      ]
+    }
+  ]
 }
