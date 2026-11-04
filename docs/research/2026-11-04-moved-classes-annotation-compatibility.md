@@ -1,6 +1,6 @@
 # Moved classes retain annotation ownership
 
-Status: user approved on 2026-11-04; implementation and qualification pending. Research date: 2026-11-04.
+Status: user approved and implemented in candidate 5bc08163 on 2026-11-04; native CI pending. Research date: 2026-11-04.
 
 ## Evidence
 
@@ -71,3 +71,23 @@ Private evidence: logs/moved-class-annotations-reproduction.json,
 logs/moved-class-native-annotations-probe.json,
 logs/class-annotations-and-ci-graph.json. Fresh graph: generation-18e4b727fda2f155-75b523bd,
 2439 sources, candidate293339ab; callers and actual sources/tests checked.
+
+
+## Candidate qualification (2026-11-04)
+
+Removed stringified annotations in eight owners and imported the existing OwnerLease
+at runtime. Production function/class ASTs are unchanged; facade aliases and pickle
+identities remain. Immutable fixtures retain original fields, defaults and annotation
+labels; additional assertions require actual native types and ordinary get_type_hints.
+Cold-process regressions fail on old source (16 failures, 5 controls pass) and pass
+after repair without importing historical facades.
+
+194 focused checks, 63 weighed checks and 3700 expanded checks passed (3 skips and
+one pre-existing warning in the expanded run). Additional transaction, ownership,
+SQLite and event consumer checks: 280 passed, 5 platform skips. The first consumer
+command named a nonexistent test file and ran no tests; the corrected selection
+produced the result above. All 169 measured functions satisfy CCN/if/depth limits;
+Ruff clean. All159 complete packets reconstructed exact paths and bytes, largest
+99806tokens. This approval report is currently outside those packets. No live
+installation or full-current/native CI success is claimed. Evidence: logs/native-
+annotations-{red,consumers,bundles}.txt and approved-contracts-annotations-graph.json.
