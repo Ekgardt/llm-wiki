@@ -36,6 +36,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import process_liveness  # noqa: E402
+from llm_wiki.runtime_publication import write_all  # noqa: E402
 from memory_state import (  # noqa: E402
     ROOT,
     STATE_ROOT,
@@ -182,7 +183,7 @@ def _exclusive_write_lock(payload: bytes) -> bool:
     except OSError:
         return False
     try:
-        os.write(fd, payload)
+        write_all(fd, payload)
     finally:
         os.close(fd)
     return True

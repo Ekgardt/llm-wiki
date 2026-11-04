@@ -1266,6 +1266,7 @@
   "test_live_evidence_reuses_only_a_content_verified_parse.py": 0.04,
   "test_llm_descriptors.py": 0.11,
   "test_lock_probe_preserves_corpus_root.py": 0.08,
+  "test_lock_writes_are_complete.py": 2.61,
   "test_locomo_becomes_a_question_this_stand_can_read.py": 0.01,
   "test_longmemeval_benchmark.py": 0.02,
   "test_longmemeval_coverage.py": 0.01,

@@ -45,7 +45,7 @@ from llm_wiki.daily_log_selection import (
 )
 from llm_wiki.formats.canonical import sha256_bytes
 from llm_wiki.reliability_defaults import MAX_CAPTURE_INTENT_BYTES as MAX_CAPTURE_INTENT_BYTES
-from llm_wiki.runtime_publication import durable_publish_file
+from llm_wiki.runtime_publication import durable_publish_file, write_all
 from llm_wiki.runtime_sync import fsync_directory
 from llm_wiki.state_json_values import (
     _decoded_state,
@@ -226,7 +226,11 @@ def _claim_lock(payload: bytes) -> int | None:
         fd = os.open(str(LOCK_FILE), _LOCK_OPEN_FLAGS)
     except FileExistsError:
         return None
-    os.write(fd, payload)
+    try:
+        write_all(fd, payload)
+    except BaseException:
+        os.close(fd)
+        raise
     return fd
 
 

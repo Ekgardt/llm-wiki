@@ -303,6 +303,10 @@ def _write_all(descriptor: int, data: bytes) -> None:
         view = view[written:]
 
 
+# Public descriptor API; retain the historical private name and function identity.
+write_all = _write_all
+
+
 def _write_staged_bytes(staged: Path, data: bytes, mode: int) -> None:
     descriptor = os.open(
         staged,

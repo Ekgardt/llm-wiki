@@ -10,6 +10,10 @@ def _hash(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def test_public_descriptor_writer_is_the_existing_implementation():
+    assert publication.write_all is publication._write_all
+
+
 def test_create_duplicate_and_replacement_keep_identity_and_bytes(tmp_path):
     path = tmp_path / 'record'
     first = publication.publish_runtime_file(path, b'first', state_root=tmp_path, create_only=True)

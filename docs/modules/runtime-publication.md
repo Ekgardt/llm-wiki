@@ -37,3 +37,23 @@ adding a forwarding layer. Research: [Python import bindings](https://docs.pytho
 Preserving the existing local bindings takes precedence over switching to module-qualified
 call sites. Regression verifies fresh-process import, object identity and a real
 atomic write; full consumer tests retain lock, error and permission checks.
+
+## Complete lock writes — 2026-11-04
+
+`write_all` is the identical existing `_write_all` function, now a public entry
+point for blocking descriptor consumers. It retries partial writes and refuses
+zero progress. State, compile fallback, nightly marker, claims token/preparation
+and install lock preparation share this implementation. State creation closes
+its descriptor on write failure; other owners retain their existing finally
+blocks. Partial failed files remain subject to existing recovery, with no unsafe
+unlink of a replacement file. This guarantees complete accepted bytes on return,
+not fsync or atomic publication of the lock. Existing deadlines, flags and formats
+are unchanged. Other deadline-aware transport loops keep their own responsibilities.
+
+Evidence and alternatives: [Python raw writes](https://docs.python.org/3.14/library/os.html#os.write),
+[Linux write semantics](https://man7.org/linux/man-pages/man2/write.2.html),
+[Microsoft WriteFile](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-writefile).
+Buffered IO could also retry, but would add another mechanism where a checked
+descriptor writer already exists. Generic integration tests inject short, zero
+and failing writes, verify descriptor closure and native file-size-limit refusal.
+The historical helper and its implementation remain unchanged.

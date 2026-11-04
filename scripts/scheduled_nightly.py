@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import maybe_compile  # noqa: E402
 import process_liveness  # noqa: E402
 from doctor import run_generation_maintenance  # noqa: E402
+from llm_wiki.runtime_publication import write_all  # noqa: E402
 from maintenance_helpers import prune_maintenance_output, trim_scheduler_logs  # noqa: E402
 from maintenance_helpers import run_step as _run_step  # noqa: E402
 from maintenance_helpers import wait_for_compile_idle as _wait_for_compile_idle
@@ -922,7 +923,7 @@ def _write_marker(marker: Path) -> bool:
     except FileExistsError:
         return False
     try:
-        os.write(descriptor, marker_payload())
+        write_all(descriptor, marker_payload())
     finally:
         os.close(descriptor)
     return True

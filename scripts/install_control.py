@@ -29,6 +29,7 @@ from pathlib import Path, PurePosixPath
 
 from llm_wiki.formats.canonical import canonical_json_bytes
 from llm_wiki.formats.schema import validate_schema
+from llm_wiki.runtime_publication import write_all
 from reliable_memory import fsync_directory
 
 # One install-control record (`run/install/*.json`); a session record allows 8 MiB.
@@ -309,7 +310,7 @@ def _install_lock(path: Path, timeout: float) -> Iterator[None]:
     acquired = False
     try:
         if os.fstat(descriptor).st_size == 0:
-            os.write(descriptor, b"0")
+            write_all(descriptor, b"0")
             os.fsync(descriptor)
         os.chmod(path, 0o600)
         _acquire_lock(descriptor, timeout)

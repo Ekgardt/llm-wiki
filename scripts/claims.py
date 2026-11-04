@@ -29,6 +29,7 @@ from evidence_resolver import (
 from iso_time import block_instant, names_block
 from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
 from llm_wiki.formats.schema import validate_schema, validate_schema_object
+from llm_wiki.runtime_publication import write_all
 from reliable_memory import open_operational_db
 from settings import raise_hint, setting_value
 
@@ -1564,7 +1565,7 @@ def _open_lock_file(path: Path) -> tuple[int, bool]:
 
 def _prepare_lock_file(path: Path, descriptor: int, created: bool) -> None:
     if os.fstat(descriptor).st_size == 0:
-        os.write(descriptor, b"0")
+        write_all(descriptor, b"0")
     if created:
         _restrict_owner_only(path, 0o600)
         return
@@ -1611,7 +1612,7 @@ def _unlock_region(descriptor: int) -> None:
 def _write_lock_token(descriptor: int) -> None:
     token = f"{os.getpid()}:{threading.get_ident()}".encode()
     os.lseek(descriptor, 0, os.SEEK_SET)
-    os.write(descriptor, token)
+    write_all(descriptor, token)
     os.ftruncate(descriptor, len(token))
 
 
