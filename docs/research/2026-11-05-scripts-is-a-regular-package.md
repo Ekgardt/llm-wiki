@@ -65,9 +65,42 @@ findings are older than this change and are not fixed by it.
   "Source file found twice under different module names". Closing it means choosing one import
   style for `scripts/`, which is a separate and much larger change.
 
+## A second stop this file does not clear
+
+The outside check still ends without a verdict after this change, with exit code 2 at a different
+place: `numpy/__init__.pyi:737`, "Type statement is only supported in Python 3.12 and greater". The
+lock installs numpy 2.5.1 on Python 3.12 and later, and its type stubs use that syntax, so a mypy
+that reads them for an older target stops.
+
+Measured with numpy 2.5.1 installed, `--ignore-missing-imports scripts`:
+
+| mypy | Settings | Result |
+|---|---|---|
+| 2.2.0, 2.0.0, 1.19.1 | `--python-version 3.10` | Exit 2 on the numpy stub |
+| 2.4.1 | Any target | Does not stop on the numpy stub |
+| 2.2.0 | `--python-version 3.10`, `[mypy-numpy.*] follow_imports = skip` | Exit 2 on the numpy stub |
+| 2.2.0 | `--python-version 3.10`, `python_version = 3.12` in the configuration | Exit 2 on the numpy stub: the flag wins |
+| 2.2.0 | No flag, `python_version = 3.12` in the configuration | Exit 1, 1 674 findings in 101 files |
+| 2.2.0 | `--python-version 3.10`, without this file | Exit 2 on `code_graph.py`, the original stop |
+
+The exit 1 and exit 2 figures in "Alternatives" above were measured on mypy 2.4.1 without numpy, so
+they did not see this stop.
+
+A trial commit put `mypy.ini` with `python_version = 3.12` in the merged tree of the outside check.
+It stopped on the same numpy line. So that check either passes its own target or does not read this
+repository's configuration; which one, its mypy version and its command are not visible from here.
+The trial was removed.
+
+No change here fits: raising `requires-python` drops supported Python versions, and holding numpy
+back for every Python changes what the product runs on. Both would bend the product around one
+check's setup. Using a mypy that does not stop here, or a target of 3.12 or later, is a change to
+that check. That is a conclusion from the measurements above, and the owner of the check has to
+confirm it.
+
 ## Sources
 
 - mypy 2.4.1 source, `mypy/find_sources.py`, read from the installed package.
+- numpy 2.5.1 stubs, `numpy/__init__.pyi`, read from the installed wheel.
 - CPython 3.12 source, `importlib/_bootstrap_external.py`, read from the installed interpreter.
 - [PEP 420](https://peps.python.org/pep-0420/), the search order, read through search results
   and [a mirror](https://peps-aaturner.readthedocs.io/pep-0420); the network policy of the
