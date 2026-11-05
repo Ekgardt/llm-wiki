@@ -22,12 +22,22 @@ this stage stops the whole run, so no other finding can be reported.
 | `python -m scripts.x` | Not used by the installers or CI | Would keep working |
 | Packaging | `uv.lock` has `source = { virtual = "." }`; `pyproject.toml` has no build system | Nothing is built, so nothing new is installed |
 
-One behaviour does change. A namespace package is only a fallback: Python records the directory
-and keeps scanning `sys.path`, and a regular package found anywhere later wins (PEP 420; CPython
-`PathFinder._get_spec`). So today any other regular package named `scripts` later on the path
-takes the name, and `import scripts.code_graph` fails with `ModuleNotFoundError`. With the file,
-the first `scripts` on the path wins. That is the only runtime difference, and
-`tests/test_scripts_is_a_regular_package.py` fails without the file because of it.
+The name `scripts` itself resolves differently. A namespace package is only a fallback: Python
+records the directory and keeps scanning `sys.path`, and a regular package found anywhere later
+wins (PEP 420; CPython `PathFinder._get_spec`). With the file, the first `scripts` on the path
+wins. That has two effects:
+
+- Another regular package named `scripts` later on the path no longer takes the name. Before, it
+  made `import scripts.code_graph` fail with `ModuleNotFoundError`.
+  `tests/test_scripts_is_a_regular_package.py` fails without the file because of this.
+- Another `scripts` directory without `__init__.py` later on the path no longer adds submodules
+  to the name. Nothing in this repository relies on that merge.
+
+The live code graph's Jedi resolution was measured because Jedi 0.20.0 skips parent directories
+holding an `__init__.py` when it builds a search path (`Project._get_sys_path`). Real Jedi, with the repository root as
+the workspace and through `code_graph._inferred_targets`, resolved the same targets with and
+without the file for all 111 calls through plain sibling imports in the 70 smallest modules of
+`scripts/` (110 resolved in both runs).
 
 ## Alternatives, measured on this repository
 
@@ -46,8 +56,14 @@ findings are older than this change and are not fixed by it.
   `import_resolver.py`, not measured).
 - `mypy .` still stops with exit code 2 on the deliberately broken fixture
   `tests/fixtures/code_kernel/python/pkg/broken.py`. That is a separate matter from this file.
-- `import value_references` in the fallback branches names a module mypy cannot resolve from the
-  repository root. It counts as an ordinary finding and does not stop the run.
+- mypy finishes, but it does not see across most of `scripts/`. Modules there import each other
+  with plain `import memory_state`, and from the repository root mypy cannot resolve those names.
+  Without flags each one is an `import-not-found` finding (772 of the 799 measured name a module
+  of `scripts/`); with `--ignore-missing-imports` it becomes `Any`. A call through such an import is therefore not checked, so a broken signature
+  in another module of `scripts/` may report nothing.
+- `MYPYPATH=scripts` does not close that gap on top of this file: mypy stops with exit code 2,
+  "Source file found twice under different module names". Closing it means choosing one import
+  style for `scripts/`, which is a separate and much larger change.
 
 ## Sources
 

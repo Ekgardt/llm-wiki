@@ -12,7 +12,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+from tests.slow_machine import SHORT_TIMEOUT
+
+ROOT =Path(__file__).resolve().parents[1]
 
 _REPORT_WHERE_THE_RELATIVE_IMPORT_LANDED = """
 import sys
@@ -32,7 +34,7 @@ def test_a_relative_import_lands_in_this_checkout_beside_another_scripts_package
         cwd=ROOT,
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=SHORT_TIMEOUT,
     )
 
     assert result.returncode == 0, result.stderr
