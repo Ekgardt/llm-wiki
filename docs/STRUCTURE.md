@@ -552,6 +552,9 @@ or nonzero active state remains fail-closed.
   lifecycle boundary), `mcp_server.py` (12 task-shaped tools; run as a program it is
   `mcp_supervisor.py`, which serves the tools from a child it restarts, with the client's
   initialisation replayed, when the code under `scripts/` changes), and `doctor.py`.
+  An empty `__init__.py` makes it a regular package for `import scripts.x` and static
+  analysis; its programs still run by path and nothing is packaged
+  (`docs/research/2026-11-05-scripts-is-a-regular-package.md`).
 - `tests/` — full regression suite. Hermetic via `conftest.py` (pins
   `LLM_WIKI_ROOT` to checkout, redirects `LLM_WIKI_STATE_ROOT` to a temp
   dir, defaults `MEMORY_LLM_PROVIDER=fake`).
