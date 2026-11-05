@@ -97,6 +97,32 @@ check's setup. Using a mypy that does not stop here, or a target of 3.12 or late
 that check. That is a conclusion from the measurements above, and the owner of the check has to
 confirm it.
 
+## A test that depended on the speed of the disk
+
+The first full run of the outside check on this branch blamed
+`tests/test_compile_cache.py::test_fd_read_rejects_same_inode_change_between_lstat_and_open`, which
+this change does not touch. Its log does not show that failure's details, so the cause below is
+the one reproduced here, not one read from that run.
+
+The test rewrites a cache entry in place at the same size and expects the read to notice. The read
+compares device, inode, size and mtime, so only the mtime can show this change, and two writes
+inside one clock tick share an mtime. On disk the `fsync` in between outlasts the tick and hides
+this. Repeated in one process, 3 000 times each:
+
+| Storage | Failures |
+|---|---|
+| ext4 | 0 |
+| ext4, `fsync` removed | 2 545 |
+| `/dev/shm` | 2 688 |
+
+Forcing an equal mtime fails the same way with and without `scripts/__init__.py`. A single run in a
+fresh pytest process on `/dev/shm` passed, so the rate depends on how warm the process is.
+
+The test now moves the mtime on after its rewrite, and still expects the same `PermissionError`: 0
+failures in 3 000 on `/dev/shm`, and it fails if the mtime is removed from the comparison. The
+code's limit stays and is now stated: a same-size rewrite inside one tick is not seen by this
+comparison, and ctime does not help (measured: 1 373 of 2 000 rewrites kept both stamps).
+
 ## Sources
 
 - mypy 2.4.1 source, `mypy/find_sources.py`, read from the installed package.
