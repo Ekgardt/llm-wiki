@@ -665,6 +665,7 @@
   "test_the_adoption_pass_says_what_it_skipped.py": 16.11,
   "test_the_advice_reads_the_decisions.py": 0.08,
   "test_the_answer_path_reads_no_benchmark_label.py": 5.65,
+  "test_the_audit_reads_every_locked_pin.py": 0.35,
   "test_the_busy_answer_is_not_a_timeout.py": 0.24,
   "test_the_calendar_does_the_arithmetic.py": 0.07,
   "test_the_checkpoint_keys_are_indexed.py": 0.86,
