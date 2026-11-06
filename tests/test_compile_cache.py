@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 import os
 import stat
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
+import bounded_io
 import compile_cache
 import llm_client
 import pytest
@@ -491,11 +494,23 @@ def test_get_rejects_entry_replaced_between_lstat_and_open(tmp_path, monkeypatch
     assert validator_calls == []
 
 
-def _rewrite_where_the_clock_can_see_it(path: Path, content: bytes) -> None:
-    """Two writes inside one clock tick share an mtime, which no file metadata can tell apart."""
-    before = path.stat()
-    path.write_bytes(content)
-    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000))
+def _rewrite_when_opened(
+    monkeypatch: pytest.MonkeyPatch, path: Path, rewrite: Callable[[], object]
+) -> None:
+    """Run `rewrite` once, just before the reader opens `path`."""
+    real_open = os.open
+    rewritten = False
+
+    def racing_open(
+        target: str | os.PathLike[str], flags: int, *args: Any, **kwargs: Any
+    ) -> int:
+        nonlocal rewritten
+        if Path(target) == path and not rewritten:
+            rewritten = True
+            rewrite()
+        return real_open(target, flags, *args, **kwargs)
+
+    monkeypatch.setattr(compile_cache.os, "open", racing_open)
 
 
 def test_fd_read_rejects_same_inode_change_between_lstat_and_open(tmp_path, monkeypatch):
@@ -504,20 +519,71 @@ def test_fd_read_rejects_same_inode_change_between_lstat_and_open(tmp_path, monk
     original = path.read_bytes()
     changed = original.replace(b'"schema_version":1', b'"schema_version":2')
     assert len(changed) == len(original)
-    real_open = compile_cache.os.open
-    modified = False
-
-    def racing_open(target, flags, *args, **kwargs):
-        nonlocal modified
-        if Path(target) == path and not modified:
-            modified = True
-            _rewrite_where_the_clock_can_see_it(path, changed)
-        return real_open(target, flags, *args, **kwargs)
-
-    monkeypatch.setattr(compile_cache.os, "open", racing_open)
+    _rewrite_when_opened(monkeypatch, path, lambda: path.write_bytes(changed))
 
     with pytest.raises(PermissionError, match="changed before open"):
         compile_cache._read_cache_entry(path)
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="Windows os.stat has no change time; st_ctime is the creation time"
+)
+def test_fd_read_rejects_same_size_rewrite_that_keeps_its_mtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Equal size and mtime on purpose: only the change time can tell the rewrite."""
+    cache = CompileCache(tmp_path)
+    path = cache.put(_action(), _plan())
+    original = path.read_bytes()
+    stamps = path.stat()
+    changed = original.replace(b'"schema_version":1', b'"schema_version":2')
+
+    def rewrite_keeping_size_and_mtime() -> None:
+        path.write_bytes(changed)
+        os.utime(path, ns=(stamps.st_atime_ns, stamps.st_mtime_ns))
+        assert (path.stat().st_size, path.stat().st_mtime_ns) == (
+            stamps.st_size,
+            stamps.st_mtime_ns,
+        )
+
+    _rewrite_when_opened(monkeypatch, path, rewrite_keeping_size_and_mtime)
+
+    with pytest.raises(PermissionError, match="changed before open"):
+        compile_cache._read_cache_entry(path)
+
+
+def test_entry_stamped_in_the_future_is_a_hit(tmp_path: Path) -> None:
+    """No write before the clock reaches that tick can carry such a stamp."""
+    cache = CompileCache(tmp_path)
+    action = _action()
+    path = cache.put(action, _plan())
+    future_ns = path.stat().st_mtime_ns + 60 * 1_000_000_000
+    os.utime(path, ns=(future_ns, future_ns))
+
+    assert cache.get(action, _accept_application) == _plan()
+
+
+def test_entry_still_being_written_after_the_budget_is_a_miss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = CompileCache(tmp_path)
+    action = _action()
+    path = cache.put(action, _plan())
+    now = [bounded_io.change_stamp_ns(path.lstat())]
+    waited = [0.0]
+
+    def rewrite_while_waiting(seconds: float) -> None:
+        waited[0] += seconds
+        path.write_bytes(path.read_bytes() + b" ")
+        now[0] = bounded_io.change_stamp_ns(path.lstat())
+
+    monkeypatch.setattr(bounded_io.time, "time_ns", lambda: now[0])
+    monkeypatch.setattr(bounded_io.time, "monotonic", lambda: waited[0])
+    monkeypatch.setattr(bounded_io.time, "sleep", rewrite_while_waiting)
+
+    with pytest.raises(bounded_io.SourceChangedDuringRead, match="still being written"):
+        compile_cache._read_cache_entry(path)
+    assert cache.get(action, _accept_application) is None
 
 
 def test_get_rejects_symlinked_entry_without_running_validator(tmp_path):

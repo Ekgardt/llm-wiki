@@ -19,6 +19,20 @@ MAX_KNOWLEDGE_PAGE_BYTES = 8 * 1024 * 1024
 # five names before 2026-09-23; see
 # `docs/research/2026-09-23-one-limit-one-place.md`.
 IO_CHUNK_BYTES = 64 * 1024
+# How old a file's change stamp must be before an unchanged stat proves the
+# file unchanged. Operating systems stamp files from a coarse clock: Linux
+# advances it once per jiffy (10 ms at the lowest supported CONFIG_HZ of 100),
+# Windows once per system timer tick (15.6 ms by default). A second write in
+# the same tick carries the same stamp, so an observation is trusted only once
+# the stamp is older than a tick (git's racily-clean rule). Research:
+# `docs/research/2026-11-06-a-rewrite-in-the-same-tick-is-a-change.md`.
+TIMESTAMP_SETTLE_NS = 20_000_000
+# How long a reader keeps looking at a file that is still being written before
+# it refuses it: fifty settle windows, enough for a burst of writes to stop, and
+# well inside the 60-second default timeout of an agent hook. A caller's earlier
+# deadline ends the wait sooner; a later one leaves the rest of its time to the
+# caller's other work.
+SETTLE_BUDGET_NS = 1_000_000_000
 
 
 class SourceChangedDuringRead(PermissionError):
@@ -115,17 +129,85 @@ def _require_regular_file(path: Path, before: os.stat_result, label: str) -> Non
         raise PermissionError(f"{label} must be a regular non-symlink file")
 
 
-def _file_identity(info: os.stat_result) -> tuple[int, int, int, int]:
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+FileIdentity = tuple[int, int, int, int, int]
+
+
+def file_identity(info: os.stat_result) -> FileIdentity:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, _change_time_ns(info))
+
+
+def change_stamp_ns(info: os.stat_result) -> int:
+    """The stamp every write moves: ctime on POSIX, which `utime` cannot set.
+
+    Windows reports the creation time as ctime, so mtime is its write stamp.
+    """
+    if os.name == "nt":
+        return info.st_mtime_ns
+    return info.st_ctime_ns
+
+
+def _change_time_ns(info: os.stat_result) -> int:
+    if os.name == "nt":
+        return 0
+    return info.st_ctime_ns
+
+
+def settled_lstat(
+    path: Path, *, label: str = "file", deadline: float | None = None
+) -> os.stat_result:
+    """An lstat whose change stamp no write from now on can carry.
+
+    A stamp younger than one clock tick is looked at again until its tick has
+    passed; a write meanwhile gives a newer stamp, which is waited out the same
+    way. `SETTLE_BUDGET_NS`, or an earlier caller deadline, ends a file that never
+    stops being written. Callers that check the path's ancestors do so after this
+    returns, so the wait cannot separate that check from the stat. Research:
+    `docs/research/2026-11-06-a-rewrite-in-the-same-tick-is-a-change.md`.
+    """
+    until, give_up = _settle_limit(deadline, label)
+    observed = path.lstat()
+    wait_ns = _settle_wait_ns(observed)
+    while wait_ns:
+        _sleep_until_settled(wait_ns, until, give_up)
+        observed = path.lstat()
+        wait_ns = _settle_wait_ns(observed)
+    return observed
+
+
+def _settle_limit(deadline: float | None, label: str) -> tuple[float, OSError]:
+    """The earlier of the settle budget and the caller's deadline, and its refusal."""
+    budget_ends = time.monotonic() + SETTLE_BUDGET_NS / 1_000_000_000
+    if deadline is None or budget_ends <= deadline:
+        return budget_ends, SourceChangedDuringRead(f"{label} is still being written")
+    return deadline, TimeoutError(f"{label} read deadline expired")
+
+
+def _settle_wait_ns(info: os.stat_result) -> int:
+    """How long until no write can share the stamp; none for one over a tick ahead.
+
+    A write is stamped with the current tick, so it cannot carry a stamp still
+    more than a tick in the future (a clock stepped back, a synced mtime).
+    """
+    ahead_ns = change_stamp_ns(info) - time.time_ns()
+    if ahead_ns > TIMESTAMP_SETTLE_NS:
+        return 0
+    return max(ahead_ns + TIMESTAMP_SETTLE_NS, 0)
+
+
+def _sleep_until_settled(wait_ns: int, until: float, give_up: OSError) -> None:
+    wait_seconds = wait_ns / 1_000_000_000
+    if time.monotonic() + wait_seconds >= until:
+        raise give_up
+    time.sleep(wait_seconds)
 
 
 def _require_opened_identity(
-    descriptor: int, identity: tuple[int, int, int, int], label: str
+    descriptor: int, identity: FileIdentity, label: str
 ) -> None:
     opened = os.fstat(descriptor)
     if not stat.S_ISREG(opened.st_mode):
         raise PermissionError(f"{label} changed before open")
-    if identity != _file_identity(opened):
+    if identity != file_identity(opened):
         raise SourceChangedDuringRead(f"{label} changed before open")
 
 
@@ -151,17 +233,17 @@ def _read_bounded_chunks(
 def _require_unchanged_after_read(
     descriptor: int,
     path: Path,
-    identity: tuple[int, int, int, int],
+    identity: FileIdentity,
     label: str,
 ) -> None:
     after = os.fstat(descriptor)
-    if identity != _file_identity(after):
+    if identity != file_identity(after):
         raise SourceChangedDuringRead(f"{label} changed during read")
     _require_same_file_at_path(path, identity, label)
 
 
 def _require_same_file_at_path(
-    path: Path, identity: tuple[int, int, int, int], label: str
+    path: Path, identity: FileIdentity, label: str
 ) -> None:
     current = path.lstat()
     if path.is_symlink():
@@ -173,7 +255,7 @@ def _require_same_file_at_path(
 def _read_open_descriptor(
     descriptor: int,
     path: Path,
-    identity: tuple[int, int, int, int],
+    identity: FileIdentity,
     max_bytes: int,
     label: str,
     deadline: float | None,
@@ -197,9 +279,9 @@ def read_stable_bytes(
     _require_byte_limit(max_bytes)
     deadline = _validated_deadline(deadline)
     path = Path(path)
-    _require_safe_ancestors(path, label, deadline)
     _check_deadline(deadline, label)
-    before = path.lstat()
+    before = settled_lstat(path, label=label, deadline=deadline)
+    _require_safe_ancestors(path, label, deadline)
     _require_regular_file(path, before, label)
     if before.st_size > max_bytes:
         raise ValueError(f"{label} exceeds {max_bytes} bytes")
@@ -208,7 +290,7 @@ def read_stable_bytes(
     descriptor = os.open(path, flags)
     try:
         return _read_open_descriptor(
-            descriptor, path, _file_identity(before), max_bytes, label, deadline
+            descriptor, path, file_identity(before), max_bytes, label, deadline
         )
     finally:
         os.close(descriptor)

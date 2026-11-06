@@ -165,3 +165,33 @@ def test_the_observation_store_stays_bounded(tmp_path):
         search_memory._sealed_file(path)
 
     assert len(search_memory._seal_observations) <= search_memory._SEAL_OBSERVATION_LIMIT
+
+
+@pytest.mark.skipif(
+    not CACHE_IS_TRUSTWORTHY,
+    reason="no change time on this host, so the cache is inert by design",
+)
+@pytest.mark.parametrize(
+    ("age_ns", "hashed"),
+    [
+        (search_memory.TIMESTAMP_SETTLE_NS, 1),
+        (search_memory.TIMESTAMP_SETTLE_NS - 1, 2),
+    ],
+    ids=["a-window-old-is-remembered", "younger-than-a-window-is-not"],
+)
+def test_an_observation_is_kept_only_once_its_change_stamp_is_a_window_old(
+    tmp_path: Path,
+    hashes: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    age_ns: int,
+    hashed: int,
+) -> None:
+    path = tmp_path / "search.sqlite3"
+    path.write_bytes(b"artifact-bytes")
+    stamped_ns = search_memory.change_stamp_ns(path.lstat())
+    monkeypatch.setattr(search_memory.time, "time_ns", lambda: stamped_ns + age_ns)
+
+    search_memory._sealed_file(path)
+    search_memory._sealed_file(path)
+
+    assert len(hashes) == hashed

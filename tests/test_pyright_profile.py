@@ -412,6 +412,7 @@ def _stat_with(
         st_ino=value.st_ino,
         st_mode=value.st_mode if mode is None else mode,
         st_mtime_ns=value.st_mtime_ns,
+        st_ctime_ns=value.st_ctime_ns,
         st_size=value.st_size,
         st_file_attributes=(
             getattr(value, "st_file_attributes", 0)
