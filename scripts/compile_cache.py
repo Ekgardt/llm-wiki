@@ -482,7 +482,7 @@ def _settled_lstat(path: Path) -> os.stat_result:
 
 def _settle_wait_ns(info: os.stat_result) -> int:
     stamped_ns = max(info.st_mtime_ns, info.st_ctime_ns)
-    wait_ns = stamped_ns + TIMESTAMP_SETTLE_NS - time.time_ns()
+    wait_ns: int = stamped_ns + TIMESTAMP_SETTLE_NS - time.time_ns()
     if wait_ns > TIMESTAMP_SETTLE_NS:
         raise PermissionError("cache entry is stamped in the future")
     return max(wait_ns, 0)

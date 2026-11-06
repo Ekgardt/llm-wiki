@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import os
 import stat
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import compile_cache
 import llm_client
@@ -491,23 +493,32 @@ def test_get_rejects_entry_replaced_between_lstat_and_open(tmp_path, monkeypatch
     assert validator_calls == []
 
 
+def _rewrite_when_opened(
+    monkeypatch: pytest.MonkeyPatch, path: Path, rewrite: Callable[[], object]
+) -> None:
+    """Run `rewrite` once, just before the reader opens `path`."""
+    real_open = os.open
+    rewritten = False
+
+    def racing_open(
+        target: str | os.PathLike[str], flags: int, *args: Any, **kwargs: Any
+    ) -> int:
+        nonlocal rewritten
+        if Path(target) == path and not rewritten:
+            rewritten = True
+            rewrite()
+        return real_open(target, flags, *args, **kwargs)
+
+    monkeypatch.setattr(compile_cache.os, "open", racing_open)
+
+
 def test_fd_read_rejects_same_inode_change_between_lstat_and_open(tmp_path, monkeypatch):
     cache = CompileCache(tmp_path)
     path = cache.put(_action(), _plan())
     original = path.read_bytes()
     changed = original.replace(b'"schema_version":1', b'"schema_version":2')
     assert len(changed) == len(original)
-    real_open = compile_cache.os.open
-    modified = False
-
-    def racing_open(target, flags, *args, **kwargs):
-        nonlocal modified
-        if Path(target) == path and not modified:
-            modified = True
-            path.write_bytes(changed)
-        return real_open(target, flags, *args, **kwargs)
-
-    monkeypatch.setattr(compile_cache.os, "open", racing_open)
+    _rewrite_when_opened(monkeypatch, path, lambda: path.write_bytes(changed))
 
     with pytest.raises(PermissionError, match="changed before open"):
         compile_cache._read_cache_entry(path)
@@ -516,35 +527,31 @@ def test_fd_read_rejects_same_inode_change_between_lstat_and_open(tmp_path, monk
 @pytest.mark.skipif(
     os.name == "nt", reason="Windows os.stat has no change time; st_ctime is the creation time"
 )
-def test_fd_read_rejects_same_size_rewrite_that_keeps_its_mtime(tmp_path, monkeypatch):
+def test_fd_read_rejects_same_size_rewrite_that_keeps_its_mtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Equal size and mtime on purpose: only the change time can tell the rewrite."""
     cache = CompileCache(tmp_path)
     path = cache.put(_action(), _plan())
     original = path.read_bytes()
     stamps = path.stat()
     changed = original.replace(b'"schema_version":1', b'"schema_version":2')
-    real_open = compile_cache.os.open
-    modified = False
 
-    def racing_open(target, flags, *args, **kwargs):
-        nonlocal modified
-        if Path(target) == path and not modified:
-            modified = True
-            path.write_bytes(changed)
-            os.utime(path, ns=(stamps.st_atime_ns, stamps.st_mtime_ns))
-            assert (path.stat().st_size, path.stat().st_mtime_ns) == (
-                stamps.st_size,
-                stamps.st_mtime_ns,
-            )
-        return real_open(target, flags, *args, **kwargs)
+    def rewrite_keeping_size_and_mtime() -> None:
+        path.write_bytes(changed)
+        os.utime(path, ns=(stamps.st_atime_ns, stamps.st_mtime_ns))
+        assert (path.stat().st_size, path.stat().st_mtime_ns) == (
+            stamps.st_size,
+            stamps.st_mtime_ns,
+        )
 
-    monkeypatch.setattr(compile_cache.os, "open", racing_open)
+    _rewrite_when_opened(monkeypatch, path, rewrite_keeping_size_and_mtime)
 
     with pytest.raises(PermissionError, match="changed before open"):
         compile_cache._read_cache_entry(path)
 
 
-def test_entry_stamped_in_the_future_is_a_miss(tmp_path):
+def test_entry_stamped_in_the_future_is_a_miss(tmp_path: Path) -> None:
     cache = CompileCache(tmp_path)
     action = _action()
     path = cache.put(action, _plan())
@@ -556,7 +563,9 @@ def test_entry_stamped_in_the_future_is_a_miss(tmp_path):
     assert cache.get(action, _accept_application) is None
 
 
-def test_entry_still_fresh_after_the_settle_wait_is_being_written(tmp_path, monkeypatch):
+def test_entry_still_fresh_after_the_settle_wait_is_being_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A writer that keeps stamping the entry outlasts one wait; the read refuses."""
     cache = CompileCache(tmp_path)
     action = _action()
