@@ -128,3 +128,9 @@ constant.
 - With the fix, the whole `tests/test_compile_cache.py` passed 100 of 100 runs on
   tmpfs and 30 of 30 on ext4 on disk (Linux 6.8). macOS and Windows were not run
   in this session; CI runs them.
+- `docs/research/2026-11-05-scripts-is-a-regular-package.md` (#54) made the
+  original test move the mtime on after its rewrite and recorded the limit, with
+  ctime alone keeping both stamps in 1 373 of 2 000 rewrites, which matches the
+  measurement above. The settle wait removes that limit, so the test again rewrites
+  in place without touching the stamps. After rebasing onto #54, the test and the
+  deterministic test passed 200 of 200 fresh pytest runs on tmpfs.
