@@ -491,6 +491,13 @@ def test_get_rejects_entry_replaced_between_lstat_and_open(tmp_path, monkeypatch
     assert validator_calls == []
 
 
+def _rewrite_where_the_clock_can_see_it(path: Path, content: bytes) -> None:
+    """Two writes inside one clock tick share an mtime, which no file metadata can tell apart."""
+    before = path.stat()
+    path.write_bytes(content)
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000))
+
+
 def test_fd_read_rejects_same_inode_change_between_lstat_and_open(tmp_path, monkeypatch):
     cache = CompileCache(tmp_path)
     path = cache.put(_action(), _plan())
@@ -504,7 +511,7 @@ def test_fd_read_rejects_same_inode_change_between_lstat_and_open(tmp_path, monk
         nonlocal modified
         if Path(target) == path and not modified:
             modified = True
-            path.write_bytes(changed)
+            _rewrite_where_the_clock_can_see_it(path, changed)
         return real_open(target, flags, *args, **kwargs)
 
     monkeypatch.setattr(compile_cache.os, "open", racing_open)

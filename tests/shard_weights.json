@@ -635,6 +635,7 @@
   "test_scheduled_fence.py": 12.66,
   "test_scheduled_nightly.py": 6.94,
   "test_scheduled_weekly.py": 1.31,
+  "test_scripts_is_a_regular_package.py": 0.05,
   "test_seal_observation_cache.py": 1.8,
   "test_search_ranking.py": 30.13,
   "test_secret_redact.py": 0.01,
