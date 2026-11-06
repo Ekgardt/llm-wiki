@@ -116,12 +116,18 @@ The settle step lives in `scripts/bounded_io.py`, the shared reader, as
   and is waited out again; a clock that has not moved far enough (Python's
   `time.time_ns()` on Windows before 3.13 ticks at the system timer, source 8) costs
   another look, not a refusal. A burst of writes is read once it stops.
-- The waiting ends at the caller's deadline (`TimeoutError`, raised before a sleep
-  that would cross it) or, for a caller with no deadline, after `SETTLE_BUDGET_NS`
-  (1 s) with `SourceChangedDuringRead` "still being written". Basis for 1 s: it is
+- The waiting ends at the earlier of `SETTLE_BUDGET_NS` (1 s) and the caller's
+  deadline. When the budget ends first the file is refused with
+  `SourceChangedDuringRead` "still being written", so one busy file is a changed
+  file and leaves the rest of the caller's deadline to its other work (code
+  navigation maps it to a moved revision). When the deadline ends first it is
+  `TimeoutError`, raised before a sleep that would cross it. Basis for 1 s: it is
   well inside the 60 s default timeout of an agent hook, and 50 windows is far more
-  than a writer that stops needs. A caller that needs another bound passes a
-  deadline.
+  than a writer that stops needs.
+- `read_stable_bytes` checks the path's ancestors after the settle step, not
+  before. Checked first, a parent directory swapped for a symlink during the wait
+  went unnoticed: the next `lstat` followed it, and the open, `fstat` and after-read
+  checks all agreed with that new file.
 - `file_identity` is `(st_dev, st_ino, st_size, st_mtime_ns, ctime)`, so on POSIX
   a rewrite that restores mtime with `utime` is caught too. On Windows the ctime
   field is 0: Python reports the creation time there (source 7), and
@@ -129,15 +135,17 @@ The settle step lives in `scripts/bounded_io.py`, the shared reader, as
   it can differ.
 
 `read_stable_bytes` (75 call sites in 31 other scripts) takes its first `lstat`
-through `settled_lstat`; `compile_cache._read_cache_entry` calls the same helper
+through `settled_lstat`, then checks the ancestors; `compile_cache._read_cache_entry` calls the same helper
 and `file_identity` instead of its own copies; `search_memory.py`'s seal
 observation uses `change_stamp_ns` and the same constant.
 
 ## Trade-offs and limits
 
-- Cost: one `time.time_ns()` per read; a sleep of at most 40 ms (20 ms for a stamp
-  that is now, 40 ms for one a window ahead) only for a file written that recently.
-  Most reads are of files written in an earlier run and never wait.
+- Cost: one `time.time_ns()` per read. A file written in the last 20 ms costs one
+  sleep of at most 40 ms per look (20 ms for a stamp that is now, 40 ms for one a
+  window ahead); a file written again meanwhile costs more looks, up to the 1 s
+  budget or an earlier deadline. Most reads are of files written in an earlier run
+  and never wait.
 - A file written continuously, more often than every 20 ms, can no longer be read
   between two writes: the reader waits for its budget and refuses it. Measured
   below: an append every 10 ms that never stops was read 199 of 200 times by the
@@ -215,11 +223,16 @@ this session; CI runs them.
   - a clock that stands still through two waits gets a third look and is not
     refused;
   - five appends landing during the waits are waited out, and the read returns
-    all of them; a writer that never stops is refused once the budget is spent;
+    all of them; a writer that never stops is refused once the budget is spent,
+    with no deadline and with a deadline 60 s away;
   - a stamp exactly one window ahead waits, and one nanosecond more does not;
   - a page with a +1 h mtime is read, and a same-size rewrite of it is still
     caught; in `tests/test_compile_cache.py` a +60 s entry is a hit;
-  - a wait past the deadline times out without sleeping.
+  - a wait past the deadline times out without sleeping;
+  - a parent directory swapped for a symlink to an outside directory during the
+    wait is refused. A probe of the same swap with real threads, 50 runs: the
+    previous round of this change returned the outside file 50 times, this one
+    refused all 50.
   - with `os.name` set to `nt`, the change stamp is mtime and the identity's ctime
     field is 0, so the Windows branch is tested on every host;
   - a file that grows while it is read is "changed during read".

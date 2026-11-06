@@ -305,16 +305,22 @@ def test_a_burst_of_writes_is_read_once_it_stops(
     assert len(clock.sleeps) == 6
 
 
+@pytest.mark.parametrize(
+    "deadline",
+    [None, 60.0],
+    ids=["no-deadline", "a-deadline-far-past-the-budget-is-not-spent"],
+)
 def test_a_file_that_never_stops_being_written_is_refused_after_the_budget(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, deadline: float | None
 ) -> None:
+    """One busy file gives up as changed, leaving the caller's deadline to the rest."""
     import bounded_io
 
     target = tmp_path / "page.md"
     clock = _append_while_waiting(monkeypatch, target, appends=10**6)
 
     with pytest.raises(bounded_io.SourceChangedDuringRead, match="still being written"):
-        bounded_io.read_stable_bytes(target, 1024 * 1024, label="page")
+        bounded_io.read_stable_bytes(target, 1024 * 1024, label="page", deadline=deadline)
     assert sum(clock.sleeps) * 1_000_000_000 <= bounded_io.SETTLE_BUDGET_NS
     assert len(clock.sleeps) == bounded_io.SETTLE_BUDGET_NS // bounded_io.TIMESTAMP_SETTLE_NS - 1
 
@@ -439,3 +445,36 @@ def test_a_file_grown_while_it_is_read_is_changed_during_read(
 
     with pytest.raises(bounded_io.SourceChangedDuringRead, match="changed during read"):
         bounded_io.read_stable_bytes(target, 1024, label="page")
+
+
+def test_a_parent_swapped_for_a_symlink_during_the_settle_wait_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wait must not separate the ancestor check from the stat it vouches for."""
+    import bounded_io
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "page.md").write_bytes(b"outside-secret")
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    target = vault / "page.md"
+    target.write_bytes(b"inside")
+    real_sleep = time.sleep
+    swaps: list[str] = []
+
+    def swap_parent_while_waiting(seconds: float) -> None:
+        if not swaps:
+            vault.rename(tmp_path / "vault-original")
+            try:
+                vault.symlink_to(outside, target_is_directory=True)
+            except OSError:
+                pytest.skip("directory symlinks are unavailable")
+            swaps.append("swapped")
+        real_sleep(seconds)
+
+    monkeypatch.setattr(bounded_io.time, "sleep", swap_parent_while_waiting)
+
+    with pytest.raises(PermissionError, match="parent must be a regular directory"):
+        bounded_io.read_stable_bytes(target, 1024, label="page")
+    assert swaps == ["swapped"], "the fresh page did not make the reader wait"

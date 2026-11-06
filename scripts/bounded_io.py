@@ -27,10 +27,11 @@ IO_CHUNK_BYTES = 64 * 1024
 # the stamp is older than a tick (git's racily-clean rule). Research:
 # `docs/research/2026-11-06-a-rewrite-in-the-same-tick-is-a-change.md`.
 TIMESTAMP_SETTLE_NS = 20_000_000
-# How long a reader given no deadline keeps looking at a file that is still
-# being written before it refuses it: fifty settle windows, enough for a burst
-# of writes to stop, and well inside the 60-second default timeout of an agent
-# hook. A caller that needs another bound passes a deadline, which replaces it.
+# How long a reader keeps looking at a file that is still being written before
+# it refuses it: fifty settle windows, enough for a burst of writes to stop, and
+# well inside the 60-second default timeout of an agent hook. A caller's earlier
+# deadline ends the wait sooner; a later one leaves the rest of its time to the
+# caller's other work.
 SETTLE_BUDGET_NS = 1_000_000_000
 
 
@@ -158,8 +159,9 @@ def settled_lstat(
 
     A stamp younger than one clock tick is looked at again until its tick has
     passed; a write meanwhile gives a newer stamp, which is waited out the same
-    way. The deadline, or `SETTLE_BUDGET_NS` without one, ends a file that never
-    stops being written. Research:
+    way. `SETTLE_BUDGET_NS`, or an earlier caller deadline, ends a file that never
+    stops being written. Callers that check the path's ancestors do so after this
+    returns, so the wait cannot separate that check from the stat. Research:
     `docs/research/2026-11-06-a-rewrite-in-the-same-tick-is-a-change.md`.
     """
     until, give_up = _settle_limit(deadline, label)
@@ -173,10 +175,11 @@ def settled_lstat(
 
 
 def _settle_limit(deadline: float | None, label: str) -> tuple[float, OSError]:
-    if deadline is not None:
-        return deadline, TimeoutError(f"{label} read deadline expired")
+    """The earlier of the settle budget and the caller's deadline, and its refusal."""
     budget_ends = time.monotonic() + SETTLE_BUDGET_NS / 1_000_000_000
-    return budget_ends, SourceChangedDuringRead(f"{label} is still being written")
+    if deadline is None or budget_ends <= deadline:
+        return budget_ends, SourceChangedDuringRead(f"{label} is still being written")
+    return deadline, TimeoutError(f"{label} read deadline expired")
 
 
 def _settle_wait_ns(info: os.stat_result) -> int:
@@ -276,9 +279,9 @@ def read_stable_bytes(
     _require_byte_limit(max_bytes)
     deadline = _validated_deadline(deadline)
     path = Path(path)
-    _require_safe_ancestors(path, label, deadline)
     _check_deadline(deadline, label)
     before = settled_lstat(path, label=label, deadline=deadline)
+    _require_safe_ancestors(path, label, deadline)
     _require_regular_file(path, before, label)
     if before.st_size > max_bytes:
         raise ValueError(f"{label} exceeds {max_bytes} bytes")
