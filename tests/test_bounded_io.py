@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -184,6 +185,9 @@ class _FakeClock:
     def time_ns(self) -> int:
         return self.now_ns
 
+    def monotonic(self) -> float:
+        return sum(self.sleeps)
+
     def sleep(self, seconds: float) -> None:
         self.sleeps.append(seconds)
         if len(self.sleeps) > self._coarse_sleeps:
@@ -194,6 +198,7 @@ def _install(monkeypatch: pytest.MonkeyPatch, clock: _FakeClock) -> None:
     import bounded_io
 
     monkeypatch.setattr(bounded_io.time, "time_ns", clock.time_ns)
+    monkeypatch.setattr(bounded_io.time, "monotonic", clock.monotonic)
     monkeypatch.setattr(bounded_io.time, "sleep", clock.sleep)
 
 
@@ -202,7 +207,7 @@ def _stamped(tmp_path: Path) -> tuple[Path, int]:
 
     target = tmp_path / "page.md"
     target.write_bytes(b"settled")
-    return target, bounded_io.newest_stamp_ns(target.lstat())
+    return target, bounded_io.change_stamp_ns(target.lstat())
 
 
 @pytest.mark.skipif(
@@ -264,44 +269,112 @@ def test_a_clock_coarser_than_the_window_costs_another_look_not_a_refusal(
     assert len(clock.sleeps) == 3
 
 
-def test_a_file_rewritten_during_the_wait_is_being_written(
+def _append_while_waiting(
+    monkeypatch: pytest.MonkeyPatch, target: Path, appends: int
+) -> _FakeClock:
+    """The first `appends` waits each see an append landing at that moment."""
+    import bounded_io
+
+    target.write_bytes(b"settled")
+    clock = _FakeClock(bounded_io.change_stamp_ns(target.lstat()))
+    _install(monkeypatch, clock)
+
+    def append_then_wait(seconds: float) -> None:
+        clock.sleep(seconds)
+        if len(clock.sleeps) > appends:
+            return
+        with target.open("ab") as handle:
+            handle.write(b"+")
+        clock.now_ns = bounded_io.change_stamp_ns(target.lstat())
+
+    monkeypatch.setattr(bounded_io.time, "sleep", append_then_wait)
+    return clock
+
+
+def test_a_burst_of_writes_is_read_once_it_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Appends faster than the window, then quiet: the reader waits them out."""
+    import bounded_io
+
+    target = tmp_path / "page.md"
+    clock = _append_while_waiting(monkeypatch, target, appends=5)
+
+    assert bounded_io.read_stable_bytes(target, 1024) == b"settled+++++"
+    assert len(clock.sleeps) == 6
+
+
+def test_a_file_that_never_stops_being_written_is_refused_after_the_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import bounded_io
 
-    target, stamped_ns = _stamped(tmp_path)
-    clock = _FakeClock(stamped_ns)
+    target = tmp_path / "page.md"
+    clock = _append_while_waiting(monkeypatch, target, appends=10**6)
 
-    def rewrite_while_waiting(seconds: float) -> None:
-        target.write_bytes(b"settled, then rewritten")
-        clock.now_ns += int(seconds * 1_000_000_000)
-
-    monkeypatch.setattr(bounded_io.time, "time_ns", clock.time_ns)
-    monkeypatch.setattr(bounded_io.time, "sleep", rewrite_while_waiting)
-
-    with pytest.raises(bounded_io.SourceChangedDuringRead, match="being written"):
-        bounded_io.read_stable_bytes(target, 1024, label="page")
+    with pytest.raises(bounded_io.SourceChangedDuringRead, match="still being written"):
+        bounded_io.read_stable_bytes(target, 1024 * 1024, label="page")
+    assert sum(clock.sleeps) * 1_000_000_000 <= bounded_io.SETTLE_BUDGET_NS
+    assert len(clock.sleeps) == bounded_io.SETTLE_BUDGET_NS // bounded_io.TIMESTAMP_SETTLE_NS - 1
 
 
 @pytest.mark.parametrize(
-    ("ahead_ns", "refused"),
-    [(20_000_000, False), (20_000_001, True)],
-    ids=["one-tick-ahead-is-the-same-tick", "more-than-a-tick-ahead"],
+    ("ahead_ns", "sleeps"),
+    [(20_000_000, 1), (20_000_001, 0)],
+    ids=["one-tick-ahead-is-the-same-tick", "more-than-a-tick-ahead-cannot-be-written"],
 )
-def test_a_stamp_more_than_one_tick_ahead_of_the_clock_is_refused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ahead_ns: int, refused: bool
+def test_only_a_stamp_within_a_tick_of_the_clock_is_waited_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ahead_ns: int, sleeps: int
 ) -> None:
     import bounded_io
 
     assert ahead_ns - 1 <= bounded_io.TIMESTAMP_SETTLE_NS <= ahead_ns
     target, stamped_ns = _stamped(tmp_path)
-    _install(monkeypatch, _FakeClock(stamped_ns - ahead_ns))
+    clock = _FakeClock(stamped_ns - ahead_ns)
+    _install(monkeypatch, clock)
 
-    if refused:
-        with pytest.raises(PermissionError, match="stamped in the future"):
-            bounded_io.settled_lstat(target, label="page")
-        return
     assert bounded_io.settled_lstat(target, label="page").st_ino == target.lstat().st_ino
+    assert len(clock.sleeps) == sleeps
+
+
+def test_a_page_with_a_future_mtime_is_read(tmp_path: Path) -> None:
+    """A synced or `touch -d` mtime an hour ahead: no write now can carry it."""
+    import bounded_io
+
+    target = tmp_path / "page.md"
+    target.write_bytes(b"from a fast clock")
+    future_ns = time.time_ns() + 3600 * 1_000_000_000
+    os.utime(target, ns=(future_ns, future_ns))
+
+    assert bounded_io.read_stable_bytes(target, 1024) == b"from a fast clock"
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="Windows os.stat has no change time; st_ctime is the creation time"
+)
+def test_a_same_size_rewrite_of_a_future_stamped_page_is_still_caught(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import bounded_io
+
+    target = tmp_path / "page.md"
+    target.write_bytes(b"version 1")
+    future_ns = time.time_ns() + 3600 * 1_000_000_000
+    os.utime(target, ns=(future_ns, future_ns))
+    real_open = os.open
+
+    def rewrite_before_open(
+        path: str | os.PathLike[str], flags: int, *args: Any, **kwargs: Any
+    ) -> int:
+        if Path(path) == target:
+            target.write_bytes(b"version 2")
+            os.utime(target, ns=(future_ns, future_ns))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(bounded_io.os, "open", rewrite_before_open)
+
+    with pytest.raises(bounded_io.SourceChangedDuringRead, match="changed before open"):
+        bounded_io.read_stable_bytes(target, 1024, label="page")
 
 
 def test_a_wait_that_would_outlast_the_deadline_times_out_without_sleeping(

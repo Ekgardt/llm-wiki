@@ -552,34 +552,36 @@ def test_fd_read_rejects_same_size_rewrite_that_keeps_its_mtime(
         compile_cache._read_cache_entry(path)
 
 
-def test_entry_stamped_in_the_future_is_a_miss(tmp_path: Path) -> None:
+def test_entry_stamped_in_the_future_is_a_hit(tmp_path: Path) -> None:
+    """No write before the clock reaches that tick can carry such a stamp."""
     cache = CompileCache(tmp_path)
     action = _action()
     path = cache.put(action, _plan())
     future_ns = path.stat().st_mtime_ns + 60 * 1_000_000_000
     os.utime(path, ns=(future_ns, future_ns))
 
-    with pytest.raises(PermissionError, match="stamped in the future"):
-        compile_cache._read_cache_entry(path)
-    assert cache.get(action, _accept_application) is None
+    assert cache.get(action, _accept_application) == _plan()
 
 
-def test_entry_rewritten_during_the_settle_wait_is_being_written(
+def test_entry_still_being_written_after_the_budget_is_a_miss(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cache = CompileCache(tmp_path)
     action = _action()
     path = cache.put(action, _plan())
-    now = [bounded_io.newest_stamp_ns(path.lstat())]
+    now = [bounded_io.change_stamp_ns(path.lstat())]
+    waited = [0.0]
 
     def rewrite_while_waiting(seconds: float) -> None:
+        waited[0] += seconds
         path.write_bytes(path.read_bytes() + b" ")
-        now[0] += int(seconds * 1_000_000_000)
+        now[0] = bounded_io.change_stamp_ns(path.lstat())
 
     monkeypatch.setattr(bounded_io.time, "time_ns", lambda: now[0])
+    monkeypatch.setattr(bounded_io.time, "monotonic", lambda: waited[0])
     monkeypatch.setattr(bounded_io.time, "sleep", rewrite_while_waiting)
 
-    with pytest.raises(bounded_io.SourceChangedDuringRead, match="being written"):
+    with pytest.raises(bounded_io.SourceChangedDuringRead, match="still being written"):
         compile_cache._read_cache_entry(path)
     assert cache.get(action, _accept_application) is None
 

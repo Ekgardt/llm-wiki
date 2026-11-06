@@ -92,7 +92,7 @@ change time (source 4).
   `open` is what refuses a symlink on Windows, where `O_NOFOLLOW` does not exist,
   and a content change before the only look is not detectable at all.
 - **Wait out the tick (chosen).** Git's racily-clean rule made explicit: a stat
-  observation proves "unchanged later" only when its newest stamp is older than
+  observation proves "unchanged later" only when its change stamp is older than
   one clock tick, because then any later write is stamped in a later tick.
 
 ## Decision
@@ -100,21 +100,28 @@ change time (source 4).
 The settle step lives in `scripts/bounded_io.py`, the shared reader, as
 `settled_lstat(path, label=, deadline=)`:
 
-- The file's newest stamp is `newest_stamp_ns` = `max(st_mtime_ns, st_ctime_ns)`
-  (mtime only on Windows, see below). When it is younger than
-  `TIMESTAMP_SETTLE_NS` (20 ms: Linux's jiffy is at most 10 ms at `CONFIG_HZ=100`,
-  Windows' default timer tick 15.6 ms), the reader sleeps until it is not and
-  looks again.
-- The wait ends on the wall clock, not after one sleep. If the identity is
-  unchanged at the next look and the clock has not moved far enough (Python's
-  `time.time_ns()` on Windows before 3.13 ticks at the system timer, source 8), it waits
-  again; it ends because the stamp is fixed and the clock moves on. If the
-  identity moved, the file is being written: `SourceChangedDuringRead`, the
-  retryable refusal callers already handle.
-- A stamp more than one window ahead of the clock is refused as "stamped in the
-  future"; up to one window ahead is the same tick seen through two clocks.
-- A wait that would end past the caller's deadline raises `TimeoutError` before
-  sleeping.
+- The file's change stamp is `change_stamp_ns`: `st_ctime_ns` on POSIX, which every
+  write moves and `utime` cannot set (source 4), and `st_mtime_ns` on Windows, where
+  `st_ctime` is the creation time (source 7). On POSIX a forged mtime therefore
+  neither delays nor shortens the wait.
+- When the stamp is within `TIMESTAMP_SETTLE_NS` (20 ms: Linux's jiffy is at most
+  10 ms at `CONFIG_HZ=100`, Windows' default timer tick 15.6 ms) of the clock, in
+  either direction, the reader sleeps until it is one window old and looks again.
+  Within a window ahead is the same tick seen through two clocks.
+- A stamp more than one window ahead of the clock is settled. No write made before
+  the clock reaches that tick can carry that stamp, so a later write in this read is
+  stamped differently. Only a write landing exactly in that future tick would look
+  the same, and that needs a read that lasts until the clock gets there.
+- Each look decides afresh. A file written again during the wait has a new stamp
+  and is waited out again; a clock that has not moved far enough (Python's
+  `time.time_ns()` on Windows before 3.13 ticks at the system timer, source 8) costs
+  another look, not a refusal. A burst of writes is read once it stops.
+- The waiting ends at the caller's deadline (`TimeoutError`, raised before a sleep
+  that would cross it) or, for a caller with no deadline, after `SETTLE_BUDGET_NS`
+  (1 s) with `SourceChangedDuringRead` "still being written". Basis for 1 s: it is
+  well inside the 60 s default timeout of an agent hook, and 50 windows is far more
+  than a writer that stops needs. A caller that needs another bound passes a
+  deadline.
 - `file_identity` is `(st_dev, st_ino, st_size, st_mtime_ns, ctime)`, so on POSIX
   a rewrite that restores mtime with `utime` is caught too. On Windows the ctime
   field is 0: Python reports the creation time there (source 7), and
@@ -124,30 +131,34 @@ The settle step lives in `scripts/bounded_io.py`, the shared reader, as
 `read_stable_bytes` (75 call sites in 31 other scripts) takes its first `lstat`
 through `settled_lstat`; `compile_cache._read_cache_entry` calls the same helper
 and `file_identity` instead of its own copies; `search_memory.py`'s seal
-observation uses `newest_stamp_ns` and the same constant.
+observation uses `change_stamp_ns` and the same constant.
 
 ## Trade-offs and limits
 
-- Cost: one `time.time_ns()` per read; a sleep of at most 20 ms (40 ms for a stamp
-  up to one window ahead) only for a file written less than 20 ms ago. Most
-  reads are of files written in an earlier run and never wait. The full suite's
-  wall time is in Verification.
+- Cost: one `time.time_ns()` per read; a sleep of at most 40 ms (20 ms for a stamp
+  that is now, 40 ms for one a window ahead) only for a file written that recently.
+  Most reads are of files written in an earlier run and never wait.
+- A file written continuously, more often than every 20 ms, can no longer be read
+  between two writes: the reader waits for its budget and refuses it. Measured
+  below: an append every 10 ms that never stops was read 199 of 200 times by the
+  old reader and 0 of 200 by this one, each refusal after 1 s. Such a read was only
+  safe before because appends change the size; a same-size rewrite in that stream
+  would have been missed. The refusal is a `PermissionError`, the same class as the
+  existing "file changed during read" refusals, so callers that catch those treat
+  it the same way. Only `corpus_snapshot._sealed_source_bytes` catches
+  `SourceChangedDuringRead` by name.
+- A stamp just over a window ahead (a clock stepped back by a few tens of
+  milliseconds) is trusted at once; a same-size rewrite in that future tick, during
+  a read that lasts until then, would be missed. Further ahead the read would have
+  to last longer.
 - Windows has no change time in `os.stat` (source 7): a same-size rewrite that also
   restores mtime with `os.utime` is not caught there; a plain rewrite is, once its
-  handle is closed (source 6). The two deterministic `utime` tests are skipped on
+  handle is closed (source 6). The deterministic `utime` tests are skipped on
   Windows for this reason. The content checks remain the defence.
 - A filesystem with 1 s or 2 s stamps (FAT, HFS+, ext4 with 128-byte inodes) is
   coarser than the window; the state root must already be a local filesystem with
   correct locking, and the defaults on all three platforms (ext4, XFS, btrfs,
   tmpfs, APFS, NTFS) stamp at 100 ns or finer.
-- A file stamped more than 20 ms in the future is refused, for example after the
-  wall clock steps backwards, or with an archive unpacked from a machine whose
-  clock ran fast, or after `touch -d` to a later date. It stays refused until the
-  clock reaches its stamp. A shorter wait cannot prove that file unchanged: any
-  write landing in the tick its stamp names would look the same, and waiting for
-  that tick could take days. The refusal is the ordinary `PermissionError` of a
-  file that is unsafe to read, with "stamped in the future" in its message.
-  `touch` on the file gives it a current stamp and clears it.
 
 ### Readers that keep their own stat identity
 
@@ -191,16 +202,23 @@ this session; CI runs them.
   nanosecond with `os.utime`. The old compile-cache code failed the first one in
   10 of 10 runs. With ctime removed from `file_identity`, the second fails with
   `DID NOT RAISE`.
-- A probe of the reviewer's case: write a file, rewrite it in place at the same
-  size just before `read_stable_bytes` opens it. 200 runs each: with
-  `settled_lstat` replaced by a plain `lstat` (ctime still in the identity), 185
+- A probe of the first reviewer's case: write a file, rewrite it in place at the
+  same size just before `read_stable_bytes` opens it. 200 runs each: with
+  `settled_lstat` replaced by a plain `lstat` (ctime still in the identity), 182
   rewrites were missed. With the fix, 0 were missed.
+- A probe of the second reviewer's case, old reader against new: 10 appends 10 ms
+  apart, the read starting 5 ms into them. Old 100 of 100 read, new 100 of 100 read,
+  the slowest new read 0.106 s. With appends that never stop: old 199 of 200, new 0
+  of 200 ("still being written", 1 s each; see Trade-offs).
 - `tests/test_bounded_io.py` has fake-clock tests with exact boundaries:
   - a fresh file waits once;
   - a clock that stands still through two waits gets a third look and is not
     refused;
-  - a rewrite during the wait is "being written";
-  - a stamp exactly one window ahead waits, and one nanosecond more is refused;
+  - five appends landing during the waits are waited out, and the read returns
+    all of them; a writer that never stops is refused once the budget is spent;
+  - a stamp exactly one window ahead waits, and one nanosecond more does not;
+  - a page with a +1 h mtime is read, and a same-size rewrite of it is still
+    caught; in `tests/test_compile_cache.py` a +60 s entry is a hit;
   - a wait past the deadline times out without sleeping.
 - `tests/test_bounded_io.py`, `tests/test_compile_cache.py` and
   `tests/test_a_file_being_written_is_a_changed_corpus_on_every_system.py`:

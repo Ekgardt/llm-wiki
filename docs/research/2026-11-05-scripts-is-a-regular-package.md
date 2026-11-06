@@ -123,9 +123,10 @@ failures in 3 000 on `/dev/shm`, and it fails if the mtime is removed from the c
 code's limit stays and is now stated: a same-size rewrite inside one tick is not seen by this
 comparison, and ctime does not help (measured: 1 373 of 2 000 rewrites kept both stamps).
 
-Later (2026-11-06): that limit was removed. Readers now wait until a file's stamps are a clock
-tick old before they trust its stat, and the test again rewrites in place. See
-`docs/research/2026-11-06-a-rewrite-in-the-same-tick-is-a-change.md`.
+Later (2026-11-06): the limit was removed for `bounded_io.read_stable_bytes` and the compile
+cache. These two now wait until a file's change stamp is a clock tick old before they trust its
+stat, and the test again rewrites in place. The other readers listed in
+`docs/research/2026-11-06-a-rewrite-in-the-same-tick-is-a-change.md` still have the limit.
 
 ## Sources
 

@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import (
     MAX_KNOWLEDGE_PAGE_BYTES,
     TIMESTAMP_SETTLE_NS,
-    newest_stamp_ns,
+    change_stamp_ns,
     read_stable_bytes,
 )
 from corpus_snapshot import (  # noqa: E402
@@ -1798,7 +1798,7 @@ def _require_expected_seal(
 # including the utimensat that would forge mtime. What stat identity cannot
 # rule out is a second same-size write landing in the same clock tick as the
 # one that was hashed, which would carry the same stamp, so an observation is
-# kept only once the artifact's stamps are older than `TIMESTAMP_SETTLE_NS`.
+# kept only once the artifact's change stamp is older than `TIMESTAMP_SETTLE_NS`.
 # This is git's racily-clean rule with the tick made explicit instead of
 # inferred from the index's own write time.
 _SEAL_OBSERVATION_LIMIT = 32
@@ -1876,7 +1876,7 @@ def _hashed_seal(
     _record_observed_checksum(
         _seal_observation_key(path, identity, expected),
         checksum,
-        racy=newest_stamp_ns(after) > began_ns - TIMESTAMP_SETTLE_NS,
+        racy=change_stamp_ns(after) > began_ns - TIMESTAMP_SETTLE_NS,
     )
     return (*identity, checksum)
 

@@ -19,7 +19,7 @@ MAX_KNOWLEDGE_PAGE_BYTES = 8 * 1024 * 1024
 # five names before 2026-09-23; see
 # `docs/research/2026-09-23-one-limit-one-place.md`.
 IO_CHUNK_BYTES = 64 * 1024
-# How old a file's newest stamp must be before an unchanged stat proves the
+# How old a file's change stamp must be before an unchanged stat proves the
 # file unchanged. Operating systems stamp files from a coarse clock: Linux
 # advances it once per jiffy (10 ms at the lowest supported CONFIG_HZ of 100),
 # Windows once per system timer tick (15.6 ms by default). A second write in
@@ -27,6 +27,11 @@ IO_CHUNK_BYTES = 64 * 1024
 # the stamp is older than a tick (git's racily-clean rule). Research:
 # `docs/research/2026-11-06-a-rewrite-in-the-same-tick-is-a-change.md`.
 TIMESTAMP_SETTLE_NS = 20_000_000
+# How long a reader given no deadline keeps looking at a file that is still
+# being written before it refuses it: fifty settle windows, enough for a burst
+# of writes to stop, and well inside the 60-second default timeout of an agent
+# hook. A caller that needs another bound passes a deadline, which replaces it.
+SETTLE_BUDGET_NS = 1_000_000_000
 
 
 class SourceChangedDuringRead(PermissionError):
@@ -130,16 +135,17 @@ def file_identity(info: os.stat_result) -> FileIdentity:
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, _change_time_ns(info))
 
 
-def newest_stamp_ns(info: os.stat_result) -> int:
-    return max(info.st_mtime_ns, _change_time_ns(info))
+def change_stamp_ns(info: os.stat_result) -> int:
+    """The stamp every write moves: ctime on POSIX, which `utime` cannot set.
+
+    Windows reports the creation time as ctime, so mtime is its write stamp.
+    """
+    if os.name == "nt":
+        return info.st_mtime_ns
+    return info.st_ctime_ns
 
 
 def _change_time_ns(info: os.stat_result) -> int:
-    """POSIX ctime moves on every write, even when mtime is forged.
-
-    Windows reports the creation time there, which can differ between the
-    path and descriptor views and says nothing about a write.
-    """
     if os.name == "nt":
         return 0
     return info.st_ctime_ns
@@ -148,37 +154,47 @@ def _change_time_ns(info: os.stat_result) -> int:
 def settled_lstat(
     path: Path, *, label: str = "file", deadline: float | None = None
 ) -> os.stat_result:
-    """An lstat whose newest stamp is a tick old, so any later write moves it.
+    """An lstat whose change stamp no write from now on can carry.
 
-    A fresh file is observed again until its tick has passed. The wait ends on
-    the wall clock, not after one sleep, so a clock coarser than the window
-    (Windows before Python 3.13) costs another look instead of a refusal; a file
-    whose identity moves meanwhile is being written. Research:
+    A stamp younger than one clock tick is looked at again until its tick has
+    passed; a write meanwhile gives a newer stamp, which is waited out the same
+    way. The deadline, or `SETTLE_BUDGET_NS` without one, ends a file that never
+    stops being written. Research:
     `docs/research/2026-11-06-a-rewrite-in-the-same-tick-is-a-change.md`.
     """
+    until, give_up = _settle_limit(deadline, label)
     observed = path.lstat()
-    wait_ns = _settle_wait_ns(observed, label)
+    wait_ns = _settle_wait_ns(observed)
     while wait_ns:
-        _sleep_within_deadline(wait_ns, deadline, label)
-        current = path.lstat()
-        if file_identity(current) != file_identity(observed):
-            raise SourceChangedDuringRead(f"{label} is being written")
-        wait_ns = _settle_wait_ns(current, label)
+        _sleep_until_settled(wait_ns, until, give_up)
+        observed = path.lstat()
+        wait_ns = _settle_wait_ns(observed)
     return observed
 
 
-def _settle_wait_ns(info: os.stat_result, label: str) -> int:
-    """How long until the stamp is a tick old; a stamp over a tick ahead is refused."""
-    ahead_ns = newest_stamp_ns(info) - time.time_ns()
+def _settle_limit(deadline: float | None, label: str) -> tuple[float, OSError]:
+    if deadline is not None:
+        return deadline, TimeoutError(f"{label} read deadline expired")
+    budget_ends = time.monotonic() + SETTLE_BUDGET_NS / 1_000_000_000
+    return budget_ends, SourceChangedDuringRead(f"{label} is still being written")
+
+
+def _settle_wait_ns(info: os.stat_result) -> int:
+    """How long until no write can share the stamp; none for one over a tick ahead.
+
+    A write is stamped with the current tick, so it cannot carry a stamp still
+    more than a tick in the future (a clock stepped back, a synced mtime).
+    """
+    ahead_ns = change_stamp_ns(info) - time.time_ns()
     if ahead_ns > TIMESTAMP_SETTLE_NS:
-        raise PermissionError(f"{label} is stamped in the future")
+        return 0
     return max(ahead_ns + TIMESTAMP_SETTLE_NS, 0)
 
 
-def _sleep_within_deadline(wait_ns: int, deadline: float | None, label: str) -> None:
+def _sleep_until_settled(wait_ns: int, until: float, give_up: OSError) -> None:
     wait_seconds = wait_ns / 1_000_000_000
-    if deadline is not None and time.monotonic() + wait_seconds >= deadline:
-        raise TimeoutError(f"{label} read deadline expired")
+    if time.monotonic() + wait_seconds >= until:
+        raise give_up
     time.sleep(wait_seconds)
 
 
