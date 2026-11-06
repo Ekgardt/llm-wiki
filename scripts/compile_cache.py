@@ -6,11 +6,13 @@ import os
 import re
 import stat
 import tempfile
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
+from bounded_io import TIMESTAMP_SETTLE_NS
 from markdown_transaction import (
     _acl_output_text,
     _run_acl_command,
@@ -447,7 +449,7 @@ def _require_normalized_operation_path(index: int, path: str) -> None:
 
 
 def _read_cache_entry(path: Path) -> bytes:
-    metadata = path.lstat()
+    metadata = _settled_lstat(path)
     if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
         raise PermissionError("cache entry must be a regular non-symlink file")
     _verify_owner_only(path, 0o600)
@@ -459,8 +461,36 @@ def _read_cache_entry(path: Path) -> bytes:
         os.close(descriptor)
 
 
-def _file_identity(info: os.stat_result) -> tuple[int, int, int, int]:
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+def _settled_lstat(path: Path) -> os.stat_result:
+    """An lstat whose stamps are a tick old, so any later write moves them.
+
+    A rewrite in the same clock tick keeps size and both stamps, so a fresh
+    entry is observed again once its tick has passed; one rewritten meanwhile
+    is still being written and is refused. Research:
+    `docs/research/2026-11-06-a-rewrite-in-the-same-tick-is-a-change.md`.
+    """
+    metadata = path.lstat()
+    wait_ns = _settle_wait_ns(metadata)
+    if wait_ns == 0:
+        return metadata
+    time.sleep(wait_ns / 1_000_000_000)
+    settled = path.lstat()
+    if _settle_wait_ns(settled):
+        raise PermissionError("cache entry is being written")
+    return settled
+
+
+def _settle_wait_ns(info: os.stat_result) -> int:
+    stamped_ns = max(info.st_mtime_ns, info.st_ctime_ns)
+    wait_ns = stamped_ns + TIMESTAMP_SETTLE_NS - time.time_ns()
+    if wait_ns > TIMESTAMP_SETTLE_NS:
+        raise PermissionError("cache entry is stamped in the future")
+    return max(wait_ns, 0)
+
+
+def _file_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    """Where ctime is a change time (POSIX), it moves even when mtime is forged."""
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
 def _read_verified_descriptor(path: Path, descriptor: int, metadata_identity: tuple) -> bytes:

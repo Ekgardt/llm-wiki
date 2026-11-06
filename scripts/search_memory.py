@@ -40,7 +40,11 @@ from pathlib import Path
 from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
+from bounded_io import (  # noqa: E402
+    MAX_KNOWLEDGE_PAGE_BYTES,
+    TIMESTAMP_SETTLE_NS,
+    read_stable_bytes,
+)
 from corpus_snapshot import (  # noqa: E402
     MAX_CORPUS_FILE_BYTES,
     CorpusSnapshot,
@@ -1792,12 +1796,10 @@ def _require_expected_seal(
 # which no syscall can set: the kernel stamps it on every inode change,
 # including the utimensat that would forge mtime. What stat identity cannot
 # rule out is a second same-size write landing in the same clock tick as the
-# one that was hashed, which would carry the same stamp. Linux stamps inodes
-# from the coarse clock, one jiffy wide — 10 ms at the lowest supported
-# CONFIG_HZ — so an observation is kept only once the artifact's stamps are
-# older than that. This is git's racily-clean rule with the tick made explicit
-# instead of inferred from the index's own write time.
-_SEAL_STAMP_SETTLE_NS = 20_000_000
+# one that was hashed, which would carry the same stamp, so an observation is
+# kept only once the artifact's stamps are older than `TIMESTAMP_SETTLE_NS`.
+# This is git's racily-clean rule with the tick made explicit instead of
+# inferred from the index's own write time.
 _SEAL_OBSERVATION_LIMIT = 32
 _seal_observations: dict[tuple, str] = {}
 _seal_observation_lock = threading.Lock()
@@ -1874,7 +1876,7 @@ def _hashed_seal(
         _seal_observation_key(path, identity, expected),
         checksum,
         racy=max(after.st_mtime_ns, after.st_ctime_ns)
-        > began_ns - _SEAL_STAMP_SETTLE_NS,
+        > began_ns - TIMESTAMP_SETTLE_NS,
     )
     return (*identity, checksum)
 

@@ -19,6 +19,14 @@ MAX_KNOWLEDGE_PAGE_BYTES = 8 * 1024 * 1024
 # five names before 2026-09-23; see
 # `docs/research/2026-09-23-one-limit-one-place.md`.
 IO_CHUNK_BYTES = 64 * 1024
+# How old a file's newest stamp must be before an unchanged stat proves the
+# file unchanged. Operating systems stamp files from a coarse clock: Linux
+# advances it once per jiffy (10 ms at the lowest supported CONFIG_HZ of 100),
+# Windows once per system timer tick (15.6 ms by default). A second write in
+# the same tick carries the same stamp, so an observation is trusted only once
+# the stamp is older than a tick (git's racily-clean rule). Research:
+# `docs/research/2026-11-06-a-rewrite-in-the-same-tick-is-a-change.md`.
+TIMESTAMP_SETTLE_NS = 20_000_000
 
 
 class SourceChangedDuringRead(PermissionError):
