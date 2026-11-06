@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bounded_io import (  # noqa: E402
+from bounded_io import (
     MAX_KNOWLEDGE_PAGE_BYTES,
     TIMESTAMP_SETTLE_NS,
     read_stable_bytes,
