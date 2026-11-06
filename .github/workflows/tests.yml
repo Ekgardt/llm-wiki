@@ -40,10 +40,45 @@ jobs:
   # A vulnerable anyio and cryptography sat in the lock unseen: nothing read the
   # lock against advisories. pip-audit is pinned by hash in uv.lock (the `audit`
   # group, synced alone), and it reads every extra and group the lock resolves.
-  # See docs/research/2026-09-27-the-lock-is-audited.md.
+  # pip-audit skips a requirement whose marker does not match the interpreter it
+  # runs on, so one run reads one branch of a lock that forks by Python and
+  # platform: there is one leg per supported Python, plus Windows for its own pins.
+  # tests/test_the_audit_reads_every_locked_pin.py proves the legs together
+  # install every locked version. `accepted` names advisories with no fix for that
+  # interpreter: filelock's fixed releases need Python 3.11, and the lock keeps 3.10
+  # on the 3.x line with the fewest. It lapses when 3.10 support ends.
+  # See docs/research/2026-09-27-the-lock-is-audited.md and
+  # docs/research/2026-11-06-seven-locked-packages-move-past-their-advisories.md.
   dependency-audit:
-    name: timing::focused::dependency-audit
-    runs-on: ubuntu-24.04
+    name: timing::focused::dependency-audit-${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-py3.10
+            os: ubuntu-24.04
+            python: "3.10"
+            accepted: &filelock-without-a-python-3-10-fix >-
+              GHSA-567q-5qvw-pf92 GHSA-69hj-f68j-2879 GHSA-8mx5-7m5m-r77g
+              GHSA-9vhv-jxww-xfm5 GHSA-cwqr-hh33-gh44 GHSA-fq56-3cx3-fjxp
+              GHSA-j8f7-rjxc-mr56 GHSA-rfpc-qcw5-3pc4 GHSA-v4x8-3wr5-3wq8
+          - target: linux-py3.11
+            os: ubuntu-24.04
+            python: "3.11"
+          - target: linux-py3.12
+            os: ubuntu-24.04
+            python: "3.12"
+          - target: linux-py3.13
+            os: ubuntu-24.04
+            python: "3.13"
+          - target: linux-py3.14
+            os: ubuntu-24.04
+            python: "3.14"
+          - target: windows-py3.10
+            os: windows-2025
+            python: "3.10"
+            accepted: *filelock-without-a-python-3-10-fix
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -53,9 +88,18 @@ jobs:
         with:
           version: "0.12.3"
           enable-cache: true
+      - run: uv python install ${{ matrix.python }}
+      - run: uv python pin ${{ matrix.python }}
       - run: uv sync --locked --only-group audit
       - run: uv export --locked --all-extras --all-groups --no-emit-project --format requirements-txt -o "${{ runner.temp }}/locked-requirements.txt"
-      - run: uv run --locked --no-sync pip-audit --requirement "${{ runner.temp }}/locked-requirements.txt" --disable-pip --progress-spinner off
+      - name: Audit the requirements this interpreter installs
+        shell: bash
+        env:
+          ACCEPTED: ${{ matrix.accepted }}
+        run: |
+          accepted=()
+          for advisory in ${ACCEPTED}; do accepted+=(--ignore-vuln "${advisory}"); done
+          uv run --locked --no-sync pip-audit --requirement "${RUNNER_TEMP}/locked-requirements.txt" --disable-pip --progress-spinner off "${accepted[@]}"
 
   lint:
     name: timing::focused::lint

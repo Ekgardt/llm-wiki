@@ -321,6 +321,10 @@ window on its own; `--clear` removes it deliberately.
 - **Not implemented: session cleanup.** `StreamableHTTPSessionManager` accepts
   a `session_idle_timeout`; this passes none, so it keeps the SDK default. An
   agent that dies without sending `DELETE` leaves its session behind.
+  *Update 2026-11-06:* the lock now holds mcp 1.30.0, whose defaults close a
+  session idle for 30 minutes and hold at most 10 000; this module still passes
+  neither value itself
+  (docs/research/2026-11-06-seven-locked-packages-move-past-their-advisories.md).
 - **Windows.** `_private_mode_is_enforceable()` returns False off POSIX, the
   0600 check is skipped and the server says so on startup. On Windows the token
   file is only as private as its directory. Untested there - this machine is

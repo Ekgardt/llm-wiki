@@ -92,6 +92,11 @@ audit = [
 
 [tool.uv]
 required-version = "==0.12.3"
+# No filelock release that fixes its 2026 advisories (4.2.1+) supports Python 3.10.
+# Below 3.30 every 3.10-capable release carries the same nine; 3.30 and later add
+# more, up to seventeen in 4.1.0. Remove when Python 3.10 support ends or filelock
+# publishes a fix for it (docs/research/2026-11-06-seven-locked-packages-move-past-their-advisories.md).
+constraint-dependencies = ["filelock<3.30; python_full_version < '3.11'"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
