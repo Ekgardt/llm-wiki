@@ -26,14 +26,31 @@ ROOT = Path(__file__).resolve().parent.parent
 PROJECT = "llm-wiki"
 UNFIXED_FORK_PYTHON = "3.10"
 RUNNER_PLATFORMS = {
-    "ubuntu-24.04": {"sys_platform": "linux", "platform_system": "Linux", "os_name": "posix", "platform_machine": "x86_64"},
-    "windows-2025": {"sys_platform": "win32", "platform_system": "Windows", "os_name": "nt", "platform_machine": "AMD64"},
-    "macos-15": {"sys_platform": "darwin", "platform_system": "Darwin", "os_name": "posix", "platform_machine": "arm64"},
+    "ubuntu-24.04": {
+        "sys_platform": "linux",
+        "platform_system": "Linux",
+        "os_name": "posix",
+        "platform_machine": "x86_64",
+    },
+    "windows-2025": {
+        "sys_platform": "win32",
+        "platform_system": "Windows",
+        "os_name": "nt",
+        "platform_machine": "AMD64",
+    },
+    "macos-15": {
+        "sys_platform": "darwin",
+        "platform_system": "Darwin",
+        "os_name": "posix",
+        "platform_machine": "arm64",
+    },
 }
 
 
 def _audit_job() -> dict:
-    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8"))
+    workflow = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+    )
     return workflow["jobs"]["dependency-audit"]
 
 
@@ -78,11 +95,15 @@ def _resolve(edge: dict, packages: dict[str, list[dict]]) -> dict:
 
 def _edges(package: dict, extras: list[str]) -> list[dict]:
     optional = package.get("optional-dependencies", {})
-    return package.get("dependencies", []) + [edge for extra in extras for edge in optional.get(extra, [])]
+    return package.get("dependencies", []) + [
+        edge for extra in extras for edge in optional.get(extra, [])
+    ]
 
 
 def _every_root_edge(root: dict) -> list[dict]:
-    groups = list(root.get("optional-dependencies", {}).values()) + list(root.get("dev-dependencies", {}).values())
+    groups = list(root.get("optional-dependencies", {}).values()) + list(
+        root.get("dev-dependencies", {}).values()
+    )
     return root.get("dependencies", []) + [edge for group in groups for edge in group]
 
 
@@ -94,7 +115,9 @@ def _applicable(edges: list[dict], environment: dict[str, str]) -> list[dict]:
     return [edge for edge in edges if _applies(edge, environment)]
 
 
-def _visit(edge: dict, packages: dict[str, list[dict]], environment: dict[str, str], seen: set) -> list[dict]:
+def _visit(
+    edge: dict, packages: dict[str, list[dict]], environment: dict[str, str], seen: set
+) -> list[dict]:
     """Marks the package `edge` installs as seen and returns its new edges, if any."""
     package = _resolve(edge, packages)
     key = (package["name"], package["version"], tuple(edge.get("extra", [])))
@@ -124,7 +147,11 @@ def _names_advisories_only(leg: dict) -> bool:
 
 def test_the_audit_legs_together_install_every_locked_version() -> None:
     lock = _lock()
-    locked = {(package["name"], package["version"]) for package in lock["package"] if package["name"] != PROJECT}
+    locked = {
+        (package["name"], package["version"])
+        for package in lock["package"]
+        if package["name"] != PROJECT
+    }
     audited = set().union(*(_installed(lock, _environment(leg)) for leg in _legs()))
 
     assert sorted(locked - audited) == []
