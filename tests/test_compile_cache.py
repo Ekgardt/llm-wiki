@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import bounded_io
 import compile_cache
 import llm_client
 import pytest
@@ -563,22 +564,23 @@ def test_entry_stamped_in_the_future_is_a_miss(tmp_path: Path) -> None:
     assert cache.get(action, _accept_application) is None
 
 
-def test_entry_still_fresh_after_the_settle_wait_is_being_written(
+def test_entry_rewritten_during_the_settle_wait_is_being_written(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A writer that keeps stamping the entry outlasts one wait; the read refuses."""
     cache = CompileCache(tmp_path)
     action = _action()
     path = cache.put(action, _plan())
-    stamps = path.lstat()
-    newest_ns = max(stamps.st_mtime_ns, stamps.st_ctime_ns)
-    sleeps: list[float] = []
-    monkeypatch.setattr(compile_cache.time, "time_ns", lambda: newest_ns)
-    monkeypatch.setattr(compile_cache.time, "sleep", sleeps.append)
+    now = [bounded_io.newest_stamp_ns(path.lstat())]
 
-    with pytest.raises(PermissionError, match="being written"):
+    def rewrite_while_waiting(seconds: float) -> None:
+        path.write_bytes(path.read_bytes() + b" ")
+        now[0] += int(seconds * 1_000_000_000)
+
+    monkeypatch.setattr(bounded_io.time, "time_ns", lambda: now[0])
+    monkeypatch.setattr(bounded_io.time, "sleep", rewrite_while_waiting)
+
+    with pytest.raises(bounded_io.SourceChangedDuringRead, match="being written"):
         compile_cache._read_cache_entry(path)
-    assert sleeps == [compile_cache.TIMESTAMP_SETTLE_NS / 1_000_000_000]
     assert cache.get(action, _accept_application) is None
 
 

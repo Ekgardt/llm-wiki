@@ -67,6 +67,13 @@ file it inspected, unchanged; with a same-tick rewrite that promise was false.
    `st_ctime`/`st_ctime_ns` "is deprecated on Windows. Use `st_birthtime` for the
    file creation time" — on Windows it is not a change time.
 
+8. Python, *What's New In Python 3.13*, `time` —
+   https://docs.python.org/3/whatsnew/3.13.html: on Windows `time()` now uses
+   `GetSystemTimePreciseAsFileTime()` (1 µs) instead of `GetSystemTimeAsFileTime()`
+   (15.6 ms), gh-63207. `time_ns()` reads the same system clock. The page was too long
+   to read in full here, so this entry was taken from a summary of its `time`
+   section and not quoted.
+
 macOS: Apple's APFS reference could not be read as text in this session, so the
 macOS timestamp clock granularity is unverified; its `st_ctime` is the POSIX
 change time (source 4).
@@ -90,47 +97,118 @@ change time (source 4).
 
 ## Decision
 
-`_read_cache_entry` takes its `lstat` through `_settled_lstat`: when the entry's
-newest stamp (`max(st_mtime_ns, st_ctime_ns)`) is younger than
-`bounded_io.TIMESTAMP_SETTLE_NS` (20 ms: Linux's jiffy is at most 10 ms at
-`CONFIG_HZ=100`, Windows' default timer tick 15.6 ms), the reader sleeps until it
-is not and looks again; an entry still fresh then is being written and is refused,
-and one stamped more than the window in the future is refused. The identity tuple
-gains `st_ctime_ns`, so on POSIX a rewrite that restores mtime is caught too.
-`search_memory.py` used the same 20 ms under a private name; both now read the one
-constant.
+The settle step lives in `scripts/bounded_io.py`, the shared reader, as
+`settled_lstat(path, label=, deadline=)`:
+
+- The file's newest stamp is `newest_stamp_ns` = `max(st_mtime_ns, st_ctime_ns)`
+  (mtime only on Windows, see below). When it is younger than
+  `TIMESTAMP_SETTLE_NS` (20 ms: Linux's jiffy is at most 10 ms at `CONFIG_HZ=100`,
+  Windows' default timer tick 15.6 ms), the reader sleeps until it is not and
+  looks again.
+- The wait ends on the wall clock, not after one sleep. If the identity is
+  unchanged at the next look and the clock has not moved far enough (Python's
+  `time.time_ns()` on Windows before 3.13 ticks at the system timer, source 8), it waits
+  again; it ends because the stamp is fixed and the clock moves on. If the
+  identity moved, the file is being written: `SourceChangedDuringRead`, the
+  retryable refusal callers already handle.
+- A stamp more than one window ahead of the clock is refused as "stamped in the
+  future"; up to one window ahead is the same tick seen through two clocks.
+- A wait that would end past the caller's deadline raises `TimeoutError` before
+  sleeping.
+- `file_identity` is `(st_dev, st_ino, st_size, st_mtime_ns, ctime)`, so on POSIX
+  a rewrite that restores mtime with `utime` is caught too. On Windows the ctime
+  field is 0: Python reports the creation time there (source 7), and
+  `markdown_transaction.py` already records that the path and descriptor views of
+  it can differ.
+
+`read_stable_bytes` (75 call sites in 31 other scripts) takes its first `lstat`
+through `settled_lstat`; `compile_cache._read_cache_entry` calls the same helper
+and `file_identity` instead of its own copies; `search_memory.py`'s seal
+observation uses `newest_stamp_ns` and the same constant.
 
 ## Trade-offs and limits
 
-- Cost: one `time.time_ns()` per read; a sleep of at most 20 ms only for an entry
-  written less than 20 ms ago. The compile writes an entry after a model call and
-  reads it in a later run, so production reads almost never wait.
+- Cost: one `time.time_ns()` per read; a sleep of at most 20 ms (40 ms for a stamp
+  up to one window ahead) only for a file written less than 20 ms ago. Most
+  reads are of files written in an earlier run and never wait. The full suite's
+  wall time is in Verification.
 - Windows has no change time in `os.stat` (source 7): a same-size rewrite that also
   restores mtime with `os.utime` is not caught there; a plain rewrite is, once its
-  handle is closed (source 6). The deterministic test is skipped on Windows for
-  this reason. The content checks remain the defence.
+  handle is closed (source 6). The two deterministic `utime` tests are skipped on
+  Windows for this reason. The content checks remain the defence.
 - A filesystem with 1 s or 2 s stamps (FAT, HFS+, ext4 with 128-byte inodes) is
   coarser than the window; the state root must already be a local filesystem with
   correct locking, and the defaults on all three platforms (ext4, XFS, btrfs,
   tmpfs, APFS, NTFS) stamp at 100 ns or finer.
-- A wall clock stepped backwards by more than 20 ms makes existing entries look
-  stamped in the future; they are cache misses until the clock catches up.
-- The same `(dev, ino, size, mtime)` identity is used by `bounded_io.read_stable_bytes`
-  and about fifteen other readers in `scripts/`. They are not changed here; each
-  has its own callers and cost profile and needs its own measurement.
+- A file stamped more than 20 ms in the future is refused, for example after the
+  wall clock steps backwards, or with an archive unpacked from a machine whose
+  clock ran fast, or after `touch -d` to a later date. It stays refused until the
+  clock reaches its stamp. A shorter wait cannot prove that file unchanged: any
+  write landing in the tick its stamp names would look the same, and waiting for
+  that tick could take days. The refusal is the ordinary `PermissionError` of a
+  file that is unsafe to read, with "stamped in the future" in its message.
+  `touch` on the file gives it a current stamp and clears it.
+
+### Readers that keep their own stat identity
+
+Other code in `scripts/` compares stat fields without the settle step. They are
+not changed here. The condition for each is stated so it can be checked.
+
+Readers that return bytes and check one open descriptor before and after the
+read: `doctor._read_opened_lsp_record`, `evidence_graph._require_manifest_unchanged`,
+`integration_adapter._require_stable_transcript`, `memory_queue._read_stable_descriptor`
+and `_descriptor_identity`, `reliable_memory._require_stable_read`,
+`search_memory._require_stable_identity` and `_require_same_file`,
+`lsp_security._posix_read_identity`, and the Windows branch of
+`install_pyright._artifact_is_stable`. `corpus_snapshot`, `generation_catalog`,
+`project_journal`, `markdown_transaction`, `private_vault_backup`,
+`workspace_revision._strong_identity` and the POSIX branch of `install_pyright`
+already compare ctime, but none of them settles. A same-size rewrite in the
+same tick during their read is the same defect, and it is still there. Each one
+has its own errors, deadline and callers. This change was asked to stay small,
+so moving them is not part of it. Condition: each one is closed when it reads
+through `bounded_io.read_stable_bytes` or takes its first stat through
+`bounded_io.settled_lstat`.
+
+Caches that use stat only to decide whether to look again, and return no bytes
+on its strength: `pyright_session._file_identity` (its docstring states this
+trade-off), `evidence_reader_cache._stat_identity`,
+`pyright_profile._node_probe_key`, `mcp_supervisor._file_identity`,
+`install_models._file_identity` (it already has its own 2 s racy window) and
+`workspace_revision._identity`. A missed same-tick change there means an answer
+is recomputed later, not that changed bytes are vouched for. Condition: revisit
+any of them once a test shows a same-tick rewrite producing a wrong result
+there.
 
 ## Verification
 
-- `test_fd_read_rejects_same_size_rewrite_that_keeps_its_mtime` sets the rewritten
-  entry's mtime back to the original nanosecond with `os.utime`; the old code
-  failed it 10 of 10 runs on tmpfs, with `DID NOT RAISE`.
-- `test_entry_stamped_in_the_future_is_a_miss` covers the refusal of a future stamp.
-- With the fix, the whole `tests/test_compile_cache.py` passed 100 of 100 runs on
-  tmpfs and 30 of 30 on ext4 on disk (Linux 6.8). macOS and Windows were not run
-  in this session; CI runs them.
+Linux 6.8, tmpfs (`/dev/shm`) unless stated. macOS and Windows were not run in
+this session; CI runs them.
+
+- `test_fd_read_rejects_same_size_rewrite_that_keeps_its_mtime` (compile cache)
+  and `test_stable_read_rejects_same_size_rewrite_that_keeps_its_mtime`
+  (`read_stable_bytes`) set the rewritten file's mtime back to the original
+  nanosecond with `os.utime`. The old compile-cache code failed the first one in
+  10 of 10 runs. With ctime removed from `file_identity`, the second fails with
+  `DID NOT RAISE`.
+- A probe of the reviewer's case: write a file, rewrite it in place at the same
+  size just before `read_stable_bytes` opens it. 200 runs each: with
+  `settled_lstat` replaced by a plain `lstat` (ctime still in the identity), 185
+  rewrites were missed. With the fix, 0 were missed.
+- `tests/test_bounded_io.py` has fake-clock tests with exact boundaries:
+  - a fresh file waits once;
+  - a clock that stands still through two waits gets a third look and is not
+    refused;
+  - a rewrite during the wait is "being written";
+  - a stamp exactly one window ahead waits, and one nanosecond more is refused;
+  - a wait past the deadline times out without sleeping.
+- `tests/test_bounded_io.py`, `tests/test_compile_cache.py` and
+  `tests/test_a_file_being_written_is_a_changed_corpus_on_every_system.py`:
+  50 of 50 fresh pytest runs passed.
+- The earlier round of this change: the whole `tests/test_compile_cache.py`
+  passed 100 of 100 runs on tmpfs and 30 of 30 on ext4 on disk.
 - `docs/research/2026-11-05-scripts-is-a-regular-package.md` (#54) made the
-  original test move the mtime on after its rewrite and recorded the limit, with
-  ctime alone keeping both stamps in 1 373 of 2 000 rewrites, which matches the
-  measurement above. The settle wait removes that limit, so the test again rewrites
-  in place without touching the stamps. After rebasing onto #54, the test and the
-  deterministic test passed 200 of 200 fresh pytest runs on tmpfs.
+  original test move the mtime on after its rewrite, and recorded the limit:
+  ctime alone kept both stamps in 1 373 of 2 000 rewrites, which matches the
+  measurement above. The settle wait removes that limit, so the test again
+  rewrites in place without touching the stamps.

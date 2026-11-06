@@ -123,17 +123,72 @@ def _require_regular_file(path: Path, before: os.stat_result, label: str) -> Non
         raise PermissionError(f"{label} must be a regular non-symlink file")
 
 
-def _file_identity(info: os.stat_result) -> tuple[int, int, int, int]:
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+FileIdentity = tuple[int, int, int, int, int]
+
+
+def file_identity(info: os.stat_result) -> FileIdentity:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, _change_time_ns(info))
+
+
+def newest_stamp_ns(info: os.stat_result) -> int:
+    return max(info.st_mtime_ns, _change_time_ns(info))
+
+
+def _change_time_ns(info: os.stat_result) -> int:
+    """POSIX ctime moves on every write, even when mtime is forged.
+
+    Windows reports the creation time there, which can differ between the
+    path and descriptor views and says nothing about a write.
+    """
+    if os.name == "nt":
+        return 0
+    return info.st_ctime_ns
+
+
+def settled_lstat(
+    path: Path, *, label: str = "file", deadline: float | None = None
+) -> os.stat_result:
+    """An lstat whose newest stamp is a tick old, so any later write moves it.
+
+    A fresh file is observed again until its tick has passed. The wait ends on
+    the wall clock, not after one sleep, so a clock coarser than the window
+    (Windows before Python 3.13) costs another look instead of a refusal; a file
+    whose identity moves meanwhile is being written. Research:
+    `docs/research/2026-11-06-a-rewrite-in-the-same-tick-is-a-change.md`.
+    """
+    observed = path.lstat()
+    wait_ns = _settle_wait_ns(observed, label)
+    while wait_ns:
+        _sleep_within_deadline(wait_ns, deadline, label)
+        current = path.lstat()
+        if file_identity(current) != file_identity(observed):
+            raise SourceChangedDuringRead(f"{label} is being written")
+        wait_ns = _settle_wait_ns(current, label)
+    return observed
+
+
+def _settle_wait_ns(info: os.stat_result, label: str) -> int:
+    """How long until the stamp is a tick old; a stamp over a tick ahead is refused."""
+    ahead_ns = newest_stamp_ns(info) - time.time_ns()
+    if ahead_ns > TIMESTAMP_SETTLE_NS:
+        raise PermissionError(f"{label} is stamped in the future")
+    return max(ahead_ns + TIMESTAMP_SETTLE_NS, 0)
+
+
+def _sleep_within_deadline(wait_ns: int, deadline: float | None, label: str) -> None:
+    wait_seconds = wait_ns / 1_000_000_000
+    if deadline is not None and time.monotonic() + wait_seconds >= deadline:
+        raise TimeoutError(f"{label} read deadline expired")
+    time.sleep(wait_seconds)
 
 
 def _require_opened_identity(
-    descriptor: int, identity: tuple[int, int, int, int], label: str
+    descriptor: int, identity: FileIdentity, label: str
 ) -> None:
     opened = os.fstat(descriptor)
     if not stat.S_ISREG(opened.st_mode):
         raise PermissionError(f"{label} changed before open")
-    if identity != _file_identity(opened):
+    if identity != file_identity(opened):
         raise SourceChangedDuringRead(f"{label} changed before open")
 
 
@@ -159,17 +214,17 @@ def _read_bounded_chunks(
 def _require_unchanged_after_read(
     descriptor: int,
     path: Path,
-    identity: tuple[int, int, int, int],
+    identity: FileIdentity,
     label: str,
 ) -> None:
     after = os.fstat(descriptor)
-    if identity != _file_identity(after):
+    if identity != file_identity(after):
         raise SourceChangedDuringRead(f"{label} changed during read")
     _require_same_file_at_path(path, identity, label)
 
 
 def _require_same_file_at_path(
-    path: Path, identity: tuple[int, int, int, int], label: str
+    path: Path, identity: FileIdentity, label: str
 ) -> None:
     current = path.lstat()
     if path.is_symlink():
@@ -181,7 +236,7 @@ def _require_same_file_at_path(
 def _read_open_descriptor(
     descriptor: int,
     path: Path,
-    identity: tuple[int, int, int, int],
+    identity: FileIdentity,
     max_bytes: int,
     label: str,
     deadline: float | None,
@@ -207,7 +262,7 @@ def read_stable_bytes(
     path = Path(path)
     _require_safe_ancestors(path, label, deadline)
     _check_deadline(deadline, label)
-    before = path.lstat()
+    before = settled_lstat(path, label=label, deadline=deadline)
     _require_regular_file(path, before, label)
     if before.st_size > max_bytes:
         raise ValueError(f"{label} exceeds {max_bytes} bytes")
@@ -216,7 +271,7 @@ def read_stable_bytes(
     descriptor = os.open(path, flags)
     try:
         return _read_open_descriptor(
-            descriptor, path, _file_identity(before), max_bytes, label, deadline
+            descriptor, path, file_identity(before), max_bytes, label, deadline
         )
     finally:
         os.close(descriptor)

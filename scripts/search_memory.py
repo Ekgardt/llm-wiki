@@ -43,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import (
     MAX_KNOWLEDGE_PAGE_BYTES,
     TIMESTAMP_SETTLE_NS,
+    newest_stamp_ns,
     read_stable_bytes,
 )
 from corpus_snapshot import (  # noqa: E402
@@ -1875,8 +1876,7 @@ def _hashed_seal(
     _record_observed_checksum(
         _seal_observation_key(path, identity, expected),
         checksum,
-        racy=max(after.st_mtime_ns, after.st_ctime_ns)
-        > began_ns - TIMESTAMP_SETTLE_NS,
+        racy=newest_stamp_ns(after) > began_ns - TIMESTAMP_SETTLE_NS,
     )
     return (*identity, checksum)
 

@@ -38,7 +38,7 @@ def _read_with_a_writer_in_between(path: Path, max_bytes: int, *, label: str) ->
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
     try:
         return bounded_io._read_open_descriptor(
-            descriptor, path, bounded_io._file_identity(before), max_bytes, label, None
+            descriptor, path, bounded_io.file_identity(before), max_bytes, label, None
         )
     finally:
         os.close(descriptor)
@@ -56,7 +56,7 @@ def test_a_file_written_between_the_look_and_the_open_is_named_as_changed(tmp_pa
 
 def test_a_file_replaced_under_the_reader_is_named_as_changed(tmp_path):
     _vault, source = _source(tmp_path)
-    identity = bounded_io._file_identity(source.lstat())
+    identity = bounded_io.file_identity(source.lstat())
     newer = source.with_name("newer.py")
     newer.write_bytes(source.read_bytes())
     os.replace(newer, source)
