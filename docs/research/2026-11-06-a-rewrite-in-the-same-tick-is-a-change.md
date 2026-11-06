@@ -220,6 +220,11 @@ this session; CI runs them.
   - a page with a +1 h mtime is read, and a same-size rewrite of it is still
     caught; in `tests/test_compile_cache.py` a +60 s entry is a hit;
   - a wait past the deadline times out without sleeping.
+  - with `os.name` set to `nt`, the change stamp is mtime and the identity's ctime
+    field is 0, so the Windows branch is tested on every host;
+  - a file that grows while it is read is "changed during read".
+- `tests/test_seal_observation_cache.py`: a search seal observation is remembered
+  once its change stamp is exactly one window old, and not one nanosecond earlier.
 - `tests/test_bounded_io.py`, `tests/test_compile_cache.py` and
   `tests/test_a_file_being_written_is_a_changed_corpus_on_every_system.py`:
   50 of 50 fresh pytest runs passed.

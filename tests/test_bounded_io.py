@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -390,3 +391,51 @@ def test_a_wait_that_would_outlast_the_deadline_times_out_without_sleeping(
     with pytest.raises(TimeoutError, match="deadline"):
         bounded_io.read_stable_bytes(target, 1024, deadline=100.01)
     assert clock.sleeps == []
+
+
+MTIME_NS = 111
+CTIME_NS = 222
+
+
+@pytest.mark.parametrize(
+    ("system", "change_stamp", "identity_ctime"),
+    [("posix", CTIME_NS, CTIME_NS), ("nt", MTIME_NS, 0)],
+    ids=["posix-ctime-is-the-change-time", "windows-ctime-is-the-creation-time"],
+)
+def test_the_change_stamp_is_the_one_every_write_moves(
+    monkeypatch: pytest.MonkeyPatch, system: str, change_stamp: int, identity_ctime: int
+) -> None:
+    import bounded_io
+
+    info: Any = SimpleNamespace(
+        st_dev=1, st_ino=2, st_size=3, st_mtime_ns=MTIME_NS, st_ctime_ns=CTIME_NS
+    )
+    monkeypatch.setattr(bounded_io.os, "name", system)
+
+    observed = (bounded_io.change_stamp_ns(info), bounded_io.file_identity(info)[-1])
+
+    assert observed == (change_stamp, identity_ctime)
+
+
+def test_a_file_grown_while_it_is_read_is_changed_during_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import bounded_io
+
+    target = tmp_path / "page.md"
+    target.write_bytes(b"first half")
+    real_read = os.read
+    appended: list[bool] = []
+
+    def read_then_append(descriptor: int, length: int) -> bytes:
+        chunk = real_read(descriptor, length)
+        if not appended:
+            appended.append(True)
+            with target.open("ab") as handle:
+                handle.write(b", second half")
+        return chunk
+
+    monkeypatch.setattr(bounded_io.os, "read", read_then_append)
+
+    with pytest.raises(bounded_io.SourceChangedDuringRead, match="changed during read"):
+        bounded_io.read_stable_bytes(target, 1024, label="page")
