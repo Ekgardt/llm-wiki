@@ -9,6 +9,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ### Changed
 - The three READMEs are rewritten to match the code as it is: removed features (loop detector, agent timeline, feedback capture) and the unverifiable comparison table are gone; the agents, hooks, search, maintenance, backup and code navigation are described as they work today.
 
+### Security
+- The lock moves seven packages past their published advisories, so the dependency audit passes again: certifi 2026.10.23, filelock 4.2.9, mcp 1.30.0, msgpack 1.2.4, pyjwt 2.15.1, setuptools 84.2.1 and virtualenv 21.15.5 (distlib, packaging and python-discovery follow virtualenv). No fixed filelock supports Python 3.10, which keeps 4.1.0; the HTTP MCP server now closes a session idle for 30 minutes, the SDK's fix for unbounded sessions (docs/research/2026-11-06-seven-locked-packages-move-past-their-advisories.md).
+
 ### Fixed
 - A failed installer update no longer quarantines itself on a file it never wrote: its revert undoes only what it wrote, keeps the forward failure as `error.cause`, and `install_control.py rollback` now leaves an existing quarantine. `--adopt <resource-id>` (`install.sh`, `install.ps1`) takes over a file changed outside the installer and keeps its content as the rollback point; schedulers cannot be adopted (docs/research/2026-09-28-a-rollback-undoes-only-what-it-did.md).
 - A transaction that appends keeps only the bytes it added and the before length instead of two full images of the file (plan v2; v1 plans stay readable): on the live vault one day's 7 026 appends held 2.58 GB of images for 9.67 MB they added; undo, abort and recovery rebuild the bytes from the target and check them against the recorded hash.
