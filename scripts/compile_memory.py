@@ -2076,8 +2076,14 @@ _BODY_SECTIONS = frozenset(
 def _require_semantic_shape(operation: Mapping[str, object]) -> None:
     if not _SEMANTIC_FIELDS.issubset(operation):
         raise ValueError("compile operation is missing semantic fields")
-    if set(operation) - (_SEMANTIC_FIELDS | {"claims"}):
-        raise ValueError("compile operation has unsupported semantic fields")
+    unsupported = set(operation) - (_SEMANTIC_FIELDS | {"claims"})
+    if unsupported:
+        # Name them: without the names the rejection cannot be told apart as model
+        # noise or a missing field. Model-authored keys, so bounded in count and length.
+        names = sorted(str(field) for field in unsupported)
+        shown = ", ".join(repr(name[:40]) for name in names[:5])
+        more = f" (+{len(names) - 5} more)" if len(names) > 5 else ""
+        raise ValueError(f"compile operation has unsupported semantic fields: {shown}{more}")
     _require_semantic_action(operation["action"])
     _require_semantic_category(operation["category"])
     _require_semantic_slug(operation["slug"])

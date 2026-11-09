@@ -7317,10 +7317,17 @@ class _QueueV3CandidateReader:
         ]
 
     def count_eligible(self, *, max_attempts: int = DEFAULTS.queue_max_attempts) -> int:
+        """Ready tasks `work` could claim. A capture task is the capture worker's
+        (`claim_capture`); `work` never claims one, so it is not counted here. Counting
+        it failed the nightly's work step whenever a capture waited on its retry."""
         with closing(self._connect()) as database:
             row = database.execute(
                 """SELECT COUNT(*) FROM tasks
-                   WHERE state='ready' AND attempts < ? AND available_at <= ?""",
+                   WHERE state='ready' AND attempts < ? AND available_at <= ?
+                     AND NOT EXISTS (
+                         SELECT 1 FROM capture_task_links link
+                         WHERE link.task_id=tasks.id
+                     )""",
                 (max_attempts, _timestamp(_utc_now())),
             ).fetchone()
         return int(row[0])
