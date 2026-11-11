@@ -73,11 +73,13 @@ def test_missing_declared_shared_library_is_not_silently_ignored(runtime):
         controller.compile_runtime_dependency_manifest()
 
 
-def test_static_runtime_does_not_require_a_shared_library(runtime):
-    root, config = runtime
-    config['Py_ENABLE_SHARED'] = 0
+def test_an_interpreter_inside_its_executable_binds_no_library(runtime, monkeypatch):
+    root, _ = runtime
+    monkeypatch.setattr(dependencies, 'loaded_python_library', lambda: None)
     (root / 'libpython.so.1').unlink()
-    assert controller.compile_runtime_dependency_manifest()['files']
+    files = controller.compile_runtime_dependency_manifest()['files']
+    assert files
+    assert not any('python-library' in key for key in files)
 
 
 def test_expired_runtime_inventory_does_not_discover_paths(runtime, monkeypatch):
@@ -97,11 +99,14 @@ def test_overlapping_stdlib_and_package_roots_do_not_hide_standard_code(runtime,
     assert controller.compile_runtime_dependency_manifest() != before
 
 
-def test_unknown_shared_library_configuration_refuses_qualification(runtime):
-    _, config = runtime
+@pytest.mark.parametrize('shared', [{'Py_ENABLE_SHARED': 0, 'PYTHONFRAMEWORK': 'Python'}, {}])
+def test_a_loaded_library_is_bound_whatever_the_configuration_says(runtime, shared):
+    root, config = runtime
     config.pop('Py_ENABLE_SHARED')
-    with pytest.raises(ValueError, match='configuration is unavailable'):
-        controller.compile_runtime_dependency_manifest()
+    config.update(shared)
+    before = controller.compile_runtime_dependency_manifest()
+    (root / 'libpython.so.1').write_bytes(b'replaced framework library')
+    assert controller.compile_runtime_dependency_manifest() != before
 
 
 def test_windows_library_uses_loaded_handle_without_unix_configuration(tmp_path, monkeypatch):
@@ -119,7 +124,7 @@ def test_windows_library_uses_loaded_handle_without_unix_configuration(tmp_path,
     monkeypatch.setattr(sys, 'platform', 'win32')
     monkeypatch.setattr(sys, 'dllhandle', handle, raising=False)
     monkeypatch.setattr(windows_native, 'loaded_module_filename', filename, raising=False)
-    assert controller.compile_runtime_library({}) == {'python-library': path}
+    assert controller.compile_runtime_library() == {'python-library': path}
     assert calls == [handle]
 
 
@@ -128,7 +133,7 @@ def test_windows_library_refuses_missing_or_invalid_handle(monkeypatch, handle):
     monkeypatch.setattr(sys, 'platform', 'win32')
     monkeypatch.setattr(sys, 'dllhandle', handle, raising=False)
     with pytest.raises(ValueError, match='Python DLL handle is unavailable'):
-        controller.compile_runtime_library({})
+        controller.compile_runtime_library()
 
 
 def test_windows_library_propagates_native_lookup_failure(monkeypatch):
@@ -141,13 +146,13 @@ def test_windows_library_propagates_native_lookup_failure(monkeypatch):
     monkeypatch.setattr(sys, 'dllhandle', 123, raising=False)
     monkeypatch.setattr(windows_native, 'loaded_module_filename', refused)
     with pytest.raises(OSError, match='native lookup failed'):
-        controller.compile_runtime_library({})
+        controller.compile_runtime_library()
 
 
 def test_a_build_machine_libdir_does_not_name_the_library(runtime):
     root, config = runtime
     config['LIBDIR'] = '/install/lib'
-    assert controller.compile_runtime_library(config) == {'python-library': root / 'libpython.so.1'}
+    assert controller.compile_runtime_library() == {'python-library': root / 'libpython.so.1'}
 
 
 def _mapped_files():
@@ -236,13 +241,8 @@ def test_an_unknown_platform_refuses_to_guess_the_main_program(monkeypatch):
         dependencies.main_program_base()
 
 
-def test_the_actual_runtime_is_fingerprinted_whatever_its_build_libdir_says():
-    config = {**sysconfig.get_config_vars(), 'LIBDIR': '/install/lib'}
-    assert all(path.is_file() for path in controller.compile_runtime_library(config).values())
-
-
 def test_actual_runtime_library_can_be_fingerprinted():
-    libraries = controller.compile_runtime_library(sysconfig.get_config_vars())
+    libraries = controller.compile_runtime_library()
     for path in libraries.values():
         record = controller.compile_dependency_file(path, None)
         assert record['size'] > 0

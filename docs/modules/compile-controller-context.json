@@ -298,7 +298,7 @@
         "compile_runtime_library",
         "compile_work_identity"
       ],
-      "contract_sha256": "e629c4926b35defdc6ba00c7de6cbe5e6006a9336159feab3049267163898f3a",
+      "contract_sha256": "0d2d7a4a2e59f936c8c6379716e7ba5ef40b20ab4db328d60bdede41818d81ff",
       "integration_tests": [
         "tests/test_compile_dependency_identity.py",
         "tests/test_compile_execution_inventory.py"

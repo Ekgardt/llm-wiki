@@ -50,7 +50,7 @@
         "compile_runtime_dependency_manifest",
         "compile_runtime_library"
       ],
-      "contract_sha256": "4dccfb0a623713802c2fb9fe84e80056bce695fb79bd35b955b83232409b5268",
+      "contract_sha256": "0a3ac0f1c843205a26fb369bfca8b5ef8d35318da17c55ff93d04af14d3bd6b0",
       "integration_tests": [
         "tests/test_compile_runtime_identity.py"
       ]

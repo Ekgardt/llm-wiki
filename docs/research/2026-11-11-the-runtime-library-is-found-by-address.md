@@ -41,8 +41,11 @@ Bind the image that actually holds the running interpreter's code:
    fingerprinted; no library is bound. Different base: that image is the library;
    a path that is not a file is refused. `dladdr` failure is refused.
 
-`Py_ENABLE_SHARED=0` still binds no library, and unknown configuration still
-refuses. Windows keeps using the loaded `sys.dllhandle`.
+The build configuration no longer decides. A macOS framework build keeps its
+interpreter in `Python.framework/.../Python`, a separate image, yet does not set
+`Py_ENABLE_SHARED=1`: CPython's `configure` tests "shared, or framework" as two
+cases. Trusting the flag left that image unbound, so the address lookup runs on
+every Unix build. Windows keeps using the loaded `sys.dllhandle`.
 
 ## Alternatives considered
 
@@ -88,5 +91,10 @@ refuses. Windows keeps using the loaded `sys.dllhandle`.
   https://developer.apple.com/forums/thread/749458; dyld test
   `dlopen-NULL-RTLD_FIRST`: `dlopen(NULL)` is the main-executable handle —
   https://git.saurik.com/apple/dyld.git/blob/HEAD:/unit-tests/test-cases/dlopen-NULL-RTLD_FIRST/main.c
+- CPython bpo-43103 (GH-24676): library dependencies follow the shared path when
+  `PY_ENABLE_SHARED = 1` or `enable_framework`, two separate conditions —
+  https://www.python.org/pipermail/python-checkins/2021-March/169234.html; and
+  bpo-4472: a build is either a regular Unix shared build or a framework —
+  https://bugs.python.org/issue4472
 - python-build-standalone behaviour quirks: build-time `/install` paths remain in
   sysconfig data — https://docs.astral.sh/python-build-standalone/quirks/

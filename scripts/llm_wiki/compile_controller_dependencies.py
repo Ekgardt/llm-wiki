@@ -232,19 +232,11 @@ def _require_acyclic_dependency_directory(resolved, ancestors):
         raise ValueError('compile dependency directory cycle')
 
 
-def compile_runtime_library(config):
+def compile_runtime_library():
     import sys
 
     if sys.platform == 'win32':
         return _windows_compile_runtime_library()
-    return _unix_compile_runtime_library(config)
-
-
-def _unix_compile_runtime_library(config):
-    if config.get('Py_ENABLE_SHARED') == 0:
-        return {}
-    if config.get('Py_ENABLE_SHARED') != 1:
-        raise ValueError('Python shared-library configuration is unavailable')
     return _loaded_library_entry(loaded_python_library())
 
 
@@ -362,10 +354,10 @@ def compile_runtime_dependency_manifest(*, deadline=None):
 
     Package roots are covered by the separate package inventory. This component
     binds on-disk interpreter/stdlib bytes, not old code already loaded in memory
-    or transitive operating-system libraries. Unsupported shared-library metadata
-    refuses qualification explicitly; no guessed platform pathname is substituted.
-    A shared build binds the image that holds the running interpreter's code,
-    found by address; an interpreter linked into its executable binds none.
+    or transitive operating-system libraries. The image that holds the running
+    interpreter's code is found by address, whatever the build configuration says:
+    outside the executable it is bound, inside it nothing more is. A lookup that
+    fails refuses qualification; no guessed platform pathname is substituted.
     """
     import sys
     import sysconfig
@@ -373,7 +365,7 @@ def compile_runtime_dependency_manifest(*, deadline=None):
     operational_deadline_active(deadline)
     paths, config = sysconfig.get_paths(), sysconfig.get_config_vars()
     files = dict(_compile_standard_library_files(paths, deadline))
-    files.update(compile_runtime_library(config))
+    files.update(compile_runtime_library())
     files['python-executable'] = Path(sys.executable)
     files.update({f'search-path/{index}': Path(path) for index, path in enumerate(sys.path)
                   if Path(path).is_file()})
