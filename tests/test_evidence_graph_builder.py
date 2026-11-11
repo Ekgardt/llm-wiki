@@ -27,7 +27,6 @@ import os
 import sqlite3
 import sys
 from contextlib import closing
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -78,26 +77,6 @@ def test_omitted_builder_schema_keeps_legacy_v2_manifest(tmp_path: Path) -> None
         result.generation_path / "evidence.sqlite3"
     ) as database:
         assert database.execute("PRAGMA user_version").fetchone()[0] == 2
-
-
-_FIELD_DAMAGE = {
-    "source_id": ("source_id", "source:other"),
-    "relative_path": ("relative_path", "other.py"),
-    "sha256": ("sha256", "f" * 64),
-}
-
-
-def _damaged_values(original, damage: str) -> dict:
-    values = {
-        name: getattr(original, name)
-        for name in ("source_id", "relative_path", "sha256", "stat")
-    }
-    if damage not in _FIELD_DAMAGE:
-        values["stat"] = replace(original.stat, size=original.stat.size + 1)
-        return values
-    name, value = _FIELD_DAMAGE[damage]
-    values[name] = value
-    return values
 
 
 def _basic_records():

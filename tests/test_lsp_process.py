@@ -42,13 +42,6 @@ from tests.lsp_process_scenario_helpers import (
 from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
 
 
-def _expect_repeated_close_failure(process, message: str, attempts: int = 2) -> None:
-    """The same failure must repeat until the blocked cleanup is released."""
-    for _attempt in range(attempts):
-        with pytest.raises(OSError, match=message):
-            process.close(time.monotonic() + 5)
-
-
 def _retry_cleanup_errors(errors) -> None:
     for error in errors:
         if isinstance(error, lsp_process_cleanup.StartupCleanupError):

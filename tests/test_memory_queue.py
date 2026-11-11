@@ -75,14 +75,6 @@ class CustomSequence:
         return self.items[index]
 
 
-def _task_row(queue: MemoryQueue, task_id: str, columns: str) -> tuple:
-    """Named columns of one task row, read past the API."""
-    with sqlite3.connect(queue.db_path) as connection:
-        return connection.execute(
-            f"SELECT {columns} FROM tasks WHERE id=?", (task_id,)  # noqa: S608
-        ).fetchone()
-
-
 def _rows_at(path: Path, queries: tuple[str, ...]) -> tuple:
     """One row per query, read through one connection to one database."""
     with sqlite3.connect(path) as database:

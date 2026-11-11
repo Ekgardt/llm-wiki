@@ -59,18 +59,6 @@ def _sync_apply_line(script: str) -> str:
     )
 
 
-def _apply_knowledge_change(root, original, change: str) -> None:
-    """One way the knowledge tree can differ from the built index."""
-    if change == "added":
-        added = root / "knowledge" / "notes" / "added.md"
-        added.write_text("---\ntype: concept\n---\n# Added\n", encoding="utf-8")
-        return
-    if change == "removed":
-        original.unlink()
-        return
-    original.write_text("---\ntype: concept\n---\n# Modified\n", encoding="utf-8")
-
-
 def _action(report, identifier: str) -> dict:
     return next(item for item in report["actions"] if item["id"] == identifier)
 

@@ -876,18 +876,6 @@ def test_queue_ignores_symlink_entries_without_following_payload(tmp_path):
     assert "OUTSIDE-SECRET" not in json.dumps(report)
 
 
-def _index_verdicts(index, contents, root, state_root, home) -> list:
-    """(status, freshness) after writing each of these byte strings as the index."""
-    from doctor import run_doctor
-
-    verdicts = []
-    for content in contents:
-        index.write_bytes(content)
-        check = _check(run_doctor(root=root, state_root=state_root, home=home), "index")
-        verdicts.append((check["status"], check["details"]["freshness"]))
-    return verdicts
-
-
 def test_queue_scan_is_bounded_by_count_and_file_size(tmp_path):
     from doctor import run_doctor
 

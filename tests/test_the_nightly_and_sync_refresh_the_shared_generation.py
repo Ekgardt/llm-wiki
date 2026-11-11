@@ -122,16 +122,6 @@ def _recording_kwargs(calls, value):
     return stub
 
 
-def _recording_name(calls, name, value):
-    """A stub that remembers only that it ran, in order."""
-
-    def stub(**kwargs):
-        calls.append(name)
-        return value
-
-    return stub
-
-
 def _action_of(result: dict, action_id: str) -> dict:
     return next(item for item in result["actions"] if item["id"] == action_id)
 

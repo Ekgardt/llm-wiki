@@ -787,16 +787,6 @@ def _variant_pairs(model: dict) -> list:
     return [(item["variant_id"], item["dimensions"]) for item in model["variants"]]
 
 
-def _pin_identity(model: dict) -> tuple:
-    """Revision, licence and token bounds: the fields a pin is made of."""
-    return (
-        model["revision"],
-        model["license"],
-        model["benchmark_max_tokens"],
-        model["native_max_tokens"],
-    )
-
-
 def test_required_embedding_pins_and_formatting_are_exact():
     embeddings = {model["id"]: model for model in _load()["embeddings"]}
     assert set(embeddings) == {

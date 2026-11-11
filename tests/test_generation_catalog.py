@@ -292,20 +292,6 @@ def test_v2_generation_rejects_null_and_unknown_graph_schema(
         catalog.register("invalid-v2-graph")
 
 
-def _write_damaged_manifest(manifest_path: Path, manifest: dict, damage: str) -> None:
-    """Only the NFC case must bypass canonical encoding — that is its point."""
-    from reliable_memory import canonical_json_bytes
-
-    if damage != "policy-nfc":
-        manifest_path.write_bytes(canonical_json_bytes(manifest))
-        return
-    manifest_path.write_bytes(
-        json.dumps(
-            manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-    )
-
-
 @pytest.mark.parametrize("graph_schema", [None, "other-graph/v1"])
 def test_v2_requires_exact_evidence_graph_schema(tmp_path, graph_schema):
     from reliable_memory import canonical_json_bytes

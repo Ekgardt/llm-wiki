@@ -500,16 +500,6 @@ def test_public_search_threads_deadline_and_cancel_into_the_markdown_read(monkey
         )
 
 
-def _mode_of(row: dict) -> tuple:
-    return (
-        row["requested_mode"],
-        row["effective_mode"],
-        row["signals_used"],
-        row["fallback_reason"],
-        row["partial"],
-    )
-
-
 def _assert_optional_stage_times_out(retrieval, hanging) -> None:
     with pytest.raises(retrieval.OptionalStageTimeout):
         retrieval.run_optional_bounded(

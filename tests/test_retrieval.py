@@ -280,9 +280,6 @@ def test_retrieve_runs_lexical_and_dense_separately() -> None:
         calls.append("dense")
         return [_hit(candidate_id="c-b", path="b.md", score=0.9)]
 
-    def fused_backend(**_kwargs):
-        raise AssertionError("must not call a pre-fused backend")
-
     result = retrieval.retrieve(
         "needle",
         requested_profile="HYBRID",

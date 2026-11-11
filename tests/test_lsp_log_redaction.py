@@ -32,28 +32,6 @@ _SCANNER_TOKEN_SHAPES = (
 )
 
 
-# One token text per shape, given (index, native root, URI root).
-_SCANNER_TOKEN_TEXT = {
-    "native": lambda index, native_root, uri_root: (
-        f"path={native_root}/pkg/module-{index}.py:12:34"
-    ),
-    "uri": lambda index, native_root, uri_root: f"uri={uri_root}/pkg/module-{index}.py:56:78",
-    "dotted": lambda index, native_root, uri_root: (
-        f"/srv/scratch/../Program Files/linear-repository/pkg/module-{index}.py"
-    ),
-    "sibling": lambda index, native_root, uri_root: (
-        f"path={native_root}-sibling/module-{index}.py"
-    ),
-    "outside": lambda index, native_root, uri_root: f"path=/outside/module-{index}.py",
-}
-
-
-def _scanner_token(index: int, native_root: str, uri_root: str) -> str:
-    """One token of each shape the scanner must classify, by position."""
-    shape = _SCANNER_TOKEN_SHAPES[index % len(_SCANNER_TOKEN_SHAPES)]
-    return _SCANNER_TOKEN_TEXT[shape](index, native_root, uri_root)
-
-
 def _joined_tokens(tokens: list[str]) -> str:
     return "".join(
         token + _token_separator(index) for index, token in enumerate(tokens)
