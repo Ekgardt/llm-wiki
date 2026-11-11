@@ -245,7 +245,10 @@ def _unix_compile_runtime_library(config):
         return {}
     if config.get('Py_ENABLE_SHARED') != 1:
         raise ValueError('Python shared-library configuration is unavailable')
-    library = loaded_python_library()
+    return _loaded_library_entry(loaded_python_library())
+
+
+def _loaded_library_entry(library):
     if library is None:
         return {}
     return {'python-library': library}
