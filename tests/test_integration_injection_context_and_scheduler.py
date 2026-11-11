@@ -13,7 +13,6 @@ import pytest
 
 from tests.breadcrumb_worker_helpers import ingress as ingress
 from tests.integration_injection_case_helpers import (
-    _shell_functions,
     _unmet_substrings,
     require_tool,
 )
@@ -23,6 +22,7 @@ from tests.integration_injection_helpers import (
     _ensure_scripts_on_path,
 )
 from tests.powershell_literal import ps_literal
+from tests.shell_function_source import _shell_functions
 
 
 def _task_limit(kind: str) -> str:

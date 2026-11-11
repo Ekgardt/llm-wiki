@@ -44,6 +44,7 @@
     "tests/powershell_literal.py",
     "tests/queue_v3_capture_links_helpers.py",
     "tests/shared_fixtures.py",
+    "tests/shell_function_source.py",
     "tests/slow_machine.py",
     "tests/test_integration_injection_context_and_scheduler.py"
   ],

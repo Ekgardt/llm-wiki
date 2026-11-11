@@ -17,6 +17,12 @@ No directory scan, guessed python314.dll name or current-directory fallback.
 The existing streaming fingerprint then binds the actual DLL bytes. Unix static
 and shared-library rules remain, including refusal of unknown configuration.
 
+Superseded 2026-11-11 for Unix: no build configuration decides and an unknown
+configuration is no longer refused; the image holding the interpreter is found by
+address, see
+[2026-11-11-the-runtime-library-is-found-by-address](2026-11-11-the-runtime-library-is-found-by-address.md).
+The Windows rule above is unchanged.
+
 Existing synthetic Unix configuration tests must explicitly model a Unix platform;
 new tests cover Windows dispatch, missing handles, buffer truncation, high native
 handle values, API errors and actual runtime-library fingerprinting on native CI.

@@ -1693,6 +1693,7 @@
   "test_the_installer_asks_which_model.py": 2.8,
   "test_the_installer_brings_the_runtime_of_every_model_it_fetches.py": 0.01,
   "test_the_installer_does_not_vouch_for_agents_it_cannot_see.py": 0.91,
+  "test_the_installer_reads_its_arguments.py": 0.1,
   "test_the_installer_says_what_it_needs.py": 1.81,
   "test_the_installers_agree.py": 0.04,
   "test_the_installers_register_claude_mcp_alike.py": 0.81,

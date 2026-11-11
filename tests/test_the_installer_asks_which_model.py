@@ -27,6 +27,7 @@ import choose_model  # noqa: E402
 import integration_hook_config  # noqa: E402
 import llm_client  # noqa: E402
 
+from tests.shell_function_source import _shell_function  # noqa: E402
 from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT  # noqa: E402
 
 pytestmark = [
@@ -252,8 +253,7 @@ info() { echo "$1"; }; ok() { echo "$1"; }; warn() { echo "WARN $1"; }; fail() {
 
 def _the_installers_model_step() -> str:
     text = (SCRIPTS.parent / 'install.sh').read_text(encoding='utf-8')
-    start = text.index('info "Choosing the model')
-    return text[start:text.rindex('\n', start, text.index('Set up scheduled maintenance'))]
+    return _shell_function(text, 'choose_memory_model') + '\nchoose_memory_model\n'
 
 
 def _run_the_installers_model_step(tmp_path: Path, root: Path, discovery: str, *model_args: str):

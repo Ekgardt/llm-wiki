@@ -77,6 +77,14 @@ def _shape_violations(source: bytes) -> list[str]:
     ]
 
 
+def _script_body_violations(source: bytes) -> list[str]:
+    """The statements outside every function are one more unit under the same ceiling."""
+    body = PARSER.parse(source).root_node
+    measured = {"ccn": (_ccn(body), MAX_CCN), "nesting": (_nesting(body), MAX_NESTING)}
+    reasons = [f"{label}={value} > {limit}" for label, (value, limit) in measured.items() if value > limit]
+    return [f"script body: {reason}" for reason in [*reasons, *_shape_reasons(body)]]
+
+
 def _shape_reasons(function: Node) -> list[str]:
     nodes = _own_nodes(function)
     measured = {"if count": (sum(n.type == "if_statement" for n in nodes), 2),

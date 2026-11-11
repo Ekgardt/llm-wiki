@@ -48,7 +48,7 @@ def _expiry(database: Path, table: str, key: str, value: str) -> str:
 
 
 def test_both_fences_are_pushed_out_while_they_are_live(tmp_path):
-    queue, coordinator, registry, binding, lease, owner = _held_claims(tmp_path)
+    queue, coordinator, registry, binding, _lease, owner = _held_claims(tmp_path)
     with queue.queue_owner(role="queue-worker", scope=SCOPE, parent=owner):
         task_fence = queue.acquire_task_fence(binding.task_id, mode="worker", owner=owner)
         intent_fence = coordinator.acquire_intent_fence(binding.intent_id, mode="worker", owner=owner)
@@ -65,7 +65,7 @@ def test_both_fences_are_pushed_out_while_they_are_live(tmp_path):
 
 
 def test_a_released_fence_is_not_brought_back(tmp_path):
-    queue, coordinator, registry, binding, lease, owner = _held_claims(tmp_path)
+    queue, coordinator, registry, binding, _lease, owner = _held_claims(tmp_path)
     with queue.queue_owner(role="queue-worker", scope=SCOPE, parent=owner):
         intent_fence = coordinator.acquire_intent_fence(binding.intent_id, mode="worker", owner=owner)
         coordinator.release_intent_fence(intent_fence)
@@ -148,7 +148,7 @@ def _fence_case(kind, queue, coordinator, binding):
 
 @pytest.mark.parametrize("kind", ["intent", "task"])
 def test_an_expired_fence_cannot_be_renewed_after_waiting_for_write_admission(tmp_path, monkeypatch, kind):
-    queue, coordinator, registry, binding, lease, owner = _held_claims(tmp_path)
+    queue, coordinator, registry, binding, _lease, owner = _held_claims(tmp_path)
     with queue.queue_owner(role="queue-worker", scope=SCOPE, parent=owner):
         advance, fence_seconds, store, identity, table, key = _fence_case(kind, queue, coordinator, binding)
         fence = getattr(store, f"acquire_{kind}_fence")(identity, mode="worker", owner=owner)
@@ -164,9 +164,9 @@ def test_an_expired_fence_cannot_be_renewed_after_waiting_for_write_admission(tm
 
 @pytest.mark.parametrize("kind", ["intent"])
 def test_new_fence_expiry_starts_at_write_admission(tmp_path, monkeypatch, kind):
-    queue, coordinator, registry, binding, lease, owner = _held_claims(tmp_path)
+    queue, coordinator, registry, binding, _lease, owner = _held_claims(tmp_path)
     with queue.queue_owner(role="queue-worker", scope=SCOPE, parent=owner):
-        advance, fence_seconds, store, identity, table, key = _fence_case(kind, queue, coordinator, binding)
+        advance, fence_seconds, store, identity, _table, _key = _fence_case(kind, queue, coordinator, binding)
         clock = advance(monkeypatch)
         fence = getattr(store, f"acquire_{kind}_fence")(identity, mode="worker", owner=owner)
         assert fence.expires_at == min(owner.expires_at, clock[0] + timedelta(seconds=fence_seconds))
@@ -175,7 +175,7 @@ def test_new_fence_expiry_starts_at_write_admission(tmp_path, monkeypatch, kind)
 
 
 def test_expired_intent_cannot_project_a_binding_after_write_admission(tmp_path, monkeypatch):
-    queue, coordinator, registry, binding, lease, owner = _held_claims(tmp_path)
+    queue, coordinator, registry, binding, _lease, owner = _held_claims(tmp_path)
     with queue.queue_owner(role="queue-worker", scope=SCOPE, parent=owner):
         fence = coordinator.acquire_intent_fence(binding.intent_id, mode="worker", owner=owner)
         binding = queue.seal_capture_binding(binding.task_id, consumer_kind="terminal",
@@ -188,7 +188,7 @@ def test_expired_intent_cannot_project_a_binding_after_write_admission(tmp_path,
 
 
 def test_expired_queue_owner_cannot_acquire_a_task_fence_after_waiting(tmp_path, monkeypatch):
-    queue, coordinator, registry, binding, lease, owner = _held_claims(tmp_path)
+    queue, _coordinator, registry, binding, _lease, owner = _held_claims(tmp_path)
     with queue.queue_owner(role="queue-worker", scope=SCOPE, parent=owner):
         _advance_queue_clock(monkeypatch, owner.ttl_seconds + 1)
         with pytest.raises(RuntimeError, match="queue_owner_fence_lost"):

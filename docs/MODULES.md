@@ -394,9 +394,12 @@ alone grants no authority; registry validation remains required. Guides:
 
 Windows compile-runtime identity resolves the loaded Python DLL from `sys.dllhandle`
 through the existing lazy Windows API owner. It fingerprints that actual file;
-missing handles and native lookup errors refuse qualification. Unix configured
-shared/static-library handling remains distinct. Buffer growth handles long paths
-without a guessed DLL name or silently omitted runtime dependency.
+missing handles and native lookup errors refuse qualification. Buffer growth
+handles long paths without a guessed DLL name or silently omitted runtime
+dependency. Unix reads no build configuration: it binds the image that holds the
+running interpreter, found by the address of `Py_GetVersion`, and binds none when
+that image is the executable itself; see
+[the runtime library is found by address](research/2026-11-11-the-runtime-library-is-found-by-address.md).
 
 [context-ownership](modules/context-ownership.md).
 

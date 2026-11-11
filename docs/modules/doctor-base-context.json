@@ -33,6 +33,7 @@
     "tests/module_records.py",
     "tests/reliability_v3_adoption_helpers.py",
     "tests/shared_fixtures.py",
+    "tests/shell_function_source.py",
     "tests/slow_machine.py",
     "tests/test_a_health_read_uses_sqlite_pages.py",
     "tests/test_doctor_database_reads_keep_the_caller_deadline.py",

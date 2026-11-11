@@ -21,6 +21,7 @@ from tests.shell_functions_stay_simple_helpers import (
     _ccn,
     _functions,
     _name,
+    _script_body_violations,
     _shape_violations,
     _violations,
 )
@@ -42,6 +43,21 @@ def test_the_installer_is_among_the_measured_files() -> None:
 def test_every_shipped_shell_function_is_under_the_ceiling(path: Path) -> None:
     assert _violations(path.read_bytes()) == {}
     assert _shape_violations(path.read_bytes()) == []
+
+
+@pytest.mark.parametrize("path", _shell_files(), ids=lambda path: path.relative_to(ROOT).as_posix())
+def test_every_shipped_script_body_is_under_the_ceiling(path: Path) -> None:
+    assert _script_body_violations(path.read_bytes()) == []
+
+
+@pytest.mark.parametrize(("body", "reason"), [
+    ("for a in 1; do\n  while b; do\n    if c; then :; fi\n  done\ndone\n", "script body: nesting=3 > 2"),
+    ("case $1 in a) :;; b) :;; c) :;; d) :;; e) :;; esac\n", "script body: ccn=6 > 5"),
+    ("if a; then :; fi\nif b; then :; fi\nif c; then :; fi\n", "script body: if count=3 > 2"),
+    ("if a; then :; elif b; then :; fi\n", "script body: else-if chains=1 > 0"),
+])
+def test_branching_outside_functions_is_measured(body: str, reason: str) -> None:
+    assert reason in _script_body_violations(f"helper() {{ :; }}\n{body}".encode())
 
 
 @pytest.mark.parametrize("body", [

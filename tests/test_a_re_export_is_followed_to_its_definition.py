@@ -18,24 +18,34 @@ FILES = {
 }
 
 
+def _extract(files: dict[str, bytes]):
+    sources = tuple(_source(path, content) for path, content in files.items())
+    return extract_code(sources, repository_id="repo")
+
+
 def test_an_aliased_call_through_the_package_reaches_the_definition() -> None:
-    result = extract_code(tuple(_source(path, content) for path, content in FILES.items()), repository_id="repo")
+    result = _extract(FILES)
 
     assert _call_target_names(result) == ["compute"]
 
 
 def test_a_re_export_cycle_resolves_to_nothing_and_ends() -> None:
-    files = {"a/__init__.py": b"from b import thing\n", "b/__init__.py": b"from a import thing\n", "m.py": b"from a import thing\n\n\ndef f():\n    return thing()\n"}
+    files = {
+        "a/__init__.py": b"from b import thing\n",
+        "b/__init__.py": b"from a import thing\n",
+        "m.py": b"from a import thing\n\n\ndef f():\n    return thing()\n",
+    }
 
-    result = extract_code(tuple(_source(path, content) for path, content in files.items()), repository_id="repo")
+    result = _extract(files)
 
     assert _call_target_names(result) == []
 
 
 def test_a_long_reexport_chain_reaches_its_definition() -> None:
     files = {f"p{index}.py": f"from p{index + 1} import compute\n".encode() for index in range(12)}
-    files.update({"p12.py": b"def compute():\n    return 1\n", "app.py": b"from p0 import compute\ndef run():\n    return compute()\n"})
-    result = extract_code(tuple(_source(path, content) for path, content in files.items()), repository_id="repo")
+    files["p12.py"] = b"def compute():\n    return 1\n"
+    files["app.py"] = b"from p0 import compute\ndef run():\n    return compute()\n"
+    result = _extract(files)
     assert _call_target_names(result) == ["compute"]
 
 

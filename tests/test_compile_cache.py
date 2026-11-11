@@ -37,7 +37,7 @@ def _plan(*operations) -> dict[str, object]:
 
 
 def _call(**changes) -> CompileCallDescriptor:
-    values = {
+    values: dict[str, Any] = {
         "prompt_program_hash": "1" * 64,
         "provider": "codex",
         "model": "gpt-5",

@@ -493,20 +493,16 @@ def record_capture_failure(
     # mutator only changes counters; it never acquires the trail's lock.
     if not _trail_written(record, trim=True):
         _trail_written(record, trim=False)
-    try:
+    with suppress(Exception):  # a failed counter must not replay the trail
         update_state(lambda state: bump_counter(state, record), lock_timeout=STATE_LOCK_TIMEOUT)
-    except Exception:  # noqa: BLE001 - a failed counter must not replay the trail
-        pass
 
 
 def _write_owned_failure(record: dict[str, str], *, trim: bool) -> bool:
     written = append_failure_line(record)
     if not written or not trim:
         return written
-    try:
+    with suppress(Exception):  # a maintenance failure cannot undo a written line
         trim_under_lock()
-    except Exception:  # noqa: BLE001 - maintenance failure cannot undo a written line
-        pass
     return written
 
 

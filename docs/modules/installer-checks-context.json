@@ -37,6 +37,7 @@
     "tests/powershell_literal.py",
     "tests/script_sources.py",
     "tests/shared_fixtures.py",
+    "tests/shell_function_source.py",
     "tests/slow_machine.py",
     "tests/test_a_base_install_can_search.py",
     "tests/test_a_fresh_install_adopts_the_queue.py",
@@ -46,6 +47,7 @@
     "tests/test_installer_bootstrap.py",
     "tests/test_the_install_checks_itself_last.py",
     "tests/test_the_installer_does_not_vouch_for_agents_it_cannot_see.py",
+    "tests/test_the_installer_reads_its_arguments.py",
     "tests/test_the_installer_says_what_it_needs.py",
     "tests/test_the_installers_register_claude_mcp_alike.py",
     "tests/the_installer_says_what_it_needs_helpers.py"
@@ -67,6 +69,7 @@
       "tests/test_installer_bootstrap.py",
       "tests/test_the_install_checks_itself_last.py",
       "tests/test_the_installer_does_not_vouch_for_agents_it_cannot_see.py",
+      "tests/test_the_installer_reads_its_arguments.py",
       "tests/test_the_installer_says_what_it_needs.py",
       "tests/test_the_installers_register_claude_mcp_alike.py",
       "tests/the_installer_says_what_it_needs_helpers.py"

@@ -172,7 +172,7 @@ def test_the_block_is_attached_when_it_is_a_rounding_error() -> None:
 
 def test_always_forces_the_block_onto_a_cheap_answer(monkeypatch) -> None:
     monkeypatch.setenv(MODE_ENV, "always")
-    envelope = {"components": {}, "data": {"ok": True}}
+    envelope: dict[str, dict] = {"components": {}, "data": {"ok": True}}
     assert attach_answer_cost(envelope, elapsed_seconds=0.02, budget_seconds=10.0)
     assert envelope["data"][COST_KEY]["duration_ms"] == 20
 

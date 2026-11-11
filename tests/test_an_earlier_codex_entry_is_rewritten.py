@@ -11,7 +11,6 @@ rewrite keeps a verified preimage. See docs/research/2026-09-28-a-check-names-it
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import sys
 import tomllib
@@ -23,6 +22,7 @@ import pytest
 
 from tests.an_earlier_codex_entry_is_rewritten_helpers import EARLIER
 from tests.installer_bootstrap_helpers import _powershell_functions, _pwsh
+from tests.shell_function_source import _shell_function
 from tests.the_installer_says_what_it_needs_helpers import STUB_ENV, UV_STUB_PS1
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -82,12 +82,6 @@ def test_an_inline_entry_is_not_rewritten(tmp_path: Path) -> None:
     outcome = codex_memory.replace_codex_mcp_entry(config, ROOT, foreign=True)
 
     assert (outcome, config.read_text(encoding="utf-8")) == ("not-rewritable", inline)
-
-
-def _shell_function(source: str, name: str) -> str:
-    match = re.search(rf"(?ms)^{re.escape(name)}\(\) \{{.*?^\}}", source)
-    assert match, f"{name} missing"
-    return match.group(0)
 
 
 def test_the_installer_rewrites_an_earlier_entry_and_reports_it_verified(tmp_path: Path) -> None:

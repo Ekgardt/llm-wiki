@@ -36,6 +36,7 @@
     "tests/module_records.py",
     "tests/powershell_literal.py",
     "tests/shared_fixtures.py",
+    "tests/shell_function_source.py",
     "tests/slow_machine.py",
     "tests/test_an_earlier_codex_entry_is_rewritten.py",
     "tests/test_codex_config_status_has_a_platform_independent_newline.py",

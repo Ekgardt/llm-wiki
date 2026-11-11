@@ -36,10 +36,8 @@ AGENTS_STOPPED=0
 REPLACE_CODEX_MCP=0
 CODEX_MCP_STATE=unverified
 SCHEDULER_MODE=native
-EXPECT_SCHEDULER_VALUE=0
-EXPECT_ADOPT_VALUE=0
-EXPECT_MODEL_VALUE=0
-EXPECT_COMPILE_BACKUP_VALUE=0
+PENDING_OPTION=""
+INSTALLER_SOURCE="${BASH_SOURCE[0]:-}"
 COMPILE_BACKUP_IMAGE=""
 # `--model <name>`: the memory model, checked with one short call; without it the
 # installer asks on a terminal (docs/research/2026-09-29-the-installer-asks-which-model.md).
@@ -58,53 +56,66 @@ fail()  { echo -e "${RED}[FAIL]${NC} $1"; exit 1; }
 # expansion under `set -u` is an error before bash 4.4.
 # See docs/research/2026-09-17-the-installer-runs-on-the-bash-macos-ships.md.
 
-for argument in "$@"; do
-  if [[ "$EXPECT_COMPILE_BACKUP_VALUE" -eq 1 ]]; then
-    COMPILE_BACKUP_IMAGE="$argument"
-    EXPECT_COMPILE_BACKUP_VALUE=0
-    continue
-  fi
-  if [[ "$EXPECT_SCHEDULER_VALUE" -eq 1 ]]; then
-    SCHEDULER_MODE="$argument"
-    EXPECT_SCHEDULER_VALUE=0
-    continue
-  fi
-  if [[ "$EXPECT_ADOPT_VALUE" -eq 1 ]]; then
-    ADOPT_ARGS+=(--adopt "$argument")
-    EXPECT_ADOPT_VALUE=0
-    continue
-  fi
-  if [[ "$EXPECT_MODEL_VALUE" -eq 1 ]]; then
-    MODEL_ARGS=(--model "$argument")
-    EXPECT_MODEL_VALUE=0
-    continue
-  fi
-  case "$argument" in
+take_option_value() {
+  case "$1" in
+    --scheduler) SCHEDULER_MODE="$2" ;;
+    --adopt) ADOPT_ARGS+=(--adopt "$2") ;;
+    --model) MODEL_ARGS=(--model "$2") ;;
+    --compile-backup-image) COMPILE_BACKUP_IMAGE="$2" ;;
+  esac
+}
+
+set_installer_flag() {
+  case "$1" in
     --protect-push) PROTECT_PUSH=1 ;;
     --confirm-all-agents-stopped) AGENTS_STOPPED=1 ;;
     --replace-codex-mcp) REPLACE_CODEX_MCP=1 ;;
-    --scheduler) EXPECT_SCHEDULER_VALUE=1 ;;
-    --scheduler=*) SCHEDULER_MODE="${argument#--scheduler=}" ;;
-    --adopt) EXPECT_ADOPT_VALUE=1 ;;
-    --adopt=*) ADOPT_ARGS+=(--adopt "${argument#--adopt=}") ;;
-    --model) EXPECT_MODEL_VALUE=1 ;;
-    --model=*) MODEL_ARGS=(--model "${argument#--model=}") ;;
-    --compile-backup-image) EXPECT_COMPILE_BACKUP_VALUE=1 ;;
-    --compile-backup-image=*) COMPILE_BACKUP_IMAGE="${argument#--compile-backup-image=}" ;;
+    *) return 1 ;;
+  esac
+}
+
+read_installer_argument() {
+  local argument="$1"
+  if [[ -n "$PENDING_OPTION" ]]; then
+    take_option_value "$PENDING_OPTION" "$argument"
+    PENDING_OPTION=""
+    return
+  fi
+  set_installer_flag "$argument" && return
+  case "$argument" in
+    --scheduler|--adopt|--model|--compile-backup-image) PENDING_OPTION="$argument" ;;
+    --scheduler=*|--adopt=*|--model=*|--compile-backup-image=*)
+      take_option_value "${argument%%=*}" "${argument#*=}" ;;
     *) fail "Unknown installer argument: $argument" ;;
   esac
-done
-[[ "$EXPECT_SCHEDULER_VALUE" -eq 0 ]] || fail "--scheduler requires native or cron"
-[[ "$EXPECT_ADOPT_VALUE" -eq 0 ]] || fail "--adopt requires a resource id"
-[[ "$EXPECT_MODEL_VALUE" -eq 0 ]] || fail "--model requires a model name"
-[[ "$EXPECT_COMPILE_BACKUP_VALUE" -eq 0 ]] || fail "--compile-backup-image requires an external image directory"
-if [[ -n "$COMPILE_BACKUP_IMAGE" && "$AGENTS_STOPPED" -ne 1 ]]; then
-  fail "--compile-backup-image requires --confirm-all-agents-stopped"
-fi
-case "$SCHEDULER_MODE" in
-  native|cron) ;;
-  *) fail "--scheduler requires native or cron" ;;
-esac
+}
+
+parse_installer_arguments() {
+  local argument
+  for argument in "$@"; do
+    read_installer_argument "$argument"
+  done
+}
+
+missing_value_message() {
+  case "$1" in
+    --scheduler) echo "--scheduler requires native or cron" ;;
+    --adopt) echo "--adopt requires a resource id" ;;
+    --model) echo "--model requires a model name" ;;
+    *) echo "--compile-backup-image requires an external image directory" ;;
+  esac
+}
+
+validate_installer_arguments() {
+  [[ -z "$PENDING_OPTION" ]] || fail "$(missing_value_message "$PENDING_OPTION")"
+  [[ -z "$COMPILE_BACKUP_IMAGE" || "$AGENTS_STOPPED" -eq 1 ]] || \
+    fail "--compile-backup-image requires --confirm-all-agents-stopped"
+  case "$SCHEDULER_MODE" in
+    native|cron) ;;
+    *) fail "--scheduler requires native or cron" ;;
+  esac
+}
+
 
 # One remote's push URLs cleared; `git config --get-all` exits 1 when there are none.
 clear_push_urls() {
@@ -277,21 +288,32 @@ existing_target_advice() {
 
 # ─── 1. Resolve vault root ──────────────────────────────────────────
 
-if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-else
-  SCRIPT_DIR=""
-fi
+installer_script_dir() {
+  [[ -n "$INSTALLER_SOURCE" && -f "$INSTALLER_SOURCE" ]] || return 0
+  cd "$(dirname "$INSTALLER_SOURCE")" && pwd -P
+}
 
-if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/pyproject.toml" ]]; then
+use_local_checkout() {
   VAULT_ROOT="${LLM_WIKI_ROOT:-$SCRIPT_DIR}"
   REQUESTED_ROOT="$(cd "$VAULT_ROOT" 2>/dev/null && pwd -P)" || \
     fail "LLM_WIKI_ROOT does not identify an accessible checkout."
-  if [[ "$REQUESTED_ROOT" != "$SCRIPT_DIR" ]]; then
+  [[ "$REQUESTED_ROOT" == "$SCRIPT_DIR" ]] || \
     fail "LLM_WIKI_ROOT points to a different checkout than this installer."
-  fi
   VAULT_ROOT="$REQUESTED_ROOT"
-else
+}
+
+verify_bootstrapped_checkout() {
+  local required
+  [[ "$(git -C "$VAULT_ROOT" rev-parse HEAD)" == "$LLM_WIKI_COMMIT_NORMALIZED" ]] || \
+    fail "Checked-out commit does not match LLM_WIKI_COMMIT"
+  [[ "$(git -C "$VAULT_ROOT" remote get-url origin)" == "$REPOSITORY_URL" ]] || \
+    fail "Installed checkout repository identity does not match LLM-Wiki"
+  for required in pyproject.toml uv.lock install.sh install.ps1 scripts/installer_config.py scripts/install_control.py; do
+    [[ -f "$VAULT_ROOT/$required" ]] || fail "Installed checkout is missing $required"
+  done
+}
+
+bootstrap_remote_checkout() {
   [[ "${LLM_WIKI_COMMIT:-}" =~ ^[0-9a-fA-F]{40}$ ]] || \
     fail "Remote bootstrap requires LLM_WIKI_COMMIT as a full 40-hex commit OID"
   LLM_WIKI_COMMIT_NORMALIZED="$(printf '%s' "$LLM_WIKI_COMMIT" | tr 'ABCDEF' 'abcdef')"
@@ -301,105 +323,110 @@ else
     fail "Could not fetch $LLM_WIKI_COMMIT_NORMALIZED; nothing was left behind, so the same command can be run again"
   VAULT_ROOT="$(cd "$INSTALL_DIR" && pwd -P)"
   INSTALLER_CREATED_CLONE=1
-  [[ "$(git -C "$VAULT_ROOT" rev-parse HEAD)" == "$LLM_WIKI_COMMIT_NORMALIZED" ]] || \
-    fail "Checked-out commit does not match LLM_WIKI_COMMIT"
-  [[ "$(git -C "$VAULT_ROOT" remote get-url origin)" == "$REPOSITORY_URL" ]] || \
-    fail "Installed checkout repository identity does not match LLM-Wiki"
-  for required in pyproject.toml uv.lock install.sh install.ps1 scripts/installer_config.py scripts/install_control.py; do
-    [[ -f "$VAULT_ROOT/$required" ]] || fail "Installed checkout is missing $required"
-  done
+  verify_bootstrapped_checkout
   export LLM_WIKI_ROOT="$VAULT_ROOT"
   export LLM_WIKI_INSTALLER_CREATED_CLONE=1
   exec bash "$VAULT_ROOT/install.sh" "$@"
-fi
+}
 
-INHERITED_STATE_ROOT="${LLM_WIKI_STATE_ROOT:-}"
-STATE_ROOT_INPUT="${LLM_WIKI_STATE_ROOT:-$VAULT_ROOT}"
-mkdir -p "$STATE_ROOT_INPUT"
-STATE_ROOT="$(cd "$STATE_ROOT_INPUT" && pwd -P)"
-export LLM_WIKI_ROOT="$VAULT_ROOT"
-export LLM_WIKI_STATE_ROOT="$STATE_ROOT"
+resolve_vault_root() {
+  SCRIPT_DIR="$(installer_script_dir)"
+  if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/pyproject.toml" ]]; then
+    use_local_checkout
+    return
+  fi
+  bootstrap_remote_checkout "$@"
+}
+
+resolve_state_root() {
+  INHERITED_STATE_ROOT="${LLM_WIKI_STATE_ROOT:-}"
+  STATE_ROOT_INPUT="${LLM_WIKI_STATE_ROOT:-$VAULT_ROOT}"
+  mkdir -p "$STATE_ROOT_INPUT"
+  STATE_ROOT="$(cd "$STATE_ROOT_INPUT" && pwd -P)"
+  export LLM_WIKI_ROOT="$VAULT_ROOT"
+  export LLM_WIKI_STATE_ROOT="$STATE_ROOT"
+}
 
 # Detect shell profile before any child process observes the installation roots.
-if [[ -n "${ZSH_VERSION:-}" ]] || [[ "$SHELL" == */zsh ]]; then
-  PROFILE="${HOME}/.zshrc"
-elif [[ -n "${BASH_VERSION:-}" ]] || [[ "$SHELL" == */bash ]]; then
-  PROFILE="${HOME}/.bashrc"
-else
+detect_shell_profile() {
+  if [[ -n "${ZSH_VERSION:-}" ]] || [[ "$SHELL" == */zsh ]]; then
+    PROFILE="${HOME}/.zshrc"
+    return
+  fi
+  if [[ -n "${BASH_VERSION:-}" ]] || [[ "$SHELL" == */bash ]]; then
+    PROFILE="${HOME}/.bashrc"
+    return
+  fi
   PROFILE="${HOME}/.profile"
-fi
-cd "$VAULT_ROOT"
-info "Vault root: $VAULT_ROOT"
-info "State root: $STATE_ROOT"
-# A state root left over from another vault silently splits the installation
-# across two directories, so say so rather than letting it pass as a default.
-if [ -n "$INHERITED_STATE_ROOT" ] && [ "$STATE_ROOT" != "$VAULT_ROOT" ]; then
-  warn "Runtime state will live outside this vault, in $STATE_ROOT"
-  warn "That came from LLM_WIKI_STATE_ROOT in your environment, not from this vault."
-  warn "Unset it and re-run to keep run/, logs/ and cache/ inside $VAULT_ROOT"
-fi
+}
+
+announce_roots() {
+  cd "$VAULT_ROOT"
+  info "Vault root: $VAULT_ROOT"
+  info "State root: $STATE_ROOT"
+  # A state root left over from another vault silently splits the installation
+  # across two directories, so say so rather than letting it pass as a default.
+  if [ -n "$INHERITED_STATE_ROOT" ] && [ "$STATE_ROOT" != "$VAULT_ROOT" ]; then
+    warn "Runtime state will live outside this vault, in $STATE_ROOT"
+    warn "That came from LLM_WIKI_STATE_ROOT in your environment, not from this vault."
+    warn "Unset it and re-run to keep run/, logs/ and cache/ inside $VAULT_ROOT"
+  fi
+}
 
 # ─── 2. Check prerequisites ────────────────────────────────────────
 
-info "Checking prerequisites..."
-
-# git
-if ! command -v git &>/dev/null; then
-  fail "git is required but not installed."
-fi
-ok "git $(git --version)"
-
-# uv
-if ! command -v uv &>/dev/null; then
-  fail "uv is required at version ${UV_VERSION}. Install it from https://astral.sh/uv/${UV_VERSION}/install.sh and rerun the installer."
-fi
-installedUvVersion="$(uv --version | awk '{print $2}')"
-if [ "$installedUvVersion" != "$UV_VERSION" ]; then
-  fail "uv is required at version ${UV_VERSION}, found ${installedUvVersion}. Upgrade it and rerun: standalone installs use 'uv self update ${UV_VERSION}'; pip or uv-tool installs use 'uv tool install \"uv==${UV_VERSION}\" --force' (or 'pip install uv==${UV_VERSION}')."
-fi
-ok "uv ${installedUvVersion}"
+check_uv() {
+  if ! command -v uv &>/dev/null; then
+    fail "uv is required at version ${UV_VERSION}. Install it from https://astral.sh/uv/${UV_VERSION}/install.sh and rerun the installer."
+  fi
+  installedUvVersion="$(uv --version | awk '{print $2}')"
+  if [ "$installedUvVersion" != "$UV_VERSION" ]; then
+    fail "uv is required at version ${UV_VERSION}, found ${installedUvVersion}. Upgrade it and rerun: standalone installs use 'uv self update ${UV_VERSION}'; pip or uv-tool installs use 'uv tool install \"uv==${UV_VERSION}\" --force' (or 'pip install uv==${UV_VERSION}')."
+  fi
+  ok "uv ${installedUvVersion}"
+}
 
 # One interpreter series for bootstrap and the project environment.
-if ! BOOTSTRAP_PYTHON="$(uv python find 3.14)"; then
-  fail "Python 3.14 is required. Run: uv python install 3.14"
-fi
-ok "Python $("$BOOTSTRAP_PYTHON" --version)"
+select_bootstrap_python() {
+  if ! BOOTSTRAP_PYTHON="$(uv python find 3.14)"; then
+    fail "Python 3.14 is required. Run: uv python install 3.14"
+  fi
+  ok "Python $("$BOOTSTRAP_PYTHON" --version)"
+}
+
+check_prerequisites() {
+  info "Checking prerequisites..."
+  if ! command -v git &>/dev/null; then
+    fail "git is required but not installed."
+  fi
+  ok "git $(git --version)"
+  check_uv
+  select_bootstrap_python
+}
 
 # ─── 3. Install dependencies ───────────────────────────────────────
 
-info "Installing locked production dependencies..."
-SYNC_PLAN="$("$BOOTSTRAP_PYTHON" "$VAULT_ROOT/scripts/installer_config.py" sync-args \
-  --root "$VAULT_ROOT" --environment "${UV_PROJECT_ENVIRONMENT:-}")"
-PROJECT_ENVIRONMENT="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1])["environment"])' "$SYNC_PLAN")"
-SYNC_ARGS=()
-while IFS= read -r sync_argument; do
-  SYNC_ARGS+=("$sync_argument")
-done < <("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(*json.loads(sys.argv[1])["arguments"], sep="\n")' "$SYNC_PLAN")
-IGNORED_ENVIRONMENT="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1])["ignored_environment"] or "")' "$SYNC_PLAN")"
-if [ -n "$IGNORED_ENVIRONMENT" ]; then
-  # Timers, hooks and the MCP server run the vault from its own .venv (audit B-26).
-  warn "UV_PROJECT_ENVIRONMENT=$IGNORED_ENVIRONMENT is not used: the vault runs from $PROJECT_ENVIRONMENT"
-fi
-export UV_PROJECT_ENVIRONMENT="$PROJECT_ENVIRONMENT"
-uv "${SYNC_ARGS[@]}"
-ok "Production dependencies installed (MCP included)"
+install_dependencies() {
+  info "Installing locked production dependencies..."
+  SYNC_PLAN="$("$BOOTSTRAP_PYTHON" "$VAULT_ROOT/scripts/installer_config.py" sync-args \
+    --root "$VAULT_ROOT" --environment "${UV_PROJECT_ENVIRONMENT:-}")"
+  PROJECT_ENVIRONMENT="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1])["environment"])' "$SYNC_PLAN")"
+  SYNC_ARGS=()
+  while IFS= read -r sync_argument; do
+    SYNC_ARGS+=("$sync_argument")
+  done < <("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(*json.loads(sys.argv[1])["arguments"], sep="\n")' "$SYNC_PLAN")
+  IGNORED_ENVIRONMENT="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1])["ignored_environment"] or "")' "$SYNC_PLAN")"
+  if [ -n "$IGNORED_ENVIRONMENT" ]; then
+    # Timers, hooks and the MCP server run the vault from its own .venv (audit B-26).
+    warn "UV_PROJECT_ENVIRONMENT=$IGNORED_ENVIRONMENT is not used: the vault runs from $PROJECT_ENVIRONMENT"
+  fi
+  export UV_PROJECT_ENVIRONMENT="$PROJECT_ENVIRONMENT"
+  uv "${SYNC_ARGS[@]}"
+  ok "Production dependencies installed (MCP included)"
+}
 
 # ─── 4. Run production smoke ───────────────────────────────────────
 
-info "Running production smoke..."
-testTimeoutSeconds="${LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS:-180}"
-case "$testTimeoutSeconds" in
-  ""|*[!0-9]*|0) fail "LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS must be a positive integer" ;;
-esac
-# The smoke's own deadline is two thirds of the bound, rounded up: 120 s of the
-# default 180, leaving the rest for it to report and exit before it is stopped.
-# A fixed 120 meant a longer bound could never give the smoke longer.
-smokeDeadlineSeconds=$(( (testTimeoutSeconds * 2 + 2) / 3 ))
-testPid=""
-testPgid=""
-testTimerPid=""
-testTimedOut=0
-testMonitorMode=""
 restore_test_monitor_mode() {
   case "$testMonitorMode" in
     on) set -m ;;
@@ -532,149 +559,181 @@ handle_test_signal() {
   restore_test_monitor_mode
   exit "$status"
 }
-trap 'stop_test_timer; stop_test_child; restore_test_monitor_mode' EXIT
-trap 'handle_test_signal 129' HUP
-trap 'handle_test_signal 130' INT
-trap 'handle_test_signal 143' TERM
-trap 'handle_test_timeout' USR1
-start_test_child
-if wait_test_child; then
-  testExit=0
-else
-  testExit=$?
-fi
-trap - EXIT HUP INT TERM USR1
-if [ "$testTimedOut" -eq 1 ]; then
-  fail "Production smoke timed out after ${testTimeoutSeconds}s; installation aborted"
-elif [ "$testExit" -ne 0 ]; then
-  fail "Production smoke failed; installation aborted"
-fi
-ok "Production smoke passed"
+read_smoke_bound() {
+  testTimeoutSeconds="${LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS:-180}"
+  case "$testTimeoutSeconds" in
+    ""|*[!0-9]*|0) fail "LLM_WIKI_INSTALL_SMOKE_TIMEOUT_SECONDS must be a positive integer" ;;
+  esac
+  # The smoke's own deadline is two thirds of the bound, rounded up: 120 s of the
+  # default 180, leaving the rest for it to report and exit before it is stopped.
+  # A fixed 120 meant a longer bound could never give the smoke longer.
+  smokeDeadlineSeconds=$(( (testTimeoutSeconds * 2 + 2) / 3 ))
+}
+report_smoke_outcome() {
+  if [ "$testTimedOut" -eq 1 ]; then
+    fail "Production smoke timed out after ${testTimeoutSeconds}s; installation aborted"
+  fi
+  if [ "$testExit" -ne 0 ]; then
+    fail "Production smoke failed; installation aborted"
+  fi
+  ok "Production smoke passed"
+}
+run_production_smoke() {
+  info "Running production smoke..."
+  read_smoke_bound
+  testPid=""
+  testPgid=""
+  testTimerPid=""
+  testTimedOut=0
+  testMonitorMode=""
+  trap 'stop_test_timer; stop_test_child; restore_test_monitor_mode' EXIT
+  trap 'handle_test_signal 129' HUP
+  trap 'handle_test_signal 130' INT
+  trap 'handle_test_signal 143' TERM
+  trap 'handle_test_timeout' USR1
+  start_test_child
+  if wait_test_child; then
+    testExit=0
+  else
+    testExit=$?
+  fi
+  trap - EXIT HUP INT TERM USR1
+  report_smoke_outcome
+}
 
 # ─── 5. Set environment variables ──────────────────────────────────
 
 # External configuration starts only after the mandatory test gate.
-protect_push_urls_if_authorized
-if [[ "$INSTALLER_CREATED_CLONE" == "1" || "$PROTECT_PUSH" == "1" ]]; then
-  ok "Push disabled (no-push) for every configured remote"
-fi
+prepare_runtime_directories() {
+  protect_push_urls_if_authorized
+  if [[ "$INSTALLER_CREATED_CLONE" == "1" || "$PROTECT_PUSH" == "1" ]]; then
+    ok "Push disabled (no-push) for every configured remote"
+  fi
+  # Create runtime dirs inside the vault (gitignored)
+  mkdir -p "$STATE_ROOT/run" "$STATE_ROOT/logs" "$STATE_ROOT/cache"
+  ok "Runtime dirs: $STATE_ROOT/{run,logs,cache} (gitignored)"
+}
 
-# Create runtime dirs inside the vault (gitignored)
-mkdir -p "$STATE_ROOT/run" "$STATE_ROOT/logs" "$STATE_ROOT/cache"
-ok "Runtime dirs: $STATE_ROOT/{run,logs,cache} (gitignored)"
-
-OPENCODE_PLUGIN=0
 # Detected here rather than in step 7 so the plugin is written by the ownership
 # transaction: an uninstall has to be able to take back exactly what it wrote.
-if [ -d "$HOME/.config/opencode" ] || command -v opencode &>/dev/null; then
-  OPENCODE_PLUGIN=1
-fi
+detect_opencode_plugin() {
+  OPENCODE_PLUGIN=0
+  if [ -d "$HOME/.config/opencode" ] || command -v opencode &>/dev/null; then
+    OPENCODE_PLUGIN=1
+  fi
+}
 # Same reason: Claude's user settings were merged by a separate script in step 7,
 # so an uninstall left our hooks in settings.json pointing at a vault that was
 # gone. The transaction owns our hook blocks and the two env keys now.
-CLAUDE_SETTINGS=0
-if command -v claude &>/dev/null || [ -d "$HOME/.claude" ] || [ -f "$HOME/.claude.json" ]; then
-  CLAUDE_SETTINGS=1
-fi
+detect_claude_settings() {
+  CLAUDE_SETTINGS=0
+  if command -v claude &>/dev/null || [ -d "$HOME/.claude" ] || [ -f "$HOME/.claude.json" ]; then
+    CLAUDE_SETTINGS=1
+  fi
+}
 # Same reason again: Codex hooks were merged in step 7 by a separate command, so
 # an uninstall never took them back. The transaction owns hooks.json when the
 # inline configuration leaves that free.
-CODEX_HOOKS_STATE="none"
-CODEX_HOOKS_OWNED=0
-if command -v codex &>/dev/null || [ -d "$HOME/.codex" ]; then
-  mkdir -p "$HOME/.codex"
-  CODEX_HOOKS_STATE="$(codex_inline_hooks_state "$VAULT_ROOT" "$HOME/.codex")"
-  if [ "$CODEX_HOOKS_STATE" = "absent" ]; then
-    CODEX_HOOKS_OWNED=1
+detect_codex_hooks() {
+  CODEX_HOOKS_STATE="none"
+  CODEX_HOOKS_OWNED=0
+  if command -v codex &>/dev/null || [ -d "$HOME/.codex" ]; then
+    mkdir -p "$HOME/.codex"
+    CODEX_HOOKS_STATE="$(codex_inline_hooks_state "$VAULT_ROOT" "$HOME/.codex")"
+    if [ "$CODEX_HOOKS_STATE" = "absent" ]; then
+      CODEX_HOOKS_OWNED=1
+    fi
   fi
-fi
-IDE_HOOK_ARGS=()
-if [ "$OPENCODE_PLUGIN" -eq 1 ]; then
-  IDE_HOOK_ARGS+=(--opencode-plugin)
-fi
-if [ "$CLAUDE_SETTINGS" -eq 1 ]; then
-  IDE_HOOK_ARGS+=(--claude-settings)
-fi
-if [ "$CODEX_HOOKS_OWNED" -eq 1 ]; then
-  IDE_HOOK_ARGS+=(--codex-hooks)
-fi
+}
+add_ide_hook_argument() {
+  if [ "$1" -eq 1 ]; then
+    IDE_HOOK_ARGS+=("$2")
+  fi
+}
+detect_owned_integrations() {
+  detect_opencode_plugin
+  detect_claude_settings
+  detect_codex_hooks
+  IDE_HOOK_ARGS=()
+  add_ide_hook_argument "$OPENCODE_PLUGIN" --opencode-plugin
+  add_ide_hook_argument "$CLAUDE_SETTINGS" --claude-settings
+  add_ide_hook_argument "$CODEX_HOOKS_OWNED" --codex-hooks
+}
 
 # ─── 5a. Choose the memory model ───────────────────────────────────
 
 # The chooser saves one vault setting; hooks and schedulers read it at runtime.
-info "Choosing the model the memory pipeline calls..."
-MODEL_CHOICE="$(uv run --locked --no-sync --directory "$VAULT_ROOT" python \
-  "$VAULT_ROOT/scripts/choose_model.py" --home "$HOME" \
-  ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"})" || fail "Model choice failed"
-MODEL_VALUE="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1])["model"])' "$MODEL_CHOICE")"
-if [ -n "$MODEL_VALUE" ]; then
-  ok "Memory model saved in llm-wiki.toml: $MODEL_VALUE"
-fi
-MODEL_REASON="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1]).get("reason", ""))' "$MODEL_CHOICE")"
-if [ -n "$MODEL_REASON" ]; then
-  warn "The memory model was not changed: $MODEL_REASON"
-fi
+choose_memory_model() {
+  info "Choosing the model the memory pipeline calls..."
+  MODEL_CHOICE="$(uv run --locked --no-sync --directory "$VAULT_ROOT" python \
+    "$VAULT_ROOT/scripts/choose_model.py" --home "$HOME" \
+    ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"})" || fail "Model choice failed"
+  MODEL_VALUE="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1])["model"])' "$MODEL_CHOICE")"
+  if [ -n "$MODEL_VALUE" ]; then
+    ok "Memory model saved in llm-wiki.toml: $MODEL_VALUE"
+  fi
+  MODEL_REASON="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1]).get("reason", ""))' "$MODEL_CHOICE")"
+  if [ -n "$MODEL_REASON" ]; then
+    warn "The memory model was not changed: $MODEL_REASON"
+  fi
+}
 
 # ─── 6. Set up scheduled maintenance ────────────────────────────────
 
-info "Setting up scheduled maintenance..."
-
-UV_PATH="$(command -v uv)"
-INSTALL_CONTROL_RESULT="$(uv run --locked --no-sync --directory "$VAULT_ROOT" python \
-  "$VAULT_ROOT/scripts/install_control.py" install \
-  --root "$VAULT_ROOT" \
-  --state-root "$STATE_ROOT" \
-  --uv-path "$UV_PATH" \
-  --home "$HOME" \
-  --scheduler "$SCHEDULER_MODE" \
-  --profile "$PROFILE" \
-  ${IDE_HOOK_ARGS[@]+"${IDE_HOOK_ARGS[@]}"} \
-  ${ADOPT_ARGS[@]+"${ADOPT_ARGS[@]}"})" || fail "Install ownership transaction failed"
-SCHEDULER_BACKEND="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1])["scheduler_backend"])' "$INSTALL_CONTROL_RESULT")"
-case "$SCHEDULER_BACKEND" in
-  launchd|systemd_user|cron) ;;
-  *) fail "Install control returned an invalid scheduler backend" ;;
-esac
-ok "Environment roots and $SCHEDULER_BACKEND maintenance are verified"
+set_up_maintenance() {
+  info "Setting up scheduled maintenance..."
+  UV_PATH="$(command -v uv)"
+  INSTALL_CONTROL_RESULT="$(uv run --locked --no-sync --directory "$VAULT_ROOT" python \
+    "$VAULT_ROOT/scripts/install_control.py" install \
+    --root "$VAULT_ROOT" \
+    --state-root "$STATE_ROOT" \
+    --uv-path "$UV_PATH" \
+    --home "$HOME" \
+    --scheduler "$SCHEDULER_MODE" \
+    --profile "$PROFILE" \
+    ${IDE_HOOK_ARGS[@]+"${IDE_HOOK_ARGS[@]}"} \
+    ${ADOPT_ARGS[@]+"${ADOPT_ARGS[@]}"})" || fail "Install ownership transaction failed"
+  SCHEDULER_BACKEND="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1])["scheduler_backend"])' "$INSTALL_CONTROL_RESULT")"
+  case "$SCHEDULER_BACKEND" in
+    launchd|systemd_user|cron) ;;
+    *) fail "Install control returned an invalid scheduler backend" ;;
+  esac
+  ok "Environment roots and $SCHEDULER_BACKEND maintenance are verified"
+}
 
 # ─── 7. Detect and wire up agents ──────────────────────────────────
 
-info "Detecting installed agents..."
-
-AGENT_STATUSES=()
-VAULT_JSON=$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$VAULT_ROOT")
+opencode_is_active() {
+  AGENT_STATUSES+=("OpenCode: active automatic")
+  ok "OpenCode configuration is active"
+  uv run --locked --no-sync --directory "$VAULT_ROOT" python \
+    "$VAULT_ROOT/scripts/session_start_context.py" \
+    --output-file "$STATE_ROOT/cache/session-context.md" 2>/dev/null || true
+}
 
 # OpenCode configuration is merged structurally and verified after all precedence layers.
-OPENCODE_RESULT="$(uv run --locked --no-sync --directory "$VAULT_ROOT" python \
-  "$VAULT_ROOT/scripts/installer_config.py" opencode \
-  --root "$VAULT_ROOT" --state-root "$STATE_ROOT" --cwd "$CALLER_CWD")"
-OPENCODE_STATUS="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1])["status"])' "$OPENCODE_RESULT")"
-case "$OPENCODE_STATUS" in
-  active)
-    AGENT_STATUSES+=("OpenCode: active automatic")
-    ok "OpenCode configuration is active"
-    uv run --locked --no-sync --directory "$VAULT_ROOT" python \
-      "$VAULT_ROOT/scripts/session_start_context.py" \
-      --output-file "$STATE_ROOT/cache/session-context.md" 2>/dev/null || true
-    ;;
-  conflict)
-    AGENT_STATUSES+=("OpenCode: conflict")
-    warn "OpenCode configuration status: conflict"
-    ;;
-  configured_unverified)
-    AGENT_STATUSES+=("OpenCode: configured unverified")
-    warn "OpenCode configuration status: configured_unverified"
-    ;;
-  not_detected) : ;;
-  *) fail "OpenCode configuration helper returned an invalid status" ;;
-esac
+wire_up_opencode() {
+  OPENCODE_RESULT="$(uv run --locked --no-sync --directory "$VAULT_ROOT" python \
+    "$VAULT_ROOT/scripts/installer_config.py" opencode \
+    --root "$VAULT_ROOT" --state-root "$STATE_ROOT" --cwd "$CALLER_CWD")"
+  OPENCODE_STATUS="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1])["status"])' "$OPENCODE_RESULT")"
+  case "$OPENCODE_STATUS" in
+    active) opencode_is_active ;;
+    conflict)
+      AGENT_STATUSES+=("OpenCode: conflict")
+      warn "OpenCode configuration status: conflict"
+      ;;
+    configured_unverified)
+      AGENT_STATUSES+=("OpenCode: configured unverified")
+      warn "OpenCode configuration status: configured_unverified"
+      ;;
+    not_detected) : ;;
+    *) fail "OpenCode configuration helper returned an invalid status" ;;
+  esac
+}
 
 # Codex CLI
-if command -v codex &>/dev/null; then
-  CODEX_MCP_READY=0
-  CODEX_HOOKS_READY=0
-  CODEX_CONFIG="$HOME/.codex/config.toml"
-  mkdir -p "$HOME/.codex"
+configure_codex_mcp_or_advise() {
   if configure_codex_mcp "$VAULT_ROOT" "$CODEX_CONFIG"; then
     CODEX_MCP_READY=1
     ok "Codex MCP config verified: $CODEX_CONFIG"
@@ -685,6 +744,9 @@ if command -v codex &>/dev/null; then
     warn "$(uv run --locked --no-sync --directory "$VAULT_ROOT" python "$VAULT_ROOT/scripts/codex_memory.py" \
       config-advice --state "$CODEX_MCP_STATE")"
   fi
+}
+
+report_codex_hooks() {
   CODEX_HOOKS="$HOME/.codex/hooks.json"
   case "$CODEX_HOOKS_STATE" in
     absent)
@@ -707,55 +769,95 @@ if command -v codex &>/dev/null; then
       warn "Codex hooks were not changed: the existing $CODEX_HOOKS state is '${CODEX_HOOKS_STATE}'. Compare it with integrations/codex/hooks.json and merge the LLM-Wiki entries by hand, then open /hooks in Codex to trust them."
       ;;
   esac
+}
+
+record_codex_status() {
   if [ "$CODEX_MCP_READY" -eq 1 ] && [ "$CODEX_HOOKS_READY" -eq 1 ]; then
     AGENT_STATUSES+=("Codex: manual /hooks trust review required")
   else
     AGENT_STATUSES+=("Codex: conflict or unverified")
   fi
-fi
+}
+
+wire_up_codex() {
+  command -v codex &>/dev/null || return 0
+  CODEX_MCP_READY=0
+  CODEX_HOOKS_READY=0
+  CODEX_CONFIG="$HOME/.codex/config.toml"
+  mkdir -p "$HOME/.codex"
+  configure_codex_mcp_or_advise
+  report_codex_hooks
+  record_codex_status
+}
 
 # Claude Code — hooks and env are owned by the install transaction (step 6)
-if [ "$CLAUDE_SETTINGS" -eq 1 ]; then
+write_claude_mcp_file() {
+  info "Adding MCP server config for Claude Code..."
+  printf '%s\n' '{"mcpServers":{"llm-wiki":{"command":"uv","args":["run","--locked","--no-sync","--directory",'"$VAULT_JSON"',"python","scripts/mcp_server.py"]}}}' > "$CLAUDE_MCP"
+  CLAUDE_MCP_STATE="current"
+  ok "Claude MCP config: ~/.claude.json"
+}
+
+# `~/.claude.json` is Claude Code's live state file and it writes to it
+# while running, so this must not read-modify-write it. Its own CLI adds
+# the entry safely; without the CLI the only honest option is to say what
+# to add.
+add_claude_mcp_with_cli() {
+  if command -v claude &>/dev/null && claude mcp add --scope user llm-wiki \
+      -- uv run --locked --no-sync --directory "$VAULT_ROOT" python scripts/mcp_server.py \
+      >/dev/null 2>&1; then
+    CLAUDE_MCP_STATE="current"
+    ok "Claude MCP server registered: llm-wiki"
+  else
+    warn "Existing ~/.claude.json found without llm-wiki; add it with:"
+    warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VAULT_ROOT python scripts/mcp_server.py"
+  fi
+}
+
+register_claude_mcp() {
+  case "$CLAUDE_MCP_STATE" in
+    missing) write_claude_mcp_file ;;
+    absent) add_claude_mcp_with_cli ;;
+    elsewhere)
+      warn "The llm-wiki MCP entry in ~/.claude.json points at another vault; replace it with:"
+      warn "  claude mcp remove --scope user llm-wiki"
+      warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VAULT_ROOT python scripts/mcp_server.py"
+      ;;
+    unreadable)
+      warn "The file ~/.claude.json could not be read as JSON, so llm-wiki was not registered; once it reads, add it with:"
+      warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VAULT_ROOT python scripts/mcp_server.py"
+      ;;
+  esac
+}
+
+wire_up_claude() {
+  [ "$CLAUDE_SETTINGS" -eq 1 ] || return 0
   ok "Claude settings owned by the install transaction → ~/.claude/settings.json"
   # v4.0: MCP server config for Claude Code
   CLAUDE_MCP="$HOME/.claude.json"
   CLAUDE_MCP_STATE="$(claude_mcp_state "$CLAUDE_MCP" "$VAULT_ROOT")"
-  if [ "$CLAUDE_MCP_STATE" = "missing" ]; then
-    info "Adding MCP server config for Claude Code..."
-    printf '%s\n' '{"mcpServers":{"llm-wiki":{"command":"uv","args":["run","--locked","--no-sync","--directory",'"$VAULT_JSON"',"python","scripts/mcp_server.py"]}}}' > "$CLAUDE_MCP"
-    CLAUDE_MCP_STATE="current"
-    ok "Claude MCP config: ~/.claude.json"
-  elif [ "$CLAUDE_MCP_STATE" = "absent" ]; then
-    # `~/.claude.json` is Claude Code's live state file and it writes to it
-    # while running, so this must not read-modify-write it. Its own CLI adds
-    # the entry safely; without the CLI the only honest option is to say what
-    # to add.
-    if command -v claude &>/dev/null && claude mcp add --scope user llm-wiki \
-        -- uv run --locked --no-sync --directory "$VAULT_ROOT" python scripts/mcp_server.py \
-        >/dev/null 2>&1; then
-      CLAUDE_MCP_STATE="current"
-      ok "Claude MCP server registered: llm-wiki"
-    else
-      warn "Existing ~/.claude.json found without llm-wiki; add it with:"
-      warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VAULT_ROOT python scripts/mcp_server.py"
-    fi
-  elif [ "$CLAUDE_MCP_STATE" = "elsewhere" ]; then
-    warn "The llm-wiki MCP entry in ~/.claude.json points at another vault; replace it with:"
-    warn "  claude mcp remove --scope user llm-wiki"
-    warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VAULT_ROOT python scripts/mcp_server.py"
-  elif [ "$CLAUDE_MCP_STATE" = "unreadable" ]; then
-    warn "The file ~/.claude.json could not be read as JSON, so llm-wiki was not registered; once it reads, add it with:"
-    warn "  claude mcp add --scope user llm-wiki -- uv run --locked --no-sync --directory $VAULT_ROOT python scripts/mcp_server.py"
-  fi
+  register_claude_mcp
   AGENT_STATUSES+=("$(claude_status_line "$CLAUDE_MCP_STATE")")
-fi
+}
 
-if [ "${#AGENT_STATUSES[@]}" -eq 0 ]; then
-  warn "No supported agents detected. Install Claude Code, OpenCode, or Codex CLI."
-else
-  ok "Agent integrations:"
-  printf '  - %s\n' "${AGENT_STATUSES[@]}"
-fi
+report_agent_statuses() {
+  if [ "${#AGENT_STATUSES[@]}" -eq 0 ]; then
+    warn "No supported agents detected. Install Claude Code, OpenCode, or Codex CLI."
+  else
+    ok "Agent integrations:"
+    printf '  - %s\n' "${AGENT_STATUSES[@]}"
+  fi
+}
+
+wire_up_agents() {
+  info "Detecting installed agents..."
+  AGENT_STATUSES=()
+  VAULT_JSON=$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$VAULT_ROOT")
+  wire_up_opencode
+  wire_up_codex
+  wire_up_claude
+  report_agent_statuses
+}
 
 # ─── 8. Reliability V3 adoption ────────────────────────────────────
 # Session capture writes through the V3 queue, and a vault that has not
@@ -767,15 +869,6 @@ fi
 # coordinator, which leaves half a legacy pair and a vault the cutover can no
 # longer adopt. A real end-to-end install finished with capture disabled that
 # way. See docs/research/2026-09-17-the-queue-is-adopted-before-anything-writes-to-it.md.
-SYNC_WARNING=0
-
-info "Checking Reliability V3 adoption..."
-# Whatever the check or the adoption says on stderr lands in one log and its
-# tail is quoted on failure, so the user never has to rerun a command blind
-# (audit OPS-20, docs/research/2026-09-11-a-skipped-night-and-a-failed-adoption-say-why.md).
-ADOPTION_ERR="$STATE_ROOT/logs/install-adoption.err.log"
-mkdir -p "$STATE_ROOT/logs"
-: > "$ADOPTION_ERR"
 # The check exits 1 for a fresh or upgrade-required vault, because both are
 # reported as degraded. Under `pipefail` a fallback written after the pipe
 # fired even though the parser had already answered, and the state became two
@@ -787,7 +880,6 @@ adoption_state_of() {
   report="$(uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --check --json 2>>"$ADOPTION_ERR" || true)"
   printf '%s' "$report" | "$BOOTSTRAP_PYTHON" -c 'import json,sys; print(json.load(sys.stdin).get("details", {}).get("adoption_state", "unknown"))' 2>>"$ADOPTION_ERR" || echo unknown
 }
-ADOPTION_STATE="$(adoption_state_of)"
 adoption_tail() {
   if [ -s "$ADOPTION_ERR" ]; then
     warn "  last lines of $ADOPTION_ERR:"
@@ -810,36 +902,50 @@ adoption_plan() {
     *) echo unknown ;;
   esac
 }
-ADOPT_COMMAND="uv run --locked --no-sync python scripts/repair_installed_memory.py --apply --adopt-ownership-v3 --confirm-all-agents-stopped"
-case "$(adoption_plan "$ADOPTION_STATE" "$AGENTS_STOPPED")" in
-  adopted) ok "Reliability V3 adopted" ;;
-  ask)
+adoption_ask() {
+  SYNC_WARNING=1
+  warn "Reliability V3 state is '${ADOPTION_STATE}': this vault holds the earlier queue, and the installer cannot see whether an agent is using it."
+  warn "Close every agent session, then either rerun the installer with --confirm-all-agents-stopped or run:"
+  warn "  $ADOPT_COMMAND"
+  warn "Session capture stays disabled until then."
+}
+# The report on standard output names the reason of a failure, so it is kept too.
+adoption_apply() {
+  if uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --apply --adopt-ownership-v3 --confirm-all-agents-stopped >>"$ADOPTION_ERR" 2>&1; then
+    ok "Reliability V3 adopted (was ${ADOPTION_STATE}); session capture is enabled"
+  else
     SYNC_WARNING=1
-    warn "Reliability V3 state is '${ADOPTION_STATE}': this vault holds the earlier queue, and the installer cannot see whether an agent is using it."
-    warn "Close every agent session, then either rerun the installer with --confirm-all-agents-stopped or run:"
+    warn "Reliability V3 adoption did not complete; session capture stays disabled until it does:"
     warn "  $ADOPT_COMMAND"
-    warn "Session capture stays disabled until then."
-    ;;
-  # The report on standard output names the reason of a failure, so it is kept too.
-  adopt)
-    if uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --apply --adopt-ownership-v3 --confirm-all-agents-stopped >>"$ADOPTION_ERR" 2>&1; then
-      ok "Reliability V3 adopted (was ${ADOPTION_STATE}); session capture is enabled"
-    else
-      SYNC_WARNING=1
-      warn "Reliability V3 adoption did not complete; session capture stays disabled until it does:"
-      warn "  $ADOPT_COMMAND"
-      adoption_tail
-    fi
-    ;;
-  *)
-    SYNC_WARNING=1
-    # The check's own line says what the state means; the installer claims no more.
-    # See docs/research/2026-09-28-a-check-names-its-cause.md.
-    warn "$(uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --check --summary 2>>"$ADOPTION_ERR" || true)"
-    warn "  details: uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json"
     adoption_tail
-    ;;
-esac
+  fi
+}
+# The check's own line says what the state means; the installer claims no more.
+# See docs/research/2026-09-28-a-check-names-its-cause.md.
+adoption_unknown() {
+  SYNC_WARNING=1
+  warn "$(uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --check --summary 2>>"$ADOPTION_ERR" || true)"
+  warn "  details: uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json"
+  adoption_tail
+}
+adopt_reliability_v3() {
+  SYNC_WARNING=0
+  info "Checking Reliability V3 adoption..."
+  # Whatever the check or the adoption says on stderr lands in one log and its
+  # tail is quoted on failure, so the user never has to rerun a command blind
+  # (audit OPS-20, docs/research/2026-09-11-a-skipped-night-and-a-failed-adoption-say-why.md).
+  ADOPTION_ERR="$STATE_ROOT/logs/install-adoption.err.log"
+  mkdir -p "$STATE_ROOT/logs"
+  : > "$ADOPTION_ERR"
+  ADOPTION_STATE="$(adoption_state_of)"
+  ADOPT_COMMAND="uv run --locked --no-sync python scripts/repair_installed_memory.py --apply --adopt-ownership-v3 --confirm-all-agents-stopped"
+  case "$(adoption_plan "$ADOPTION_STATE" "$AGENTS_STOPPED")" in
+    adopted) ok "Reliability V3 adopted" ;;
+    ask) adoption_ask ;;
+    adopt) adoption_apply ;;
+    *) adoption_unknown ;;
+  esac
+}
 
 compile_progress_state_of() {
   local report
@@ -868,7 +974,6 @@ upgrade_compile_progress() {
   fi
   apply_compile_progress_upgrade
 }
-upgrade_compile_progress
 
 # ─── 8a. Pinned model weights ──────────────────────────────────────
 # The read path loads weights local-only. Every pinned model whose runtime is
@@ -879,79 +984,119 @@ upgrade_compile_progress
 # the install ends with warnings. Fetched after it, the weights left the first
 # generation without vectors and every fresh install warning about weights it was
 # about to fetch. See docs/research/2026-09-27-the-install-checks-itself-last.md.
-MODELS_EXIT=0
-uv run --locked --no-sync python "$VAULT_ROOT/scripts/install_models.py" || MODELS_EXIT=$?
-case "$MODELS_EXIT" in
-  0) ok "Model weights step done" ;;
-  2) info "huggingface_hub is not installed; model weights are fetched once it is" ;;
-  *) warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" ;;
-esac
+fetch_model_weights() {
+  MODELS_EXIT=0
+  uv run --locked --no-sync python "$VAULT_ROOT/scripts/install_models.py" || MODELS_EXIT=$?
+  case "$MODELS_EXIT" in
+    0) ok "Model weights step done" ;;
+    2) info "huggingface_hub is not installed; model weights are fetched once it is" ;;
+    *) warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" ;;
+  esac
+}
 
 # A managed Pyright the operator installed earlier is validated, and repaired when
 # its receipt is from before the tree digest (`install_pyright.py` retires such an
 # install and reinstalls the pinned release). Nothing is installed where the operator
 # never installed it: that stays an explicit action.
 # See docs/research/2026-09-28-a-check-names-its-cause.md.
-if [ -d "$STATE_ROOT/cache/code-tools/pyright" ]; then
+verify_managed_pyright() {
+  [ -d "$STATE_ROOT/cache/code-tools/pyright" ] || return 0
   if PYRIGHT_REPORT="$(uv run --locked --no-sync python "$VAULT_ROOT/scripts/install_pyright.py" --state-root "$STATE_ROOT" 2>&1 >/dev/null)"; then
     ok "Managed Pyright verified"
   else
     warn "Managed Pyright could not be verified or repaired: ${PYRIGHT_REPORT}"
   fi
-fi
+}
 
 # ─── 8b. Bounded runtime sync ──────────────────────────────────────
 
-info "Synchronizing runtime state and derived indexes..."
-SYNC_EXIT=0
-# The first generation is built here (the generation is the only index since
-# 2026-09-23): 48.9 s for 189 pages with vectors on the reference vault, so the
-# sync gets fifteen minutes instead of its 30-second default.
-uv run --locked --no-sync python "$VAULT_ROOT/scripts/sync_memory.py" --apply --time-limit-seconds 900 || SYNC_EXIT=$?
-case "$SYNC_EXIT" in
-  0) ok "Runtime state synchronized" ;;
-  1) SYNC_WARNING=1; warn "Runtime synchronization completed with warnings" ;;
-  *) fail "Runtime synchronization failed" ;;
-esac
+synchronize_runtime() {
+  info "Synchronizing runtime state and derived indexes..."
+  SYNC_EXIT=0
+  # The first generation is built here (the generation is the only index since
+  # 2026-09-23): 48.9 s for 189 pages with vectors on the reference vault, so the
+  # sync gets fifteen minutes instead of its 30-second default.
+  uv run --locked --no-sync python "$VAULT_ROOT/scripts/sync_memory.py" --apply --time-limit-seconds 900 || SYNC_EXIT=$?
+  case "$SYNC_EXIT" in
+    0) ok "Runtime state synchronized" ;;
+    1) SYNC_WARNING=1; warn "Runtime synchronization completed with warnings" ;;
+    *) fail "Runtime synchronization failed" ;;
+  esac
+}
 
 # ─── 9. Print summary ─────────────────────────────────────────────
 
-echo ""
-echo "=============================================="
-if [ "$SYNC_WARNING" -eq 1 ]; then
-  echo -e "${YELLOW}  LLM-Wiki installed with warnings${NC}"
-  echo "  The install completed; this is not a failure (a failure stops with [FAIL] and exit 1)."
-  echo "  The [WARN] lines above and the doctor line name what needs attention now."
-  echo "  For the state now: uv run --locked --no-sync python scripts/doctor.py"
-else
-  echo -e "${GREEN}  LLM-Wiki installed successfully!${NC}"
-fi
-echo "=============================================="
-echo ""
-echo "Vault:          $VAULT_ROOT"
-echo "State:          $STATE_ROOT"
-echo "Profile:        $PROFILE"
-echo "Agent integrations:"
-if [ "${#AGENT_STATUSES[@]}" -eq 0 ]; then
-  echo "  - none detected"
-else
-  printf '  - %s\n' "${AGENT_STATUSES[@]}"
-fi
-echo "Maintenance:    $SCHEDULER_BACKEND (nightly 03:00 + weekly Sun 04:00)"
-echo "Code updates:   $(code_update_note "$VAULT_ROOT")"
-echo ""
-echo "Next steps:"
-echo "  1. Restart your terminal (to pick up env vars)"
-echo "  2. Open a project in your agent"
-echo "  3. Review the integration states above; automatic capture runs only for active automatic entries"
-echo ""
-echo "Useful commands:"
-echo "  uv run --locked --no-sync python scripts/search_memory.py 'your query'  # search vault"
-echo "  uv run --locked --no-sync python scripts/build_advisory.py              # proactive advisory"
-echo "  uv run --locked --no-sync python scripts/build_guardrails.py             # learned rules"
-echo "  uv run --locked --no-sync python benchmark/run_benchmark.py              # run benchmark"
-echo ""
-echo "MCP: 12 local task-shaped tools; every component is installed, with Pyright for Python"
-echo "Code navigation in another language (one command each, when you need it):"
-echo "  uv run --locked --no-sync python scripts/install_language_server.py --profile <typescript|gopls|rust-analyzer>"
-echo ""
+print_install_outcome() {
+  if [ "$SYNC_WARNING" -eq 1 ]; then
+    echo -e "${YELLOW}  LLM-Wiki installed with warnings${NC}"
+    echo "  The install completed; this is not a failure (a failure stops with [FAIL] and exit 1)."
+    echo "  The [WARN] lines above and the doctor line name what needs attention now."
+    echo "  For the state now: uv run --locked --no-sync python scripts/doctor.py"
+  else
+    echo -e "${GREEN}  LLM-Wiki installed successfully!${NC}"
+  fi
+}
+
+print_agent_statuses() {
+  if [ "${#AGENT_STATUSES[@]}" -eq 0 ]; then
+    echo "  - none detected"
+  else
+    printf '  - %s\n' "${AGENT_STATUSES[@]}"
+  fi
+}
+
+print_summary() {
+  echo ""
+  echo "=============================================="
+  print_install_outcome
+  echo "=============================================="
+  echo ""
+  echo "Vault:          $VAULT_ROOT"
+  echo "State:          $STATE_ROOT"
+  echo "Profile:        $PROFILE"
+  echo "Agent integrations:"
+  print_agent_statuses
+  echo "Maintenance:    $SCHEDULER_BACKEND (nightly 03:00 + weekly Sun 04:00)"
+  echo "Code updates:   $(code_update_note "$VAULT_ROOT")"
+  echo ""
+  echo "Next steps:"
+  echo "  1. Restart your terminal (to pick up env vars)"
+  echo "  2. Open a project in your agent"
+  echo "  3. Review the integration states above; automatic capture runs only for active automatic entries"
+  echo ""
+  echo "Useful commands:"
+  echo "  uv run --locked --no-sync python scripts/search_memory.py 'your query'  # search vault"
+  echo "  uv run --locked --no-sync python scripts/build_advisory.py              # proactive advisory"
+  echo "  uv run --locked --no-sync python scripts/build_guardrails.py             # learned rules"
+  echo "  uv run --locked --no-sync python benchmark/run_benchmark.py              # run benchmark"
+  echo ""
+  echo "MCP: 12 local task-shaped tools; every component is installed, with Pyright for Python"
+  echo "Code navigation in another language (one command each, when you need it):"
+  echo "  uv run --locked --no-sync python scripts/install_language_server.py --profile <typescript|gopls|rust-analyzer>"
+  echo ""
+}
+
+main() {
+  parse_installer_arguments "$@"
+  validate_installer_arguments
+  resolve_vault_root "$@"
+  resolve_state_root
+  detect_shell_profile
+  announce_roots
+  check_prerequisites
+  install_dependencies
+  run_production_smoke
+  prepare_runtime_directories
+  detect_owned_integrations
+  choose_memory_model
+  set_up_maintenance
+  wire_up_agents
+  adopt_reliability_v3
+  upgrade_compile_progress
+  fetch_model_weights
+  verify_managed_pyright
+  synchronize_runtime
+  print_summary
+}
+
+main "$@"

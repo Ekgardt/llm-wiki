@@ -34,6 +34,7 @@
     "tests/module_records.py",
     "tests/powershell_literal.py",
     "tests/shared_fixtures.py",
+    "tests/shell_function_source.py",
     "tests/slow_machine.py",
     "tests/test_the_installers_say_which_branch_and_which_warning.py",
     "tests/the_installer_says_what_it_needs_helpers.py"

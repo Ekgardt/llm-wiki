@@ -2,7 +2,12 @@
 
 Date: 2026-11-11. Supersedes the shared-library part of
 [the configured Python runtime dependency component](2026-10-19-durable-compile-progress.md)
-(section "2026-10-20: configured Python runtime dependency component").
+(section "2026-10-20: configured Python runtime dependency component") and the
+Unix sentence of
+[Windows Python library identity](2026-11-03-windows-python-library-identity.md)
+("Unix static and shared-library rules remain, including refusal of unknown
+configuration"), which also stated the replaced rule in
+[the module guide](../MODULES.md).
 
 ## Problem
 

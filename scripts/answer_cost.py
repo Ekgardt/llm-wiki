@@ -185,7 +185,7 @@ def _stage_fields(envelope) -> dict:
 
 
 def _named_stage_buckets(components: dict) -> dict:
-    buckets = {state: [] for state in _STATES}
+    buckets: dict[str, list[str]] = {state: [] for state in _STATES}
     for name, detail in sorted(components.items()):
         buckets[_stage_state(detail)].append(str(name))
     return {_STAGE_KEY: "; ".join(_stated_buckets(buckets))}

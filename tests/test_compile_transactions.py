@@ -38,7 +38,9 @@ from tests.script_sources import SCRIPTS
 
 
 def _draft_response() -> str:
-    semantic = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operations = _semantic_plan()["operations"]
+    assert isinstance(operations, list)
+    semantic = json.loads(str(operations[0]["content"]))
     return json.dumps({"operations": [semantic], "audit": {}})
 
 

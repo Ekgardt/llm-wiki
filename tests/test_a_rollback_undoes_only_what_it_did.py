@@ -190,7 +190,7 @@ def test_both_installers_hand_an_adopted_resource_to_the_ownership_transaction()
     powershell = (root / "install.ps1").read_text(encoding="utf-8")
 
     forwarded = (
-        'ADOPT_ARGS+=(--adopt "$argument")' in shell,
+        'ADOPT_ARGS+=(--adopt "$2")' in shell,
         '${ADOPT_ARGS[@]+"${ADOPT_ARGS[@]}"})"' in shell,
         '$installControlArgs += @("--adopt", $resourceId)' in powershell,
         '$reexecArguments += @("-Adopt", $resourceId)' in powershell,

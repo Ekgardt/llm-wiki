@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.shell_function_source import _shell_function
 from tests.slow_machine import LONG_TIMEOUT
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,7 +43,7 @@ def test_health_refuses_interpreters_outside_the_supported_series(tmp_path, monk
 
 def _selection_block():
     source = (ROOT / 'install.sh').read_text(encoding='utf-8')
-    return source.split('# One interpreter series for bootstrap and the project environment.', 1)[1].split('# ─── 3.', 1)[0]
+    return _shell_function(source, 'select_bootstrap_python') + '\nselect_bootstrap_python\n'
 
 
 @pytest.mark.skipif(os.name == 'nt' or shutil.which('bash') is None, reason='Native POSIX shell')

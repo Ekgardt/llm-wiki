@@ -128,7 +128,9 @@ def _refresh_artifact(directory: Path, manifest: dict[str, object], name: str) -
     from reliable_memory import canonical_json_bytes
 
     payload = (directory / name).read_bytes()
-    descriptor = next(item for item in manifest["artifacts"] if item["path"] == name)
+    artifacts = manifest["artifacts"]
+    assert isinstance(artifacts, list)
+    descriptor = next(item for item in artifacts if item["path"] == name)
     descriptor.update(size=len(payload), sha256=hashlib.sha256(payload).hexdigest())
     (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
 

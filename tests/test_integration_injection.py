@@ -22,8 +22,6 @@ import pytest
 from tests.breadcrumb_worker_helpers import ingress as ingress
 from tests.integration_injection_case_helpers import (
     _codex_inline_hooks_toml,
-    _shell_function,
-    _shell_functions,
     _unmet_substrings,
     require_tool,
 )
@@ -33,6 +31,7 @@ from tests.integration_injection_helpers import (
     _codex_mcp_toml,
 )
 from tests.powershell_literal import ps_literal
+from tests.shell_function_source import _shell_function, _shell_functions
 
 
 def test_codex_installers_use_official_hooks_and_request_trust_review():
@@ -64,6 +63,10 @@ def _installer_test_section(source: str) -> str:
         "5. Set environment variables", 1
     )[0]
     return section.split("\n", 1)[1]
+
+
+def _unix_smoke_step(source: str) -> str:
+    return _installer_test_section(source) + "\nrun_production_smoke\n"
 
 
 def _write_fake_uv(directory: Path, *, exit_code: int, last_line: str) -> None:
@@ -277,7 +280,7 @@ def test_unix_installer_trusts_smoke_exit_status(
     tmp_path, fake_exit, fake_output, expected_exit, expected_marker
 ):
     bash = _require_bash()
-    section = _installer_test_section((ROOT / "install.sh").read_text(encoding="utf-8"))
+    section = _unix_smoke_step((ROOT / "install.sh").read_text(encoding="utf-8"))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     _write_fake_uv(fake_bin, exit_code=fake_exit, last_line=fake_output)
@@ -322,7 +325,7 @@ def test_unix_installer_trusts_smoke_exit_status(
 
 def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
     bash = _require_bash()
-    section = _installer_test_section((ROOT / "install.sh").read_text(encoding="utf-8"))
+    section = _unix_smoke_step((ROOT / "install.sh").read_text(encoding="utf-8"))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     _write_blocking_fake_uv(fake_bin)
@@ -400,7 +403,7 @@ def test_unix_installer_timeout_stops_tests_and_aborts(tmp_path):
 )
 def test_unix_installer_signal_traps_cleanup_and_exit(tmp_path, signal_name, expected_exit):
     bash = _require_bash()
-    section = _installer_test_section((ROOT / "install.sh").read_text(encoding="utf-8"))
+    section = _unix_smoke_step((ROOT / "install.sh").read_text(encoding="utf-8"))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     _write_blocking_fake_uv(fake_bin)
@@ -493,7 +496,7 @@ def test_unix_installer_signal_traps_cleanup_and_exit(tmp_path, signal_name, exp
 
 def test_unix_installer_signal_kills_complete_stubborn_test_tree(tmp_path):
     bash = _require_bash()
-    section = _installer_test_section((ROOT / "install.sh").read_text(encoding="utf-8"))
+    section = _unix_smoke_step((ROOT / "install.sh").read_text(encoding="utf-8"))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     _write_stubborn_fake_uv_tree(fake_bin)
@@ -571,7 +574,7 @@ def test_unix_installer_signal_kills_complete_stubborn_test_tree(tmp_path):
 
 def test_unix_installer_initial_monitor_mode_cleans_stopped_test_tree(tmp_path):
     bash = _require_bash()
-    section = _installer_test_section((ROOT / "install.sh").read_text(encoding="utf-8"))
+    section = _unix_smoke_step((ROOT / "install.sh").read_text(encoding="utf-8"))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     _write_stubborn_fake_uv_tree(fake_bin)
@@ -669,7 +672,7 @@ def test_unix_installer_initial_monitor_mode_cleans_stopped_test_tree(tmp_path):
 @pytest.mark.parametrize("stop_signal", ["STOP", "TTIN"])
 def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(tmp_path, stop_signal):
     bash = _require_bash()
-    section = _installer_test_section((ROOT / "install.sh").read_text(encoding="utf-8"))
+    section = _unix_smoke_step((ROOT / "install.sh").read_text(encoding="utf-8"))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     _write_stubborn_fake_uv_tree(fake_bin)
