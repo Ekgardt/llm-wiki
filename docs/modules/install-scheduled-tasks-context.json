@@ -23,6 +23,7 @@
     "scripts/llm_wiki/context_bundle.py",
     "tests/__init__.py",
     "tests/conftest.py",
+    "tests/installer_bootstrap_helpers.py",
     "tests/module_context.py",
     "tests/module_context_paths.py",
     "tests/module_interface.py",
@@ -30,14 +31,17 @@
     "tests/module_qualification.py",
     "tests/module_record_context.py",
     "tests/module_records.py",
+    "tests/powershell_literal.py",
     "tests/shared_fixtures.py",
-    "tests/slow_machine.py"
+    "tests/slow_machine.py",
+    "tests/test_the_scheduled_task_installer_answers_each_mode.py"
   ],
   "ownership": {
     "files": [
       "docs/modules/install-scheduled-tasks-context.json",
       "docs/modules/install-scheduled-tasks.md",
-      "scripts/install-scheduled-tasks.ps1"
+      "scripts/install-scheduled-tasks.ps1",
+      "tests/test_the_scheduled_task_installer_answers_each_mode.py"
     ]
   },
   "qualified_dependencies": [

@@ -24,28 +24,34 @@
 # To disable temporarily: `codex -NoMemory ...` runs without capture.
 # To check status: `codex-memory-status` shows recent captures.
 
-# Resolve the real codex binary (npm shim, full path to avoid recursion).
-$REAL_CODEX = if ($IsWindows -or $PSVersionTable.Platform -eq $null) {
-    # Windows: npm installs codex.cmd in %APPDATA%\npm
-    if (Test-Path "$env:APPDATA\npm\codex.cmd") {
-        "$env:APPDATA\npm\codex.cmd"
-    } elseif (Test-Path "$env:APPDATA\npm\codex.ps1") {
-        "$env:APPDATA\npm\codex.ps1"
-    } else {
-        # Fallback to whatever's on PATH that isn't this wrapper.
-        (Get-Command codex.cmd -ErrorAction SilentlyContinue).Source
-    }
-} else {
-    # Unix: codex is typically in /usr/local/bin or ~/.local/bin.
-    # Exclude Function/Script results to avoid resolving our own wrapper
-    # when the profile is reloaded (recursion guard).
+# Windows: npm installs codex.cmd (or codex.ps1) in %APPDATA%\npm; otherwise whatever
+# codex.cmd is on PATH, which is never this wrapper.
+function Find-CodexOnWindows {
+    $found = @(@("$env:APPDATA\npm\codex.cmd", "$env:APPDATA\npm\codex.ps1") | Where-Object { Test-Path $_ })
+    $found += @((Get-Command codex.cmd -ErrorAction SilentlyContinue).Source)
+    return $found[0]
+}
+
+# Unix: only an application named codex; this wrapper's own function is excluded, so a
+# reloaded profile cannot resolve the wrapper to itself.
+function Find-CodexOnPath {
     $app = Get-Command codex -All -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandType -eq 'Application' } |
         Select-Object -First 1
-    if ($app) { $app.Source }
+    if ($app) { return $app.Source }
 }
 
-if (-not $REAL_CODEX -or -not (Test-Path $REAL_CODEX)) {
+function Find-RealCodex {
+    if ($IsWindows -or $PSVersionTable.Platform -eq $null) { return Find-CodexOnWindows }
+    return Find-CodexOnPath
+}
+
+function Test-RealCodex([string]$Path) {
+    return [bool]$Path -and (Test-Path $Path)
+}
+
+$REAL_CODEX = Find-RealCodex
+if (-not (Test-RealCodex -Path $REAL_CODEX)) {
     Write-Warning "codex-memory-wrapper: could not locate real codex binary; wrapper disabled."
     return
 }

@@ -268,7 +268,6 @@ def test_windows_scheduler_status_validates_registered_contract() -> None:
         ".Actions.Count",
         ".Triggers.Count",
         "if ($verified)",
-        "exit 1",
     )
 
     assert _missing(source, required) == []

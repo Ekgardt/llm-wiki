@@ -14,13 +14,11 @@ from tests.powershell_functions_stay_simple_helpers import (
 
 ROOT = Path(__file__).resolve().parents[1]
 ZONES = ("scripts", "tests", "docs", "skills", "rules", "integrations", "benchmark")
-# Script bodies that were over the law-5 ceiling before 2026-11-11, held at what they
-# measure now. The owner deferred splitting install.ps1's body to task 178, item 2
-# (Pester tests first); an entry goes when its body measures within LAW_CEILINGS.
+# The one script body still over the law-5 ceiling, held at what it measures now. The
+# owner deferred splitting install.ps1's body to task 178, item 2 (Pester tests first);
+# the entry goes when the body measures within LAW_CEILINGS.
 BODIES_HELD_AT_THEIR_LEVEL = {
     "install.ps1": {"ccn": 86, "ifs": 57, "nesting": 3, "chains": 3, "ternaries": 0},
-    "scripts/install-scheduled-tasks.ps1": {"ccn": 21, "ifs": 18, "nesting": 3, "chains": 0, "ternaries": 0},
-    "scripts/codex-memory-wrapper.ps1": {"ccn": 8, "ifs": 5, "nesting": 2, "chains": 1, "ternaries": 0},
 }
 
 
