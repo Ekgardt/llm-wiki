@@ -16,6 +16,7 @@
     "docs/modules/product-structure.md",
     "docs/modules/project-governance.md",
     "docs/modules/test-support.md",
+    "docs/research/2026-11-11-the-runtime-library-is-found-by-address.md",
     "rules/development-laws.md",
     "scripts/__init__.py",
     "scripts/llm_wiki/__init__.py",
@@ -37,6 +38,7 @@
     "files": [
       "docs/modules/compile-controller-tests-compile-runtime-identity-context.json",
       "docs/modules/compile-controller-tests-compile-runtime-identity.md",
+      "docs/research/2026-11-11-the-runtime-library-is-found-by-address.md",
       "tests/test_compile_runtime_identity.py"
     ]
   },
@@ -48,7 +50,7 @@
         "compile_runtime_dependency_manifest",
         "compile_runtime_library"
       ],
-      "contract_sha256": "a578f9825536db216b8ce8b6f724a4a7717c793e2eb1dd3cd5aa86419781caf0",
+      "contract_sha256": "4dccfb0a623713802c2fb9fe84e80056bce695fb79bd35b955b83232409b5268",
       "integration_tests": [
         "tests/test_compile_runtime_identity.py"
       ]
@@ -56,10 +58,13 @@
     {
       "provider": "scripts/llm_wiki/compile_controller_dependencies.py",
       "names": [
+        "LoadedImage",
+        "library_outside_main_program",
+        "loaded_image",
         "loaded_python_library",
-        "shared_object_path"
+        "main_program_base"
       ],
-      "contract_sha256": "2b455b82fbed3110091acde073f10400a2ae79b9da637273ceb79d483bead0a0",
+      "contract_sha256": "74b25d6f90e1074a693c912f1304f0ba843799a5fd0c52a8538d16b776684eaa",
       "integration_tests": [
         "tests/test_compile_runtime_identity.py"
       ]

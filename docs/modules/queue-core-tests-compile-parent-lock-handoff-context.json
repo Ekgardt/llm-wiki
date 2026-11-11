@@ -176,7 +176,7 @@
         "compile_product_dependency_manifest",
         "compile_runtime_dependency_manifest"
       ],
-      "contract_sha256": "654b4db15d0881ba8cc6acc9747a463ccc12ad78c47f6077d20ff1a11aba6abc",
+      "contract_sha256": "4efef3933d151a6b990404e110709569503074e192912a2d49f583fe48041ad0",
       "integration_tests": [
         "tests/test_compile_dependency_identity.py",
         "tests/test_compile_execution_inventory.py"

@@ -1177,6 +1177,9 @@ configured installed library. Version-only identity and guessed platform paths
 were rejected; unsupported/missing shared-library metadata refuses qualification.
 No new package, service, path contract or configuration option is introduced.
 
+Superseded 2026-11-11: no configured library path is fingerprinted; see
+[2026-11-11-the-runtime-library-is-found-by-address](2026-11-11-the-runtime-library-is-found-by-address.md).
+
 Normally package directories are handled by the separate package inventory.
 A red regression showed that a valid installation scheme with identical stdlib
 and package roots would drop the entire standard library. Roots that overlap are

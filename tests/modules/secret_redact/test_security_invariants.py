@@ -55,6 +55,13 @@ class TestRedactionBeforePersistence:
         out = redact_secrets(f"token: {jwt}")
         assert jwt not in out
 
+    def test_a_bare_jwt_is_caught_by_the_jwt_rule(self):
+        from secret_redact import redact_secrets
+
+        jwt = _signed_test_jwt()
+        out = redact_secrets(f"header value {jwt} end")
+        assert out == "header value [REDACTED_JWT] end"
+
     def test_entropy_token_redacted(self):
         from secret_redact import redact_secrets
 

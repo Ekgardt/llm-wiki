@@ -24,7 +24,7 @@ def runtime(tmp_path, monkeypatch):
     library = tmp_path / 'libpython.so.1'
     library.write_bytes(b'library')
     config = {'Py_ENABLE_SHARED': 1, 'INSTSONAME': library.name, 'LIBDIR': str(tmp_path)}
-    monkeypatch.setattr(dependencies, 'loaded_python_library', lambda config: library)
+    monkeypatch.setattr(dependencies, 'loaded_python_library', lambda: library)
     paths = dict(stdlib=str(stdlib), platstdlib=str(stdlib), purelib=str(packages), platlib=str(packages))
     monkeypatch.setattr(sys, 'executable', str(executable))
     monkeypatch.setattr(sys, 'path', [])
@@ -156,27 +156,84 @@ def _mapped_files():
 
 
 LINUX_MAPS = pytest.mark.skipif(not Path('/proc/self/maps').is_file(), reason='needs /proc/self/maps')
+UNIX_LOADER = pytest.mark.skipif(sys.platform == 'win32', reason='Windows names the library by its loaded handle')
+
+
+def _address(function):
+    import ctypes
+
+    return ctypes.cast(function, ctypes.c_void_p).value
+
+
+def _libc_getpid():
+    import ctypes
+    import ctypes.util
+
+    return ctypes.CDLL(ctypes.util.find_library('c')).getpid
 
 
 @LINUX_MAPS
 def test_the_named_library_is_the_libpython_this_process_mapped():
-    library = dependencies.loaded_python_library(sysconfig.get_config_vars())
+    library = dependencies.loaded_python_library()
     mapped = {path for path in _mapped_files() if Path(path).name.startswith('libpython')}
     assert mapped == (set() if library is None else {str(library.resolve())})
 
 
 @LINUX_MAPS
+def test_the_main_program_base_is_where_the_kernel_mapped_the_executable():
+    import os
+
+    executable = os.readlink('/proc/self/exe')
+    starts = [int(line.split('-')[0], 16) for line in Path('/proc/self/maps').read_text(encoding='utf-8').splitlines()
+              if line.split()[-1] == executable]
+    assert dependencies.main_program_base() == min(starts)
+
+
+@LINUX_MAPS
 def test_a_symbol_is_traced_to_the_shared_object_that_holds_it():
+    assert str(dependencies.loaded_image(_address(_libc_getpid())).path.resolve()) in _mapped_files()
+
+
+@UNIX_LOADER
+def test_a_c_library_function_lies_outside_the_main_program():
+    image = dependencies.loaded_image(_address(_libc_getpid()))
+    library = dependencies.library_outside_main_program(image, dependencies.main_program_base())
+    assert library == image.path
+    assert library.is_file()
+
+
+@UNIX_LOADER
+def test_the_interpreter_is_in_the_main_program_or_in_the_named_library():
     import ctypes
-    import ctypes.util
 
-    libc = ctypes.CDLL(ctypes.util.find_library('c'))
-    assert str(dependencies.shared_object_path(libc.getpid).resolve()) in _mapped_files()
+    image = dependencies.loaded_image(_address(ctypes.pythonapi.Py_GetVersion))
+    library = dependencies.loaded_python_library()
+    assert (library is None) == (image.base == dependencies.main_program_base())
+    assert library in (None, image.path)
 
 
-@pytest.mark.skipif(sys.platform == 'win32', reason='Windows names the library by its loaded handle')
-def test_a_library_this_process_never_loaded_is_not_loaded_to_be_named():
-    assert dependencies.loaded_python_library({'INSTSONAME': 'libpython-never-loaded.so.9'}) is None
+def test_an_image_at_the_main_program_base_is_no_library(tmp_path):
+    image = dependencies.LoadedImage(tmp_path / 'python', 4096)
+    assert dependencies.library_outside_main_program(image, 4096) is None
+
+
+def test_an_image_elsewhere_is_named_as_the_library(tmp_path):
+    library = tmp_path / 'libpython.so.1'
+    library.write_bytes(b'library')
+    image = dependencies.LoadedImage(library, 8192)
+    assert dependencies.library_outside_main_program(image, 4096) == library
+
+
+def test_an_image_elsewhere_that_names_no_file_is_refused(tmp_path):
+    image = dependencies.LoadedImage(tmp_path / 'gone.so', 8192)
+    with pytest.raises(ValueError, match='not a file'):
+        dependencies.library_outside_main_program(image, 4096)
+
+
+def test_an_unknown_platform_refuses_to_guess_the_main_program(monkeypatch):
+    monkeypatch.setattr(sys, 'platform', 'freebsd14')
+    with pytest.raises(ValueError, match='cannot be located'):
+        dependencies.main_program_base()
 
 
 def test_the_actual_runtime_is_fingerprinted_whatever_its_build_libdir_says():

@@ -245,27 +245,34 @@ def _unix_compile_runtime_library(config):
         return {}
     if config.get('Py_ENABLE_SHARED') != 1:
         raise ValueError('Python shared-library configuration is unavailable')
-    library = loaded_python_library(config)
+    library = loaded_python_library()
     if library is None:
         return {}
     return {'python-library': library}
 
 
-def loaded_python_library(config):
+@dataclass(frozen=True)
+class LoadedImage:
+    path: Path
+    base: int
+
+
+def loaded_python_library():
     import ctypes
-    import os
 
-    name = config.get('INSTSONAME') or config.get('LDLIBRARY')
-    if not name:
-        raise ValueError('Python shared-library configuration is unavailable')
-    try:
-        library = ctypes.CDLL(name, mode=os.RTLD_NOLOAD | os.RTLD_LAZY)
-    except OSError:
+    image = loaded_image(ctypes.cast(ctypes.pythonapi.Py_GetVersion, ctypes.c_void_p).value)
+    return library_outside_main_program(image, main_program_base())
+
+
+def library_outside_main_program(image, main_base):
+    if image.base == main_base:
         return None
-    return shared_object_path(library.Py_GetVersion)
+    if not image.path.is_file():
+        raise ValueError(f'the loaded Python library is not a file: {image.path}')
+    return image.path
 
 
-def shared_object_path(symbol):
+def loaded_image(address):
     import ctypes
     import os
 
@@ -276,9 +283,37 @@ def shared_object_path(symbol):
     dladdr = ctypes.CDLL(None).dladdr
     dladdr.argtypes = [ctypes.c_void_p, ctypes.POINTER(SharedObjectInfo)]
     info = SharedObjectInfo()
-    if not dladdr(ctypes.cast(symbol, ctypes.c_void_p), ctypes.byref(info)) or not info.dli_fname:
-        raise ValueError('the loaded Python library is unavailable')
-    return Path(os.fsdecode(info.dli_fname))
+    if not dladdr(address, ctypes.byref(info)) or not info.dli_fname or not info.dli_fbase:
+        raise ValueError('no loaded image holds the Python runtime')
+    return LoadedImage(Path(os.fsdecode(info.dli_fname)), info.dli_fbase)
+
+
+def main_program_base():
+    import sys
+
+    if sys.platform == 'darwin':
+        return _darwin_main_program_base()
+    if sys.platform.startswith('linux'):
+        return _linux_main_program_base()
+    raise ValueError(f'the main program image cannot be located on {sys.platform}')
+
+
+def _linux_main_program_base():
+    import ctypes
+
+    getauxval = ctypes.CDLL(None).getauxval
+    getauxval.argtypes, getauxval.restype = [ctypes.c_ulong], ctypes.c_ulong
+    program_headers = getauxval(3)
+    if not program_headers:
+        raise ValueError('the kernel reported no program headers for the main program')
+    return loaded_image(program_headers).base
+
+
+def _darwin_main_program_base():
+    import ctypes
+
+    header = ctypes.c_char.in_dll(ctypes.CDLL(None), '_mh_execute_header')
+    return ctypes.addressof(header)
 
 
 def _windows_compile_runtime_library():
@@ -326,6 +361,8 @@ def compile_runtime_dependency_manifest(*, deadline=None):
     binds on-disk interpreter/stdlib bytes, not old code already loaded in memory
     or transitive operating-system libraries. Unsupported shared-library metadata
     refuses qualification explicitly; no guessed platform pathname is substituted.
+    A shared build binds the image that holds the running interpreter's code,
+    found by address; an interpreter linked into its executable binds none.
     """
     import sys
     import sysconfig
