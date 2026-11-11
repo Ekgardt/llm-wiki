@@ -27,17 +27,13 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from llm_wiki import runtime_roots  # noqa: E402
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
-from memory_state import ROOT  # noqa: E402
 from reply_json import object_with, reply_document  # noqa: E402
 from retrieval import PROFILES as QA_PROFILES  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
-from vault_log import LOG_NAME  # noqa: E402
+from vault_log import vault_log_path  # noqa: E402
 
-MEMORY = ROOT / "knowledge"
-INDEX = MEMORY / "index.md"
-LOG = MEMORY / LOG_NAME  # private; `vault_log`
-QA_DIR = MEMORY / "notes"  # flat layout: all notes live directly under knowledge/notes/
 ANSWER_SCHEMA = Path(__file__).with_name("schemas") / "grounded-answer-v1.json"
 # Measured on this machine, not chosen: one provider round trip for a 4 KiB
 # evidence prompt took 32.5 s, retrieval and corpus capture 6.3 s more, and a
@@ -55,7 +51,7 @@ QA_MAX_OUTPUT_TOKENS = 1200
 # The window and everything subtracted from it are UTF-8 bytes, under the
 # estimate `context_budget` documents and this path relies on: one token per
 # byte, which over-counts for every script and so can only reserve too much.
-# `ContextBudget` names its fields in tokens; `_qa_budget` is the one place that
+# `ContextBudget` names its fields in tokens; `qa_budget` is the one place that
 # says what this path actually puts in them. Cyrillic and CJK evidence therefore
 # get a smaller share than Latin — safe, and the reason the names disagreed with
 # the values until 2026-09-18. See
@@ -222,7 +218,7 @@ def _as_optional_text(value: object) -> str | None:
     return value if isinstance(value, str) else str(value)
 
 
-def _generate_before_deadline(
+def generate_before_deadline(
     generator: Callable[[str, str, int], str | None],
     prompt: str,
     system_prompt: str,
@@ -295,7 +291,7 @@ def _chunk_of_cited(candidate: object, chunks: tuple) -> object | None:
     if not _candidate_field(candidate, "cited"):
         return None
     path = _first_present(candidate, _CANDIDATE_PATH_KEYS)
-    on_page = [chunk for chunk in chunks if chunk.source_path == path]
+    on_page = (chunk for chunk in chunks if chunk.source_path == path)
     return _holding(on_page, _candidate_field(candidate, "byte_start") or 0)
 
 
@@ -303,16 +299,46 @@ def _holds(chunk: object, byte: int) -> bool:
     return chunk.byte_start <= byte < chunk.byte_end
 
 
-def _holding(on_page: list, byte: int) -> object | None:
-    holding = [chunk for chunk in on_page if _holds(chunk, byte)]
-    return next(iter(holding or on_page), None)
+def _holding(on_page: Iterable[object], byte: int) -> object | None:
+    iterator = iter(on_page)
+    first = next(iterator, None)
+    if first is None:
+        return None
+    if _holds(first, byte):
+        return first
+    return next((chunk for chunk in iterator if _holds(chunk, byte)), first)
 
 
-def _matching_chunks(snapshot: object, candidates: Iterable[object]) -> tuple[object, ...]:
-    chunks = tuple(snapshot.chunks)
-    by_id = {chunk.id: chunk for chunk in chunks}
+def _requested_chunk_ids(candidates: Iterable[object]) -> set[object]:
+    return {_first_present(candidate, _CANDIDATE_ID_KEYS) for candidate in candidates}
+
+
+def _requested_chunks_by_id(chunks: Iterable[object], requested: set[object]) -> dict:
+    return {chunk.id: chunk for chunk in chunks if chunk.id in requested}
+
+
+class _CallerChunks:
+    """Replay immutable chunks with this caller's clock on every traversal."""
+
+    def __init__(self, snapshot: object, deadline: float | None):
+        self.snapshot = snapshot
+        self.deadline = deadline
+
+    def __iter__(self):
+        from corpus_snapshot import iter_snapshot_chunks
+
+        return iter_snapshot_chunks(self.snapshot, deadline=self.deadline)
+
+
+def matching_chunks(
+    snapshot: object, candidates: Iterable[object], *, deadline: float | None = None
+) -> tuple[object, ...]:
+    candidates = tuple(candidates)
+    chunks = _CallerChunks(snapshot, deadline)
+    by_id = _requested_chunks_by_id(chunks, _requested_chunk_ids(candidates))
     selected: list[object] = []
     for candidate in candidates:
+        check_optional_deadline(deadline)
         match = _resolved_chunk(candidate, chunks, by_id)
         if match is not None and match not in selected:
             selected.append(match)
@@ -360,22 +386,28 @@ def _operator_whole_entries(raw: str) -> int | None:
     return WHOLE_ENTRIES_DEFAULT
 
 
-def _entry_key(chunk: object) -> tuple[object, tuple]:
+def entry_key(chunk: object) -> tuple[object, tuple]:
     """The entry a piece belongs to: its source and the heading it sits under."""
     return (chunk.source_path, tuple(chunk.heading_ancestry or ()))
 
 
-def _entry_pieces(snapshot: object) -> dict[tuple, list]:
+def _entry_pieces(
+    snapshot: object, requested: set[tuple], deadline: float | None = None
+) -> dict[tuple, list]:
+    chunks = _selected_source_chunks(snapshot, {key[0] for key in requested}, deadline)
     pieces: dict[tuple, list] = {}
-    for chunk in snapshot.chunks:
-        pieces.setdefault(_entry_key(chunk), []).append(chunk)
+    for chunk in chunks:
+        key = entry_key(chunk)
+        if key in requested:
+            pieces.setdefault(key, []).append(chunk)
     for group in pieces.values():
         group.sort(key=lambda chunk: chunk.byte_start)
     return pieces
 
 
-def _with_entry_siblings(
-    snapshot: object, selected: tuple, whole: int | None = None, partner: bool = True
+def with_entry_siblings(
+    snapshot: object, selected: tuple, whole: int | None = None, partner: bool = True,
+    *, deadline: float | None = None,
 ) -> tuple:
     """Every piece of the top entries, in byte order, where each entry first ranked.
 
@@ -384,11 +416,11 @@ def _with_entry_siblings(
     user said, not what the assistant replied.
     """
     limit = _whole_entry_limit(whole)
-    pieces = _entry_pieces(snapshot)
+    pieces = _entry_pieces(snapshot, {entry_key(chunk) for chunk in selected}, deadline)
     kept: list = []
     admitted: set[tuple] = set()
     for chunk in selected:
-        key = _entry_key(chunk)
+        key = entry_key(chunk)
         _admit(key, admitted, limit)
         siblings = _pieces_of(chunk, key, admitted, pieces, partner)
         # The retrieved piece leads its entry, so shedding reaches the siblings
@@ -461,7 +493,7 @@ class _ReadingOrder:
         by_span: dict[tuple[str, int], tuple[int, int]] = {}
         by_source: dict[str, int] = {}
         for chunk in selected:
-            rank = entry_rank.setdefault(_entry_key(chunk), len(entry_rank))
+            rank = entry_rank.setdefault(entry_key(chunk), len(entry_rank))
             by_span[(chunk.source_path, chunk.byte_start)] = (rank, chunk.byte_start)
             by_source.setdefault(chunk.source_path, rank)
         return cls(by_span, by_source)
@@ -514,7 +546,7 @@ def _render_cached_full_index(index_text: str) -> str:
     )
 
 
-def _qa_budget() -> object:
+def qa_budget() -> object:
     """The answer path's window, in bytes, under the one-byte-per-token estimate."""
     from context_budget import ContextBudget
 
@@ -550,12 +582,12 @@ def build_grounded_context(
     normalized_profile = profile.upper()
     if normalized_profile not in QA_PROFILES:
         raise GroundedQAError("unsupported grounded QA profile")
-    active_budget = budget or _qa_budget()
+    active_budget = budget or qa_budget()
     index_text, chosen = _profile_selection(
-        snapshot, candidates, vault=vault, profile=normalized_profile
+        snapshot, candidates, vault=vault, profile=normalized_profile, deadline=deadline
     )
-    selected = _with_entry_siblings(snapshot, chosen, whole, partner)
-    parent_paths, sources, compiled = _fitted_selection(
+    selected = with_entry_siblings(snapshot, chosen, whole, partner, deadline=deadline)
+    parent_paths, sources, compiled = fitted_selection(
         snapshot,
         selected,
         _evidence_budget(active_budget, MANIFEST_OVERHEAD_BYTES * len(selected)),
@@ -563,7 +595,7 @@ def build_grounded_context(
         deadline,
     )
     evidence, stale = _authoritative_evidence(
-        compiled, sources, snapshot.corpus_sha256, vault, _ReadingOrder.of(selected), _pruner(question)
+        compiled, sources, snapshot.corpus_sha256, vault, _ReadingOrder.of(selected), _pruner(question), deadline
     )
     offered = len(evidence)
     prompt_context = _packed_context(evidence, index_text, active_budget)
@@ -583,7 +615,7 @@ def build_grounded_context(
     )
 
 
-def _cached_full_index(vault: Path) -> bytes:
+def cached_full_index(vault: Path) -> bytes:
     """The knowledge index, when CACHED_FULL is allowed to carry it."""
     cached_index = Path(vault) / "knowledge" / "index.md"
     if not cached_index.exists():
@@ -598,22 +630,24 @@ def _cached_full_index(vault: Path) -> bytes:
         raise GroundedQAError("CACHED_FULL requires a genuinely small measured index") from exc
 
 
-def _cached_full_selection(snapshot: object, vault: Path) -> tuple[str, tuple]:
+def cached_full_selection(snapshot: object, vault: Path) -> tuple[str, Sequence]:
     """The whole corpus and index, refused unless the corpus is genuinely small."""
-    index_bytes = _cached_full_index(vault)
+    index_bytes = cached_full_index(vault)
     total_bytes = sum(len(source.content) for source in snapshot.sources) + len(index_bytes)
     if len(snapshot.sources) > CACHED_FULL_MAX_SOURCES or total_bytes > CACHED_FULL_MAX_BYTES:
         raise GroundedQAError("CACHED_FULL requires a genuinely small measured corpus")
-    return index_bytes.decode("utf-8", errors="strict"), tuple(snapshot.chunks)
+    return index_bytes.decode("utf-8", errors="strict"), snapshot.chunks
 
 
 def _profile_selection(
-    snapshot: object, candidates: Iterable[object], *, vault: Path, profile: str
-) -> tuple[str, tuple]:
+    snapshot: object, candidates: Iterable[object], *, vault: Path, profile: str,
+    deadline: float | None = None,
+) -> tuple[str, Sequence]:
     """The chunks this profile exposes, and any cached index text alongside."""
+    check_optional_deadline(deadline)
     if profile != "CACHED_FULL":
-        return "", _matching_chunks(snapshot, candidates)
-    return _cached_full_selection(snapshot, vault)
+        return "", matching_chunks(snapshot, candidates, deadline=deadline)
+    return cached_full_selection(snapshot, vault)
 
 
 def _parent_paths(selected: tuple) -> tuple[str, ...]:
@@ -628,7 +662,7 @@ def _ranked_paths(selected: tuple, kept: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(page for page in ranked if page in present))
 
 
-def _fitted_selection(
+def fitted_selection(
     snapshot: object,
     selected: tuple,
     budget: object,
@@ -646,28 +680,41 @@ def _fitted_selection(
     """
     from context_budget import BudgetExceededError
 
-    pages = _chunks_by_page(snapshot)
+    pages = chunks_by_page(snapshot, _parent_paths(selected), deadline)
     if not selected:
-        return _compiled_for(snapshot, (), budget, pages, deadline)
+        return compiled_for(snapshot, (), budget, pages, deadline)
     kept = list(selected)
     while kept:
         try:
-            return _compiled_for(snapshot, tuple(kept), budget, pages, deadline)
+            return compiled_for(snapshot, tuple(kept), budget, pages, deadline)
         except BudgetExceededError:
-            _shed_one(kept, retrieved)
+            shed_one(kept, retrieved)
     raise GroundedQAError("no retrieved span fits the grounded answer budget")
 
 
-def _chunks_by_page(snapshot: object) -> dict[str, list]:
-    """The snapshot's chunks grouped by page, each with its place in the snapshot.
+def _selected_source_chunks(snapshot: object, paths: set, deadline: float | None):
+    from types import SimpleNamespace
+
+    from corpus_snapshot import iter_snapshot_chunks, select_snapshot_chunks
+
+    check_optional_deadline(deadline)
+    selected = select_snapshot_chunks(snapshot, paths)
+    return iter_snapshot_chunks(SimpleNamespace(chunks=selected), deadline=deadline)
+
+
+def chunks_by_page(
+    snapshot: object, parent_paths: tuple[str, ...], deadline: float | None = None
+) -> dict[str, list]:
+    """Requested pages' chunks, each with its place in their ordered source view.
 
     Built once for the whole shedding loop, which narrows the snapshot again
     after every dropped span and used to walk every chunk of the corpus each
     time. The position travels with the chunk so the narrowed snapshot keeps
     the order the corpus has.
     """
+    chunks = _selected_source_chunks(snapshot, set(parent_paths), deadline)
     pages: dict[str, list] = {}
-    for position, chunk in enumerate(snapshot.chunks):
+    for position, chunk in enumerate(chunks):
         pages.setdefault(chunk.parent_page, []).append((position, chunk))
     return pages
 
@@ -684,14 +731,14 @@ def _repeats(kept: list) -> list[int]:
     seen: set[tuple] = set()
     repeats: list[int] = []
     for position, chunk in enumerate(kept):
-        key = _entry_key(chunk)
+        key = entry_key(chunk)
         if key in seen:
             repeats.append(position)
         seen.add(key)
     return repeats
 
 
-def _redundant_index(kept: list, retrieved: frozenset = frozenset()) -> int | None:
+def redundant_index(kept: list, retrieved: frozenset = frozenset()) -> int | None:
     """The piece to shed: a sibling retrieval never chose, else a repeated retrieved piece."""
     repeats = _repeats(kept)
     siblings = [position for position in repeats if kept[position].id not in retrieved]
@@ -702,7 +749,7 @@ def _redundant_index(kept: list, retrieved: frozenset = frozenset()) -> int | No
     return None
 
 
-def _shed_one(kept: list, retrieved: frozenset = frozenset()) -> None:
+def shed_one(kept: list, retrieved: frozenset = frozenset()) -> None:
     """Drop a repeat of a page already present before dropping the last page.
 
     Plain tail-shedding drops by rank alone, which is the baseline the 2026
@@ -725,27 +772,27 @@ def _shed_one(kept: list, retrieved: frozenset = frozenset()) -> None:
     dropped is the last one, and where nothing is a repeat this is tail-shedding
     exactly as before.
     """
-    position = _redundant_index(kept, retrieved)
+    position = redundant_index(kept, retrieved)
     if position is None:
         kept.pop()
         return
     kept.pop(position)
 
 
-def _compiled_for(
+def compiled_for(
     snapshot: object,
     selected: tuple,
     budget: object,
     pages: dict[str, list] | None = None,
     deadline: float | None = None,
 ) -> tuple[tuple[str, ...], tuple, object]:
-    _check_optional_deadline(deadline)
+    check_optional_deadline(deadline)
     parent_paths = _parent_paths(selected)
     narrow, sources = _narrowed_snapshot(snapshot, parent_paths, pages)
     return parent_paths, sources, _compiled_context(narrow, sources, selected, budget, deadline)
 
 
-def _check_optional_deadline(deadline: float | None) -> None:
+def check_optional_deadline(deadline: float | None) -> None:
     if deadline is None:
         return
     _check_deadline(deadline)
@@ -772,9 +819,9 @@ def _compiled_context(
     )
 
 
-def _chunks_of(snapshot: object, parent_paths: tuple[str, ...], pages: dict[str, list] | None):
+def chunks_of(snapshot: object, parent_paths: tuple[str, ...], pages: dict[str, list] | None):
     """The chunks of these pages in the snapshot's own order, through the index."""
-    index = pages if pages is not None else _chunks_by_page(snapshot)
+    index = pages if pages is not None else chunks_by_page(snapshot, parent_paths)
     found = [entry for page in parent_paths for entry in index.get(page, ())]
     found.sort()
     return [chunk for _position, chunk in found]
@@ -789,7 +836,7 @@ def _narrowed_snapshot(
     sources = tuple(
         source for source in snapshot.sources if source.record.relative_path in parent_paths
     )
-    chunks = _chunks_of(snapshot, parent_paths, pages)
+    chunks = chunks_of(snapshot, parent_paths, pages)
     narrow = CorpusSnapshot(
         sources,
         tuple(chunks),
@@ -852,7 +899,7 @@ def _spans_for(pruner: _Pruner | None, item: object, source: object) -> list[tup
     return pruner.spans_of(item, source)
 
 
-def _sentence_encoder():
+def sentence_encoder():
     """The retrieval dual encoder when it is already resident, else None.
 
     Pruning never loads the model: an answer must not change the process it
@@ -861,10 +908,10 @@ def _sentence_encoder():
     the generation and the MCP server on its first search, so both prune; a
     one-shot command-line answer delivers turns whole.
     """
-    import search_memory
+    import generation_search
     from embedding_model import prefixed_texts
 
-    embedder = search_memory._embedder_cache
+    embedder = generation_search.embedder_cache
     if embedder is None:
         return None
 
@@ -877,14 +924,18 @@ def _sentence_encoder():
 def _pruner(question: str | None):
     if not question:
         return None
-    return _Pruner(question, _sentence_encoder())
+    return _Pruner(question, sentence_encoder())
 
 
-def _source_is_unchanged(source: object, vault: Path) -> bool:
-    """Whether the file still holds the bytes the snapshot captured."""
+def source_is_unchanged(source: object, vault: Path, *, deadline: float | None = None) -> bool:
+    """A safe, bounded live read still holds the bytes the snapshot captured."""
+    from corpus_snapshot import CorpusChanged, read_current_source
+
     try:
-        live = (Path(vault) / source.record.relative_path).read_bytes()
-    except OSError:
+        live = read_current_source(vault, source.record, deadline=deadline)
+    except TimeoutError:
+        raise
+    except (OSError, ValueError, CorpusChanged):
         return False
     return hashlib.sha256(live).hexdigest() == source.record.sha256
 
@@ -903,14 +954,16 @@ class _FreshSources:
     it affordable at query time.
     """
 
-    def __init__(self, vault: Path) -> None:
+    def __init__(self, vault: Path, deadline: float | None = None) -> None:
         self.vault = vault
+        self.deadline = deadline
         self.verdicts: dict[str, bool] = {}
 
     def holds(self, source: object) -> bool:
+        check_optional_deadline(self.deadline)
         path = source.record.relative_path
         if path not in self.verdicts:
-            self.verdicts[path] = _source_is_unchanged(source, self.vault)
+            self.verdicts[path] = source_is_unchanged(source, self.vault, deadline=self.deadline)
         return self.verdicts[path]
 
     @property
@@ -939,6 +992,7 @@ def _authoritative_evidence(
     vault: Path,
     order: _ReadingOrder | None = None,
     pruner: _Pruner | None = None,
+    deadline: float | None = None,
 ) -> tuple[list[GroundedEvidence], tuple[str, ...]]:
     """One entry per distinct authoritative span, numbered in reading order.
 
@@ -947,7 +1001,7 @@ def _authoritative_evidence(
     the model a session shuffled; `order` puts each entry's pieces back in byte
     order behind the entry retrieval ranked before it.
     """
-    fresh = _FreshSources(vault)
+    fresh = _FreshSources(vault, deadline)
     pairs = _quotable_pairs(compiled, sources, fresh)
     if order is not None:
         pairs.sort(key=lambda pair: order.rank(pair[0]))
@@ -979,26 +1033,28 @@ def _packed_context(evidence: list[GroundedEvidence], index_text: str, budget: o
     return rendered
 
 
-# Words shorter than three characters (articles, particles) carry no evidence for a citation's
-# relevance; CJK is matched by bigrams instead. Basis unknown: value predates measurement; review
-# when a relevance check misses a real short term.
-_RELEVANCE_MIN_TOKEN_LENGTH = 3
 # Function words carry no evidence, so sharing only these proves nothing.
+# Token length does not distinguish these from technical terms such as C, Go,
+# IP and R. See docs/research/2026-09-30-short-terms-are-evidence.md.
 _RELEVANCE_STOPWORDS = frozenset(
     {
         "and", "are", "but", "для", "for", "from", "has", "have", "not", "the",
         "that", "this", "was", "were", "with", "что", "как", "это", "или",
+        "a", "an", "as", "at", "be", "by", "do", "if", "in", "is", "it",
+        "no", "of", "on", "or", "so", "to", "us", "we",
+        "вы", "да", "до", "за", "из", "и", "к", "ко", "ли", "мы", "на",
+        "не", "ни", "но", "о", "об", "от", "по", "с", "со", "у", "я",
     }
 )
 
 
-def _content_tokens(text: str) -> set[str]:
+def content_tokens(text: str) -> set[str]:
     """Words worth matching on, plus CJK character bigrams for unspaced scripts."""
     lowered = str(text).casefold()
     words = {
         token
         for token in re.findall(r"\w+", lowered, flags=re.UNICODE)
-        if len(token) >= _RELEVANCE_MIN_TOKEN_LENGTH and token not in _RELEVANCE_STOPWORDS
+        if token not in _RELEVANCE_STOPWORDS
     }
     ideographs = re.findall(r"[\u3400-\u9fff]", lowered)
     return words | {a + b for a, b in zip(ideographs, ideographs[1:])}
@@ -1088,7 +1144,7 @@ def supplied_figures(entry: Mapping[str, object]) -> str:
     return str(entry.get("relative_path") or "")
 
 
-def _require_figures_agree(
+def require_figures_agree(
     claim_text: str, span_text: str, supplied_text: str = ""
 ) -> None:
     """When both sides name figures, at least one has to be the same figure.
@@ -1116,7 +1172,7 @@ def _require_figures_agree(
     )
 
 
-def _require_citation_touches_claim(
+def require_citation_touches_claim(
     claim_text: str, span_text: str, *, derived: bool = False, supplied_text: str = ""
 ) -> None:
     """Reject a citation that shares nothing with the claim it is offered for.
@@ -1128,14 +1184,14 @@ def _require_citation_touches_claim(
     none of them agree.
     """
     if not derived:
-        _require_figures_agree(claim_text, span_text, supplied_text)
+        require_figures_agree(claim_text, span_text, supplied_text)
     # The word-overlap gate below reads the span only. A claim that shares
     # nothing with the span but repeats its file name has still cited a page
     # and not a sentence.
-    claim_tokens = _content_tokens(claim_text)
+    claim_tokens = content_tokens(claim_text)
     if not claim_tokens:
         return
-    _require_token_overlap(claim_tokens, _content_tokens(span_text))
+    _require_token_overlap(claim_tokens, content_tokens(span_text))
 
 
 def _require_token_overlap(claim_tokens: set[str], span_tokens: set[str]) -> None:
@@ -1197,9 +1253,9 @@ def _with_claimed_citations(document: object) -> object:
     return {**document, "citations": [{"citation_id": name} for name in ids]}
 
 
-def _validated_answer_document(document: object) -> dict:
+def validated_answer_document(document: object) -> dict:
     from evidence_resolver import EvidenceResolutionError
-    from reliable_memory import SchemaValidationError, validate_schema
+    from llm_wiki.formats.schema import SchemaValidationError, validate_schema
 
     document = _with_claimed_citations(document)
     try:
@@ -1210,7 +1266,7 @@ def _validated_answer_document(document: object) -> dict:
     return document
 
 
-def _require_answered_shape(document: Mapping[str, object]) -> None:
+def require_answered_shape(document: Mapping[str, object]) -> None:
     """An answer carries claims and citations. A note beside them is not a refusal.
 
     `reason` is where an abstention states itself, and this used to refuse any
@@ -1224,7 +1280,7 @@ def _require_answered_shape(document: Mapping[str, object]) -> None:
 
     The empty case still refuses, because a reply with no claim or no citation
     has grounded nothing. A note next to a grounded answer is dropped instead,
-    by `_answer_of_surviving_claims`, so it never reaches a reader as though it
+    by `answer_of_surviving_claims`, so it never reaches a reader as though it
     were a reason to doubt.
     """
     if not (document["claims"] and document["citations"]):
@@ -1233,7 +1289,7 @@ def _require_answered_shape(document: Mapping[str, object]) -> None:
         )
 
 
-def _require_abstention_shape(document: Mapping[str, object]) -> None:
+def require_abstention_shape(document: Mapping[str, object]) -> None:
     """A claim or a missing reason makes it no abstention; citations beside it do not.
 
     Four stand abstentions on 2026-09-14 had a reason, no claim, and cited the
@@ -1250,9 +1306,9 @@ def _require_abstention_shape(document: Mapping[str, object]) -> None:
 def _require_status_shape(document: Mapping[str, object]) -> None:
     """An answer carries claims and citations; an abstention carries a reason."""
     if document["status"] == "answered":
-        _require_answered_shape(document)
+        require_answered_shape(document)
         return
-    _require_abstention_shape(document)
+    require_abstention_shape(document)
 
 
 def _span_still_holds(supplied: Mapping[str, object], *, vault: Path) -> bool:
@@ -1357,7 +1413,7 @@ def _check_one_citation(
     if quotes:
         _require_quoted_support(claim, quotes, supplied[citation_id], derived=derived)
         return
-    _require_citation_touches_claim(
+    require_citation_touches_claim(
         str(claim["text"]),
         str(supplied[citation_id]["text"]),
         derived=derived,
@@ -1408,10 +1464,10 @@ def _require_quoted_support(
     _require_quotes_in_spans(quotes, [str(span["text"])])
     if derived:
         return
-    _require_figures_agree(str(claim["text"]), " ".join(quotes), supplied_figures(span))
+    require_figures_agree(str(claim["text"]), " ".join(quotes), supplied_figures(span))
 
 
-def _cited_ids_of_claim(
+def cited_ids_of_claim(
     claim: Mapping[str, object],
     cited: Mapping[str, Mapping[str, object]],
     supplied: Mapping[str, Mapping[str, object]],
@@ -1449,7 +1505,7 @@ def _cited_ids_of_claim(
     return {str(item) for item in ids}
 
 
-def _claim_survives(
+def claim_survives(
     claim: Mapping[str, object],
     cited: Mapping[str, Mapping[str, object]],
     supplied: Mapping[str, Mapping[str, object]],
@@ -1458,12 +1514,12 @@ def _claim_survives(
     from evidence_resolver import EvidenceResolutionError
 
     try:
-        return _cited_ids_of_claim(claim, cited, supplied)
+        return cited_ids_of_claim(claim, cited, supplied)
     except (GroundedQAError, EvidenceResolutionError) as exc:
         return str(exc)
 
 
-def _kept_claims(
+def kept_claims(
     claims: Sequence[Mapping[str, object]],
     cited: Mapping[str, Mapping[str, object]],
     supplied: Mapping[str, Mapping[str, object]],
@@ -1473,7 +1529,7 @@ def _kept_claims(
     refused: list[str] = []
     dropped: list[Mapping[str, object]] = []
     for claim in claims:
-        ids = _claim_survives(claim, cited, supplied)
+        ids = claim_survives(claim, cited, supplied)
         if isinstance(ids, str):
             refused.append(ids)
             dropped.append(claim)
@@ -1543,23 +1599,23 @@ def verify_grounded_answer(
     that is what "no cited span supports the answer" means.
     See `docs/research/2026-09-02-throwing-away-right-answers-and-whether-the-shape-is-wrong.md`.
     """
-    validated = _validated_answer_document(document)
+    validated = validated_answer_document(document)
     _require_status_shape(validated)
     if validated["status"] != "answered":
         return {**validated, "citations": []}
     supplied = {item.citation_id: asdict(item) for item in context.evidence}
     cited = _verified_citations(validated["citations"], supplied, vault=vault)
-    return _answer_of_surviving_claims(validated, cited, supplied)
+    return answer_of_surviving_claims(validated, cited, supplied)
 
 
-def _answer_of_surviving_claims(
+def answer_of_surviving_claims(
     validated: dict[str, object],
     cited: Mapping[str, Mapping[str, object]],
     supplied: Mapping[str, Mapping[str, object]],
 ) -> dict[str, object]:
     from refusal_pass import DROPPED_CLAIMS_KEY
 
-    kept, used, refused, dropped = _kept_claims(validated["claims"], cited, supplied)
+    kept, used, refused, dropped = kept_claims(validated["claims"], cited, supplied)
     if not kept:
         return _nothing_survived(validated, refused, dropped)
     return {
@@ -1569,7 +1625,7 @@ def _answer_of_surviving_claims(
         "citations": [cited[name] for name in cited if name in used],
         # An answer has no abstention reason. Whatever the model wrote beside
         # its claims is a note, and a note must not reach a reader in the field
-        # that means "this was refused". See `_require_answered_shape`.
+        # that means "this was refused". See `require_answered_shape`.
         "reason": None,
         # The gates that dropped a claim while the answer still went out.
         # `grounded_qa` records these and removes the key, so it never reaches
@@ -1578,23 +1634,21 @@ def _answer_of_surviving_claims(
     }
 
 
-def _answer_corpus(vault: Path, deadline: float) -> object:
-    """Capture the same corpus the candidates were retrieved from.
-
-    Retrieval searches a published generation; capturing a different corpus
-    here once meant candidates failed to resolve into a source and the answer
-    refused itself while search had just returned the right page. One corpus
-    definition, read from the same place the builder reads it.
-    """
+def answer_corpus(vault: Path, deadline: float) -> object:
+    """Use the published capture; selected sources are rechecked before prompts."""
     from corpus_snapshot import VAULT_CODE_ROOTS, collect_corpus
+    from search_memory import published_corpus
 
+    published = published_corpus(vault, deadline=deadline)
+    if published is not None:
+        return published
     return collect_corpus(vault, code_roots=VAULT_CODE_ROOTS, deadline=deadline)
 
 
-def _default_candidates(
+def default_candidates(
     question: str,
     *,
-    profile: str,
+    profile: str | None,
     deadline: float,
     limit: int = QA_MAX_CANDIDATES,
     since: str | None = None,
@@ -1606,7 +1660,7 @@ def _default_candidates(
     # cap on how many rows each backend may fetch before fusion. Passing the
     # answer size as the resource cap collapsed the pool to the answer, and a
     # pool the size of the answer cannot hold that many distinct pages — the
-    # defect `_candidate_pool` exists to prevent. Measured on this vault, "как
+    # defect `candidate_pool` exists to prevent. Measured on this vault, "как
     # устроен повтор после карантина" returned twelve candidates of which ten
     # were chunks of one status document and none was the decision page;
     # without the cap the decision page is first.
@@ -1622,7 +1676,7 @@ def _default_candidates(
     return tuple(rows)
 
 
-def _asked_on(question: str):
+def asked_on(question: str):
     """The date the question is asked from, stated in it or else today."""
     from datetime import date
 
@@ -1649,7 +1703,7 @@ def searchable_question(question: str, anchor=None) -> str:
     """
     from temporal_anchor import query_with_dates
 
-    return query_with_dates(question, anchor or _asked_on(question))
+    return query_with_dates(question, anchor or asked_on(question))
 
 
 # How many candidates the second look asks for when a count reached the edge
@@ -1690,8 +1744,8 @@ class _AnswerPass:
     ) -> tuple[dict[str, object], GroundedContext]:
         _check_deadline(self.deadline)
         self.passes.append(note)
-        system_prompt = _qa_system_prompt()
-        question_block = "<question>\n" + self.question.strip() + "\n</question>\n" + note
+        system_prompt = qa_system_prompt()
+        question_block = _question_block(self.question, note)
         fixed_tokens = len((system_prompt + question_block).encode("utf-8"))
         context = build_grounded_context(
             self.captured,
@@ -1707,13 +1761,17 @@ class _AnswerPass:
         prompt = question_block + context.prompt_context
         _require_prompt_fits(system_prompt + prompt, self.budget)
         raw = _provider_response(self.generator, prompt, system_prompt, self.deadline)
-        return verify_grounded_answer(_parsed_answer(raw), context, vault=self.vault), context
+        return verify_grounded_answer(parsed_answer(raw), context, vault=self.vault), context
+
+
+def _question_block(question: str, note: str = "") -> str:
+    return "<question>\n" + question.strip() + "\n</question>\n" + note
 
 
 def grounded_qa(
     question: str,
     *,
-    vault: Path = ROOT,
+    vault: Path | None = None,
     snapshot: object | None = None,
     candidates: Iterable[object] | None = None,
     generator: Callable[[str, str, int], str | None] | None = None,
@@ -1734,29 +1792,28 @@ def grounded_qa(
     a stand: it returns the text of claims the gates dropped, labelled, so an
     answer policy can be measured; the product never asks for it.
     """
-    _require_bounded_question(question)
+    require_bounded_question(question)
+    selected_budget = budget or qa_budget()
+    _require_prompt_fits(qa_system_prompt() + _question_block(question), selected_budget)
     selected_deadline = _resolved_deadline(deadline)
     _check_deadline(selected_deadline)
-    selected_profile = _resolved_profile(profile, question)
-    fetch = _resolved_retriever(retrieve, candidates, question, selected_profile, selected_deadline)
+    selected_profile = resolved_profile(profile, question)
+    retrieval_profile = None
+    if profile is not None:
+        retrieval_profile = selected_profile
+    fetch = _resolved_retriever(retrieve, candidates, question, retrieval_profile, selected_deadline)
     seek = _resolved_search(
-        search, candidates is not None or retrieve is not None, selected_profile, selected_deadline
+        search, candidates is not None or retrieve is not None, retrieval_profile, selected_deadline
     )
-    single = _AnswerPass(
-        question,
-        Path(vault),
-        snapshot or _answer_corpus(Path(vault), selected_deadline),
-        selected_profile,
-        budget or _qa_budget(),
-        generator,
-        selected_deadline,
+    single = _answer_pass(
+        question, vault, snapshot, selected_profile, selected_budget, generator, selected_deadline
     )
     first_candidates = _with_dated_leg(question, _resolved_candidates(candidates, fetch), seek)
     answer, context = _second_look(
         single, first_candidates, single.run(first_candidates), fetch, seek
     )
     answer, context = _calendar_look(single, first_candidates, (answer, context))
-    answer, context = _refusal_look(single, first_candidates, (answer, context), seek)
+    answer, context = refusal_look(single, first_candidates, (answer, context), seek)
     _record_cited_evidence(question, context, answer)
     _record_refused_evidence(question, context, answer)
     answer.pop(DROPPED_GATES_KEY, None)
@@ -1764,6 +1821,13 @@ def grounded_qa(
     # of the question, so a refusal can be told from evidence that was not there.
     answer[SUFFICIENCY_KEY] = _measured_sufficiency(single, context).as_record()
     return _published(answer, keep_unverified)
+
+
+def _answer_pass(question, vault, snapshot, profile, budget, generator, deadline) -> _AnswerPass:
+    """One answer pass over `vault` (the configured vault when None) and its corpus."""
+    vault = Path(vault or runtime_roots.vault_root())
+    corpus = snapshot or answer_corpus(vault, deadline)
+    return _AnswerPass(question, vault, corpus, profile, budget, generator, deadline)
 
 
 def _with_dated_leg(
@@ -1778,11 +1842,11 @@ def _with_dated_leg(
     """
     from temporal_anchor import window
 
-    span = window(question, _asked_on(question))
+    span = window(question, asked_on(question))
     if search is None or span is None:
         return candidates
     dated = tuple(search(question, QA_MAX_CANDIDATES, since=span[0], as_of=span[1]))
-    return _merged(candidates, None, dated) or candidates
+    return merged(candidates, None, dated) or candidates
 
 
 def _published(answer: dict[str, object], keep_unverified: bool) -> dict[str, object]:
@@ -1797,7 +1861,7 @@ def _published(answer: dict[str, object], keep_unverified: bool) -> dict[str, ob
     return answer
 
 
-def _refusal_look(
+def refusal_look(
     single: _AnswerPass,
     candidates: tuple,
     first: tuple[dict[str, object], GroundedContext],
@@ -1843,7 +1907,7 @@ def _measured_sufficiency(single: _AnswerPass, context: GroundedContext):
     """What the shown evidence covers of the question, measured by the system."""
     from evidence_sufficiency import sufficiency
 
-    return sufficiency(single.question, context.evidence, _asked_on(single.question))
+    return sufficiency(single.question, context.evidence, asked_on(single.question))
 
 
 def _reads_again(single: _AnswerPass, first: tuple[dict[str, object], GroundedContext]) -> bool:
@@ -1860,7 +1924,7 @@ def _read_again(
     candidates: tuple,
     first: tuple[dict[str, object], GroundedContext],
 ) -> tuple[dict[str, object], GroundedContext]:
-    """The optional part of `_refusal_look`: the same evidence, read once more beside its coverage."""
+    """The optional part of `refusal_look`: the same evidence, read once more beside its coverage."""
     from evidence_sufficiency import coverage_note
 
     answer, context = first
@@ -1875,9 +1939,9 @@ def _searched_again(
     first: tuple[dict[str, object], GroundedContext],
     search: Callable[[str, int], Iterable[object]],
 ) -> tuple[dict[str, object], GroundedContext]:
-    """The optional part of `_refusal_look`: search for the gap, answer once more."""
+    """The optional part of `refusal_look`: search for the gap, answer once more."""
     answer, context = first
-    more = _merged(candidates, None, _searched_for_the_gap(answer, single, search))
+    more = merged(candidates, None, _searched_for_the_gap(answer, single, search))
     if more is None:
         return first
     second = single.run(more)
@@ -2008,7 +2072,7 @@ def _counted_again(
 
     answer, context = current
     widened = _widened(answer, context, fetch)
-    more = _merged(pool, widened, _gathered(answer, single, search))
+    more = merged(pool, widened, _gathered(answer, single, search))
     note = _entity_note(answer, single)
     if more is None and not note:
         return current, pool, False
@@ -2043,7 +2107,7 @@ def _calendar_look(
     answer, context = first
     if answer.get("status") != "answered" or single.regenerated:
         return first
-    note = calendar_note(unstated_gaps(answer, _asked_on(single.question)))
+    note = calendar_note(unstated_gaps(answer, asked_on(single.question)))
     if not note:
         return first
     # The gap is between dates the cited spans carry; nothing else is needed.
@@ -2143,7 +2207,7 @@ def _candidate_key(candidate: object) -> object:
     return _first_present(candidate, _CANDIDATE_ID_KEYS)
 
 
-def _merged(candidates: tuple, widened: tuple | None, gathered: tuple) -> tuple | None:
+def merged(candidates: tuple, widened: tuple | None, gathered: tuple) -> tuple | None:
     """Every candidate once, the ones more searches agreed on first; None when nothing is new.
 
     A piece that the question and a sub-query both found outranks one that a
@@ -2268,7 +2332,7 @@ def _cited_paths(context: GroundedContext, answer: Mapping[str, object]) -> list
     return sorted(dict.fromkeys(paths))
 
 
-def _refused_gates(answer: Mapping[str, object]) -> list[str]:
+def refused_gates(answer: Mapping[str, object]) -> list[str]:
     """Every gate that refused a claim, whether or not the answer survived.
 
     A total refusal states its gates in the reason. A partial one states them
@@ -2320,9 +2384,9 @@ def _record_refused_evidence(
     an afternoon of manual work.
 
     A claim dropped from an answer that still published something is recorded
-    too, and used not to be. `_refused_gates` says what that cost.
+    too, and used not to be. `refused_gates` says what that cost.
     """
-    gates = _refused_gates(answer)
+    gates = refused_gates(answer)
     if not gates:
         return
     try:
@@ -2403,9 +2467,9 @@ def _write_cited_events(question: str, profile: str, paths: Sequence[str]) -> No
     best_effort_record_events([event for event in events if event is not None])
 
 
-def _require_bounded_question(question: object) -> None:
-    if not isinstance(question, str) or not question.strip() or len(question) > 16_384:
-        raise GroundedQAError("question must be a bounded non-empty string")
+def require_bounded_question(question: object) -> None:
+    if not isinstance(question, str) or not question.strip():
+        raise GroundedQAError("question must be a non-empty string")
 
 
 def _resolved_deadline(deadline: float | None) -> float:
@@ -2414,7 +2478,7 @@ def _resolved_deadline(deadline: float | None) -> float:
     return time.monotonic() + QA_DEADLINE_SECONDS
 
 
-def _resolved_profile(profile: str | None, question: str) -> str:
+def resolved_profile(profile: str | None, question: str) -> str:
     from retrieval import analyze_query
 
     if profile is not None:
@@ -2434,7 +2498,7 @@ def _resolved_candidates(
 def _resolved_search(
     search: Callable[[str, int], Iterable[object]] | None,
     fixed: bool,
-    profile: str,
+    profile: str | None,
     deadline: float,
 ) -> Callable[[str, int], Iterable[object]] | None:
     """How to search for something else; None when the caller decided retrieval.
@@ -2446,7 +2510,7 @@ def _resolved_search(
         return search
     if fixed:
         return None
-    return lambda query, limit, **window: _default_candidates(
+    return lambda query, limit, **window: default_candidates(
         query, profile=profile, deadline=deadline, limit=limit, **window
     )
 
@@ -2455,7 +2519,7 @@ def _resolved_retriever(
     retrieve: Callable[[int], Iterable[object]] | None,
     candidates: Iterable[object] | None,
     question: str,
-    profile: str,
+    profile: str | None,
     deadline: float,
 ) -> Callable[[int], Iterable[object]] | None:
     """How to ask retrieval for more; None when the caller fixed the candidates."""
@@ -2463,12 +2527,12 @@ def _resolved_retriever(
         return retrieve
     if candidates is not None:
         return None
-    return lambda limit: _default_candidates(
+    return lambda limit: default_candidates(
         question, profile=profile, deadline=deadline, limit=limit
     )
 
 
-def _qa_system_prompt() -> str:
+def qa_system_prompt() -> str:
     """The instruction the answer schema is closed against.
 
     Abstention is stated as a calibration with two error directions, because
@@ -2587,7 +2651,7 @@ def _provider_response(
         from llm_client import call_llm
 
         generator = call_llm
-    raw = _generate_before_deadline(generator, prompt, system_prompt, deadline)
+    raw = generate_before_deadline(generator, prompt, system_prompt, deadline)
     _check_deadline(deadline)
     return raw
 
@@ -2615,7 +2679,7 @@ def _excerpt(raw: str) -> str:
     return redact_secrets(collapsed)[:_UNPARSABLE_EXCERPT_CHARS]
 
 
-def _parsed_answer(raw: str | None) -> object:
+def parsed_answer(raw: str | None) -> object:
     if not raw:
         raise GroundedQAError("grounded QA provider returned no response")
     try:
@@ -2640,7 +2704,7 @@ def file_back(question: str, answer_text: str) -> Path:
     question = redact_secrets(question)
     answer_text = redact_secrets(answer_text)
     slug = slugify(question)
-    out = QA_DIR / f"{slug}.md"
+    out = runtime_roots.notes_dir() / f"{slug}.md"
     today = datetime.now().strftime("%Y-%m-%d")
     summary_line = question.strip().rstrip("?").strip()
     title = str(question.strip().rstrip("?")).replace(
@@ -2690,8 +2754,8 @@ def rebuild_index() -> bool:
     """
     try:
         result = subprocess.run(
-            [sys.executable, str(ROOT / "scripts" / "rebuild_memory_index.py")],
-            check=False, cwd=str(ROOT), capture_output=True, text=True, timeout=INDEX_REBUILD_SECONDS,
+            [sys.executable, str(runtime_roots.vault_root() / "scripts" / "rebuild_memory_index.py")],
+            check=False, cwd=str(runtime_roots.vault_root()), capture_output=True, text=True, timeout=INDEX_REBUILD_SECONDS,
         )
     except subprocess.TimeoutExpired:
         print(f"query_memory: rebuild_memory_index did not finish in {INDEX_REBUILD_SECONDS:.0f} s")
@@ -2708,15 +2772,15 @@ def append_log(entry: str) -> None:
 
     entry = redact_secrets(entry)
     header = b"# Session Memory Log\n\n"
-    if not LOG.exists():
+    if not vault_log_path(runtime_roots.vault_root()).exists():
         append_knowledge(
-            stable_operation_id("knowledge-log-header", "log", header), LOG, header
+            stable_operation_id("knowledge-log-header", "log", header), vault_log_path(runtime_roots.vault_root()), header
         )
     block = (entry if entry.endswith("\n") else entry + "\n").encode("utf-8")
-    append_knowledge(None, LOG, block)
+    append_knowledge(None, vault_log_path(runtime_roots.vault_root()), block)
 
 
-def _filed_page_phrase(out: Path) -> str:
+def filed_page_phrase(out: Path) -> str:
     """The filed page by path when this repository publishes it, else counted.
 
     The vault log is private, but the slug is the question's own words and the log may
@@ -2725,7 +2789,7 @@ def _filed_page_phrase(out: Path) -> str:
     """
     from rebuild_memory_index import published_paths
 
-    named, hidden = published_paths(ROOT, [out.relative_to(ROOT).as_posix()])
+    named, hidden = published_paths(runtime_roots.vault_root(), [out.relative_to(runtime_roots.vault_root()).as_posix()])
     if named:
         return f"`{named[0]}`"
     return f"{hidden} unpublished page"
@@ -2744,9 +2808,9 @@ def main() -> int:
         index_ok = rebuild_index()
         suffix = "" if index_ok else " (WARN: knowledge/index.md rebuild failed — page written, index stale)"
         append_log(
-            f"- {datetime.now().strftime('%Y-%m-%d')} — Filed Q&A {_filed_page_phrase(out)} via `query_memory.py --file-back`.{suffix}"
+            f"- {datetime.now().strftime('%Y-%m-%d')} — Filed Q&A {filed_page_phrase(out)} via `query_memory.py --file-back`.{suffix}"
         )
-        print(f"\n[filed] {out.relative_to(ROOT).as_posix()}")
+        print(f"\n[filed] {out.relative_to(runtime_roots.vault_root()).as_posix()}")
     return 0
 
 

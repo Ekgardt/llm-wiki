@@ -1,0 +1,155 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/a-question-is-answered-by-its-own-kind-of-generation-helpers.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/evidence-graph-tests-context.json",
+    "docs/modules/evidence-graph-tests.md",
+    "docs/modules/generation-catalog-tests-generation-catalog-helpers.md",
+    "docs/modules/memory-state-tests-repository-index-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/a_question_is_answered_by_its_own_kind_of_generation_helpers.py",
+    "tests/conftest.py",
+    "tests/generation_catalog_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/repository_index_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_an_open_that_runs_out_of_time_closes_its_database.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/evidence-graph-tests-context.json",
+      "docs/modules/evidence-graph-tests.md",
+      "tests/test_an_open_that_runs_out_of_time_closes_its_database.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "canonical_source_manifest",
+        "collect_corpus"
+      ],
+      "contract_sha256": "6f1af8b5d6e29a6eaebcd144bf94853e4b167148485f11c44b06bf8f4c21604d",
+      "integration_tests": [
+        "tests/test_an_open_that_runs_out_of_time_closes_its_database.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_graph.py",
+      "names": [
+        "EvidenceGraph",
+        "GRAPH_SCHEMA_VERSION",
+        "create_generation_database"
+      ],
+      "contract_sha256": "1b731151e7954a08af84ca855a1dccffd2fdefabc31f401ddb4342e626a41d17",
+      "integration_tests": [
+        "tests/test_an_open_that_runs_out_of_time_closes_its_database.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_fts_validation.py",
+      "names": [
+        "GENERATION_TOKENIZER_CONFIG_SHA256",
+        "GENERATION_TOKENIZER_VERSION"
+      ],
+      "contract_sha256": "41a5ba6fcba2b0852a5187a5c47402f077682f14e1f983941f7647502022a803",
+      "integration_tests": [
+        "tests/test_an_open_that_runs_out_of_time_closes_its_database.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_search.py",
+      "names": [
+        "build_generation_fts"
+      ],
+      "contract_sha256": "b2391df99aa883af90d0b8cd8ab8c5b7e83a8d39521b0fa0af81f0a449783354",
+      "integration_tests": [
+        "tests/test_an_open_that_runs_out_of_time_closes_its_database.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_an_open_that_runs_out_of_time_closes_its_database.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "7bba4b535d3f0a73445fece541c540939989b41456c9a79a67f82634748be36b",
+      "integration_tests": [
+        "tests/test_an_open_that_runs_out_of_time_closes_its_database.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_indexing.py",
+      "names": [
+        "index_repository"
+      ],
+      "contract_sha256": "3cd1d101518c65bea40b7c4cf2b6d1851d5cb57ce4389ee40ae23f3ef01d210f",
+      "integration_tests": [
+        "tests/test_an_open_that_runs_out_of_time_closes_its_database.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "RepositoryScope",
+        "SCHEMA_VERSION",
+        "derive_checkout_id",
+        "derive_repository_id",
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "98d98af2c6ea84a103c5c8463e8dc6a995656f82b7f67a22c295feed5d7a3e6e",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

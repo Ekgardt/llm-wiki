@@ -22,7 +22,8 @@ RUNS = """
 import json, os, sys
 sys.path.insert(0, sys.argv[1])
 import lint_memory
-pages = sorted((lint_memory.ROOT / "knowledge" / "notes").glob("*.md"))
+from llm_wiki import runtime_roots
+pages = sorted(runtime_roots.notes_dir().glob("*.md"))
 os.environ["MEMORY_LLM_BASE_URL"] = "http://127.0.0.1:9/v1"
 runs = []
 for reply in json.loads(sys.argv[3]):

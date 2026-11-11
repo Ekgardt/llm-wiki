@@ -11,28 +11,35 @@ import sys
 import textwrap
 from pathlib import Path
 
-import install_control
 import pytest
-from install_control import (
+from install_control import main, parser
+from install_state import (
     ManagedResource,
-    _parser,
-    cron_scheduler_resource,
     file_resource,
-    inspect_install_state,
-    install_resources,
-    launchd_scheduler_resource,
-    main,
-    profile_resource,
+    validate_install_state,
+)
+from llm_wiki import (
+    install_scheduler_projection,
+    install_transactions,
+    install_v2_mutation,
+    install_windows,
+)
+from llm_wiki.formats.canonical import canonical_json_bytes
+from llm_wiki.install_cron import cron_scheduler_resource
+from llm_wiki.install_inspection import inspect_install_state
+from llm_wiki.install_launchd import launchd_scheduler_resource
+from llm_wiki.install_profile import profile_resource
+from llm_wiki.install_scheduler_render import (
     render_launchd_definitions,
     render_systemd_definitions,
-    rollback_resources,
     select_scheduler_backend,
-    systemd_scheduler_resource,
-    uninstall_resources,
-    validate_install_state,
-    windows_environment_resources,
-    windows_task_scheduler_resource,
 )
+from llm_wiki.install_systemd import systemd_scheduler_resource
+from llm_wiki.install_uninstall_rollback import rollback_resources, uninstall_resources
+from llm_wiki.install_v2_transactions import install_resources
+from llm_wiki.install_windows import windows_environment_resources, windows_task_scheduler_resource
+
+from tests.install_control_helpers import _FakeLaunchd, _FakeSystemd, _release
 
 
 def test_status_is_read_only_when_install_state_is_absent(tmp_path: Path) -> None:
@@ -58,79 +65,6 @@ def test_status_names_what_the_install_created_but_never_removes(tmp_path: Path)
     assert set(kinds) == {"checkout", "virtualenv"}
     assert kinds["virtualenv"]["state"] == "present"
     assert kinds["checkout"]["path"] == str(state_root.resolve())
-
-
-def _release() -> dict[str, object]:
-    return {
-        "commit_oid": "a" * 40,
-        "project_version": "4.0.0",
-        "source_mode": "pinned_remote",
-        "uv_lock_sha256": "b" * 64,
-        "worktree_clean": True,
-    }
-
-
-class _FakeSystemd:
-    def __init__(self) -> None:
-        self.enabled: set[str] = set()
-        self.calls: list[tuple[str, ...]] = []
-
-    def __call__(self, command: tuple[str, ...], _input: bytes | None = None) -> tuple[int, bytes]:
-        self.calls.append(command)
-        handlers = {
-            "disable": self._disable,
-            "enable": self._enable,
-            "is-active": self._is_active,
-            "is-enabled": self._is_enabled,
-        }
-        return handlers.get(command[2], self._ok)(command)
-
-    def _is_enabled(self, command: tuple[str, ...]) -> tuple[int, bytes]:
-        if command[3] in self.enabled:
-            return 0, b"enabled\n"
-        return 1, b"disabled\n"
-
-    def _is_active(self, command: tuple[str, ...]) -> tuple[int, bytes]:
-        if command[3] in self.enabled:
-            return 0, b"active\n"
-        return 3, b"inactive\n"
-
-    def _enable(self, command: tuple[str, ...]) -> tuple[int, bytes]:
-        self.enabled.update(command[4:])
-        return 0, b""
-
-    def _disable(self, command: tuple[str, ...]) -> tuple[int, bytes]:
-        self.enabled.difference_update(command[4:])
-        return 0, b""
-
-    def _ok(self, _command: tuple[str, ...]) -> tuple[int, bytes]:
-        return 0, b""
-
-
-class _FakeLaunchd:
-    def __init__(self) -> None:
-        self.active: set[str] = set()
-
-    def __call__(self, command: tuple[str, ...], _input: bytes | None = None) -> tuple[int, bytes]:
-        handlers = {
-            "bootstrap": self._bootstrap,
-            "bootout": self._bootout,
-            "print": self._print,
-        }
-        return handlers[command[1]](command)
-
-    def _bootstrap(self, command: tuple[str, ...]) -> tuple[int, bytes]:
-        self.active.add(Path(command[3]).stem)
-        return 0, b""
-
-    def _bootout(self, command: tuple[str, ...]) -> tuple[int, bytes]:
-        self.active.discard(command[2].rsplit("/", 1)[-1])
-        return 0, b""
-
-    def _print(self, command: tuple[str, ...]) -> tuple[int, bytes]:
-        if command[2].rsplit("/", 1)[-1] in self.active:
-            return 0, b"active\n"
-        return 113, b"not found\n"
 
 
 class _FakeCron:
@@ -189,7 +123,7 @@ class _SpecAwareWindowsTasks:
         return self._install(candidate)
 
     def _candidate(self, command: tuple[str, ...]) -> bytes:
-        return install_control.render_windows_task_spec(
+        return install_windows.render_windows_task_spec(
             Path(command[command.index("-VaultRoot") + 1]),
             Path(command[command.index("-StateRoot") + 1]),
             Path(command[command.index("-UvPath") + 1]),
@@ -234,7 +168,7 @@ def _legacy_definition_resource(resource: ManagedResource) -> ManagedResource:
     definitions = {
         relative.rsplit("/", 1)[-1]: value for relative, value in resource.definitions.items()
     }
-    legacy = install_control._definition_digest(definitions)
+    legacy = install_scheduler_projection.definition_digest(definitions)
 
     def read_owned() -> bytes | None:
         current = resource.read_owned()
@@ -353,9 +287,9 @@ def _windows_tasks_v2_scenario(tmp_path: Path) -> dict[str, object]:
         "backend": "task_scheduler",
         "current": lambda: runner.installed,
         "new": new,
-        "new_state": install_control.render_windows_task_spec(vault, state_root, new_uv),
+        "new_state": install_windows.render_windows_task_spec(vault, state_root, new_uv),
         "old": old,
-        "old_state": install_control.render_windows_task_spec(vault, state_root, old_uv),
+        "old_state": install_windows.render_windows_task_spec(vault, state_root, old_uv),
         "state_root": state_root,
         "vault": vault,
     }
@@ -420,7 +354,7 @@ def test_profile_install_preserves_unrelated_bytes_and_mode_without_copying_secr
     original_mode = stat.S_IMODE(original.st_mode)
     owner_updates: list[tuple[int, int]] = []
     monkeypatch.setattr(
-        install_control.os,
+        os,
         "chown",
         lambda _path, uid, gid: owner_updates.append((uid, gid)),
         raising=False,
@@ -1169,7 +1103,7 @@ def test_native_installers_delegate_persistent_mutation_only_after_smoke() -> No
 def test_recovery_cli_commands_require_explicit_runtime_inputs(
     tmp_path: Path, command: str
 ) -> None:
-    parsed = _parser().parse_args(
+    parsed = parser().parse_args(
         [
             command,
             "--root",
@@ -1190,7 +1124,12 @@ def test_recovery_cli_commands_require_explicit_runtime_inputs(
 
 
 def test_install_cli_activates_v2_with_explicit_home(tmp_path: Path, monkeypatch) -> None:
-    import install_control
+    from llm_wiki import (
+        install_release,
+        install_requests,
+        install_resource_builder,
+        install_v2_transactions,
+    )
 
     captured = {}
     resource = ManagedResource(
@@ -1214,21 +1153,21 @@ def test_install_cli_activates_v2_with_explicit_home(tmp_path: Path, monkeypatch
         claude_settings=False,
         codex_hooks=False,
     )
-    monkeypatch.setattr(install_control, "_selected_backend", lambda _value: "cron")
+    monkeypatch.setattr(install_resource_builder, "selected_backend", lambda _value: "cron")
     monkeypatch.setattr(
-        install_control,
+        install_resource_builder,
         "build_install_resources",
         lambda **kwargs: captured.setdefault("build", kwargs) and [resource],
     )
-    monkeypatch.setattr(install_control, "build_release_identity", lambda _root: _release())
+    monkeypatch.setattr(install_release, "build_release_identity", lambda _root: _release())
 
     def install(**kwargs):
         captured["install"] = kwargs
         return {"transaction_id": "a" * 32}
 
-    monkeypatch.setattr(install_control, "install_resources", install)
+    monkeypatch.setattr(install_v2_transactions, "install_resources", install)
 
-    result = install_control._install_from_args(args)
+    result = install_requests.install_from_args(args)
 
     assert result["status"] == "committed"
     assert captured["build"]["home"] == (tmp_path / "home").resolve()
@@ -1294,7 +1233,7 @@ def test_corrupt_install_transaction_fails_closed_without_path_disclosure(
 
 
 def test_doctor_runtime_check_reports_corrupt_install_state(tmp_path: Path) -> None:
-    import doctor
+    from llm_wiki import doctor_base
 
     state_root = tmp_path / "state"
     for name in ("cache", "logs", "run"):
@@ -1303,7 +1242,7 @@ def test_doctor_runtime_check_reports_corrupt_install_state(tmp_path: Path) -> N
     install_root.mkdir()
     (install_root / "transaction.json").write_text("{not-json", encoding="utf-8")
 
-    result = doctor._runtime_check(state_root)
+    result = doctor_base.runtime_check(state_root)
 
     assert result["status"] == "error"
     assert result["details"]["codes"] == ["install_state_corrupt"]
@@ -1496,11 +1435,11 @@ def test_v2_update_resumes_interruption_around_external_mutation(
         resources=[managed(b"old")],
         control_version=2,
     )
-    original_mutator = install_control._v2_mutate_resources
+    original_mutator = install_v2_mutation.v2_mutate_resources
     if crash_point == "before_mutation":
         monkeypatch.setattr(
-            install_control,
-            "_v2_mutate_resources",
+            install_v2_mutation,
+            "v2_mutate_resources",
             lambda **_kwargs: (_ for _ in ()).throw(
                 KeyboardInterrupt("simulated process interruption")
             ),
@@ -1524,7 +1463,7 @@ def test_v2_update_resumes_interruption_around_external_mutation(
     assert interrupted["state"] == "mutating"
 
     store.enabled = False
-    monkeypatch.setattr(install_control, "_v2_mutate_resources", original_mutator)
+    monkeypatch.setattr(install_v2_mutation, "v2_mutate_resources", original_mutator)
     resumed = install_resources(
         state_root=state_root,
         vault_root=tmp_path / "vault",
@@ -1570,14 +1509,14 @@ def test_v2_update_resumes_after_manifest_publication(tmp_path: Path, monkeypatc
         control_version=2,
     )
     release = {**_release(), "project_version": "4.1.0"}
-    set_state = install_control._set_transaction_state
+    set_state = install_transactions.set_transaction_state
 
     def interrupt_commit(path, transaction, state):
         if state == "committed" and transaction["operation"] == "update":
             raise KeyboardInterrupt("crash after publication")
         set_state(path, transaction, state)
 
-    monkeypatch.setattr(install_control, "_set_transaction_state", interrupt_commit)
+    monkeypatch.setattr(install_transactions, "set_transaction_state", interrupt_commit)
 
     with pytest.raises(KeyboardInterrupt, match="after publication"):
         install_resources(
@@ -1597,7 +1536,7 @@ def test_v2_update_resumes_after_manifest_publication(tmp_path: Path, monkeypatc
     assert interrupted["state"] == "publishing"
     assert published["generation"] == 2
 
-    monkeypatch.setattr(install_control, "_set_transaction_state", set_state)
+    monkeypatch.setattr(install_transactions, "set_transaction_state", set_state)
     resumed = install_resources(
         state_root=state_root,
         vault_root=tmp_path / "vault",
@@ -2109,7 +2048,7 @@ def test_scheduler_v2_interrupted_update_rolls_back_persisted_legacy_definition(
 )
 def test_scheduler_v2_rejects_malformed_definition_bundle(tmp_path: Path, scenario_builder) -> None:
     resource = scenario_builder(tmp_path)["new"]
-    malformed = install_control.canonical_json_bytes(
+    malformed = canonical_json_bytes(
         {
             "definitions": {},
             "format": "scheduler-definitions/v1",
@@ -2128,7 +2067,7 @@ def test_windows_task_v2_rejects_untrusted_historical_spec_root(
     resource = scenario["new"]
     value = json.loads(resource.desired)
     value["root"] = str((tmp_path / "different-vault").resolve())
-    untrusted = install_control.canonical_json_bytes(value)
+    untrusted = canonical_json_bytes(value)
 
     with pytest.raises(Exception, match="task_spec_invalid"):
         resource.read_projections([untrusted])
@@ -2221,16 +2160,18 @@ def test_systemd_units_can_find_the_tools_installed_beside_uv(tmp_path: Path) ->
 
 def test_the_provider_and_model_chosen_at_install_travel_with_the_roots(tmp_path, monkeypatch):
     """Issue #22: the nightly unit auto-detected OpenCode after an install that chose Claude."""
-    import install_control
+    from llm_wiki import (
+        install_scheduler_render,
+    )
 
     monkeypatch.setenv("MEMORY_LLM_PROVIDER", "claude")
     monkeypatch.setenv("MEMORY_CLAUDE_MODEL", "claude-sonnet-5")
 
-    unit = install_control._systemd_service(tmp_path, tmp_path / "state", tmp_path / "uv", "nightly").decode()
+    unit = install_scheduler_render.systemd_service(tmp_path, tmp_path / "state", tmp_path / "uv", "nightly").decode()
 
     assert 'Environment="MEMORY_LLM_PROVIDER=claude"' in unit
     assert 'Environment="MEMORY_CLAUDE_MODEL=claude-sonnet-5"' in unit
     monkeypatch.setenv("MEMORY_LLM_PROVIDER", "fake")
-    assert "MEMORY_LLM_PROVIDER" not in install_control._systemd_service(
+    assert "MEMORY_LLM_PROVIDER" not in install_scheduler_render.systemd_service(
         tmp_path, tmp_path / "state", tmp_path / "uv", "nightly"
     ).decode()

@@ -11,9 +11,7 @@ to judge (a registration and a tree that disagree).
 from __future__ import annotations
 
 import shutil
-import sqlite3
 import sys
-from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -25,43 +23,14 @@ TESTS = Path(__file__).resolve().parent
 if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
 
-from test_generation_catalog import _catalog, _publish  # noqa: E402
-
-
-def _chain(catalog, names: list[str]) -> None:
-    """Publish and activate a linear parent chain, oldest first."""
-    previous = None
-    for name in names:
-        _publish(catalog, name, parent=previous)
-        catalog.register(name)
-        assert catalog.activate(name, expected_active=previous) is True
-        previous = name
-
-
-def _rows(catalog, table: str, identifier: str) -> int:
-    with closing(sqlite3.connect(catalog.catalog_path)) as database:
-        return database.execute(
-            f"SELECT COUNT(*) FROM {table} WHERE generation_id = ?", (identifier,)
-        ).fetchone()[0]
-
-
-def _footprint(catalog, identifier: str) -> tuple[bool, int, int]:
-    """Directory, registration and activation history, as one observation."""
-    return (
-        (catalog.generations_path / identifier).is_dir(),
-        _rows(catalog, "generations", identifier),
-        _rows(catalog, "activation_history", identifier),
-    )
-
-
-def _present(catalog, names: list[str]) -> list[bool]:
-    return [(catalog.generations_path / name).is_dir() for name in names]
+from tests.generation_catalog_helpers import _catalog, _publish  # noqa: E402
+from tests.prune_generations_helpers import _chain, _footprint, _present, _rows  # noqa: E402
 
 
 def _prune_step_commands() -> list[list[str]]:
-    import scheduled_weekly
+    import weekly_budget
 
-    steps = scheduled_weekly._script_steps()
+    steps = weekly_budget.script_steps()
     return [command for _message, _label, command, _timeout in steps]
 
 
@@ -118,7 +87,7 @@ def test_a_superseded_generation_loses_row_history_and_tree_together(tmp_path):
 def test_a_failed_tree_removal_rolls_the_registration_back(tmp_path, monkeypatch):
     """No reader may see a row without its tree: nothing commits until the
     directory is actually gone."""
-    import generation_catalog
+
 
     catalog = _catalog(tmp_path)
     _chain(catalog, ["gen-1", "gen-2", "gen-3"])
@@ -126,7 +95,7 @@ def test_a_failed_tree_removal_rolls_the_registration_back(tmp_path, monkeypatch
     def refuse(path):
         raise OSError("filesystem refused the removal")
 
-    monkeypatch.setattr(generation_catalog.shutil, "rmtree", refuse)
+    monkeypatch.setattr(shutil, "rmtree", refuse)
 
     with pytest.raises(OSError, match="filesystem refused"):
         catalog.discard_superseded("gen-1")
@@ -211,7 +180,7 @@ def test_a_pending_publication_survives_the_applied_pass(tmp_path):
 
     assert "PENDING: gen-flight: registered but never activated" in lines
     assert _footprint(catalog, "gen-flight") == (True, 1, 0)
-    assert prune_generations._report(lines) == 0
+    assert prune_generations.report(lines) == 0
 
 
 def test_a_dry_run_removes_nothing(tmp_path):
@@ -231,7 +200,7 @@ def test_applying_the_policy_reclaims_the_superseded_trees(tmp_path):
 
     catalog = _catalog(tmp_path)
     _chain(catalog, ["gen-1", "gen-2", "gen-3"])
-    doomed = prune_generations._directory_bytes(catalog.generations_path / "gen-1")
+    doomed = prune_generations.directory_bytes(catalog.generations_path / "gen-1")
 
     lines = prune_generations.prune_generations(
         state_root=catalog.state_root, apply=True
@@ -260,7 +229,7 @@ def test_an_unpaired_generation_makes_the_pass_report_a_failure(tmp_path):
     )
 
     assert "UNPAIRED: gen-flight: registration and tree disagree" in lines
-    assert prune_generations._report(lines) == 1
+    assert prune_generations.report(lines) == 1
 
 
 def test_a_catalog_with_no_active_pointer_collects_nothing(tmp_path):
@@ -288,7 +257,7 @@ def test_a_catalog_with_no_generation_yet_has_nothing_to_prune(tmp_path):
 
     lines = prune_generations.prune_generations(state_root=catalog.state_root, apply=True)
 
-    assert (lines[0], prune_generations._report(lines)) == (
+    assert (lines[0], prune_generations.report(lines)) == (
         "no memory generation is registered yet; nothing to prune",
         0,
     )

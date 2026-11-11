@@ -1,0 +1,206 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/memory-state-tests-repository-index-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/pyright-profile-tests-code-kernel-helpers.md",
+    "docs/modules/repository-scope-tests-context.json",
+    "docs/modules/repository-scope-tests.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/code_kernel_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/repository_index_helpers.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_revision_holds_only_what_it_proves.py",
+    "tests/test_code_kernel_helpers.py",
+    "tests/test_generation_reuse_scope_identity.py",
+    "tests/test_repository_scope_identity_guard.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/repository-scope-tests-context.json",
+      "docs/modules/repository-scope-tests.md",
+      "tests/test_a_revision_holds_only_what_it_proves.py",
+      "tests/test_code_kernel_helpers.py",
+      "tests/test_generation_reuse_scope_identity.py",
+      "tests/test_repository_scope_identity_guard.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "CapturedSource",
+        "CorpusSnapshot"
+      ],
+      "contract_sha256": "75a1b27ea7e82513a67ebecfa0706b6279e7e7f5b7dfea7cce493cced2b92267",
+      "integration_tests": [
+        "tests/test_a_revision_holds_only_what_it_proves.py",
+        "tests/test_code_kernel_helpers.py",
+        "tests/test_generation_reuse_scope_identity.py",
+        "tests/test_repository_scope_identity_guard.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_graph_builder.py",
+      "names": [
+        "INCREMENTAL_MANIFEST_VERSION",
+        "IncrementalReuseConfig",
+        "reuse_config_matches"
+      ],
+      "contract_sha256": "ccaace6817d30ed44233042588d5f878e96d8050bbb529f4d595df2a76706b24",
+      "integration_tests": [
+        "tests/test_generation_reuse_scope_identity.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_maintenance.py",
+      "names": [
+        "parent_matches_identity"
+      ],
+      "contract_sha256": "f9be75d4149f0855611123c332b1fdc1976537579123e495f764ae27aaabfff4",
+      "integration_tests": [
+        "tests/test_generation_reuse_scope_identity.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_revision_holds_only_what_it_proves.py",
+        "tests/test_code_kernel_helpers.py",
+        "tests/test_generation_reuse_scope_identity.py",
+        "tests/test_repository_scope_identity_guard.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_configuration.py",
+      "names": [
+        "PYRIGHT_PACKAGE_INTEGRITY",
+        "PYRIGHT_PACKAGE_URL"
+      ],
+      "contract_sha256": "1006f9ca9d6c403b9dbb75f82c61e7d4d68818571719b97f22a617db5c0bafe3",
+      "integration_tests": [
+        "tests/modules/pyright_configuration/test_configuration.py",
+        "tests/test_install_pyright.py",
+        "tests/test_pyright_profile.py"
+      ]
+    },
+    {
+      "provider": "scripts/pyright_profile.py",
+      "names": [
+        "PYRIGHT_CONFIGURATION_SHA256",
+        "PYRIGHT_EXECUTED_TREE_RELATIVE",
+        "PYRIGHT_INITIALIZATION_OPTIONS_SHA256",
+        "PYRIGHT_SERVER_RELATIVE",
+        "PyrightIdentity",
+        "build_pyright_install_manifest",
+        "executed_tree_digest"
+      ],
+      "contract_sha256": "ff76b7f440138d25ea8b6c15df411995a1282aa9e1f5be021340d642c73c268a",
+      "integration_tests": [
+        "tests/test_a_revision_holds_only_what_it_proves.py",
+        "tests/test_code_kernel_helpers.py",
+        "tests/test_generation_reuse_scope_identity.py",
+        "tests/test_repository_scope_identity_guard.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "7bba4b535d3f0a73445fece541c540939989b41456c9a79a67f82634748be36b",
+      "integration_tests": [
+        "tests/test_a_revision_holds_only_what_it_proves.py",
+        "tests/test_code_kernel_helpers.py",
+        "tests/test_generation_reuse_scope_identity.py",
+        "tests/test_repository_scope_identity_guard.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_indexing.py",
+      "names": [
+        "GIT_TIMEOUT_SECONDS"
+      ],
+      "contract_sha256": "99375235fd4e0c3e840e4c1add34447cbf07014faed58958b8e879f0907341f3",
+      "integration_tests": [
+        "tests/test_repository_scope_identity_guard.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "GIT_TIMEOUT_SECONDS",
+        "IDENTITY_FIELDS",
+        "RepositoryScope",
+        "derive_checkout_id",
+        "derive_repository_id",
+        "local_serialized_path",
+        "record_identity",
+        "resolve_repository_scope",
+        "same_repository_record",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "576b7c53a1e4b2d412d241f6fc337f86d0d89f6430c02772817758a975ed88de",
+      "integration_tests": [
+        "tests/test_a_revision_holds_only_what_it_proves.py",
+        "tests/test_code_kernel_helpers.py",
+        "tests/test_generation_reuse_scope_identity.py",
+        "tests/test_repository_scope_identity_guard.py"
+      ]
+    },
+    {
+      "provider": "scripts/workspace_revision.py",
+      "names": [
+        "compute_workspace_revision"
+      ],
+      "contract_sha256": "fc7205e39b642841c7cd3770452541388a3f38be3eebee26c46cf149080b7552",
+      "integration_tests": [
+        "tests/test_a_revision_holds_only_what_it_proves.py"
+      ]
+    }
+  ]
+}

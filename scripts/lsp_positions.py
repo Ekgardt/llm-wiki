@@ -94,11 +94,11 @@ class _LineBoundaryIndex:
     utf32_offsets: tuple[int, ...]
 
 
-_LINE_BOUNDARY_INDEXES: OrderedDict[tuple[str, int], _LineBoundaryIndex] = OrderedDict()
-_LINE_BOUNDARY_CACHE_LOCK = Lock()
+LINE_BOUNDARY_INDEXES: OrderedDict[tuple[str, int], _LineBoundaryIndex] = OrderedDict()
+LINE_BOUNDARY_CACHE_LOCK = Lock()
 
 
-def _build_line_boundary_index(
+def build_line_boundary_index(
     content: bytes, start: int, end: int
 ) -> _LineBoundaryIndex:
     byte_offsets = [0]
@@ -133,21 +133,21 @@ def _line_boundary_index(
     end: int,
 ) -> _LineBoundaryIndex:
     key = (source_sha256, line_number)
-    with _LINE_BOUNDARY_CACHE_LOCK:
-        index = _LINE_BOUNDARY_INDEXES.get(key)
+    with LINE_BOUNDARY_CACHE_LOCK:
+        index = LINE_BOUNDARY_INDEXES.get(key)
         if index is not None:
-            _LINE_BOUNDARY_INDEXES.move_to_end(key)
+            LINE_BOUNDARY_INDEXES.move_to_end(key)
             return index
-        index = _build_line_boundary_index(content, start, end)
-        _LINE_BOUNDARY_INDEXES[key] = index
-        if len(_LINE_BOUNDARY_INDEXES) > _BOUNDARY_INDEX_CACHE_LINES:
-            _LINE_BOUNDARY_INDEXES.popitem(last=False)
+        index = build_line_boundary_index(content, start, end)
+        LINE_BOUNDARY_INDEXES[key] = index
+        if len(LINE_BOUNDARY_INDEXES) > _BOUNDARY_INDEX_CACHE_LINES:
+            LINE_BOUNDARY_INDEXES.popitem(last=False)
         return index
 
 
-def _clear_line_boundary_cache() -> None:
-    with _LINE_BOUNDARY_CACHE_LOCK:
-        _LINE_BOUNDARY_INDEXES.clear()
+def clear_line_boundary_cache() -> None:
+    with LINE_BOUNDARY_CACHE_LOCK:
+        LINE_BOUNDARY_INDEXES.clear()
 
 
 _UTF8_LEAD_LIMITS = ((0x80, 1), (0xE0, 2), (0xF0, 3))

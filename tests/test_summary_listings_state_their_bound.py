@@ -36,7 +36,7 @@ def _rows(count: int) -> list[dict]:
 
 
 def test_a_long_listing_is_cut_and_says_so() -> None:
-    fields = code_graph._listing_fields(_rows(97), "entry_points", 30)
+    fields = code_graph.listing_fields(_rows(97), "entry_points", 30)
 
     assert len(fields["entry_points"]) == code_graph.SUMMARY_LISTING_LIMIT
     assert fields["entry_points_count"] == 97
@@ -45,7 +45,7 @@ def test_a_long_listing_is_cut_and_says_so() -> None:
 
 
 def test_a_short_listing_is_whole_and_says_so() -> None:
-    fields = code_graph._listing_fields(_rows(3), "routes", 30)
+    fields = code_graph.listing_fields(_rows(3), "routes", 30)
 
     assert fields["routes"] == _rows(3)
     assert fields["routes_count"] == 3
@@ -54,7 +54,7 @@ def test_a_short_listing_is_whole_and_says_so() -> None:
 
 def test_an_empty_listing_still_carries_its_count() -> None:
     """Zero routes is an answer; an absent count is not."""
-    fields = code_graph._listing_fields([], "routes", 30)
+    fields = code_graph.listing_fields([], "routes", 30)
 
     assert fields["routes"] == []
     assert fields["routes_count"] == 0
@@ -63,7 +63,7 @@ def test_an_empty_listing_still_carries_its_count() -> None:
 
 def test_the_cut_keeps_the_head_of_the_listing() -> None:
     """Order carries meaning here, so the bound takes from the tail."""
-    fields = code_graph._listing_fields(_rows(50), "entry_points", 30)
+    fields = code_graph.listing_fields(_rows(50), "entry_points", 30)
 
     assert fields["entry_points"] == _rows(50)[: code_graph.SUMMARY_LISTING_LIMIT]
 
@@ -91,7 +91,7 @@ def test_a_limit_beyond_what_the_query_fetches_is_clamped() -> None:
 
 def test_the_hotspot_ranking_states_no_count_it_cannot_know() -> None:
     """Ten thousand members, a hundred fetched: any count would be the fetch."""
-    fields = code_graph._hotspot_fields(_rows(100), True, 30)
+    fields = code_graph.hotspot_fields(_rows(100), True, 30)
 
     assert "hotspot_count" not in fields
     assert fields["hotspots_truncated"] is True
@@ -99,13 +99,13 @@ def test_the_hotspot_ranking_states_no_count_it_cannot_know() -> None:
 
 
 def test_an_unclipped_ranking_says_it_was_not_clipped() -> None:
-    fields = code_graph._hotspot_fields(_rows(5), False, 30)
+    fields = code_graph.hotspot_fields(_rows(5), False, 30)
 
     assert fields["hotspots_truncated"] is False
 
 
 class _FakeGraph:
-    """The two calls `_stored_modules` makes, and nothing else."""
+    """The two calls `stored_modules` makes, and nothing else."""
 
     def __init__(self, counts: list[dict], truncated: bool, nodes: dict) -> None:
         self._counts = counts
@@ -136,7 +136,7 @@ def _module_graph(truncated: bool = False) -> _FakeGraph:
 def test_the_module_ranking_asks_the_graph_about_imports() -> None:
     graph = _module_graph()
 
-    code_graph._stored_modules(graph, 30)
+    code_graph.stored_modules(graph, 30)
 
     assert graph.asked == {
         "edge_types": ("IMPORTS",),
@@ -148,7 +148,7 @@ def test_the_module_ranking_asks_the_graph_about_imports() -> None:
 def test_the_summary_ranks_modules_by_who_imports_them() -> None:
     graph = _module_graph()
 
-    modules, truncated = code_graph._stored_modules(graph, 30)
+    modules, truncated = code_graph.stored_modules(graph, 30)
 
     assert truncated is False
     assert modules[0] == {
@@ -163,15 +163,15 @@ def test_a_ranked_module_whose_node_vanished_is_dropped() -> None:
     graph = _module_graph()
     graph._nodes.pop("n2")
 
-    modules, _ = code_graph._stored_modules(graph, 30)
+    modules, _ = code_graph.stored_modules(graph, 30)
 
-    assert code_graph._module_fields(modules, False, 30)["modules"] == [
+    assert code_graph.module_fields(modules, False, 30)["modules"] == [
         {"name": "scripts.reliable_memory", "path": "a.py", "importing_modules": 129}
     ]
 
 
 def test_the_module_ranking_states_its_bound() -> None:
-    fields = code_graph._module_fields([{"name": "x"}], True, 30)
+    fields = code_graph.module_fields([{"name": "x"}], True, 30)
 
     assert fields["modules_limit"] == 30
     assert fields["modules_truncated"] is True

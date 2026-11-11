@@ -15,7 +15,7 @@ for directory in (TESTS.parent / "scripts", TESTS):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
-from test_private_vault_backup import _staged_image  # noqa: E402
+from tests.private_vault_backup_helpers import _staged_image  # noqa: E402
 
 
 def _files(root: Path) -> list[str]:
@@ -45,7 +45,7 @@ def test_a_failure_part_way_removes_what_was_written(tmp_path, monkeypatch):
     image, digest = _staged_image(tmp_path)
     target = tmp_path / "new-machine"
     (target / "run").mkdir(parents=True)
-    real_write = backup._write_new
+    real_write = backup.write_new
     calls: list[int] = []
 
     def fail_second(source, destination):
@@ -54,7 +54,7 @@ def test_a_failure_part_way_removes_what_was_written(tmp_path, monkeypatch):
             raise OSError("disk full")
         real_write(source, destination)
 
-    monkeypatch.setattr(backup, "_write_new", fail_second)
+    monkeypatch.setattr(backup, "write_new", fail_second)
 
     with pytest.raises(OSError):
         backup.publish_restored_image(image=image, vault_root=target, state_root=target, expected_manifest_sha256=digest)

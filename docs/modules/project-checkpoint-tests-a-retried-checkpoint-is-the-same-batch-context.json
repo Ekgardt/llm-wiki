@@ -1,0 +1,207 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-checkpoint-tests-a-retried-checkpoint-is-the-same-batch-context.json",
+    "docs/modules/project-checkpoint-tests-a-retried-checkpoint-is-the-same-batch.md",
+    "docs/modules/project-checkpoint.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/project_checkpoint.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_retried_checkpoint_is_the_same_batch.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/project-checkpoint-tests-a-retried-checkpoint-is-the-same-batch-context.json",
+      "docs/modules/project-checkpoint-tests-a-retried-checkpoint-is-the-same-batch.md",
+      "tests/test_a_retried_checkpoint_is_the_same_batch.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/capture_diagnostics.py",
+      "names": [
+        "is_contention",
+        "record_capture_failure",
+        "record_hook_error"
+      ],
+      "contract_sha256": "3028c70a548e2324c96a889656cee1d101eeada8424d01724838418f36a9a492",
+      "integration_tests": [
+        "tests/test_a_retried_checkpoint_is_the_same_batch.py"
+      ]
+    },
+    {
+      "provider": "scripts/event_envelope.py",
+      "names": [
+        "EventEnvelope"
+      ],
+      "contract_sha256": "702156fffb3d11227892f73c52c17029db5130be3866ca227a989d6c7dc548e4",
+      "integration_tests": [
+        "tests/test_a_retried_checkpoint_is_the_same_batch.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_adapter.py",
+      "names": [
+        "normalize_event"
+      ],
+      "contract_sha256": "4c40e38b4fef213732b19b063193f53f7c2029be10e2ce5dbb5f84d29b2d7ac8",
+      "integration_tests": [
+        "tests/test_a_capture_that_fails_says_so.py",
+        "tests/test_a_checkpoint_records_what_was_done.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/event_project.py",
+      "names": [
+        "project_context"
+      ],
+      "contract_sha256": "b1a378b80a7315c70b5f4bed5289f8b452c33de107638f6a0b23a54b679b3d6c",
+      "integration_tests": [
+        "tests/test_a_retried_checkpoint_is_the_same_batch.py",
+        "tests/test_breadcrumb_worker.py",
+        "tests/test_integration_injection.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_a_retried_checkpoint_is_the_same_batch.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/integration_session_start.py",
+      "names": [
+        "ProjectStore"
+      ],
+      "contract_sha256": "33a03e00e50d0b3dcef7c8f0a1e1e1b91b94693f7e3eae4827b6c2817e23955f",
+      "integration_tests": [
+        "tests/test_a_capture_that_fails_says_so.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_missed_nightly_is_caught_up.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_retried_checkpoint_is_the_same_batch.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "904b31835161d11b79ab937c4651d91dd6966bdaa1f33e93b9ea768f519d2d3b",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "load_state",
+        "update_state"
+      ],
+      "contract_sha256": "16766a3a530ab56b9404215b376a871b02f7a40ef6c6346eb23bc5a9f249944d",
+      "integration_tests": [
+        "tests/test_a_retried_checkpoint_is_the_same_batch.py"
+      ]
+    },
+    {
+      "provider": "scripts/project_journal.py",
+      "names": [
+        "CheckpointDecision",
+        "CheckpointReducer",
+        "ProjectStore",
+        "SESSION_START_RECOVERY_SECONDS"
+      ],
+      "contract_sha256": "e01678fec8284e4b8d197ad1e69b24d5ca0f4d3c9b516388f9730e0e7564d8af",
+      "integration_tests": [
+        "tests/test_a_retried_checkpoint_is_the_same_batch.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_retried_checkpoint_is_the_same_batch.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_retried_checkpoint_is_the_same_batch.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "redact_secrets"
+      ],
+      "contract_sha256": "8b925f76433b0c3f5ab03f4b8b41a462551d5616843facdd2918813d103ad6f5",
+      "integration_tests": [
+        "tests/test_a_retried_checkpoint_is_the_same_batch.py"
+      ]
+    }
+  ]
+}

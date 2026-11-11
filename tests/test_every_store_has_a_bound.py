@@ -11,43 +11,27 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
-import tempfile
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import ephemeral_paths
 import maintenance_helpers
-import markdown_transaction
 import memory_state
 import reclaim_runtime_state
 import repository_index
 import repository_retention
 import repository_worktrees
 import retire_benchmark_runs
-import scheduled_weekly
+import weekly_budget
+from llm_wiki import markdown_undo
 from markdown_transaction import MarkdownCoordinator
 
-from tests.slow_machine import LONG_TIMEOUT
+from tests.every_store_has_a_bound_helpers import _append
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 # --- throwaway checkouts ----------------------------------------------------
-
-
-def test_the_temporary_and_job_directories_are_ephemeral(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "host"))
-    job = tmp_path / "host" / "jobs" / "abc" / "tmp" / "clean"
-
-    roots = ephemeral_paths.ephemeral_roots()
-    verdicts = (
-        ephemeral_paths.is_under(Path(tempfile.gettempdir()) / "x", roots),
-        ephemeral_paths.is_under(job, roots),
-        ephemeral_paths.is_under(ROOT, roots),
-    )
-
-    assert verdicts == (True, True, False)
 
 
 def _job_checkout(tmp_path: Path, monkeypatch) -> Path:
@@ -60,10 +44,10 @@ def _job_checkout(tmp_path: Path, monkeypatch) -> Path:
 def test_a_checkout_in_the_job_directory_is_retired_and_not_refreshed(tmp_path: Path, monkeypatch) -> None:
     checkout = _job_checkout(tmp_path, monkeypatch)
 
-    verdict = repository_retention._verdict({"checkout_root": str(checkout)})
-    refreshed = repository_index._refresh_row({"checkout_root": str(checkout)}, None, time.monotonic() + 5)
+    verdict = repository_retention.retention_verdict({"checkout_root": str(checkout)})
+    refreshed = repository_index.refresh_row({"checkout_root": str(checkout)}, None, time.monotonic() + 5)
 
-    assert (verdict, repository_retention._kept_count(verdict)) == ("throwaway_checkout", 0)
+    assert (verdict, repository_retention.kept_count(verdict)) == ("throwaway_checkout", 0)
     assert refreshed["status"] == "throwaway_not_refreshed"
 
 
@@ -72,21 +56,10 @@ def test_a_worktree_in_the_job_directory_is_not_followed(tmp_path: Path, monkeyp
         path=_job_checkout(tmp_path, monkeypatch), branch=None, bare=False, prunable=False
     )
 
-    assert repository_worktrees._indexable(worktree) is False
+    assert repository_worktrees.indexable(worktree) is False
 
 
 # --- transaction history ----------------------------------------------------
-
-
-def _append(coordinator: MarkdownCoordinator, day: str, family: str = "post-tool"):
-    return markdown_transaction._append_until_committed(
-        coordinator,
-        f"{family}:{day}",
-        f"knowledge/daily/{day}.md",
-        f"# {day}\n".encode(),
-        deadline=time.monotonic() + LONG_TIMEOUT,
-        cancelled=None,
-    )
 
 
 def _transaction_count(coordinator: MarkdownCoordinator) -> int:
@@ -100,8 +73,8 @@ def test_settled_rows_past_the_window_are_dropped_and_recent_ones_kept(tmp_path:
     coordinator = MarkdownCoordinator(root, tmp_path / "state")
     _append(coordinator, "2026-01-01")
     _append(coordinator, "2026-01-02")
-    later = datetime.now(timezone.utc) + timedelta(days=markdown_transaction.HISTORY_RETENTION_DAYS + 1)
-    soon = datetime.now(timezone.utc) + timedelta(days=3)
+    later = datetime.now(UTC) + timedelta(days=markdown_undo.HISTORY_RETENTION_DAYS + 1)
+    soon = datetime.now(UTC) + timedelta(days=3)
 
     unpruned = coordinator.prune_history(now=later)
     coordinator.prune(now=soon)
@@ -119,9 +92,9 @@ def test_a_row_something_reads_back_is_never_pruned(tmp_path: Path) -> None:
     coordinator = MarkdownCoordinator(root, tmp_path / "state")
     _append(coordinator, "2026-01-01", family="compile")
     _append(coordinator, "2026-01-02", family="user-prompt")
-    coordinator.prune(now=datetime.now(timezone.utc) + timedelta(days=3))
+    coordinator.prune(now=datetime.now(UTC) + timedelta(days=3))
 
-    later = datetime.now(timezone.utc) + timedelta(days=markdown_transaction.HISTORY_RETENTION_DAYS + 1)
+    later = datetime.now(UTC) + timedelta(days=markdown_undo.HISTORY_RETENTION_DAYS + 1)
     dropped = coordinator.prune_history(now=later)
 
     assert (dropped["transactions"], _transaction_count(coordinator)) == (1, 1)
@@ -162,10 +135,9 @@ def test_empty_intent_shards_are_removed_and_full_ones_kept(tmp_path: Path) -> N
 def test_keeping_the_previous_state_never_leaves_a_staged_link(tmp_path: Path, monkeypatch) -> None:
     state = tmp_path / "state.json"
     state.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(memory_state, "STATE_FILE", state)
 
-    memory_state._keep_previous(True)
-    memory_state._keep_previous(True)  # `.previous` already is this inode
+    memory_state.keep_previous(state, True)
+    memory_state.keep_previous(state, True)  # `.previous` already is this inode
 
     assert [path.name for path in tmp_path.iterdir() if path.name.endswith(".tmp")] == []
 
@@ -179,13 +151,13 @@ def test_the_hook_error_log_is_bounded_with_the_scheduler_logs() -> None:
 
 
 def test_the_weekly_purges_finished_queue_work_into_the_private_archive() -> None:
-    steps = {label: command for _message, label, command, _timeout in scheduled_weekly._script_steps()}
+    steps = {label: command for _message, label, command, _timeout in weekly_budget.script_steps()}
     command = steps["queue_purge"]
     before = datetime.fromisoformat(command[command.index("--terminal-before") + 1])
     export = Path(command[command.index("--export") + 1])
 
     assert (command[2], "--include-dead" in command) == ("purge", True)
-    assert datetime.now(timezone.utc) - before > timedelta(days=29)
+    assert datetime.now(UTC) - before > timedelta(days=29)
     assert export.parent == ROOT / "knowledge" / "raw" / "queue-archive"
 
 

@@ -17,10 +17,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 
 from integration_config_backup import publish_configuration
+from llm_wiki import runtime_roots
 
 # Allow entries we shipped before 2026-09-10 that granted writes or execution
 # under a read-only-looking name; the merge retires exactly these strings.
@@ -207,18 +207,22 @@ def _publish_reporting(user_settings: Path, text: str) -> None:
         print(f"merge_claude_settings: wrote {user_settings}")
 
 
+def _configured_text(root: Path | None) -> str:
+    return "" if root is None else str(root)
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--user-settings", type=Path, default=None)
     p.add_argument("--template", type=Path, default=None)
     p.add_argument(
         "--vault-root",
-        default=os.environ.get("LLM_WIKI_ROOT", ""),
+        default=_configured_text(runtime_roots.configured_vault_root()),
         help="Value for env.LLM_WIKI_ROOT (default: $LLM_WIKI_ROOT)",
     )
     p.add_argument(
         "--state-root",
-        default=os.environ.get("LLM_WIKI_STATE_ROOT", ""),
+        default=_configured_text(runtime_roots.configured_state_root()),
         help="Value for env.LLM_WIKI_STATE_ROOT",
     )
     p.add_argument("--dry-run", action="store_true")

@@ -1,6 +1,6 @@
 """Audit 3, B26 at the MCP boundary: a damaged cache degrades, it does not fail.
 
-`code_graph._active_evidence_graph` now raises `GenerationUnreadable` where it
+`code_graph.active_evidence_graph` now raises `GenerationUnreadable` where it
 used to answer `None`. The freshness decoration and the navigation graph opener
 must both keep answering. Research:
 `docs/research/2026-09-18-graph-an-unreadable-generation-must-not-fail-a-good-answer.md`.
@@ -31,9 +31,9 @@ def _scope() -> SimpleNamespace:
 
 
 def test_the_freshness_decoration_says_the_generation_is_unreadable(monkeypatch):
-    monkeypatch.setattr(code_graph, "_active_evidence_graph", _raise_unreadable)
+    monkeypatch.setattr("llm_wiki.code_graph_generation.active_evidence_graph", _raise_unreadable)
 
-    assert mcp_server._repository_freshness(Path(".")) == {
+    assert mcp_server.repository_freshness(Path(".")) == {
         "unavailable": "generation_unreadable:ValueError"
     }
 
@@ -42,13 +42,13 @@ def test_the_freshness_decoration_says_when_its_bound_is_reached(monkeypatch):
     def expire(*_args, **_options):
         raise TimeoutError("generation catalog deadline reached")
 
-    monkeypatch.setattr(code_graph, "_active_evidence_graph", expire)
+    monkeypatch.setattr("llm_wiki.code_graph_generation.active_evidence_graph", expire)
 
-    assert mcp_server._repository_freshness(Path(".")) == {"unavailable": "deadline"}
+    assert mcp_server.repository_freshness(Path(".")) == {"unavailable": "deadline"}
 
 
 def test_navigation_degrades_on_an_unreadable_generation(monkeypatch):
-    monkeypatch.setattr(code_graph, "_active_evidence_graph", _raise_unreadable)
-    monkeypatch.setattr(mcp_server, "_operation_cancelled", lambda: (lambda: False))
+    monkeypatch.setattr("llm_wiki.code_graph_generation.active_evidence_graph", _raise_unreadable)
+    monkeypatch.setattr("llm_wiki.mcp_server_workers.operation_cancelled", lambda: (lambda: False))
 
-    assert mcp_server._open_navigation_graph(_scope(), None) is None
+    assert mcp_server.open_navigation_graph(_scope(), None) is None

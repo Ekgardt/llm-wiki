@@ -29,6 +29,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, BinaryIO
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -41,6 +42,7 @@ from embedding_model import (  # noqa: E402
     EMBEDDING_WEIGHTS_FILE,
     EMBEDDING_WEIGHTS_SHA256,
 )
+from llm_wiki import runtime_roots
 from reranker import (  # noqa: E402
     DEFAULT_RERANKER_MODEL,
     DEFAULT_RERANKER_REVISION,
@@ -127,17 +129,22 @@ def cached_weights(model: PinnedModel, hub) -> Path | None:
     return Path(found)
 
 
-def _digest(path: Path, ceiling: int) -> tuple[int, str]:
+def bounded_file_digest(path: Path, ceiling: int) -> tuple[int, str]:
     """Size and SHA-256, reading no further than one chunk past the ceiling."""
     digest = hashlib.sha256()
-    total = 0
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(HASH_CHUNK_BYTES), b""):
-            total += len(chunk)
-            if total > ceiling:
-                break
-            digest.update(chunk)
+        total = _digest_up_to(handle, digest, ceiling)
     return total, digest.hexdigest()
+
+
+def _digest_up_to(handle: BinaryIO, digest: Any, ceiling: int) -> int:
+    total = 0
+    for chunk in iter(lambda: handle.read(HASH_CHUNK_BYTES), b""):
+        total += len(chunk)
+        if total > ceiling:
+            return total
+        digest.update(chunk)
+    return total
 
 
 def mismatch_reason(path: Path, model: PinnedModel) -> str | None:
@@ -157,7 +164,7 @@ def mismatch_reason(path: Path, model: PinnedModel) -> str | None:
 
 
 def _hashed_mismatch(path: Path, model: PinnedModel) -> str | None:
-    size, digest = _digest(path, model.weights_bytes)
+    size, digest = bounded_file_digest(path, model.weights_bytes)
     if size != model.weights_bytes:
         return f"size {size} != {model.weights_bytes}"
     if digest != model.weights_sha256:
@@ -166,9 +173,8 @@ def _hashed_mismatch(path: Path, model: PinnedModel) -> str | None:
 
 
 def _verification_record() -> Path:
-    from memory_state import STATE_ROOT
 
-    return STATE_ROOT / "cache" / "model-verification.json"
+    return runtime_roots.state_root() / "cache" / "model-verification.json"
 
 
 def _file_identity(path: Path) -> list[object]:
@@ -324,7 +330,7 @@ def retire_superseded(model: PinnedModel, hub) -> list[str]:
     return [name for name in model.retired_files if _retire_cached(model, hub, name)]
 
 
-def _settled_and_retired(model: PinnedModel, hub, *, download: bool) -> dict:
+def settled_and_retired(model: PinnedModel, hub, *, download: bool) -> dict:
     """Ensure the weights; only verified weights retire what they replace.
 
     A fetch that fails (offline, a server error) is this model's outcome, not the
@@ -417,7 +423,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return EXIT_NO_LIBRARY
     outcomes = [
-        _settled_and_retired(model, hub, download=not args.check) for model in wanted
+        settled_and_retired(model, hub, download=not args.check) for model in wanted
     ]
     _print(outcomes, args.json)
     return _exit_code(outcomes)

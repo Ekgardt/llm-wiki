@@ -17,9 +17,9 @@ for folder in (REPO / "scripts", REPO / "benchmark"):
     if str(folder) not in sys.path:
         sys.path.insert(0, str(folder))
 
+import generation_fts_validation  # noqa: E402
 import longmemeval_vault  # noqa: E402
-import search_memory  # noqa: E402
-from generation_catalog import GenerationCatalog  # noqa: E402
+from llm_wiki.generation_catalog_store import GenerationCatalog  # noqa: E402
 
 DAILY = "knowledge/daily/2023-05-26.md"
 BODY = (
@@ -36,7 +36,7 @@ def _ask(prompt: str, system_prompt: str) -> str:
 def _keys_column(state: Path) -> list[str]:
     catalog = GenerationCatalog(state)
     generation = catalog.generations_path / catalog.get_active()["generation_id"]
-    artifact = generation / search_memory.GENERATION_FTS_ARTIFACT
+    artifact = generation / generation_fts_validation.GENERATION_FTS_ARTIFACT
     with sqlite3.connect(f"file:{artifact}?mode=ro", uri=True) as database:
         return [row[0] for row in database.execute("SELECT keys FROM chunks WHERE keys != ''")]
 

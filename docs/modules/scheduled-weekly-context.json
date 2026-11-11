@@ -1,0 +1,398 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/build-tiers.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/install-models.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/reflection.md",
+    "docs/modules/scheduled-weekly-context.json",
+    "docs/modules/scheduled-weekly.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/build_tiers.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/reflection.py",
+    "scripts/scheduled_weekly.py",
+    "scripts/weekly_budget.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/doctor_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_weekly_waits_for_the_nightly.py",
+    "tests/test_scheduled_weekly.py",
+    "tests/test_the_weekly_pass_has_its_own_record.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/scheduled-weekly-context.json",
+      "docs/modules/scheduled-weekly.md",
+      "scripts/scheduled_weekly.py",
+      "scripts/weekly_budget.py",
+      "tests/test_a_weekly_waits_for_the_nightly.py",
+      "tests/test_scheduled_weekly.py",
+      "tests/test_the_weekly_pass_has_its_own_record.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "e570dc41e0fd70556ec6a4e887a3da194bcc13122684e515651b13dd19d7d5c1",
+      "integration_tests": [
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_scheduled_weekly.py",
+        "tests/test_the_weekly_pass_has_its_own_record.py"
+      ]
+    },
+    {
+      "provider": "scripts/claims.py",
+      "names": [
+        "ClaimIndex",
+        "claim_json_bytes",
+        "parse_claim_ledger",
+        "reflection_history_boundary",
+        "reflection_history_spans"
+      ],
+      "contract_sha256": "da6355ba85e955018f7ef8b3426a94e731fc629ffe5557df9ed34918d1db5ed9",
+      "integration_tests": [
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_scheduled_weekly.py",
+        "tests/test_the_weekly_pass_has_its_own_record.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "collect_corpus"
+      ],
+      "contract_sha256": "7ea12368f51c070a84b0754260f0a82db5ac44b0395b95eabcb01e5053c9f0bb",
+      "integration_tests": [
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_scheduled_weekly.py",
+        "tests/test_the_weekly_pass_has_its_own_record.py"
+      ]
+    },
+    {
+      "provider": "scripts/doctor.py",
+      "names": [
+        "run_doctor"
+      ],
+      "contract_sha256": "081378e281c574733c396a4a7f1ea7acb280b17ae89b8adc43e765a745844581",
+      "integration_tests": [
+        "tests/test_the_weekly_pass_has_its_own_record.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_graph_builder.py",
+      "names": [
+        "build_full_generation"
+      ],
+      "contract_sha256": "056e93b70cc341eb253323f95833791e52929a5e343d4f8e53acd37f1b2004cd",
+      "integration_tests": [
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_scheduled_weekly.py",
+        "tests/test_the_weekly_pass_has_its_own_record.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_maintenance.py",
+      "names": [
+        "maintenance_extractor_identity"
+      ],
+      "contract_sha256": "6155b9fd16203e4406c49671a0456a9248cc335753aafc2e1375508b2b9c75fb",
+      "integration_tests": [
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_scheduled_weekly.py",
+        "tests/test_the_weekly_pass_has_its_own_record.py"
+      ]
+    },
+    {
+      "provider": "scripts/install_models.py",
+      "names": [
+        "hub_library",
+        "pinned_models"
+      ],
+      "contract_sha256": "9a6c3545cdbff6160d81687d42bfb1947647503068382262658d5bc5d97a7e2f",
+      "integration_tests": [
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_scheduled_weekly.py",
+        "tests/test_the_weekly_pass_has_its_own_record.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_scheduled_weekly.py",
+        "tests/test_the_weekly_pass_has_its_own_record.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "DEFAULT_TIMEOUT_S",
+        "ProviderDescriptor",
+        "call_llm"
+      ],
+      "contract_sha256": "8276dbe86853d78cbb73fce75a6259bdec2a0020f428739fda2028549abadd71",
+      "integration_tests": [
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_scheduled_weekly.py",
+        "tests/test_the_weekly_pass_has_its_own_record.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/claim_ledger.py",
+      "names": [
+        "claim_ledger_match"
+      ],
+      "contract_sha256": "3d4dceb9c02424023e469ef3c60c1015d22417cbacb8482f48281fcb2e005808",
+      "integration_tests": [
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_scheduled_weekly.py",
+        "tests/test_the_weekly_pass_has_its_own_record.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_lsp.py",
+      "names": [
+        "pyright_check"
+      ],
+      "contract_sha256": "3c445a457d8f69a3d5fbb41d97391bc64cbd89430971d46393d2895d2a6cf4dd",
+      "integration_tests": [
+        "tests/test_the_weekly_pass_has_its_own_record.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_schedule.py",
+      "names": [
+        "weekly_verdict"
+      ],
+      "contract_sha256": "3c48daca4806e1e16d3565003986aec27737fd302778a0966204aedaddc41351",
+      "integration_tests": [
+        "tests/test_a_weekly_waits_for_the_nightly.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "sha256_bytes"
+      ],
+      "contract_sha256": "7d34a853c5a6f1be8b00805b2e865ac2a5ca5a6fe3ca141de97ebda61d2a85cf",
+      "integration_tests": [
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_scheduled_weekly.py",
+        "tests/test_the_weekly_pass_has_its_own_record.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_scheduler_render.py",
+      "names": [
+        "SCHEDULER_LIMIT_HOURS"
+      ],
+      "contract_sha256": "2944f4219a46a054baaceb478a03050fac836db548f2145b5857fe6eafb44a4b",
+      "integration_tests": [
+        "tests/test_a_scheduled_run_keeps_the_uv_link.py",
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_an_update_replaces_what_it_owns.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_scheduled_weekly.py",
+        "tests/test_the_weekly_pass_has_its_own_record.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_scheduled_weekly.py",
+        "tests/test_the_weekly_pass_has_its_own_record.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "notes_dir",
+        "reports_dir",
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "631cd90e8bc9119d53b7f1c245ee55c36bdbe90ef3f91c742d42caf02cb7b4cd",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/maintenance_helpers.py",
+      "names": [
+        "wait_for_compile_idle"
+      ],
+      "contract_sha256": "9e07ddd38b8ea9ce0a836059d3aad2bef2731ac5eda18691d558e9a12b997e41",
+      "integration_tests": [
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_scheduled_weekly.py",
+        "tests/test_the_weekly_pass_has_its_own_record.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "initialize_coordinator_v3_candidate",
+        "mutate_knowledge",
+        "stable_operation_id"
+      ],
+      "contract_sha256": "b57045a3c71df7051f16a5a92795690e069844553ef7aa5b82cd83ebe963b610",
+      "integration_tests": [
+        "tests/test_scheduled_weekly.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "atomic_write",
+        "update_state"
+      ],
+      "contract_sha256": "584f862055fa9ad13d33b0702e356147d9374897bb39f8e2a5f54cdc00eb628f",
+      "integration_tests": [
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_scheduled_weekly.py",
+        "tests/test_the_weekly_pass_has_its_own_record.py"
+      ]
+    },
+    {
+      "provider": "scripts/nightly_budget.py",
+      "names": [
+        "COMPILE_IDLE_WAIT_SECONDS",
+        "capture_adoption_step",
+        "post_compile_steps",
+        "worst_case_seconds"
+      ],
+      "contract_sha256": "2844cf793bc2e4f6dffb142394aaab57b4b40fc105085c25cb8c4101bdb31565",
+      "integration_tests": [
+        "tests/test_the_weekly_pass_has_its_own_record.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "OperationalOwnershipError",
+        "OwnerLease",
+        "acquire_scheduled_owner",
+        "heartbeat_owner",
+        "release_marker_owner",
+        "timestamp"
+      ],
+      "contract_sha256": "71238a43a15885e5b3cb1398b8118e1c8f34ed75ecd0e91be68d35ffbfad2416",
+      "integration_tests": [
+        "tests/test_scheduled_weekly.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_scheduled_weekly.py",
+        "tests/test_the_weekly_pass_has_its_own_record.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "983dd096d99bafff98ca0aaa2cd722477333e30eed4bfa9297d1830c635e8d90",
+      "integration_tests": [
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_scheduled_weekly.py",
+        "tests/test_the_weekly_pass_has_its_own_record.py"
+      ]
+    },
+    {
+      "provider": "scripts/scheduled_nightly.py",
+      "names": [
+        "StepLog",
+        "fenced_step_runner",
+        "record_scheduled_failure",
+        "take_scheduled_fence"
+      ],
+      "contract_sha256": "e58360de8823b2711ac25527a91f8405305f058e41df6547adbca07cae1c8ef6",
+      "integration_tests": [
+        "tests/test_the_weekly_pass_has_its_own_record.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "describe_error",
+        "describe_error_chain",
+        "redact_secrets"
+      ],
+      "contract_sha256": "efe850529362cc077fe725abcb4a7fd84ac402668f8f413e55f6309ca9e1da6f",
+      "integration_tests": [
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_scheduled_weekly.py",
+        "tests/test_the_weekly_pass_has_its_own_record.py"
+      ]
+    }
+  ]
+}

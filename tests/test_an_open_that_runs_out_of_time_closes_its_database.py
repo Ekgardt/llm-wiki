@@ -16,10 +16,14 @@ for directory in (TESTS.parent / "scripts", TESTS):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
-from test_a_question_is_answered_by_its_own_kind_of_generation import (  # noqa: E402
+from tests.a_question_is_answered_by_its_own_kind_of_generation_helpers import (  # noqa: E402
     _active_memory_generation,
 )
-from test_repository_index import ALPHA, _repository, vault  # noqa: E402,F401
+from tests.repository_index_helpers import (  # noqa: E402,F401
+    ALPHA,
+    _repository,
+    vault,  # noqa: E402,F401
+)
 
 DESCRIPTORS = Path("/proc/self/fd")
 MAX_STOP_POINTS = 400
@@ -95,15 +99,15 @@ def _leaks(opener, catalog, scope, state_root: Path) -> tuple[int, list[str]]:
 @pytest.mark.skipif(not DESCRIPTORS.is_dir(), reason="needs /proc to see open descriptors")
 @pytest.mark.parametrize("opener_name", ["open_code_for_repository", "open_active_for_repository"])
 def test_no_stop_point_of_an_open_leaves_the_graph_database_open(vault, opener_name):  # noqa: F811
-    import generation_catalog
-    import repository_index
+    import repository_indexing
     from evidence_graph import EvidenceGraph
+    from llm_wiki import generation_catalog_store
     from repository_scope import resolve_repository_scope
 
     _root, state = vault
     repository = _repository(state.parent / "repo", {"pkg/alpha.py": ALPHA})
-    repository_index.index_repository(repository, state_root=state)
-    catalog = generation_catalog.GenerationCatalog(state)
+    repository_indexing.index_repository(repository, state_root=state)
+    catalog = generation_catalog_store.GenerationCatalog(state)
     # The pointer path answers memory questions only, so the active opener needs
     # a memory generation of this checkout to have anything to open:
     # docs/research/2026-09-17-a-question-is-answered-by-its-own-kind-of-generation.md

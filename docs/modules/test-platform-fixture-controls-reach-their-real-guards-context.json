@@ -1,0 +1,290 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/breadcrumb-decision-tests.md",
+    "docs/modules/breadcrumb-documents.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/fact-keys-tests-native-user-frames-keep-their-physical-evidence.md",
+    "docs/modules/fact-keys.md",
+    "docs/modules/generation-search-tests-the-keys-are-indexed-beside-the-turn-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/native-event-reader.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-platform-fixture-controls-reach-their-real-guards-context.json",
+    "docs/modules/test-platform-fixture-controls-reach-their-real-guards.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/fact_keys.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/modules/__init__.py",
+    "tests/modules/breadcrumb_documents/__init__.py",
+    "tests/modules/breadcrumb_documents/contract_helpers.py",
+    "tests/modules/native_event_reader/__init__.py",
+    "tests/modules/native_event_reader/contract_helpers.py",
+    "tests/native_user_frames_keep_their_physical_evidence_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_native_user_frames_keep_their_physical_evidence.py",
+    "tests/test_platform_fixture_controls_reach_their_real_guards.py",
+    "tests/the_keys_are_indexed_beside_the_turn_helpers.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-platform-fixture-controls-reach-their-real-guards-context.json",
+      "docs/modules/test-platform-fixture-controls-reach-their-real-guards.md",
+      "tests/test_platform_fixture_controls_reach_their_real_guards.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "MAX_KNOWLEDGE_PAGE_BYTES"
+      ],
+      "contract_sha256": "a3bdaf915b13ffb59cd0e0c42661404f4401cdd6abe6bb6eb3bcf9c2bb806faa",
+      "integration_tests": [
+        "tests/test_platform_fixture_controls_reach_their_real_guards.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_decision.py",
+      "names": [
+        "journal_block"
+      ],
+      "contract_sha256": "d9c930484c634bdb57dbd893d182a3cb86d6d5b4893041035de163552c86eebc",
+      "integration_tests": [
+        "tests/test_platform_fixture_controls_reach_their_real_guards.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_evidence.py",
+      "names": [
+        "read_head",
+        "read_permanent_source",
+        "read_source_document",
+        "restore_source"
+      ],
+      "contract_sha256": "cac9f206ece04de409398a0a39a09f229a15fb0e517ed6266dd034b1a6b67beb",
+      "integration_tests": [
+        "tests/test_platform_fixture_controls_reach_their_real_guards.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_protocol.py",
+      "names": [
+        "encode_parts",
+        "make_anchor",
+        "make_manifest"
+      ],
+      "contract_sha256": "d9092eee738a1a4113c9bf87afe3ae4ad27a6f4bb640b6b8040da43b1d304729",
+      "integration_tests": [
+        "tests/test_platform_fixture_controls_reach_their_real_guards.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "collect_corpus"
+      ],
+      "contract_sha256": "7ea12368f51c070a84b0754260f0a82db5ac44b0395b95eabcb01e5053c9f0bb",
+      "integration_tests": [
+        "tests/test_platform_fixture_controls_reach_their_real_guards.py"
+      ]
+    },
+    {
+      "provider": "scripts/event_envelope.py",
+      "names": [
+        "native_physical_user_text",
+        "native_selected_user_text",
+        "native_user_text"
+      ],
+      "contract_sha256": "5e6216306d5d2e94feb03f338997d319a6028ebdac70cb8f954bc5a9544fa5ac",
+      "integration_tests": [
+        "tests/test_platform_fixture_controls_reach_their_real_guards.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_fts_validation.py",
+      "names": [
+        "GENERATION_FTS_ARTIFACT"
+      ],
+      "contract_sha256": "4bacec051f26142ff7fdb9eba018ffcd82f6bdef07fa4597f4745636431bd7f3",
+      "integration_tests": [
+        "tests/test_platform_fixture_controls_reach_their_real_guards.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_search.py",
+      "names": [
+        "build_generation_fts",
+        "generation_fts_search"
+      ],
+      "contract_sha256": "bd1b40389d064c21e2b2982022b2180257d7c369c593be0cf9f4c594d29ab9ef",
+      "integration_tests": [
+        "tests/test_platform_fixture_controls_reach_their_real_guards.py"
+      ]
+    },
+    {
+      "provider": "scripts/ledger.py",
+      "names": [
+        "ensure_table",
+        "extend_entity_pages",
+        "post",
+        "records_of",
+        "rows_in_store"
+      ],
+      "contract_sha256": "94e6322790ac02a3f976e91ce47774fd7d078e524eec1add8ff4a47269b5f00b",
+      "integration_tests": [
+        "tests/test_platform_fixture_controls_reach_their_real_guards.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "call_llm"
+      ],
+      "contract_sha256": "69cae5b47f126ae4e45e541f3401efae2ad068c9c9cac4da4a08a082d7190feb",
+      "integration_tests": [
+        "tests/test_platform_fixture_controls_reach_their_real_guards.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/breadcrumb_documents.py",
+      "names": [
+        "source_documents",
+        "source_path"
+      ],
+      "contract_sha256": "9c32d29ba0229ab4fd59256dd23d9ea9fb8fde486cddde3ce431f64e296ab907",
+      "integration_tests": [
+        "tests/test_platform_fixture_controls_reach_their_real_guards.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/evidence_reference.py",
+      "names": [
+        "MAX_DAILY_BYTES"
+      ],
+      "contract_sha256": "67bdf6c1a8f32fcf2f7d79b17ad45deed31ece6af1fbd94c3aeb0c3003073943",
+      "integration_tests": [
+        "tests/test_platform_fixture_controls_reach_their_real_guards.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_platform_fixture_controls_reach_their_real_guards.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "904b31835161d11b79ab937c4651d91dd6966bdaa1f33e93b9ea768f519d2d3b",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_bad_model_file_is_fetched_again.py",
+        "tests/test_a_block_opens_one_entry.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/step_budgets.py",
+      "names": [
+        "DEFAULT_BUDGET_SECONDS"
+      ],
+      "contract_sha256": "23b826ee5651324ed20ec4b1e3c5b1c2044e9fb1e0f46d058351c3df11b4d031",
+      "integration_tests": [
+        "tests/test_platform_fixture_controls_reach_their_real_guards.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "active_or_legacy_coordinator"
+      ],
+      "contract_sha256": "c925a7d2a81ec95533c80abc3906d8b8f0c1422d98e7175814de9a57f0ec45ec",
+      "integration_tests": [
+        "tests/test_platform_fixture_controls_reach_their_real_guards.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "daily_logs"
+      ],
+      "contract_sha256": "85eb7649be6f2700cea30c4dd25477777814ae031cf438d73e4e4a6bfb02dfb6",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_blocked_task_has_a_way_back.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_platform_fixture_controls_reach_their_real_guards.py"
+      ]
+    },
+    {
+      "provider": "scripts/reply_json.py",
+      "names": [
+        "reply_document"
+      ],
+      "contract_sha256": "f22f350c4ed3bc3f62231939d1d10afa6e81a60b08b65de60783121e8d560c93",
+      "integration_tests": [
+        "tests/test_platform_fixture_controls_reach_their_real_guards.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_platform_fixture_controls_reach_their_real_guards.py"
+      ]
+    }
+  ]
+}

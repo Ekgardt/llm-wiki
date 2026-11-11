@@ -1,0 +1,239 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/project-journal-context.json",
+    "docs/modules/project-journal.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/project_journal.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/project-journal-context.json",
+      "docs/modules/project-journal.md",
+      "scripts/project_journal.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "MAX_KNOWLEDGE_PAGE_BYTES"
+      ],
+      "contract_sha256": "a3bdaf915b13ffb59cd0e0c42661404f4401cdd6abe6bb6eb3bcf9c2bb806faa",
+      "integration_tests": [
+        "tests/compile_streamed_archive_batches_helpers.py",
+        "tests/test_a_file_being_written_is_a_changed_corpus_on_every_system.py",
+        "tests/test_compile_archive_json_views.py"
+      ]
+    },
+    {
+      "provider": "scripts/context_budget.py",
+      "names": [
+        "BudgetExceededError",
+        "ContextItem",
+        "DEFAULT_CONTEXT_BUDGET"
+      ],
+      "contract_sha256": "8d6d945b7aa33430fbc4f3f434536a390af63ef89c0c9356bc65a63ea9707579",
+      "integration_tests": [
+        "tests/compile_repair_child_helpers.py",
+        "tests/compile_saved_context_refresh_helpers.py",
+        "tests/test_a_context_answer_sends_its_text_once.py"
+      ]
+    },
+    {
+      "provider": "scripts/context_compiler.py",
+      "names": [
+        "compile_context_items"
+      ],
+      "contract_sha256": "23b1ffbfd102d5b171b6535f6c6997b12c598befccfd3dc0c9d8afaef214fe00",
+      "integration_tests": [
+        "tests/test_a_context_answer_sends_its_text_once.py",
+        "tests/test_project_checkpoint_triggers.py",
+        "tests/test_selected_context_is_not_duplicated_to_fit_a_page.py"
+      ]
+    },
+    {
+      "provider": "scripts/iso_time.py",
+      "names": [
+        "utc_text"
+      ],
+      "contract_sha256": "b7151d094646f6efb0895d5e32f0237918a40d0f8e12b5eb0af3e60484d51a03",
+      "integration_tests": [
+        "tests/test_a_writer_past_its_lease_is_named.py",
+        "tests/test_the_daily_log_keeps_one_clock.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_a_checkpoint_that_fails_at_the_commit_puts_its_files_back.py",
+        "tests/test_a_journal_gap_is_repairable.py",
+        "tests/test_a_journal_line_ends_only_at_a_newline.py",
+        "tests/test_a_journal_rebuild_holds_the_project_lease.py",
+        "tests/test_a_rebound_reservation_takes_the_next_attempt.py",
+        "tests/test_a_rebuild_unblocks_the_project_it_was_run_for.py",
+        "tests/test_an_idle_checkpoint_backlog_finishes.py",
+        "tests/test_event_dedupe_uses_state_bytes.py",
+        "tests/test_graph_record_budget_belongs_to_the_caller.py",
+        "tests/test_integration_injection.py",
+        "tests/test_markdown_transaction_recovery.py",
+        "tests/test_ownership_reclaim_under_process_death.py",
+        "tests/test_pending_checkpoint_queue_is_bounded.py",
+        "tests/test_project_checkpoint_triggers.py",
+        "tests/test_project_journal.py",
+        "tests/test_project_journal_concurrent_caller_wait.py",
+        "tests/test_project_store_adopted_coordinator.py",
+        "tests/test_projector_relative_wait_does_not_grow.py",
+        "tests/test_rotation_keeps_every_open_blocker.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/schema.py",
+      "names": [
+        "validate_schema"
+      ],
+      "contract_sha256": "753e4abefcf29389d3fc0c051070bfaa66db14ecb88e1c98fc9b85588a6017cb",
+      "integration_tests": [
+        "tests/test_reliable_memory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "904b31835161d11b79ab937c4651d91dd6966bdaa1f33e93b9ea768f519d2d3b",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_transactions.py",
+      "names": [
+        "begin_immediate"
+      ],
+      "contract_sha256": "fb9ecde177ce133dd8e6e34a67214ca0c051a02d758e8611dac84b568d955373",
+      "integration_tests": [
+        "tests/test_sqlite_transaction_compatibility.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "ABSENT",
+        "MarkdownChange",
+        "MarkdownCoordinator",
+        "OperationBoundElsewhereError",
+        "ProjectCheckpointReservation",
+        "ProjectPendingPriorError",
+        "TransactionFailure",
+        "active_or_legacy_coordinator",
+        "mutate_knowledge_in_transaction"
+      ],
+      "contract_sha256": "9e6a73803610388fb461f51d3adc18271389ef025056004982707bea9198da0b",
+      "integration_tests": [
+        "tests/a_dead_owner_is_reclaimed_without_its_marker_helpers.py",
+        "tests/a_prune_keeps_what_resolves_a_quarantine_helpers.py",
+        "tests/a_stray_candidate_after_adoption_helpers.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "OwnerLease",
+        "OwnershipRegistry",
+        "ProcessIdentity",
+        "utc_now"
+      ],
+      "contract_sha256": "1b07d9611ece66e362dcfdf58ae8e8c73608447387faa1adcde416a48d339e1f",
+      "integration_tests": [
+        "tests/test_a_breadcrumb_has_one_publication_owner.py",
+        "tests/test_a_capture_keeps_its_claim_while_it_asks.py",
+        "tests/test_a_dead_capture_gets_its_second_chance_after_a_fix.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/a_publication_that_stopped_half_way_is_finished_helpers.py",
+        "tests/capture_intent_adoption_helpers.py",
+        "tests/capture_terminal_helpers.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

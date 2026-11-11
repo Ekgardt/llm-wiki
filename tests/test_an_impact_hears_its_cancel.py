@@ -35,7 +35,7 @@ def test_a_cancel_stops_a_running_git_child(tmp_path, monkeypatch) -> None:
     started = time.monotonic()
 
     with pytest.raises(TimeoutError, match="cancelled"):
-        impact_analysis._git(
+        impact_analysis.git(
             tmp_path, ["status"], deadline=time.monotonic() + LONG_TIMEOUT, max_bytes=1024, cancelled=cancel.is_set
         )
 
@@ -46,7 +46,7 @@ def test_a_cancel_stops_the_range_walk() -> None:
     content = b"line\n" * 1000
 
     with pytest.raises(TimeoutError, match="cancelled"):
-        impact_analysis._changed_ranges(content, content + b"x\n", deadline=float("inf"), cancelled=lambda: True)
+        impact_analysis.changed_ranges(content, content + b"x\n", deadline=float("inf"), cancelled=lambda: True)
 
 
 def _is_stop_check(node: ast.AST) -> bool:

@@ -18,6 +18,9 @@ from pathlib import Path
 
 import pytest
 
+from tests.script_sources import script_files
+from tests.structure_reference import structure_reference
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -72,8 +75,12 @@ def _assert_docs_clean(relative_paths, check) -> None:
         check(relative_path)
 
 
+# A scope modifier (`$script:name`) names the variable after the colon.
+_PS_SCOPE = r"(?:(?:script|global|local|private|using):)?"
+
+
 def _powershell_variables(content: str) -> set[str]:
-    return set(re.findall(r"\$([A-Za-z_]\w*)", content))
+    return set(re.findall(r"\$" + _PS_SCOPE + r"([A-Za-z_]\w*)", content))
 
 
 def _powershell_parameter_names(content: str) -> set[str]:
@@ -87,7 +94,7 @@ def _powershell_parameter_names(content: str) -> set[str]:
 
 
 def _powershell_assigned_variables(content: str) -> set[str]:
-    assigned = set(re.findall(r"\$([A-Za-z_]\w*)\s*=", content))
+    assigned = set(re.findall(r"\$" + _PS_SCOPE + r"([A-Za-z_]\w*)\s*=", content))
     assigned |= _powershell_parameter_names(content)
     assigned |= set(re.findall(r"foreach\s*\(\s*\$([A-Za-z_]\w*)\s+in\b", content))
     return assigned
@@ -199,6 +206,11 @@ def _assert_tool_count_documented(relative_path: str, expected: int) -> None:
 _QMD_FREE_DOCS = (
     "docs/ARCHITECTURE.md",
     "docs/STRUCTURE.md",
+    "docs/MODULES.md",
+    "docs/contracts/compile-and-nightly.md",
+    "docs/contracts/corpus-and-navigation.md",
+    "docs/contracts/integration-and-recovery.md",
+    "docs/contracts/reliability-and-capture.md",
     "docs/USER-GUIDE.md",
     "docs/EXPORTING.md",
     "integrations/README.md",
@@ -209,6 +221,11 @@ _QMD_FREE_DOCS = (
 _WEB_CLIPPER_FREE_DOCS = (
     "docs/ARCHITECTURE.md",
     "docs/STRUCTURE.md",
+    "docs/MODULES.md",
+    "docs/contracts/compile-and-nightly.md",
+    "docs/contracts/corpus-and-navigation.md",
+    "docs/contracts/integration-and-recovery.md",
+    "docs/contracts/reliability-and-capture.md",
     "docs/USER-GUIDE.md",
     "integrations/README.md",
 )
@@ -261,6 +278,43 @@ def test_ci_uses_current_gitleaks_action():
     workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
     assert "gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e" in workflow
     assert "GITLEAKS_VERSION: 8.30.1" in workflow
+
+
+_EXACT_LITERAL = re.compile(r"\^[^\[\]\\*+?{}()|.]+\$")
+
+
+def _targets_the_secret(allowlist: dict) -> bool:
+    return allowlist.get("regexTarget", "secret") == "secret"
+
+
+def _is_inexact(regex: str) -> bool:
+    return not _EXACT_LITERAL.fullmatch(regex)
+
+
+def _inexact_secret_regexes(config: dict) -> list[str]:
+    secret_lists = filter(_targets_the_secret, config.get("allowlists", []))
+    regexes = [regex for allowlist in secret_lists for regex in allowlist.get("regexes", [])]
+    return list(filter(_is_inexact, regexes))
+
+
+def test_a_secret_allowlist_names_exact_values_not_a_class():
+    """A class such as `^[0-9a-f]{64}$` would also exempt a real token committed to the
+    same fixture; an anchored literal exempts only the value the test already holds."""
+    import tomllib
+
+    config = tomllib.loads((ROOT / ".gitleaks.toml").read_text(encoding="utf-8"))
+    assert _inexact_secret_regexes(config) == []
+
+
+def test_the_exact_literal_rule_refuses_a_character_class():
+    config = {
+        "allowlists": [
+            {"regexes": ["^[0-9a-f]{64}$", "^1111111111111111$"]},
+            {"regexTarget": "line", "regexes": ["^anything.*$"]},
+            {"regexTarget": "secret", "regexes": ["user:privatepw"]},
+        ]
+    }
+    assert _inexact_secret_regexes(config) == ["^[0-9a-f]{64}$", "user:privatepw"]
 
 
 # ─── 2. install.ps1 — no undefined PowerShell variables ─────────────
@@ -379,7 +433,10 @@ _SHELL_SMOKE_FORBIDDEN = (
 )
 _SHELL_SMOKE_REQUIRED_PATTERNS = (
     r"trap .*EXIT",
-    r'uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds "\$smokeDeadlineSeconds"\s*&',
+    # The report file is the only argument allowed after the deadline (it keeps the JSON
+    # out of the operator's terminal); the launch is still in the background.
+    r'uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds "\$smokeDeadlineSeconds"'
+    r'(?: \\\n\s+--report "\$STATE_ROOT/logs/install-smoke\.json")?\s*&',
 )
 _SHELL_SMOKE_FORBIDDEN_PATTERNS = (r'=\s*"\$\(uv run .*install_smoke',)
 
@@ -520,7 +577,7 @@ _ARCHITECTURE_REQUIRED = (
     "MCP READS + ACTIONS",
     "LLM BACKEND (CLASSIFY + COMPILE ONLY)",
     "5 backends including Ollama",
-    "### Optional semantic tier",
+    "### Semantic tier",
     "### Hybrid tier",
 )
 # The casefolded tuples are compared with the casefolded document.
@@ -571,7 +628,7 @@ def _assert_vector_storage_is_documented() -> None:
     assert _missing(_GUIDE_VECTOR_REQUIRED, guide) == []
     assert _present(_GUIDE_VECTOR_FORBIDDEN, guide) == []
 
-    structure = _read("docs/STRUCTURE.md")
+    structure = structure_reference(ROOT)
     assert _present(_STRUCTURE_VECTOR_FORBIDDEN, structure) == []
     assert _missing(_STRUCTURE_VECTOR_REQUIRED, structure) == []
 
@@ -889,7 +946,7 @@ def test_cognee_bridge_is_retired_without_deleting_legacy_cache():
     _assert_cognee_code_is_gone()
     _assert_docs_clean(("install.sh", "install.ps1"), _assert_installer_leaves_cognee_cache_alone)
     _assert_docs_clean(_COGNEE_FREE_DOCS, _assert_doc_does_not_advertise_cognee)
-    assert _missing(_COGNEE_LEGACY_CACHE_REQUIRED, _read("docs/STRUCTURE.md")) == []
+    assert _missing(_COGNEE_LEGACY_CACHE_REQUIRED, structure_reference(ROOT)) == []
 
 
 # ─── 11. Installer version comments match pyproject.toml ────────────
@@ -991,7 +1048,7 @@ def _uses_daily_lock(source: str) -> bool:
 
 def test_all_daily_writers_use_lock():
     """Scripts that write to daily logs must go through append_daily or locked_append."""
-    for py in sorted((ROOT / "scripts").glob("*.py")):
+    for py in script_files():
         if py.name in _DAILY_INFRASTRUCTURE:
             continue  # These define the lock/append infrastructure.
         source = py.read_text(encoding="utf-8")
@@ -1025,7 +1082,7 @@ def test_all_script_imports_resolve_in_git():
         tracked.add(line)  # full path
 
     # Scan all tracked scripts for local imports
-    for py in sorted((ROOT / "scripts").glob("*.py")):
+    for py in script_files():
         if not _is_tracked_script(py, tracked):
             continue  # untracked script — skip (will be caught by git status)
         _assert_local_imports_tracked(py, tracked)
@@ -1052,7 +1109,7 @@ def test_no_untracked_imported_modules():
         return  # No untracked .py files — clean
 
     # Check if any tracked script imports these untracked modules
-    for py in sorted((ROOT / "scripts").glob("*.py")):
+    for py in script_files():
         _assert_no_untracked_import(py, untracked)
 
 

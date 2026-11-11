@@ -1,0 +1,52 @@
+{
+  "bootstrap": "exec(__import__('base64').b64decode('aW1wb3J0IGJhc2U2NAppbXBvcnQgYnVpbHRpbnMKaW1wb3J0IGpzb24KaW1wb3J0IG9zCmltcG9ydCBzeXMKZnJvbSBpbXBvcnRsaWIubWFjaGluZXJ5IGltcG9ydCBTb3VyY2VGaWxlTG9hZGVyCmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aApmcm9tIHR5cGVzIGltcG9ydCBNb2R1bGVUeXBlCgpLRVlTPSgnTUVNT1JZX0xMTV9QUk9WSURFUicsICdNRU1PUllfQ0xBVURFX01PREVMJywgJ01FTU9SWV9DT0RFWF9NT0RFTCcsICdNRU1PUllfQ09ERVhfUkVBU09OSU5HJywgJ01FTU9SWV9MTE1fTU9ERUwnLCAnTUVNT1JZX0xMTV9CQVNFX1VSTCcsICdPTExBTUFfTk9fQ0xPVUQnKQpTQ1JJUFRTPSgnY29kZXhfbWVtb3J5LnB5JywgJ2dyYXBoX2hpbnQucHknLCAnaW50ZWdyYXRpb25fYWRhcHRlci5weScsICdtY3Bfc2VydmVyLnB5JykKZGVmIHJlcXVpcmVfdmFsdWVzKHZhbHVlKToKICAgIGlmIHR5cGUodmFsdWUpIGlzIG5vdCBkaWN0IG9yIG5vdCBzZXQodmFsdWUpLmlzc3Vic2V0KEtFWVMpOgogICAgICAgIHJhaXNlIFZhbHVlRXJyb3IoImludmFsaWQgaW5zdGFsbGVkIHByb3ZpZGVyIGtleXMiKQogICAgaWYgYW55KHR5cGUoaXRlbSkgaXMgbm90IHN0ciBmb3IgaXRlbSBpbiB2YWx1ZS52YWx1ZXMoKSk6CiAgICAgICAgcmFpc2UgVmFsdWVFcnJvcigiaW52YWxpZCBpbnN0YWxsZWQgcHJvdmlkZXIgdmFsdWVzIikKICAgIHJldHVybiB2YWx1ZQpkZWYgcmVxdWlyZV9wYXlsb2FkKGVuY29kZWQpOgogICAgdmFsdWU9cmVxdWlyZV92YWx1ZXMoanNvbi5sb2FkcyhiYXNlNjQuYjY0ZGVjb2RlKGVuY29kZWQsdmFsaWRhdGU9VHJ1ZSkpKQogICAgY2Fub25pY2FsPWJhc2U2NC5iNjRlbmNvZGUoanNvbi5kdW1wcyh2YWx1ZSxzb3J0X2tleXM9VHJ1ZSxzZXBhcmF0b3JzPSgiLCIsIjoiKSxlbnN1cmVfYXNjaWk9VHJ1ZSkuZW5jb2RlKCkpLmRlY29kZSgpCiAgICBpZiBlbmNvZGVkICE9IGNhbm9uaWNhbDoKICAgICAgICByYWlzZSBWYWx1ZUVycm9yKCJub25jYW5vbmljYWwgaW5zdGFsbGVkIHByb3ZpZGVyIHBheWxvYWQiKQogICAgaWYgdmFsdWUuZ2V0KCJNRU1PUllfTExNX1BST1ZJREVSIiwiIikuc3RyaXAoKS5sb3dlcigpID09ICJmYWtlIjoKICAgICAgICByYWlzZSBWYWx1ZUVycm9yKCJ0ZXN0IHByb3ZpZGVyIGNhbm5vdCBiZSBpbnN0YWxsZWQiKQogICAgcmV0dXJuIHZhbHVlCmRlZiB0YXJnZXRfcGF0aChhcmd1bWVudCk6CiAgICB0YXJnZXQ9UGF0aChhcmd1bWVudCkKICAgIGFic29sdXRlPVBhdGgob3MucGF0aC5hYnNwYXRoKHRhcmdldCkpCiAgICBpZiBhYnNvbHV0ZS5yZXNvbHZlKHN0cmljdD1UcnVlKSAhPSBhYnNvbHV0ZSBvciBub3QgYWJzb2x1dGUuaXNfZmlsZSgpOgogICAgICAgIHJhaXNlIFZhbHVlRXJyb3IoImludmFsaWQgaW5zdGFsbGVkIHByb3ZpZGVyIHRhcmdldCIpCiAgICBpZiBhYnNvbHV0ZS5wYXJlbnQubmFtZSAhPSAic2NyaXB0cyIgb3IgYWJzb2x1dGUubmFtZSBub3QgaW4gU0NSSVBUUzoKICAgICAgICByYWlzZSBWYWx1ZUVycm9yKCJpbnZhbGlkIGluc3RhbGxlZCBwcm92aWRlciBzY3JpcHQiKQogICAgcmV0dXJuIGFic29sdXRlCmRlZiBzY3JpcHRfbW9kdWxlKHRhcmdldCk6CiAgICBtb2R1bGU9TW9kdWxlVHlwZSgiX19tYWluX18iKQogICAgbW9kdWxlLl9fZGljdF9fLnVwZGF0ZShfX2ZpbGVfXz1zdHIodGFyZ2V0KSxfX3BhY2thZ2VfXz1Ob25lLF9fc3BlY19fPU5vbmUsCiAgICAgICAgX19jYWNoZWRfXz1Ob25lLF9fbG9hZGVyX189U291cmNlRmlsZUxvYWRlcigiX19tYWluX18iLHN0cih0YXJnZXQpKSxfX2J1aWx0aW5zX189YnVpbHRpbnMpCiAgICByZXR1cm4gbW9kdWxlCmRlZiBwcmVwYXJlX2ltcG9ydF9wYXRoKHRhcmdldCk6CiAgICBpZiBnZXRhdHRyKHN5cy5mbGFncywic2FmZV9wYXRoIixGYWxzZSkgb3Igc3lzLmZsYWdzLmlzb2xhdGVkOgogICAgICAgIHJldHVybgogICAgc3lzLnBhdGhbMF09c3RyKHRhcmdldC5wYXJlbnQpCmRlZiBsYXVuY2goKToKICAgIGJ1bmRsZT1yZXF1aXJlX3BheWxvYWQoc3lzLmFyZ3ZbMV0pCiAgICB0YXJnZXQ9dGFyZ2V0X3BhdGgoc3lzLmFyZ3ZbMl0pCiAgICBzb3VyY2U9dGFyZ2V0LnJlYWRfYnl0ZXMoKQogICAgaWYgc2V0KEtFWVMpLmlzZGlzam9pbnQob3MuZW52aXJvbik6CiAgICAgICAgb3MuZW52aXJvbi51cGRhdGUoYnVuZGxlKQogICAgc3lzLmFyZ3Y9c3lzLmFyZ3ZbMjpdCiAgICBwcmVwYXJlX2ltcG9ydF9wYXRoKHRhcmdldCkKICAgIG1vZHVsZT1zY3JpcHRfbW9kdWxlKHRhcmdldCkKICAgIHN5cy5tb2R1bGVzWyJfX21haW5fXyJdPW1vZHVsZQogICAgZXhlYyhjb21waWxlKHNvdXJjZSxzdHIodGFyZ2V0KSwiZXhlYyIsZG9udF9pbmhlcml0PVRydWUpLG1vZHVsZS5fX2RpY3RfXykKbGF1bmNoKCkK'))",
+  "body": "import base64\nimport builtins\nimport json\nimport os\nimport sys\nfrom importlib.machinery import SourceFileLoader\nfrom pathlib import Path\nfrom types import ModuleType\n\nKEYS={keys!r}\nSCRIPTS={scripts!r}\ndef require_values(value):\n    if type(value) is not dict or not set(value).issubset(KEYS):\n        raise ValueError(\"invalid installed provider keys\")\n    if any(type(item) is not str for item in value.values()):\n        raise ValueError(\"invalid installed provider values\")\n    return value\ndef require_payload(encoded):\n    value=require_values(json.loads(base64.b64decode(encoded,validate=True)))\n    canonical=base64.b64encode(json.dumps(value,sort_keys=True,separators=(\",\",\":\"),ensure_ascii=True).encode()).decode()\n    if encoded != canonical:\n        raise ValueError(\"noncanonical installed provider payload\")\n    if value.get(\"MEMORY_LLM_PROVIDER\",\"\").strip().lower() == \"fake\":\n        raise ValueError(\"test provider cannot be installed\")\n    return value\ndef target_path(argument):\n    target=Path(argument)\n    absolute=Path(os.path.abspath(target))\n    if absolute.resolve(strict=True) != absolute or not absolute.is_file():\n        raise ValueError(\"invalid installed provider target\")\n    if absolute.parent.name != \"scripts\" or absolute.name not in SCRIPTS:\n        raise ValueError(\"invalid installed provider script\")\n    return absolute\ndef script_module(target):\n    module=ModuleType(\"__main__\")\n    module.__dict__.update(__file__=str(target),__package__=None,__spec__=None,\n        __cached__=None,__loader__=SourceFileLoader(\"__main__\",str(target)),__builtins__=builtins)\n    return module\ndef prepare_import_path(target):\n    if getattr(sys.flags,\"safe_path\",False) or sys.flags.isolated:\n        return\n    sys.path[0]=str(target.parent)\ndef launch():\n    bundle=require_payload(sys.argv[1])\n    target=target_path(sys.argv[2])\n    source=target.read_bytes()\n    if set(KEYS).isdisjoint(os.environ):\n        os.environ.update(bundle)\n    sys.argv=sys.argv[2:]\n    prepare_import_path(target)\n    module=script_module(target)\n    sys.modules[\"__main__\"]=module\n    exec(compile(source,str(target),\"exec\",dont_inherit=True),module.__dict__)\nlaunch()\n",
+  "keys": [
+    "MEMORY_LLM_PROVIDER",
+    "MEMORY_CLAUDE_MODEL",
+    "MEMORY_CODEX_MODEL",
+    "MEMORY_CODEX_REASONING",
+    "MEMORY_LLM_MODEL",
+    "MEMORY_LLM_BASE_URL",
+    "OLLAMA_NO_CLOUD"
+  ],
+  "payloads": [
+    {
+      "bundle": {},
+      "payload": "e30="
+    },
+    {
+      "bundle": {
+        "MEMORY_LLM_PROVIDER": "codex",
+        "MEMORY_CODEX_MODEL": "Caf\u00e9 \u03a9 \" \\",
+        "MEMORY_CODEX_REASONING": ""
+      },
+      "payload": "eyJNRU1PUllfQ09ERVhfTU9ERUwiOiJDYWZcdTAwZTkgXHUwM2E5IFwiIFxcIiwiTUVNT1JZX0NPREVYX1JFQVNPTklORyI6IiIsIk1FTU9SWV9MTE1fUFJPVklERVIiOiJjb2RleCJ9"
+    },
+    {
+      "bundle": {
+        "MEMORY_LLM_PROVIDER": " Codex "
+      },
+      "payload": "eyJNRU1PUllfTExNX1BST1ZJREVSIjoiIENvZGV4ICJ9"
+    }
+  ],
+  "windows": [
+    {
+      "args": [
+        "uv",
+        ""
+      ],
+      "command": "uv \"\""
+    },
+    {
+      "args": [
+        "uv",
+        "a&b",
+        "C:\\vault\\",
+        "quoted\"value",
+        "Caf\u00e9 \u03a9"
+      ],
+      "command": "uv \"a&b\" \"C:\\vault\\\\\" \"quoted\\\"value\" \"Caf\u00e9 \u03a9\""
+    }
+  ]
+}

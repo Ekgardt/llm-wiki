@@ -38,6 +38,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from tests.script_sources import script_files, script_key
+
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 
 # Parameter names this codebase uses for a whole scope record.
@@ -59,11 +61,11 @@ ALLOWED = {
     # "Is the active generation byte-for-byte what this checkout is at now?" --
     # the identity question one line below goes through `same_repository_record`,
     # and the difference between the two answers is what `superseded` reports.
-    ("doctor.py", "_scope_state"),
+    ("llm_wiki/doctor_generation.py", "scope_state"),
     # "Did the manifest we are publishing record the scope we were handed?" --
     # publication binds provenance too, commit included; both sides come from
     # the same build, so this is self-consistency, not repository identity.
-    ("generation_catalog.py", "_require_publication_scope"),
+    ("llm_wiki/generation_registration.py", "require_publication_scope"),
 }
 
 
@@ -152,13 +154,13 @@ def _findings_in(function: ast.AST, names: frozenset[str], path: Path) -> list[s
     for node in ast.walk(function):
         operands = _equality_operands(node)
         if any(_carries_scope(operand, names) for operand in operands):
-            found.append(f"{path.name}:{node.lineno} in {function.name}: {ast.unparse(node)}")
+            found.append(f"{script_key(path)}:{node.lineno} in {function.name}: {ast.unparse(node)}")
     return found
 
 
 def _whole_scope_comparisons() -> list[str]:
     findings: list[str] = []
-    for path in sorted(SCRIPTS.glob("*.py")):
+    for path in script_files():
         tree = ast.parse(path.read_text(encoding="utf-8"))
         findings.extend(_findings_in_file(tree, path))
     return findings
@@ -169,7 +171,7 @@ def _findings_in_file(tree: ast.AST, path: Path) -> list[str]:
     for function in ast.walk(tree):
         if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        if (path.name, function.name) in ALLOWED:
+        if (script_key(path), function.name) in ALLOWED:
             continue
         findings.extend(_findings_in(function, _scope_names(function), path))
     return findings
@@ -194,7 +196,7 @@ def test_the_guard_still_sees_the_shape_it_was_written_for():
         "    return parent.get('repository_scope') == repository_scope_object\n"
     )
     tree = ast.parse(source)
-    findings = _findings_in_file(tree, Path("evidence_graph_builder.py"))
+    findings = _findings_in_file(tree, SCRIPTS / "evidence_graph_builder.py")
     assert len(findings) == 1, findings
 
 
@@ -204,7 +206,7 @@ def test_the_guard_still_sees_the_object_shape():
         "def f(registered: RepositoryScope, live: RepositoryScope) -> bool:\n"
         "    return registered != live\n"
     )
-    findings = _findings_in_file(ast.parse(source), Path("generation_catalog.py"))
+    findings = _findings_in_file(ast.parse(source), SCRIPTS / "generation_catalog.py")
     assert len(findings) == 1, findings
 
 
@@ -215,4 +217,15 @@ def test_the_guard_does_not_fire_on_a_field_comparison():
         "    return observed != (repository_scope.repository_id, "
         "repository_scope.checkout_id)\n"
     )
-    assert _findings_in_file(ast.parse(source), Path("evidence_graph.py")) == []
+    assert _findings_in_file(ast.parse(source), SCRIPTS / "evidence_graph.py") == []
+
+
+def test_the_git_budget_matches_the_one_the_index_gives_the_same_probe():
+    """One operation, one bound. Two seconds was a Linux figure.
+
+    Research: docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md.
+    """
+    import repository_indexing
+    import repository_scope as scope_module
+
+    assert scope_module.GIT_TIMEOUT_SECONDS == repository_indexing.GIT_TIMEOUT_SECONDS

@@ -9,8 +9,8 @@ import json
 import os
 from pathlib import Path
 
-import doctor
 import pytest
+from llm_wiki import doctor_integrations
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMAND = ('uv run --locked --no-sync --directory "$LLM_WIKI_ROOT" '
@@ -27,7 +27,7 @@ def _installed_command(root: Path) -> str:
 
 
 def _template(root: Path) -> Path:
-    template = json.loads((ROOT / "integrations/codex/hooks.json").read_text())
+    template = json.loads((ROOT / "integrations/codex/hooks.json").read_text(encoding='utf-8'))
     destination = root / "integrations/codex/hooks.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(template))
@@ -36,7 +36,7 @@ def _template(root: Path) -> Path:
 
 def _template_command(root: Path) -> str:
     """The template's own command for this platform."""
-    return doctor._expected_codex_runtime_hooks(_template(root))[0]["command"]
+    return doctor_integrations.expected_codex_runtime_hooks(_template(root))[0]["command"]
 
 
 def _runtime_command(wanted: dict, command: str) -> str:
@@ -50,18 +50,18 @@ def _verdict(root: Path, command: str, trust: str = "trusted"):
     destination = _template(root)
     hooks = [dict(wanted, eventName=wanted["eventName"][0].lower() + wanted["eventName"][1:],
                   command=_runtime_command(wanted, command), enabled=True, trustStatus=trust)
-             for wanted in doctor._expected_codex_runtime_hooks(destination)]
-    return doctor._codex_hooks_verdict(root, hooks)
+             for wanted in doctor_integrations.expected_codex_runtime_hooks(destination)]
+    return doctor_integrations.codex_hooks_verdict(root, hooks)
 
 
 @posix_rendering
 def test_rendered_graph_hooks_are_ours_and_accepted(tmp_path):
     destination = _template(tmp_path)
-    expected = doctor._expected_codex_runtime_hooks(destination)
-    rendered = [dict(wanted, command=doctor._rendered_codex_hook_command(tmp_path, wanted["command"]),
+    expected = doctor_integrations.expected_codex_runtime_hooks(destination)
+    rendered = [dict(wanted, command=doctor_integrations.rendered_codex_hook_command(tmp_path, wanted["command"]),
                      enabled=True, trustStatus="trusted") for wanted in expected]
-    owned = doctor._codex_owned_hooks(rendered)
-    assert (len(owned), doctor._codex_hooks_verdict(tmp_path, owned)) == (
+    owned = doctor_integrations.codex_owned_hooks(rendered)
+    assert (len(owned), doctor_integrations.codex_hooks_verdict(tmp_path, owned)) == (
         len(expected), (True, "runtime_hooks_active"))
 
 
@@ -120,17 +120,17 @@ def test_a_hook_still_requires_enabled_and_unique_match(tmp_path):
     command = _template_command(tmp_path)
     wanted = dict(eventName="Stop", matcher=None, command=command)
     hook = dict(wanted, command=command, enabled=False, trustStatus="trusted")
-    assert doctor._codex_hook_problem(wanted, [hook], tmp_path) == "runtime_hooks_disabled"
-    assert doctor._codex_hook_problem(wanted, [hook, hook], tmp_path) == "runtime_hooks_mismatch"
+    assert doctor_integrations.codex_hook_problem(wanted, [hook], tmp_path) == "runtime_hooks_disabled"
+    assert doctor_integrations.codex_hook_problem(wanted, [hook, hook], tmp_path) == "runtime_hooks_mismatch"
 
 
 def test_rendered_hook_does_not_accept_wrong_matcher(tmp_path):
     wanted = dict(eventName="Stop", matcher=None, command=COMMAND)
     hook = dict(wanted, command=_installed_command(tmp_path), matcher="other")
-    assert doctor._matching_hooks(wanted, [hook], tmp_path) == []
+    assert doctor_integrations.matching_hooks(wanted, [hook], tmp_path) == []
 
 
 def test_event_aliases_are_exact_not_case_insensitive(tmp_path):
     wanted = dict(eventName="Stop", matcher=None, command=COMMAND)
     hook = dict(wanted, command=_installed_command(tmp_path), eventName="STOP")
-    assert doctor._matching_hooks(wanted, [hook], tmp_path) == []
+    assert doctor_integrations.matching_hooks(wanted, [hook], tmp_path) == []

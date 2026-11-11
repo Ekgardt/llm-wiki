@@ -17,9 +17,10 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import memory_queue  # noqa: E402
-import secret_redact  # noqa: E402
-from memory_queue import MemoryQueue  # noqa: E402
+import queue_core  # noqa: E402
+from queue_core import (  # noqa: E402
+    MemoryQueue,
+)
 
 _TOO_LONG = "e" * 65
 _CYRILLIC = "ошибка" * 8  # 48 characters, 96 bytes.
@@ -27,8 +28,8 @@ _CYRILLIC = "ошибка" * 8  # 48 characters, 96 bytes.
 
 def _v3_queue(tmp_path: Path):
     candidate = tmp_path / "run" / "queue-v3.candidate.sqlite3"
-    memory_queue.initialize_queue_v3_candidate(candidate, source_v2=None)
-    return MemoryQueue._from_v3_candidate(candidate, state_root=tmp_path)
+    queue_core.initialize_queue_v3_candidate(candidate, source_v2=None)
+    return MemoryQueue.from_v3_candidate(candidate, state_root=tmp_path)
 
 
 def _refused(queue, error_code: str) -> str:
@@ -78,12 +79,6 @@ def test_a_payload_key_that_is_not_a_string_is_refused_by_its_own_rule(
     assert str(raised.value) == "canonical JSON object keys must be strings"
 
 
-def test_the_redaction_walk_passes_a_non_string_key_to_the_encoder() -> None:
-    walked = secret_redact.redact_structure({1: "plain", "token": "secret-value"})
-
-    assert walked == {1: "plain", "token": "[REDACTED]"}
-
-
 def test_a_long_redrive_chain_orders_without_python_s_stack() -> None:
     """The deepest child sorts first, so the walk meets the whole chain at once."""
     depth = sys.getrecursionlimit() * 2
@@ -96,7 +91,7 @@ def test_a_long_redrive_chain_orders_without_python_s_stack() -> None:
         for index in range(depth)
     }
 
-    ordered = memory_queue._parents_before_children(rows)
+    ordered = queue_core.parents_before_children(rows)
 
     # Parents first: the oldest ancestor is the highest-numbered task.
     assert [row["id"] for row in ordered] == [
@@ -110,7 +105,7 @@ def test_a_cycle_in_the_chain_is_still_named(tmp_path: Path) -> None:
         "b": {"id": "b", "redrive_of": "a"},
     }
 
-    with pytest.raises(memory_queue.OperationalDatabaseContractError) as raised:
-        memory_queue._parents_before_children(rows)
+    with pytest.raises(queue_core.OperationalDatabaseContractError) as raised:
+        queue_core.parents_before_children(rows)
 
     assert raised.value.code == "queue_v2_lineage_ambiguous"

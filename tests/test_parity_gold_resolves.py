@@ -18,7 +18,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 TASKS_PATH = ROOT / "benchmark" / "code-parity-v2.json"
-# `scripts/retrieval.py:3107 (def _fused_candidates)` and the bare `:3113` that
+# `scripts/retrieval.py:3107 (def fused_candidates)` and the bare `:3113` that
 # follows it in the same citation, which continues the previous path.
 ANCHOR = re.compile(
     r"(?:(?P<path>[\w/.\-]+\.py))?"
@@ -204,9 +204,9 @@ def test_a_retired_task_states_why_it_left():
 
 def test_a_definition_anchor_needs_no_line_number():
     """The name is the fact; the line is resolved here, so edits cannot rot it."""
-    facts = _anchor_facts("scripts/search_memory.py (def _manifest_seal)")
+    facts = _anchor_facts("scripts/generation_search.py (def _manifest_seal)")
 
-    assert facts == [("scripts/search_memory.py", 0, "def _manifest_seal")]
+    assert facts == [("scripts/generation_search.py", 0, "def _manifest_seal")]
     _assert_anchor_holds(facts[0])
 
 

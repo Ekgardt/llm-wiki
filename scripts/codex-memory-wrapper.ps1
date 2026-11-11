@@ -63,6 +63,50 @@ if (-not $REAL_CODEX -or -not (Test-Path $REAL_CODEX)) {
   codex -NoMemory "quick one-off question"
   # Codex runs; memory capture SKIPPED for this session.
 #>
+# Context generation happens before the real process; failures remain visible.
+function Initialize-CodexMemoryContext {
+    param([string]$Directory)
+    try {
+        $contextFile = Join-Path $env:LLM_WIKI_STATE_ROOT "cache\session-context.md"
+        & uv run --locked --no-sync --directory $env:LLM_WIKI_ROOT python `
+            "$env:LLM_WIKI_ROOT\scripts\session_start_context.py" --output-file $contextFile | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "session context generation failed ($LASTEXITCODE)" }
+        # codex_memory.py project-state recovers journals before context injection.
+        & uv run --locked --no-sync --directory $env:LLM_WIKI_ROOT python `
+            "$env:LLM_WIKI_ROOT\scripts\codex_memory.py" project-state --cwd $Directory |
+            Add-Content -LiteralPath $contextFile -Encoding utf8
+        if ($LASTEXITCODE -ne 0) { throw "project context generation failed ($LASTEXITCODE)" }
+    } catch { Write-Warning "[codex-memory] context unavailable: $_" }
+}
+
+function Invoke-CodexMemoryMaintenance {
+    & uv run --locked --no-sync --directory $env:LLM_WIKI_ROOT python scripts/memory_queue.py work 2>&1 |
+        ForEach-Object { Write-Host "[codex-memory] $_" -ForegroundColor DarkGray }
+    if ($LASTEXITCODE -ne 0) { Write-Warning "[codex-memory] queue work failed ($LASTEXITCODE)" }
+    & uv run --locked --no-sync --directory $env:LLM_WIKI_ROOT python scripts/maybe_compile.py 2>&1 |
+        ForEach-Object { Write-Host "[codex-memory] $_" -ForegroundColor DarkGray }
+    if ($LASTEXITCODE -ne 0) { Write-Warning "[codex-memory] compile trigger failed ($LASTEXITCODE)" }
+}
+
+function Save-CodexMemorySession {
+    param([string]$Directory, [string]$Reason)
+    Push-Location $env:LLM_WIKI_ROOT
+    try {
+        & uv run --locked --no-sync --directory $env:LLM_WIKI_ROOT python scripts/codex_memory.py daily-log `
+            --cwd $Directory --reason $Reason --json | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "session capture failed ($LASTEXITCODE)" }
+        Invoke-CodexMemoryMaintenance
+    } finally { Pop-Location }
+}
+
+function Complete-CodexMemorySession {
+    param([string]$Directory, [string[]]$Arguments, [switch]$NoMemory)
+    if ($NoMemory) { return }
+    $reason = if ($Arguments -contains 'exec') { 'codex-exec' } else { 'codex-session-end' }
+    try { Save-CodexMemorySession -Directory $Directory -Reason $reason }
+    catch { Write-Warning "[codex-memory] session capture incomplete: $_" }
+}
+
 function codex {
     [CmdletBinding()]
     param(
@@ -70,141 +114,78 @@ function codex {
         [string[]]$Arguments,
         [switch]$NoMemory
     )
-
-    # Strip -NoMemory from the args we forward to real codex.
     $fwdArgs = $Arguments | Where-Object { $_ -ne '-NoMemory' -and $_ -ne '--NoMemory' }
-
-    # Remember the cwd BEFORE codex runs (codex may cd internally).
     $cwdBefore = (Get-Location).Path
-
+    $exitCode = 1
     try {
-        # Generate session context file for knowledge injection.
-        # Codex reads AGENTS.md at startup; the global AGENTS.md instructs
-        # it to read this file for project knowledge state.
-        try {
-            $contextFile = Join-Path $env:LLM_WIKI_STATE_ROOT "cache\session-context.md"
-            & uv run --locked --no-sync --directory $env:LLM_WIKI_ROOT python `
-                "$env:LLM_WIKI_ROOT\scripts\session_start_context.py" --output-file $contextFile 2>$null | Out-Null
-            # codex_memory.py project-state recovers journals before context injection.
-            & uv run --locked --no-sync --directory $env:LLM_WIKI_ROOT python `
-                "$env:LLM_WIKI_ROOT\scripts\codex_memory.py" project-state --cwd $cwdBefore 2>$null |
-                Add-Content -LiteralPath $contextFile -Encoding utf8
-        } catch {}
-
-        # Invoke the real codex binary with all forwarded args.
+        Initialize-CodexMemoryContext -Directory $cwdBefore
         & $REAL_CODEX @fwdArgs
         $exitCode = $LASTEXITCODE
-    }
-    catch {
-        Write-Error "codex failed: $_"
-        $exitCode = 1
-    }
+    } catch { Write-Error "codex failed: $_" }
     finally {
-        # Always run memory capture, even if codex crashed or was Ctrl-C'd.
-        if (-not $NoMemory) {
-            try {
-                $reason = if ($fwdArgs -contains 'exec') { 'codex-exec' } else { 'codex-session-end' }
-                Push-Location $env:LLM_WIKI_ROOT
-                try {
-                    & uv run --locked --no-sync --directory $env:LLM_WIKI_ROOT python scripts/codex_memory.py daily-log `
-                        --cwd $cwdBefore `
-                        --reason $reason `
-                        --json 2>$null | Out-Null
-
-                    # Work pending memory-pipeline queue: any tasks that were
-                    # enqueued while no backend was available get serviced now
-                    # by Codex LLM (via llm_client.py auto-detection).
-                    $workResult = & uv run --locked --no-sync --directory $env:LLM_WIKI_ROOT python scripts/memory_queue.py work 2>&1
-                    if ($workResult) {
-                        Write-Host "[codex-memory] $workResult" -ForegroundColor DarkGray
-                    }
-
-                    # Fire-and-forget compile trigger. Checks concurrency lock
-                    # + pending work; spawns detached compile_memory.py if both
-                    # pass. Returns immediately - compile runs in background
-                    # and won't block the next codex invocation.
-                    & uv run --locked --no-sync --directory $env:LLM_WIKI_ROOT python scripts/maybe_compile.py 2>&1 | ForEach-Object {
-                        Write-Host "[codex-memory] $_" -ForegroundColor DarkGray
-                    }
-                }
-                finally {
-                    Pop-Location
-                }
-            }
-            catch {
-                # Never let memory capture failure block the user.
-            }
-        }
-    }
-
-    # Propagate codex's exit code without killing the interactive shell.
-    if ($null -ne $exitCode) {
+        Complete-CodexMemorySession -Directory $cwdBefore -Arguments $fwdArgs -NoMemory:$NoMemory
         $global:LASTEXITCODE = $exitCode
     }
-    return
 }
 
-<#
-.SYNOPSIS
-  Show recent Codex memory captures and current backlog.
-#>
+function Get-CodexMemoryState {
+    $statePath = Join-Path $env:LLM_WIKI_STATE_ROOT "run\state.json"
+    if (-not (Test-Path -LiteralPath $statePath)) {
+        Write-Host "  (state.json not found - no captures yet)"
+        return $null
+    }
+    try { return Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json }
+    catch {
+        Write-Host "  (state.json corrupt or unreadable: $($_.Exception.Message))" -ForegroundColor Yellow
+        return $null
+    }
+}
+
+function Write-CodexMemoryHeartbeats {
+    param($State)
+    Write-Host "=== Codex heartbeats (recent activity) ===" -ForegroundColor Cyan
+    if (-not $State.codex_heartbeats) { Write-Host "  (no heartbeats yet)"; return }
+    $State.codex_heartbeats.PSObject.Properties | ForEach-Object {
+        $h = $_.Value
+        Write-Host "  $($_.Name): $($h.reason) at $($h.at)"
+    }
+}
+
+function Write-CodexMemoryCompileStatus {
+    param($State)
+    Write-Host "`n=== Tier distribution ===" -ForegroundColor Cyan
+    if ($State.flush_tier_counts) {
+        $State.flush_tier_counts.PSObject.Properties | ForEach-Object {
+            Write-Host "  $($_.Name): $($_.Value)"
+        }
+    }
+    Write-Host "`n=== Last compile ===" -ForegroundColor Cyan
+    Write-Host "  at: $($State.last_compile_at)"
+    Write-Host "  status: $($State.last_compile_status)"
+    if ($State.last_compile_audit) {
+        Write-Host "  verified citations: $($State.last_compile_audit.verified)"
+    }
+}
+
+function Write-CodexMemoryQueueStatus {
+    Write-Host "`n=== Memory queue (deferred tasks) ===" -ForegroundColor Cyan
+    $queueStatus = & uv run --locked --no-sync --directory $env:LLM_WIKI_ROOT python scripts/memory_queue.py status | Out-String
+    if ($LASTEXITCODE -ne 0) { Write-Warning "[codex-memory] queue status unavailable ($LASTEXITCODE)"; return }
+    Write-Host $queueStatus
+}
+
 function codex-memory-status {
     Push-Location $env:LLM_WIKI_ROOT
     try {
-        Write-Host "=== Codex heartbeats (recent activity) ===" -ForegroundColor Cyan
-        $statePath = Join-Path $env:LLM_WIKI_STATE_ROOT "run\state.json"
-        if (-not (Test-Path -LiteralPath $statePath)) {
-            Write-Host "  (state.json not found - no captures yet)"
-            return
-        }
-        try {
-            $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-        } catch {
-            Write-Host "  (state.json corrupt or unreadable: $($_.Exception.Message))" -ForegroundColor Yellow
-            return
-        }
-        if ($state.codex_heartbeats) {
-            $state.codex_heartbeats.PSObject.Properties | ForEach-Object {
-                $h = $_.Value
-                Write-Host "  $($_.Name): $($h.reason) at $($h.at)"
-            }
-        } else {
-            Write-Host "  (no heartbeats yet)"
-        }
-
-        Write-Host ""
-        Write-Host "=== Tier distribution ===" -ForegroundColor Cyan
-        if ($state.flush_tier_counts) {
-            $state.flush_tier_counts.PSObject.Properties | ForEach-Object {
-                Write-Host "  $($_.Name): $($_.Value)"
-            }
-        }
-
-        Write-Host ""
-        Write-Host "=== Last compile ===" -ForegroundColor Cyan
-        Write-Host "  at: $($state.last_compile_at)"
-        Write-Host "  status: $($state.last_compile_status)"
-        if ($state.last_compile_audit) {
-            Write-Host "  verified citations: $($state.last_compile_audit.verified)"
-        }
-
-        Write-Host ""
-        Write-Host "=== Daily log count ===" -ForegroundColor Cyan
+        $state = Get-CodexMemoryState
+        if ($null -eq $state) { return }
+        Write-CodexMemoryHeartbeats -State $state
+        Write-CodexMemoryCompileStatus -State $state
+        Write-Host "`n=== Daily log count ===" -ForegroundColor Cyan
         $dailies = Get-ChildItem -LiteralPath (Join-Path $env:LLM_WIKI_ROOT 'knowledge\daily') -Filter *.md -ErrorAction SilentlyContinue
         Write-Host "  total daily logs: $($dailies.Count)"
-
-        Write-Host ""
-        Write-Host "=== Memory queue (deferred tasks) ===" -ForegroundColor Cyan
-        Push-Location $env:LLM_WIKI_ROOT
-        try {
-            $queueStatus = & uv run --locked --no-sync --directory $env:LLM_WIKI_ROOT python scripts/memory_queue.py status 2>$null | Out-String
-            if ($queueStatus) { Write-Host $queueStatus }
-            else { Write-Host "  (queue empty or memory_queue unavailable)" }
-        } finally { Pop-Location }
-    }
-    finally {
-        Pop-Location
-    }
+        Write-CodexMemoryQueueStatus
+    } finally { Pop-Location }
 }
 
 <#

@@ -1,0 +1,29 @@
+{
+  "schema": "module-records/v1",
+  "source": "benchmark/results/crosslingual-2026-09-10/bge-m3+bge-rr.json",
+  "bytes": 215631,
+  "sha256": "58664903b93a54c24a10e862d91a9c5f8c58155afeac7445370f3ddfcd46bbae",
+  "records": [
+    {
+      "id": "part-1",
+      "label": "{\"acquisition_mode\":\"offline-local-files-only\",\"adapter_kind\":\"model-m",
+      "start": 0,
+      "end": 95837,
+      "sha256": "5774e4716b159e37237b61d762f04d570e8b960fe39f35b9a895d30677127a93"
+    },
+    {
+      "id": "part-2",
+      "label": "{\"abstained\":false,\"abstention_contract_valid\":true,\"abstention_reason",
+      "start": 95837,
+      "end": 192815,
+      "sha256": "ccce75529e4debbf9975de1f4bff624616c07ca87b969db984fa7bfbe088173a"
+    },
+    {
+      "id": "part-3",
+      "label": "{\"abstained\":true,\"abstention_contract_valid\":false,\"abstention_reason",
+      "start": 192815,
+      "end": 215631,
+      "sha256": "74e00ad8f721c29a0fda06a29039ba37ff8d848026d2c5b58049553e05582b6e"
+    }
+  ]
+}

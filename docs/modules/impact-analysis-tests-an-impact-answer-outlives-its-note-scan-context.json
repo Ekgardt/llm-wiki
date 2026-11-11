@@ -1,0 +1,159 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/impact-analysis-tests-an-impact-answer-outlives-its-note-scan-context.json",
+    "docs/modules/impact-analysis-tests-an-impact-answer-outlives-its-note-scan.md",
+    "docs/modules/impact-analysis.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/impact_analysis.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_an_impact_answer_outlives_its_note_scan.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/impact-analysis-tests-an-impact-answer-outlives-its-note-scan-context.json",
+      "docs/modules/impact-analysis-tests-an-impact-answer-outlives-its-note-scan.md",
+      "tests/test_an_impact_answer_outlives_its_note_scan.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "e570dc41e0fd70556ec6a4e887a3da194bcc13122684e515651b13dd19d7d5c1",
+      "integration_tests": [
+        "tests/test_an_impact_answer_outlives_its_note_scan.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "CorpusChanged",
+        "open_descriptor_chain",
+        "read_bounded_descriptor",
+        "seal_path",
+        "verify_seal"
+      ],
+      "contract_sha256": "6025d8869db20662f7199e7723f78b9c714b36c699645f7e9b9c08ef33a042c7",
+      "integration_tests": [
+        "tests/test_an_impact_answer_outlives_its_note_scan.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_graph.py",
+      "names": [
+        "EvidenceGraph"
+      ],
+      "contract_sha256": "86b2ba92cf9a77f847977e49ffeaa884e7b4a54eec2b32d9a0fe040a4be6f6b9",
+      "integration_tests": [
+        "tests/test_an_impact_answer_outlives_its_note_scan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/code_graph_generation.py",
+      "names": [
+        "opened_code_or_active"
+      ],
+      "contract_sha256": "f0ac97c82b9e9e62811a1021a317e0b0bb9c8bbff6d5bcf3a4c2c771c2d243ec",
+      "integration_tests": [
+        "tests/test_an_impact_answer_outlives_its_note_scan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_an_impact_answer_outlives_its_note_scan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "notes_dir",
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "f198488107a53b2ab3269ea7bb28967d1dd6aa21cd99b403940282f97ea0d88e",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_an_impact_answer_outlives_its_note_scan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "983dd096d99bafff98ca0aaa2cd722477333e30eed4bfa9297d1830c635e8d90",
+      "integration_tests": [
+        "tests/test_an_impact_answer_outlives_its_note_scan.py"
+      ]
+    },
+    {
+      "provider": "scripts/settings.py",
+      "names": [
+        "raise_hint",
+        "setting_value"
+      ],
+      "contract_sha256": "6996986733aff8ab379a49ff913796288b35a03330b3f3d67951ced08a779207",
+      "integration_tests": [
+        "tests/test_an_impact_answer_outlives_its_note_scan.py"
+      ]
+    }
+  ]
+}

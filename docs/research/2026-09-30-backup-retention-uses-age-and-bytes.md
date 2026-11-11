@@ -1,0 +1,13 @@
+# Configuration backup retention uses age and bytes
+
+Research date: 2026-09-30. Eleven recent verified preimages containing only a few bytes reproduced deletion of the oldest solely because MAX_BACKUPS was ten. The existing retention age and 100 MiB byte budget were not exceeded. The regression failed before the change; the failure remains in logs/audit-2026-09-30-finish-backup-count-red.txt.
+
+Remove the additional count check. Keep configured retention.config_backup_days, existing byte budget, newest-backup protection, verified preimages, exclusive publication and unrelated-file preservation. This does not establish a measured basis for the separate 100 MiB budget; that remains a numerical-review question. No setting, environment contract, directory or architecture is added.
+
+Three independent primary references verified today: [Redis eviction](https://redis.io/docs/latest/develop/reference/eviction/), [Python file metadata](https://docs.python.org/3/library/os.html#os.fstat), and [OWASP resource consumption](https://api-security.owasp.org/editions/2023/en/0xa4-unrestricted-resource-consumption/). They support controlling actual resource use, not this particular budget value. Redis is not a dependency. Alternatives rejected: an arbitrary higher count, an extra unapproved setting, or removing all retention protection.
+
+Related candidate checks: 148 passed, 21 skipped. The first complexity gate exposed excessive complexity in the new test; its expected bytes are now collected during fixture construction. Previous failures are retained. No model call is made on this path. The demonstrated benefit is retaining an additional valid recovery preimage; no unrelated answer-quality or token-saving claim is made.
+
+Corrected combined complexity/quality and integration checks: 132 passed, 21 skipped. Ruff passed; every function in the three changed modules measured CCN <=5 with real Lizard. Installed files were replaced under canonical exclusive admission, with verified preimages retained in the cutover manifest.
+
+Installed proof retained all eleven recent copies (12 bytes total) without changing the destination. Fresh public-source Gitleaks found no leaks. The first public-export run had 170 passed, 21 skipped and three failures caused by absent Git fixture metadata. After creating a separate temporary test repository with the original executable mode, all 67 quality/structure tests passed; source code and test criteria were unchanged. Main checkout Git metadata remains read-only, so this correction is installed but not committed or pushed in the current execution.

@@ -48,15 +48,15 @@ def _limit_seconds(value: str) -> int:
 
 def test_each_systemd_pass_is_stopped_only_above_its_worst_case(tmp_path, monkeypatch):
     """Measured in auto provider mode, the mode an installed scheduler runs in."""
-    import install_control
-    import scheduled_nightly
-    import scheduled_weekly
+    import nightly_budget
+    import weekly_budget
+    from llm_wiki import install_scheduler_render
 
     monkeypatch.delenv("MEMORY_LLM_PROVIDER", raising=False)
 
-    definitions = install_control.render_systemd_definitions(tmp_path / "vault", tmp_path / "state", tmp_path / "uv")
-    worst = {"nightly": scheduled_nightly.worst_case_seconds(), "weekly": scheduled_weekly.worst_case_seconds()}
-    limits = {kind: install_control.SYSTEMD_START_LIMITS[kind] for kind in worst}
+    definitions = install_scheduler_render.render_systemd_definitions(tmp_path / "vault", tmp_path / "state", tmp_path / "uv")
+    worst = {"nightly": nightly_budget.worst_case_seconds(), "weekly": weekly_budget.worst_case_seconds()}
+    limits = {kind: f"{install_scheduler_render.scheduler_limit_hours(tmp_path / 'vault')[kind]}h" for kind in worst}
     rendered = all(f"TimeoutStartSec={limits[kind]}" in definitions[f"llm-wiki-{kind}.service"].decode() for kind in worst)
 
     assert (rendered, [kind for kind in worst if _limit_seconds(limits[kind]) <= worst[kind]]) == (True, [])

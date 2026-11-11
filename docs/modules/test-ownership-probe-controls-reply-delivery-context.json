@@ -1,0 +1,195 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "benchmark/__init__.py",
+    "benchmark/navigation_benchmark_deadlines.py",
+    "benchmark/navigation_benchmark_ownership.py",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/benchmark-run-benchmark.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/lsp-process-tree.md",
+    "docs/modules/lsp-protocol-tests-fake-lsp-server.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/run-code-navigation.md",
+    "docs/modules/test-ownership-probe-controls-reply-delivery-context.json",
+    "docs/modules/test-ownership-probe-controls-reply-delivery.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/fake_lsp_server.py",
+    "tests/fake_process_tree.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_ownership_probe_controls_reply_delivery.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-ownership-probe-controls-reply-delivery-context.json",
+      "docs/modules/test-ownership-probe-controls-reply-delivery.md",
+      "tests/test_ownership_probe_controls_reply_delivery.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "benchmark/generate_python_qualification.py",
+      "names": [
+        "QualificationRepository"
+      ],
+      "contract_sha256": "266e1194c1d79ddc327bb49bb39b747b8c66469491fe03009b1e203cc89a40e9",
+      "integration_tests": [
+        "tests/test_an_ownership_failure_says_what_and_when.py",
+        "tests/test_an_ownership_probe_says_why_it_measured_nothing.py",
+        "tests/test_code_navigation_benchmark.py"
+      ]
+    },
+    {
+      "provider": "scripts/code_intelligence.py",
+      "names": [
+        "Capability",
+        "PositionEncoding"
+      ],
+      "contract_sha256": "adf311d873eaad68dd0a1c40541c3108c34c405038648a5adacc4139828d8a8d",
+      "integration_tests": [
+        "tests/test_ownership_probe_controls_reply_delivery.py"
+      ]
+    },
+    {
+      "provider": "scripts/code_navigation.py",
+      "names": [
+        "CodeNavigation",
+        "NavigationRequest",
+        "NavigationResult",
+        "NavigationStatus"
+      ],
+      "contract_sha256": "0a2206bc16a81f17375eb40005e5249c578a1cb71d33ea701f133a1aeddb69b7",
+      "integration_tests": [
+        "tests/test_ownership_probe_controls_reply_delivery.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_ownership_probe_controls_reply_delivery.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_positions.py",
+      "names": [
+        "SourceDocument"
+      ],
+      "contract_sha256": "39a690cd293a87827a31a419f2ea174a18e6429c88bce9001a54cf013c5927aa",
+      "integration_tests": [
+        "tests/test_ownership_probe_controls_reply_delivery.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_process.py",
+      "names": [
+        "coordinator_has_ownership"
+      ],
+      "contract_sha256": "df470b4e84f7fe6161f2d91d61a08c456a1e7cb7a2fbf1f3e747a6b9ae845899",
+      "integration_tests": [
+        "tests/test_ownership_probe_controls_reply_delivery.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_protocol.py",
+      "names": [
+        "CancellationSource",
+        "LspProtocol",
+        "RequestCancelled"
+      ],
+      "contract_sha256": "a815de3bb270e2c666e3f1131ab687127dc09159e57bb456b45bdc1437f0322a",
+      "integration_tests": [
+        "tests/test_ownership_probe_controls_reply_delivery.py"
+      ]
+    },
+    {
+      "provider": "scripts/pyright_profile.py",
+      "names": [
+        "PyrightIdentity"
+      ],
+      "contract_sha256": "85809561bdda220617d92c8cc000de59aaf12ca45393ef3487561f4cc02cd31c",
+      "integration_tests": [
+        "tests/test_ownership_probe_controls_reply_delivery.py"
+      ]
+    },
+    {
+      "provider": "scripts/pyright_session.py",
+      "names": [
+        "PyrightSession"
+      ],
+      "contract_sha256": "db434debb473a9b234e810be11bb9cd8a06592f3dc890b746d1fe6ce2e374c59",
+      "integration_tests": [
+        "tests/test_ownership_probe_controls_reply_delivery.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_ownership_probe_controls_reply_delivery.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "RepositoryScope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "326d40aac35c4481e07bbe2e6113f897bd139f95b4b8c69e1245517167ef96a6",
+      "integration_tests": [
+        "tests/test_ownership_probe_controls_reply_delivery.py"
+      ]
+    },
+    {
+      "provider": "scripts/workspace_revision.py",
+      "names": [
+        "compute_workspace_revision"
+      ],
+      "contract_sha256": "fc7205e39b642841c7cd3770452541388a3f38be3eebee26c46cf149080b7552",
+      "integration_tests": [
+        "tests/test_ownership_probe_controls_reply_delivery.py"
+      ]
+    }
+  ]
+}

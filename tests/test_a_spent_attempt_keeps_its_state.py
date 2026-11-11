@@ -10,7 +10,7 @@ from pathlib import Path
 import reclaim_runtime_state
 from markdown_transaction import MarkdownCoordinator
 
-from tests.test_every_store_has_a_bound import _append
+from tests.every_store_has_a_bound_helpers import _append
 
 
 def _quarantine_all(coordinator: MarkdownCoordinator) -> None:
@@ -24,8 +24,8 @@ def test_the_nightly_leaves_a_refusal_quarantined_and_its_retry_advances(tmp_pat
     coordinator = MarkdownCoordinator(tmp_path / "vault", tmp_path / "state")
     _append(coordinator, "2026-01-01", family="compile")
     _quarantine_all(coordinator)
-    monkeypatch.setattr(reclaim_runtime_state, "ROOT", tmp_path / "vault")
-    monkeypatch.setattr(reclaim_runtime_state, "STATE_ROOT", tmp_path / "state")
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path / "vault"))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
 
     # The snapshot writes outside the vault and the co-activation table is derived;
     # neither touches transaction state.

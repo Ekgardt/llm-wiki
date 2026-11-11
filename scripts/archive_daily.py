@@ -12,55 +12,53 @@ import sys
 import time
 import uuid
 from collections.abc import Callable
-from contextlib import closing
+from contextlib import ExitStack
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from bounded_io import read_stable_bytes  # noqa: E402
+import reliable_memory
+from bounded_io import immutable_source_digest, open_stable_range, read_stable_bytes  # noqa: E402
 from evidence_resolver import (  # noqa: E402
     MAX_DAILY_BYTES,
-    EvidenceRef,
     EvidenceResolutionError,
-    EvidenceResolver,
-    _daily_part_bounds,
-    _line_span,
-    _regular_directory,
     bounded_directory_entries,
     compile_authority_attestation,
     daily_entries,
+    line_span,
+    owned_source_newlines,
+    regular_directory,
+    require_payload_evidence,
+    source_chunks,
+    source_range_digest,
     validate_bag,
+)
+from llm_wiki import windows_acl
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes  # noqa: E402
+from llm_wiki.queue_contracts import QueueOperationError, SourceFence
+from llm_wiki.reliability_defaults import DEFAULTS  # noqa: E402
+from llm_wiki.sqlite_deadlines import operational_deadline_active
+from llm_wiki.windows_acl import (  # noqa: E402
+    acl_lines_naming,
+    acl_output_text,
 )
 from markdown_transaction import (  # noqa: E402
     MarkdownChange,
-    _acl_lines_naming,
-    _acl_output_text,
-    _harden_owner_only,
-    _run_acl_command,
-    _windows_acl_identity,
     active_or_legacy_coordinator,
+    harden_owner_only,
 )
-from memory_queue import (  # noqa: E402
+from queue_core import (
     MemoryQueue,
-    QueueOperationError,
-    SourceFence,
     active_or_legacy_memory_queue,
 )
-from memory_state import ROOT, STATE_ROOT  # noqa: E402
-from reliable_memory import (  # noqa: E402
-    DEFAULTS,
-    _set_owner_only,
-    canonical_json_bytes,
-    fsync_directory,
-    fsync_file,
-    sha256_bytes,
-)
+from reliable_memory import set_owner_only
 
 # The Stage 2 contract's 90 hot days (CLAUDE.md: "Archives keep 90 hot days"), from
 # its one definition rather than a second literal.
 DEFAULT_HOT_DAYS = DEFAULTS.archive_hot_days
+from llm_wiki import runtime_roots  # noqa: E402
 from markdown_transaction import UNDO_RETENTION_DAYS  # noqa: E402
 
 DEFAULT_TRANSACTION_RETENTION_DAYS = UNDO_RETENTION_DAYS
@@ -187,21 +185,27 @@ class DailyArchiver:
         queue: MemoryQueue | None = None,
         source_heartbeat_seconds: int = DEFAULTS.queue_heartbeat_seconds,
         source_lease_seconds: int = DEFAULTS.queue_lease_seconds,
+        deadline: float = float("inf"),
+        max_month_entries: int = MAX_ARCHIVE_ENTRIES,
     ) -> None:
+        self.deadline = deadline
+        operational_deadline_active(deadline)
         self.vault = Path(vault).resolve(strict=True)
         self.state_root = Path(state_root)
         self.daily_root = self.vault / "knowledge" / "daily"
         self.archive_root = self.daily_root / "archive"
         self.coordinator = active_or_legacy_coordinator(
-            self.vault, self.state_root
+            self.vault, self.state_root, deadline=deadline
         )
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.killpoint = killpoint or (lambda _point: None)
         self.queue = queue or active_or_legacy_memory_queue(
-            self.vault, self.state_root
+            self.vault, self.state_root, deadline=deadline
         )
         self.source_heartbeat_seconds = source_heartbeat_seconds
         self.source_lease_seconds = source_lease_seconds
+        self.max_month_entries = max_month_entries
+        self.receipt_selection = None
 
     def eligible(
         self,
@@ -232,7 +236,7 @@ class DailyArchiver:
 
     def _retention_reasons(self, daily_date: date, hot_days: int) -> list[str]:
         """Today's log and anything inside the hot window stay where they are."""
-        today = self.clock().astimezone(timezone.utc).date()
+        today = self.clock().astimezone(UTC).date()
         reasons: list[str] = []
         if daily_date == today:
             reasons.append("today")
@@ -241,10 +245,15 @@ class DailyArchiver:
         return reasons
 
     def _read_compile_receipt(self, logical_path: str, digest: str) -> dict[str, object] | None:
+        operational_deadline_active(self.deadline)
         try:
-            from compile_memory import read_compile_receipt_v3
+            from compile_receipts import (
+                read_compile_receipt_v3,
+            )
 
-            return read_compile_receipt_v3(logical_path, digest, self.coordinator)
+            return read_compile_receipt_v3(logical_path, digest, self.coordinator, deadline=self.deadline)
+        except TimeoutError:
+            raise
         except (OSError, RuntimeError, ValueError):
             return None
 
@@ -285,21 +294,20 @@ class DailyArchiver:
         binding = self._receipt_binding_reason(receipt, logical_path, digest)
         return [] if binding is None else [binding]
 
-    def _evidence_reasons(self, source: Path, content: bytes, digest: str) -> list[str]:
+    def _evidence_reasons(self, content) -> list[str]:
         """Every evidence block in the daily must still resolve before it moves."""
         try:
-            self._resolve_all_blocks(source, content, digest)
+            self._resolve_all_blocks(content)
         except (OSError, ValueError, EvidenceResolutionError):
             return ["unresolved_evidence"]
         return []
 
-    def _resolve_all_blocks(self, source: Path, content: bytes, digest: str) -> None:
-        blocks = daily_entries(content)
+    def _resolve_all_blocks(self, content) -> None:
+        owned_source_newlines(content)
+        blocks = self._evidence_entries(content)
         if not blocks:
             raise EvidenceResolutionError("daily has no evidence blocks")
-        resolver = EvidenceResolver(self.vault, state_root=self.state_root)
-        for block_id, start, end in blocks:
-            resolver.resolve(EvidenceRef(source.stem, digest, block_id, start, end))
+        require_payload_evidence({"evidence": blocks}, content)
 
     def _writer_reason(self, ignore_current_writer: bool) -> list[str]:
         if ignore_current_writer or not self._writer_active():
@@ -376,13 +384,29 @@ class DailyArchiver:
         source = self._validated_source(source)
         if DATE_RE.fullmatch(source.stem) is None:
             return Eligibility(False, ("invalid_daily_id",))
-        try:
-            daily_date = date.fromisoformat(source.stem)
-            content = read_stable_bytes(source, MAX_DAILY_BYTES, label="daily archive source")
-        except (OSError, ValueError) as exc:
-            return Eligibility(False, (f"source:{exc}",))
+        with ExitStack() as owner:
+            try:
+                daily_date = date.fromisoformat(source.stem)
+                content = owner.enter_context(self._open_archive_source(source))
+            except (OSError, ValueError) as exc:
+                return Eligibility(False, (f"source:{exc}",))
+            return self._eligible_content(source, content, daily_date, hot_days,
+                                          transaction_retention_days, ignore_current_writer,
+                                          skip_queue_database_checks)
 
-        digest = sha256_bytes(content)
+    def _open_archive_source(self, source):
+        deadline = None if self.deadline == float("inf") else self.deadline
+        return open_stable_range(source, MAX_DAILY_BYTES, label="daily archive source",
+                                 deadline=deadline)
+
+    def _source_digest(self, source):
+        with self._open_archive_source(source) as content:
+            return immutable_source_digest(content)
+
+    def _eligible_content(self, source, content, daily_date, hot_days,
+                          transaction_retention_days, ignore_current_writer,
+                          skip_queue_database_checks):
+        digest = immutable_source_digest(content)
         logical_path = f"knowledge/daily/{source.name}"
         parts, receipt_reasons = self._part_receipts(logical_path, content)
         blocking_tasks, queue_reasons = self._queue_reasons(
@@ -394,7 +418,7 @@ class DailyArchiver:
         reasons = [
             *self._retention_reasons(daily_date, hot_days),
             *receipt_reasons,
-            *self._evidence_reasons(source, content, digest),
+            *self._evidence_reasons(content),
             *queue_reasons,
             *self._retained_reasons(source, digest, parts, transaction_retention_days),
             *self._writer_reason(ignore_current_writer),
@@ -411,37 +435,59 @@ class DailyArchiver:
         self, logical_path: str, content: bytes
     ) -> tuple[tuple[CompiledPart, ...], list[str]]:
         """Every compile part of the day with its receipt, and what any part lacks."""
+        from compile_receipts import (
+            iter_daily_parts,
+        )
+
+        selection = self._context_receipt_selection()
         parts: list[CompiledPart] = []
         reasons: list[str] = []
-        for start, end in _daily_part_bounds(content):
-            digest = sha256_bytes(content[start:end])
-            receipt, part_reasons = self._receipt_reasons(logical_path, digest)
-            parts.append(CompiledPart(start, end, digest, receipt))
+        for part in iter_daily_parts(logical_path, content):
+            receipt, part_reasons = self._context_part_receipt(selection, part)
+            parts.append(CompiledPart(part.byte_start, part.byte_end, part.sha256, receipt))
             reasons.extend(part_reasons)
         return tuple(parts), reasons
 
-    def _receipt_operation_state(
-        self, logical_path: str, digest: str
-    ) -> str | None:
-        from compile_memory import compile_receipt_path, compile_source_identity
+    def _context_receipt_selection(self):
+        from compile_receipts import (
+            receipt_predicate,
+        )
 
-        path = compile_receipt_path(compile_source_identity(logical_path, digest))
+        if self.receipt_selection is None:
+            self.receipt_selection = receipt_predicate(self.coordinator, deadline=self.deadline)
+        return self.receipt_selection
+
+    def _context_part_receipt(self, selection, part):
+        try:
+            receipt = selection.receipt(part)
+        except TimeoutError:
+            raise
+        except (OSError, RuntimeError, ValueError):
+            return None, ["compile_receipt_context_invalid"]
+        if receipt is not None:
+            return receipt, []
+        legacy, reasons = self._receipt_reasons(part.logical_path, part.sha256)
+        if legacy is not None:
+            return None, ["compile_receipt_context_unverified", *reasons]
+        return None, reasons
+
+    def _receipt_operation_state(
+        self, logical_path: str, digest: str, *, path: Path | None = None
+    ) -> str | None:
+        from compile_receipts import (
+            compile_receipt_path,
+        )
+        from llm_wiki.formats.receipts import compile_source_identity
+
+        operational_deadline_active(self.deadline)
+        path = compile_receipt_path(compile_source_identity(logical_path, digest)) if path is None else path
         if not path.exists():
             return None
         try:
-            text = read_stable_bytes(
-                path, MAX_POLICY_BYTES, label="compile receipt"
-            ).decode("utf-8", errors="strict")
-            record = json.loads(text.split("```json\n", 1)[1].split("\n```", 1)[0])
-            operation_id = record["operation_id"]
-            if not isinstance(operation_id, str):
-                return "invalid"
-            with closing(sqlite3.connect(self.coordinator.database_path)) as connection:
-                row = connection.execute(
-                    'SELECT state FROM "transaction" WHERE operation_id=?',
-                    (operation_id,),
-                ).fetchone()
-            return "missing" if row is None else str(row[0])
+            operation_id = self._receipt_operation_id(path)
+            return self._receipt_operation_record_state(operation_id)
+        except TimeoutError:
+            raise
         except (
             IndexError,
             KeyError,
@@ -450,9 +496,25 @@ class DailyArchiver:
             UnicodeDecodeError,
             ValueError,
             json.JSONDecodeError,
-            sqlite3.Error,
         ):
+            operational_deadline_active(self.deadline)
             return "invalid"
+
+    def _receipt_operation_record_state(self, operation_id: str) -> str:
+        with self.coordinator._authority_read_connection(self.deadline) as connection:
+            row = connection.execute(
+                'SELECT state FROM "transaction" WHERE operation_id=?', (operation_id,)
+            ).fetchone()
+        return "missing" if row is None else str(row[0])
+
+    def _receipt_operation_id(self, path: Path) -> str:
+        text = read_stable_bytes(path, MAX_POLICY_BYTES, label="compile receipt").decode("utf-8", errors="strict")
+        operational_deadline_active(self.deadline)
+        record = json.loads(text.split("```json\n", 1)[1].split("\n```", 1)[0])
+        operation_id = record["operation_id"]
+        if not isinstance(operation_id, str):
+            raise ValueError("compile receipt operation identity is invalid")
+        return operation_id
 
     @staticmethod
     def _receipt_expected_paths(receipt: dict[str, object]) -> set[str]:
@@ -463,18 +525,19 @@ class DailyArchiver:
             for item in receipt.get("operations", [])
             if isinstance(item, dict)
         }
-        paths.add(str(identity and f"knowledge/daily/receipts/v3-{identity}.md"))
+        version = str(receipt.get("schema_version", "")).rsplit("/", 1)[-1]
+        paths.add(str(identity and f"knowledge/daily/receipts/{version}-{identity}.md"))
         return paths
 
     def _transaction_within_retention(
         self, transaction: object, transaction_retention_days: int
     ) -> bool:
-        cutoff = self.clock().astimezone(timezone.utc) - timedelta(
+        cutoff = self.clock().astimezone(UTC) - timedelta(
             days=transaction_retention_days
         )
         try:
             updated = datetime.fromisoformat(
-                transaction.updated_at.replace("Z", "+00:00")
+                transaction.updated_at
             )
         except ValueError:
             return True
@@ -482,10 +545,11 @@ class DailyArchiver:
 
     def _committed_receipt_transaction(self, receipt: dict[str, object]) -> object | None:
         """The committed transaction this receipt names, or None when unusable."""
+        operational_deadline_active(self.deadline)
         operation_id = receipt.get("operation_id")
         if not isinstance(operation_id, str):
             return None
-        transaction = self.coordinator._record_for_operation_id(operation_id)
+        transaction = self.coordinator._record_for_operation_id(operation_id, deadline=self.deadline)
         if transaction is None or transaction.state != "committed":
             return None
         return transaction
@@ -529,26 +593,24 @@ class DailyArchiver:
     ) -> ArchiveReceipt:
         source = self.daily_root / f"{daily_id}.md"
         self.coordinator.recover()
-        source_bytes = read_stable_bytes(
-            source, MAX_DAILY_BYTES, label="daily archive source"
-        )
+        source_digest = self._source_digest(source)
         self._recover_hidden_builds()
         reused = self._recover_daily(
             daily_id,
-            sha256_bytes(source_bytes),
+            source_digest,
             hot_days=hot_days,
             transaction_retention_days=transaction_retention_days,
         )
         if reused is not None:
             return reused
-        eligibility, content = self._archive_preflight(
+        eligibility, source = self._archive_preflight(
             source,
             hot_days=hot_days,
             transaction_retention_days=transaction_retention_days,
         )
         receipt = self._archive_under_fence(
             daily_id,
-            content,
+            source,
             eligibility,
             hot_days=hot_days,
             transaction_retention_days=transaction_retention_days,
@@ -562,8 +624,8 @@ class DailyArchiver:
         *,
         hot_days: int,
         transaction_retention_days: int,
-    ) -> tuple[Eligibility, bytes]:
-        """Prove the daily is eligible and still byte-identical before any write."""
+    ) -> tuple[Eligibility, Path]:
+        """Prove eligibility; build verifies the same source before publication."""
         eligibility = self._eligible(
             source,
             hot_days=hot_days,
@@ -574,10 +636,7 @@ class DailyArchiver:
             raise ValueError(
                 "daily is not archive eligible: " + ", ".join(eligibility.reasons)
             )
-        content = read_stable_bytes(source, MAX_DAILY_BYTES, label="daily archive source")
-        if sha256_bytes(content) != eligibility.source_sha256:
-            raise RuntimeError("daily source changed during archive preflight")
-        return eligibility, content
+        return eligibility, source
 
     def _release_source_fence(self, queue: MemoryQueue, fence: SourceFence) -> None:
         had_error = sys.exc_info()[0] is not None
@@ -592,7 +651,7 @@ class DailyArchiver:
     def _archive_under_fence(
         self,
         daily_id: str,
-        content: bytes,
+        source: Path,
         eligibility: Eligibility,
         *,
         hot_days: int,
@@ -609,7 +668,7 @@ class DailyArchiver:
                 queue,
                 fence,
                 daily_id,
-                content,
+                source,
                 eligibility,
                 hot_days=hot_days,
                 transaction_retention_days=transaction_retention_days,
@@ -623,7 +682,7 @@ class DailyArchiver:
         queue: MemoryQueue,
         fence: SourceFence,
         daily_id: str,
-        content: bytes,
+        source: Path,
         eligibility: Eligibility,
         *,
         hot_days: int,
@@ -642,7 +701,7 @@ class DailyArchiver:
                     queue,
                     heartbeat,
                     daily_id,
-                    content,
+                    source,
                     eligibility,
                     hot_days=hot_days,
                     transaction_retention_days=transaction_retention_days,
@@ -672,14 +731,14 @@ class DailyArchiver:
         queue: MemoryQueue,
         heartbeat: object,
         daily_id: str,
-        content: bytes,
+        source: Path,
         eligibility: Eligibility,
         *,
         hot_days: int,
         transaction_retention_days: int,
     ) -> Path:
         final_bag, publish_build = self._build_bag(
-            daily_id, content, eligibility, hot_days=hot_days
+            daily_id, source, eligibility, hot_days=hot_days
         )
         published = False
         try:
@@ -690,7 +749,7 @@ class DailyArchiver:
             heartbeat.refresh()
             self._publish_build(publish_build, final_bag)
             published = True
-            fsync_directory(final_bag.parent)
+            reliable_memory.fsync_directory(final_bag.parent)
             self.killpoint("after_publish_rename")
             self._revalidate_published(final_bag, eligibility.source_sha256)
             self.killpoint("after_revalidate")
@@ -743,8 +802,7 @@ class DailyArchiver:
 
     def _flat_still_matches(self, daily_id: str, digest: str) -> bool:
         flat = self.daily_root / f"{daily_id}.md"
-        flat_bytes = read_stable_bytes(flat, MAX_DAILY_BYTES, label="daily duplicate")
-        return sha256_bytes(flat_bytes) == digest
+        return self._source_digest(flat) == digest
 
     def _recovered_keeper_still_matches(
         self, keeper: object, daily_id: str, digest: str
@@ -805,7 +863,7 @@ class DailyArchiver:
         return {
             entry.name
             for entry in bounded_directory_entries(
-                month, MAX_ARCHIVE_ENTRIES, label="daily archive month"
+                month, self.max_month_entries, label="daily archive month"
             )
         }
 
@@ -818,7 +876,7 @@ class DailyArchiver:
     def _build_bag(
         self,
         daily_id: str,
-        content: bytes,
+        source: Path,
         eligibility: Eligibility,
         *,
         hot_days: int,
@@ -826,24 +884,30 @@ class DailyArchiver:
         month = self.archive_root / daily_id[:7]
         before = self._month_entry_names(month)
         try:
-            return self._build_bag_contents(
-                daily_id, content, eligibility, hot_days=hot_days
-            )
+            with self._open_archive_source(source) as content:
+                self._require_build_source(content, eligibility)
+                return self._build_bag_contents(
+                    daily_id, content, eligibility, hot_days=hot_days)
         except BaseException:
             self._remove_new_builds(month, before)
             raise
+
+    @staticmethod
+    def _require_build_source(content, eligibility):
+        if immutable_source_digest(content) != eligibility.source_sha256:
+            raise RuntimeError("daily source changed during archive preflight")
 
     def _ensure_month_directory(self, daily_id: str) -> Path:
         month = self.archive_root / daily_id[:7]
         self._ensure_archive_root()
         if not month.exists():
             month.mkdir()
-            _regular_directory(month, label="daily archive month")
-            fsync_directory(self.archive_root)
-            _harden_owner_only(month, 0o700)
+            regular_directory(month, label="daily archive month")
+            reliable_memory.fsync_directory(self.archive_root)
+            harden_owner_only(month, 0o700)
             return month
-        _regular_directory(month, label="daily archive month")
-        _harden_owner_only(month, 0o700)
+        regular_directory(month, label="daily archive month")
+        harden_owner_only(month, 0o700)
         return month
 
     def _start_publish_build(
@@ -858,14 +922,14 @@ class DailyArchiver:
         """Create the hidden build directory and its recoverable intent record."""
         publish_build = month / f".bag-{daily_id}.building-{nonce}"
         publish_build.mkdir()
-        _harden_owner_only(publish_build, 0o700)
-        fsync_directory(month)
+        harden_owner_only(publish_build, 0o700)
+        reliable_memory.fsync_directory(month)
         intent = {
             "created_at": now.isoformat().replace("+00:00", "Z"),
             "final_bag_name": final_bag.name,
             "logical_daily_id": daily_id,
             "schema_version": "archive-build-intent/v1",
-            "source_hash": sha256_bytes(content),
+            "source_hash": immutable_source_digest(content),
         }
         (publish_build / "build-intent.json").write_bytes(canonical_json_bytes(intent))
         return publish_build
@@ -876,11 +940,11 @@ class DailyArchiver:
         """Write the BagIt payload and its tag files; return the payload digest."""
         data = publish_build / "data"
         data.mkdir()
-        _set_owner_only(data, 0o700)
-        fsync_directory(publish_build)
+        set_owner_only(data, 0o700)
+        reliable_memory.fsync_directory(publish_build)
         payload_name = f"data/{daily_id}.md"
-        (publish_build / payload_name).write_bytes(content)
-        digest = sha256_bytes(content)
+        self._write_source_payload(publish_build / payload_name, content)
+        digest = immutable_source_digest(content)
         bag_info = (
             f"Bagging-Date: {now.date().isoformat()}\n"
             f"Payload-Oxum: {len(content)}.1\n"
@@ -895,16 +959,22 @@ class DailyArchiver:
         )
         return digest
 
+    @staticmethod
+    def _write_source_payload(target, content):
+        with target.open("xb") as output:
+            for chunk in source_chunks(content):
+                output.write(chunk)
+
     def _committed_compile_transaction(self, receipt: dict[str, object]) -> object:
         transaction = self.coordinator._record_for_operation_id(
-            str(receipt["operation_id"])
+            str(receipt["operation_id"]), deadline=self.deadline
         )
         if transaction is None or transaction.state != "committed":
             raise RuntimeError("compile transaction authority is not committed")
         return transaction
 
     def _commit_sequence(self, transaction: object) -> int:
-        with self.coordinator._connect() as database:
+        with self.coordinator._authority_read_connection(self.deadline) as database:
             row = database.execute(
                 'SELECT rowid AS commit_sequence FROM "transaction" WHERE id=?',
                 (transaction.id,),
@@ -923,23 +993,21 @@ class DailyArchiver:
         """Re-prove one compile receipt and its committed transaction at build time."""
         assert receipt is not None
         logical_path = f"knowledge/daily/{daily_id}.md"
-        from compile_memory import (
-            compile_receipt_path,
-            compile_source_identity,
-            read_compile_receipt_v3,
-        )
+        from llm_wiki.compile_receipt_authority import read_compile_receipt_version
 
-        source_identity = compile_source_identity(logical_path, digest)
-        receipt_path = compile_receipt_path(source_identity)
+        source_identity = str(receipt["source_identity"])
+        version = str(receipt["schema_version"]).rsplit("/", 1)[-1]
+        receipt_path = self.daily_root / "receipts" / f"{version}-{source_identity}.md"
         receipt_bytes = read_stable_bytes(
             receipt_path, MAX_POLICY_BYTES, label="compile receipt"
         )
-        authoritative_receipt = read_compile_receipt_v3(
+        authoritative_receipt = read_compile_receipt_version(
             logical_path,
             digest,
             self.coordinator,
             path=receipt_path,
             vault=self.vault,
+            deadline=self.deadline,
         )
         if authoritative_receipt != receipt:
             raise RuntimeError("compile receipt authority changed during archive")
@@ -962,9 +1030,9 @@ class DailyArchiver:
                 "block_id": block_id,
                 "byte_start": start,
                 "byte_end": end,
-                "line_start": _line_span(content, start, end)[0],
-                "line_end": _line_span(content, start, end)[1],
-                "sha256": sha256_bytes(content[start:end]),
+                "line_start": line_span(content, start, end)[0],
+                "line_end": line_span(content, start, end)[1],
+                "sha256": source_range_digest(content, start, end),
             }
             for block_id, start, end in daily_entries(content)
         ]
@@ -1058,11 +1126,11 @@ class DailyArchiver:
         for path in sorted(
             item for item in self._bounded_tree(publish_build) if item.is_file()
         ):
-            _set_owner_only(path, 0o600)
-            fsync_file(path)
-        fsync_directory(publish_build / "data")
-        fsync_directory(publish_build)
-        self._seal(publish_build)
+            set_owner_only(path, 0o600)
+            reliable_memory.fsync_file(path)
+        reliable_memory.fsync_directory(publish_build / "data")
+        reliable_memory.fsync_directory(publish_build)
+        self.seal(publish_build)
         validate_bag(
             publish_build,
             coordinator=self.coordinator,
@@ -1078,7 +1146,7 @@ class DailyArchiver:
         *,
         hot_days: int,
     ) -> tuple[Path, Path]:
-        now = self.clock().astimezone(timezone.utc)
+        now = self.clock().astimezone(UTC)
         month = self._ensure_month_directory(daily_id)
         nonce = uuid.uuid4().hex
         stamp = now.strftime("%Y%m%dT%H%M%S%fZ")
@@ -1145,11 +1213,11 @@ class DailyArchiver:
         )
         self._unseal_root(build)
         if os.name == "nt":
-            _harden_owner_only(build / "build-intent.json", 0o600)
+            harden_owner_only(build / "build-intent.json", 0o600)
         else:
             (build / "build-intent.json").chmod(0o600)
         (build / "build-intent.json").unlink()
-        fsync_directory(build)
+        reliable_memory.fsync_directory(build)
         self._set_archive_read_only(build)
         validate_bag(build, coordinator=self.coordinator, vault=self.vault)
         return intent
@@ -1158,7 +1226,7 @@ class DailyArchiver:
     def _unseal_root(build: Path) -> None:
         """Make only the package root writable; every member stays read-only."""
         if os.name == "nt":
-            _harden_owner_only(build, 0o700)
+            harden_owner_only(build, 0o700)
             return
         build.chmod(0o700)
 
@@ -1227,7 +1295,7 @@ class DailyArchiver:
         self._prepare_build_for_publish(build)
         self._require_recovery_active(deadline, cancelled)
         self._publish_build(build, final)
-        fsync_directory(final.parent)
+        reliable_memory.fsync_directory(final.parent)
 
     def _recover_hidden_build(
         self, build: Path, deadline: float, cancelled: Callable[[], bool] | None
@@ -1256,23 +1324,23 @@ class DailyArchiver:
         child = root / name
         if not root.exists():
             root.mkdir(parents=True)
-            _harden_owner_only(root, 0o700)
-            fsync_directory(root.parent)
-        _regular_directory(root, label="archive quarantine root")
+            harden_owner_only(root, 0o700)
+            reliable_memory.fsync_directory(root.parent)
+        regular_directory(root, label="archive quarantine root")
         if not child.exists():
             child.mkdir()
-            _harden_owner_only(child, 0o700)
-            fsync_directory(root)
-        _regular_directory(child, label=f"archive quarantine {name}")
+            harden_owner_only(child, 0o700)
+            reliable_memory.fsync_directory(root)
+        regular_directory(child, label=f"archive quarantine {name}")
         return root, child
 
     @staticmethod
     def _write_quarantine_record(root: Path, prefix: str, record: dict[str, str]) -> None:
         path = root / f"{prefix}{sha256_bytes(canonical_json_bytes(record))}.json"
         path.write_bytes(canonical_json_bytes(record))
-        _harden_owner_only(path, 0o600)
-        fsync_file(path)
-        fsync_directory(root)
+        harden_owner_only(path, 0o600)
+        reliable_memory.fsync_file(path)
+        reliable_memory.fsync_directory(root)
 
     def _move_quarantined_build(self, build: Path, builds: Path) -> Path:
         """Move a build into quarantine, staying on this volume if it must."""
@@ -1292,8 +1360,8 @@ class DailyArchiver:
         original = build.relative_to(self.vault).as_posix()
         parent = build.parent
         destination = self._move_quarantined_build(build, builds)
-        fsync_directory(parent)
-        fsync_directory(destination.parent)
+        reliable_memory.fsync_directory(parent)
+        reliable_memory.fsync_directory(destination.parent)
         self._write_quarantine_record(
             root,
             "build-",
@@ -1481,8 +1549,7 @@ class DailyArchiver:
         flat = self.daily_root / f"{daily_id}.md"
         if not flat.exists():
             return []
-        flat_bytes = read_stable_bytes(flat, MAX_DAILY_BYTES, label="daily duplicate")
-        if sha256_bytes(flat_bytes) != digest:
+        if self._source_digest(flat) != digest:
             return self._quarantine_all(paths, daily_id, digest, deadline, cancelled)
         keeper = paths[0]
         for duplicate in paths[1:]:
@@ -1534,7 +1601,7 @@ class DailyArchiver:
     ) -> list[ArchiveReceipt]:
         if not self.archive_root.exists():
             return []
-        _regular_directory(self.archive_root, label="daily archive root")
+        regular_directory(self.archive_root, label="daily archive root")
         with self.coordinator.writer_gate(wait_seconds=ARCHIVE_WRITER_WAIT_SECONDS):
             self._recover_hidden_builds(deadline=deadline, cancelled=cancelled)
             recovered = self._recover_groups(
@@ -1571,22 +1638,22 @@ class DailyArchiver:
         temporary.write_bytes(
             canonical_json_bytes({"schema_version": "archive-index/v1", "bags": bags})
         )
-        _harden_owner_only(temporary, 0o600)
-        fsync_file(temporary)
+        harden_owner_only(temporary, 0o600)
+        reliable_memory.fsync_file(temporary)
         self._require_recovery_active(deadline, cancelled)
         temporary.replace(index)
-        fsync_directory(self.archive_root)
+        reliable_memory.fsync_directory(self.archive_root)
         return index
 
     def _ensure_archive_root(self) -> None:
-        _regular_directory(self.daily_root, label="daily root")
+        regular_directory(self.daily_root, label="daily root")
         if self.archive_root.exists():
-            _regular_directory(self.archive_root, label="daily archive root")
+            regular_directory(self.archive_root, label="daily archive root")
         else:
             self.archive_root.mkdir()
-            _regular_directory(self.archive_root, label="daily archive root")
-            fsync_directory(self.daily_root)
-        _harden_owner_only(self.archive_root, 0o700)
+            regular_directory(self.archive_root, label="daily archive root")
+            reliable_memory.fsync_directory(self.daily_root)
+        harden_owner_only(self.archive_root, 0o700)
 
     @staticmethod
     def _is_archive_entry(name: str, *, hidden: bool) -> bool:
@@ -1595,15 +1662,15 @@ class DailyArchiver:
         return name.startswith("bag-")
 
     def _month_archive_paths(self, month: Path, *, hidden: bool) -> list[Path]:
-        _regular_directory(month, label="daily archive month")
+        regular_directory(month, label="daily archive month")
         entries = bounded_directory_entries(
-            month, MAX_ARCHIVE_ENTRIES, label="daily archive month"
+            month, self.max_month_entries, label="daily archive month"
         )
         found: list[Path] = []
         for entry in sorted(entries):
             if not self._is_archive_entry(entry.name, hidden=hidden):
                 continue
-            _regular_directory(entry, label="daily archive bag")
+            regular_directory(entry, label="daily archive bag")
             found.append(entry)
         return found
 
@@ -1635,7 +1702,7 @@ class DailyArchiver:
         """Transaction states touching this daily, or None when unreadable."""
         relative = f"knowledge/daily/{source_name}"
         try:
-            with closing(sqlite3.connect(self.coordinator.database_path)) as connection:
+            with self.coordinator._authority_read_connection(self.deadline) as connection:
                 return connection.execute(
                     'SELECT t.state, t.updated_at FROM "transaction" t '
                     'JOIN "operation" o ON o.transaction_id=t.id WHERE o.path=?',
@@ -1650,7 +1717,7 @@ class DailyArchiver:
             return True
         if state_name != "committed":
             return False
-        updated = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
+        updated = datetime.fromisoformat(str(updated_at))
         return updated >= cutoff
 
     def _transaction_references(
@@ -1659,7 +1726,7 @@ class DailyArchiver:
         rows = self._transaction_rows(source_name)
         if rows is None:
             return True
-        cutoff = self.clock().astimezone(timezone.utc) - timedelta(
+        cutoff = self.clock().astimezone(UTC) - timedelta(
             days=transaction_retention_days
         )
         return any(
@@ -1669,7 +1736,7 @@ class DailyArchiver:
 
     def _writer_active(self) -> bool:
         try:
-            with self.coordinator._connect() as connection:
+            with self.coordinator._authority_read_connection(self.deadline) as connection:
                 row = connection.execute(
                     "SELECT * FROM writer_owners WHERE gate_name='global'"
                 ).fetchone()
@@ -1758,8 +1825,8 @@ class DailyArchiver:
         original = bag.relative_to(self.vault).as_posix()
         parent = bag.parent
         self._move_quarantined_bag(bag, destination)
-        fsync_directory(parent)
-        fsync_directory(bags)
+        reliable_memory.fsync_directory(parent)
+        reliable_memory.fsync_directory(bags)
         self._write_quarantine_record(
             target,
             "",
@@ -1788,19 +1855,17 @@ class DailyArchiver:
         for directory in directories:
             target = staging / directory.relative_to(source)
             target.mkdir()
-            _harden_owner_only(target, 0o700)
-            fsync_directory(target.parent)
+            harden_owner_only(target, 0o700)
+            reliable_memory.fsync_directory(target.parent)
 
     @staticmethod
     def _copy_files(source: Path, staging: Path, files: list[Path]) -> None:
         for file in files:
-            data = read_stable_bytes(
-                file, MAX_DAILY_BYTES, label="archive quarantine copy"
-            )
             target = staging / file.relative_to(source)
-            target.write_bytes(data)
-            _harden_owner_only(target, 0o600)
-            fsync_file(target)
+            with open_stable_range(file, MAX_DAILY_BYTES, label="archive quarantine copy") as data:
+                DailyArchiver._write_source_payload(target, data)
+            harden_owner_only(target, 0o600)
+            reliable_memory.fsync_file(target)
 
     def _copy_tree_into_staging(self, source: Path, staging: Path) -> None:
         entries = self._bounded_tree(source)
@@ -1808,23 +1873,23 @@ class DailyArchiver:
         self._mirror_directories(source, staging, directories)
         self._copy_files(source, staging, self._tree_files(entries))
         for directory in reversed(directories):
-            fsync_directory(staging / directory.relative_to(source))
-        fsync_directory(staging)
+            reliable_memory.fsync_directory(staging / directory.relative_to(source))
+        reliable_memory.fsync_directory(staging)
 
     def _copy_bag_cross_volume(self, source: Path, destination: Path) -> None:
         staging = destination.parent / f".{destination.name}.staging-{uuid.uuid4().hex}"
         staging.mkdir()
-        _harden_owner_only(staging, 0o700)
-        fsync_directory(staging.parent)
+        harden_owner_only(staging, 0o700)
+        reliable_memory.fsync_directory(staging.parent)
         try:
             self._copy_tree_into_staging(source, staging)
-            self._seal(staging)
+            self.seal(staging)
             validate_bag(staging, coordinator=self.coordinator, vault=self.vault)
             # Same sealed-directory rename that `_publish_build` exists for:
             # macOS returns EACCES when renaming a directory that denies write
             # permission, and the staged copy is sealed at 0o500 above.
             self._publish_build(staging, destination)
-            fsync_directory(destination.parent)
+            reliable_memory.fsync_directory(destination.parent)
             self._remove_build(source)
         except BaseException:
             if staging.exists():
@@ -1832,7 +1897,7 @@ class DailyArchiver:
             raise
 
     @staticmethod
-    def _seal(root: Path) -> None:
+    def seal(root: Path) -> None:
         paths = [*sorted(DailyArchiver._bounded_tree(root), reverse=True), root]
         try:
             for path in paths:
@@ -1859,7 +1924,7 @@ class DailyArchiver:
             if len(found) > MAX_ARCHIVE_ENTRIES:
                 raise ValueError("archive package exceeds the entry scan limit")
             if stat.S_ISDIR(info.st_mode):
-                _regular_directory(entry, label="archive package directory")
+                regular_directory(entry, label="archive package directory")
                 pending.append(entry)
 
     @staticmethod
@@ -1883,12 +1948,12 @@ class DailyArchiver:
 
     @staticmethod
     def _windows_read_only_acl(path: Path) -> None:
-        identity = _windows_acl_identity()
+        identity = windows_acl.windows_acl_identity()
         applied = [
-            _run_acl_command(command)
+            windows_acl.run_acl_command(command)
             for command in DailyArchiver._read_only_acl_commands(path, identity)
         ]
-        verified = _run_acl_command(["icacls", str(path)])
+        verified = windows_acl.run_acl_command(["icacls", str(path)])
         DailyArchiver._require_read_only_acl(identity, applied, verified)
 
     @staticmethod
@@ -1914,7 +1979,7 @@ class DailyArchiver:
             raise DailyArchiver._acl_failure(
                 "icacls exit",
                 f"apply={codes} read={verified.returncode} "
-                f"{_acl_output_text(getattr(first, 'stdout', b''))}",
+                f"{acl_output_text(getattr(first, 'stdout', b''))}",
             )
 
     @staticmethod
@@ -1926,10 +1991,10 @@ class DailyArchiver:
         docs/research/2026-09-17-the-last-three-windows-readers-of-a-name-and-a-handle.md
         """
         DailyArchiver._require_acl_commands_succeeded(applied, verified)
-        acl_lines = _acl_lines_naming(verified.stdout, identity)
+        acl_lines = acl_lines_naming(verified.stdout, identity)
         if not acl_lines:
             raise DailyArchiver._acl_failure(
-                "no ACL entries", _acl_output_text(verified.stdout)
+                "no ACL entries", acl_output_text(verified.stdout)
             )
         DailyArchiver._require_acl_grants_read_only(
             identity, "\n".join(acl_lines), acl_lines
@@ -1964,9 +2029,9 @@ class DailyArchiver:
 
     @staticmethod
     def _harden_windows_tree(path: Path, entries: list[Path]) -> None:
-        _harden_owner_only(path, 0o700)
+        harden_owner_only(path, 0o700)
         for item in sorted(entries, key=lambda value: len(value.parts)):
-            _harden_owner_only(item, 0o700 if item.is_dir() else 0o600)
+            harden_owner_only(item, 0o700 if item.is_dir() else 0o600)
 
     @staticmethod
     def _remove_entry(item: Path) -> None:
@@ -2058,7 +2123,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _flat_daily_sources(archiver: DailyArchiver) -> list[Path]:
+def flat_daily_sources(archiver: DailyArchiver) -> list[Path]:
     entries = bounded_directory_entries(
         archiver.daily_root, MAX_ARCHIVE_ENTRIES, label="flat daily directory"
     )
@@ -2127,9 +2192,9 @@ def main(argv: list[str] | None = None) -> int:
     See `docs/research/2026-09-25-the-weekly-archive-says-why-and-goes-on.md`.
     """
     args = parse_args(argv)
-    archiver = DailyArchiver(ROOT, STATE_ROOT)
+    archiver = DailyArchiver(runtime_roots.vault_root(), runtime_roots.state_root())
     run = _ArchiveRun()
-    for source in _flat_daily_sources(archiver):
+    for source in flat_daily_sources(archiver):
         _archive_reported(archiver, source, args, run)
     if args.commit:
         print(f"Archived {run.archived} log(s); {run.failed} failed.")

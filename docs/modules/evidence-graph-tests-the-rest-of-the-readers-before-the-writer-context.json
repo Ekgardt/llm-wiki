@@ -1,0 +1,138 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/evidence-graph-tests-the-rest-of-the-readers-before-the-writer-context.json",
+    "docs/modules/evidence-graph-tests-the-rest-of-the-readers-before-the-writer.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_the_rest_of_the_readers_before_the_writer.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/evidence-graph-tests-the-rest-of-the-readers-before-the-writer-context.json",
+      "docs/modules/evidence-graph-tests-the-rest-of-the-readers-before-the-writer.md",
+      "tests/test_the_rest_of_the_readers_before_the_writer.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/build_tiers.py",
+      "names": [
+        "build_page_tier"
+      ],
+      "contract_sha256": "1614d9afe6105ad9f3e74e2afb142232ff949d4eea064ba2354894e66c1f3c3a",
+      "integration_tests": [
+        "tests/test_the_rest_of_the_readers_before_the_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/code_extractor.py",
+      "names": [
+        "extract_code"
+      ],
+      "contract_sha256": "7cbb9657efc927be714c93ad71e9856a45172b579056636a041f9d132a0ded33",
+      "integration_tests": [
+        "tests/test_the_rest_of_the_readers_before_the_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "collect_corpus"
+      ],
+      "contract_sha256": "7ea12368f51c070a84b0754260f0a82db5ac44b0395b95eabcb01e5053c9f0bb",
+      "integration_tests": [
+        "tests/test_the_rest_of_the_readers_before_the_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_graph.py",
+      "names": [
+        "create_generation_database",
+        "storable_identity_key"
+      ],
+      "contract_sha256": "a73a216daae08471958f3cdaea1e482136c645945f83d8c11c57521ff1590cb6",
+      "integration_tests": [
+        "tests/test_the_rest_of_the_readers_before_the_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/knowledge_extractor.py",
+      "names": [
+        "extract_knowledge"
+      ],
+      "contract_sha256": "7e8074eb46f52db34b4d8cf19ec4be98b28e9cf3750f6af14cea5ec6abf7f9f2",
+      "integration_tests": [
+        "tests/test_the_rest_of_the_readers_before_the_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_the_rest_of_the_readers_before_the_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_the_rest_of_the_readers_before_the_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_the_rest_of_the_readers_before_the_writer.py"
+      ]
+    }
+  ]
+}

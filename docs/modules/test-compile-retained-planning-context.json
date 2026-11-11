@@ -1,0 +1,350 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/compile-atomic-capture-helpers.md",
+    "docs/modules/compile-controller-tests-compile-execution-inventory-helpers.md",
+    "docs/modules/compile-controller-tests-compile-protected-dispatch-helpers.md",
+    "docs/modules/compile-durable-stream-capture-helpers.md",
+    "docs/modules/compile-paths.md",
+    "docs/modules/compile-pipeline-prompts-tests-compile-critic-drop-cannot-complete-source-work-helpers.md",
+    "docs/modules/compile-progress-tests.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/installed-memory-repair-tests.md",
+    "docs/modules/llm-client-tests-compile-saved-context-refresh-helpers.md",
+    "docs/modules/llm-client-tests-compile-shared-run-planning-helpers.md",
+    "docs/modules/llm-client-tests-the-compile-decides-what-the-snapshot-already-knows-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/queue-core-tests-compile-parent-lock-handoff.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-compile-retained-planning-context.json",
+    "docs/modules/test-compile-retained-planning.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/adopted_vault.py",
+    "tests/compile_atomic_capture_helpers.py",
+    "tests/compile_call_controller_helpers.py",
+    "tests/compile_critic_drop_cannot_complete_source_work_helpers.py",
+    "tests/compile_durable_stream_capture_helpers.py",
+    "tests/compile_execution_inventory_helpers.py",
+    "tests/compile_leased_entrypoint_helpers.py",
+    "tests/compile_paths.py",
+    "tests/compile_progress_admission_helpers.py",
+    "tests/compile_protected_dispatch_helpers.py",
+    "tests/compile_saved_context_refresh_helpers.py",
+    "tests/compile_shared_run_planning_helpers.py",
+    "tests/conftest.py",
+    "tests/legacy_adopted_vault.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_compile_retained_planning.py",
+    "tests/the_compile_decides_what_the_snapshot_already_knows_helpers.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-compile-retained-planning-context.json",
+      "docs/modules/test-compile-retained-planning.md",
+      "tests/test_compile_retained_planning.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_cache.py",
+      "names": [
+        "CompileCache"
+      ],
+      "contract_sha256": "2f950a945aecf6065663cf128b0cdc4db8f0e8cf0f8d1f1057cc0d1e52d56c95",
+      "integration_tests": [
+        "tests/test_compile_retained_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_controller.py",
+      "names": [
+        "CompileDependencies",
+        "compile_dependency_manifest",
+        "compile_inputs_digest",
+        "write_archive_snapshot"
+      ],
+      "contract_sha256": "0e690966fdf0cb89e8c36425dfdbdf0a1d57f58f6b5f20d84fc184653b3b429d",
+      "integration_tests": [
+        "tests/test_compile_retained_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_pipeline.py",
+      "names": [
+        "CompileRunPlanning",
+        "restore_compile_planning"
+      ],
+      "contract_sha256": "0f572427ae9212b42a833258452c4ac8b47c69efc06e96097382fb2d6b657b5f",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_discarded_receipt_reopens_its_day.py",
+        "tests/test_a_failure_of_content_that_is_gone_is_retired.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_progress.py",
+      "names": [
+        "CompileEvent",
+        "ProgressConflict",
+        "SCHEMA_STATEMENTS",
+        "make_source_scope",
+        "root_work_id"
+      ],
+      "contract_sha256": "4b0adde0d0a03f5d9c075d37df6f9bd56ee00be98bbf2ec68b1b94cbc75295c4",
+      "integration_tests": [
+        "tests/test_compile_retained_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_progress_migration.py",
+      "names": [
+        "migrate_candidate"
+      ],
+      "contract_sha256": "9fb4b3b645d47db7ba07afa96b3ea3eb03d0e946b9744af3d59dabbf32a2984a",
+      "integration_tests": [
+        "tests/test_compile_retained_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/context_budget.py",
+      "names": [
+        "TokenUsage"
+      ],
+      "contract_sha256": "bde088db86ce68f91e9a4e3f1416339f5cecdd6c3a2e40390f25bf4fb954af76",
+      "integration_tests": [
+        "tests/test_compile_retained_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_a_check_names_its_cause.py",
+        "tests/test_a_marker_is_judged_by_the_process_it_names.py",
+        "tests/test_a_tool_breadcrumb_waits_in_the_background.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "BACKENDS",
+        "BackendResponse",
+        "CodexExecutable",
+        "CodexPlanningBasis",
+        "LLMResult",
+        "ProviderDescriptor",
+        "provider_candidates"
+      ],
+      "contract_sha256": "0bb641ea2cf805d1425184b48ef8f0fa439f4b8b0da8255d7d956ed5698b1e0c",
+      "integration_tests": [
+        "tests/test_compile_retained_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/adoption_admission.py",
+      "names": [
+        "MAX_OPERATIONAL_DB_BYTES",
+        "expected_schema_digests",
+        "initial_schema_digests"
+      ],
+      "contract_sha256": "e2a9874844b2e0ecfbabd9067bd53ce68d47dfc5fc0e2893293a7c8459c704ee",
+      "integration_tests": [
+        "tests/test_compile_retained_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_calls.py",
+      "names": [
+        "run_candidate_call"
+      ],
+      "contract_sha256": "5596e25bcbd542645a7fd9df9815c5f733b47e624e041535aaa6a29b25ac1fa0",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py",
+        "tests/test_answer_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_dependencies.py",
+      "names": [
+        "compile_package_dependency_manifest",
+        "compile_product_dependency_manifest",
+        "compile_runtime_dependency_manifest"
+      ],
+      "contract_sha256": "654b4db15d0881ba8cc6acc9747a463ccc12ad78c47f6077d20ff1a11aba6abc",
+      "integration_tests": [
+        "tests/test_compile_dependency_identity.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_repair.py",
+      "names": [
+        "save_compile_publication"
+      ],
+      "contract_sha256": "af0c6bd426dace78f0488a63d403d671407145b0bc113892637c5b85e0e9481e",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py",
+        "tests/test_answer_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_work.py",
+      "names": [
+        "execute_compile_work"
+      ],
+      "contract_sha256": "c507d39bc5065f7a09ce5dc4406f838a81f2d878873a41417ff27194fab7047b",
+      "integration_tests": [
+        "tests/test_compile_retained_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_batches.py",
+      "names": [
+        "CompilePlanUnavailable"
+      ],
+      "contract_sha256": "204b51d2230ef1d2d7533fca419f76df0148c462b913d588ca34386301fd46bd",
+      "integration_tests": [
+        "tests/test_compile_retained_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_prompts.py",
+      "names": [
+        "CompileAttempt",
+        "SOURCE_REVIEW_SCHEMA",
+        "critique_prompt"
+      ],
+      "contract_sha256": "3ac0177410f6b9270e4e0cf2f772cdace777ab10981c0898d25c0d0d4d6c0211",
+      "integration_tests": [
+        "tests/test_compile_retained_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "snapshot_compile_inputs"
+      ],
+      "contract_sha256": "bf02fc1c5e0236abe974c7bd9563649093ead7a0da80b24feef40a93b2a02969",
+      "integration_tests": [
+        "tests/test_compile_retained_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_compile_retained_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "vault_root"
+      ],
+      "contract_sha256": "35ea768c9fd09097366a2ded61783ec66ac8997f3f02255c744c8443405a706b",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_queue.py",
+      "names": [
+        "manual_lease_processor"
+      ],
+      "contract_sha256": "be3dd2dc07dd4b3f0cea61a669fa7f67825cd8ac20bd89b6589fcbaba62bdac9",
+      "integration_tests": [
+        "tests/test_compile_retained_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "QUEUE_V3_SCHEMA_SHA256",
+        "active_memory_queue",
+        "compat_task"
+      ],
+      "contract_sha256": "f0c6333b1f3f5d6ffe5f4907b50cf3f91ec9d80df8534778a8aef79bd658665c",
+      "integration_tests": [
+        "tests/test_compile_retained_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliability_v3_validation.py",
+      "names": [
+        "artifact_record"
+      ],
+      "contract_sha256": "3a4adad396f3e17fbdae971bd0f09e3de3f286bbe731eb0f10564ed7df20eb60",
+      "integration_tests": [
+        "tests/test_compile_retained_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "4243e32fa6ecab88fca1a2d2b3214c0a36944fc23129138102dfaebf6d99457f",
+      "integration_tests": [
+        "tests/test_compile_retained_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_compile_retained_planning.py"
+      ]
+    }
+  ]
+}

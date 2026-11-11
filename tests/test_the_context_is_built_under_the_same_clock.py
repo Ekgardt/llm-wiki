@@ -27,12 +27,13 @@ LONG_TURN = b"**user:** " + b"I bought the amplifier in Berlin. " * 40 + b"It st
 
 
 def _chunk(page: str, identity: str, position: int):
-    """One chunk of a page, of the shape `_chunks_by_page` and the compiler read."""
+    """One chunk of a page, of the shape `chunks_by_page` and the compiler read."""
     from types import SimpleNamespace
 
     return SimpleNamespace(
         id=identity,
         parent_page=page,
+        source_path=page,
         byte_start=position,
         byte_end=position + 10,
         text="**user:** something",
@@ -50,8 +51,8 @@ def test_the_narrowed_snapshot_keeps_the_corpus_order_through_the_index() -> Non
     chunks = [_chunk("a.md", "a1", 0), _chunk("b.md", "b1", 10), _chunk("a.md", "a2", 20)]
     snapshot = _snapshot(chunks)
 
-    through_index = query_memory._chunks_of(snapshot, ("a.md", "b.md"), query_memory._chunks_by_page(snapshot))
-    without_index = query_memory._chunks_of(snapshot, ("a.md", "b.md"), None)
+    through_index = query_memory.chunks_of(snapshot, ("a.md", "b.md"), query_memory.chunks_by_page(snapshot, ("a.md", "b.md")))
+    without_index = query_memory.chunks_of(snapshot, ("a.md", "b.md"), None)
 
     assert [chunk.id for chunk in through_index] == ["a1", "b1", "a2"]
     assert [chunk.id for chunk in without_index] == ["a1", "b1", "a2"]
@@ -61,16 +62,16 @@ def test_a_passed_deadline_stops_the_compilation_instead_of_shedding_on() -> Non
     snapshot = _snapshot([_chunk("a.md", "a1", 0)])
 
     with pytest.raises(TimeoutError):
-        query_memory._compiled_for(snapshot, (), object(), None, time.monotonic() - 1.0)
+        query_memory.compiled_for(snapshot, (), object(), None, time.monotonic() - 1.0)
 
 
 def test_without_a_deadline_the_compilation_is_not_timed_out() -> None:
     """Every existing caller passes none, and must behave exactly as before."""
-    assert query_memory._check_optional_deadline(None) is None
+    assert query_memory.check_optional_deadline(None) is None
 
 
 def test_the_budget_says_which_unit_it_counts() -> None:
-    budget = query_memory._qa_budget()
+    budget = query_memory.qa_budget()
 
     assert budget.max_input_tokens == query_memory.QA_DEFAULT_INPUT_BYTES
     assert budget.reserved_output_tokens == query_memory.QA_OUTPUT_RESERVE_BYTES
@@ -98,6 +99,6 @@ def test_a_long_first_sentence_still_leaves_room_for_one_the_question_chose() ->
     first_bytes = len(b"**user:** ") + evidence_pruning.KEEP_BYTES + 50
     spans = [(0, first_bytes), (first_bytes + 1, first_bytes + 30), (first_bytes + 31, first_bytes + 60)]
 
-    chosen = evidence_pruning._within_budget(spans, [0, 2, 1])
+    chosen = evidence_pruning.within_budget(spans, [0, 2, 1])
 
     assert chosen == {0, 2}

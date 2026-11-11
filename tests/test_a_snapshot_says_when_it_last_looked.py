@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import doctor
@@ -43,11 +43,11 @@ def test_an_unchanged_memory_keeps_the_backup_current(tmp_path: Path, monkeypatc
     vault = _vault(tmp_path)
     snapshot_knowledge.take_snapshot(vault, root)
     monkeypatch.setenv("LLM_WIKI_SNAPSHOT_ROOT", str(root))
-    later = datetime.now(timezone.utc) + timedelta(days=3)
-    stale = doctor._backup_check(tmp_path, later)["status"]
+    later = datetime.now(UTC) + timedelta(days=3)
+    stale = doctor.backup_check(tmp_path, later)["status"]
 
     result = snapshot_knowledge.take_snapshot(vault, root)
     marker = snapshot_knowledge.last_checked_at(root)
 
     assert (stale, result["commit"], marker is not None) == ("degraded", "no change", True)
-    assert doctor._backup_check(tmp_path, marker + timedelta(hours=1))["status"] == "ok"
+    assert doctor.backup_check(tmp_path, marker + timedelta(hours=1))["status"] == "ok"

@@ -33,14 +33,18 @@ from __future__ import annotations
 import json
 import re
 import sys
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from memory_state import ROOT, STATE_ROOT, daily_logs  # noqa: E402
+from llm_wiki import runtime_roots  # noqa: E402
+from memory_state import daily_logs  # noqa: E402
 
-TABLE_PATH = STATE_ROOT / "cache" / "co-activation.json"
+
+def table_path() -> Path:
+    return runtime_roots.state_root() / "cache" / "co-activation.json"
+
 
 # A pairing loses half its weight over this long. Six weeks is short enough that
 # last spring's coincidence stops mattering and long enough that a project worked
@@ -116,8 +120,8 @@ def _entry_text(entry: Path) -> str:
 
 def build(vault: Path | None = None, today: date | None = None) -> dict[str, dict[str, float]]:
     """The co-occurrence table, read from the daily entries of the vault."""
-    root = Path(vault or ROOT)
-    when = today or datetime.now(timezone.utc).date()
+    root = Path(vault or runtime_roots.vault_root())
+    when = today or datetime.now(UTC).date()
     table: dict[str, dict[str, float]] = {}
     for entry in daily_logs(root / "knowledge" / "daily"):
         accumulate(table, _entry_text(entry), entry.stem, when)
@@ -125,7 +129,7 @@ def build(vault: Path | None = None, today: date | None = None) -> dict[str, dic
 
 
 def save(table: dict[str, dict[str, float]], path: Path | None = None) -> Path:
-    destination = Path(path or TABLE_PATH)
+    destination = Path(path or table_path())
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(table, ensure_ascii=False, sort_keys=True), encoding="utf-8")
     return destination
@@ -133,7 +137,7 @@ def save(table: dict[str, dict[str, float]], path: Path | None = None) -> Path:
 
 def load(path: Path | None = None) -> dict[str, dict[str, float]]:
     """The stored table, or nothing at all. A missing table is not an error."""
-    source = Path(path or TABLE_PATH)
+    source = Path(path or table_path())
     if not source.is_file():
         return {}
     try:

@@ -25,11 +25,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES, read_stable_bytes  # noqa: E402
+from llm_wiki import runtime_roots  # noqa: E402
+from llm_wiki.formats.canonical import sha256_bytes  # noqa: E402
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
-from memory_state import ROOT  # noqa: E402
-from reliable_memory import sha256_bytes  # noqa: E402
 
-KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 # One column, one identity: every writer of `retrieval_events` names a page by
 # its vault-relative path. This module's public surface is slug-shaped, because
 # the CLI and `archive_stale` call it that way, so the slug is resolved to that
@@ -104,7 +103,7 @@ def _note_slug(candidate: str) -> str | None:
     if not candidate.startswith(prefix) or not candidate.endswith(".md"):
         return None
     slug = candidate[len(prefix) : -len(".md")]
-    if "/" in slug or not (KNOWLEDGE_DIR / f"{slug}.md").is_file():
+    if "/" in slug or not (runtime_roots.notes_dir() / f"{slug}.md").is_file():
         return None
     return slug
 
@@ -147,18 +146,18 @@ def record_access(slug: str, source: str = "search", query: str | None = None,
 # cursor still advances past them (a bounded scan never stalls on one page)
 # and a wrapped cursor retries them. Research:
 # docs/research/2026-09-10-a-page-that-cannot-be-flushed-is-named.md
-_FLUSH_FAILURES: list[dict[str, str]] = []
+FLUSH_FAILURES: list[dict[str, str]] = []
 
 
 def last_flush_failures() -> list[dict[str, str]]:
-    return list(_FLUSH_FAILURES)
+    return list(FLUSH_FAILURES)
 
 
 def _note_flush_failure(slug: str, error: BaseException) -> None:
     from secret_redact import describe_error
 
     described = describe_error(error)
-    _FLUSH_FAILURES.append({"slug": slug, "error": described})
+    FLUSH_FAILURES.append({"slug": slug, "error": described})
     print(f"access_tracking: {slug}: not exported ({described})", file=sys.stderr)
 
 
@@ -221,14 +220,14 @@ def _page_change(page_path: Path, slug: str, source_bytes: bytes, events: list) 
         "access-telemetry", f"{slug}:{first_sequence}-{final_sequence}:{count}", encoded
     )
     precondition = {
-        page_path.relative_to(KNOWLEDGE_DIR.parent.parent).as_posix(): sha256_bytes(source_bytes)
+        page_path.relative_to(runtime_roots.notes_dir().parent.parent).as_posix(): sha256_bytes(source_bytes)
     }
     return operation_id, {page_path: encoded}, precondition
 
 
 def _flush_page(slug: str) -> bool:
     """Export one page's pending events; True when the page was rewritten."""
-    page_path = KNOWLEDGE_DIR / f"{slug}.md"
+    page_path = runtime_roots.notes_dir() / f"{slug}.md"
     if not page_path.exists():
         return False
     source_bytes = read_stable_bytes(page_path, MAX_ACCESS_PAGE_BYTES, label="access tracking page")
@@ -335,7 +334,7 @@ def _next_batch(scan: _Scan, may_wrap: bool) -> tuple[list[str] | None, bool]:
 
 
 def _flush_candidates_with_cursor() -> int:
-    _FLUSH_FAILURES.clear()
+    FLUSH_FAILURES.clear()
     cursor = _export_cursor()
     if cursor is None:
         return 0
@@ -396,7 +395,7 @@ def get_access_stats(slug: str) -> dict:
     return stats.as_dict()
 
 
-def _half_life_days(page_type: str) -> float | None:
+def half_life_days(page_type: str) -> float | None:
     """The page's own window from the contract, or None for a type that never archives.
 
     One set, two readers, as `okf_types` says of these numbers: the archiver and
@@ -410,7 +409,7 @@ def _half_life_days(page_type: str) -> float | None:
     return float(TYPE_AGE_DAYS.get(page_type, DEFAULT_AGE_DAYS))
 
 
-def _decayed(base: float, delta_days: int, half_life: float | None) -> float:
+def decayed(base: float, delta_days: int, half_life: float | None) -> float:
     """What is left of a page's importance after that many days.
 
     A half-life halves: `0.5 ** (delta / h)`, not `exp(-delta / h)`, which is
@@ -439,7 +438,7 @@ def decay_score(slug: str, page_type: str = "concept",
     """
     base_map = {"high": 1.0, "medium": 0.7, "low": 0.4}
     base = base_map.get(confidence, 0.7)
-    half_life = _half_life_days(page_type)
+    half_life = half_life_days(page_type)
 
     stats = get_access_stats(slug)
     access_count = stats["total_count"]
@@ -447,7 +446,7 @@ def decay_score(slug: str, page_type: str = "concept",
 
     if last_accessed:
         try:
-            last_dt = datetime.fromisoformat(last_accessed.replace("Z", "+00:00"))
+            last_dt = datetime.fromisoformat(last_accessed)
             now = datetime.now(last_dt.tzinfo) if last_dt.tzinfo else datetime.now()
             delta_days = max(0, (now - last_dt).days)
         except (ValueError, TypeError):
@@ -458,7 +457,7 @@ def decay_score(slug: str, page_type: str = "concept",
     # Reinforcement from access.
     reinforcement = min(0.3, access_count * 0.05)
 
-    return round(min(1.0, _decayed(base, delta_days, half_life) + reinforcement), 4)
+    return round(min(1.0, decayed(base, delta_days, half_life) + reinforcement), 4)
 
 
 def main() -> int:
@@ -501,9 +500,9 @@ def _decay_command(args) -> int:
 
 
 def _print_telemetry_locations() -> None:
-    from retrieval_telemetry import TELEMETRY_DB
+    from retrieval_telemetry import telemetry_db
 
-    print(f"Durable telemetry: {TELEMETRY_DB}")
+    print(f"Durable telemetry: {telemetry_db()}")
     print("Use --flush for explicit bounded frontmatter promotion.")
 
 

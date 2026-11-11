@@ -11,22 +11,18 @@ from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
 
-import compile_memory
-import memory_state
+import compile_pipeline
 import pytest
+from llm_wiki import compile_pipeline_claims, compile_pipeline_selection, compile_pipeline_sources
 from markdown_transaction import MarkdownChange, MarkdownCoordinator
 from memory_state import load_state, update_state
 
-from tests.test_compile_transactions import (
-    _daily,
-    vault,  # noqa: F401 - the fixture is used by name
-)
+from tests.compile_transactions_helpers import _daily, vault  # noqa: F401
 
 
 @pytest.fixture
 def state_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(memory_state, "STATE_DIR", tmp_path / "run")
-    monkeypatch.setattr(memory_state, "STATE_FILE", tmp_path / "run/state.json")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
 
 
 def _quarantine_commit(root: Path, state_root: Path) -> tuple[MarkdownCoordinator, int]:
@@ -36,7 +32,7 @@ def _quarantine_commit(root: Path, state_root: Path) -> tuple[MarkdownCoordinato
     (root / "knowledge/inbox/claims").mkdir(parents=True, exist_ok=True)
     transaction = coordinator.prepare(
         [MarkdownChange.create(path, b"---\ntype: claim-candidate\n---\n")],
-        operation_id=compile_memory.QUARANTINE_OPERATION_PREFIX + "a" * 64,
+        operation_id=compile_pipeline_claims.QUARANTINE_OPERATION_PREFIX + "a" * 64,
         preconditions={path: "absent"},
     )
     coordinator.apply(transaction.id)
@@ -48,9 +44,9 @@ def _quarantine_commit(root: Path, state_root: Path) -> tuple[MarkdownCoordinato
 def test_a_batch_without_receipts_writes_nothing_to_the_mirror(vault, state_file) -> None:  # noqa: F811 - the fixture
     root, state_root = vault
     daily = _daily(root)
-    inputs = compile_memory.snapshot_compile_inputs([daily])
+    inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
 
-    digests = compile_memory._mirror_digests(SimpleNamespace(inputs=inputs), MarkdownCoordinator(root, state_root))
+    digests = compile_pipeline.mirror_digests(SimpleNamespace(inputs=inputs), MarkdownCoordinator(root, state_root))
 
     assert digests == {}
 
@@ -59,23 +55,23 @@ def test_a_day_an_old_quarantine_hid_is_offered_again(vault, state_file) -> None
     root, state_root = vault
     daily = _daily(root)
     coordinator, sequence = _quarantine_commit(root, state_root)
-    hidden = {daily.name: compile_memory.sha256_bytes(daily.read_bytes())}
+    hidden = {daily.name: compile_pipeline.sha256_bytes(daily.read_bytes())}
     commit = {daily.name: {"committed_at": "2026-09-02T08:13:40Z", "sequence": sequence}}
     update_state(lambda state: state.update({"compiled_daily_hashes": hidden, "compiled_daily_commits": commit}))
 
-    compile_memory._repair_compile_mirror(coordinator)
+    compile_pipeline_selection.repair_compile_mirror(coordinator)
 
     state = load_state()
     assert (state["compiled_daily_hashes"], state["compiled_daily_commits"]) == ({}, {})
-    assert compile_memory.select_dailies(Namespace(file=None), state, coordinator=coordinator) == [daily]
+    assert compile_pipeline_selection.select_dailies(Namespace(file=None), state, coordinator=coordinator) == [daily]
 
 
 def test_a_mirror_only_day_without_a_quarantine_behind_it_is_kept(vault, state_file) -> None:  # noqa: F811 - the fixture
     root, state_root = vault
     daily = _daily(root)
-    digest = compile_memory.sha256_bytes(daily.read_bytes())
+    digest = compile_pipeline.sha256_bytes(daily.read_bytes())
     update_state(lambda state: state.update({"compiled_daily_hashes": {daily.name: digest}}))
 
-    compile_memory._repair_compile_mirror(MarkdownCoordinator(root, state_root))
+    compile_pipeline_selection.repair_compile_mirror(MarkdownCoordinator(root, state_root))
 
     assert load_state()["compiled_daily_hashes"] == {daily.name: digest}

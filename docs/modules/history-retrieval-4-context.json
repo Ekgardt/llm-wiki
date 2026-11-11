@@ -1,0 +1,153 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/history-retrieval-4-context.json",
+    "docs/modules/history-retrieval-4.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "docs/research/2026-09-26-decisions-report-their-retrieval.md",
+    "docs/research/2026-09-26-the-tool-list-has-a-token-budget.md",
+    "docs/research/2026-09-27-a-context-answer-fits-the-budget-it-was-given.md",
+    "docs/research/2026-09-27-a-rerank-has-the-window-it-was-measured-to-need.md",
+    "docs/research/2026-09-27-an-answer-is-fresh-by-its-own-sources.md",
+    "docs/research/2026-09-29-context-delivery-reports-failure.md",
+    "docs/research/2026-09-29-the-caller-sets-the-context-budget.md",
+    "docs/research/2026-09-30-context-lists-use-the-existing-budget.md",
+    "docs/research/2026-09-30-prefixes-are-query-data.md",
+    "docs/research/2026-09-30-query-admission-uses-the-existing-deadline.md",
+    "docs/research/2026-09-30-reducer-cache-uses-the-state-byte-budget.md",
+    "docs/research/2026-09-30-repeated-evidence-search.md",
+    "docs/research/2026-09-30-traversal-stops-at-the-budget.md",
+    "docs/research/2026-10-02-an-answer-keeps-automatic-retrieval.md",
+    "docs/research/2026-10-02-blackboard-records-use-the-journal-budget.md",
+    "docs/research/2026-10-02-verified-claims-share-the-response-budget.md",
+    "docs/research/2026-10-03-a-code-answer-is-shaped-throughout-its-tree.md",
+    "docs/research/2026-10-03-an-unanswered-turn-remains-pending.md",
+    "docs/research/2026-10-03-historical-citations-reuse-source-boundaries.md",
+    "docs/research/2026-10-03-refused-history-is-not-a-retry-budget.md",
+    "docs/research/2026-10-03-selected-context-keeps-its-own-span.md",
+    "docs/research/2026-10-07-literal-evidence-search-stops-when-ambiguity-is-proved.md",
+    "docs/research/2026-10-07-the-critic-sees-selected-context-and-claim-meaning.md",
+    "docs/research/2026-10-08-ordinal-authority-search-avoids-table-scans.md",
+    "docs/research/2026-10-09-native-citation-output-ids-accompany-complete-lines.md",
+    "docs/research/2026-10-09-native-citations-use-the-existing-source-choice-protocol.md",
+    "docs/research/2026-10-09-repair-refresh-retains-the-reviewed-context.md",
+    "docs/research/2026-10-09-retrieval-tests-use-logical-paths-on-windows.md",
+    "docs/research/2026-10-13-a-host-budget-measures-ingestion-with-the-writer-ready.md",
+    "docs/research/2026-10-13-node-probe-relative-wait-keeps-its-budget.md",
+    "docs/research/2026-11-02-module-context-bootstrap.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/history-retrieval-4-context.json",
+      "docs/modules/history-retrieval-4.md",
+      "docs/research/2026-09-26-decisions-report-their-retrieval.md",
+      "docs/research/2026-09-26-the-tool-list-has-a-token-budget.md",
+      "docs/research/2026-09-27-a-context-answer-fits-the-budget-it-was-given.md",
+      "docs/research/2026-09-27-a-rerank-has-the-window-it-was-measured-to-need.md",
+      "docs/research/2026-09-27-an-answer-is-fresh-by-its-own-sources.md",
+      "docs/research/2026-09-29-context-delivery-reports-failure.md",
+      "docs/research/2026-09-29-the-caller-sets-the-context-budget.md",
+      "docs/research/2026-09-30-context-lists-use-the-existing-budget.md",
+      "docs/research/2026-09-30-prefixes-are-query-data.md",
+      "docs/research/2026-09-30-query-admission-uses-the-existing-deadline.md",
+      "docs/research/2026-09-30-reducer-cache-uses-the-state-byte-budget.md",
+      "docs/research/2026-09-30-repeated-evidence-search.md",
+      "docs/research/2026-09-30-traversal-stops-at-the-budget.md",
+      "docs/research/2026-10-02-an-answer-keeps-automatic-retrieval.md",
+      "docs/research/2026-10-02-blackboard-records-use-the-journal-budget.md",
+      "docs/research/2026-10-02-verified-claims-share-the-response-budget.md",
+      "docs/research/2026-10-03-a-code-answer-is-shaped-throughout-its-tree.md",
+      "docs/research/2026-10-03-an-unanswered-turn-remains-pending.md",
+      "docs/research/2026-10-03-historical-citations-reuse-source-boundaries.md",
+      "docs/research/2026-10-03-refused-history-is-not-a-retry-budget.md",
+      "docs/research/2026-10-03-selected-context-keeps-its-own-span.md",
+      "docs/research/2026-10-07-literal-evidence-search-stops-when-ambiguity-is-proved.md",
+      "docs/research/2026-10-07-the-critic-sees-selected-context-and-claim-meaning.md",
+      "docs/research/2026-10-08-ordinal-authority-search-avoids-table-scans.md",
+      "docs/research/2026-10-09-native-citation-output-ids-accompany-complete-lines.md",
+      "docs/research/2026-10-09-native-citations-use-the-existing-source-choice-protocol.md",
+      "docs/research/2026-10-09-repair-refresh-retains-the-reviewed-context.md",
+      "docs/research/2026-10-09-retrieval-tests-use-logical-paths-on-windows.md",
+      "docs/research/2026-10-13-a-host-budget-measures-ingestion-with-the-writer-ready.md",
+      "docs/research/2026-10-13-node-probe-relative-wait-keeps-its-budget.md",
+      "docs/research/2026-11-02-module-context-bootstrap.md"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/modules/cleanup_worktrees/test_git_refusal.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py"
+      ]
+    }
+  ]
+}

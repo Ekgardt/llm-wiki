@@ -8,11 +8,11 @@ docs/research/2026-09-25-a-weekly-pass-counts-what-failed.md.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import ModuleType
 
-import doctor
 import scheduled_weekly
+from llm_wiki import doctor_schedule
 
 
 class _Log(list):
@@ -32,16 +32,16 @@ def test_a_failing_tier_build_is_a_counted_failure(monkeypatch) -> None:
     broken.build_all_tiers = build_all_tiers
     monkeypatch.setitem(sys.modules, "build_tiers", broken)
 
-    assert scheduled_weekly._build_tiers(_Log()) == 1
+    assert scheduled_weekly.build_tiers(_Log()) == 1
 
 
 def test_a_stale_weekly_names_its_skip() -> None:
-    now = datetime(2026, 9, 25, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 25, tzinfo=UTC)
     state = {
         "last_weekly_at": (now - timedelta(days=10)).isoformat(),
         "last_weekly_skip": {"skipped_at": (now - timedelta(days=3)).isoformat(), "reason": "fence held"},
     }
 
-    status, message = doctor._weekly_verdict(state, now)
+    status, message = doctor_schedule.weekly_verdict(state, now)
 
     assert (status, "skipped" in message, "fence held" in message) == ("degraded", True, True)

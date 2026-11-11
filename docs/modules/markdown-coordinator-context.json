@@ -1,0 +1,233 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/markdown-coordinator-context.json",
+    "docs/modules/markdown-coordinator.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/markdown_coordinator.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/markdown-coordinator-context.json",
+      "docs/modules/markdown-coordinator.md",
+      "scripts/llm_wiki/markdown_coordinator.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_abort.py",
+      "names": [
+        "TransactionAbort"
+      ],
+      "contract_sha256": "82b47aaa177387b36976705e12f5ad65de1a108cff540c10ee885071b463d50d",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_busy_append_repeats_its_attempt.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_apply.py",
+      "names": [
+        "TransactionApplication"
+      ],
+      "contract_sha256": "ea11a0da128295320be7280bff838ab889cb81d7e2792d7097b3fd0def4f4d1e",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_busy_append_repeats_its_attempt.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_checkpoints.py",
+      "names": [
+        "ProjectCheckpointOperations"
+      ],
+      "contract_sha256": "2d9a8e8ae46e2d1eb74373b6c2579a872de1d61254925bb1f94a2debce6025a8",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_busy_append_repeats_its_attempt.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_coordinator_base.py",
+      "names": [
+        "MarkdownCoordinatorFoundation"
+      ],
+      "contract_sha256": "13444416043976782cd32d7fcaecc834591b6eab1d2d652510970f8af9e9247b",
+      "integration_tests": [
+        "tests/test_an_append_keeps_only_what_it_added.py",
+        "tests/test_sql_schema_names_are_identifiers.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_operations.py",
+      "names": [
+        "OperationExecution"
+      ],
+      "contract_sha256": "db34e84ad368b4fc5d92876c9678fee71bd21800d82b67218703f7fdce19845b",
+      "integration_tests": [
+        "tests/test_markdown_transaction.py",
+        "tests/test_windows_handles_keep_their_width_and_their_error.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_preconditions.py",
+      "names": [
+        "PreconditionChecks"
+      ],
+      "contract_sha256": "5785c3bc3a1123cb603e6df8e8dc1ea6acc09242210e9ad5724d36ef6d8cddc0",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_busy_append_repeats_its_attempt.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_prepare.py",
+      "names": [
+        "TransactionPreparation"
+      ],
+      "contract_sha256": "8abc26957279ec06ab6c361f5e3c7ba6a8e4e5db3b90d53712212afc797f0a27",
+      "integration_tests": [
+        "tests/test_a_refused_append_is_owed_its_delta.py",
+        "tests/test_a_refused_page_is_still_owed.py",
+        "tests/test_markdown_transaction.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_records_access.py",
+      "names": [
+        "TransactionRecordOperations"
+      ],
+      "contract_sha256": "8d744ddf100d6075441d4a53eab37ed42074ba1c433bd8edff7fd490c60f32ef",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_busy_append_repeats_its_attempt.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_recovery.py",
+      "names": [
+        "TransactionRecovery"
+      ],
+      "contract_sha256": "7ea6fffa4c257c68457708e84c0d173457a6303fb11543f7c0804ed9d20f8dd0",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_busy_append_repeats_its_attempt.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_targets.py",
+      "names": [
+        "TargetCaptureOperations"
+      ],
+      "contract_sha256": "d472e81c11a5508e92eb79efa95fc0497fc5080017e5054eee9c9318dcd58777",
+      "integration_tests": [
+        "tests/test_markdown_transaction.py",
+        "tests/test_markdown_transaction_recovery.py",
+        "tests/test_streamed_transaction_capture.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_undo.py",
+      "names": [
+        "TransactionUndoAndPrune"
+      ],
+      "contract_sha256": "672ad4ee1f51d22ed1a0c5ae47e6d2be202249893c3170aa205a3a315f0dbca4",
+      "integration_tests": [
+        "tests/test_a_new_operation_family_is_bounded_by_default.py",
+        "tests/test_a_prune_keeps_what_resolves_a_quarantine.py",
+        "tests/test_doctor_current_v4_exact_historical_work.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_writer_gate.py",
+      "names": [
+        "WriterGateOperations"
+      ],
+      "contract_sha256": "e88da4d4989942b7445e73fa60d7e3668d6fd297396126bbde2aeda0d7779301",
+      "integration_tests": [
+        "tests/test_a_failed_release_does_not_keep_the_gate.py",
+        "tests/test_compile_publication_writer_contention.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

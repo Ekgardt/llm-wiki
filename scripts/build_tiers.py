@@ -30,10 +30,15 @@ import unicodedata
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT, STATE_ROOT, atomic_write  # noqa: E402
+from llm_wiki import runtime_roots  # noqa: E402
+from memory_state import atomic_write  # noqa: E402
+from secret_redact import describe_error  # noqa: E402
 
-KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
-TIERS_DIR = STATE_ROOT / "cache" / "tiers"
+
+def tiers_dir() -> Path:
+    return runtime_roots.state_root() / "cache" / "tiers"
+
+
 SKIP_NAMES = {"index.md", "log.md", "README.md", "state.md", "context.md"}
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
@@ -75,7 +80,7 @@ def get_l0(slug: str) -> str:
     Reads from the page's 'One-sentence summary:' line.
     Falls back to first sentence of body or slug.
     """
-    page_path = KNOWLEDGE_DIR / f"{slug}.md"
+    page_path = runtime_roots.notes_dir() / f"{slug}.md"
     if not page_path.exists():
         return ""
     content = page_path.read_text(encoding="utf-8", errors="ignore")
@@ -172,7 +177,7 @@ def _require_generation_mode(generation_mode: str) -> None:
 def _unhashed_tier_path(safe_slug: str, generation_mode: str) -> Path:
     if generation_mode == "llm":
         raise ValueError("LLM cache identity requires source_sha256")
-    return TIERS_DIR / f"{safe_slug}.l1.md"
+    return tiers_dir() / f"{safe_slug}.l1.md"
 
 
 def tier_legacy_cache_path(
@@ -206,7 +211,7 @@ def tier_legacy_cache_path(
         separators=(",", ":"),
     ).encode("utf-8")
     suffix = hashlib.sha256(identity).hexdigest()[:20]
-    return TIERS_DIR / f"{safe_slug}.{suffix}.l1.md"
+    return tiers_dir() / f"{safe_slug}.{suffix}.l1.md"
 
 
 def _safe_cache_slug(value: str) -> str:
@@ -256,7 +261,7 @@ def _reserved_device_part(part: str) -> bool:
 
 def get_l2(slug: str) -> str:
     """Get L2 (full page content). Just reads the markdown file."""
-    page_path = KNOWLEDGE_DIR / f"{slug}.md"
+    page_path = runtime_roots.notes_dir() / f"{slug}.md"
     if not page_path.exists():
         return ""
     return page_path.read_text(encoding="utf-8", errors="ignore")
@@ -301,14 +306,14 @@ def generate_l1(
     When ``source_sha256`` is supplied, the cache file is hash-suffixed so
     stale overviews cannot survive a content change (Task 15 contract).
     """
-    page_path = KNOWLEDGE_DIR / f"{slug}.md"
+    page_path = runtime_roots.notes_dir() / f"{slug}.md"
     if not page_path.exists():
         return None
     content = page_path.read_text(encoding="utf-8", errors="ignore")
     body = FRONTMATTER_RE.sub("", content, count=1)
     l0 = get_l0(slug)
     if not use_llm or os_env_fake():
-        return _deterministic_l1(slug, body, l0)
+        return deterministic_l1(slug, body, l0)
     return _llm_l1(slug, body, l0)
 
 
@@ -317,7 +322,7 @@ def _llm_l1(slug: str, body: str, l0: str) -> str:
     try:
         from llm_client import call_llm
     except ImportError:
-        return _deterministic_l1(slug, body, l0)
+        return deterministic_l1(slug, body, l0)
     prompt = f"""Summarize this knowledge page into a structured overview.
 Keep it under 500 words. Include:
 - Key points (bulleted)
@@ -332,7 +337,7 @@ Return ONLY the overview markdown (no title, no commentary).
 """
     result = call_llm(prompt, "You are a knowledge summarizer.", max_tokens=1000)
     if not result or not result.strip():
-        return _deterministic_l1(slug, body, l0)
+        return deterministic_l1(slug, body, l0)
     return result.strip()
 
 
@@ -355,7 +360,7 @@ def write_l1(
     return target
 
 
-def _deterministic_l1(slug: str, body: str, l0: str) -> str:
+def deterministic_l1(slug: str, body: str, l0: str) -> str:
     """Generate L1 without LLM — extract first sections."""
     overview_lines = [l0, ""]
     char_count = len(l0)
@@ -409,8 +414,8 @@ def build_all_tiers(use_llm: bool = False, verbose: bool = True) -> dict:
             "LLM generation requires an explicit model descriptor and revision; "
             "legacy tier batch generation is unavailable"
         )
-    TIERS_DIR.mkdir(parents=True, exist_ok=True)
-    if not KNOWLEDGE_DIR.exists():
+    tiers_dir().mkdir(parents=True, exist_ok=True)
+    if not runtime_roots.notes_dir().exists():
         return {"generated": 0, "skipped": 0, "errors": 0}
     return _build_page_tiers(verbose)
 
@@ -418,10 +423,10 @@ def build_all_tiers(use_llm: bool = False, verbose: bool = True) -> dict:
 def _build_page_tiers(verbose: bool) -> dict:
     stats = {"generated": 0, "skipped": 0, "errors": 0}
     current: set[Path] = set()
-    for md in sorted(KNOWLEDGE_DIR.rglob("*.md")):
+    for md in sorted(runtime_roots.notes_dir().rglob("*.md")):
         if md.name in SKIP_NAMES or "archive" in md.parts:
             continue
-        stats[_build_page_tier(md, verbose, current)] += 1
+        stats[build_page_tier(md, verbose, current)] += 1
     _prune_unreferenced_l1(current)
     if verbose:
         print(f"\nL1 tier generation: {stats['generated']} generated, "
@@ -439,7 +444,7 @@ def _prune_unreferenced_l1(current: set[Path]) -> None:
     disposable and its only reader asks for the current hash, so what the pass
     did not name is residue.
     """
-    for path in TIERS_DIR.glob("*.l1.md"):
+    for path in tiers_dir().glob("*.l1.md"):
         _remove_stale_l1(path, current)
 
 
@@ -452,7 +457,7 @@ def _remove_stale_l1(path: Path, current: set[Path]) -> None:
         pass
 
 
-def _build_page_tier(md: Path, verbose: bool, current: set[Path]) -> str:
+def build_page_tier(md: Path, verbose: bool, current: set[Path]) -> str:
     """The stats bucket of one page: generated, skipped or errors."""
     # One page that is not UTF-8, or whose name is unsafe (`aux.md`, `a:b.md`), is
     # that page's error, not the whole weekly run's. See
@@ -460,8 +465,8 @@ def _build_page_tier(md: Path, verbose: bool, current: set[Path]) -> str:
     try:
         captured = md.read_bytes()
         content = captured.decode("utf-8", errors="strict")
-    except (OSError, UnicodeDecodeError):
-        return "errors"
+    except (OSError, UnicodeDecodeError) as exc:
+        return _page_error(md, exc)
     if "status: superseded" in content or "status: archived" in content:
         return "skipped"
     return _refresh_page_tier(md, captured, content, verbose, current)
@@ -472,7 +477,7 @@ def _refresh_page_tier(
 ) -> str:
     slug = md.stem
     source_sha256 = hashlib.sha256(captured).hexdigest()
-    logical_path = md.relative_to(KNOWLEDGE_DIR).as_posix()
+    logical_path = md.relative_to(runtime_roots.notes_dir()).as_posix()
     try:
         current.add(
             tier_legacy_cache_path(
@@ -483,8 +488,8 @@ def _refresh_page_tier(
             return "skipped"
         _write_page_l1(slug, content, source_sha256, logical_path)
         _announce_generated(slug, verbose)
-    except Exception:  # noqa: BLE001 - one page's failure is counted, the run goes on
-        return "errors"
+    except Exception as exc:  # noqa: BLE001 - one page's failure is counted, the run goes on
+        return _page_error(md, exc)
     return "generated"
 
 
@@ -494,10 +499,16 @@ def _write_page_l1(slug: str, content: str, source_sha256: str, logical_path: st
     l0 = summary_match.group(1).strip() if summary_match else slug.replace("-", " ")
     write_l1(
         slug,
-        _deterministic_l1(slug, body, l0),
+        deterministic_l1(slug, body, l0),
         source_sha256=source_sha256,
         logical_path=logical_path,
     )
+
+
+def _page_error(md: Path, exc: Exception) -> str:
+    """Count one page's failure, and say which page and why: a count alone let nobody act."""
+    print(f"  L1 failed for {md.name}: {describe_error(exc)}", file=sys.stderr)
+    return "errors"
 
 
 def _announce_generated(slug: str, verbose: bool) -> None:
@@ -575,20 +586,20 @@ def _argument_parser():
 
 
 def _print_status(args) -> int:
-    if not TIERS_DIR.exists():
+    if not tiers_dir().exists():
         print("No L1 cache. Run --all to generate.")
         return 0
-    l1_files = list(TIERS_DIR.glob("*.l1.md"))
+    l1_files = list(tiers_dir().glob("*.l1.md"))
     print(f"L1 cache: {len(l1_files)} / {_tier_page_count()} pages")
     return 0
 
 
 def _tier_page_count() -> int:
-    if not KNOWLEDGE_DIR.exists():
+    if not runtime_roots.notes_dir().exists():
         return 0
     return sum(
         1
-        for page in KNOWLEDGE_DIR.rglob("*.md")
+        for page in runtime_roots.notes_dir().rglob("*.md")
         if page.name not in SKIP_NAMES and "archive" not in page.parts
     )
 

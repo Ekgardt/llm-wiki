@@ -15,10 +15,9 @@ import maintenance_helpers
 
 
 def test_a_month_of_artifacts_is_kept(tmp_path: Path, monkeypatch) -> None:
-    artifacts = tmp_path / "maintenance"
-    artifacts.mkdir()
-    monkeypatch.setattr(maintenance_helpers, "REPORTS_DIR", tmp_path)
-    monkeypatch.setattr(maintenance_helpers, "ARTIFACT_DIR", artifacts)
+    artifacts = tmp_path / "logs" / "maintenance"
+    artifacts.mkdir(parents=True)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     now = time.time()
     for index in range(29 * 30):
         path = artifacts / f"step-{index:04d}.out.log"

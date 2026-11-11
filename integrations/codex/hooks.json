@@ -45,8 +45,7 @@
           {
             "type": "command",
             "command": "uv run --locked --no-sync --directory \"$LLM_WIKI_ROOT\" python \"$LLM_WIKI_ROOT/scripts/integration_adapter.py\" --source codex --event user_prompt",
-            "commandWindows": "uv run --locked --no-sync --directory \"%LLM_WIKI_ROOT%\" python \"%LLM_WIKI_ROOT%\\scripts\\integration_adapter.py\" --source codex --event user_prompt",
-            "timeout": 5
+            "commandWindows": "uv run --locked --no-sync --directory \"%LLM_WIKI_ROOT%\" python \"%LLM_WIKI_ROOT%\\scripts\\integration_adapter.py\" --source codex --event user_prompt"
           }
         ]
       }
@@ -69,8 +68,7 @@
           {
             "type": "command",
             "command": "uv run --locked --no-sync --directory \"$LLM_WIKI_ROOT\" python \"$LLM_WIKI_ROOT/scripts/integration_adapter.py\" --source codex --event post_tool_use",
-            "commandWindows": "uv run --locked --no-sync --directory \"%LLM_WIKI_ROOT%\" python \"%LLM_WIKI_ROOT%\\scripts\\integration_adapter.py\" --source codex --event post_tool_use",
-            "timeout": 5
+            "commandWindows": "uv run --locked --no-sync --directory \"%LLM_WIKI_ROOT%\" python \"%LLM_WIKI_ROOT%\\scripts\\integration_adapter.py\" --source codex --event post_tool_use"
           }
         ]
       }

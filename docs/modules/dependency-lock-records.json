@@ -1,0 +1,43 @@
+{
+  "schema": "module-records/v1",
+  "source": "uv.lock",
+  "bytes": 291840,
+  "sha256": "7a0c178f72c7f90606c48cfaf83ff14528e4157fca0f66ffc7550cef0b82a02c",
+  "records": [
+    {
+      "id": "part-1",
+      "label": "version = 1",
+      "start": 0,
+      "end": 64978,
+      "sha256": "dc77b63c57afccb4f3f33ae36781c7cd01dee33b1c699b8c1d5d0824adb4aa86"
+    },
+    {
+      "id": "part-2",
+      "label": "[[package]]",
+      "start": 64978,
+      "end": 129946,
+      "sha256": "505ecc02ca1e04a996cad321d53f0629aeb7b67dd0cf71a47c385044eba9c08e"
+    },
+    {
+      "id": "part-3",
+      "label": "[[package]]",
+      "start": 129946,
+      "end": 190767,
+      "sha256": "845c73d8200914484525bab8651e634578edafc9c64a3546ba1f6a3345c096e8"
+    },
+    {
+      "id": "part-4",
+      "label": "[[package]]",
+      "start": 190767,
+      "end": 255006,
+      "sha256": "dfd942cecf5400e880008f81b51380da959876d15e2c75bd9d02e0fbdd2ba054"
+    },
+    {
+      "id": "part-5",
+      "label": "[[package]]",
+      "start": 255006,
+      "end": 291840,
+      "sha256": "74959cebb6c9d9a3eb288b1fea5337d8b78b78bacf0a5bef0ceaecfcfbc7d1a5"
+    }
+  ]
+}

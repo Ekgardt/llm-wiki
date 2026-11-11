@@ -46,7 +46,7 @@ def test_a_knowledge_question_reads_code_root_sources_as_commentary():
 def test_a_code_question_leaves_code_and_docs_exactly_where_they_were():
     """Today's weights, unchanged: the prior is off, so nothing is demoted."""
     for question in (
-        "what does scripts/retrieval.py::_weigh_by_trust do",
+        "what does scripts/retrieval.py::weigh_by_trust do",
         "who calls fuse_rrf",
         "покажи структуру проекта",
     ):
@@ -59,23 +59,6 @@ def test_a_code_question_leaves_code_and_docs_exactly_where_they_were():
         assert _weight("decision", KNOWLEDGE_PAGE, question=question) == (
             provenance.TYPE_WEIGHTS["decision"]
         )
-
-
-def test_the_prior_is_only_ever_turned_off_by_a_positive_reading():
-    """An unreadable or absent intent list keeps the vault's own rule."""
-    assert provenance.curated_pages_first(()) is True
-    assert provenance.curated_pages_first(None) is True
-    assert provenance.curated_pages_first(("question", "cross_language")) is True
-    assert provenance.curated_pages_first(("exact_identifier",)) is False
-
-
-def test_living_under_a_code_root_never_lifts_a_page():
-    """Raw evidence stays at its own weight; the rule only ever demotes."""
-    raw = provenance.source_type_weight(
-        "raw-source", "docs/notes/transcript.md", curated_first=True
-    )
-    assert raw == provenance.TYPE_WEIGHTS["raw-source"]
-    assert raw < provenance.TYPE_WEIGHTS["doc"]
 
 
 _ROWS = (

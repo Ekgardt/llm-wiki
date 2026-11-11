@@ -15,8 +15,8 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-import install_control  # noqa: E402
 import installer_config  # noqa: E402
+from llm_wiki import install_scheduler_render  # noqa: E402
 
 
 def _cron_assignments(tmp_path: Path) -> dict[str, str]:
@@ -44,7 +44,7 @@ def test_the_cron_line_carries_the_path_and_the_provider(tmp_path, monkeypatch):
 
 
 def test_the_launch_agent_carries_the_path(tmp_path):
-    definitions = install_control.render_launchd_definitions(tmp_path / "vault", tmp_path / "state", tmp_path / "bin/uv")
+    definitions = install_scheduler_render.render_launchd_definitions(tmp_path / "vault", tmp_path / "state", tmp_path / "bin/uv")
     nightly = plistlib.loads(definitions["io.github.ekgardt.llm-wiki.nightly.plist"])
 
     assert nightly["EnvironmentVariables"]["PATH"] == f"{(tmp_path / 'bin').resolve()}:/usr/bin:/bin:/usr/sbin:/sbin"

@@ -17,8 +17,8 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import fact_keys  # noqa: E402
-import memory_state  # noqa: E402
 import retrieval  # noqa: E402
+from llm_wiki import runtime_roots  # noqa: E402
 
 DAY_ONE = "knowledge/daily/2023-05-20.md"
 DAY_TWO = "knowledge/daily/2023-05-22.md"
@@ -54,7 +54,7 @@ def _meta(pool: list[tuple[retrieval.RetrievalCandidate, dict]]) -> dict[str, di
 
 
 def _window(pool, query: str, limit: int) -> list[str]:
-    ordered = retrieval._cover_then_fill([chunk for chunk, _ in pool], _meta(pool), query, limit)
+    ordered = retrieval.cover_then_fill([chunk for chunk, _ in pool], _meta(pool), query, limit)
     return [item.candidate_id for item in ordered[:limit]]
 
 
@@ -91,7 +91,7 @@ def test_a_count_admits_every_source_that_mentions_the_kind() -> None:
 def test_a_fact_key_lets_a_turn_cover_what_its_text_does_not() -> None:
     """The store says the turn states a needle; its own words do not."""
     span = "cover-" + uuid.uuid4().hex
-    store = fact_keys.KeyStore(fact_keys.store_path(memory_state.STATE_ROOT))
+    store = fact_keys.KeyStore(fact_keys.store_path(runtime_roots.state_root()))
     try:
         store.add(fact_keys.Turn(DAY_TWO, 0, 10, span, "sewing kit"), ["the person bought a needle"])
     finally:
@@ -149,6 +149,6 @@ def test_more_admitted_than_can_be_displaced_leaves_the_lane_last_outside() -> N
         _turn(DAY_TWO, 0, "beta"), _turn(DAY_FAR, 0, "gamma"),
     ]
 
-    ordered = retrieval._cover_then_fill([c for c, _ in pool], _meta(pool), "alpha beta gamma", 2)
+    ordered = retrieval.cover_then_fill([c for c, _ in pool], _meta(pool), "alpha beta gamma", 2)
 
     assert [item.relative_path for item in ordered] == [DAY_ONE, DAY_TWO, DAY_ONE, DAY_FAR]

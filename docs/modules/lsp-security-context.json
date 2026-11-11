@@ -1,0 +1,165 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/lsp-security-context.json",
+    "docs/modules/lsp-security.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/lsp_security.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/lsp-security-context.json",
+      "docs/modules/lsp-security.md",
+      "scripts/lsp_security.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "IO_CHUNK_BYTES"
+      ],
+      "contract_sha256": "832f143c7663b746e254455c650afd8b3ccb426152369aa1345298267ee40739",
+      "integration_tests": [
+        "tests/compile_streamed_archive_batches_helpers.py",
+        "tests/test_a_file_being_written_is_a_changed_corpus_on_every_system.py",
+        "tests/test_compile_archive_json_views.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_credentials.py",
+      "names": [
+        "redact_assignments",
+        "redact_private_key_blocks",
+        "redact_standalone_secrets",
+        "redact_url_userinfo"
+      ],
+      "contract_sha256": "e1d8c2769fbb42786bd0456eae36e6d1f8409f9f94fd9f2a8f1eafff99a69d6d",
+      "integration_tests": [
+        "tests/test_module_legacy_aliases.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_text.py",
+      "names": [
+        "is_control",
+        "normalize_log_text"
+      ],
+      "contract_sha256": "60b7f65181c2062433a12a054172e654cbbe0a87bf6804f2066d35f84b39564d",
+      "integration_tests": [
+        "tests/modules/lsp_text/test_text.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_positions.py",
+      "names": [
+        "file_uri_to_path",
+        "path_to_file_uri"
+      ],
+      "contract_sha256": "198c662a38fc95b16a3e3d063f714c1d12764c08996ec2aed70ac74cc820d2a4",
+      "integration_tests": [
+        "tests/pyright_session_helpers.py",
+        "tests/test_a_position_names_its_units.py",
+        "tests/test_code_navigation.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "RepositoryScope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "326d40aac35c4481e07bbe2e6113f897bd139f95b4b8c69e1245517167ef96a6",
+      "integration_tests": [
+        "tests/code_graph_helpers.py",
+        "tests/code_navigation_helpers.py",
+        "tests/pyright_session_helpers.py"
+      ]
+    },
+    {
+      "provider": "scripts/windows_workspace.py",
+      "names": [
+        "WindowsEntry",
+        "close_handle",
+        "file_modified_time_ns",
+        "file_size",
+        "get_short_path",
+        "identity",
+        "list_directory",
+        "open_directory",
+        "open_directory_path",
+        "open_shared_readonly_source_file",
+        "read_chunks",
+        "seek_start"
+      ],
+      "contract_sha256": "ffd6080a96af40f519622b225d9423db72d140b920f561521028e9dc324c62f0",
+      "integration_tests": [
+        "tests/test_doctor.py",
+        "tests/test_lsp_security.py",
+        "tests/test_reliable_memory.py"
+      ]
+    }
+  ]
+}

@@ -15,6 +15,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from code_hints import (
+    qualified_name,
+)
+
 DEFAULT_KINDS = ("class", "function", "method")
 # Largest row count a symbol search accepts; `graph_query` accepts 200.
 MAX_LIMIT = 100
@@ -22,17 +26,10 @@ MAX_LIMIT = 100
 DEFAULT_LIMIT = 10
 
 
-def _qualified_name(row: dict) -> str:
-    metadata = row["metadata"]
-    owner = str(metadata.get("owner", ""))
-    name = str(metadata.get("name", row["identity_key"]))
-    return f"{owner}.{name}" if owner else name
-
-
 def _located_row(row: dict, location: dict | None) -> dict:
     found = location or {}
     return {
-        "qualified_name": _qualified_name(row),
+        "qualified_name": qualified_name(row),
         "name": row["metadata"].get("name"),
         "kind": row["kind"],
         "path": found.get("relative_path", row["metadata"].get("path")),
@@ -83,9 +80,9 @@ def search_symbols(
     deadline: float,
 ) -> dict:
     """Ranked qualified names matching `pattern`, or a named refusal."""
-    from code_graph import _active_evidence_graph
+    from llm_wiki.code_graph_generation import active_evidence_graph
 
-    graph = _active_evidence_graph(directory)
+    graph = active_evidence_graph(directory)
     if graph is None:
         return {"pattern": pattern, "results": [], "graph": "no_active_generation"}
     try:

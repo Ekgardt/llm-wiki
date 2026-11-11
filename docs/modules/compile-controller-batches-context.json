@@ -1,0 +1,225 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/compile-controller-batches-context.json",
+    "docs/modules/compile-controller-batches.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/compile_controller_batches.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-controller-batches-context.json",
+      "docs/modules/compile-controller-batches.md",
+      "scripts/llm_wiki/compile_controller_batches.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_pipeline.py",
+      "names": [
+        "record_failed_batch"
+      ],
+      "contract_sha256": "c356c0815f644f1c475858bcb8ca2f2ba9a6af90d48ba8006b0bffc4eb802b67",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_discarded_receipt_reopens_its_day.py",
+        "tests/test_a_failure_of_content_that_is_gone_is_retired.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_progress.py",
+      "names": [
+        "CompileEvent",
+        "ProgressConflict"
+      ],
+      "contract_sha256": "c5e0c2129bb8b34a9793ea2acacdf3ee87acd3edb157044ea87400620ae56f93",
+      "integration_tests": [
+        "tests/test_compile_archive_json_views.py",
+        "tests/test_compile_artifact_retention.py",
+        "tests/test_compile_atomic_capture.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "require_compile_active"
+      ],
+      "contract_sha256": "03c407a06cce6f2ea6877c77de8a2f8586821d3f82760d9c7c7b7e508515dba4",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_derived_field_is_derived_again.py",
+        "tests/test_a_journal_is_readable_by_every_reader.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_call_runtime.py",
+      "names": [
+        "CompileDelivery",
+        "ProviderOutcomeUnknown"
+      ],
+      "contract_sha256": "77d202f40f58614e31d161b7d61583ac99e55c606b578526c5ba55fa7d64cc6d",
+      "integration_tests": [
+        "tests/modules/compile_call_runtime/test_lifecycle.py",
+        "tests/test_compile_call_controller.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_batch_admission.py",
+      "names": [
+        "batch_context_event",
+        "capture_current_compile_context",
+        "context_event_binding",
+        "read_bound_batch_context",
+        "save_compile_batch_context",
+        "validate_context_view"
+      ],
+      "contract_sha256": "6e904d8b1fe2dab6c3897aeb57b20f1ebc3854fadaccd22e6819fdfd8e41eeb6",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py",
+        "tests/test_answer_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_capture.py",
+      "names": [
+        "require_capture_event_identity"
+      ],
+      "contract_sha256": "cd7c5f288dd04aa5886ab6ca038e4c60b778b12c6282ba512913c23ff6d4bdf3",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_durable_stream_capture.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_publication.py",
+      "names": [
+        "check_batch_context_owner",
+        "compile_work_cursor",
+        "confirm_compile_publication",
+        "require_publication_coordinator"
+      ],
+      "contract_sha256": "6d6a3258c2e1c639ac0819ddd5effb8697e403dd5aac007a78b0891b055a3ba4",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py",
+        "tests/test_answer_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_reader.py",
+      "names": [
+        "open_compile_inputs"
+      ],
+      "contract_sha256": "a57514f05ff52ca4b7b39d9bcf619dd3cbbdb3f5bc0f7b4b10f99c2bfb37894a",
+      "integration_tests": [
+        "tests/test_compile_streamed_archive_batches.py",
+        "tests/test_compile_verified_original_ranges.py",
+        "tests/test_evidence_verified_ranges.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_repair.py",
+      "names": [
+        "RepairCompileBatch",
+        "begin_compile_repair_batch",
+        "confirm_compile_repair",
+        "execute_context_compile_batch",
+        "read_compile_repair"
+      ],
+      "contract_sha256": "6e42f114c66cd67f0d93bfa32201ebf2f4023b7dde1f48890636174d7a004767",
+      "integration_tests": [
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_retained_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_batches.py",
+      "names": [
+        "CompilePlanUnavailable",
+        "CompileRepairCapacityError",
+        "refresh_compile_batch_from_context"
+      ],
+      "contract_sha256": "7c16578a5543a1c144d820a1ce20aa759f8d9abdbf62ad203ba7988b39b6b4e8",
+      "integration_tests": [
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py",
+        "tests/test_a_long_entry_is_cut_inside_itself.py",
+        "tests/test_archive_daily_bagit.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

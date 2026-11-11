@@ -44,13 +44,13 @@ class _Locking:
 @pytest.fixture
 def trail(tmp_path, monkeypatch) -> Path:
     path = tmp_path / "logs" / "capture-failures.jsonl"
-    monkeypatch.setattr(capture_diagnostics, "FAILURE_LOG", path)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     return path
 
 
 def _append_with(locking: _Locking, monkeypatch) -> bool:
-    monkeypatch.setattr(capture_diagnostics, "_append_locking", lambda: locking)
-    return capture_diagnostics._append_failure_line({"reason": "second"})
+    monkeypatch.setattr(capture_diagnostics, "append_locking", lambda: locking)
+    return capture_diagnostics.append_failure_line({"reason": "second"})
 
 
 def test_the_line_is_written_between_the_lock_and_the_unlock(trail, monkeypatch):
@@ -86,7 +86,7 @@ def test_a_lock_that_frees_up_is_waited_for(trail):
     pauses: list[float] = []
     descriptor = os.open(trail, APPEND_FLAGS)
     try:
-        written = capture_diagnostics._write_trail_line(descriptor, b"x\n", locking, pauses.append)
+        written = capture_diagnostics.write_trail_line(descriptor, b"x\n", locking, pauses.append)
     finally:
         os.close(descriptor)
 
@@ -105,7 +105,7 @@ def test_a_lock_that_never_frees_up_is_given_up_without_writing_or_raising(trail
     pauses: list[float] = []
     descriptor = os.open(trail, APPEND_FLAGS)
     try:
-        written = capture_diagnostics._write_trail_line(descriptor, b"x\n", locking, pauses.append)
+        written = capture_diagnostics.write_trail_line(descriptor, b"x\n", locking, pauses.append)
     finally:
         os.close(descriptor)
 
@@ -130,6 +130,44 @@ def test_the_whole_wait_fits_well_inside_a_hook_budget():
 
 
 def test_where_append_is_atomic_there_is_no_lock_at_all():
-    locking = capture_diagnostics._append_locking()
+    locking = capture_diagnostics.append_locking()
 
     assert (locking is None) == (os.name != "nt")
+
+
+@pytest.mark.parametrize("with_byte_lock", [False, True])
+def test_short_writes_complete_one_utf8_record(trail, monkeypatch, with_byte_lock):
+    trail.parent.mkdir()
+    trail.write_bytes(b'{"reason":"existing"}\n')
+    locking = _Locking(trail) if with_byte_lock else None
+    monkeypatch.setattr(capture_diagnostics, "append_locking", lambda: locking)
+    real_write = os.write
+
+    def short_write(descriptor, data):
+        assert capture_diagnostics.owns_trail_lock()
+        return real_write(descriptor, data[:1])
+
+    monkeypatch.setattr(os, "write", short_write)
+    record = {"reason": "ошибка записи"}
+    assert capture_diagnostics.append_failure_line(record)
+    assert [json.loads(line) for line in trail.read_bytes().splitlines()] == [
+        {"reason": "existing"}, record,
+    ]
+    if with_byte_lock:
+        assert [event[0] for event in locking.events] == ["lock", "unlock"]
+        assert locking.events[-1][-1] == trail.stat().st_size
+
+
+@pytest.mark.parametrize("with_byte_lock", [False, True])
+def test_no_write_progress_is_reported_as_failure(trail, monkeypatch, with_byte_lock):
+    trail.parent.mkdir()
+    trail.write_bytes(b'{"reason":"existing"}\n')
+    before = trail.read_bytes()
+    locking = _Locking(trail) if with_byte_lock else None
+    monkeypatch.setattr(capture_diagnostics, "append_locking", lambda: locking)
+    monkeypatch.setattr(os, "write", lambda *_args: 0)
+    assert not capture_diagnostics.append_failure_line({"reason": "new"})
+    assert trail.read_bytes() == before
+    assert not capture_diagnostics.owns_trail_lock()
+    if with_byte_lock:
+        assert [event[0] for event in locking.events] == ["lock", "unlock"]

@@ -12,12 +12,10 @@ import ast
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
+from tests.script_sources import script_files
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -50,7 +48,7 @@ def _local_modules() -> set[str]:
 
 
 def _third_party_imports() -> set[str]:
-    everything = set().union(*map(_top_level_modules, SCRIPTS.glob("*.py")))
+    everything = set().union(*map(_top_level_modules, script_files()))
     return everything - (sys.stdlib_module_names | _local_modules() | {"__future__"})
 
 

@@ -46,7 +46,7 @@ def _top3(values: list[float]) -> list[int]:
 def test_the_default_is_int8_on_the_linear_layers(monkeypatch):
     monkeypatch.delenv(reranker.PRECISION_ENV, raising=False)
 
-    model, precision = reranker._cpu_precision(_Tiny().eval())
+    model, precision = reranker.cpu_precision(_Tiny().eval())
 
     assert precision == reranker.INT8_DYNAMIC
     assert _is_quantized(model)
@@ -56,7 +56,7 @@ def test_fp32_by_name_keeps_the_model_as_loaded(monkeypatch):
     monkeypatch.setenv(reranker.PRECISION_ENV, "FP32")
     original = _Tiny().eval()
 
-    model, precision = reranker._cpu_precision(original)
+    model, precision = reranker.cpu_precision(original)
 
     assert model is original
     assert precision == reranker.FP32
@@ -72,7 +72,7 @@ def test_a_fake_model_that_is_not_a_module_is_left_alone(monkeypatch):
     monkeypatch.delenv(reranker.PRECISION_ENV, raising=False)
     fake = object()
 
-    model, precision = reranker._cpu_precision(fake)
+    model, precision = reranker.cpu_precision(fake)
 
     assert model is fake
     assert precision == reranker.FP32
@@ -86,7 +86,7 @@ def test_a_quantized_model_still_scores_the_same_order(monkeypatch):
     with torch.inference_mode():
         before = original(x).view(-1).tolist()
 
-    quantized, _ = reranker._cpu_precision(original)
+    quantized, _ = reranker.cpu_precision(original)
 
     with torch.inference_mode():
         after = quantized(x).view(-1).tolist()
@@ -97,6 +97,6 @@ def test_quantisation_happens_in_place_so_no_second_copy_of_the_weights_exists(m
     monkeypatch.delenv(reranker.PRECISION_ENV, raising=False)
     original = _Tiny().eval()
 
-    quantized, _ = reranker._cpu_precision(original)
+    quantized, _ = reranker.cpu_precision(original)
 
     assert quantized is original

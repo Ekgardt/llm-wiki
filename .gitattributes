@@ -29,3 +29,6 @@ uv.lock    -text
 *.webp     binary
 *.pdf      binary
 *.zip      binary
+
+# Vendored tokenizer vocabularies are verified by SHA-256; never rewrite their line endings
+tests/data/tiktoken/* -text

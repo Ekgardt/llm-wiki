@@ -13,12 +13,17 @@ import sys
 import time
 from pathlib import Path
 
-from sync_memory import _run_process_tree
+from llm_wiki import runtime_roots
+from process_tree import run_process_tree
+from secret_redact import redact_secrets
 
 # Default wall-clock budget for one installer smoke run; distinct from the corpus collector's.
 DEFAULT_DEADLINE_SECONDS = 120.0
 MAX_CHILD_BYTES = 4 * 1024 * 1024
 MAX_ERROR_BYTES = 512
+# The end of doctor's stderr quoted in a failure: what fits in MAX_ERROR_BYTES after the
+# fixed text before it (about 90 bytes), so the cause is not cut off by the bound.
+STDERR_TAIL_CHARS = 400
 EXPECTED_TOOL_NAMES = (
     "recall",
     "read_page",
@@ -52,16 +57,13 @@ class SmokeFailure(RuntimeError):
     """
 
 
-def _production_imports() -> dict[str, bool]:
+def production_imports() -> dict[str, bool]:
     """Import the packages required by the installed production profile."""
     importlib.import_module("mcp")
     mcp_server = importlib.import_module("mcp_server")
     if not bool(getattr(mcp_server, "MCP_AVAILABLE", False)):
         raise SmokeFailure("MCP server capability is unavailable")
     result = {"mcp": True, "mcp_server": True}
-    if sys.version_info < (3, 11):
-        importlib.import_module("tomli")
-        result["tomli"] = True
     return result
 
 
@@ -89,14 +91,14 @@ def _validate_doctor_report(value: object) -> dict[str, object]:
     return value
 
 
-def _doctor_report(root: Path, state_root: Path, timeout: float) -> dict[str, object]:
+def doctor_report(root: Path, state_root: Path, timeout: float) -> dict[str, object]:
     environment = os.environ.copy()
     environment.update(
         LLM_WIKI_ROOT=str(root),
         LLM_WIKI_STATE_ROOT=str(state_root),
     )
     command = [sys.executable, str(root / "scripts" / "doctor.py"), "--json"]
-    completed = _run_process_tree(
+    completed = run_process_tree(
         command,
         cwd=root,
         env=environment,
@@ -105,14 +107,14 @@ def _doctor_report(root: Path, state_root: Path, timeout: float) -> dict[str, ob
         capture_output=True,
         text=True,
     )
-    return _checked_doctor_report(completed)
+    return checked_doctor_report(completed)
 
 
-def _checked_doctor_report(completed: subprocess.CompletedProcess) -> dict[str, object]:
+def checked_doctor_report(completed: subprocess.CompletedProcess) -> dict[str, object]:
     """The report, read before the exit code: an `error` exits 2 and must be named."""
-    report = _validate_doctor_report(_parsed_doctor_output(completed.stdout))
+    report = _validate_doctor_report(_parsed_doctor_output(completed))
     if _install_is_broken(report):
-        raise SmokeFailure(_doctor_error_message(report))
+        raise SmokeFailure(doctor_error_message(report))
     if completed.returncode != _EXPECTED_EXIT[report["overall_status"]]:
         raise SmokeFailure("Doctor failed during install smoke")
     return report
@@ -130,7 +132,7 @@ def _install_is_broken(report: dict) -> bool:
     return not failing or bool(INSTALL_OWNED_CHECKS.intersection(failing))
 
 
-def _doctor_error_message(report: dict) -> str:
+def doctor_error_message(report: dict) -> str:
     failing = _failing_checks(report)
     return (
         "Doctor reported error in: "
@@ -139,14 +141,20 @@ def _doctor_error_message(report: dict) -> str:
     )
 
 
-def _parsed_doctor_output(stdout: str) -> object:
-    encoded = stdout.encode("utf-8", errors="replace")
+def _parsed_doctor_output(completed: subprocess.CompletedProcess) -> object:
+    encoded = completed.stdout.encode("utf-8", errors="replace")
     if len(encoded) > MAX_CHILD_BYTES:
         raise SmokeFailure("Doctor output exceeded the install smoke bound")
     try:
-        return json.loads(stdout)
+        return json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
-        raise SmokeFailure("Doctor did not return valid JSON") from exc
+        raise SmokeFailure(f"Doctor did not return valid JSON ({doctor_reply_cause(completed)})") from exc
+
+
+def doctor_reply_cause(completed: subprocess.CompletedProcess) -> str:
+    """What doctor gave instead of a report: its exit code and the end of its stderr."""
+    tail = redact_secrets(completed.stderr or "").strip()[-STDERR_TAIL_CHARS:]
+    return f"exit {completed.returncode}; stderr: {tail or '(empty)'}"
 
 
 async def _mcp_tools(root: Path, state_root: Path, timeout: float) -> tuple[str, ...]:
@@ -173,7 +181,7 @@ async def _mcp_tools(root: Path, state_root: Path, timeout: float) -> tuple[str,
                 return tuple(tool.name for tool in result.tools)
 
 
-def _mcp_tool_names(root: Path, state_root: Path, timeout: float) -> tuple[str, ...]:
+def mcp_tool_names(root: Path, state_root: Path, timeout: float) -> tuple[str, ...]:
     import anyio
 
     return anyio.run(_mcp_tools, root, state_root, timeout)
@@ -207,7 +215,7 @@ def _remaining_before(deadline: float, stage: str) -> float:
     return remaining
 
 
-def _smoke_status(doctor: dict[str, object]) -> str:
+def smoke_status(doctor: dict[str, object]) -> str:
     """`degraded` for any finding the install leaves to the vault, `ok` otherwise."""
     if doctor["overall_status"] == "ok":
         return "ok"
@@ -225,12 +233,12 @@ def run_smoke(
     root, state_root = _resolved_roots(root, state_root)
     deadline = time.monotonic() + seconds
 
-    imports = _production_imports()
-    doctor = _doctor_report(root, state_root, _remaining_before(deadline, "Doctor"))
-    names = _mcp_tool_names(root, state_root, _remaining_before(deadline, "MCP"))
+    imports = production_imports()
+    doctor = doctor_report(root, state_root, _remaining_before(deadline, "Doctor"))
+    names = mcp_tool_names(root, state_root, _remaining_before(deadline, "MCP"))
     validate_tool_contract(names)
     return {
-        "status": _smoke_status(doctor),
+        "status": smoke_status(doctor),
         "imports": imports,
         "doctor": doctor,
         "tool_count": len(names),
@@ -245,7 +253,7 @@ def _error_text(error: BaseException) -> str:
     return type(error).__name__
 
 
-def _bounded_error(error: BaseException) -> str:
+def bounded_error(error: BaseException) -> str:
     message = f"install smoke failed: {_error_text(error)}\n"
     encoded = message.encode("utf-8")[:MAX_ERROR_BYTES]
     return encoded.decode("utf-8", errors="ignore")
@@ -258,12 +266,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--state-root",
         type=Path,
-        default=Path(os.environ.get("LLM_WIKI_STATE_ROOT", default_root)),
+        default=runtime_roots.state_root_for(default_root),
     )
     parser.add_argument(
         "--deadline-seconds",
         type=float,
         default=DEFAULT_DEADLINE_SECONDS,
+    )
+    parser.add_argument(
+        "--report",
+        type=Path,
+        help="Write the JSON report to this file instead of stdout (the installers keep it in logs/).",
     )
     args = parser.parse_args(argv)
     try:
@@ -273,14 +286,27 @@ def main(argv: list[str] | None = None) -> int:
             deadline_seconds=args.deadline_seconds,
         )
     except BaseException as error:
-        sys.stderr.write(_bounded_error(error))
+        sys.stderr.write(bounded_error(error))
         return 1
-    sys.stderr.write(_vault_findings_note(report.get("doctor", {})))
-    print(json.dumps(report, ensure_ascii=False, sort_keys=True, allow_nan=False))
+    sys.stderr.write(vault_findings_note(report.get("doctor", {})))
+    emit_report(json.dumps(report, ensure_ascii=False, sort_keys=True, allow_nan=False), args.report)
     return 0
 
 
-def _vault_findings_note(doctor: dict) -> str:
+def emit_report(encoded: str, destination: Path | None) -> None:
+    """The report is for a machine: stdout by default, a file when an installer asks.
+
+    An installer's operator reads the stderr lines; the whole report printed into
+    the terminal buried them (clig.dev: output that drowns what matters).
+    """
+    if destination is None:
+        print(encoded)
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(encoded + "\n", encoding="utf-8")
+
+
+def vault_findings_note(doctor: dict) -> str:
     """The vault errors the install left in place, named so the operator sees them."""
     failing = _failing_checks(doctor)
     if not failing:

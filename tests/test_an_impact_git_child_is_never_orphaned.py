@@ -27,6 +27,6 @@ def test_an_expired_deadline_leaves_no_git_child(tmp_path):
     before = _children()
 
     with pytest.raises(TimeoutError):
-        impact_analysis._git(tmp_path, ["status"], deadline=time.monotonic() - 1, max_bytes=64)
+        impact_analysis.git(tmp_path, ["status"], deadline=time.monotonic() - 1, max_bytes=64)
 
     assert _children() - before == set()

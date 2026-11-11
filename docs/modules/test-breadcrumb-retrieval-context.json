@@ -1,0 +1,364 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/breadcrumb-documents.md",
+    "docs/modules/breadcrumb-reader.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/corpus-snapshot.md",
+    "docs/modules/formats.md",
+    "docs/modules/generation-catalog-tests-generation-catalog-helpers.md",
+    "docs/modules/generation-fts-validation-tests.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-breadcrumb-retrieval-context.json",
+    "docs/modules/test-breadcrumb-retrieval.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/corpus_snapshot.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/generation_catalog_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/modules/__init__.py",
+    "tests/modules/breadcrumb_documents/__init__.py",
+    "tests/modules/breadcrumb_documents/contract_helpers.py",
+    "tests/modules/breadcrumb_reader/__init__.py",
+    "tests/modules/breadcrumb_reader/contract_helpers.py",
+    "tests/search_ranking_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_breadcrumb_retrieval.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-breadcrumb-retrieval-context.json",
+      "docs/modules/test-breadcrumb-retrieval.md",
+      "tests/test_breadcrumb_retrieval.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "MAX_KNOWLEDGE_PAGE_BYTES",
+        "SourceChangedDuringRead",
+        "read_stable_bytes",
+        "time"
+      ],
+      "contract_sha256": "6dfa51ce4d38c93aedec8d178d2d08b9706e7741bd22279f96a51fb8d1f68691",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_evidence.py",
+      "names": [
+        "archived_source_path",
+        "is_breadcrumb_document",
+        "restore_source",
+        "source_documents"
+      ],
+      "contract_sha256": "43b0a3aa2ca83e8ed05a50b8f2a0867ccb7df5811c5b0cb35a1376c03a30f85a",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_protocol.py",
+      "names": [
+        "RECORD_PARSING",
+        "RecordParsing",
+        "encode_parts",
+        "make_anchor",
+        "make_manifest",
+        "using_record_parsing"
+      ],
+      "contract_sha256": "d0a086811a30b10357f242c2e8b3faced13cbc921601abc5d07383ed78f3fa68",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/code_languages.py",
+      "names": [
+        "language_for_path"
+      ],
+      "contract_sha256": "de9eb32f9279792e1fa43cf95f5fbff42305ca46106873d8ba5ff3bf7d614d2b",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/event_envelope.py",
+      "names": [
+        "native_frame_heading",
+        "native_physical_user_text"
+      ],
+      "contract_sha256": "b1a10802304e4452c78e45021c34c3ebd8bd03a7eecea0460655469f5589683c",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_graph.py",
+      "names": [
+        "GRAPH_SCHEMA_VERSION",
+        "create_generation_database"
+      ],
+      "contract_sha256": "89e205850c231804d8c65759f029246f8d981164fe97f6250aa48f942c0c9359",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_fts_validation.py",
+      "names": [
+        "GENERATION_FTS_ARTIFACT",
+        "GENERATION_TOKENIZER_CONFIG_SHA256",
+        "GENERATION_TOKENIZER_VERSION"
+      ],
+      "contract_sha256": "54ebc35a973abe284f7559a0785d18a57c2aa816d0b242c9ddec6769aea6af9e",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_search.py",
+      "names": [
+        "artifact_descriptor",
+        "build_generation_fts",
+        "generation_vector_rows",
+        "markdown_hits"
+      ],
+      "contract_sha256": "0f200ddfd7e1e19096a08d3a0799c240af7e92d424e89bb7280049e7a8c14077",
+      "integration_tests": [
+        "tests/test_a_fallback_names_its_cause.py",
+        "tests/test_a_hit_is_named_by_its_page.py",
+        "tests/test_a_journal_is_readable_by_every_reader.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/breadcrumb_documents.py",
+      "names": [
+        "source_documents",
+        "source_path"
+      ],
+      "contract_sha256": "9c32d29ba0229ab4fd59256dd23d9ea9fb8fde486cddde3ce431f64e296ab907",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/breadcrumb_reader.py",
+      "names": [
+        "archived_source_path"
+      ],
+      "contract_sha256": "4dbca883040da5024b31f4a80de2e4145427e08c97e6702cf3f7fda0805ed345",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/corpus_membership_policy.py",
+      "names": [
+        "APPROVED_CODE_ROOTS",
+        "ARCHIVE_DIRECTORIES",
+        "GENERATED_DIRECTORIES",
+        "PROJECT_FILES",
+        "VAULT_CODE_ROOTS",
+        "VAULT_SKIP_DIRECTORIES"
+      ],
+      "contract_sha256": "921dbbbaa241dc4ac79d8e69a5fa75ecb9c2eda124a4680409adee343b276a50",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/evidence_reference.py",
+      "names": [
+        "MAX_DAILY_BYTES"
+      ],
+      "contract_sha256": "67bdf6c1a8f32fcf2f7d79b17ad45deed31ece6af1fbd94c3aeb0c3003073943",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/extractor_versions.py",
+      "names": [
+        "CORPUS_EXTRACTOR_VERSION"
+      ],
+      "contract_sha256": "42806c73be5e8cdb642eab60a5d3e608bc965d03ab0d69a519839acf5fb237a6",
+      "integration_tests": [
+        "tests/test_generation_catalog.py",
+        "tests/test_generation_maintenance.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/schema.py",
+      "names": [
+        "validate_schema_object"
+      ],
+      "contract_sha256": "51ea8b6e268e98ac3764f50dd73abaf180f833d71c23b46cc288528bde4651d3",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_fences.py",
+      "names": [
+        "closing_fence",
+        "opening_fence"
+      ],
+      "contract_sha256": "f38ec6e20b913f2a661d9c5bf53e1f23159d54bfbe2ed6f3e15c7a832389f789",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "vault_root"
+      ],
+      "contract_sha256": "35ea768c9fd09097366a2ded61783ec66ac8997f3f02255c744c8443405a706b",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/page_status.py",
+      "names": [
+        "is_retired"
+      ],
+      "contract_sha256": "49ad14e3e3d61b1a684408df0b40800edf20acd42b02998db97d07538d63ebe8",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/query_memory.py",
+      "names": [
+        "build_grounded_context"
+      ],
+      "contract_sha256": "d01c911801d68f88b120aa383f7f250a522136a4556bb9fe9995f6d9a1ac5b65",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "7bba4b535d3f0a73445fece541c540939989b41456c9a79a67f82634748be36b",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "RepositoryScope",
+        "SCHEMA_VERSION",
+        "derive_checkout_id",
+        "derive_repository_id",
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "98d98af2c6ea84a103c5c8463e8dc6a995656f82b7f67a22c295feed5d7a3e6e",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
+    {
+      "provider": "scripts/retrieval.py",
+      "names": [
+        "retrieve_via_search_memory"
+      ],
+      "contract_sha256": "a15db354f7311819377a030a4ac63e5774115646577bedcfbc5ef99646595d46",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/search_memory.py",
+      "names": [
+        "build_generation_numpy_vectors"
+      ],
+      "contract_sha256": "c4aa3c17bbc51151ad39e786c5a7b9f06c365629922c1fc5816eaca67c60d7f3",
+      "integration_tests": [
+        "tests/test_a_fallback_names_its_cause.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py",
+        "tests/test_an_answer_uses_the_published_corpus.py"
+      ]
+    },
+    {
+      "provider": "scripts/settings.py",
+      "names": [
+        "MAX_CORPUS_INSPECTED_ENTRIES",
+        "raise_hint",
+        "setting_value"
+      ],
+      "contract_sha256": "aa2d54b7450f92d2bc91de52f433ebd61f85ef40557866b0f883ce966c1326b7",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py"
+      ]
+    },
+    {
+      "provider": "scripts/vault_editorial.py",
+      "names": [
+        "EDITORIAL_NAMES"
+      ],
+      "contract_sha256": "077ffd345188bc0a58980339e0b3573ab5ffa108410f0104e75efdbfefd94e57",
+      "integration_tests": [
+        "tests/test_breadcrumb_retrieval.py"
+      ]
+    }
+  ]
+}

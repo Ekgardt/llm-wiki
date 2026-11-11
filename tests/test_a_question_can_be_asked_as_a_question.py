@@ -25,15 +25,15 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import search_memory  # noqa: E402
+import generation_search  # noqa: E402
 
 
 def test_terms_are_joined_so_that_one_missing_word_is_not_fatal() -> None:
-    assert search_memory._fts_query("cocktail class") == '"cocktail" OR "class"'
+    assert generation_search.fts_query("cocktail class") == '"cocktail" OR "class"'
 
 
 def test_the_function_words_of_a_question_are_not_matched_on() -> None:
-    built = search_memory._fts_query("What day of the week do I take a cocktail class?")
+    built = generation_search.fts_query("What day of the week do I take a cocktail class?")
 
     assert '"what"' not in built
     assert '"the"' not in built
@@ -43,14 +43,14 @@ def test_the_function_words_of_a_question_are_not_matched_on() -> None:
 
 def test_a_question_of_nothing_but_function_words_still_searches() -> None:
     """Dropping every term would turn a query into a syntax error, not a search."""
-    built = search_memory._fts_query("what is it")
+    built = generation_search.fts_query("what is it")
 
     assert built == '"what" OR "is" OR "it"'
 
 
 def test_a_quote_in_the_query_cannot_break_out_of_its_phrase() -> None:
-    assert search_memory._fts_query('say "hi"') == '"say" OR """hi"""'
+    assert generation_search.fts_query('say "hi"') == '"say" OR """hi"""'
 
 
 def test_an_empty_query_builds_an_empty_expression() -> None:
-    assert search_memory._fts_query("   ") == ""
+    assert generation_search.fts_query("   ") == ""

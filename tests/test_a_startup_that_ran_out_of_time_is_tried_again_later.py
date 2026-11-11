@@ -12,9 +12,15 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-import pyright_session as pyright_session_module
 import pytest
-from pyright_session import MAX_LSP_PROCESSES, PyrightSession, PyrightSessionManager
+from llm_wiki.pyright_session_core import PyrightSession
+from llm_wiki.pyright_session_manager import (
+    IDLE_SECONDS,
+    MAX_LSP_PROCESSES,
+    PyrightSessionManager,
+)
+from llm_wiki.pyright_session_startup import STARTUP_RETRY_BACKOFF
+from lsp_protocol import LspProtocol
 from repository_scope import resolve_repository_scope
 
 from tests.code_kernel_helpers import (
@@ -29,7 +35,7 @@ class _InitializeFault:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, failures: int) -> None:
         self.attempts = 0
-        request = pyright_session_module.LspProtocol.request
+        request = LspProtocol.request
         fault = self
 
         def timed_out(
@@ -48,9 +54,7 @@ class _InitializeFault:
                 protocol, method, params, deadline=deadline, cancellation=cancellation
             )
 
-        monkeypatch.setattr(
-            pyright_session_module.LspProtocol, "request", timed_out
-        )
+        monkeypatch.setattr(LspProtocol, "request", timed_out)
 
 
 def _started_session(repository: Path, state_root: Path) -> PyrightSession:
@@ -93,7 +97,7 @@ def test_a_timed_out_start_waits_for_its_backoff_and_then_succeeds(
 def test_the_number_of_retries_is_bounded(
     repository: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    attempts = len(pyright_session_module._STARTUP_RETRY_BACKOFF) + 1
+    attempts = len(STARTUP_RETRY_BACKOFF) + 1
     session = _started_session(repository, state_root)
     _InitializeFault(monkeypatch, attempts + 1)
     try:
@@ -156,7 +160,7 @@ def _start_and_age(sessions: list[PyrightSession]) -> None:
     """Give each session a live server and an old, but not expired, last-used time.
 
     One clock answers both of the manager's questions: a session past
-    `_IDLE_SECONDS` is closed by the next request, and a session inside the
+    `IDLE_SECONDS` is closed by the next request, and a session inside the
     limit is only ordered for eviction. These have to stay inside the limit to
     reach the eviction order at all, so they are aged by half of it — still far
     older than the session that owns no server, which is what this is about.
@@ -165,7 +169,7 @@ def _start_and_age(sessions: list[PyrightSession]) -> None:
         session.start(deadline=time.monotonic() + SHORT_TIMEOUT)
         with session._lock:
             session._last_used_monotonic = (
-                time.monotonic() - pyright_session_module._IDLE_SECONDS / 2
+                time.monotonic() - IDLE_SECONDS / 2
             )
 
 

@@ -36,7 +36,7 @@ class WindowsEntry:
             raise ValueError("Windows entry size must be a bounded non-negative integer")
 
 
-_API = None
+API = None
 _API_ERROR = "Windows native workspace APIs are unavailable on this platform"
 
 
@@ -285,7 +285,7 @@ if os.name == "nt":
             self.status_to_error.restype = wintypes.ULONG
 
     try:
-        _API = _WindowsApi()
+        API = _WindowsApi()
         _API_ERROR = None
     except (AttributeError, OSError, RuntimeError) as exc:
         _API_ERROR = str(exc)
@@ -293,7 +293,7 @@ if os.name == "nt":
 
 def capability() -> tuple[bool, str | None]:
     """Return whether the required native boundary is available and why not."""
-    return _API is not None, _API_ERROR
+    return API is not None, _API_ERROR
 
 
 def require_capability() -> None:
@@ -345,7 +345,7 @@ def get_short_path(path: Path) -> Path:
 
 
 def _short_path_length(value: str) -> int:
-    required = int(_API.get_short_path(value, None, 0))
+    required = int(API.get_short_path(value, None, 0))
     if required == 0:
         raise ctypes.WinError(ctypes.get_last_error())
     if required > _MAX_LOCAL_PATH_CHARACTERS + 1:
@@ -355,7 +355,7 @@ def _short_path_length(value: str) -> int:
 
 def _short_path_text(value: str, required: int) -> str:
     buffer = ctypes.create_unicode_buffer(required)
-    written = int(_API.get_short_path(value, buffer, required))
+    written = int(API.get_short_path(value, buffer, required))
     if written == 0:
         raise ctypes.WinError(ctypes.get_last_error())
     if written >= required or written > _MAX_LOCAL_PATH_CHARACTERS:
@@ -406,22 +406,22 @@ def _unportable_component(name: str, encoded: bytes) -> bool:
 
 def close_handle(handle: int) -> None:
     require_capability()
-    if not _API.close_handle(handle):
+    if not API.close_handle(handle):
         raise ctypes.WinError(ctypes.get_last_error())
 
 
-def _attributes(handle: int) -> int:
+def handle_attributes(handle: int) -> int:
     information = _FileAttributeTagInfo()
-    if not _API.get_information(handle, 9, ctypes.byref(information), ctypes.sizeof(information)):
+    if not API.get_information(handle, 9, ctypes.byref(information), ctypes.sizeof(information)):
         raise ctypes.WinError(ctypes.get_last_error())
     return int(information.file_attributes)
 
 
 def identity(handle: int, *, directory: bool | None = None) -> tuple[int, bytes, bool]:
     require_capability()
-    actual_directory = _checked_kind(_attributes(handle), directory)
+    actual_directory = _checked_kind(handle_attributes(handle), directory)
     information = _FileIdInfo()
-    if not _API.get_information(
+    if not API.get_information(
         handle, 18, ctypes.byref(information), ctypes.sizeof(information)
     ):
         raise ctypes.WinError(ctypes.get_last_error())
@@ -461,7 +461,7 @@ def _object_attributes(parent: int, name: str):
     return name_buffer, unicode_name, attributes
 
 
-def _relative_handle(
+def relative_handle(
     parent: int,
     name: str,
     *,
@@ -487,7 +487,7 @@ def _relative_handle(
         handle, desired, attributes, io_status, share, _open_options(directory), create=create
     )
     if status < 0:
-        raise _open_failure(int(_API.status_to_error(status)), name, create)
+        raise _open_failure(int(API.status_to_error(status)), name, create)
     return _checked_handle(int(handle.value), directory)
 
 
@@ -527,7 +527,7 @@ def _share_mode(directory: bool, share_access: int | None) -> int:
 def _open_or_create(handle, desired: int, attributes, io_status, share: int, options: int, *, create: bool) -> int:
     if create:
         allocation = ctypes.c_longlong(0)
-        return _API.nt_create_file(
+        return API.nt_create_file(
             ctypes.byref(handle),
             desired,
             ctypes.byref(attributes),
@@ -540,7 +540,7 @@ def _open_or_create(handle, desired: int, attributes, io_status, share: int, opt
             None,
             0,
         )
-    return _API.nt_open_file(
+    return API.nt_open_file(
         ctypes.byref(handle),
         desired,
         ctypes.byref(attributes),
@@ -569,31 +569,31 @@ def _checked_handle(value: int, directory: bool) -> int:
 
 
 def create_directory(parent: int, name: str) -> int:
-    return _relative_handle(parent, name, directory=True, create=True)
+    return relative_handle(parent, name, directory=True, create=True)
 
 
 def create_writable_directory(parent: int, name: str) -> int:
     """Create a directory whose retained handle supports metadata flushing."""
-    return _relative_handle(parent, name, directory=True, create=True, writable=True)
+    return relative_handle(parent, name, directory=True, create=True, writable=True)
 
 
 def open_directory(parent: int, name: str) -> int:
-    return _relative_handle(parent, name, directory=True, create=False)
+    return relative_handle(parent, name, directory=True, create=False)
 
 
 def create_file(parent: int, name: str) -> int:
-    return _relative_handle(
+    return relative_handle(
         parent, name, directory=False, create=True, writable=True
     )
 
 
 def open_file(parent: int, name: str) -> int:
-    return _relative_handle(parent, name, directory=False, create=False)
+    return relative_handle(parent, name, directory=False, create=False)
 
 
 def open_shared_readonly_source_file(parent: int, name: str) -> int:
     """Open one no-follow source without blocking editor file activity."""
-    return _relative_handle(
+    return relative_handle(
         parent,
         name,
         directory=False,
@@ -605,7 +605,7 @@ def open_shared_readonly_source_file(parent: int, name: str) -> int:
 def _open_local_readonly_path(path: Path, share_access: int) -> int:
     require_capability()
     value, _pure = _bounded_local_absolute_path(path)
-    handle = _API.create_file(
+    handle = API.create_file(
         f"\\\\?\\{value}",
         _FILE_READ_DATA | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
         share_access,
@@ -644,13 +644,13 @@ def open_shared_readonly_runtime_file(path: Path) -> int:
 
 
 def open_deletable_file(parent: int, name: str) -> int:
-    return _relative_handle(
+    return relative_handle(
         parent, name, directory=False, create=False, deletable=True
     )
 
 
 def open_deletable_directory(parent: int, name: str) -> int:
-    return _relative_handle(
+    return relative_handle(
         parent, name, directory=True, create=False, deletable=True
     )
 
@@ -672,7 +672,7 @@ def _open_volume_root(pure: PureWindowsPath, *, writable: bool) -> int:
     desired = _FILE_LIST_DIRECTORY | _FILE_READ_ATTRIBUTES
     if writable:
         desired |= _FILE_WRITE_ATTRIBUTES | _FILE_WRITE_DATA | _SYNCHRONIZE
-    root = _API.create_file(
+    root = API.create_file(
         f"\\\\?\\{pure.drive}\\",
         desired,
         _FILE_SHARE_READ | _FILE_SHARE_WRITE,
@@ -706,7 +706,7 @@ class _DirectoryChain:
             self._descend(part, writable=writable_leaf and index == last)
 
     def _descend(self, part: str, *, writable: bool) -> None:
-        child = _relative_handle(
+        child = relative_handle(
             self.current,
             part,
             directory=True,
@@ -770,7 +770,7 @@ def _directory_batch(handle: int, restart: bool):
     """The next buffer of directory records; None once enumeration is exhausted."""
     buffer = ctypes.create_string_buffer(_DIRECTORY_BUFFER_BYTES)
     information_class = 20 if restart else 19
-    if _API.get_information(handle, information_class, ctypes.byref(buffer), _DIRECTORY_BUFFER_BYTES):
+    if API.get_information(handle, information_class, ctypes.byref(buffer), _DIRECTORY_BUFFER_BYTES):
         return buffer
     error = ctypes.get_last_error()
     if error in {18, 38}:  # ERROR_NO_MORE_FILES | ERROR_HANDLE_EOF
@@ -863,7 +863,7 @@ def _written_chunk_bytes(handle: int, chunk: bytes) -> int:
     """One WriteFile call; how many bytes it took, never zero."""
     buffer = ctypes.create_string_buffer(chunk)
     written = wintypes.DWORD()
-    if not _API.write_file(
+    if not API.write_file(
         handle, buffer, len(chunk), ctypes.byref(written), None
     ):
         raise ctypes.WinError(ctypes.get_last_error())
@@ -888,7 +888,7 @@ def _read_chunk(handle: int, chunk_bytes: int) -> bytes:
     """The next chunk of the file; empty at its end."""
     buffer = ctypes.create_string_buffer(chunk_bytes)
     read = wintypes.DWORD()
-    if _API.read_file(handle, buffer, chunk_bytes, ctypes.byref(read), None):
+    if API.read_file(handle, buffer, chunk_bytes, ctypes.byref(read), None):
         return buffer.raw[: read.value]
     error = ctypes.get_last_error()
     if error == 38:  # ERROR_HANDLE_EOF
@@ -898,13 +898,13 @@ def _read_chunk(handle: int, chunk_bytes: int) -> bytes:
 
 def seek_start(handle: int) -> None:
     require_capability()
-    if not _API.set_file_pointer(handle, 0, None, 0):
+    if not API.set_file_pointer(handle, 0, None, 0):
         raise ctypes.WinError(ctypes.get_last_error())
 
 
 def file_size(handle: int) -> int:
     information = _FileStandardInfo()
-    if not _API.get_information(
+    if not API.get_information(
         handle, 1, ctypes.byref(information), ctypes.sizeof(information)
     ):
         raise ctypes.WinError(ctypes.get_last_error())
@@ -915,7 +915,7 @@ def file_size(handle: int) -> int:
 
 def file_modified_time_ns(handle: int) -> int:
     information = _FileBasicInfo()
-    if not _API.get_information(
+    if not API.get_information(
         handle, 0, ctypes.byref(information), ctypes.sizeof(information)
     ):
         raise ctypes.WinError(ctypes.get_last_error())
@@ -924,21 +924,21 @@ def file_modified_time_ns(handle: int) -> int:
 
 
 def is_read_only(handle: int) -> bool:
-    return bool(_attributes(handle) & _FILE_ATTRIBUTE_READONLY)
+    return bool(handle_attributes(handle) & _FILE_ATTRIBUTE_READONLY)
 
 
 def set_read_only(handle: int) -> bool:
-    attributes = _attributes(handle)
+    attributes = handle_attributes(handle)
     information = _FileBasicInfo(0, 0, 0, 0, attributes | _FILE_ATTRIBUTE_READONLY)
-    if not _API.set_information(
+    if not API.set_information(
         handle, 0, ctypes.byref(information), ctypes.sizeof(information)
     ):
         return False
-    return bool(_attributes(handle) & _FILE_ATTRIBUTE_READONLY)
+    return bool(handle_attributes(handle) & _FILE_ATTRIBUTE_READONLY)
 
 
 def flush_file(handle: int) -> None:
-    if not _API.flush_file_buffers(handle):
+    if not API.flush_file_buffers(handle):
         raise ctypes.WinError(ctypes.get_last_error())
 
 
@@ -946,7 +946,7 @@ def flush_file_path(path: Path) -> None:
     """Flush one bounded local regular file through a checked Win32 handle."""
     require_capability()
     value, _pure = _bounded_local_absolute_path(path)
-    handle = _API.create_file(
+    handle = API.create_file(
         f"\\\\?\\{value}",
         _GENERIC_WRITE | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
         _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
@@ -966,7 +966,7 @@ def flush_file_path(path: Path) -> None:
 
 
 def flush_directory(handle: int) -> bool:
-    if _API.flush_file_buffers(handle):
+    if API.flush_file_buffers(handle):
         return True
     return False
 
@@ -982,7 +982,7 @@ def move_file_write_through(
     source_value, _source_pure = _bounded_local_absolute_path(source)
     destination_value, _destination_pure = _bounded_local_absolute_path(destination)
     flags = _MOVEFILE_WRITE_THROUGH | (_MOVEFILE_REPLACE_EXISTING if replace else 0)
-    if _API.move_file_ex(
+    if API.move_file_ex(
         f"\\\\?\\{source_value}",
         f"\\\\?\\{destination_value}",
         flags,
@@ -1012,11 +1012,11 @@ def _rename_file(handle: int, parent: int, name: str, *, replace: bool) -> None:
         len(encoded),
     )
     io_status = _IoStatusBlock()
-    status = _API.nt_set_information_file(
+    status = API.nt_set_information_file(
         handle, ctypes.byref(io_status), ctypes.byref(buffer), size, 10
     )
     if status < 0:
-        error = int(_API.status_to_error(status))
+        error = int(API.status_to_error(status))
         if not replace and error in {80, 183}:
             raise FileExistsError(error, f"Windows component already exists: {name}")
         action = "replace" if replace else "publish"
@@ -1036,7 +1036,7 @@ def publish_file(handle: int, parent: int, name: str) -> None:
 def delete_handle(handle: int) -> None:
     """Mark one held file or empty directory for deletion by identity."""
     information = _FileDispositionInfo(True)
-    if not _API.set_information(
+    if not API.set_information(
         handle, 4, ctypes.byref(information), ctypes.sizeof(information)
     ):
         raise ctypes.WinError(ctypes.get_last_error())

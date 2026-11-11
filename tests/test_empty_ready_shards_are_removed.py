@@ -10,7 +10,7 @@ import reclaim_runtime_state
 
 
 def test_empty_shards_under_ready_are_removed_too(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(reclaim_runtime_state, "STATE_ROOT", tmp_path)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     for stage in ("pending", "ready"):
         (tmp_path / "run/capture-intents" / stage / "0a").mkdir(parents=True)
 

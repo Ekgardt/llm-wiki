@@ -1,0 +1,216 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/evidence-graph-builder-tests-evidence-graph-incremental-context.json",
+    "docs/modules/evidence-graph-builder-tests-evidence-graph-incremental-helpers.md",
+    "docs/modules/evidence-graph-builder-tests-evidence-graph-incremental.md",
+    "docs/modules/evidence-graph-builder.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/evidence_graph_builder.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/evidence_graph_incremental_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_evidence_graph_incremental.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/evidence-graph-builder-tests-evidence-graph-incremental-context.json",
+      "docs/modules/evidence-graph-builder-tests-evidence-graph-incremental.md",
+      "tests/test_evidence_graph_incremental.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "COLLECTOR_VERSION",
+        "CorpusSnapshot",
+        "EXTRACTOR_VERSION",
+        "canonical_source_manifest",
+        "is_memory_path"
+      ],
+      "contract_sha256": "fc3dd0c62ec002a6b5684ddf15315c3dc07889fda5067368754bb7383bc3008d",
+      "integration_tests": [
+        "tests/test_evidence_graph_incremental.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_graph.py",
+      "names": [
+        "GRAPH_SCHEMA_VERSION",
+        "GraphSchema",
+        "PROGRESS_OPCODES",
+        "create_generation_database"
+      ],
+      "contract_sha256": "0edf6b1e63e78a98340e00d3d01a9cf01deab41e848116c8814b96ee39d2e995",
+      "integration_tests": [
+        "tests/test_evidence_graph_incremental.py"
+      ]
+    },
+    {
+      "provider": "scripts/fact_keys.py",
+      "names": [
+        "keys_by_span",
+        "ledger_rows",
+        "store_path"
+      ],
+      "contract_sha256": "063d388b761e9f97adf5a95567de0f4fa1b09969f0a3ade054747df18c8aa49f",
+      "integration_tests": [
+        "tests/test_evidence_graph_incremental.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_fts_validation.py",
+      "names": [
+        "GENERATION_TOKENIZER_CONFIG_SHA256",
+        "GENERATION_TOKENIZER_VERSION"
+      ],
+      "contract_sha256": "41a5ba6fcba2b0852a5187a5c47402f077682f14e1f983941f7647502022a803",
+      "integration_tests": [
+        "tests/test_evidence_graph_incremental.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_search.py",
+      "names": [
+        "build_generation_fts",
+        "build_generation_vectors_if_available",
+        "publish_validated_generation"
+      ],
+      "contract_sha256": "f5a69116efb383b6479de480d6cf5be8e641210936c9d644ae2d1fe7d4a96a2e",
+      "integration_tests": [
+        "tests/test_evidence_graph_incremental.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/evidence_graph_limits.py",
+      "names": [
+        "MAX_VALIDATION_ROWS"
+      ],
+      "contract_sha256": "e0271d3f28aac2461d4543e7d12fd011b8b5b2e56f9c8efbaff103300b4ac7b2",
+      "integration_tests": [
+        "tests/test_evidence_graph_builder.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes"
+      ],
+      "contract_sha256": "679597eaf19bb4eef12b405f35978a452a06007dd565b01d3f0d04a4f1116c49",
+      "integration_tests": [
+        "tests/test_evidence_graph_incremental.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_limits.py",
+      "names": [
+        "HASH_CHUNK_BYTES",
+        "MAX_ARTIFACT_BYTES"
+      ],
+      "contract_sha256": "2d0df4296474bc2608bb3c89e30c9f4e5f87785fbd92ca4104a44eb4be504ba1",
+      "integration_tests": [
+        "tests/test_generation_catalog.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_validation.py",
+      "names": [
+        "validate_generation"
+      ],
+      "contract_sha256": "e714537aaef61e588e8506b4620db2d1dd1560c8ae60cd2e005b21eef1ffa926",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_evidence_graph_incremental.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_sync.py",
+      "names": [
+        "fsync_file"
+      ],
+      "contract_sha256": "a2a9e0d389182545d05d579d83a07f43ac5a8f6e3c83695b8410c51c6e317c5c",
+      "integration_tests": [
+        "tests/modules/runtime_sync/test_sync.py",
+        "tests/test_evidence_graph_builder.py",
+        "tests/test_generation_catalog.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "fsync_directory",
+        "read_runtime_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "8014ca1b9defa8002cfe0f2bc035379bdc738d9daa63d98ff5f31e5b8726e193",
+      "integration_tests": [
+        "tests/test_evidence_graph_incremental.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "RepositoryScope",
+        "resolve_repository_scope",
+        "same_repository_record",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "2325767e21b31fa9191765bb08461671d597d938e30ddaa4ea09e81944c4ce98",
+      "integration_tests": [
+        "tests/test_evidence_graph_incremental.py"
+      ]
+    }
+  ]
+}

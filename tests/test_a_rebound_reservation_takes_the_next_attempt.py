@@ -71,7 +71,7 @@ def _replay(store, lease=None):
 
 def test_a_rebound_reservation_is_replayed_under_the_next_attempt(monkeypatch):
     monkeypatch.setattr(
-        project_journal, "_project_lease_precondition", lambda slug, lease: {}
+        project_journal, "project_lease_precondition", lambda slug, lease: {}
     )
     fresh = _Reservation()
     store = _Store(OperationBoundElsewhereError(REBOUND), fresh=fresh)
@@ -83,7 +83,7 @@ def test_a_rebound_reservation_is_replayed_under_the_next_attempt(monkeypatch):
 
 def test_a_sequence_that_settled_meanwhile_needs_no_attempt(monkeypatch):
     monkeypatch.setattr(
-        project_journal, "_project_lease_precondition", lambda slug, lease: {}
+        project_journal, "project_lease_precondition", lambda slug, lease: {}
     )
     store = _Store(OperationBoundElsewhereError(REBOUND), fresh=None)
 

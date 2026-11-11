@@ -1,0 +1,352 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/operational-ownership-tests-operational-ownership-helpers.md",
+    "docs/modules/operational-ownership.md",
+    "docs/modules/process-liveness-tests-context.json",
+    "docs/modules/process-liveness-tests.md",
+    "docs/modules/process-liveness.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/operational_ownership.py",
+    "scripts/process_liveness.py",
+    "tests/__init__.py",
+    "tests/a_dead_owner_root_is_swept_when_the_next_server_starts_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/operational_ownership_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_process_namespace_ownership.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/process-liveness-tests-context.json",
+      "docs/modules/process-liveness-tests.md",
+      "tests/a_dead_owner_root_is_swept_when_the_next_server_starts_helpers.py",
+      "tests/test_process_namespace_ownership.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/generation_maintenance.py",
+      "names": [
+        "owner_pid_live"
+      ],
+      "contract_sha256": "a880803be358de64ef2751bfae525040027c3c275f0cc4b8fc83de755a00e5b0",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/install_pyright.py",
+      "names": [
+        "lock_owner_is_alive"
+      ],
+      "contract_sha256": "6a1aa6e4170fdf37df768e0890654a5b54bfe7264f176c69686881dabcc4b223",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "require_process_absent"
+      ],
+      "contract_sha256": "395a615e25c53c222e638ea579e73c4bdcfee597bbb591e864a8468484d1be4a",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/iso_time.py",
+      "names": [
+        "utc_text"
+      ],
+      "contract_sha256": "b7151d094646f6efb0895d5e32f0237918a40d0f8e12b5eb0af3e60484d51a03",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/lease_renewal.py",
+      "names": [
+        "renew_until_stopped"
+      ],
+      "contract_sha256": "b2ab0739508c291354a6b92c1a414225732496cb481a22a3ff3b824be15c52bd",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/coordinator_validation.py",
+      "names": [
+        "reliability_v3_records_present",
+        "validate_coordinator_v3_database"
+      ],
+      "contract_sha256": "0e52322a931b4f3d9c248b10e2c4f91562c272af14f9cf464e7ee30d13ae16ea",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_lsp.py",
+      "names": [
+        "lsp_liveness",
+        "lsp_start_identity",
+        "read_lsp_owner"
+      ],
+      "contract_sha256": "fbc725a859a1c6465d773c52240dc0e8d4c9348b5fcf6df7a9330f423c652dfd",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/ownership_contracts.py",
+      "names": [
+        "MarkerIdentity",
+        "OperationalOwnershipError",
+        "OwnerLease",
+        "OwnerRole",
+        "ProcessIdentity",
+        "ProcessState"
+      ],
+      "contract_sha256": "dba54aeec1b9de6ca4fa9802379a9d256fb527894d95488a8f4691cce7c806f7",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/ownership_rows.py",
+      "names": [
+        "AcquireRequest",
+        "OWNER_BINDING_DELETE",
+        "OWNER_PROJECTIONS",
+        "OWNER_PROJECTION_DELETES",
+        "delete_owner_projections",
+        "insert_owner_row",
+        "next_owner_epoch",
+        "owner_key",
+        "row_process"
+      ],
+      "contract_sha256": "7ac3f1ca789c6c6083b2a89d47bdf00baaa2c1e8a23e0f0c5bf3749bc18a2394",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/ownership_timing.py",
+      "names": [
+        "LONG_LEASE_ROLES",
+        "as_utc",
+        "parse_timestamp",
+        "require_lease_timing",
+        "timestamp",
+        "timing"
+      ],
+      "contract_sha256": "bad2bcef18cbcce070c2bd8ecd3cf0d5330c0a1c8befdaf27986148e6a881a0a",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/ownership_validation.py",
+      "names": [
+        "MARKER_ROLES",
+        "MAX_MARKER_BYTES",
+        "ROLES",
+        "bounded_text",
+        "file_identity_value",
+        "marker_from_columns",
+        "marker_from_row",
+        "marker_json",
+        "require_marker_given",
+        "require_marker_identity_fields",
+        "require_marker_match",
+        "require_marker_metadata",
+        "require_marker_presence",
+        "runtime_file_identity",
+        "utf8_size",
+        "valid_marker_columns",
+        "valid_marker_mtime",
+        "valid_marker_size",
+        "validate_process",
+        "validate_role",
+        "validated_marker_json",
+        "validated_marker_path"
+      ],
+      "contract_sha256": "7dde5fc6b77e4d3f829619b4308ae81977bbdde68d587f4f61ba0f97d9527a91",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/restricted_paths.py",
+      "names": [
+        "restricted_relative_path"
+      ],
+      "contract_sha256": "da0f32f3b3897cc6b0a148a0ab7dcad5a82bf356267ecd94c5ab0aaab267fd42",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_contracts.py",
+      "names": [
+        "OperationalDatabaseContract"
+      ],
+      "contract_sha256": "819cca1e291f921a6fb6e6e90a16fb4a05b0659e020227653689af60d484a1a8",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_transactions.py",
+      "names": [
+        "begin_immediate"
+      ],
+      "contract_sha256": "fb9ecde177ce133dd8e6e34a67214ca0c051a02d758e8611dac84b568d955373",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/windows_actor.py",
+      "names": [
+        "WindowsTokenApi",
+        "validated_windows_actor",
+        "windows_actor_identity",
+        "windows_open_token",
+        "windows_token_api",
+        "windows_token_information",
+        "windows_token_sid_text"
+      ],
+      "contract_sha256": "39a53e4ef5909e25a1c0fba7ab2470621802c347aefc1c6454eb7214d2830af1",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_process.py",
+      "names": [
+        "process_is_gone"
+      ],
+      "contract_sha256": "355f72599e64c11a82925d82d32c7e9bbfa3040003b8be578cd00ea57447ccd9",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "initialize_coordinator_v3_candidate",
+        "preparer_alive"
+      ],
+      "contract_sha256": "80701f558983b4a2508977c9ff12c85726be9baedd267fd95236e1e0e1ab9eda",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "RuntimeFileIdentity",
+        "capture_runtime_file_identity",
+        "open_operational_db",
+        "read_runtime_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "3f43d6d61d94efa28ff2046da5b80bedd88ae4b6653c1a3d94e004a6588a93d2",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/retire_lsp_evidence.py",
+      "names": [
+        "dead_evidence",
+        "retirable"
+      ],
+      "contract_sha256": "b13d3157f761851cda1feb6e760dc026b08b095fb901dfb744044ea6128c1ec4",
+      "integration_tests": [
+        "tests/test_process_namespace_ownership.py"
+      ]
+    }
+  ]
+}

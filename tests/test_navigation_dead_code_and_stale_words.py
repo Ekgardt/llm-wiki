@@ -17,11 +17,11 @@ import workspace_revision  # noqa: E402
 def test_a_git_run_gets_the_whole_budget_its_caller_gave():
     budget = time.monotonic() + 10 * workspace_revision.GIT_STATUS_TIMEOUT_SECONDS
 
-    assert workspace_revision._git_run_deadline(budget) == budget
+    assert workspace_revision.git_run_deadline(budget) == budget
 
 
 def test_a_git_run_without_a_budget_is_still_bounded():
-    bound = workspace_revision._git_run_deadline(None) - time.monotonic()
+    bound = workspace_revision.git_run_deadline(None) - time.monotonic()
 
     assert 0 < bound <= workspace_revision.GIT_STATUS_TIMEOUT_SECONDS
 

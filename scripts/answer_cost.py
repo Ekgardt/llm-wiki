@@ -12,7 +12,7 @@ Four properties are load-bearing.
    and reusing it makes a runtime number directly comparable to the harness
    numbers. The research note measured it understating by ~4-13 % while the
    wire form was `indent=2`; since 2026-09-13 the wire form is compact
-   (`mcp_server._rendered_envelope`), so the estimator and the wire now differ
+   (`mcp_server.rendered_envelope`), so the estimator and the wire now differ
    only by the separators' spaces.
 
 2. **A missing measurement reads as missing.** `0` is a legal value for both
@@ -24,7 +24,7 @@ Four properties are load-bearing.
 
 3. **Stages are read, not re-derived.** The envelope's `components` map already
    carries `fresh`/`stale`/`missing`/`unknown` per retrieval leg, folded there
-   by `mcp_server._recall_components` from the trace fields `signals_used`,
+   by `mcp_server.recall_components` from the trace fields `signals_used`,
    `reranker_applied` and `reranker_fallback_reason` and from the index's age. A second derivation could
    disagree with the first.
 
@@ -151,9 +151,19 @@ def _answer_body(envelope):
 def _estimated_tokens(envelope):
     """The estimate, or None when it cannot be produced. Never 0 as a stand-in."""
     try:
-        return estimate_tokens(envelope)
+        return estimate_tokens(_without_cost_block(envelope))
     except (TypeError, ValueError, RecursionError):
         return None
+
+
+def _without_cost_block(envelope):
+    """Detach only the reserved field's containers; leave caller data untouched."""
+    data = _answer_body(envelope)
+    if data is None or COST_KEY not in data:
+        return envelope
+    measured_data = dict(data)
+    del measured_data[COST_KEY]
+    return {**envelope, "data": measured_data}
 
 
 def _milliseconds(seconds):

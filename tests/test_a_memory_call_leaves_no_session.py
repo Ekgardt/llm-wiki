@@ -23,17 +23,17 @@ ISOLATION = {"--no-session-persistence", "--tools", "--strict-mcp-config"}
 
 
 def test_a_cli_that_has_the_flags_saves_no_session_and_loads_no_tools(monkeypatch):
-    monkeypatch.setattr(llm_client, "_claude_cli_flags", lambda: frozenset(ISOLATION))
+    monkeypatch.setattr(llm_client, "claude_cli_flags", lambda: frozenset(ISOLATION))
 
-    command = llm_client._claude_command("/usr/bin/claude", None, "")
+    command = llm_client.claude_command("/usr/bin/claude", None, "")
 
     assert (ISOLATION <= set(command), command[command.index("--tools") + 1]) == (True, "")
 
 
 def test_an_older_cli_is_not_given_flags_it_does_not_know(monkeypatch):
-    monkeypatch.setattr(llm_client, "_claude_cli_flags", lambda: frozenset())
+    monkeypatch.setattr(llm_client, "claude_cli_flags", lambda: frozenset())
 
-    assert ISOLATION & set(llm_client._claude_command("/usr/bin/claude", None, "")) == set()
+    assert ISOLATION & set(llm_client.claude_command("/usr/bin/claude", None, "")) == set()
 
 
 def _saved(root: Path, relative: str, text: str) -> Path:
@@ -49,4 +49,4 @@ def test_the_backfill_skips_sessions_of_memory_calls_and_keeps_conversations(tmp
     _saved(tmp_path, "2026/09/14/rollout-two.jsonl", started_in_provider + "\n" + TURN)
     kept = _saved(tmp_path, "-repo-project/three.jsonl", json.dumps({"cwd": "/repo/project"}) + "\n" + TURN)
 
-    assert backfill_sessions._transcripts((tmp_path,)) == [kept]
+    assert backfill_sessions.found_transcripts((tmp_path,)) == [kept]

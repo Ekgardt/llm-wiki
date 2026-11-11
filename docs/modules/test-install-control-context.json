@@ -1,0 +1,324 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/install-control-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-install-control-context.json",
+    "docs/modules/test-install-control.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/install_control_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_install_control.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-install-control-context.json",
+      "docs/modules/test-install-control.md",
+      "tests/test_install_control.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/install_control.py",
+      "names": [
+        "main",
+        "parser"
+      ],
+      "contract_sha256": "27b407a5b1d4e9cd1a4c6ef116b8b3a4223be77a0be2419e0b639dcd0742e0f3",
+      "integration_tests": [
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_an_update_replaces_what_it_owns.py",
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/install_state.py",
+      "names": [
+        "ManagedResource",
+        "file_resource",
+        "validate_install_state"
+      ],
+      "contract_sha256": "10947e0693b8c5c93c72c026d972da92561cb0b6792b8fab1528a1a352a6c93a",
+      "integration_tests": [
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_hook_config.py",
+      "names": [
+        "opencode_plugin_resource"
+      ],
+      "contract_sha256": "9123d5031d320aba4bdb925ec88c619708d2c63b5c9f29c98b71196829e44cc8",
+      "integration_tests": [
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_base.py",
+      "names": [
+        "runtime_check"
+      ],
+      "contract_sha256": "d4a60d0a8019d00000949ee278f86c37c6eb8f7522263b88dcfc02dfa53f0beb",
+      "integration_tests": [
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes"
+      ],
+      "contract_sha256": "679597eaf19bb4eef12b405f35978a452a06007dd565b01d3f0d04a4f1116c49",
+      "integration_tests": [
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_cron.py",
+      "names": [
+        "cron_scheduler_resource"
+      ],
+      "contract_sha256": "70a6808d32de3f42c00fae8204771de7b584993cb2a3441c683d5265761f99e2",
+      "integration_tests": [
+        "tests/test_install_control.py",
+        "tests/test_the_scheduler_log_is_bounded.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_inspection.py",
+      "names": [
+        "inspect_install_state"
+      ],
+      "contract_sha256": "021bc3d4e91bd436953416502dcdd9d04da1fa69a0d58892cfdd8e026c87bd43",
+      "integration_tests": [
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_codex_provider_bundle_manifest_proves_desired.py",
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_launchd.py",
+      "names": [
+        "launchd_scheduler_resource"
+      ],
+      "contract_sha256": "34b62cbb18508197ea504cb95f95a645e7e875b29dbbf32068a84c22149dd847",
+      "integration_tests": [
+        "tests/test_an_update_replaces_what_it_owns.py",
+        "tests/test_install_control.py",
+        "tests/test_launchd_absent_only_when_launchd_says_so.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_profile.py",
+      "names": [
+        "profile_resource"
+      ],
+      "contract_sha256": "bda4f6096153dc26b5e56acc1ed247d092387e9393ae717356d1ab73b53344c9",
+      "integration_tests": [
+        "tests/test_an_update_honors_explicit_resource_adoption.py",
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_release.py",
+      "names": [
+        "build_release_identity"
+      ],
+      "contract_sha256": "bc62d4f35445a8db90edd38825221aa68df56e89c8b78a24f20bd8c73d501d65",
+      "integration_tests": [
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_requests.py",
+      "names": [
+        "install_from_args"
+      ],
+      "contract_sha256": "e4f49c041915fca18ffb0241dd00aa4407e85859438d7ed938f90a475108874d",
+      "integration_tests": [
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_a_rollback_undoes_only_what_it_did.py",
+        "tests/test_an_uninstall_names_what_it_leaves.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_resource_builder.py",
+      "names": [
+        "build_install_resources",
+        "selected_backend"
+      ],
+      "contract_sha256": "b722a52bd3dae57f3a5f01885cc4288d4106f5dd70e4dd61824214a4f45c38c7",
+      "integration_tests": [
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_an_uninstall_names_what_it_leaves.py",
+        "tests/test_claude_settings_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_scheduler_projection.py",
+      "names": [
+        "definition_digest"
+      ],
+      "contract_sha256": "bfbb64f581f8a2728fe7fa1c703d101c99f20cbc283208f63d3f5b0c1929b27e",
+      "integration_tests": [
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_scheduler_render.py",
+      "names": [
+        "render_launchd_definitions",
+        "render_systemd_definitions",
+        "select_scheduler_backend",
+        "systemd_service"
+      ],
+      "contract_sha256": "9f7b45f649d9b6ee15d80f5514223eda6e515b9bf55c8d0b906b0c5783dc2105",
+      "integration_tests": [
+        "tests/test_a_scheduled_run_keeps_the_uv_link.py",
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_an_update_replaces_what_it_owns.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_systemd.py",
+      "names": [
+        "systemd_scheduler_resource"
+      ],
+      "contract_sha256": "4c49876010df5e0b233ccb29222eedbfbfa42614f0e99b7eed75614ff585b9c4",
+      "integration_tests": [
+        "tests/test_an_update_replaces_what_it_owns.py",
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_transactions.py",
+      "names": [
+        "set_transaction_state"
+      ],
+      "contract_sha256": "854e3921c816b22d5f2a7c8426dd51a5f923dfdc4e13cd74951056139014399f",
+      "integration_tests": [
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_uninstall_rollback.py",
+      "names": [
+        "rollback_resources",
+        "uninstall_resources"
+      ],
+      "contract_sha256": "624562915228514c2dbc18f5860dab5fc810154dc1b8f3ad54c02b3d827e18da",
+      "integration_tests": [
+        "tests/test_a_rollback_undoes_only_what_it_did.py",
+        "tests/test_an_update_honors_explicit_resource_adoption.py",
+        "tests/test_claude_provider_projection_round_trips.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_v2_mutation.py",
+      "names": [
+        "v2_mutate_resources"
+      ],
+      "contract_sha256": "32bbf94fd20d24bd40c67e3d5f8481133242636906654c12ec4517e468bd33ff",
+      "integration_tests": [
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_v2_transactions.py",
+      "names": [
+        "install_resources"
+      ],
+      "contract_sha256": "074664d4c33ddcaaa76fbe45b137f8f494dc7de80f4f3c32abd52b035eade17b",
+      "integration_tests": [
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_rerun_may_ask_for_fewer_things.py",
+        "tests/test_a_rollback_undoes_only_what_it_did.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_windows.py",
+      "names": [
+        "render_windows_task_spec",
+        "windows_environment_resources",
+        "windows_task_scheduler_resource"
+      ],
+      "contract_sha256": "794d3574937bf4915faf10b09f1e91b1643ca271259ad0e5e8e1b0e62d08fbea",
+      "integration_tests": [
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_generation_windows_follow_operator_settings.py",
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_install_control.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_install_control.py"
+      ]
+    }
+  ]
+}

@@ -12,8 +12,7 @@ See `docs/research/2026-09-18-nothing-half-written-is-left-behind.md`.
 from __future__ import annotations
 
 import sys
-import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -22,33 +21,12 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import markdown_transaction  # noqa: E402
-from markdown_transaction import MarkdownChange, MarkdownCoordinator  # noqa: E402
-
-_PAGE = "knowledge/notes/a-page.md"
-
-
-def _coordinator(tmp_path: Path) -> MarkdownCoordinator:
-    root = tmp_path / "vault"
-    (root / "knowledge/notes").mkdir(parents=True)
-    return MarkdownCoordinator(root, tmp_path / "state")
-
-
-def _committed(coordinator: MarkdownCoordinator) -> str:
-    record = coordinator.prepare(
-        [MarkdownChange.create(_PAGE, b"one\n")], operation_id="a-write"
-    )
-    coordinator.apply(record.id)
-    return record.id
-
-
-def _kill_a_prune(coordinator: MarkdownCoordinator, transaction_id: str) -> Path:
-    """Exactly what `_prune_one` leaves when the process dies after its rename."""
-    staged = coordinator.transaction_root / (
-        f".{transaction_id}{markdown_transaction._STAGED_PRUNE_MARK}{uuid.uuid4().hex}"
-    )
-    (coordinator.transaction_root / transaction_id).replace(staged)
-    return staged
+from tests.nothing_half_written_is_left_behind_helpers import (  # noqa: E402
+    _PAGE,
+    _committed,
+    _coordinator,
+    _kill_a_prune,
+)
 
 
 def test_the_images_of_a_killed_prune_are_put_back_and_then_pruned(
@@ -57,7 +35,7 @@ def test_the_images_of_a_killed_prune_are_put_back_and_then_pruned(
     coordinator = _coordinator(tmp_path)
     transaction_id = _committed(coordinator)
     staged = _kill_a_prune(coordinator, transaction_id)
-    later = datetime.now(timezone.utc) + timedelta(days=30)
+    later = datetime.now(UTC) + timedelta(days=30)
 
     pruned = coordinator.prune(now=later)
 
@@ -72,7 +50,7 @@ def test_a_live_image_directory_wins_over_a_staged_copy(tmp_path: Path) -> None:
     staged = _kill_a_prune(coordinator, transaction_id)
     (coordinator.transaction_root / transaction_id).mkdir()
 
-    coordinator.prune(now=datetime.now(timezone.utc) + timedelta(days=30))
+    coordinator.prune(now=datetime.now(UTC) + timedelta(days=30))
 
     assert not staged.exists()
 

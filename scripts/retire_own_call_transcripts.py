@@ -18,6 +18,7 @@ import json
 import re
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -29,14 +30,11 @@ from ephemeral_paths import (  # noqa: E402
     resolved,
     spellings,
 )
+from llm_wiki import runtime_roots  # noqa: E402
 from retire_lsp_evidence import SCAN_BUDGET_SECONDS  # noqa: E402
 
 OWN_CALL_ENTRYPOINT = "sdk-cli"
 HEAD_LINES = 40  # the entry point is in the first records of a transcript
-# Transcripts one nightly pass retires; the rest wait for the next night, so nothing is lost.
-# Bounds one pass beside its deadline. Basis unknown: value predates measurement; review when a
-# pass stops on this count.
-MAX_TRANSCRIPTS_PER_PASS = 2000
 
 
 def projects_directory() -> Path:
@@ -90,7 +88,7 @@ def is_own_call(path: Path, roots: tuple[Path, ...]) -> bool:
     return isinstance(cwd, str) and is_under(Path(cwd), roots)
 
 
-def _encoded(root: Path) -> str:
+def encoded(root: Path) -> str:
     """How the CLI names a project directory: separators, drive colons and dots become `-`."""
     return re.sub(r"[\\/:.]", "-", str(root))
 
@@ -98,24 +96,32 @@ def _encoded(root: Path) -> str:
 def _own_empty_directory(directory: Path, spellings: tuple[Path, ...]) -> bool:
     if not directory.is_dir() or any(directory.iterdir()):
         return False
-    return any(directory.name.startswith(_encoded(root)) for root in spellings)
+    return any(directory.name.startswith(encoded(root)) for root in spellings)
 
 
-def _bounded_transcripts(projects: Path, deadline: float) -> list[Path]:
-    found: list[Path] = []
+def _bounded_transcripts(projects: Path, deadline: float) -> Iterator[Path]:
+    """Stream candidates until the existing time budget expires; no count cutoff."""
     for path in projects.glob("*/*.jsonl"):
-        if len(found) >= MAX_TRANSCRIPTS_PER_PASS or time.monotonic() >= deadline:
-            break
-        found.append(path)
-    return found
+        if time.monotonic() >= deadline:
+            return
+        yield path
+
+
+def _remove_own_transcript(path: Path, roots: tuple[Path, ...], deadline: float) -> int:
+    if not is_own_call(path, roots):
+        return 0
+    if time.monotonic() >= deadline:
+        return 0
+    path.unlink(missing_ok=True)
+    return 1
 
 
 def _remove_own_transcripts(projects: Path, roots: tuple[Path, ...]) -> int:
     deadline = time.monotonic() + SCAN_BUDGET_SECONDS
-    own = [p for p in _bounded_transcripts(projects, deadline) if is_own_call(p, roots)]
-    for path in own:
-        path.unlink(missing_ok=True)
-    return len(own)
+    return sum(
+        _remove_own_transcript(path, roots, deadline)
+        for path in _bounded_transcripts(projects, deadline)
+    )
 
 
 def _remove_emptied_directories(projects: Path, spellings: tuple[Path, ...]) -> int:
@@ -134,9 +140,8 @@ def retire(projects: Path, vault_root: Path) -> tuple[int, int]:
 
 
 def main() -> int:
-    from memory_state import ROOT
 
-    removed, emptied = retire(projects_directory(), ROOT)
+    removed, emptied = retire(projects_directory(), runtime_roots.vault_root())
     print(
         f"retire_own_call_transcripts: removed {removed} transcript(s) of the memory's "
         f"own calls and {emptied} emptied project director(ies)"

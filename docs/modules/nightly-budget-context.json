@@ -1,0 +1,413 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/generation-catalog-tests-generation-catalog-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/nightly-budget-context.json",
+    "docs/modules/nightly-budget.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/prune-generations.md",
+    "docs/modules/scheduled-nightly.md",
+    "docs/modules/step-budgets.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/step_budgets.py",
+    "scripts/nightly_budget.py",
+    "scripts/scheduled_nightly.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/generation_catalog_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/prune_generations_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_fix_arrives_when_the_checkout_moves.py",
+    "tests/test_a_pass_that_knows_how_long_it_can_be.py",
+    "tests/test_a_prune_inside_its_step.py",
+    "tests/test_a_step_no_provider_answered_is_not_green.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/nightly-budget-context.json",
+      "docs/modules/nightly-budget.md",
+      "scripts/nightly_budget.py",
+      "tests/test_a_fix_arrives_when_the_checkout_moves.py",
+      "tests/test_a_pass_that_knows_how_long_it_can_be.py",
+      "tests/test_a_prune_inside_its_step.py",
+      "tests/test_a_step_no_provider_answered_is_not_green.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_lock.py",
+      "names": [
+        "process_status"
+      ],
+      "contract_sha256": "b343fc3a906094bb9c34d064071b40db89fe023f004e791c90a7ccc337d6233a",
+      "integration_tests": [
+        "tests/test_a_fix_arrives_when_the_checkout_moves.py",
+        "tests/test_a_pass_that_knows_how_long_it_can_be.py",
+        "tests/test_a_prune_inside_its_step.py",
+        "tests/test_a_step_no_provider_answered_is_not_green.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "canonical_source_manifest",
+        "collect_corpus"
+      ],
+      "contract_sha256": "6f1af8b5d6e29a6eaebcd144bf94853e4b167148485f11c44b06bf8f4c21604d",
+      "integration_tests": [
+        "tests/test_a_fix_arrives_when_the_checkout_moves.py",
+        "tests/test_a_pass_that_knows_how_long_it_can_be.py",
+        "tests/test_a_prune_inside_its_step.py",
+        "tests/test_a_step_no_provider_answered_is_not_green.py"
+      ]
+    },
+    {
+      "provider": "scripts/doctor.py",
+      "names": [
+        "run_doctor"
+      ],
+      "contract_sha256": "081378e281c574733c396a4a7f1ea7acb280b17ae89b8adc43e765a745844581",
+      "integration_tests": [
+        "tests/test_a_fix_arrives_when_the_checkout_moves.py",
+        "tests/test_a_pass_that_knows_how_long_it_can_be.py",
+        "tests/test_a_prune_inside_its_step.py",
+        "tests/test_a_step_no_provider_answered_is_not_green.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_graph.py",
+      "names": [
+        "GRAPH_SCHEMA_VERSION",
+        "create_generation_database"
+      ],
+      "contract_sha256": "89e205850c231804d8c65759f029246f8d981164fe97f6250aa48f942c0c9359",
+      "integration_tests": [
+        "tests/test_a_fix_arrives_when_the_checkout_moves.py",
+        "tests/test_a_pass_that_knows_how_long_it_can_be.py",
+        "tests/test_a_prune_inside_its_step.py",
+        "tests/test_a_step_no_provider_answered_is_not_green.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_fts_validation.py",
+      "names": [
+        "GENERATION_TOKENIZER_CONFIG_SHA256",
+        "GENERATION_TOKENIZER_VERSION"
+      ],
+      "contract_sha256": "41a5ba6fcba2b0852a5187a5c47402f077682f14e1f983941f7647502022a803",
+      "integration_tests": [
+        "tests/test_a_fix_arrives_when_the_checkout_moves.py",
+        "tests/test_a_pass_that_knows_how_long_it_can_be.py",
+        "tests/test_a_prune_inside_its_step.py",
+        "tests/test_a_step_no_provider_answered_is_not_green.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_maintenance.py",
+      "names": [
+        "run_generation_maintenance"
+      ],
+      "contract_sha256": "f993c23c1e2b938d88bee02a716a716c4bb2c99dfcb153bbb47aacab7a37f71b",
+      "integration_tests": [
+        "tests/test_a_fix_arrives_when_the_checkout_moves.py",
+        "tests/test_a_pass_that_knows_how_long_it_can_be.py",
+        "tests/test_a_prune_inside_its_step.py",
+        "tests/test_a_step_no_provider_answered_is_not_green.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_search.py",
+      "names": [
+        "build_generation_fts"
+      ],
+      "contract_sha256": "b2391df99aa883af90d0b8cd8ab8c5b7e83a8d39521b0fa0af81f0a449783354",
+      "integration_tests": [
+        "tests/test_a_fix_arrives_when_the_checkout_moves.py",
+        "tests/test_a_pass_that_knows_how_long_it_can_be.py",
+        "tests/test_a_prune_inside_its_step.py",
+        "tests/test_a_step_no_provider_answered_is_not_green.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "DEFAULT_TIMEOUT_S",
+        "worst_case_call_seconds"
+      ],
+      "contract_sha256": "0fb5879feea77551151acc73febc6167e49be82587dd637b0baa490e3ce2e894",
+      "integration_tests": [
+        "tests/test_a_pass_that_knows_how_long_it_can_be.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_fix_arrives_when_the_checkout_moves.py",
+        "tests/test_a_pass_that_knows_how_long_it_can_be.py",
+        "tests/test_a_prune_inside_its_step.py",
+        "tests/test_a_step_no_provider_answered_is_not_green.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_publication.py",
+      "names": [
+        "write_all"
+      ],
+      "contract_sha256": "0c87cf7b659cca5738ba41c3cc77c42118959b9c2283b24a345d862f8901dcd1",
+      "integration_tests": [
+        "tests/test_a_fix_arrives_when_the_checkout_moves.py",
+        "tests/test_a_pass_that_knows_how_long_it_can_be.py",
+        "tests/test_a_prune_inside_its_step.py",
+        "tests/test_a_step_no_provider_answered_is_not_green.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "reports_dir",
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "731ab871ff014e1c00e32f2d6eb199f0995730018f87e962f8ee0672959c0e67",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/maintenance_helpers.py",
+      "names": [
+        "prune_maintenance_output",
+        "run_step",
+        "trim_scheduler_logs",
+        "wait_for_compile_idle"
+      ],
+      "contract_sha256": "9246ac798b2aa3d69baf1311231ed9bbf804349f465c30294b879eedcdaa04e9",
+      "integration_tests": [
+        "tests/test_a_fix_arrives_when_the_checkout_moves.py",
+        "tests/test_a_pass_that_knows_how_long_it_can_be.py",
+        "tests/test_a_prune_inside_its_step.py",
+        "tests/test_a_step_no_provider_answered_is_not_green.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "active_or_legacy_coordinator"
+      ],
+      "contract_sha256": "c925a7d2a81ec95533c80abc3906d8b8f0c1422d98e7175814de9a57f0ec45ec",
+      "integration_tests": [
+        "tests/test_a_fix_arrives_when_the_checkout_moves.py",
+        "tests/test_a_pass_that_knows_how_long_it_can_be.py",
+        "tests/test_a_prune_inside_its_step.py",
+        "tests/test_a_step_no_provider_answered_is_not_green.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "load_state",
+        "retire_stale_lock",
+        "update_state"
+      ],
+      "contract_sha256": "280884738799d98678da2c33e8bc248890c3c11fccecff55d8a26d38d6b27d3a",
+      "integration_tests": [
+        "tests/test_a_fix_arrives_when_the_checkout_moves.py",
+        "tests/test_a_pass_that_knows_how_long_it_can_be.py",
+        "tests/test_a_prune_inside_its_step.py",
+        "tests/test_a_step_no_provider_answered_is_not_green.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "OperationalOwnershipError",
+        "OwnerLease",
+        "OwnershipRegistry",
+        "acquire_scheduled_owner",
+        "heartbeat_owner",
+        "release_marker_owner"
+      ],
+      "contract_sha256": "f62e5bbbfd4d022e2e2f3f15dd30848a35a0f823ef4e708397d6f010ecb872f3",
+      "integration_tests": [
+        "tests/test_a_fix_arrives_when_the_checkout_moves.py",
+        "tests/test_a_pass_that_knows_how_long_it_can_be.py",
+        "tests/test_a_prune_inside_its_step.py",
+        "tests/test_a_step_no_provider_answered_is_not_green.py"
+      ]
+    },
+    {
+      "provider": "scripts/process_liveness.py",
+      "names": [
+        "owner_alive",
+        "process_start_identity"
+      ],
+      "contract_sha256": "53b16fb306b92132ba05d885846e99a49f10bb5c8a92092f2d704b5832b0d804",
+      "integration_tests": [
+        "tests/test_a_fix_arrives_when_the_checkout_moves.py",
+        "tests/test_a_pass_that_knows_how_long_it_can_be.py",
+        "tests/test_a_prune_inside_its_step.py",
+        "tests/test_a_step_no_provider_answered_is_not_green.py"
+      ]
+    },
+    {
+      "provider": "scripts/prune_generations.py",
+      "names": [
+        "count_prefixed",
+        "prune_generations"
+      ],
+      "contract_sha256": "4ae8c22241d1f718528422d6087a1cc0d3ca1d9dedafa7f0fbb451e3d0a6eca3",
+      "integration_tests": [
+        "tests/test_a_prune_inside_its_step.py"
+      ]
+    },
+    {
+      "provider": "scripts/python_series.py",
+      "names": [
+        "require_supported_python"
+      ],
+      "contract_sha256": "57bf542fde7c87f26112ffd4e3cfc93a65ece403b34a35a187f50dbc2b98cfaf",
+      "integration_tests": [
+        "tests/test_a_fix_arrives_when_the_checkout_moves.py",
+        "tests/test_a_pass_that_knows_how_long_it_can_be.py",
+        "tests/test_a_prune_inside_its_step.py",
+        "tests/test_a_step_no_provider_answered_is_not_green.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "7bba4b535d3f0a73445fece541c540939989b41456c9a79a67f82634748be36b",
+      "integration_tests": [
+        "tests/test_a_fix_arrives_when_the_checkout_moves.py",
+        "tests/test_a_pass_that_knows_how_long_it_can_be.py",
+        "tests/test_a_prune_inside_its_step.py",
+        "tests/test_a_step_no_provider_answered_is_not_green.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "RepositoryScope",
+        "SCHEMA_VERSION",
+        "derive_checkout_id",
+        "derive_repository_id",
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "98d98af2c6ea84a103c5c8463e8dc6a995656f82b7f67a22c295feed5d7a3e6e",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
+    {
+      "provider": "scripts/retrieval_telemetry.py",
+      "names": [
+        "compact"
+      ],
+      "contract_sha256": "a2f146900083e884871afbdb1bcd2992e5efd03783349a0bebc7f379ff500923",
+      "integration_tests": [
+        "tests/test_a_fix_arrives_when_the_checkout_moves.py",
+        "tests/test_a_pass_that_knows_how_long_it_can_be.py",
+        "tests/test_a_prune_inside_its_step.py",
+        "tests/test_a_step_no_provider_answered_is_not_green.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "describe_error",
+        "describe_error_chain"
+      ],
+      "contract_sha256": "884e5e05013d225e77560cc5211c6b673e5a2eb93f21415faed38c0cb7c412e2",
+      "integration_tests": [
+        "tests/test_a_fix_arrives_when_the_checkout_moves.py",
+        "tests/test_a_pass_that_knows_how_long_it_can_be.py",
+        "tests/test_a_prune_inside_its_step.py",
+        "tests/test_a_step_no_provider_answered_is_not_green.py"
+      ]
+    },
+    {
+      "provider": "scripts/self_update.py",
+      "names": [
+        "sync_dependencies",
+        "update_checkout"
+      ],
+      "contract_sha256": "374cc392946658cae7ecc2b00ecc6b1d557e9fec8acd12ac59f2beee5c69766d",
+      "integration_tests": [
+        "tests/test_a_fix_arrives_when_the_checkout_moves.py",
+        "tests/test_a_pass_that_knows_how_long_it_can_be.py",
+        "tests/test_a_prune_inside_its_step.py",
+        "tests/test_a_step_no_provider_answered_is_not_green.py"
+      ]
+    },
+    {
+      "provider": "scripts/settings.py",
+      "names": [
+        "setting_value"
+      ],
+      "contract_sha256": "ec6d2a43d91dba48c174aad5e9505790a05fd66f1bf1e5292264857f320a9881",
+      "integration_tests": [
+        "tests/test_a_fix_arrives_when_the_checkout_moves.py",
+        "tests/test_a_pass_that_knows_how_long_it_can_be.py",
+        "tests/test_a_prune_inside_its_step.py",
+        "tests/test_a_step_no_provider_answered_is_not_green.py"
+      ]
+    },
+    {
+      "provider": "scripts/weekly_budget.py",
+      "names": [
+        "script_steps"
+      ],
+      "contract_sha256": "4f125536b1c97a722f874e122cc79212b08d3c8ae5384ecab9ece9630d2cfb53",
+      "integration_tests": [
+        "tests/test_a_prune_inside_its_step.py"
+      ]
+    }
+  ]
+}

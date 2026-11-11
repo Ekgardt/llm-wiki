@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import os
 
-import memory_queue
 import pytest
-from memory_queue import QueueOperationError
+import queue_core
+from queue_core import (
+    QueueOperationError,
+)
 
 
 class _DiesWhenTheChildLoadsIt:
@@ -27,6 +29,6 @@ class _DiesWhenTheChildLoadsIt:
 
 def test_the_real_error_is_reported_and_cleanup_is_confirmed() -> None:
     with pytest.raises(QueueOperationError) as error:
-        memory_queue._run_processor_child(_DiesWhenTheChildLoadsIt(), {}, 30.0)
+        queue_core.run_processor_child(_DiesWhenTheChildLoadsIt(), {}, 30.0)
 
     assert error.value.code == "processor_result_malformed"

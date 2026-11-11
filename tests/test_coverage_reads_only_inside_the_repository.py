@@ -30,7 +30,7 @@ class _EmptyGraph:
 
 
 def _freshness_of(repository: Path, relative: str) -> str:
-    answer = path_coverage._coverage_answer(
+    answer = path_coverage.coverage_answer(
         _EmptyGraph(), repository, relative, time.monotonic() + 10
     )
     return answer["freshness"]
@@ -85,7 +85,7 @@ def test_the_tool_refuses_a_coverage_path_that_is_not_repository_relative(
     import mcp_server
 
     def verdict(path: str):
-        return mcp_server._validate_tool_arguments(
+        return mcp_server.validate_tool_arguments(
             "get_architecture",
             {"directory": str(repository), "mode": "coverage", "path": path},
         )

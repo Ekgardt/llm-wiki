@@ -1,0 +1,522 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/claims-helpers.md",
+    "docs/modules/claims-tests-a-blank-line-before-the-next-section-helpers.md",
+    "docs/modules/compile-claims-producer-helpers.md",
+    "docs/modules/compile-memory.md",
+    "docs/modules/compile-pipeline-claims-context.json",
+    "docs/modules/compile-pipeline-claims.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/reliable-memory-tests-compile-transactions-helpers.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/compile_memory.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/compile_pipeline_claims.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/a_blank_line_before_the_next_section_helpers.py",
+    "tests/claims_helpers.py",
+    "tests/compile_claims_producer_helpers.py",
+    "tests/compile_transactions_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+    "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+    "tests/test_compile_authored_citations.py",
+    "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+    "tests/test_compile_calendar_validation_remains_exact.py",
+    "tests/test_compile_evidence_uses_actual_cardinality.py",
+    "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+    "tests/test_daily_entry_boundary.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-pipeline-claims-context.json",
+      "docs/modules/compile-pipeline-claims.md",
+      "scripts/llm_wiki/compile_pipeline_claims.py",
+      "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+      "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+      "tests/test_compile_authored_citations.py",
+      "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+      "tests/test_compile_calendar_validation_remains_exact.py",
+      "tests/test_compile_evidence_uses_actual_cardinality.py",
+      "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+      "tests/test_daily_entry_boundary.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/claims.py",
+      "names": [
+        "ClaimPipeline",
+        "claim_json_bytes",
+        "claim_ledger_document",
+        "parse_claim_ledger",
+        "validate_claim_record"
+      ],
+      "contract_sha256": "fbc133b96cefc88489303ea1abe2cefca01e4fdf6c009ab4cfa0ea3af2314d3b",
+      "integration_tests": [
+        "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+        "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+        "tests/test_compile_authored_citations.py",
+        "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+        "tests/test_compile_calendar_validation_remains_exact.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py",
+        "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_leased_run.py",
+      "names": [
+        "leased_compile_processor"
+      ],
+      "contract_sha256": "863aec0b7901984e1b393865374d1be4a4c05c6bd98ff719e9832d94f4d180bb",
+      "integration_tests": [
+        "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+        "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+        "tests/test_compile_authored_citations.py",
+        "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+        "tests/test_compile_calendar_validation_remains_exact.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py",
+        "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_lock.py",
+      "names": [
+        "lock_owner_token"
+      ],
+      "contract_sha256": "c417ca9f578d004aa7296946fe7766d087c82858a09e543c77dbbaedcab08ca0",
+      "integration_tests": [
+        "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+        "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+        "tests/test_compile_authored_citations.py",
+        "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+        "tests/test_compile_calendar_validation_remains_exact.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py",
+        "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_pipeline.py",
+      "names": [
+        "require_compile_active",
+        "run"
+      ],
+      "contract_sha256": "b3b0fe89c363afcf177cfea5bafd887dbc38506f6304869b7187dc745ef8c505",
+      "integration_tests": [
+        "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+        "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+        "tests/test_compile_authored_citations.py",
+        "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+        "tests/test_compile_calendar_validation_remains_exact.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py",
+        "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "DailySnapshot",
+        "SourceSnapshot",
+        "physical_source"
+      ],
+      "contract_sha256": "0a8cbd84fc82bd462e202b62ca45fd2fe62d7c0212a2ced29ae5e62792716183",
+      "integration_tests": [
+        "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+        "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+        "tests/test_compile_authored_citations.py",
+        "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+        "tests/test_compile_calendar_validation_remains_exact.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py",
+        "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_resolver.py",
+      "names": [
+        "EvidenceRef",
+        "EvidenceResolver",
+        "MAX_DAILY_PART_BYTES",
+        "daily_entries"
+      ],
+      "contract_sha256": "1f3de2c99f45ce778dd2d50dc0d4d3242f41d593af6b21c4b61493fdbc6d4c6b",
+      "integration_tests": [
+        "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+        "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+        "tests/test_compile_authored_citations.py",
+        "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+        "tests/test_compile_calendar_validation_remains_exact.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py",
+        "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_maintenance.py",
+      "names": [
+        "run_generation_maintenance"
+      ],
+      "contract_sha256": "f993c23c1e2b938d88bee02a716a716c4bb2c99dfcb153bbb47aacab7a37f71b",
+      "integration_tests": [
+        "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+        "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+        "tests/test_compile_authored_citations.py",
+        "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+        "tests/test_compile_calendar_validation_remains_exact.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py",
+        "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/claim_ledger.py",
+      "names": [
+        "claim_ledger_match"
+      ],
+      "contract_sha256": "3d4dceb9c02424023e469ef3c60c1015d22417cbacb8482f48281fcb2e005808",
+      "integration_tests": [
+        "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+        "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+        "tests/test_compile_authored_citations.py",
+        "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+        "tests/test_compile_calendar_validation_remains_exact.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py",
+        "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_base.py",
+      "names": [
+        "CATEGORY_SINGULAR",
+        "CLAIM_RECORD_SCHEMA",
+        "NATIVE_EVIDENCE_SCHEMA",
+        "SOURCE_CHOICE_RESOLVER"
+      ],
+      "contract_sha256": "b1757a824baadf3f13e0638eb6c7d7f2969b47f7b6fadbfd203e859e60ad1767",
+      "integration_tests": [
+        "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+        "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+        "tests/test_compile_authored_citations.py",
+        "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+        "tests/test_compile_calendar_validation_remains_exact.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py",
+        "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_operations.py",
+      "names": [
+        "require_evidence_shape",
+        "require_whole_physical_line"
+      ],
+      "contract_sha256": "a6bb4d00edba35c29d609f9b05ce4089d37c5992e0824d17a3481466c2c40f68",
+      "integration_tests": [
+        "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_prompts.py",
+      "names": [
+        "draft_operations",
+        "validate_semantic_operation"
+      ],
+      "contract_sha256": "9da7f4acee9d404c56ed76ea55fb1fa122c8752499e1e4ce5e5acd868da62077",
+      "integration_tests": [
+        "tests/test_compile_authored_citations.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_selection.py",
+      "names": [
+        "compile_task_payload",
+        "compile_under_lock",
+        "discard_unusable_receipts",
+        "mark_finished",
+        "parse_args",
+        "report_deprecated_flags"
+      ],
+      "contract_sha256": "91a7e916dc576ba5809305b9e80a9557cb81cfcbfc39220445af81770046e444",
+      "integration_tests": [
+        "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+        "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+        "tests/test_compile_authored_citations.py",
+        "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+        "tests/test_compile_calendar_validation_remains_exact.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py",
+        "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "CompileApplyResult",
+        "CompileInputs",
+        "MAX_FAILURE_DETAIL_CHARS",
+        "require_native_unit",
+        "snapshot_compile_inputs"
+      ],
+      "contract_sha256": "6ba68c2d0995d58be76ebea3beadd44c831b824246fae5ea694ddad7367e19b6",
+      "integration_tests": [
+        "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+        "tests/test_compile_authored_citations.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+        "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+        "tests/test_compile_authored_citations.py",
+        "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+        "tests/test_compile_calendar_validation_remains_exact.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py",
+        "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/schema.py",
+      "names": [
+        "validate_schema_object"
+      ],
+      "contract_sha256": "51ea8b6e268e98ac3764f50dd73abaf180f833d71c23b46cc288528bde4651d3",
+      "integration_tests": [
+        "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+        "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+        "tests/test_compile_authored_citations.py",
+        "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+        "tests/test_compile_calendar_validation_remains_exact.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py",
+        "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+        "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+        "tests/test_compile_authored_citations.py",
+        "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+        "tests/test_compile_calendar_validation_remains_exact.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py",
+        "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_contracts.py",
+      "names": [
+        "LeaseProcessor"
+      ],
+      "contract_sha256": "65beb9b24756c7432bcfbdb61f10fd40deaba6d9b24f671089b198571d775864",
+      "integration_tests": [
+        "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+        "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+        "tests/test_compile_authored_citations.py",
+        "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+        "tests/test_compile_calendar_validation_remains_exact.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py",
+        "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+        "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+        "tests/test_compile_authored_citations.py",
+        "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+        "tests/test_compile_calendar_validation_remains_exact.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py",
+        "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "reports_dir",
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "731ab871ff014e1c00e32f2d6eb199f0995730018f87e962f8ee0672959c0e67",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "OwnerLease",
+        "heartbeat_owner"
+      ],
+      "contract_sha256": "c4582c6d1bbabcef579a4c3046b13d8d5245cb46712fbce11b1e2594acf2617f",
+      "integration_tests": [
+        "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+        "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+        "tests/test_compile_authored_citations.py",
+        "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+        "tests/test_compile_calendar_validation_remains_exact.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py",
+        "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "active_memory_queue",
+        "run_processor_child",
+        "uses_compile_journal",
+        "work_claimed"
+      ],
+      "contract_sha256": "1958e53b967a2a00ee20c3d945e3279fda1605a954605b21b65a71bdc535696b",
+      "integration_tests": [
+        "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+        "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+        "tests/test_compile_authored_citations.py",
+        "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+        "tests/test_compile_calendar_validation_remains_exact.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py",
+        "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "4243e32fa6ecab88fca1a2d2b3214c0a36944fc23129138102dfaebf6d99457f",
+      "integration_tests": [
+        "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+        "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+        "tests/test_compile_authored_citations.py",
+        "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+        "tests/test_compile_calendar_validation_remains_exact.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py",
+        "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+        "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+        "tests/test_compile_authored_citations.py",
+        "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+        "tests/test_compile_calendar_validation_remains_exact.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py",
+        "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "describe_error"
+      ],
+      "contract_sha256": "fb304f29eb5f060ccb0503f24561dd6ee4cfb07e2c36b130c00ad9e1c9000eaf",
+      "integration_tests": [
+        "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+        "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+        "tests/test_compile_authored_citations.py",
+        "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+        "tests/test_compile_calendar_validation_remains_exact.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py",
+        "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    },
+    {
+      "provider": "scripts/settings.py",
+      "names": [
+        "setting_value"
+      ],
+      "contract_sha256": "ec6d2a43d91dba48c174aad5e9505790a05fd66f1bf1e5292264857f320a9881",
+      "integration_tests": [
+        "tests/test_a_claim_already_on_the_page_is_not_a_conflict.py",
+        "tests/test_a_quarantined_claim_does_not_hold_its_day.py",
+        "tests/test_compile_authored_citations.py",
+        "tests/test_compile_bullets_keep_the_complete_physical_line.py",
+        "tests/test_compile_calendar_validation_remains_exact.py",
+        "tests/test_compile_evidence_uses_actual_cardinality.py",
+        "tests/test_compile_literal_quote_search_preserves_unique_span.py",
+        "tests/test_daily_entry_boundary.py"
+      ]
+    }
+  ]
+}

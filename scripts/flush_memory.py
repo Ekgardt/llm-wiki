@@ -17,7 +17,6 @@ work when no provider answered was retired on 2026-09-25
 """
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import json
 import sys
@@ -28,186 +27,43 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from iso_time import local_now  # noqa: E402
-from memory_state import (  # noqa: E402
-    MAX_CAPTURE_INTENT_BYTES,
-    ROOT,
-    STATE_ROOT,
+from capture_intent_records import (
+    capture_decision_relative_path,
+    capture_intent_reference,
+    capture_markdown_disposition,
+    commit_capture_markdown,
+    decode_capture_intent,
+    ensure_capture_results_directory,
+    held_by_this_task,
+    index_capture_decision,
+    publish_capture_terminal,
+    require_capture_intent_identity,
 )
+from iso_time import local_now  # noqa: E402
+from llm_wiki import runtime_roots  # noqa: E402
+from llm_wiki.classification_protocol import (
+    CLASSIFICATION_SYSTEM_PROMPT as CLASSIFICATION_SYSTEM_PROMPT,  # noqa: E402
+)
+from llm_wiki.classification_protocol import LEGACY_SENTINELS as LEGACY_SENTINELS  # noqa: E402
+from llm_wiki.classification_protocol import NON_FLUSH_PREFIXES as NON_FLUSH_PREFIXES  # noqa: E402
+from llm_wiki.classification_protocol import TIERS as TIERS  # noqa: E402
+from llm_wiki.classification_protocol import (
+    build_classification_prompt as build_classification_prompt,  # noqa: E402
+)
+from llm_wiki.classification_protocol import classify_response as classify_response  # noqa: E402
+from llm_wiki.classification_protocol import legacy_ok as legacy_ok  # noqa: E402
+from llm_wiki.classification_protocol import tier_token as tier_token  # noqa: E402
+from llm_wiki.classification_protocol import untiered_response as untiered_response  # noqa: E402
+from memory_state import MAX_CAPTURE_INTENT_BYTES
 from secret_redact import redact_secrets  # noqa: E402
 
-DAILY_DIR = ROOT / "knowledge" / "daily"
 # The classifier reads the last 60 000 characters, the window of session-promotion-policy-
 # decision; the stored record keeps everything and the prompt names what was omitted (see
-# _bounded_classifier_evidence).
+# bounded_classifier_evidence).
 MAX_TRANSCRIPT_CHARS = 60_000
 # What a session record may read from a transcript file; the record itself is
 # bounded again after rendering.
 MAX_RECORD_CHARS = 4_000_000
-MAX_CAPTURE_TERMINAL_BYTES = 64 * 1024
-
-_CAPTURE_SOURCE_FIELDS = (
-    "source_occurrence_id",
-    "source_event_id",
-    "occurred_at",
-    "host",
-    "event",
-    "session",
-    "project_slug",
-    "worktree",
-    "trigger",
-    "checkpoint_reason",
-    "chunk_index",
-    "chunk_count",
-    "evidence",
-)
-# Tier sentinels — replace the legacy single FLUSH_OK. The classifier
-# is asked to emit exactly one of these as the FIRST line of its
-# response, followed (for MAJOR/MINOR) by the structured summary.
-TIERS = ("FLUSH_MAJOR", "FLUSH_MINOR", "FLUSH_OK")
-
-# Legacy sentinel still recognized for backward compat with any
-# pre-Phase-0.5 summaries that may already be in flight or persisted.
-LEGACY_SENTINELS = ("FLUSH_OK", "(no durable content)", "NO_DURABLE_CONTENT")
-
-
-_NON_FLUSH_PREFIXES = ("(summary failed", '{"operations"', '{"audit"')
-
-
-def _tier_token(first_line_raw: str) -> str:
-    """The first line without the decoration a model likes to add."""
-    token = first_line_raw.upper().rstrip(".")
-    while token.startswith("`") and token.endswith("`") and len(token) > 1:
-        token = token[1:-1]
-    return token
-
-
-def _legacy_ok(stripped: str) -> bool:
-    """The old protocol: a bare FLUSH_OK, alone or on a line of its own.
-
-    Both comparisons read the same upper-cased set. The per-line one used to test an
-    upper-cased line against the mixed-case sentinels, so `(no durable content)` on a
-    line of its own never matched. See
-    `docs/research/2026-09-17-the-six-capture-corrections-the-first-round-left.md`.
-    """
-    sentinels = {sentinel.upper() for sentinel in LEGACY_SENTINELS}
-    if stripped.strip(" .\n\t*`").upper() in sentinels:
-        return True
-    return any(line.strip().upper() in sentinels for line in stripped.splitlines())
-
-
-def _untiered_response(stripped: str) -> tuple[str, str]:
-    """No tier line: the old sentinel, a non-flush payload, or content to keep."""
-    if _legacy_ok(stripped) or stripped.startswith(_NON_FLUSH_PREFIXES):
-        return "ok", ""
-    return "minor", stripped
-
-
-def _classify_response(raw: str) -> tuple[str, str]:
-    """Split the LLM response into (tier, body).
-
-    Accepts the new protocol (first line is FLUSH_MAJOR / FLUSH_MINOR /
-    FLUSH_OK) and the legacy protocol (single FLUSH_OK token anywhere).
-
-    Returns:
-        ("FLUSH_MAJOR" | "FLUSH_MINOR" | "FLUSH_OK", remaining_text)
-
-    The remaining_text is the structured summary for MAJOR/MINOR tiers
-    and is empty for OK. An unrecognised answer becomes MINOR on purpose:
-    better to keep content that may be useful than to lose it as OK.
-    """
-    stripped = (raw or "").strip()
-    if not stripped:
-        return "ok", ""
-    first_line_raw = stripped.splitlines()[0].strip()
-    token = _tier_token(first_line_raw)
-    if token in TIERS:
-        body = stripped[len(first_line_raw) :].strip(" \n\t*`")
-        return token.lower().replace("flush_", ""), body
-    return _untiered_response(stripped)
-
-
-CLASSIFICATION_SYSTEM_PROMPT = (
-    "You classify and distill Claude Code transcripts into a 3-tier "
-    "memory scale. Your default bias is toward FLUSH_OK — most "
-    "sessions are status chatter and should not pollute the daily "
-    "log. You only emit FLUSH_MAJOR when you can point to a concrete "
-    "decision or lesson in the transcript. No preamble, no apologies."
-)
-
-
-def build_classification_prompt(transcript_excerpt: str, event: str) -> str:
-    """The one prompt that decides a session's tier.
-
-    Extracted so the measurement stand in `benchmark/run_flush_classification.py`
-    scores the prompt the product actually sends, not a copy of it.
-    """
-    return f"""You are classifying + distilling a Claude Code session transcript.
-
-Event: {event}
-
-=== STEP 1 — CLASSIFY ===
-First, decide the tier of this session by scanning the transcript:
-
-- FLUSH_MAJOR  — contains at least one of: a concrete DECISION with
-  rationale, a reusable LESSON/pattern, or a non-obvious COMMAND/snippet
-  worth remembering across sessions.
-
-- FLUSH_MINOR  — contains only one or more of: a debug GOTCHA
-  (symptom→cause), an OPEN QUESTION worth returning to, or a single
-  useful observation — but no decisions or lessons. Worth saving but
-  not worth auto-compiling.
-
-- FLUSH_OK     — pure status/progress chatter ("we did X", "started Y",
-  "fixed Z" without explanation). Nothing a future session would benefit
-  from. Empty transcripts and pure-navigation turn here too.
-
-Be strict. Status updates are FLUSH_OK even if they mention real work —
-the bar is "would a future session in this project benefit from knowing
-this?". When in doubt, choose the lower tier.
-
-=== STEP 2 — DISTILL (skip for FLUSH_OK) ===
-For FLUSH_MAJOR and FLUSH_MINOR, produce a Markdown block with ONLY
-these sections that apply (skip empty sections):
-
-- **Decisions made** — concrete choices with reasons (MAJOR only).
-- **Lessons / patterns** — reusable insights (MAJOR only).
-- **Commands / snippets** — non-obvious invocations (any tier).
-- **Gotchas / debugging** — symptom → cause → fix (any tier).
-- **Open questions** — unresolved, worth returning to (any tier).
-
-Be terse. Each bullet should fit on one line. Do NOT narrate what was
-done — that is status, not memory. Keep names exactly as the transcript
-spells them — identifiers, file paths, versions, flags, numbers, commands:
-a later search finds the bullet by those, and a bullet that renames or
-drops them is lost.
-
-=== OUTPUT FORMAT ===
-Emit EXACTLY one of these tokens as the FIRST line of your response,
-followed by a blank line, then (if MAJOR/MINOR) the distilled block:
-
-For MAJOR:
-FLUSH_MAJOR
-
-<distilled markdown block>
-
-For MINOR:
-FLUSH_MINOR
-
-<distilled markdown block>
-
-For OK (no second line allowed):
-FLUSH_OK
-
-Do not add preamble, apologies, or trailing explanation. The first
-non-blank line MUST be the tier token.
-
---- BEGIN TRANSCRIPT EXCERPT ---
-{transcript_excerpt}
---- END TRANSCRIPT EXCERPT ---
-"""
-
-
 def _anchor_date(day: str):
     from datetime import date
 
@@ -237,7 +93,7 @@ def _dated_block(day: str, block: str) -> str:
 def append_daily(day: str, block: str, operation_id: str | None = None) -> Path:
     from daily_log_append import locked_append
 
-    out = DAILY_DIR / f"{day}.md"
+    out = runtime_roots.daily_dir() / f"{day}.md"
     locked_append(out, _dated_block(day, block), operation_id=operation_id)
     return out
 
@@ -249,91 +105,13 @@ def _capture_binding_intent_id(binding: object) -> str:
     return intent_id
 
 
-def _require_bound_intent(intent_id: object, intent_sha256: object) -> None:
-    """The binding names both halves of the intent identity, or neither."""
-    if not isinstance(intent_id, str) or not isinstance(intent_sha256, str):
-        raise RuntimeError("capture task binding is invalid")
-
-
-def _capture_intent_reference(
-    lease: object, active: object
-) -> tuple[str, str, str]:
-    payload = getattr(lease, "payload", None)
-    intent_id = getattr(active, "intent_id", None)
-    intent_sha256 = getattr(active, "intent_sha256", None)
-    if not isinstance(payload, Mapping):
-        raise RuntimeError("capture task payload is invalid")
-    _require_bound_intent(intent_id, intent_sha256)
-    intent_path = f"run/capture-intents/ready/{intent_id[:2]}/{intent_id}.json"
-    actual = (
-        set(payload),
-        payload.get("intent_id"),
-        payload.get("intent_sha256"),
-        isinstance(payload.get("intent_path"), str),
-        getattr(active, "task_id", None),
-    )
-    expected = (
-        {"intent_id", "intent_path", "intent_sha256"},
-        intent_id,
-        intent_sha256,
-        True,
-        getattr(lease, "id", None),
-    )
-    if actual != expected:
-        raise RuntimeError("capture task payload conflicts with its binding")
-    return intent_id, intent_path, intent_sha256
-
-
-def _decode_capture_intent(data: bytes) -> dict[str, object]:
-    from reliable_memory import canonical_json_bytes, validate_schema
-
-    try:
-        record = json.loads(data.decode("utf-8", errors="strict"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("capture intent JSON is invalid") from exc
-    if not isinstance(record, dict):
-        raise RuntimeError("capture intent must be a JSON object")
-    validate_schema(record, Path(__file__).with_name("schemas") / "capture-intent-v1.json")
-    if canonical_json_bytes(record) != data:
-        raise RuntimeError("capture intent is not canonical JSON")
-    return record
-
-
-def _require_capture_intent_identity(record: Mapping[str, object]) -> None:
-    from reliable_memory import canonical_json_bytes, sha256_bytes
-
-    source = {field: record[field] for field in _CAPTURE_SOURCE_FIELDS}
-    chunk_sha256 = sha256_bytes(canonical_json_bytes(record["evidence"]))
-    complete_sha256 = sha256_bytes(canonical_json_bytes(source))
-    identity = {
-        "schema_version": "capture-intent/v1",
-        "source_occurrence_id": record["source_occurrence_id"],
-        "source_event_id": record["source_event_id"],
-        "occurred_at": record["occurred_at"],
-        "checkpoint_reason": record["checkpoint_reason"],
-        "chunk_index": record["chunk_index"],
-        "chunk_sha256": chunk_sha256,
-    }
-    actual = (
-        record["chunk_sha256"],
-        record["complete_input_sha256"],
-        record["intent_id"],
-    )
-    expected = (
-        chunk_sha256,
-        complete_sha256,
-        sha256_bytes(canonical_json_bytes(identity)),
-    )
-    if actual != expected:
-        raise RuntimeError("capture intent identity is invalid")
-
-
 def _read_capture_intent(
     queue: object, lease: object, active: object
 ) -> dict[str, object]:
-    from reliable_memory import read_runtime_bytes, sha256_bytes
+    from llm_wiki.formats.canonical import sha256_bytes
+    from reliable_memory import read_runtime_bytes
 
-    intent_id, intent_path, intent_sha256 = _capture_intent_reference(lease, active)
+    intent_id, intent_path, intent_sha256 = capture_intent_reference(lease, active)
     data = read_runtime_bytes(
         queue.state_root / intent_path,
         queue.state_root,
@@ -342,14 +120,14 @@ def _read_capture_intent(
     )
     if sha256_bytes(data) != intent_sha256:
         raise RuntimeError("capture intent digest changed")
-    record = _decode_capture_intent(data)
+    record = decode_capture_intent(data)
     if record["intent_id"] != intent_id:
         raise RuntimeError("capture intent ID conflicts with its binding")
-    _require_capture_intent_identity(record)
+    require_capture_intent_identity(record)
     return record
 
 
-def _readable_evidence(evidence: object) -> str:
+def readable_evidence(evidence: object) -> str:
     """The conversation this evidence carries, not the JSON that carries it.
 
     The classifier used to read `canonical_json_bytes(evidence)`: the host's
@@ -374,7 +152,7 @@ def _readable_evidence(evidence: object) -> str:
     return render_transcript(evidence_text(evidence))
 
 
-def _bounded_classifier_evidence(evidence: str) -> str:
+def bounded_classifier_evidence(evidence: str) -> str:
     """The tail the classifier reads; the durable record keeps all the evidence it was given.
 
     Not "complete": the evidence of a very long session is itself a head and a
@@ -396,7 +174,7 @@ def _bounded_classifier_evidence(evidence: str) -> str:
     )
 
 
-def _capture_prompt(record: Mapping[str, object]) -> str:
+def capture_prompt(record: Mapping[str, object]) -> str:
     """The one classification prompt, on the evidence the intent carries.
 
     Until 2026-09-23 the capture path sent three lines that named the tier
@@ -405,9 +183,9 @@ def _capture_prompt(record: Mapping[str, object]) -> str:
     prompt now serves both, so the stand measures what the product sends. See
     `docs/research/2026-09-23-the-corpus-labels-itself.md`.
     """
-    evidence = _readable_evidence(record["evidence"])
+    evidence = readable_evidence(record["evidence"])
     return build_classification_prompt(
-        _bounded_classifier_evidence(evidence), str(record["event"])
+        bounded_classifier_evidence(evidence), str(record["event"])
     )
 
 
@@ -477,7 +255,7 @@ def _required_tier(raw: object) -> tuple[str, str]:
     return declared
 
 
-def _parse_capture_wire_output(raw: object) -> tuple[str, str]:
+def parse_capture_wire_output(raw: object) -> tuple[str, str]:
     tier, body = _required_tier(raw)
     if tier == "ok":
         return "ok", ""
@@ -489,8 +267,8 @@ def _parse_capture_wire_output(raw: object) -> tuple[str, str]:
 CAPTURE_KEEPALIVE_SECONDS = 10.0
 
 
-class _CaptureKeepAlive:
-    """Renew every claim a capture holds while its classifier runs.
+class CaptureKeepAlive:
+    """Renew every claim through terminal verification and all processing I/O.
 
     Owner and its queue projection, the queue lease, the task fence and the
     intent fence: nothing renewed them, and no capture over 30 seconds ever
@@ -498,8 +276,12 @@ class _CaptureKeepAlive:
     publication stays fenced, so a claim that was lost still refuses to publish.
     """
 
-    def __init__(self, queue, coordinator, lease, task_fence, intent_fence, owner) -> None:
+    def __init__(
+        self, queue, coordinator, lease, task_fence, intent_fence, owner,
+        *, interval: float = CAPTURE_KEEPALIVE_SECONDS,
+    ) -> None:
         self._queue = queue
+        self._interval = interval
         self._coordinator = coordinator
         self._lease = lease
         self._task_fence = task_fence
@@ -511,25 +293,27 @@ class _CaptureKeepAlive:
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="capture-keepalive", daemon=True)
 
-    def __enter__(self) -> _CaptureKeepAlive:
+    def __enter__(self) -> CaptureKeepAlive:
         self._thread.start()
         return self
 
     def __exit__(self, *_exc: object) -> None:
         self._stop.set()
-        self._thread.join(timeout=CAPTURE_KEEPALIVE_SECONDS * 2)
+        # Releasing the enclosing fences requires the renewer to have stopped,
+        # including a database call already in flight when stop was requested.
+        self._thread.join()
 
     def _run(self) -> None:
         from lease_renewal import renew_until_stopped
-        from markdown_transaction import INTENT_FENCE_SECONDS
-        from reliable_memory import DEFAULTS
+        from llm_wiki.markdown_coordinator_base import INTENT_FENCE_SECONDS
+        from llm_wiki.reliability_defaults import DEFAULTS
 
         # The ending error needs no handling here: publication stays fenced, so a
         # claim that ran out refuses to publish on its own. One round renews the
         # queue and the coordinator; the coordinator's busy wait is the longer.
         renew_until_stopped(
             self._renew,
-            interval=CAPTURE_KEEPALIVE_SECONDS,
+            interval=self._interval,
             lease_seconds=INTENT_FENCE_SECONDS,
             attempt_seconds=DEFAULTS.markdown_busy_ms / 1_000,
             held_since=self._held_since,
@@ -556,17 +340,17 @@ class CaptureProviderUnavailable(RuntimeError):
 PROVIDER_RETRY_SECONDS = 3600
 
 
-def _call_capture_classifier(
+def call_capture_classifier(
     record: Mapping[str, object],
     llm_call: Callable[[str, str, int], object] | None,
 ) -> tuple[object, str, str]:
     from llm_client import LLMResult, call_llm_result
 
     caller = llm_call if llm_call is not None else call_llm_result
-    result = _answered(caller(_capture_prompt(record), CLASSIFICATION_SYSTEM_PROMPT, 1500))
+    result = _answered(caller(capture_prompt(record), CLASSIFICATION_SYSTEM_PROMPT, 1500))
     if not isinstance(result, LLMResult):
         raise RuntimeError("capture provider did not return a provider result")
-    tier, body = _parse_capture_wire_output(result.text)
+    tier, body = parse_capture_wire_output(result.text)
     return result, tier, body
 
 
@@ -596,7 +380,7 @@ def _capture_tier_outcome(tier: str) -> str:
         raise ValueError("capture tier is invalid") from exc
 
 
-def _capture_now() -> datetime:
+def capture_now() -> datetime:
     return local_now()
 
 
@@ -621,7 +405,7 @@ def _project_slug_line(slug: object) -> str:
     return f"- Project slug: `{slug}`\n"
 
 
-def _capture_daily_block(
+def capture_daily_block(
     record: Mapping[str, object], tier: str, body: str, chosen_at: datetime
 ) -> str:
     event = _capture_text(record["event"], "session_end").replace("_", "-")
@@ -647,16 +431,16 @@ def _dated_capture_block(
     queued entry had its dates resolved. See
     `docs/research/2026-09-17-a-queued-entry-resolves-its-dates-too.md`.
     """
-    block = _capture_daily_block(record, tier, body, chosen_at)
+    block = capture_daily_block(record, tier, body, chosen_at)
     return _dated_block(chosen_at.strftime("%Y-%m-%d"), block)
 
 
 # `False` is the form every decision stored before 2026-09-17 recorded; it is only
 # ever rebuilt to recognise one of those.
-_CAPTURE_BLOCK_BUILDERS = {True: _dated_capture_block, False: _capture_daily_block}
+_CAPTURE_BLOCK_BUILDERS = {True: _dated_capture_block, False: capture_daily_block}
 
 
-def _capture_operation_plan(
+def capture_operation_plan(
     record: Mapping[str, object],
     tier: str,
     body: str,
@@ -664,7 +448,7 @@ def _capture_operation_plan(
     *,
     dated: bool = True,
 ) -> list[dict[str, object]]:
-    from reliable_memory import sha256_bytes
+    from llm_wiki.formats.canonical import sha256_bytes
 
     if tier == "ok":
         return []
@@ -691,16 +475,16 @@ def _capture_decision_time(decision: Mapping[str, object]) -> datetime | None:
     if not plan:
         return None
     try:
-        value = datetime.fromisoformat(str(plan[0]["chosen_at"]).replace("Z", "+00:00"))
+        value = datetime.fromisoformat(str(plan[0]["chosen_at"]))
     except (IndexError, KeyError, TypeError, ValueError) as exc:
         raise RuntimeError("capture decision time is invalid") from exc
     return _require_capture_time(value)
 
 
-def _require_capture_decision_semantics(
+def require_capture_decision_semantics(
     decision: Mapping[str, object], intent: Mapping[str, object]
 ) -> None:
-    tier, body = _parse_capture_wire_output(decision["wire_output"])
+    tier, body = parse_capture_wire_output(decision["wire_output"])
     actual = (decision["tier"], decision["outcome"])
     expected = (tier, _capture_tier_outcome(tier))
     if actual != expected:
@@ -708,7 +492,7 @@ def _require_capture_decision_semantics(
     chosen_at = _capture_decision_time(decision)
     # A decision stored before the dates were resolved is still a valid decision.
     plans = [
-        _capture_operation_plan(intent, tier, body, chosen_at, dated=dated)
+        capture_operation_plan(intent, tier, body, chosen_at, dated=dated)
         for dated in (True, False)
     ]
     if decision["operation_plan"] not in plans:
@@ -724,7 +508,9 @@ def _capture_decision_bytes(
     chosen_at: datetime | None,
 ) -> bytes:
     from llm_client import LLMResult
-    from reliable_memory import MAX_CAPTURE_DECISION_BYTES, canonical_json_bytes, validate_schema
+    from llm_wiki.formats.canonical import canonical_json_bytes
+    from llm_wiki.formats.schema import validate_schema
+    from reliable_memory import MAX_CAPTURE_DECISION_BYTES
 
     if not isinstance(result, LLMResult):
         raise TypeError("capture decision requires an LLM result")
@@ -746,7 +532,7 @@ def _capture_decision_bytes(
         "wire_output": result.text,
         "tier": tier,
         "outcome": _capture_tier_outcome(tier),
-        "operation_plan": _capture_operation_plan(record, tier, body, chosen_at),
+        "operation_plan": capture_operation_plan(record, tier, body, chosen_at),
         "processing_binding": {
             "kind": "task",
             "task_id": getattr(active, "task_id"),
@@ -755,72 +541,16 @@ def _capture_decision_bytes(
     }
     schema = Path(__file__).with_name("schemas") / "capture-decision-v1.json"
     validate_schema(decision, schema)
-    _require_capture_decision_semantics(decision, record)
+    require_capture_decision_semantics(decision, record)
     encoded = canonical_json_bytes(decision)
     if len(encoded) > MAX_CAPTURE_DECISION_BYTES:
         raise RuntimeError("capture decision exceeds its byte limit")
     return encoded
 
 
-def _ensure_capture_results_directory(queue: object) -> None:
-    from reliable_memory import fsync_directory
-
-    path = Path(queue.results_dir)
-    try:
-        path.mkdir(mode=0o700)
-    except FileExistsError:
-        pass
-    else:
-        fsync_directory(path.parent)
-    if path.is_symlink() or not path.is_dir():
-        raise PermissionError("capture results directory is unsafe")
-    path.resolve(strict=True).relative_to(Path(queue.state_root).resolve(strict=True))
-
-
-def _capture_decision_relative_path(intent_id: str) -> str:
-    from reliable_memory import canonical_json_bytes, sha256_bytes
-
-    key = sha256_bytes(
-        canonical_json_bytes({"intent_id": intent_id, "stage": "flush"})
-    )
-    return f"run/queue-results/capture-decision-{key}.json"
-
-
-def _index_capture_decision(
-    queue: object,
-    coordinator: object,
-    lease: object,
-    active: object,
-    task_fence: object,
-    intent_fence: object,
-    owner: object,
-    encoded: bytes,
-) -> object:
-    from reliable_memory import publish_runtime_file, sha256_bytes
-
-    relative = _capture_decision_relative_path(active.intent_id)
-    publish_runtime_file(
-        queue.state_root / relative,
-        encoded,
-        state_root=queue.state_root,
-        create_only=True,
-    )
-    return queue.publish_semantic_decision(
-        coordinator,
-        task_id=lease.id,
-        intent_id=active.intent_id,
-        stage="flush",
-        decision_path=relative,
-        decision_sha256=sha256_bytes(encoded),
-        active_link_digest=active.active_digest,
-        task_fence=task_fence,
-        intent_fence=intent_fence,
-        owner=owner,
-    )
-
-
 def _decode_capture_decision(data: bytes) -> dict[str, object]:
-    from reliable_memory import canonical_json_bytes, validate_schema
+    from llm_wiki.formats.canonical import canonical_json_bytes
+    from llm_wiki.formats.schema import validate_schema
 
     try:
         decision = json.loads(data.decode("utf-8", errors="strict"))
@@ -860,7 +590,7 @@ def _require_capture_decision_identity(
     )
     if actual != expected:
         raise RuntimeError("capture decision conflicts with its binding")
-    _require_capture_decision_semantics(decision, intent)
+    require_capture_decision_semantics(decision, intent)
 
 
 def _existing_capture_decision(
@@ -879,7 +609,7 @@ def _existing_capture_decision(
         stage="flush",
         active_link_digest=active.active_digest,
     )
-    relative = _capture_decision_relative_path(active.intent_id)
+    relative = capture_decision_relative_path(active.intent_id)
     candidate = queue.state_root / relative
     try:
         candidate.lstat()
@@ -898,7 +628,7 @@ def _existing_capture_decision(
         return _retire_orphaned_decision(candidate)
     _require_capture_decision_identity(decision, intent, _sealing_binding(indexed, active))
     fences = (task_fence, intent_fence, owner)
-    return _held_by_this_task(queue, coordinator, lease, active, fences, indexed, encoded), decision
+    return held_by_this_task(queue, coordinator, lease, active, fences, indexed, encoded), decision
 
 
 def _sealing_binding(indexed: object, active: object) -> object:
@@ -911,33 +641,6 @@ def _sealing_binding(indexed: object, active: object) -> object:
     if indexed is None:
         return active
     return dataclasses.replace(active, task_id=indexed.task_id, active_digest=indexed.active_link_digest)
-
-
-def _held_by_this_task(
-    queue: object,
-    coordinator: object,
-    lease: object,
-    active: object,
-    fences: tuple[object, object, object],
-    indexed: object,
-    encoded: bytes,
-) -> object:
-    """Index a decision nobody indexed yet, or seal this redrive to its ancestor's."""
-    task_fence, intent_fence, owner = fences
-    if indexed is None:
-        return _index_capture_decision(
-            queue, coordinator, lease, active, task_fence, intent_fence, owner, encoded
-        )
-    if indexed.task_id != active.task_id:
-        queue.adopt_semantic_decision(
-            indexed,
-            task_id=active.task_id,
-            active_link_digest=active.active_digest,
-            task_fence=task_fence,
-            intent_fence=intent_fence,
-            owner=owner,
-        )
-    return indexed
 
 
 def _orphaned_by_another_task(indexed: object, decision: Mapping[str, object], active: object) -> bool:
@@ -979,7 +682,7 @@ def _publish_capture_decision(
     encoded = _capture_decision_bytes(
         record, active, result, tier, body, chosen_at
     )
-    indexed = _index_capture_decision(
+    indexed = index_capture_decision(
         queue,
         coordinator,
         lease,
@@ -992,68 +695,7 @@ def _publish_capture_decision(
     return indexed, _decode_capture_decision(encoded)
 
 
-def _capture_terminal_bytes(
-    active: object, decision: object, disposition: Mapping[str, object]
-) -> bytes:
-    from reliable_memory import canonical_json_bytes
-
-    terminal = {
-        "schema_version": "capture-terminal/v1",
-        "intent_id": active.intent_id,
-        "intent_sha256": active.intent_sha256,
-        "semantic_decisions": [
-            {
-                "stage": decision.stage,
-                "decision_path": decision.decision_path,
-                "decision_sha256": decision.decision_sha256,
-            }
-        ],
-        "processing_binding": {
-            "kind": "task",
-            "task_id": active.task_id,
-            "active_link_digest": active.active_digest,
-        },
-        "disposition": dict(disposition),
-    }
-    encoded = canonical_json_bytes(terminal)
-    if len(encoded) > MAX_CAPTURE_TERMINAL_BYTES:
-        raise RuntimeError("capture terminal exceeds its byte limit")
-    return encoded
-
-
-def _publish_capture_terminal(
-    queue: object,
-    lease: object,
-    active: object,
-    task_fence: object,
-    intent_fence: object,
-    owner: object,
-    decision: object,
-    disposition: Mapping[str, object],
-) -> object:
-    from reliable_memory import publish_runtime_file, sha256_bytes
-
-    encoded = _capture_terminal_bytes(active, decision, disposition)
-    relative = f"run/queue-results/capture-{active.intent_id}.json"
-    publish_runtime_file(
-        queue.state_root / relative,
-        encoded,
-        state_root=queue.state_root,
-        create_only=True,
-    )
-    return queue.complete_capture_terminal(
-        lease,
-        intent_id=active.intent_id,
-        terminal_path=relative,
-        terminal_sha256=sha256_bytes(encoded),
-        active_link_digest=active.active_digest,
-        task_fence=task_fence,
-        intent_fence=intent_fence,
-        owner=owner,
-    )
-
-
-def _publish_no_content_terminal(
+def publish_no_content_terminal(
     queue: object,
     lease: object,
     active: object,
@@ -1066,7 +708,7 @@ def _publish_no_content_terminal(
         "kind": "no_durable_content",
         "decision_sha256": decision.decision_sha256,
     }
-    return _publish_capture_terminal(
+    return publish_capture_terminal(
         queue,
         lease,
         active,
@@ -1076,69 +718,6 @@ def _publish_no_content_terminal(
         decision,
         disposition,
     )
-
-
-def _capture_transaction_preconditions(active: object, intent_fence: object) -> dict:
-    return {
-        "intent_fence": {
-            "intent_id": intent_fence.intent_id,
-            "mode": intent_fence.mode,
-            "token": intent_fence.token,
-            "fencing_epoch": intent_fence.epoch,
-            "expires_at": intent_fence.expires_at.isoformat().replace("+00:00", "Z"),
-        },
-        "capture_binding": {
-            "intent_id": active.intent_id,
-            "task_id": active.task_id,
-            "active_link_digest": active.active_digest,
-            "seal_digest": active.seal_digest,
-        },
-    }
-
-
-def _commit_capture_markdown(
-    queue: object,
-    coordinator: object,
-    lease: object,
-    active: object,
-    intent_fence: object,
-    owner: object,
-    decision: object,
-    decision_record: Mapping[str, object],
-) -> tuple[object, object]:
-    from markdown_transaction import append_captured_knowledge
-
-    sealed = queue.active_capture_binding(None, lease.id)
-    if sealed.seal_digest is None or sealed.active_digest != active.active_digest:
-        raise RuntimeError("capture decision did not seal the active binding")
-    coordinator.project_capture_binding(sealed, intent_fence=intent_fence)
-    plan = decision_record["operation_plan"][0]
-    transaction = append_captured_knowledge(
-        coordinator,
-        owner,
-        plan["operation_id"],
-        coordinator.vault / plan["path"],
-        plan["block"].encode("utf-8"),
-        preconditions=_capture_transaction_preconditions(sealed, intent_fence),
-        inherited_bindings=queue.sealed_ancestor_bindings(lease.id, active.intent_id, "flush"),
-    )
-    if transaction.state != "committed":
-        raise RuntimeError("capture Markdown transaction did not commit")
-    return sealed, transaction
-
-
-def _capture_markdown_disposition(transaction: object, decision: object) -> dict:
-    outputs = [
-        {"path": operation.path, "sha256": operation.after_hash}
-        for operation in transaction.operations
-    ]
-    return {
-        "kind": "markdown_committed",
-        "transaction_id": transaction.id,
-        "operation_id": transaction.operation_id,
-        "decision_sha256": decision.decision_sha256,
-        "outputs": outputs,
-    }
 
 
 def _complete_capture_decision(
@@ -1153,7 +732,7 @@ def _complete_capture_decision(
     decision_record: Mapping[str, object],
 ) -> object:
     if decision_record["outcome"] == "semantic_ok":
-        return _publish_no_content_terminal(
+        return publish_no_content_terminal(
             queue,
             lease,
             active,
@@ -1162,7 +741,7 @@ def _complete_capture_decision(
             owner,
             decision,
         )
-    sealed, transaction = _commit_capture_markdown(
+    sealed, transaction = commit_capture_markdown(
         queue,
         coordinator,
         lease,
@@ -1172,8 +751,8 @@ def _complete_capture_decision(
         decision,
         decision_record,
     )
-    disposition = _capture_markdown_disposition(transaction, decision)
-    return _publish_capture_terminal(
+    disposition = capture_markdown_disposition(transaction, decision)
+    return publish_capture_terminal(
         queue,
         lease,
         sealed,
@@ -1185,7 +764,7 @@ def _complete_capture_decision(
     )
 
 
-def _keep_session_record(
+def keep_session_record(
     record: Mapping[str, object],
     now: Callable[[], datetime],
     coordinator: object | None = None,
@@ -1203,9 +782,9 @@ def _keep_session_record(
     evidence = record.get("evidence")
     if not isinstance(evidence, Sequence):
         return
-    captured_at = _session_time(record, now).isoformat()
+    captured_at = session_time(record, now).isoformat()
     write_session_evidence(
-        ROOT,
+        runtime_roots.vault_root(),
         intent_fields(record, captured_at),
         evidence_text(evidence),
         coordinator=coordinator,
@@ -1226,13 +805,13 @@ def _believable_session_time(occurred: datetime, moment: datetime) -> datetime |
     return occurred.astimezone()
 
 
-def _intent_time(record: Mapping[str, object]) -> datetime | None:
+def intent_time(record: Mapping[str, object]) -> datetime | None:
     """The moment the session itself ended, when the intent carries one."""
     raw = record.get("occurred_at")
     if not isinstance(raw, str) or not raw:
         return None
     try:
-        occurred = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        occurred = datetime.fromisoformat(raw)
     except ValueError:
         return None
     if occurred.tzinfo is None:
@@ -1240,7 +819,7 @@ def _intent_time(record: Mapping[str, object]) -> datetime | None:
     return occurred
 
 
-def _session_time(record: Mapping[str, object], now: Callable[[], datetime]) -> datetime:
+def session_time(record: Mapping[str, object], now: Callable[[], datetime]) -> datetime:
     """The session's own time when it has a believable one, else the worker's clock.
 
     Both the session record's day and the daily entry's day come from here, so a
@@ -1248,7 +827,7 @@ def _session_time(record: Mapping[str, object], now: Callable[[], datetime]) -> 
     a retry after midnight chooses the same day as the first attempt.
     """
     moment = _require_capture_time(now())
-    occurred = _intent_time(record)
+    occurred = intent_time(record)
     if occurred is None:
         return moment
     return _believable_session_time(occurred, moment) or moment
@@ -1264,20 +843,44 @@ def process_new_capture(
     owner: object,
     *,
     llm_call: Callable[[str, str, int], object] | None = None,
-    now: Callable[[], datetime] = _capture_now,
+    now: Callable[[], datetime] = capture_now,
+) -> object:
+    if lease.handler_version == 2:
+        from breadcrumb_worker import process_breadcrumb
+
+        return process_breadcrumb(queue, coordinator, lease, active, task_fence, intent_fence, owner)
+    if lease.handler_version != 1:
+        raise ValueError("unsupported capture handler version")
+    return _process_session_capture(
+        queue, coordinator, lease, active, task_fence, intent_fence, owner,
+        llm_call=llm_call, now=now,
+    )
+
+
+def _process_session_capture(
+    queue: object,
+    coordinator: object,
+    lease: object,
+    active: object,
+    task_fence: object,
+    intent_fence: object,
+    owner: object,
+    *,
+    llm_call: Callable[[str, str, int], object] | None = None,
+    now: Callable[[], datetime] = capture_now,
 ) -> object:
     record = _read_capture_intent(queue, lease, active)
-    _keep_session_record(record, now, coordinator, owner)
-    _ensure_capture_results_directory(queue)
+    _project_session_marker(record, coordinator, owner)
+    keep_session_record(record, now, coordinator, owner)
+    ensure_capture_results_directory(queue)
     resolved = _existing_capture_decision(
         queue, coordinator, lease, active, task_fence, intent_fence, owner, record
     )
     if resolved is None:
-        with _CaptureKeepAlive(queue, coordinator, lease, task_fence, intent_fence, owner):
-            result, tier, body = _call_capture_classifier(record, llm_call)
+        result, tier, body = call_capture_classifier(record, llm_call)
         chosen_at = None
         if tier != "ok":
-            chosen_at = _session_time(record, now)
+            chosen_at = session_time(record, now)
         resolved = _publish_capture_decision(
             queue,
             coordinator,
@@ -1306,6 +909,40 @@ def process_new_capture(
     )
 
 
+def _project_session_marker(record, coordinator, owner) -> None:
+    from daily_log_append import contained_block
+    from session_end_project_tag import session_marker_plan
+
+    plan = session_marker_plan(record, coordinator.vault)
+    if plan is None:
+        return
+    path, entry, operation_id = plan
+    _ensure_session_marker_header(coordinator, owner, path)
+    _append_session_marker_block(
+        coordinator, owner, operation_id, path,
+        contained_block(redact_secrets(entry)).encode("utf-8"),
+    )
+
+
+def _ensure_session_marker_header(coordinator, owner, path) -> None:
+    from markdown_transaction import stable_operation_id
+
+    if path.exists():
+        return
+    header = f"# Daily Session Memory — {path.stem}\n".encode()
+    _append_session_marker_block(
+        coordinator, owner, stable_operation_id("daily-header", path.name, header), path, header
+    )
+
+
+def _append_session_marker_block(coordinator, owner, operation_id, path, block) -> None:
+    from markdown_transaction import append_owned_knowledge
+
+    transaction = append_owned_knowledge(coordinator, owner, operation_id, path, block)
+    if transaction.state != "committed":
+        raise RuntimeError("session marker transaction did not commit")
+
+
 def process_capture_lease(
     queue: object,
     coordinator: object,
@@ -1314,7 +951,9 @@ def process_capture_lease(
     owner: object,
     process_missing: Callable[[object, object, object, object, object], object],
 ) -> object:
-    from memory_queue import capture_task_fences
+    from queue_core import (
+        capture_task_fences,
+    )
 
     binding = queue.active_capture_binding(None, lease.id)
     intent_id = _capture_binding_intent_id(binding)
@@ -1328,20 +967,21 @@ def process_capture_lease(
     ) as (task_fence, intent_fence):
         if intent_fence is None:
             raise RuntimeError("capture intent fence is unavailable")
-        terminal = queue.complete_existing_capture_terminal(
-            lease,
-            intent_id=intent_id,
-            active_link_digest=binding.active_digest,
-            task_fence=task_fence,
-            intent_fence=intent_fence,
-            owner=owner,
-        )
-        if terminal is not None:
-            return terminal
-        return process_missing(lease, binding, task_fence, intent_fence, owner)
+        with CaptureKeepAlive(queue, coordinator, lease, task_fence, intent_fence, owner):
+            return _complete_or_process_capture(queue, lease, binding, task_fence, intent_fence, owner, process_missing)
 
 
-def _adopt_orphaned_intents(queue: object, coordinator: object) -> None:
+def _complete_or_process_capture(queue, lease, binding, task_fence, intent_fence, owner, process_missing):
+    terminal = queue.complete_existing_capture_terminal(
+        lease, intent_id=binding.intent_id, active_link_digest=binding.active_digest,
+        task_fence=task_fence, intent_fence=intent_fence, owner=owner,
+    )
+    if terminal is not None:
+        return terminal
+    return process_missing(lease, binding, task_fence, intent_fence, owner)
+
+
+def adopt_orphaned_intents(queue: object, coordinator: object) -> None:
     """Give a task to any intent that was published but never dispatched.
 
     This runs before the owner below is taken, because adoption needs its own
@@ -1359,13 +999,13 @@ def _adopt_orphaned_intents(queue: object, coordinator: object) -> None:
 def _swept_intents(sweep, queue: object, coordinator: object) -> None:
     """One recovery pass, best effort: a sweeper that fails never stops the drain.
 
-    Two passes run here. One finishes a publication that stopped half way — a
-    `pending` row whose publisher died before it marked the intent ready — and the
-    other gives a task to an intent that was published and never dispatched. See
+    The passes discover unindexed durable manifests, finish a publication that
+    stopped at a `pending` row, and give a task to a ready intent that was never
+    dispatched. See
     `docs/research/2026-09-17-a-publication-that-stopped-half-way-is-finished.md`.
     """
     try:
-        result = sweep(queue, coordinator, state_root=Path(STATE_ROOT))
+        result = sweep(queue, coordinator, state_root=Path(queue.state_root))
     except Exception as error:  # noqa: BLE001 - recovery must not break the worker
         _count_dropped_capture("capture_adoption", error, None)
         return
@@ -1379,30 +1019,53 @@ def run_capture_worker_once(
     coordinator: object,
     *,
     process_missing: Callable[[object, object, object, object, object], object],
+    handler_versions: tuple[int, ...] = (1,),
+    settled_failure: Callable[[BaseException], None] | None = None,
 ) -> object | None:
     # An intent with no task is invisible to `recover_expired_leases`, which
     # recovers a task whose lease expired and so presupposes a task. See
     # `docs/research/2026-08-28-adopting-an-orphaned-intent.md`.
-    _adopt_orphaned_intents(queue, coordinator)
+    adopt_orphaned_intents(queue, coordinator)
     registry = queue.ownership_registry()
     scope = "worker:capture-recovery"
     owner = registry.acquire("queue-worker", scope=scope)
     try:
-        with queue.queue_owner(role="queue-worker", scope=scope, parent=owner):
-            # Reclaim first: `claim_capture` selects `state='ready'` only, and on
-            # the adopted V3 runtime nothing else sweeps — doctor's recovery still
-            # walks the retired file queue. Without this a capture whose worker
-            # died stays leased forever and the session is lost in silence, which
-            # is what stranded two of them here on 2026-08-26.
-            queue.recover_expired_leases()
-            lease = queue.claim_capture("capture-worker")
-            if lease is None:
-                return None
-            return _process_or_fail(
-                queue, coordinator, lease, owner, process_missing
-            )
+        return _recover_and_process_capture(
+            queue,
+            coordinator,
+            owner,
+            scope,
+            process_missing=process_missing,
+            handler_versions=handler_versions,
+            settled_failure=settled_failure,
+        )
     finally:
         registry.release(owner)
+
+
+def _recover_and_process_capture(
+    queue: object,
+    coordinator: object,
+    owner: object,
+    scope: str,
+    *,
+    process_missing: Callable[[object, object, object, object, object], object],
+    handler_versions: tuple[int, ...],
+    settled_failure: Callable[[BaseException], None] | None,
+) -> object | None:
+    with queue.queue_owner(role="queue-worker", scope=scope, parent=owner):
+        # Reclaim first: `claim_capture` selects `state='ready'` only, and on
+        # the adopted V3 runtime nothing else sweeps — doctor's recovery still
+        # walks the retired file queue. Without this a capture whose worker
+        # died stays leased forever and the session is lost in silence, which
+        # is what stranded two of them here on 2026-08-26.
+        queue.recover_expired_leases()
+        lease = queue.claim_capture("capture-worker", handler_versions=handler_versions)
+        if lease is None:
+            return None
+        return _process_or_fail(
+            queue, coordinator, lease, owner, process_missing, settled_failure
+        )
 
 
 def _process_or_fail(
@@ -1411,6 +1074,7 @@ def _process_or_fail(
     lease: object,
     owner: object,
     process_missing: Callable[..., object],
+    settled_failure: Callable[[BaseException], None] | None,
 ) -> object:
     """Settle the claim either way: a failure is a named retry, not a stuck lease.
 
@@ -1427,30 +1091,51 @@ def _process_or_fail(
             process_missing=process_missing,
         )
     except Exception as error:
-        with contextlib.suppress(Exception):
-            queue.fail(lease, _capture_queue_failure(error))
-        _raise_if_attempts_spent(lease, error)
-        raise
+        queue.fail(lease, capture_queue_failure(error))
+        return settled_capture_failure(lease, error, settled_failure)
 
 
-def _capture_queue_failure(error: BaseException) -> object:
+def settled_capture_failure(
+    lease: object,
+    error: BaseException,
+    observer: Callable[[BaseException], None] | None,
+) -> BaseException:
+    """Observe a committed retry or dead task; never turn it into success.
+
+    Called only after queue.fail returns. Settlement and owner-release failures
+    still escape. Callers without an observer retain the raised exception.
+    """
+    from capture_diagnostics import DurableWorkExhausted
+
+    try:
+        raise_if_attempts_spent(lease, error)
+    except DurableWorkExhausted as exhausted:
+        error = exhausted
+    if observer is None:
+        raise error
+    observer(error)
+    return error
+
+
+def capture_queue_failure(error: BaseException) -> object:
     """What the queue is told: an absent provider states its wait, the rest their code.
 
     The backoff is the queue's own. A stated wait of zero said nothing, whatever
     the comment that used to stand here claimed. The code is the one
     `processor_error_code` names, so a dead task says why (audit C3, 2026-09-23).
     """
-    from memory_queue import QueueFailure, processor_error_code
+    from llm_wiki.queue_contracts import QueueFailure
+    from llm_wiki.queue_worker_state import processor_error_code
 
     if isinstance(error, CaptureProviderUnavailable):
         return QueueFailure("provider_unavailable", retry_after=PROVIDER_RETRY_SECONDS)
     return QueueFailure(processor_error_code(error))
 
 
-def _raise_if_attempts_spent(lease: object, error: BaseException) -> None:
+def raise_if_attempts_spent(lease: object, error: BaseException) -> None:
     """The last attempt's failure is a loss, and is raised as one so it is recorded as one."""
     from capture_diagnostics import DurableWorkExhausted
-    from reliable_memory import DEFAULTS
+    from llm_wiki.reliability_defaults import DEFAULTS
 
     if int(getattr(lease, "attempt", 0)) >= DEFAULTS.queue_max_attempts:
         raise DurableWorkExhausted("capture task spent its last attempt") from error
@@ -1461,5 +1146,3 @@ def _count_dropped_capture(kind: str, error: BaseException, session_id: str | No
     from secret_redact import describe_error
 
     record_capture_failure(kind, describe_error(error), error=error, session_id=session_id)
-
-

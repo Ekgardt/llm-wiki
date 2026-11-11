@@ -14,8 +14,8 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+import nightly_budget  # noqa: E402
 import retire_own_call_transcripts as retirer  # noqa: E402
-import scheduled_nightly  # noqa: E402
 
 
 def _transcript(path: Path, entrypoint: str, cwd: str) -> Path:
@@ -31,7 +31,7 @@ def test_only_the_memory_s_own_calls_are_removed(tmp_path: Path) -> None:
     vault.mkdir()
     projects = tmp_path / "projects"
     own_vault = _transcript(projects / "-vault" / "a.jsonl", "sdk-cli", str(vault))
-    temp_dir = retirer._encoded(Path(tempfile.gettempdir())) + "-llm-wiki-provider-x"
+    temp_dir = retirer.encoded(Path(tempfile.gettempdir())) + "-llm-wiki-provider-x"
     own_temp = _transcript(projects / temp_dir / "b.jsonl", "sdk-cli", tempfile.gettempdir() + "/llm-wiki-provider-x")
     foreign = _transcript(projects / "-elsewhere" / "c.jsonl", "sdk-cli", "/srv/elsewhere")
     held = _transcript(projects / "-vault" / "d.jsonl", "cli", str(vault))
@@ -51,7 +51,7 @@ def test_an_emptied_project_directory_of_the_memory_s_own_goes_with_its_transcri
     vault = tmp_path / "vault"
     vault.mkdir()
     projects = tmp_path / "projects"
-    own = _transcript(projects / (retirer._encoded(vault) + "-worktree") / "a.jsonl", "sdk-cli", str(vault))
+    own = _transcript(projects / (retirer.encoded(vault) + "-worktree") / "a.jsonl", "sdk-cli", str(vault))
     stranger = projects / "-somewhere-else"
     stranger.mkdir()
 
@@ -64,8 +64,40 @@ def test_a_missing_projects_directory_is_nothing_to_do(tmp_path: Path) -> None:
 
 
 def test_the_nightly_runs_the_retirer_after_the_lsp_evidence_step() -> None:
-    labels = [step.label for step in scheduled_nightly._post_compile_steps()]
-    step = next(step for step in scheduled_nightly._post_compile_steps() if step.label == "own_calls")
+    labels = [step.label for step in nightly_budget.post_compile_steps()]
+    step = next(step for step in nightly_budget.post_compile_steps() if step.label == "own_calls")
 
     assert labels.index("own_calls") == labels.index("lsp_evidence") + 1
     assert step.command[-1].endswith("retire_own_call_transcripts.py")
+
+
+def test_all_2001_own_transcripts_are_eligible_before_the_deadline(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    projects = tmp_path / "projects"
+    for index in range(2001):
+        _transcript(projects / "-vault" / f"{index}.jsonl", "sdk-cli", str(vault))
+    monkeypatch.setattr(retirer.time, "monotonic", lambda: 0.0)
+
+    assert retirer.retire(projects, vault) == (2001, 0)
+    assert not list(projects.glob("*/*.jsonl"))
+
+
+def test_a_transcript_checked_after_deadline_is_kept(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    projects = tmp_path / "projects"
+    own = _transcript(projects / "-vault" / "own.jsonl", "sdk-cli", str(vault))
+    clock = [0.0]
+    original = retirer.is_own_call
+
+    def check_and_expire(path, roots):
+        result = original(path, roots)
+        clock[0] = retirer.SCAN_BUDGET_SECONDS + 1.0
+        return result
+
+    monkeypatch.setattr(retirer.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(retirer, "is_own_call", check_and_expire)
+
+    assert retirer.retire(projects, vault) == (0, 0)
+    assert own.is_file()

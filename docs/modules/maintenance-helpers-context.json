@@ -1,0 +1,203 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/hook-failures-reach-health-helpers.md",
+    "docs/modules/maintenance-helpers-context.json",
+    "docs/modules/maintenance-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/maintenance_helpers.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/hook_failures_reach_health_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_log_many_writers_append_to_is_rotated_not_trimmed.py",
+    "tests/test_a_report_link_outlives_no_report.py",
+    "tests/test_maintenance_helpers.py",
+    "tests/test_the_scheduler_log_is_bounded.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/maintenance-helpers-context.json",
+      "docs/modules/maintenance-helpers.md",
+      "scripts/maintenance_helpers.py",
+      "tests/test_a_log_many_writers_append_to_is_rotated_not_trimmed.py",
+      "tests/test_a_report_link_outlives_no_report.py",
+      "tests/test_maintenance_helpers.py",
+      "tests/test_the_scheduler_log_is_bounded.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_lock.py",
+      "names": [
+        "process_status"
+      ],
+      "contract_sha256": "b343fc3a906094bb9c34d064071b40db89fe023f004e791c90a7ccc337d6233a",
+      "integration_tests": [
+        "tests/test_a_log_many_writers_append_to_is_rotated_not_trimmed.py",
+        "tests/test_a_report_link_outlives_no_report.py",
+        "tests/test_maintenance_helpers.py",
+        "tests/test_the_scheduler_log_is_bounded.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_capture.py",
+      "names": [
+        "hook_error_check"
+      ],
+      "contract_sha256": "0f8b8221f4366b0aade74a7b603c8ab172a83a96c8796ca5ca7ec49fce3dd3ef",
+      "integration_tests": [
+        "tests/test_a_log_many_writers_append_to_is_rotated_not_trimmed.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_cron.py",
+      "names": [
+        "render_cron_block"
+      ],
+      "contract_sha256": "6084a9cb876e270f0b3155c68ed40f81b5cd1c1274f135508b179b487a6d758f",
+      "integration_tests": [
+        "tests/test_install_control.py",
+        "tests/test_the_scheduler_log_is_bounded.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/install_scheduler_render.py",
+      "names": [
+        "launchd_job"
+      ],
+      "contract_sha256": "baf2870687935de3e0f8203b476fe5ef8e93fd5b400ce9009bf9898e866279e3",
+      "integration_tests": [
+        "tests/test_a_scheduled_run_keeps_the_uv_link.py",
+        "tests/test_a_weekly_waits_for_the_nightly.py",
+        "tests/test_an_update_replaces_what_it_owns.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_log_many_writers_append_to_is_rotated_not_trimmed.py",
+        "tests/test_a_report_link_outlives_no_report.py",
+        "tests/test_maintenance_helpers.py",
+        "tests/test_the_scheduler_log_is_bounded.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "reports_dir",
+        "vault_root"
+      ],
+      "contract_sha256": "114289d5a8b6900bbd3fa317fe0014bb9aa1e04632e4ee28aa0aabbd525de43d",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/process_tree.py",
+      "names": [
+        "run_process_tree"
+      ],
+      "contract_sha256": "cac23754e296600d73204e59974371e40d2cded1544b474e65e272e0ad07621b",
+      "integration_tests": [
+        "tests/test_a_log_many_writers_append_to_is_rotated_not_trimmed.py",
+        "tests/test_a_report_link_outlives_no_report.py",
+        "tests/test_maintenance_helpers.py",
+        "tests/test_the_scheduler_log_is_bounded.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_log_many_writers_append_to_is_rotated_not_trimmed.py",
+        "tests/test_a_report_link_outlives_no_report.py",
+        "tests/test_maintenance_helpers.py",
+        "tests/test_the_scheduler_log_is_bounded.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_log_many_writers_append_to_is_rotated_not_trimmed.py",
+        "tests/test_a_report_link_outlives_no_report.py",
+        "tests/test_maintenance_helpers.py",
+        "tests/test_the_scheduler_log_is_bounded.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "redact_secrets"
+      ],
+      "contract_sha256": "8b925f76433b0c3f5ab03f4b8b41a462551d5616843facdd2918813d103ad6f5",
+      "integration_tests": [
+        "tests/test_a_log_many_writers_append_to_is_rotated_not_trimmed.py",
+        "tests/test_a_report_link_outlives_no_report.py",
+        "tests/test_maintenance_helpers.py",
+        "tests/test_the_scheduler_log_is_bounded.py"
+      ]
+    },
+    {
+      "provider": "scripts/settings.py",
+      "names": [
+        "setting_value"
+      ],
+      "contract_sha256": "ec6d2a43d91dba48c174aad5e9505790a05fd66f1bf1e5292264857f320a9881",
+      "integration_tests": [
+        "tests/test_the_scheduler_log_is_bounded.py"
+      ]
+    }
+  ]
+}

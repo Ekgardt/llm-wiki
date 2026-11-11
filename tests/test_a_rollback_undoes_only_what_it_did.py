@@ -12,15 +12,15 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-import install_control
 import pytest
-from install_control import (
+from install_state import (
     InstallControlError,
     ManagedResource,
-    install_resources,
-    rollback_resources,
     validate_install_state,
 )
+from llm_wiki import install_requests
+from llm_wiki.install_uninstall_rollback import rollback_resources
+from llm_wiki.install_v2_transactions import install_resources
 
 
 def _release(version: str = "4.0.0") -> dict[str, object]:
@@ -170,7 +170,7 @@ def test_an_adopted_resource_is_updated_and_its_current_content_is_the_rollback(
 @pytest.mark.parametrize(
     ("kind", "adopt", "code"),
     [
-        ("systemd_scheduler", ("second",), "install_adopt_unsupported"),
+        ("cron_scheduler", ("second",), "install_adopt_unsupported"),
         ("test_value", ("missing",), "install_adopt_unknown_resource"),
     ],
 )
@@ -180,7 +180,7 @@ def test_adoption_is_refused_for_a_scheduler_or_a_resource_not_installed(
     resource = replace(_managed("second", _Store(), b"new"), kind=kind)
 
     with pytest.raises(InstallControlError, match=code):
-        install_control._marked_adopted([resource], adopt)
+        install_requests.marked_adopted([resource], adopt)
 
 
 def test_both_installers_hand_an_adopted_resource_to_the_ownership_transaction() -> None:

@@ -22,13 +22,17 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-import maybe_compile
-from memory_state import REPORTS_DIR, ROOT
+import compile_lock
+from llm_wiki import runtime_roots
+from process_tree import run_process_tree as _run_tree
 from secret_redact import redact_secrets
 from settings import setting_value
-from sync_memory import _run_process_tree as _run_tree
 
-ARTIFACT_DIR = REPORTS_DIR / "maintenance"
+
+def artifact_dir() -> Path:
+    return runtime_roots.reports_dir() / "maintenance"
+
+
 # Stdout lines of one maintenance step copied into the nightly log; the step's full output stays
 # in its artifact. A readability trade-off, not measured.
 STEP_SUMMARY_LINES = 6
@@ -112,7 +116,7 @@ def _run_to_files(cmd: list[str], out_path: Path, err_path: Path, timeout: int) 
     with _open_owner_only(out_path) as out_handle, _open_owner_only(err_path) as err_handle:
         completed = _run_tree(
             cmd,
-            cwd=str(ROOT),
+            cwd=str(runtime_roots.vault_root()),
             stdout=out_handle,
             stderr=err_handle,
             timeout=timeout,
@@ -193,9 +197,9 @@ def _step_status(returncode: int) -> int:
 
 
 def _step_artifacts(label: str) -> tuple[Path, Path]:
-    ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    artifact_dir().mkdir(parents=True, exist_ok=True)
     stem = _artifact_stem(label)
-    return ARTIFACT_DIR / f"{stem}.out.log", ARTIFACT_DIR / f"{stem}.err.log"
+    return artifact_dir() / f"{stem}.out.log", artifact_dir() / f"{stem}.err.log"
 
 
 def run_step(cmd: list[str], log_fn, label: str, timeout: int = 600) -> int:
@@ -319,9 +323,9 @@ def artifact_retention_files() -> int:
 def prune_maintenance_output() -> int:
     """Apply retention to every maintenance report family and its artifacts."""
     removed = sum(
-        prune_reports(REPORTS_DIR, pattern) for pattern in MAINTENANCE_REPORT_PATTERNS
+        prune_reports(runtime_roots.reports_dir(), pattern) for pattern in MAINTENANCE_REPORT_PATTERNS
     )
-    return removed + prune_reports(ARTIFACT_DIR, ARTIFACT_PATTERN, max_files=artifact_retention_files())
+    return removed + prune_reports(artifact_dir(), ARTIFACT_PATTERN, max_files=artifact_retention_files())
 
 
 def _trim_in_place(path: Path, keep_bytes: int) -> None:
@@ -381,10 +385,10 @@ def trim_scheduler_logs(keep_bytes: int = SCHEDULER_LOG_KEEP_BYTES) -> int:
     no sharing (Windows) is left exactly as it is.
     """
     trimmed = sum(
-        _trim_one_scheduler_log(REPORTS_DIR / name, keep_bytes)
+        _trim_one_scheduler_log(runtime_roots.reports_dir() / name, keep_bytes)
         for name in SCHEDULER_LOG_NAMES
     )
-    return trimmed + sum(_rotate_one_log(REPORTS_DIR / name, keep_bytes) for name in ROTATED_LOG_NAMES)
+    return trimmed + sum(_rotate_one_log(runtime_roots.reports_dir() / name, keep_bytes) for name in ROTATED_LOG_NAMES)
 
 
 def wait_for_compile_idle(log_fn) -> None:
@@ -394,7 +398,7 @@ def wait_for_compile_idle(log_fn) -> None:
     a previous compile (triggered by a hook) is still running.
     """
     for attempt in range(3):
-        st = maybe_compile.status()
+        st = compile_lock.process_status()
         if not st["compile_running"]:
             return
         log_fn(f"  compile running ({st['reason']}), waiting 10s (attempt {attempt + 1}/3)...")

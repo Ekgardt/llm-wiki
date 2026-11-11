@@ -9,9 +9,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import install_control
 import pytest
 from installer_config import scheduled_path, stable_uv_path
+from llm_wiki import install_scheduler_render
 
 
 @pytest.fixture
@@ -32,7 +32,7 @@ def test_the_uv_path_keeps_its_link(linked_uv: Path) -> None:
 
 
 def test_every_scheduler_calls_the_link_and_puts_its_directory_on_path(linked_uv: Path, tmp_path: Path) -> None:
-    arguments = install_control._scheduled_arguments(tmp_path, linked_uv, "nightly")
+    arguments = install_scheduler_render.scheduled_arguments(tmp_path, linked_uv, "nightly")
 
     assert (arguments[0], scheduled_path(linked_uv, "/usr/bin").split(":")[0]) == (
         str(linked_uv),
@@ -41,23 +41,23 @@ def test_every_scheduler_calls_the_link_and_puts_its_directory_on_path(linked_uv
 
 
 def _installed_units(home: Path, uv: Path) -> None:
-    import doctor
+    from llm_wiki import doctor_schedule
 
-    for name, definition in install_control.render_systemd_definitions(home, home, uv).items():
-        path = doctor._systemd_user_directory(home) / name
+    for name, definition in install_scheduler_render.render_systemd_definitions(home, home, uv).items():
+        path = doctor_schedule.systemd_user_directory(home) / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(definition)
 
 
 def test_doctor_names_a_scheduled_uv_that_is_gone(linked_uv: Path, tmp_path: Path, monkeypatch) -> None:
-    import doctor
+    from llm_wiki import doctor_schedule
 
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     home = tmp_path / "home"
     _installed_units(home, linked_uv)
-    present = doctor._scheduled_program_verdict(home)
+    present = doctor_schedule.scheduled_program_verdict(home)
     linked_uv.unlink()
 
-    verdict = doctor._scheduled_program_verdict(home)
+    verdict = doctor_schedule.scheduled_program_verdict(home)
 
     assert (present, verdict[0], str(linked_uv) in verdict[1]) == (None, "degraded", True)

@@ -10,24 +10,27 @@ import os
 import re
 from pathlib import Path
 
-import doctor
 import pytest
 import rebuild_memory_index
 import settings
 from corpus_snapshot import collect_corpus
+from llm_wiki import doctor_capture
+
+from tests.script_sources import script_files
 
 ROOT = Path(__file__).resolve().parents[1]
-# The constants the registry replaced, with the values a vault without a file keeps.
+# Registry defaults. Corpus/extraction share the existing discovery entry budget.
 REPLACED = {
-    "index.max_pages": 2_000,
-    "index.max_total_bytes": 32 * 1024 * 1024,
-    "compile.max_sources": 2_000,
-    "compile.max_total_source_bytes": 32 * 1024 * 1024,
-    "corpus.max_files": 10_000,
+    "index.max_pages": 0,
+    "index.max_total_bytes": 0,
+    "compile.max_sources": 0,
+    "compile.max_total_source_bytes": 0,
+    "compile.validation_retries": 2,
+    "corpus.max_files": 50_000,
     "corpus.max_total_bytes": 64 * 1024 * 1024,
     "claims.max_pages": 10_000,
     "claims.max_total_bytes": 32 * 1024 * 1024,
-    "extraction.max_sources": 10_000,
+    "extraction.max_sources": 50_000,
     "search.max_pages": 10_000,
     "impact.max_note_files": 2_000,
     "impact.max_total_note_bytes": 32 * 1024 * 1024,
@@ -38,12 +41,18 @@ REPLACED = {
     "retention.benchmark_run_days": 30,
     "retention.config_backup_days": 90,
     # Was COMPILE_PROVIDER_CEILING_S = 300; raised to 600 on the 2026-09-27 measurements.
+    "doctor.nightly_seconds": 60,
+    "generation.nightly_seconds": 2131,
+    "generation.post_compile_seconds": 2131,
     "provider.draft_ceiling_seconds": 600,
+    "provider.catalog_max_bytes": 1024 * 1024,
     # Not a replaced constant: recall and get_decisions had MCP_OPERATION_SECONDS (10 s);
     # 14 s is the budget measured for the reranker (B-9).
     "mcp.retrieval_seconds": 14,
 }
 RETIRED_NAMES = (
+    "VALIDATION_RETRIES",
+    "HEALTH_REPORT_BUDGET_SECONDS",
     "MAX_PAGE_COUNT",
     "MAX_TOTAL_PAGE_BYTES",
     "MAX_SOURCE_COUNT",
@@ -75,7 +84,7 @@ _NUMBER_NODES = (ast.Constant, ast.UnaryOp, ast.BinOp)
 
 
 def _scripts() -> str:
-    return "\n".join(path.read_text(encoding="utf-8") for path in (ROOT / "scripts").glob("*.py"))
+    return "\n".join(path.read_text(encoding="utf-8") for path in script_files())
 
 
 def _vault(tmp_path: Path, notes: int, toml: str | None = None) -> Path:
@@ -88,7 +97,7 @@ def _vault(tmp_path: Path, notes: int, toml: str | None = None) -> Path:
     return tmp_path
 
 
-def test_without_a_file_every_ceiling_is_the_constant_it_replaced(tmp_path: Path) -> None:
+def test_without_a_file_every_ceiling_has_its_declared_default(tmp_path: Path) -> None:
     values = settings.effective(tmp_path, environ={})
     assert {name: item.value for name, item in values.items()} == REPLACED
     assert {item.source for item in values.values()} == {settings.DEFAULT_SOURCE}
@@ -139,7 +148,7 @@ def test_a_variable_beats_the_file(tmp_path: Path) -> None:
         ("[index]\nmax_page = 5\n", "index.max_page"),
         ("[indexes]\nmax_pages = 5\n", "[indexes]"),
         ("[index]\nmax_pages = true\n", "index.max_pages"),
-        ("[index]\nmax_pages = 0\n", "index.max_pages"),
+        ("[index]\nmax_pages = -1\n", "index.max_pages"),
         ("[index]\nmax_pages = '5'\n", "index.max_pages"),
         ("[index\n", "not valid TOML"),
     ],
@@ -157,23 +166,54 @@ def test_an_invalid_variable_stops_with_its_name(tmp_path: Path) -> None:
 
 def test_doctor_names_overrides_and_their_source(tmp_path: Path) -> None:
     _vault(tmp_path, notes=1, toml="[search]\nmax_pages = 20000\n")
-    check = doctor._settings_check(tmp_path)
+    check = doctor_capture.settings_check(tmp_path)
     assert check["status"] == "ok"
     assert check["details"]["overridden"] == {"search.max_pages": {"value": 20000, "source": "llm-wiki.toml"}}
 
 
 def test_doctor_warns_before_a_ceiling_stops_the_pipeline(tmp_path: Path) -> None:
     _vault(tmp_path, notes=4, toml="[index]\nmax_pages = 5\n")
-    check = doctor._settings_check(tmp_path)
+    check = doctor_capture.settings_check(tmp_path)
     assert check["status"] == "degraded"
     assert check["details"]["near_ceiling"]["index.max_pages"] == {"used": 4, "ceiling": 5, "share": 0.8}
 
 
 def test_doctor_reports_an_invalid_file_as_an_error(tmp_path: Path) -> None:
     _vault(tmp_path, notes=0, toml="[index]\nmax_pages = -1\n")
-    check = doctor._settings_check(tmp_path)
+    check = doctor_capture.settings_check(tmp_path)
     assert check["status"] == "error"
     assert "index.max_pages" in check["message"]
+
+
+def test_settings_does_not_count_unrelated_markdown_as_corpus(tmp_path, monkeypatch):
+    import corpus_snapshot
+
+    _vault(tmp_path, notes=1, toml="[corpus]\nmax_files = 2\nmax_total_bytes = 128\n")
+    journal = tmp_path / "knowledge/projects/demo/journal.md"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text("journal evidence\n" * 100)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("settings must not repeat the full generation collection")
+
+    monkeypatch.setattr(corpus_snapshot, "collect_corpus", forbidden)
+    check = doctor_capture.settings_check(tmp_path)
+    assert "corpus.max_total_bytes" not in check["details"]["near_ceiling"]
+    assert check["details"]["corpus_capacity"] == "not_measured; see full generation check"
+
+
+def test_size_warning_requires_resource_review_before_raising_limit(tmp_path):
+    _vault(tmp_path, notes=4, toml="[index]\nmax_pages = 5\n")
+    check = doctor_capture.settings_check(tmp_path)
+    assert "measure resource capacity" in check["message"]
+
+
+def test_limit_hint_names_controls_without_prescribing_an_unmeasured_increase():
+    hint = settings.raise_hint("corpus.max_files")
+    assert "measure resource capacity" in hint
+    assert "corpus.max_files" in hint
+    assert "llm-wiki.toml" in hint
+    assert "LLM_WIKI_CORPUS_MAX_FILES" in hint
 
 
 def _is_number(node: ast.AST) -> bool:

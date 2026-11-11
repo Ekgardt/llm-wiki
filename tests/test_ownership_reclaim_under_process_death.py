@@ -9,17 +9,16 @@ reclaimable only when its lease has expired **and** the OS says its process is
 gone. A live owner, or one whose liveness cannot be established, is still
 refused by name. See `docs/research/2026-08-28-ownership-reclaim-under-process-death.md`.
 
-The dead process here is real, not simulated by a probe: the owner row names
-this process's pid with a start identity that is not this process's, so the
-platform probe answers `dead` on every supported OS without any injection.
+The dead process is a real child whose scoped identity is captured before it
+exits. The abandoned rows model the crash boundary; the liveness probe is real
+and is never replaced by a canned `dead` response.
 """
 from __future__ import annotations
 
 import contextlib
-import os
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -29,8 +28,8 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import markdown_transaction  # noqa: E402
-import memory_queue  # noqa: E402
 import operational_ownership as ownership  # noqa: E402
+import queue_core  # noqa: E402
 from project_journal import ProjectStore  # noqa: E402
 
 INTENT_ID = "a" * 64
@@ -45,26 +44,30 @@ def _coordinator(state_root: Path):
     markdown_transaction.initialize_coordinator_v3_candidate(
         _candidate(state_root), source_v2=None
     )
-    return markdown_transaction.MarkdownCoordinator._from_v3_candidate(
+    return markdown_transaction.MarkdownCoordinator.from_v3_candidate(
         _candidate(state_root), state_root=state_root
     )
 
 
 def _queue(state_root: Path):
     candidate = state_root / "run" / "queue-v3.candidate.sqlite3"
-    memory_queue.initialize_queue_v3_candidate(candidate, source_v2=None)
-    return memory_queue.MemoryQueue._from_v3_candidate(candidate, state_root=state_root)
+    queue_core.initialize_queue_v3_candidate(candidate, source_v2=None)
+    return queue_core.MemoryQueue.from_v3_candidate(candidate, state_root=state_root)
 
 
 def _dead_identity() -> ownership.ProcessIdentity:
-    """This pid with a start identity that is not this process's start identity."""
-    return ownership.ProcessIdentity(
-        pid=os.getpid(), start_identity="llm-wiki-test:killed-process"
+    """A captured process identity whose child has exited and been reaped."""
+    from tests.a_dead_owner_root_is_swept_when_the_next_server_starts_helpers import (
+        finished_process,
     )
+
+    pid, identity = finished_process()
+    return ownership.ProcessIdentity(pid=pid, start_identity=identity)
 
 
 def _run_as_dead_process(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ownership, "current_process_identity", _dead_identity)
+    dead = _dead_identity()
+    monkeypatch.setattr(ownership, "current_process_identity", lambda: dead)
 
 
 def _run_as_this_process(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -73,7 +76,7 @@ def _run_as_this_process(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _expire(database_path: Path, table: str, *, seconds: int = 1) -> None:
     """Move a lease deadline into the past — timestamps only, never rows."""
-    when = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    when = datetime.now(UTC) - timedelta(seconds=seconds)
     stamp = when.isoformat().replace("+00:00", "Z")
     with contextlib.closing(sqlite3.connect(database_path)) as database:
         database.execute(f"UPDATE {table} SET expires_at=?", (stamp,))
@@ -87,7 +90,7 @@ def _count(database_path: Path, table: str) -> int:
 
 def _shape_is_consistent(database_path: Path) -> bool:
     with contextlib.closing(sqlite3.connect(database_path)) as database:
-        return markdown_transaction._coordinator_v3_base_cross_table_invariant(database)
+        return markdown_transaction.coordinator_v3_base_cross_table_invariant(database)
 
 
 def test_reclaim_of_a_dead_worker_removes_its_orphaned_intent_fence(
@@ -175,7 +178,7 @@ def test_reclaim_removes_the_project_lease_projection_of_a_dead_owner(
     vault = tmp_path / "vault"
     (vault / "knowledge" / "projects").mkdir(parents=True)
     _coordinator(tmp_path)
-    store = ProjectStore._from_v3_candidate(vault, state_root=tmp_path)
+    store = ProjectStore.from_v3_candidate(vault, state_root=tmp_path)
     registry = ownership.OwnershipRegistry(tmp_path)
     _run_as_dead_process(monkeypatch)
     store.acquire_lease("demo", "agent-a", 30)
@@ -290,7 +293,7 @@ def test_a_live_queue_projection_still_refuses_by_name(tmp_path: Path) -> None:
     registry, lease = _crashed_queue_owner(queue, WORKER_SCOPE)
     registry.release(lease)
 
-    with pytest.raises(memory_queue.QueueOperationError) as error:
+    with pytest.raises(queue_core.QueueOperationError) as error:
         with queue.queue_owner(role="queue-worker", scope=WORKER_SCOPE):
             pass
 

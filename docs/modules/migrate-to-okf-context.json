@@ -1,0 +1,167 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/migrate-to-okf-context.json",
+    "docs/modules/migrate-to-okf.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/migrate_to_okf.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_migrate_to_okf_exemptions.py",
+    "tests/test_okf_migration_binds_content_to_its_source_snapshot.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/migrate-to-okf-context.json",
+      "docs/modules/migrate-to-okf.md",
+      "scripts/migrate_to_okf.py",
+      "tests/test_migrate_to_okf_exemptions.py",
+      "tests/test_okf_migration_binds_content_to_its_source_snapshot.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "e570dc41e0fd70556ec6a4e887a3da194bcc13122684e515651b13dd19d7d5c1",
+      "integration_tests": [
+        "tests/test_migrate_to_okf_exemptions.py",
+        "tests/test_okf_migration_binds_content_to_its_source_snapshot.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "sha256_bytes"
+      ],
+      "contract_sha256": "7d34a853c5a6f1be8b00805b2e865ac2a5ca5a6fe3ca141de97ebda61d2a85cf",
+      "integration_tests": [
+        "tests/test_migrate_to_okf_exemptions.py",
+        "tests/test_okf_migration_binds_content_to_its_source_snapshot.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_store.py",
+      "names": [
+        "MAX_KNOWLEDGE_TARGET_BYTES"
+      ],
+      "contract_sha256": "5d4b6ece7f3dfbf36e7899967fc21c0a5a5dde7d61a32e5dca4ee56c341468bf",
+      "integration_tests": [
+        "tests/test_migrate_to_okf_exemptions.py",
+        "tests/test_okf_migration_binds_content_to_its_source_snapshot.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_migrate_to_okf_exemptions.py",
+        "tests/test_okf_migration_binds_content_to_its_source_snapshot.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "notes_dir",
+        "projects_dir",
+        "reports_dir",
+        "vault_root"
+      ],
+      "contract_sha256": "79fa9fb1fcd18ec97ce850fb7e70fe37365b9179fe225472330d7cdcdd2a0af7",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "mutate_knowledge",
+        "stable_operation_id"
+      ],
+      "contract_sha256": "ec453a4a8ce23b6daa07f805e5ab35371975f95ac4139f9d4bb17a3919b403e6",
+      "integration_tests": [
+        "tests/test_migrate_to_okf_exemptions.py",
+        "tests/test_okf_migration_binds_content_to_its_source_snapshot.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_migrate_to_okf_exemptions.py",
+        "tests/test_okf_migration_binds_content_to_its_source_snapshot.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
+    {
+      "provider": "scripts/vault_editorial.py",
+      "names": [
+        "EDITORIAL_NAMES"
+      ],
+      "contract_sha256": "077ffd345188bc0a58980339e0b3573ab5ffa108410f0104e75efdbfefd94e57",
+      "integration_tests": [
+        "tests/test_migrate_to_okf_exemptions.py"
+      ]
+    }
+  ]
+}

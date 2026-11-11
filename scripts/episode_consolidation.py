@@ -28,7 +28,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from iso_time import local_now  # noqa: E402
-from memory_state import ROOT, update_state  # noqa: E402
+from llm_wiki import runtime_roots  # noqa: E402
+from memory_state import update_state  # noqa: E402
 from session_evidence import SESSION_EVIDENCE_DIR  # noqa: E402
 from settings import setting_value  # noqa: E402
 
@@ -113,7 +114,13 @@ def session_records(vault: Path, day: str) -> list[Path]:
     directory = session_day_directory(vault, day)
     if not directory.is_dir():
         return []
-    return sorted(path for path in directory.glob("*.md") if path.is_file())
+    return sorted(path for path in directory.glob("*.md") if _is_session_record(path))
+
+
+def _is_session_record(path: Path) -> bool:
+    from breadcrumb_evidence import is_breadcrumb_document
+
+    return path.is_file() and not is_breadcrumb_document(path)
 
 
 def record_set_digest(vault: Path, day: str) -> str:
@@ -123,7 +130,7 @@ def record_set_digest(vault: Path, day: str) -> str:
     arrives after the day was closed — a session that ended after midnight, an
     imported history — makes the day pending again instead of being never read.
     """
-    from reliable_memory import sha256_bytes
+    from llm_wiki.formats.canonical import sha256_bytes
 
     names = "\n".join(path.name for path in session_records(vault, day))
     return sha256_bytes(names.encode("utf-8"))
@@ -284,10 +291,10 @@ def _lesson_headline(lesson: Lesson) -> str:
     """A rule states its situation first, because that is when it must be read."""
     if lesson.kind != "rule":
         return f"  - **{lesson.kind.capitalize()}** — {lesson.text}"
-    return f"  - **Rule** — When {_situation(lesson.trigger)}: {lesson.text}"
+    return f"  - **Rule** — When {situation(lesson.trigger)}: {lesson.text}"
 
 
-def _situation(trigger: str) -> str:
+def situation(trigger: str) -> str:
     """The trigger without its own leading "When": the model often writes one."""
     words = trigger.strip()
     if words[:5].casefold() == "when ":
@@ -329,7 +336,7 @@ def render_block(day: str, lessons: list[Lesson], moment: datetime) -> str:
 
 
 def _operation_id(day: str, lessons: list[Lesson]) -> str:
-    from reliable_memory import sha256_bytes
+    from llm_wiki.formats.canonical import sha256_bytes
 
     payload = json.dumps(
         [[item.kind, item.text, item.quote, item.trigger] for item in lessons],
@@ -363,17 +370,17 @@ def code_revision(root: Path = CODE_ROOT) -> str | None:
     return result.stdout.strip() or None
 
 
-def _lost_batches(failed: list[str]) -> dict[str, object]:
+def lost_batches(failed: list[str]) -> dict[str, object]:
     """What a day closed with lost batches keeps: which, and under which code (audit B-10)."""
     if not failed:
         return {}
     return {"failed_batches": sorted(failed), "code": code_revision()}
 
 
-def _record_consolidation(
+def record_consolidation(
     day: str, count: int, records: int, digest: str, failed: tuple[str, ...] | list[str] = ()
 ) -> None:
-    lost = _lost_batches(list(failed))
+    lost = lost_batches(list(failed))
 
     def mutate(state: dict) -> None:
         days = state.setdefault("consolidated_session_days", {})
@@ -460,7 +467,7 @@ def _day_progress(state: dict | None, day: str) -> _Progress:
     )
 
 
-def _save_progress(day: str, progress: _Progress) -> None:
+def save_progress(day: str, progress: _Progress) -> None:
     def mutate(state: dict) -> None:
         state.setdefault(PROGRESS_KEY, {})[day] = progress.as_state()
 
@@ -469,7 +476,7 @@ def _save_progress(day: str, progress: _Progress) -> None:
 
 def _batch_key(vault: Path, day: str, batch: list[Path]) -> str:
     """A batch's identity: its vault, its day and the bytes of every record in it."""
-    from reliable_memory import sha256_bytes
+    from llm_wiki.formats.canonical import sha256_bytes
 
     parts = [str(Path(vault).resolve()), day]
     parts.extend(f"{path.name}:{sha256_bytes(path.read_bytes())}" for path in batch)
@@ -524,7 +531,7 @@ def _lost_batches_await_new_code(stored: dict) -> bool:
 # night counted as failed. See `docs/research/2026-09-23-the-rest-of-the-live-audit.md`.
 
 
-def _call_provider(prompt: str) -> str | None:
+def call_provider(prompt: str) -> str | None:
     from llm_client import call_ceiling, call_llm
 
     with call_ceiling(setting_value("provider.draft_ceiling_seconds")):
@@ -533,7 +540,7 @@ def _call_provider(prompt: str) -> str | None:
         )
 
 
-def _write_block(day: str, lessons: list[Lesson], moment: datetime, key: str) -> Path:
+def write_block(day: str, lessons: list[Lesson], moment: datetime, key: str) -> Path:
     from daily_log_append import append_daily
 
     return append_daily(
@@ -552,7 +559,7 @@ def _consolidate_batch(
     lessons = grounded_lessons(reply, batch)
     if not lessons:
         return 0, None
-    return len(lessons), str(_write_block(day, lessons, moment, key))
+    return len(lessons), str(write_block(day, lessons, moment, key))
 
 
 def _answered(reply: str | None) -> str:
@@ -587,7 +594,7 @@ def consolidate_day(
     vault: Path,
     day: str,
     *,
-    call=_call_provider,
+    call=call_provider,
     state: dict | None = None,
     moment: datetime | None = None,
     deadline: float | None = None,
@@ -597,7 +604,7 @@ def consolidate_day(
     Finished batches are checkpointed, so a day that stops part-way — out of time,
     or a reply that could not be read — resumes where it stopped on the next run.
     """
-    skipped = _skip_reason(vault, day, state)
+    skipped = skip_reason(vault, day, state)
     if skipped is not None:
         return {"status": "skipped", "reason": skipped, "items": 0}
     paths = session_records(vault, day)
@@ -609,7 +616,7 @@ def consolidate_day(
     run.all(batches, keys)
     if not set(keys) <= progress.done:
         return _day_outcome("partial", progress, len(batches))
-    _record_consolidation(
+    record_consolidation(
         day, progress.items, len(paths), record_set_digest(vault, day), progress.failed
     )
     return _day_outcome(_finished_status(progress), progress, len(batches))
@@ -658,7 +665,7 @@ class _BatchRun:
         self.attempted += 1
         if key in self.logged:
             self.progress.finished(key, 0, None)
-            _save_progress(self.day, self.progress)
+            save_progress(self.day, self.progress)
             return
         try:
             count, path = _consolidate_batch(
@@ -668,7 +675,7 @@ class _BatchRun:
             self.progress.failed_once(key)
         else:
             self.progress.finished(key, count, path)
-        _save_progress(self.day, self.progress)
+        save_progress(self.day, self.progress)
 
 
 def _out_of_time(deadline: float | None) -> bool:
@@ -718,7 +725,7 @@ def _pending(vault: Path, day: str, before: str, state: dict) -> bool:
     return day < before and not _already_consolidated(vault, state, day)
 
 
-def _skip_reason(vault: Path, day: str, state: dict | None) -> str | None:
+def skip_reason(vault: Path, day: str, state: dict | None) -> str | None:
     """Why this day needs no work, or None to consolidate it."""
     if state is not None and _already_consolidated(vault, state, day):
         return "already_consolidated"
@@ -734,7 +741,7 @@ def _default_day() -> str:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--day", default=None, help="YYYY-MM-DD (default: yesterday)")
-    parser.add_argument("--vault", type=Path, default=ROOT)
+    parser.add_argument("--vault", type=Path, default=runtime_roots.vault_root())
     parser.add_argument(
         "--all-pending",
         action="store_true",

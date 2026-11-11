@@ -21,10 +21,6 @@ def _vault_with_sessions(tmp_path: Path, days: dict[str, str]) -> Path:
 
 
 def _point_at(module, monkeypatch, vault: Path) -> None:
-    sessions = vault / "knowledge/raw/sessions"
-    monkeypatch.setattr(module, "ROOT", vault)
-    monkeypatch.setattr(module, "SESSIONS", sessions)
-    monkeypatch.setattr(module, "ARCHIVE", sessions / "archive")
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(vault.parent / "state"))
 

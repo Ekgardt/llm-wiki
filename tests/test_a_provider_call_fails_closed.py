@@ -8,16 +8,16 @@ from __future__ import annotations
 import subprocess
 from types import SimpleNamespace
 
-import doctor
 import llm_client
 import pytest
+from llm_wiki import doctor_base
 
 
 @pytest.fixture(autouse=True)
 def _fresh_probe():
-    llm_client._probed_claude_flags.cache_clear()
+    llm_client.probed_claude_flags.cache_clear()
     yield
-    llm_client._probed_claude_flags.cache_clear()
+    llm_client.probed_claude_flags.cache_clear()
 
 
 def _help(monkeypatch, answers: list) -> list:
@@ -31,6 +31,7 @@ def _help(monkeypatch, answers: list) -> list:
         return answer
 
     monkeypatch.setattr(llm_client.shutil, "which", lambda name: "/usr/bin/claude")
+    monkeypatch.setattr(llm_client, "claude_executable_identity", lambda path: ("fixture",))
     monkeypatch.setattr(llm_client.subprocess, "run", run)
     return asked
 
@@ -41,22 +42,22 @@ def test_a_failed_probe_is_not_remembered(monkeypatch) -> None:
         [subprocess.TimeoutExpired("claude", 30), SimpleNamespace(returncode=0, stdout="--no-session-persistence")],
     )
 
-    first, second, third = (llm_client._claude_cli_flags() for _ in range(3))
+    first, second, third = (llm_client.claude_cli_flags() for _ in range(3))
 
     assert (first, second, third, len(asked)) == (None, frozenset({"--no-session-persistence"}), second, 2)
 
 
 def test_a_call_whose_isolation_is_unknown_is_not_made(monkeypatch) -> None:
     _help(monkeypatch, [SimpleNamespace(returncode=1, stdout="")])
-    monkeypatch.setattr(llm_client, "_run_cli", lambda *a, **k: pytest.fail("the CLI must not be called"))
+    monkeypatch.setattr(llm_client, "run_cli", lambda *a, **k: pytest.fail("the CLI must not be called"))
     descriptor = llm_client.provider_candidates("claude", max_tokens=100)[0]
 
-    assert llm_client._call_claude(descriptor, "private text", "system") == ""
+    assert llm_client.call_claude(descriptor, "private text", "system") == ""
 
 
 @pytest.mark.parametrize(("setting", "order"), [("", list(llm_client.KNOWN_PROVIDERS)), ("ollama", ["ollama"]), ("ollma", [])])
 def test_a_name_that_is_no_provider_yields_none(setting, order) -> None:
-    assert llm_client._candidate_order(setting) == order
+    assert llm_client.candidate_order(setting) == order
 
 
 def test_doctor_names_a_provider_setting_that_is_no_provider(monkeypatch, tmp_path) -> None:
@@ -64,6 +65,6 @@ def test_doctor_names_a_provider_setting_that_is_no_provider(monkeypatch, tmp_pa
         (tmp_path / name).mkdir(parents=True)
     monkeypatch.setenv("MEMORY_LLM_PROVIDER", "ollma")
 
-    result = doctor._environment_check(tmp_path, tmp_path)
+    result = doctor_base.environment_check(tmp_path, tmp_path)
 
     assert (result["status"], "MEMORY_LLM_PROVIDER=ollma" in result["message"]) == ("degraded", True)

@@ -11,10 +11,10 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-import lsp_process
 import pyright_profile
 import pytest
-from pyright_session import MAX_LSP_PROCESSES, PyrightSessionManager
+from llm_wiki import lsp_process_state
+from llm_wiki.pyright_session_manager import MAX_LSP_PROCESSES, PyrightSessionManager
 from repository_scope import resolve_repository_scope
 
 from tests.code_kernel_helpers import (
@@ -30,7 +30,7 @@ class _TreeFault:
     def __init__(self, monkeypatch: pytest.MonkeyPatch, session) -> None:
         self.active = True
         tree = session._process._coordinator.active.tree
-        original = lsp_process.ProcessTree.terminate
+        original = lsp_process_state.ProcessTree.terminate
         fault = self
 
         def terminate(current: object, *, deadline: float) -> None:
@@ -38,7 +38,7 @@ class _TreeFault:
                 raise OSError("injected tree close failure")
             original(current, deadline=deadline)
 
-        monkeypatch.setattr(lsp_process.ProcessTree, "terminate", terminate)
+        monkeypatch.setattr(lsp_process_state.ProcessTree, "terminate", terminate)
 
 
 def _manager_with_sessions(tmp_path: Path, state_root: Path, monkeypatch, count: int):

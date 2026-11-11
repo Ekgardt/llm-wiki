@@ -6,36 +6,14 @@ on 2026-09-18: `docs/research/2026-09-18-the-superseded-plan-a-seam-leaves-the-c
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import FrozenInstanceError
 
 import pytest
 from code_intelligence import (
     PositionRange,
 )
-from corpus_snapshot import (
-    SnapshotPolicy,
-    SourceRecord,
-    canonical_source_manifest_sha256,
-)
 
-SHA = tuple(character * 64 for character in "0123456789abcdef")
 SQLITE_INT64_MAX = 2**63 - 1
-SOURCE_CONTENT = {"source:a": b"name", "source:b": b"node"}
-SOURCE_RECORDS = tuple(
-    SourceRecord(
-        source_id,
-        f"{source_id[-1]}.py",
-        hashlib.sha256(content).hexdigest(),
-        len(content),
-        "text/x-python",
-        "python",
-        None,
-    )
-    for source_id, content in SOURCE_CONTENT.items()
-)
-SNAPSHOT_POLICY = SnapshotPolicy((), (".",), False, None, 10, 100, 1000, 100, 100, 10)
-SOURCE_MANIFEST_SHA256 = canonical_source_manifest_sha256(SOURCE_RECORDS, SNAPSHOT_POLICY)
 
 
 def test_all_records_are_frozen_and_slotted() -> None:

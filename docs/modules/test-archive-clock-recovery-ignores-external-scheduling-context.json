@@ -1,0 +1,616 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/archive-daily-tests-archive-daily-bagit-helpers.md",
+    "docs/modules/archive-daily-tests-archive-receipt-authority-keeps-one-clock.md",
+    "docs/modules/archive-daily.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/markdown-store.md",
+    "docs/modules/markdown-transaction-tests-markdown-coordinator-parts.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/reliable-memory.md",
+    "docs/modules/test-archive-clock-recovery-ignores-external-scheduling-context.json",
+    "docs/modules/test-archive-clock-recovery-ignores-external-scheduling.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/archive_daily.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/markdown_store.py",
+    "scripts/reliable_memory.py",
+    "tests/__init__.py",
+    "tests/archive_daily_bagit_helpers.py",
+    "tests/conftest.py",
+    "tests/markdown_coordinator_parts.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_archive_clock_recovery_ignores_external_scheduling.py",
+    "tests/test_archive_receipt_authority_keeps_one_clock.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-archive-clock-recovery-ignores-external-scheduling-context.json",
+      "docs/modules/test-archive-clock-recovery-ignores-external-scheduling.md",
+      "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "IO_CHUNK_BYTES",
+        "VerifiedByteRange",
+        "immutable_source_digest",
+        "open_stable_range",
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "1f0221b7f265b245887d8bb3a9081e93b8eff7eed98e53667c04456c3470ba13",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "compile_receipt_path",
+        "iter_daily_parts",
+        "read_compile_receipt_v3",
+        "receipt_predicate"
+      ],
+      "contract_sha256": "36e25ac8e8a006d2edbe6a73ed53473a9f8a8f971a1b542aa968e316a89a6cfd",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_resolver.py",
+      "names": [
+        "EvidenceResolutionError",
+        "MAX_DAILY_BYTES",
+        "bounded_directory_entries",
+        "compile_authority_attestation",
+        "daily_entries",
+        "line_span",
+        "owned_source_newlines",
+        "regular_directory",
+        "require_payload_evidence",
+        "source_chunks",
+        "source_range_digest",
+        "validate_bag"
+      ],
+      "contract_sha256": "b874d5b7dcde22fbf0f73cb0321ea2eb6e4a06fdaad1a1936c203a6790338802",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/iso_time.py",
+      "names": [
+        "utc_text"
+      ],
+      "contract_sha256": "b7151d094646f6efb0895d5e32f0237918a40d0f8e12b5eb0af3e60484d51a03",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_apply.py",
+      "names": [
+        "apply_compile_plan"
+      ],
+      "contract_sha256": "129ecd76764fbd203f197468ec01d03833729ef205c00c26dd60fb67025303bb",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_batches.py",
+      "names": [
+        "pack_compile_batches"
+      ],
+      "contract_sha256": "42879fb77545b262126891bf818efcf8a9307f66323329e8e70bef806a53fc39",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "snapshot_compile_inputs"
+      ],
+      "contract_sha256": "bf02fc1c5e0236abe974c7bd9563649093ead7a0da80b24feef40a93b2a02969",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_receipt_authority.py",
+      "names": [
+        "read_compile_receipt_version"
+      ],
+      "contract_sha256": "fefb0c1793f868e2cf9b6d894731a17d4d2564c66b083678e3588cc0872274de",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/receipts.py",
+      "names": [
+        "compile_source_identity"
+      ],
+      "contract_sha256": "ffc783170676fc14822542045b6ba88e5cab904fc5b3c0eda72d2b1d7708a500",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/schema.py",
+      "names": [
+        "SchemaValidationError",
+        "validate_schema",
+        "validate_schema_object"
+      ],
+      "contract_sha256": "46d24c7a6473d3ea49408722a1dcd3ba46d71ea5a0b5f9caf95082dd7e8baba1",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_records.py",
+      "names": [
+        "RefusedOperation",
+        "TargetBoundaryFailure",
+        "TargetPathBoundaryError"
+      ],
+      "contract_sha256": "9706158bdb8a2ff0a0a0b06580e38af57580da44c351394c7e8e41e864cbcb86",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_contracts.py",
+      "names": [
+        "QueueOperationError",
+        "SourceFence"
+      ],
+      "contract_sha256": "485876c5651edf5cb6ae1adc754c4fef4dc06677329d1ad76e21ee00f40ecce8",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS",
+        "MAX_CAPTURE_DECISION_BYTES",
+        "ReliableMemoryDefaults"
+      ],
+      "contract_sha256": "00576c5ace3900bbac5c6f1e329a9463c410f3371bac0050683d1128930a9eb1",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/restricted_paths.py",
+      "names": [
+        "is_posix_relative_text",
+        "require_inside_a_root",
+        "require_normalized_relative",
+        "require_posix_relative_text",
+        "restricted_relative_path",
+        "under_root"
+      ],
+      "contract_sha256": "85d629b86e4d034e2a4f87ffcc9f55ac07a5a2be7534c5ace32af1d3c50dd519",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_contracts.py",
+      "names": [
+        "MetadataDurabilityUnavailable",
+        "RuntimeFileIdentity",
+        "UnsafeStateRoot"
+      ],
+      "contract_sha256": "f790d8fec138e7a73aeb10ddcce9949319460759efa061fe6be4e07603f38d28",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_environment.py",
+      "names": [
+        "CLOUD_DIRECTORY_NAMES",
+        "chmod_or_warn",
+        "decode_mount_path",
+        "harden_runtime_owner_only",
+        "has_reparse_attribute",
+        "is_network_filesystem",
+        "known_network_path",
+        "owner_permissions_supported",
+        "parse_darwin_mounts",
+        "parse_posix_mounts",
+        "path_is_under",
+        "platform_system",
+        "posix_mount_table",
+        "posix_network_path",
+        "query_darwin_mounts",
+        "read_posix_mount_data",
+        "require_applied_mode",
+        "require_local_non_reparse_root",
+        "require_owner_only_file",
+        "require_windows_owner_only",
+        "set_owner_only",
+        "warn_if_cloud_synchronized",
+        "windows_network_anchor",
+        "windows_reparse_point"
+      ],
+      "contract_sha256": "35c6e60985600244454435ececa8a0368680e7164b1578a4ea0646ae845688b7",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_fingerprints.py",
+      "names": [
+        "digest_runtime_descriptor",
+        "fingerprint_metadata",
+        "fingerprint_regular_file",
+        "fingerprint_runtime_file",
+        "require_fingerprint_metadata",
+        "verified_runtime_digest"
+      ],
+      "contract_sha256": "164330508f19dc7e78d2c6e1fbf009862bc7f139833eeb7fa9d67f98ecce58fd",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_publication.py",
+      "names": [
+        "adopted_or_duplicate",
+        "discard_staged",
+        "durable_publish_file",
+        "fsync_parent_on_posix",
+        "link_then_unlink",
+        "move_into_place",
+        "move_posix",
+        "move_windows",
+        "publication_digest",
+        "publish_runtime_file",
+        "publish_staged",
+        "replace_in_place",
+        "require_create_only_carries_no_evidence",
+        "require_distinct_siblings",
+        "require_publication_arguments",
+        "require_replacement_carries_evidence",
+        "require_replacement_evidence",
+        "require_replacement_shape",
+        "require_runtime_arguments",
+        "require_runtime_mode",
+        "require_runtime_payload",
+        "require_unchanged_identity",
+        "resolved_parents",
+        "resolved_runtime_destination",
+        "resolved_sibling_pair",
+        "settled_publication",
+        "unlink_staged",
+        "verify_published_runtime_permissions",
+        "write_all",
+        "write_staged_bytes"
+      ],
+      "contract_sha256": "313aeb59ddc66ce043b7702c23c88123eea0b87b9bc7afea152d807d1b1fe596",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_records.py",
+      "names": [
+        "capture_operational_database_identity",
+        "capture_runtime_file_identity",
+        "confirm_runtime_identity",
+        "contained_runtime_metadata",
+        "posix_runtime_identity_names",
+        "read_runtime_bytes",
+        "require_bounded_regular_file",
+        "require_file_size_budget",
+        "require_nonnegative_file_budget",
+        "require_runtime_parent_containment",
+        "require_stable_read",
+        "runtime_identity_from_metadata",
+        "validate_operational_db_file",
+        "validate_runtime_file",
+        "validated_runtime_metadata",
+        "windows_runtime_identity_names"
+      ],
+      "contract_sha256": "bbb2899e154f4aa8ab7d6f9dbad03b5c0e31bba0fe4e20751f5e0768bdd8a8a3",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "904b31835161d11b79ab937c4651d91dd6966bdaa1f33e93b9ea768f519d2d3b",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_sync.py",
+      "names": [
+        "close_windows_handle",
+        "file_sync_mode",
+        "fsync_directory",
+        "fsync_directory_posix",
+        "fsync_directory_windows",
+        "fsync_file",
+        "metadata_durability_error",
+        "opened_directory_descriptor",
+        "sync_runtime_directory"
+      ],
+      "contract_sha256": "0f2d9c18e2b30fb7d5328583bc0ff9adfc9cf054a2963a8357559e3d687f6e53",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_contracts.py",
+      "names": [
+        "MigrationStatement",
+        "OperationalDatabaseContract",
+        "OperationalDatabaseContractError",
+        "quote_sqlite_identifier",
+        "require_migration_text",
+        "require_positive_int"
+      ],
+      "contract_sha256": "be0748b89bfdb7d33cbca2bf3a4206fc79767cbb9a18c1a5a940116a0e264bf6",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_deadlines.py",
+      "names": [
+        "OPERATIONAL_PROGRESS_VM_STEPS",
+        "busy_database",
+        "configure_operational_deadline",
+        "operational_busy_ms",
+        "operational_deadline_active",
+        "refresh_operational_deadline"
+      ],
+      "contract_sha256": "98d148a0ce7365cea317c2b0c719f019eb87aae4e0e7973c3b841dae6a83aa13",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_io.py",
+      "names": [
+        "JOURNAL_REPLAY_BUSY_MS",
+        "OPERATIONAL_SCAN_BATCH_ROWS",
+        "cleanup_lock_probe",
+        "close_probe_connections",
+        "configure_operational_connection",
+        "contained_lock_probe",
+        "hot_journal",
+        "initialize_probe_directory",
+        "open_operational_db",
+        "open_readonly_operational_db",
+        "opened_probe",
+        "opened_readonly_operational_db",
+        "operational_db_identity",
+        "prepare_local_database_directory",
+        "probe_directory",
+        "probe_directory_identity",
+        "readonly_write_refusal",
+        "remove_probe_files",
+        "replayed_hot_journal",
+        "require_operational_open_arguments",
+        "require_probe_component",
+        "require_probe_root_chain",
+        "require_replayed_journal",
+        "require_same_probe_directory",
+        "run_lock_probe",
+        "second_writer_is_blocked",
+        "sqlite_directory_lock_probe",
+        "sqlite_lock_probe",
+        "streamed_rows",
+        "validate_database_directory",
+        "validate_state_root"
+      ],
+      "contract_sha256": "9cf7ff2d5905c2c0eca3d677febb5e6f0b5da21c88f8271e4080159c2774fdbd",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_migrations.py",
+      "names": [
+        "apply_one_migration_statement",
+        "migration_incomplete",
+        "require_final_invariant",
+        "require_unique_statement_names",
+        "run_resumable_migration"
+      ],
+      "contract_sha256": "1970c8995e439516907e472a39a5bd68f1a9096b16fdcf9f0f114beb4b437271",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_pragmas.py",
+      "names": [
+        "apply_operational_pragmas",
+        "apply_readonly_operational_pragmas",
+        "initialized_contract_identity",
+        "pragma_integer",
+        "require_pragma",
+        "validate_or_initialize_operational_contract"
+      ],
+      "contract_sha256": "1738d3b676b1b8b5ed5ae45b40dcebd19055eaa24f86d687a0c3f4747d84cc58",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_transactions.py",
+      "names": [
+        "begin_immediate"
+      ],
+      "contract_sha256": "fb9ecde177ce133dd8e6e34a67214ca0c051a02d758e8611dac84b568d955373",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/windows_acl.py",
+      "names": [
+        "acl_lines_naming",
+        "acl_output_text",
+        "harden_windows_acl",
+        "run_acl_command",
+        "windows_acl_identity"
+      ],
+      "contract_sha256": "62a853e0c335c0c45301961da305704d1e2cfdd887bf2bd206273f0a5a33dee7",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/windows_native.py",
+      "names": [
+        "windows_kernel32"
+      ],
+      "contract_sha256": "14b51993282554a7a9c7484a32c9a4a0cc4eb28a22d5c9942c166c407fdf1089",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownChange",
+        "MarkdownCoordinator",
+        "UNDO_RETENTION_DAYS",
+        "active_or_legacy_coordinator",
+        "harden_owner_only"
+      ],
+      "contract_sha256": "0ccce910aaa205d63c0e5052c72262b416d027160bb9c7c923b94cdf0e09a838",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "ProcessIdentity",
+        "process_identity_state"
+      ],
+      "contract_sha256": "ad2b4e680b4994b37496b0612fe6cfa831f3d1ba487957e02e55e7d921a75305",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/process_liveness.py",
+      "names": [
+        "owner_alive"
+      ],
+      "contract_sha256": "43a93650e5db69f95a022901e1dc186127c6b792e0f8e8f2e13af548be8ebc1b",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "MemoryQueue",
+        "active_or_legacy_memory_queue"
+      ],
+      "contract_sha256": "d8218ead7196682a810f414ed0776ad4dcfe31caa20ccb1385040dbf91c13a0c",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "describe_error"
+      ],
+      "contract_sha256": "fb304f29eb5f060ccb0503f24561dd6ee4cfb07e2c36b130c00ad9e1c9000eaf",
+      "integration_tests": [
+        "tests/test_archive_clock_recovery_ignores_external_scheduling.py"
+      ]
+    }
+  ]
+}

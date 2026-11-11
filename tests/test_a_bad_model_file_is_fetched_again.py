@@ -10,9 +10,8 @@ from __future__ import annotations
 import os
 
 import install_models
-import memory_state
 
-from tests.test_install_models import _FakeHub, _pinned_to
+from tests.install_models_helpers import _FakeHub, _pinned_to
 
 
 class _CachingHub(_FakeHub):
@@ -25,7 +24,7 @@ class _CachingHub(_FakeHub):
 
 
 def _hub(tmp_path, monkeypatch):
-    monkeypatch.setattr(memory_state, "STATE_ROOT", tmp_path / "state")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
     contents = {"org/encoder": b"encoder weights"}
     hub = _CachingHub(tmp_path / "hub", contents)
     return hub, _pinned_to(contents)[0]
@@ -50,13 +49,13 @@ def test_a_verified_unchanged_file_is_not_read_again(tmp_path, monkeypatch) -> N
     os.utime(install_models.cached_weights(model, hub), (long_ago, long_ago))
     install_models.ensure(model, hub, download=True)
     reads: list[str] = []
-    real_digest = install_models._digest
+    real_digest = install_models.bounded_file_digest
 
     def counted(path, ceiling):
         reads.append(path.name)
         return real_digest(path, ceiling)
 
-    monkeypatch.setattr(install_models, "_digest", counted)
+    monkeypatch.setattr(install_models, "bounded_file_digest", counted)
 
     outcome = install_models.ensure(model, hub, download=True)
 
@@ -64,7 +63,7 @@ def test_a_verified_unchanged_file_is_not_read_again(tmp_path, monkeypatch) -> N
 
 
 def test_an_unreachable_hub_fails_one_model_and_the_next_is_still_tried(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(memory_state, "STATE_ROOT", tmp_path / "state")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
     contents = {"org/encoder": b"encoder weights", "org/reranker": b"reranker weights"}
     hub = _CachingHub(tmp_path / "hub", contents)
     real_download = hub.snapshot_download
@@ -76,7 +75,7 @@ def test_an_unreachable_hub_fails_one_model_and_the_next_is_still_tried(tmp_path
 
     hub.snapshot_download = offline_for_the_encoder
     states = [
-        install_models._settled_and_retired(model, hub, download=True)["state"]
+        install_models.settled_and_retired(model, hub, download=True)["state"]
         for model in _pinned_to(contents)
     ]
 

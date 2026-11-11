@@ -29,9 +29,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
+from llm_wiki import runtime_roots  # noqa: E402
+from llm_wiki.formats.canonical import sha256_bytes  # noqa: E402
+from llm_wiki.reliability_defaults import DEFAULTS  # noqa: E402
 from markdown_transaction import ABSENT, mutate_knowledge, stable_operation_id  # noqa: E402
-from memory_state import ROOT  # noqa: E402
-from reliable_memory import DEFAULTS, sha256_bytes  # noqa: E402
 
 # How long a record stays in the active tree: the same ninety days the archive
 # contract already gives every other hot artifact. The observability write-ups
@@ -43,8 +44,15 @@ DEFAULT_RETENTION_DAYS = DEFAULTS.archive_hot_days
 # megabyte, and the bound refuses anything that is no longer a session record.
 MAX_RECORD_BYTES = 8 * 1024 * 1024
 
-SESSIONS = ROOT / "knowledge" / "raw" / "sessions"
-ARCHIVE = SESSIONS / "archive"
+
+def sessions_dir() -> Path:
+    return runtime_roots.vault_root() / "knowledge" / "raw" / "sessions"
+
+
+def archive_dir() -> Path:
+    return sessions_dir() / "archive"
+
+
 _DAY_NAME = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 
 
@@ -67,7 +75,7 @@ def aged_out(root: Path, cutoff: date) -> list[Path]:
 
 
 def _destination(record: Path, day: Path) -> Path:
-    return ARCHIVE / day.name[:7] / day.name / record.name
+    return archive_dir() / day.name[:7] / day.name / record.name
 
 
 def _records(day: Path) -> list[Path]:
@@ -75,14 +83,14 @@ def _records(day: Path) -> list[Path]:
 
 
 def _moved(record: Path, destination: Path) -> str:
-    relative = record.relative_to(ROOT).as_posix()
+    relative = record.relative_to(runtime_roots.vault_root()).as_posix()
     content = read_stable_bytes(record, MAX_RECORD_BYTES, label="session record")
     mutate_knowledge(
         stable_operation_id("archive-session", relative, content),
         {destination: content, record: None},
         preconditions={
             relative: sha256_bytes(content),
-            destination.relative_to(ROOT).as_posix(): ABSENT,
+            destination.relative_to(runtime_roots.vault_root()).as_posix(): ABSENT,
         },
     )
     return f"ARCHIVED: {relative}"
@@ -92,7 +100,7 @@ def _attempt(record: Path, day: Path) -> str:
     try:
         return _moved(record, _destination(record, day))
     except (OSError, RuntimeError, ValueError) as exc:
-        return f"ERROR: {record.relative_to(ROOT).as_posix()}: {type(exc).__name__}"
+        return f"ERROR: {record.relative_to(runtime_roots.vault_root()).as_posix()}: {type(exc).__name__}"
 
 
 def _archive_day(day: Path) -> list[str]:
@@ -105,7 +113,7 @@ def _archive_day(day: Path) -> list[str]:
 
 def _planned(stale: list[Path]) -> list[str]:
     return [
-        f"WOULD ARCHIVE: {record.relative_to(ROOT).as_posix()}"
+        f"WOULD ARCHIVE: {record.relative_to(runtime_roots.vault_root()).as_posix()}"
         for day in stale
         for record in _records(day)
     ]
@@ -117,7 +125,7 @@ def _archived(stale: list[Path]) -> list[str]:
 
 def archive_sessions(*, days: int, today: date, apply: bool) -> list[str]:
     """Archive every record older than the window; a dry run only names them."""
-    stale = aged_out(SESSIONS, today - timedelta(days=days))
+    stale = aged_out(sessions_dir(), today - timedelta(days=days))
     if not apply:
         return _planned(stale)
     return _archived(stale)

@@ -1,0 +1,594 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/compile-controller-context.json",
+    "docs/modules/compile-controller.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/compile_controller.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-controller-context.json",
+      "docs/modules/compile-controller.md",
+      "scripts/compile_controller.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/compile_answer_records.py",
+      "names": [
+        "COMPLETED_REFUSALS",
+        "answer_event",
+        "encoded_answer"
+      ],
+      "contract_sha256": "4cd4f50f0b133d5dc51961c7042f4c330071a4cfe80ffedb32648985d6b74764",
+      "integration_tests": [
+        "tests/compile_archive_daily_sharing_helpers.py",
+        "tests/compile_execution_inventory_helpers.py",
+        "tests/compile_preflight_consumer_helpers.py",
+        "tests/compile_protected_dispatch_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/compile_repair_checkpoint_helpers.py",
+        "tests/compile_streamed_archive_batches_helpers.py",
+        "tests/compile_tree_execution_helpers.py",
+        "tests/compile_verified_original_ranges_helpers.py",
+        "tests/compile_work_completion_helpers.py",
+        "tests/test_compile_archive_json_views.py",
+        "tests/test_compile_artifact_retention.py",
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_batch_admission.py",
+        "tests/test_compile_call_controller.py",
+        "tests/test_compile_context_delta.py",
+        "tests/test_compile_delivery_scope.py",
+        "tests/test_compile_dependency_identity.py",
+        "tests/test_compile_durable_batch_context.py",
+        "tests/test_compile_durable_preflight.py",
+        "tests/test_compile_durable_stream_capture.py",
+        "tests/test_compile_execution_inventory.py",
+        "tests/test_compile_original_digest_proof.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_preflight_consumer.py",
+        "tests/test_compile_probe_replay.py",
+        "tests/test_compile_protected_dispatch.py",
+        "tests/test_compile_publication_checkpoint.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_queue_completion.py",
+        "tests/test_compile_reads_supported_knowledge_pages.py",
+        "tests/test_compile_repair_checkpoint.py",
+        "tests/test_compile_repair_child.py",
+        "tests/test_compile_repair_completion.py",
+        "tests/test_compile_request_selection.py",
+        "tests/test_compile_resolution_failure_progress.py",
+        "tests/test_compile_restores_original_ranges.py",
+        "tests/test_compile_retained_planning.py",
+        "tests/test_compile_runtime_identity.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py",
+        "tests/test_compile_source_overlap.py",
+        "tests/test_compile_streamed_archive_batches.py",
+        "tests/test_compile_streamed_capture_validation.py",
+        "tests/test_compile_streamed_json_metadata.py",
+        "tests/test_compile_streaming_capture.py",
+        "tests/test_compile_streaming_required_context.py",
+        "tests/test_compile_task_origin.py",
+        "tests/test_compile_tree_execution.py",
+        "tests/test_compile_verified_original_ranges.py",
+        "tests/test_compile_work_completion.py",
+        "tests/test_compile_worker_handoff.py",
+        "tests/test_evidence_verified_ranges.py",
+        "tests/test_native_journal_range_index.py",
+        "tests/test_queue_caller_cancellation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_call_runtime.py",
+      "names": [
+        "CompileDelivery",
+        "ProviderOutcomeUnknown",
+        "authorize_model_repeat",
+        "dispatch_event",
+        "require_checkpoint",
+        "resolve_model_call",
+        "run_model_call"
+      ],
+      "contract_sha256": "a59dd69bd6bfcc4374b0fb25bbfc881cce7d63f611e93a7c2df0cc1b2611397e",
+      "integration_tests": [
+        "tests/compile_archive_daily_sharing_helpers.py",
+        "tests/compile_execution_inventory_helpers.py",
+        "tests/compile_preflight_consumer_helpers.py",
+        "tests/compile_protected_dispatch_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/compile_repair_checkpoint_helpers.py",
+        "tests/compile_streamed_archive_batches_helpers.py",
+        "tests/compile_tree_execution_helpers.py",
+        "tests/compile_verified_original_ranges_helpers.py",
+        "tests/compile_work_completion_helpers.py",
+        "tests/test_compile_archive_json_views.py",
+        "tests/test_compile_artifact_retention.py",
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_batch_admission.py",
+        "tests/test_compile_call_controller.py",
+        "tests/test_compile_context_delta.py",
+        "tests/test_compile_delivery_scope.py",
+        "tests/test_compile_dependency_identity.py",
+        "tests/test_compile_durable_batch_context.py",
+        "tests/test_compile_durable_preflight.py",
+        "tests/test_compile_durable_stream_capture.py",
+        "tests/test_compile_execution_inventory.py",
+        "tests/test_compile_original_digest_proof.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_preflight_consumer.py",
+        "tests/test_compile_probe_replay.py",
+        "tests/test_compile_protected_dispatch.py",
+        "tests/test_compile_publication_checkpoint.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_queue_completion.py",
+        "tests/test_compile_reads_supported_knowledge_pages.py",
+        "tests/test_compile_repair_checkpoint.py",
+        "tests/test_compile_repair_child.py",
+        "tests/test_compile_repair_completion.py",
+        "tests/test_compile_request_selection.py",
+        "tests/test_compile_resolution_failure_progress.py",
+        "tests/test_compile_restores_original_ranges.py",
+        "tests/test_compile_retained_planning.py",
+        "tests/test_compile_runtime_identity.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py",
+        "tests/test_compile_source_overlap.py",
+        "tests/test_compile_streamed_archive_batches.py",
+        "tests/test_compile_streamed_capture_validation.py",
+        "tests/test_compile_streamed_json_metadata.py",
+        "tests/test_compile_streaming_capture.py",
+        "tests/test_compile_streaming_required_context.py",
+        "tests/test_compile_task_origin.py",
+        "tests/test_compile_tree_execution.py",
+        "tests/test_compile_verified_original_ranges.py",
+        "tests/test_compile_work_completion.py",
+        "tests/test_compile_worker_handoff.py",
+        "tests/test_evidence_verified_ranges.py",
+        "tests/test_native_journal_range_index.py",
+        "tests/test_queue_caller_cancellation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_archive.py",
+      "names": [
+        "ARCHIVE_JSON_FIELDS",
+        "ARCHIVE_SCHEMA",
+        "ArchiveJsonArray",
+        "SnapshotArchiveWriter",
+        "SnapshotJsonArray",
+        "archive_record_value",
+        "blob_digest",
+        "compile_inputs_digest",
+        "put_snapshot_json",
+        "snapshot_content_chunks",
+        "snapshot_json",
+        "write_archive_snapshot"
+      ],
+      "contract_sha256": "1e76ca53bab339ef31b3c913a70cc10c7b36fa5dd2b5a102fc05c8da339f1172",
+      "integration_tests": [
+        "tests/test_compile_streamed_json_metadata.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_batch_admission.py",
+      "names": [
+        "begin_compile_batch",
+        "save_compile_batch_context"
+      ],
+      "contract_sha256": "88228c3e091bb40ccb4ec3d1a9be3d845eadbd084ba445fa630f62a3a87e8b9e",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py",
+        "tests/test_answer_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_batches.py",
+      "names": [
+        "execute_compile_tree",
+        "execute_planned_compile_batch",
+        "execute_planned_compile_tree",
+        "open_compile_batch_context",
+        "open_prepared_compile_batch"
+      ],
+      "contract_sha256": "01c38ca4b4bf8974ed029c38dbcf775b3bd26accc6fb8013081ba924d87f130e",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py",
+        "tests/test_answer_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_calls.py",
+      "names": [
+        "CompileReplay",
+        "run_candidate_call"
+      ],
+      "contract_sha256": "45f9e510e63d59fea9689fc0ef7e30fbae96e6f39e644272b3ab020e8c463d32",
+      "integration_tests": [
+        "tests/test_compile_retained_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_capture.py",
+      "names": [
+        "CompileCapturePreparation",
+        "admit_compile_capture",
+        "read_compile_execution",
+        "require_capture_vault",
+        "save_compile_capture",
+        "save_compile_inputs"
+      ],
+      "contract_sha256": "9a6a4c0dbcbbfd95737089af3ebf2bd0c5abaef52b5b30d96d95a23fdd7073ee",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_durable_stream_capture.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_capture_check.py",
+      "names": [
+        "read_admitted_capture_root",
+        "validate_capture_archive"
+      ],
+      "contract_sha256": "8cafa80588ae6fcc81c2125e17557826f15e03b16cce415f0175004e6e078424",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py",
+        "tests/test_answer_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_context_delta.py",
+      "names": [
+        "read_compile_context_delta",
+        "write_compile_context_delta"
+      ],
+      "contract_sha256": "3ef994beeaade6635377e48304b1f87e4d9e9d1f9b16b10ed05e4d8655d29aef",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py",
+        "tests/test_answer_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_dependencies.py",
+      "names": [
+        "CompileDependencies",
+        "capture_compile_dependencies",
+        "compile_configuration_dependency_manifest",
+        "compile_dependency_digest",
+        "compile_dependency_file",
+        "compile_dependency_manifest",
+        "compile_execution_dependency_manifest",
+        "compile_package_dependency_manifest",
+        "compile_product_dependency_manifest",
+        "compile_runtime_dependency_manifest",
+        "compile_runtime_library",
+        "compile_work_identity"
+      ],
+      "contract_sha256": "c7e2b54f9fdee5e47bc5749a211653270f6426413b15ad6d2843959d1f8e9b75",
+      "integration_tests": [
+        "tests/test_compile_dependency_identity.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_preflight.py",
+      "names": [
+        "PlannedCompileBatch",
+        "iter_compile_preflight",
+        "preflight_source_records",
+        "save_compile_preflight"
+      ],
+      "contract_sha256": "e9cec847e6ead58295823c06f6fcdf8c587f883995db059393e5d7d1967c55a5",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py",
+        "tests/test_answer_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_publication.py",
+      "names": [
+        "confirm_compile_publication",
+        "execute_compile_publication",
+        "publication_content",
+        "read_compile_publication",
+        "save_compile_publication"
+      ],
+      "contract_sha256": "9bf480d87a7ac1aded92dacee2feedada2687f1128195089ab4b46ed27e2727f",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_an_answer_says_how_old_its_index_is.py",
+        "tests/test_answer_budget.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_reader.py",
+      "names": [
+        "ArchiveRecords",
+        "CompileInputArchive",
+        "OriginalDigestProof",
+        "compile_capture_digest",
+        "open_compile_inputs",
+        "restored_archive_record",
+        "write_compile_capture"
+      ],
+      "contract_sha256": "d7a6a23364e6072164f5bab2f482225f1f2098419c30e54cbd635223484e4a5b",
+      "integration_tests": [
+        "tests/test_compile_streamed_archive_batches.py",
+        "tests/test_compile_verified_original_ranges.py",
+        "tests/test_evidence_verified_ranges.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_repair.py",
+      "names": [
+        "RepairCompileBatch",
+        "begin_compile_repair_batch",
+        "confirm_compile_repair",
+        "execute_repair_compile_batch",
+        "read_compile_repair",
+        "save_compile_repair"
+      ],
+      "contract_sha256": "fc2f8b211698b7b2b50f8780fbba48399e368766a08ec27d96b84a80bcb3d838",
+      "integration_tests": [
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_retained_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_controller_work.py",
+      "names": [
+        "begin_compile_work",
+        "compile_root_details",
+        "confirm_compile_work",
+        "execute_compile_work",
+        "load_compile_inputs"
+      ],
+      "contract_sha256": "4825296a3277b53c1586b193504ecb4c92e5e65f9f6d30be52e41f224a00357b",
+      "integration_tests": [
+        "tests/test_compile_retained_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/compile_archive_daily_sharing_helpers.py",
+        "tests/compile_execution_inventory_helpers.py",
+        "tests/compile_preflight_consumer_helpers.py",
+        "tests/compile_protected_dispatch_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/compile_repair_checkpoint_helpers.py",
+        "tests/compile_streamed_archive_batches_helpers.py",
+        "tests/compile_tree_execution_helpers.py",
+        "tests/compile_verified_original_ranges_helpers.py",
+        "tests/compile_work_completion_helpers.py",
+        "tests/test_compile_archive_json_views.py",
+        "tests/test_compile_artifact_retention.py",
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_batch_admission.py",
+        "tests/test_compile_call_controller.py",
+        "tests/test_compile_context_delta.py",
+        "tests/test_compile_delivery_scope.py",
+        "tests/test_compile_dependency_identity.py",
+        "tests/test_compile_durable_batch_context.py",
+        "tests/test_compile_durable_preflight.py",
+        "tests/test_compile_durable_stream_capture.py",
+        "tests/test_compile_execution_inventory.py",
+        "tests/test_compile_original_digest_proof.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_preflight_consumer.py",
+        "tests/test_compile_probe_replay.py",
+        "tests/test_compile_protected_dispatch.py",
+        "tests/test_compile_publication_checkpoint.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_queue_completion.py",
+        "tests/test_compile_reads_supported_knowledge_pages.py",
+        "tests/test_compile_repair_checkpoint.py",
+        "tests/test_compile_repair_child.py",
+        "tests/test_compile_repair_completion.py",
+        "tests/test_compile_request_selection.py",
+        "tests/test_compile_resolution_failure_progress.py",
+        "tests/test_compile_restores_original_ranges.py",
+        "tests/test_compile_retained_planning.py",
+        "tests/test_compile_runtime_identity.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py",
+        "tests/test_compile_source_overlap.py",
+        "tests/test_compile_streamed_archive_batches.py",
+        "tests/test_compile_streamed_capture_validation.py",
+        "tests/test_compile_streamed_json_metadata.py",
+        "tests/test_compile_streaming_capture.py",
+        "tests/test_compile_streaming_required_context.py",
+        "tests/test_compile_task_origin.py",
+        "tests/test_compile_tree_execution.py",
+        "tests/test_compile_verified_original_ranges.py",
+        "tests/test_compile_work_completion.py",
+        "tests/test_compile_worker_handoff.py",
+        "tests/test_evidence_verified_ranges.py",
+        "tests/test_native_journal_range_index.py",
+        "tests/test_queue_caller_cancellation.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/compile_archive_daily_sharing_helpers.py",
+        "tests/compile_execution_inventory_helpers.py",
+        "tests/compile_preflight_consumer_helpers.py",
+        "tests/compile_protected_dispatch_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/compile_repair_checkpoint_helpers.py",
+        "tests/compile_streamed_archive_batches_helpers.py",
+        "tests/compile_tree_execution_helpers.py",
+        "tests/compile_verified_original_ranges_helpers.py",
+        "tests/compile_work_completion_helpers.py",
+        "tests/test_compile_archive_json_views.py",
+        "tests/test_compile_artifact_retention.py",
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_batch_admission.py",
+        "tests/test_compile_call_controller.py",
+        "tests/test_compile_context_delta.py",
+        "tests/test_compile_delivery_scope.py",
+        "tests/test_compile_dependency_identity.py",
+        "tests/test_compile_durable_batch_context.py",
+        "tests/test_compile_durable_preflight.py",
+        "tests/test_compile_durable_stream_capture.py",
+        "tests/test_compile_execution_inventory.py",
+        "tests/test_compile_original_digest_proof.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_preflight_consumer.py",
+        "tests/test_compile_probe_replay.py",
+        "tests/test_compile_protected_dispatch.py",
+        "tests/test_compile_publication_checkpoint.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_queue_completion.py",
+        "tests/test_compile_reads_supported_knowledge_pages.py",
+        "tests/test_compile_repair_checkpoint.py",
+        "tests/test_compile_repair_child.py",
+        "tests/test_compile_repair_completion.py",
+        "tests/test_compile_request_selection.py",
+        "tests/test_compile_resolution_failure_progress.py",
+        "tests/test_compile_restores_original_ranges.py",
+        "tests/test_compile_retained_planning.py",
+        "tests/test_compile_runtime_identity.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py",
+        "tests/test_compile_source_overlap.py",
+        "tests/test_compile_streamed_archive_batches.py",
+        "tests/test_compile_streamed_capture_validation.py",
+        "tests/test_compile_streamed_json_metadata.py",
+        "tests/test_compile_streaming_capture.py",
+        "tests/test_compile_streaming_required_context.py",
+        "tests/test_compile_task_origin.py",
+        "tests/test_compile_tree_execution.py",
+        "tests/test_compile_verified_original_ranges.py",
+        "tests/test_compile_work_completion.py",
+        "tests/test_compile_worker_handoff.py",
+        "tests/test_evidence_verified_ranges.py",
+        "tests/test_native_journal_range_index.py",
+        "tests/test_queue_caller_cancellation.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/compile_archive_daily_sharing_helpers.py",
+        "tests/compile_execution_inventory_helpers.py",
+        "tests/compile_preflight_consumer_helpers.py",
+        "tests/compile_protected_dispatch_helpers.py",
+        "tests/compile_publication_checkpoint_helpers.py",
+        "tests/compile_repair_checkpoint_helpers.py",
+        "tests/compile_streamed_archive_batches_helpers.py",
+        "tests/compile_tree_execution_helpers.py",
+        "tests/compile_verified_original_ranges_helpers.py",
+        "tests/compile_work_completion_helpers.py",
+        "tests/test_compile_archive_json_views.py",
+        "tests/test_compile_artifact_retention.py",
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_batch_admission.py",
+        "tests/test_compile_call_controller.py",
+        "tests/test_compile_context_delta.py",
+        "tests/test_compile_delivery_scope.py",
+        "tests/test_compile_dependency_identity.py",
+        "tests/test_compile_durable_batch_context.py",
+        "tests/test_compile_durable_preflight.py",
+        "tests/test_compile_durable_stream_capture.py",
+        "tests/test_compile_execution_inventory.py",
+        "tests/test_compile_original_digest_proof.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_preflight_consumer.py",
+        "tests/test_compile_probe_replay.py",
+        "tests/test_compile_protected_dispatch.py",
+        "tests/test_compile_publication_checkpoint.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_queue_completion.py",
+        "tests/test_compile_reads_supported_knowledge_pages.py",
+        "tests/test_compile_repair_checkpoint.py",
+        "tests/test_compile_repair_child.py",
+        "tests/test_compile_repair_completion.py",
+        "tests/test_compile_request_selection.py",
+        "tests/test_compile_resolution_failure_progress.py",
+        "tests/test_compile_restores_original_ranges.py",
+        "tests/test_compile_retained_planning.py",
+        "tests/test_compile_runtime_identity.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py",
+        "tests/test_compile_source_overlap.py",
+        "tests/test_compile_streamed_archive_batches.py",
+        "tests/test_compile_streamed_capture_validation.py",
+        "tests/test_compile_streamed_json_metadata.py",
+        "tests/test_compile_streaming_capture.py",
+        "tests/test_compile_streaming_required_context.py",
+        "tests/test_compile_task_origin.py",
+        "tests/test_compile_tree_execution.py",
+        "tests/test_compile_verified_original_ranges.py",
+        "tests/test_compile_work_completion.py",
+        "tests/test_compile_worker_handoff.py",
+        "tests/test_evidence_verified_ranges.py",
+        "tests/test_native_journal_range_index.py",
+        "tests/test_queue_caller_cancellation.py"
+      ]
+    }
+  ]
+}

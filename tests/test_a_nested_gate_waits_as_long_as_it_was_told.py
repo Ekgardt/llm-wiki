@@ -22,13 +22,13 @@ for entry in (str(SCRIPTS_DIR), str(TESTS)):
 
 import markdown_transaction  # noqa: E402
 import operational_ownership as ownership  # noqa: E402
-from test_writer_gate_reclaims_a_dead_projection import (  # noqa: E402
+
+from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
+from tests.writer_gate_reclaims_a_dead_projection_helpers import (  # noqa: E402
     PROJECT_SCOPE,
     _candidate,
     _coordinator,
 )
-
-from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
 
 
 def _hold_the_gate(coordinator, held: threading.Event, release: threading.Event) -> None:
@@ -40,7 +40,7 @@ def _hold_the_gate(coordinator, held: threading.Event, release: threading.Event)
 def _live_writer(state_root: Path) -> tuple[threading.Thread, threading.Event]:
     """Another thread inside the plain gate, until `release` is set."""
     held, release = threading.Event(), threading.Event()
-    second = markdown_transaction.MarkdownCoordinator._from_v3_candidate(
+    second = markdown_transaction.MarkdownCoordinator.from_v3_candidate(
         _candidate(state_root), state_root=state_root
     )
     writer = threading.Thread(

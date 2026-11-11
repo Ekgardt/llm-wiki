@@ -6,13 +6,14 @@ import shutil
 import sqlite3
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
-from tests.test_reliability_v3_adoption import _vault, build_adopted_reliability_v3
+from tests.private_vault_backup_helpers import _restic_restore_fixture, _staged_image
+from tests.reliability_v3_adoption_helpers import _vault, build_adopted_reliability_v3
+from tests.slow_machine import SHORT_TIMEOUT
 
 
 def _not_a_repository(backup):
@@ -119,7 +120,7 @@ def test_staged_backup_image_uses_online_databases_and_manifest(tmp_path: Path) 
         root=root,
         state_root=state_root,
         staging_parent=staging_parent,
-        now=datetime(2026, 8, 15, tzinfo=timezone.utc),
+        now=datetime(2026, 8, 15, tzinfo=UTC),
         deadline=time.monotonic() + SHORT_TIMEOUT,
     ) as image:
         facts = _staged_image_facts(backup, image, state_root)
@@ -154,14 +155,14 @@ def test_staged_backup_image_blocks_source_race_and_releases_owner(
     note.write_bytes(b"before\n")
     staging_parent = tmp_path / "staging"
     staging_parent.mkdir()
-    copy_regular_file = backup._copy_regular_file
+    copy_regular_file = backup.copy_regular_file
 
     def race(source: Path, destination: Path) -> None:
         copy_regular_file(source, destination)
         if source == note:
             note.write_bytes(b"after\n")
 
-    monkeypatch.setattr(backup, "_copy_regular_file", race)
+    monkeypatch.setattr(backup, "copy_regular_file", race)
 
     with pytest.raises(backup.BackupError) as raised:
         with backup.staged_backup_image(
@@ -188,19 +189,21 @@ def test_staged_backup_image_requires_quiescent_canonical_owners(tmp_path: Path)
     root, state_root = _vault(tmp_path)
     build_adopted_reliability_v3(root, state_root)
     coordinator = state_root / "run/markdown-transactions-v3.sqlite3"
-    registry = OwnershipRegistry._from_adopted_database(state_root, coordinator)
+    registry = OwnershipRegistry.from_adopted_database(state_root, coordinator)
     owner = registry.acquire("doctor", scope="global")
     staging_parent = tmp_path / "staging"
     staging_parent.mkdir()
     try:
-        with pytest.raises(backup.BackupError) as raised:
-            with backup.staged_backup_image(
+        with (
+            pytest.raises(backup.BackupError) as raised,
+            backup.staged_backup_image(
                 root=root,
                 state_root=state_root,
                 staging_parent=staging_parent,
                 deadline=time.monotonic() + SHORT_TIMEOUT,
-            ):
-                pass
+            ),
+        ):
+            pass
         assert raised.value.code == "backup_requires_quiescence"
         assert list(staging_parent.iterdir()) == []
     finally:
@@ -213,7 +216,7 @@ def test_staged_backup_image_rejects_unknown_runtime_projection(tmp_path: Path) 
     root, state_root = _vault(tmp_path)
     build_adopted_reliability_v3(root, state_root)
     queue = state_root / "run/queue-v3.sqlite3"
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     with contextlib.closing(sqlite3.connect(queue)) as database:
         database.execute(
             """INSERT INTO queue_ownership(
@@ -275,7 +278,7 @@ def test_backup_private_vault_runs_exact_restic_backup_and_check(
         calls.append((command, cwd, deadline, max_output_bytes))
         return _restic_backup_reply(backup, command, cwd, state_root)
 
-    monkeypatch.setattr(backup, "_run_bounded", run)
+    monkeypatch.setattr(backup, "run_bounded", run)
 
     receipt = backup.backup_private_vault(
         root=root,
@@ -283,7 +286,7 @@ def test_backup_private_vault_runs_exact_restic_backup_and_check(
         staging_parent=staging,
         restic_binary=restic,
         repository_file=repository_file,
-        now=datetime(2026, 8, 15, tzinfo=timezone.utc),
+        now=datetime(2026, 8, 15, tzinfo=UTC),
         deadline=time.monotonic() + SHORT_TIMEOUT,
     )
     backup_command = calls[1][0]
@@ -332,7 +335,7 @@ def test_backup_private_vault_rejects_restic_incomplete_exit_and_cleans_staging(
             return backup.CommandResult(0, b"restic 0.19.1 fixture\n", b"")
         return backup.CommandResult(3, b"", b"source unreadable")
 
-    monkeypatch.setattr(backup, "_run_bounded", run)
+    monkeypatch.setattr(backup, "run_bounded", run)
 
     with pytest.raises(backup.BackupError) as raised:
         backup.backup_private_vault(
@@ -364,7 +367,7 @@ def test_backup_private_vault_rejects_wrong_restic_version_before_staging(
     repository_file.write_text("s3:safe-bucket/private\n", encoding="utf-8")
     monkeypatch.setattr(
         backup,
-        "_run_bounded",
+        "run_bounded",
         lambda *args, **kwargs: backup.CommandResult(
             0, b"restic 0.20.0 compiled with go1.26\n", b""
         ),
@@ -401,7 +404,7 @@ def test_backup_private_vault_rejects_local_repository_inside_source(
     )
     monkeypatch.setattr(
         backup,
-        "_run_bounded",
+        "run_bounded",
         lambda *args, **kwargs: pytest.fail("restic must not run"),
     )
 
@@ -423,7 +426,7 @@ def test_bounded_runner_kills_output_overflow() -> None:
     import private_vault_backup as backup
 
     with pytest.raises(backup.BackupError) as raised:
-        backup._run_bounded(
+        backup.run_bounded(
             [sys.executable, "-c", "import sys; sys.stdout.write('x' * 4096)"],
             cwd=Path.cwd(),
             deadline=time.monotonic() + SHORT_TIMEOUT,
@@ -431,34 +434,6 @@ def test_bounded_runner_kills_output_overflow() -> None:
         )
 
     assert raised.value.code == "restic_output_limit"
-
-
-def _restic_restore_fixture(
-    tmp_path: Path,
-) -> tuple[Path, Path, Path, Path, str, str]:
-    import private_vault_backup as backup
-
-    root, state_root = _vault(tmp_path)
-    build_adopted_reliability_v3(root, state_root)
-    (root / "knowledge/notes/private.md").write_bytes(b"restored private\n")
-    backup_staging = tmp_path / "backup-staging"
-    backup_staging.mkdir()
-    snapshot = tmp_path / "snapshot"
-    snapshot.mkdir()
-    with backup.staged_backup_image(
-        root=root,
-        state_root=state_root,
-        staging_parent=backup_staging,
-        now=datetime(2026, 8, 15, tzinfo=timezone.utc),
-        deadline=time.monotonic() + SHORT_TIMEOUT,
-    ) as image:
-        shutil.copytree(image, snapshot, dirs_exist_ok=True, symlinks=True)
-    manifest_sha256 = backup.sha256_bytes((snapshot / "manifest.json").read_bytes())
-    restic = tmp_path / "restic.exe"
-    restic.write_bytes(b"fixture")
-    repository_file = tmp_path / "repository.txt"
-    repository_file.write_text("s3:safe-bucket/private\n", encoding="utf-8")
-    return root, state_root, snapshot, restic, repository_file, manifest_sha256
 
 
 def test_restore_private_vault_restores_exact_snapshot_to_clean_target(
@@ -480,7 +455,7 @@ def test_restore_private_vault_restores_exact_snapshot_to_clean_target(
         calls.append((command, cwd, deadline, max_output_bytes))
         return _restic_restore_reply(backup, command, snapshot, target, snapshot_id)
 
-    monkeypatch.setattr(backup, "_run_bounded", run)
+    monkeypatch.setattr(backup, "run_bounded", run)
 
     receipt = backup.restore_private_vault(
         target=target,
@@ -532,7 +507,7 @@ def test_restore_private_vault_rejects_tampered_content_and_cleans_target(
             b"",
         )
 
-    monkeypatch.setattr(backup, "_run_bounded", run)
+    monkeypatch.setattr(backup, "run_bounded", run)
 
     with pytest.raises(backup.BackupError) as raised:
         backup.restore_private_vault(
@@ -573,7 +548,7 @@ def test_restore_private_vault_rejects_wrong_manifest_digest_and_cleans_target(
             b"",
         )
 
-    monkeypatch.setattr(backup, "_run_bounded", run)
+    monkeypatch.setattr(backup, "run_bounded", run)
 
     with pytest.raises(backup.BackupError) as raised:
         backup.restore_private_vault(
@@ -602,7 +577,7 @@ def test_restore_private_vault_requires_empty_target_before_restic(
     (target / "existing.txt").write_text("keep", encoding="utf-8")
     monkeypatch.setattr(
         backup,
-        "_run_bounded",
+        "run_bounded",
         lambda *args, **kwargs: pytest.fail("restic must not run"),
     )
 
@@ -717,28 +692,6 @@ def test_cli_restore_reports_stable_error_without_paths(
         "details": ["owner_unknown"],
     }
     assert str(tmp_path) not in output
-
-
-def _staged_image(tmp_path: Path):
-    """One validated image, plus the digest a publish has to be given."""
-    import private_vault_backup as backup
-
-    root, state_root = _vault(tmp_path)
-    build_adopted_reliability_v3(root, state_root)
-    (root / "knowledge/notes/private.md").write_bytes(b"private knowledge\n")
-    staging_parent = tmp_path / "staging"
-    staging_parent.mkdir()
-    kept = tmp_path / "image"
-    with backup.staged_backup_image(
-        root=root,
-        state_root=state_root,
-        staging_parent=staging_parent,
-        now=datetime(2026, 8, 25, tzinfo=timezone.utc),
-        deadline=time.monotonic() + LONG_TIMEOUT,
-    ) as image:
-        shutil.copytree(image, kept)
-    digest = backup.sha256_bytes((kept / "manifest.json").read_bytes())
-    return kept, digest
 
 
 def test_publishing_an_image_into_an_empty_vault_puts_every_file_in_place(tmp_path):

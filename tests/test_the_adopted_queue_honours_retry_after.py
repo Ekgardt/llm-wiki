@@ -10,15 +10,18 @@ from __future__ import annotations
 from datetime import timedelta
 from pathlib import Path
 
-import memory_queue
-from memory_queue import QueueFailure
+import pytest
+import queue_core
+from queue_core import (
+    QueueFailure,
+)
 
 from tests.adopted_vault import adopt
 
 
 def test_a_rate_limited_task_waits_out_the_stated_hour(tmp_path: Path) -> None:
     root, state_root = adopt(tmp_path)
-    queue = memory_queue.active_or_legacy_memory_queue(root, state_root)
+    queue = queue_core.active_or_legacy_memory_queue(root, state_root)
     task_id = queue.enqueue("compile", 1, {"daily": "one"})
     lease = queue.claim("worker")
 
@@ -27,3 +30,18 @@ def test_a_rate_limited_task_waits_out_the_stated_hour(tmp_path: Path) -> None:
     task = queue.get(task_id)
     assert task.state == "ready"
     assert task.available_at - task.updated_at >= timedelta(seconds=3599)
+
+
+@pytest.mark.parametrize(('retry_after', 'minimum'), [('²', 0), (-(10**400), 0), (10**400, 604800)],
+                         ids=['unicode-digit', 'huge-negative', 'huge-positive'])
+def test_unusual_numeric_retry_after_does_not_leave_the_task_leased(tmp_path, retry_after, minimum):
+    root, state_root = adopt(tmp_path)
+    queue = queue_core.active_or_legacy_memory_queue(root, state_root)
+    task_id = queue.enqueue('query', 1, {})
+    lease = queue.claim('worker')
+    queue.fail(lease, QueueFailure('temporary', retry_after=retry_after))
+    task = queue.get(task_id)
+    assert task.state == 'ready'
+    assert task.lease_token is None
+    assert task.attempt_history[-1].outcome == 'failed'
+    assert (task.available_at - task.updated_at).total_seconds() >= minimum

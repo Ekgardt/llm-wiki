@@ -1,0 +1,455 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/compile-controller-tests-compile-preflight-consumer-helpers-context.json",
+    "docs/modules/compile-controller-tests-compile-preflight-consumer-helpers.md",
+    "docs/modules/compile-controller-tests-compile-streamed-archive-batches-helpers.md",
+    "docs/modules/compile-pipeline-sources-tests-compile-groups-complete-sources-by-qualified-capacity-helpers.md",
+    "docs/modules/compile-progress-tests.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/installed-memory-repair-tests.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/adopted_vault.py",
+    "tests/compile_call_controller_helpers.py",
+    "tests/compile_groups_complete_sources_by_qualified_capacity_helpers.py",
+    "tests/compile_preflight_consumer_helpers.py",
+    "tests/compile_progress_admission_helpers.py",
+    "tests/compile_streamed_archive_batches_helpers.py",
+    "tests/conftest.py",
+    "tests/legacy_adopted_vault.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-controller-tests-compile-preflight-consumer-helpers-context.json",
+      "docs/modules/compile-controller-tests-compile-preflight-consumer-helpers.md",
+      "tests/compile_preflight_consumer_helpers.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "VerifiedByteRange"
+      ],
+      "contract_sha256": "c5903c7bc0646f47f55cc2bab7ab885423d78b38922ff569819aa4314545cb90",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_batch_admission.py",
+        "tests/test_compile_durable_batch_context.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_preflight_consumer.py",
+        "tests/test_compile_probe_replay.py",
+        "tests/test_compile_publication_checkpoint.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_repair_child.py",
+        "tests/test_compile_repair_completion.py",
+        "tests/test_compile_resolution_failure_progress.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py",
+        "tests/test_compile_tree_execution.py",
+        "tests/test_compile_work_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_controller.py",
+      "names": [
+        "CompileDependencies",
+        "CompileInputArchive",
+        "begin_compile_work",
+        "compile_inputs_digest",
+        "iter_compile_preflight",
+        "save_compile_inputs",
+        "write_archive_snapshot"
+      ],
+      "contract_sha256": "b3f5abac21b08b99c6ad5a4d6b0aaffe0f3d1e562bb5a467445563cbf4f11ea6",
+      "integration_tests": [
+        "tests/compile_archive_daily_sharing_helpers.py",
+        "tests/compile_execution_inventory_helpers.py",
+        "tests/compile_preflight_consumer_helpers.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_progress.py",
+      "names": [
+        "CompileEvent",
+        "SCHEMA_STATEMENTS",
+        "make_source_scope"
+      ],
+      "contract_sha256": "cec5e599310675d2a530096b84a585feb5a35c53f99cf9974921c8faff3396e1",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_batch_admission.py",
+        "tests/test_compile_durable_batch_context.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_preflight_consumer.py",
+        "tests/test_compile_probe_replay.py",
+        "tests/test_compile_publication_checkpoint.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_repair_child.py",
+        "tests/test_compile_repair_completion.py",
+        "tests/test_compile_resolution_failure_progress.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py",
+        "tests/test_compile_tree_execution.py",
+        "tests/test_compile_work_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_progress_migration.py",
+      "names": [
+        "migrate_candidate"
+      ],
+      "contract_sha256": "9fb4b3b645d47db7ba07afa96b3ea3eb03d0e946b9744af3d59dabbf32a2984a",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_batch_admission.py",
+        "tests/test_compile_durable_batch_context.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_preflight_consumer.py",
+        "tests/test_compile_probe_replay.py",
+        "tests/test_compile_publication_checkpoint.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_repair_child.py",
+        "tests/test_compile_repair_completion.py",
+        "tests/test_compile_resolution_failure_progress.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py",
+        "tests/test_compile_tree_execution.py",
+        "tests/test_compile_work_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "SourceSnapshot"
+      ],
+      "contract_sha256": "02926d8c4ae579f35a373ac76b77bf41a7016f084df2b6a04a4afaeda23c25c1",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_batch_admission.py",
+        "tests/test_compile_durable_batch_context.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_preflight_consumer.py",
+        "tests/test_compile_probe_replay.py",
+        "tests/test_compile_publication_checkpoint.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_repair_child.py",
+        "tests/test_compile_repair_completion.py",
+        "tests/test_compile_resolution_failure_progress.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py",
+        "tests/test_compile_tree_execution.py",
+        "tests/test_compile_work_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_a_check_is_judged_when_it_ends.py",
+        "tests/test_a_check_names_its_cause.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/adoption_admission.py",
+      "names": [
+        "MAX_OPERATIONAL_DB_BYTES",
+        "expected_schema_digests",
+        "initial_schema_digests"
+      ],
+      "contract_sha256": "e2a9874844b2e0ecfbabd9067bd53ce68d47dfc5fc0e2893293a7c8459c704ee",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_batch_admission.py",
+        "tests/test_compile_durable_batch_context.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_preflight_consumer.py",
+        "tests/test_compile_probe_replay.py",
+        "tests/test_compile_publication_checkpoint.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_repair_child.py",
+        "tests/test_compile_repair_completion.py",
+        "tests/test_compile_resolution_failure_progress.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py",
+        "tests/test_compile_tree_execution.py",
+        "tests/test_compile_work_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_base.py",
+      "names": [
+        "compile_budget"
+      ],
+      "contract_sha256": "0ad321a6e320be2a17a443a51571ef93bab759c44ed13dcb13b9445aa06277e5",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_batch_admission.py",
+        "tests/test_compile_durable_batch_context.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_preflight_consumer.py",
+        "tests/test_compile_probe_replay.py",
+        "tests/test_compile_publication_checkpoint.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_repair_child.py",
+        "tests/test_compile_repair_completion.py",
+        "tests/test_compile_resolution_failure_progress.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py",
+        "tests/test_compile_tree_execution.py",
+        "tests/test_compile_work_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_batches.py",
+      "names": [
+        "draft_prompt_count"
+      ],
+      "contract_sha256": "3b681b9704d4bb047d365718b3ce8c63e098f089264d2a7a5bad4ba86316c1cb",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_batch_admission.py",
+        "tests/test_compile_durable_batch_context.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_preflight_consumer.py",
+        "tests/test_compile_probe_replay.py",
+        "tests/test_compile_publication_checkpoint.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_repair_child.py",
+        "tests/test_compile_repair_completion.py",
+        "tests/test_compile_resolution_failure_progress.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py",
+        "tests/test_compile_tree_execution.py",
+        "tests/test_compile_work_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_prompts.py",
+      "names": [
+        "draft_prompt_text"
+      ],
+      "contract_sha256": "cfc4b89d30f00827a974752640b18ebeffa52c5a1fffdc78ac329e9b51367031",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_batch_admission.py",
+        "tests/test_compile_durable_batch_context.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_preflight_consumer.py",
+        "tests/test_compile_probe_replay.py",
+        "tests/test_compile_publication_checkpoint.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_repair_child.py",
+        "tests/test_compile_repair_completion.py",
+        "tests/test_compile_resolution_failure_progress.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py",
+        "tests/test_compile_tree_execution.py",
+        "tests/test_compile_work_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "CompileInputs",
+        "daily_parts"
+      ],
+      "contract_sha256": "8a111d023fd7cafc0e0ce83d4bb620dbd93e984625a711c3c61a29e46ec80d54",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_batch_admission.py",
+        "tests/test_compile_durable_batch_context.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_preflight_consumer.py",
+        "tests/test_compile_probe_replay.py",
+        "tests/test_compile_publication_checkpoint.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_repair_child.py",
+        "tests/test_compile_repair_completion.py",
+        "tests/test_compile_resolution_failure_progress.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py",
+        "tests/test_compile_tree_execution.py",
+        "tests/test_compile_work_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_batch_admission.py",
+        "tests/test_compile_durable_batch_context.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_preflight_consumer.py",
+        "tests/test_compile_probe_replay.py",
+        "tests/test_compile_publication_checkpoint.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_repair_child.py",
+        "tests/test_compile_repair_completion.py",
+        "tests/test_compile_resolution_failure_progress.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py",
+        "tests/test_compile_tree_execution.py",
+        "tests/test_compile_work_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "QUEUE_V3_SCHEMA_SHA256",
+        "active_memory_queue"
+      ],
+      "contract_sha256": "586491a54b9c52aecaad74db32332e0ca8171faf69aaabf54a0b386b423e4d7a",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_batch_admission.py",
+        "tests/test_compile_durable_batch_context.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_preflight_consumer.py",
+        "tests/test_compile_probe_replay.py",
+        "tests/test_compile_publication_checkpoint.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_repair_child.py",
+        "tests/test_compile_repair_completion.py",
+        "tests/test_compile_resolution_failure_progress.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py",
+        "tests/test_compile_tree_execution.py",
+        "tests/test_compile_work_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliability_v3_validation.py",
+      "names": [
+        "artifact_record"
+      ],
+      "contract_sha256": "3a4adad396f3e17fbdae971bd0f09e3de3f286bbe731eb0f10564ed7df20eb60",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_batch_admission.py",
+        "tests/test_compile_durable_batch_context.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_preflight_consumer.py",
+        "tests/test_compile_probe_replay.py",
+        "tests/test_compile_publication_checkpoint.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_repair_child.py",
+        "tests/test_compile_repair_completion.py",
+        "tests/test_compile_resolution_failure_progress.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py",
+        "tests/test_compile_tree_execution.py",
+        "tests/test_compile_work_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "4243e32fa6ecab88fca1a2d2b3214c0a36944fc23129138102dfaebf6d99457f",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_batch_admission.py",
+        "tests/test_compile_durable_batch_context.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_preflight_consumer.py",
+        "tests/test_compile_probe_replay.py",
+        "tests/test_compile_publication_checkpoint.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_repair_child.py",
+        "tests/test_compile_repair_completion.py",
+        "tests/test_compile_resolution_failure_progress.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py",
+        "tests/test_compile_tree_execution.py",
+        "tests/test_compile_work_completion.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_compile_atomic_capture.py",
+        "tests/test_compile_batch_admission.py",
+        "tests/test_compile_durable_batch_context.py",
+        "tests/test_compile_planned_execution.py",
+        "tests/test_compile_preflight_consumer.py",
+        "tests/test_compile_probe_replay.py",
+        "tests/test_compile_publication_checkpoint.py",
+        "tests/test_compile_publication_completion.py",
+        "tests/test_compile_publication_execution.py",
+        "tests/test_compile_repair_child.py",
+        "tests/test_compile_repair_completion.py",
+        "tests/test_compile_resolution_failure_progress.py",
+        "tests/test_compile_saved_context_refresh.py",
+        "tests/test_compile_shared_run_planning.py",
+        "tests/test_compile_tree_execution.py",
+        "tests/test_compile_work_completion.py"
+      ]
+    }
+  ]
+}

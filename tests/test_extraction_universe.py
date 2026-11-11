@@ -4,7 +4,7 @@
 soon as one is rebuilt. That is deliberate, and it was measured rather than
 assumed: `docs/research/2026-08-29-what-a-partial-extraction-can-get-wrong.md`.
 
-The decision rests on two structural facts about `code_extractor._Collector`,
+The decision rests on two structural facts about `code_extractor.Collector`,
 and the whole point of this file is that they are facts rather than folklore.
 Gradle turns compile avoidance off when annotation processors are on the
 classpath "because for annotation processors the implementation details

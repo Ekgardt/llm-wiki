@@ -1,0 +1,243 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/doctor-base-context.json",
+    "docs/modules/doctor-base.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/queue-core-tests-reliability-v3-adoption-helpers.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/doctor_base.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/reliability_v3_adoption_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_health_read_uses_sqlite_pages.py",
+    "tests/test_doctor_database_reads_keep_the_caller_deadline.py",
+    "tests/test_doctor_knows_the_abort_states.py",
+    "tests/test_python_runtime_is_one_series.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/doctor-base-context.json",
+      "docs/modules/doctor-base.md",
+      "scripts/llm_wiki/doctor_base.py",
+      "tests/test_a_health_read_uses_sqlite_pages.py",
+      "tests/test_doctor_database_reads_keep_the_caller_deadline.py",
+      "tests/test_doctor_knows_the_abort_states.py",
+      "tests/test_python_runtime_is_one_series.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/generation_maintenance.py",
+      "names": [
+        "parse_utc",
+        "result",
+        "safe_kind"
+      ],
+      "contract_sha256": "30681ded86139f36e29a78ae7235e600b4bf162b9cccb16812dbb0895b157337",
+      "integration_tests": [
+        "tests/test_a_health_read_uses_sqlite_pages.py",
+        "tests/test_doctor_database_reads_keep_the_caller_deadline.py",
+        "tests/test_doctor_knows_the_abort_states.py",
+        "tests/test_python_runtime_is_one_series.py"
+      ]
+    },
+    {
+      "provider": "scripts/install_state.py",
+      "names": [
+        "validate_install_state"
+      ],
+      "contract_sha256": "0610320f4d0810ac79c4c8f5b1ed7e013ae176f6762ac8c3466907009bec05fb",
+      "integration_tests": [
+        "tests/test_a_health_read_uses_sqlite_pages.py",
+        "tests/test_doctor_database_reads_keep_the_caller_deadline.py",
+        "tests/test_doctor_knows_the_abort_states.py",
+        "tests/test_python_runtime_is_one_series.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_hook_config.py",
+      "names": [
+        "MAX_CONFIG_BYTES"
+      ],
+      "contract_sha256": "2e6f893e0185365198adf31de8ba3c385b1d7cd29069d3c7c7e8867469aa222f",
+      "integration_tests": [
+        "tests/test_a_health_read_uses_sqlite_pages.py",
+        "tests/test_doctor_database_reads_keep_the_caller_deadline.py",
+        "tests/test_doctor_knows_the_abort_states.py",
+        "tests/test_python_runtime_is_one_series.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "KNOWN_PROVIDERS",
+        "forced_provider",
+        "local_only_conflict"
+      ],
+      "contract_sha256": "6a02930a1813c84e65ae7570220bfd50c185684cd67abfb35f6387cf9f85b707",
+      "integration_tests": [
+        "tests/test_a_health_read_uses_sqlite_pages.py",
+        "tests/test_doctor_database_reads_keep_the_caller_deadline.py",
+        "tests/test_doctor_knows_the_abort_states.py",
+        "tests/test_python_runtime_is_one_series.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_transactions.py",
+      "names": [
+        "unsettled_count"
+      ],
+      "contract_sha256": "d54cb2a2348ea51a8bba14d9d5885f918f9b9b9355a2367f267614358c815ab9",
+      "integration_tests": [
+        "tests/test_doctor_knows_the_abort_states.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_health_read_uses_sqlite_pages.py",
+        "tests/test_doctor_database_reads_keep_the_caller_deadline.py",
+        "tests/test_doctor_knows_the_abort_states.py",
+        "tests/test_python_runtime_is_one_series.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/monotonic_deadline.py",
+      "names": [
+        "deadline_reached"
+      ],
+      "contract_sha256": "780a284b7c14768802bc81209d0e77dcd0f7a79885a4888eaaca663eda331414",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/maintenance_helpers.py",
+      "names": [
+        "MAINTENANCE_REPORT_PATTERNS"
+      ],
+      "contract_sha256": "78cb248df74e207040f0a948a890521e567b2704fb9cb0c9f0edcb73f4cea1df",
+      "integration_tests": [
+        "tests/test_doctor_knows_the_abort_states.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "COORDINATOR_V3_SCHEMA_SHA256",
+        "initialize_coordinator_v3_candidate",
+        "validate_coordinator_v3_database"
+      ],
+      "contract_sha256": "f4e825ac8b89fd59cceb6d5388c2f3bb0d798db03f4bf99b27a77138cd4deb6f",
+      "integration_tests": [
+        "tests/test_a_health_read_uses_sqlite_pages.py",
+        "tests/test_doctor_database_reads_keep_the_caller_deadline.py",
+        "tests/test_doctor_knows_the_abort_states.py",
+        "tests/test_python_runtime_is_one_series.py"
+      ]
+    },
+    {
+      "provider": "scripts/python_series.py",
+      "names": [
+        "SUPPORTED_SERIES"
+      ],
+      "contract_sha256": "9e39236619f1bc35414b9af4a3458d8dd8cf0cbe832b69dbf1749ad5f5090a80",
+      "integration_tests": [
+        "tests/test_a_health_read_uses_sqlite_pages.py",
+        "tests/test_doctor_database_reads_keep_the_caller_deadline.py",
+        "tests/test_doctor_knows_the_abort_states.py",
+        "tests/test_python_runtime_is_one_series.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "QUEUE_V3_SCHEMA_SHA256",
+        "harden_owner_only",
+        "initialize_queue_v3_candidate",
+        "validate_queue_v3_database"
+      ],
+      "contract_sha256": "66c9235a0ce0f6ddda3e804b17690f77bdad6d41070a570ab6dfd8efaaf8717a",
+      "integration_tests": [
+        "tests/test_a_health_read_uses_sqlite_pages.py",
+        "tests/test_doctor_database_reads_keep_the_caller_deadline.py",
+        "tests/test_doctor_knows_the_abort_states.py",
+        "tests/test_python_runtime_is_one_series.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "capture_runtime_file_identity",
+        "open_readonly_operational_db",
+        "read_runtime_bytes",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "a80b5834a247c5b7a8e13df52eff614c81fac0d38e3466c8e431d78ad4aec06d",
+      "integration_tests": [
+        "tests/test_a_health_read_uses_sqlite_pages.py",
+        "tests/test_doctor_database_reads_keep_the_caller_deadline.py",
+        "tests/test_doctor_knows_the_abort_states.py",
+        "tests/test_python_runtime_is_one_series.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_health_read_uses_sqlite_pages.py",
+        "tests/test_doctor_database_reads_keep_the_caller_deadline.py",
+        "tests/test_doctor_knows_the_abort_states.py",
+        "tests/test_python_runtime_is_one_series.py"
+      ]
+    }
+  ]
+}

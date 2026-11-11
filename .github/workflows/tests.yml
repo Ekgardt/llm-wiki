@@ -40,45 +40,10 @@ jobs:
   # A vulnerable anyio and cryptography sat in the lock unseen: nothing read the
   # lock against advisories. pip-audit is pinned by hash in uv.lock (the `audit`
   # group, synced alone), and it reads every extra and group the lock resolves.
-  # pip-audit skips a requirement whose marker does not match the interpreter it
-  # runs on, so one run reads one branch of a lock that forks by Python and
-  # platform: there is one leg per supported Python, plus Windows for its own pins.
-  # tests/test_the_audit_reads_every_locked_pin.py proves the legs together
-  # install every locked version. `accepted` names advisories with no fix for that
-  # interpreter: filelock's fixed releases need Python 3.11, and the lock keeps 3.10
-  # on the 3.x line with the fewest. It lapses when 3.10 support ends.
-  # See docs/research/2026-09-27-the-lock-is-audited.md and
-  # docs/research/2026-11-06-seven-locked-packages-move-past-their-advisories.md.
+  # See docs/research/2026-09-27-the-lock-is-audited.md.
   dependency-audit:
-    name: timing::focused::dependency-audit-${{ matrix.target }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: linux-py3.10
-            os: ubuntu-24.04
-            python: "3.10"
-            accepted: &filelock-without-a-python-3-10-fix >-
-              GHSA-567q-5qvw-pf92 GHSA-69hj-f68j-2879 GHSA-8mx5-7m5m-r77g
-              GHSA-9vhv-jxww-xfm5 GHSA-cwqr-hh33-gh44 GHSA-fq56-3cx3-fjxp
-              GHSA-j8f7-rjxc-mr56 GHSA-rfpc-qcw5-3pc4 GHSA-v4x8-3wr5-3wq8
-          - target: linux-py3.11
-            os: ubuntu-24.04
-            python: "3.11"
-          - target: linux-py3.12
-            os: ubuntu-24.04
-            python: "3.12"
-          - target: linux-py3.13
-            os: ubuntu-24.04
-            python: "3.13"
-          - target: linux-py3.14
-            os: ubuntu-24.04
-            python: "3.14"
-          - target: windows-py3.10
-            os: windows-2025
-            python: "3.10"
-            accepted: *filelock-without-a-python-3-10-fix
-    runs-on: ${{ matrix.os }}
+    name: timing::focused::dependency-audit
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -88,18 +53,19 @@ jobs:
         with:
           version: "0.12.3"
           enable-cache: true
-      - run: uv python install ${{ matrix.python }}
-      - run: uv python pin ${{ matrix.python }}
       - run: uv sync --locked --only-group audit
       - run: uv export --locked --all-extras --all-groups --no-emit-project --format requirements-txt -o "${{ runner.temp }}/locked-requirements.txt"
-      - name: Audit the requirements this interpreter installs
-        shell: bash
-        env:
-          ACCEPTED: ${{ matrix.accepted }}
-        run: |
-          accepted=()
-          for advisory in ${ACCEPTED}; do accepted+=(--ignore-vuln "${advisory}"); done
-          uv run --locked --no-sync pip-audit --requirement "${RUNNER_TEMP}/locked-requirements.txt" --disable-pip --progress-spinner off "${accepted[@]}"
+      - run: uv run --locked --no-sync pip-audit --requirement "${{ runner.temp }}/locked-requirements.txt" --disable-pip --progress-spinner off
+      # PyPI cannot name the vendor's +cpu torch build. Keep that feed, and
+      # query exact local versions through OSV; collection failures must fail CI.
+      - run: uv run --locked --no-sync pip-audit --requirement "${{ runner.temp }}/locked-requirements.txt" --disable-pip --vulnerability-service osv --strict --progress-spinner off
+
+      # Universal pylock collection retains variants for every interpreter/OS.
+      - run: mkdir -p "${{ runner.temp }}/universal-audit"
+      - run: uv export --locked --all-extras --all-groups --no-emit-project --format pylock.toml -o "${{ runner.temp }}/universal-audit/pylock.toml"
+      - run: uv run --locked --no-sync pip-audit --locked "${{ runner.temp }}/universal-audit" --progress-spinner off
+      - run: uv run --locked --no-sync pip-audit --locked "${{ runner.temp }}/universal-audit" --vulnerability-service osv --strict --progress-spinner off --format json --output "${{ runner.temp }}/universal-audit/osv.json"
+      - run: uv run --locked --no-sync python scripts/check_dependency_audit.py uv.lock "${{ runner.temp }}/universal-audit/osv.json"
 
   lint:
     name: timing::focused::lint
@@ -122,11 +88,14 @@ jobs:
       - run: uv run --locked --no-sync python scripts/lint_memory.py --scope all --fail-on-findings --allowed-categories orphan_daily_logs missing_backlinks missing_sources_section temporal_validity
       - run: node --check scripts/llm-wiki-memory-opencode.js
       - run: bash -n install.sh
+      - name: Native PowerShell parser is available
+        run: pwsh -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()'
+      - name: Function complexity and branch shapes
+        run: uv run --locked --no-sync pytest tests/test_a_function_holds_two_ifs.py tests/test_shell_functions_stay_simple.py tests/test_powershell_functions_stay_simple.py tests/test_javascript_branch_shapes.py -q
       # Nothing parsed PowerShell and nothing ran shellcheck: a syntax error in
       # install.ps1 reached a release, and install.sh was never checked beyond
-      # `bash -n`. The owner's complexity gate stays out: it is machine-local
-      # tooling under ~/.claude, not part of this repository. The shell's own
-      # complexity is measured by tests/test_shell_functions_stay_simple.py.
+      # `bash -n`. Repository-owned complexity checks now run above, including
+      # the native PowerShell AST. The machine-local gate is supplementary.
       # See docs/research/2026-09-17-the-remaining-ci-gaps-of-the-third-audit.md
       # and docs/research/2026-09-27-shell-functions-are-measured-too.md.
       - run: shellcheck install.sh
@@ -148,63 +117,27 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The suite is split across four shards. A single Windows job took 57
-        # minutes, and a run that long starves its own concurrency tests; each
-        # shard is a separate runner with its own cores, so the split shortens
-        # the wall clock without adding contention on one machine. Setup is
-        # about half a minute, so the extra jobs cost almost nothing.
+        # 2026-10-13: measured module costs total 16433 s; four balanced shards
+        # would need 4108 s each, beyond Windows' unchanged 3600 s job budget.
+        # Five is the smallest count fitting that budget minus the measured
+        # 50 s setup/cleanup overhead. Each runner keeps its own cores; every
+        # test remains included. Requalify the weights and count on new costs.
         target:
-          - linux-py3.10
           - linux-py3.14
-          - windows-py3.10
-          - windows-py3.11
-          - windows-py3.12
-          - windows-py3.13
           - windows-py3.14
-          - macos-py3.10
           - macos-py3.14
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5]
         include:
-          - target: linux-py3.10
-            os: ubuntu-24.04
-            python: "3.10"
-            timeout: 20
-            class: linux_full
           - target: linux-py3.14
             os: ubuntu-24.04
             python: "3.14"
             timeout: 20
             class: linux_full
-          - target: windows-py3.10
-            os: windows-2025
-            python: "3.10"
-            timeout: 60
-            class: windows_full
-          - target: windows-py3.11
-            os: windows-2025
-            python: "3.11"
-            timeout: 60
-            class: windows_full
-          - target: windows-py3.12
-            os: windows-2025
-            python: "3.12"
-            timeout: 60
-            class: windows_full
-          - target: windows-py3.13
-            os: windows-2025
-            python: "3.13"
-            timeout: 60
-            class: windows_full
           - target: windows-py3.14
             os: windows-2025
             python: "3.14"
             timeout: 60
             class: windows_full
-          - target: macos-py3.10
-            os: macos-15
-            python: "3.10"
-            timeout: 20
-            class: macos_full
           - target: macos-py3.14
             os: macos-15
             python: "3.14"
@@ -250,7 +183,7 @@ jobs:
       # from tests/shard_weights.json (see tests/shard_plan.py).
       - run: >
           uv run --locked --no-sync python -m tests.shard_plan
-          --shard ${{ matrix.shard }} --of 4 --
+          --shard ${{ matrix.shard }} --of 5 --
           -q --durations=0 --junitxml="${{ runner.temp }}/pytest-timings/junit.xml"
         env:
           LLM_WIKI_TEST_PROGRESS_FILE: ${{ runner.temp }}/pytest-timings/progress.txt
@@ -268,19 +201,16 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
-            python: "3.10"
-            label: py3.10
-          - os: ubuntu-24.04
             python: "3.14"
             label: py3.14
           # A clean production install on the two other platforms the
           # contract names had no CI evidence (audit OPS-14, 2026-09-11).
           - os: windows-2025
-            python: "3.13"
-            label: windows-py3.13
+            python: "3.14"
+            label: windows-py3.14
           - os: macos-15
-            python: "3.13"
-            label: macos-py3.13
+            python: "3.14"
+            label: macos-py3.14
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     env:
@@ -308,7 +238,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.14"]
+        python: ["3.14"]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -373,7 +303,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.14"]
+        python: ["3.14"]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -425,11 +355,17 @@ jobs:
         with:
           version: "0.12.3"
           enable-cache: true
-      - run: uv python install 3.13
-      - run: uv python pin 3.13
+      - run: uv python install 3.14
+      - run: uv python pin 3.14
+      - name: Expose the selected interpreter before changing home
+        shell: bash
+        run: >
+          uv run --no-project --python 3.14 python -c
+          "import pathlib, sys; print(pathlib.Path(sys.executable).parent)" >> "$GITHUB_PATH"
       - run: uv sync --locked
       - run: uv run --locked --no-sync pytest tests/test_installer_bootstrap.py tests/test_installer_config.py tests/test_install_smoke.py -q
       - run: uv run --locked --no-sync pytest tests/test_integration_injection.py -q -k installer
+      - run: uv run --locked --no-sync pytest tests/test_codex_installed_provider_bundle_reaches_launch.py tests/test_codex_provider_bootstrap_preserves_runtime_choice.py tests/test_codex_provider_bundle_manifest_proves_desired.py tests/test_claude_provider_projection_round_trips.py -q
       - run: uv run --locked --no-sync pytest tests/test_dependency_environments.py -q -k installer
 
   # The jobs above drive pieces of the installers with fake runners; none of them
@@ -476,6 +412,19 @@ jobs:
         with:
           version: "0.12.3"
           enable-cache: true
+      - run: uv python install 3.14
+      - run: uv python pin 3.14
+      - name: Expose the selected interpreter before changing home
+        shell: bash
+        run: >
+          uv run --no-project --python 3.14 python -c
+          "import pathlib, sys; print(pathlib.Path(sys.executable).parent)" >> "$GITHUB_PATH"
+      - name: Canonicalize the install runtime path for artifact upload
+        shell: bash
+        run: >
+          uv run --no-project --python 3.14 python -c
+          "import os, pathlib; print('LLM_WIKI_STATE_ROOT=' +
+          str(pathlib.Path(os.environ['LLM_WIKI_STATE_ROOT']).resolve()))" >> "$GITHUB_ENV"
       # Created before HOME moves: the steps above install into the runner's own home.
       - name: A home of its own, so nothing of the runner's is configured
         shell: bash
@@ -518,7 +467,15 @@ jobs:
         env:
           HOME: ${{ runner.temp }}/installer-home
           USERPROFILE: ${{ runner.temp }}\installer-home
-        run: uv run --locked --no-sync python scripts/scheduled_nightly.py
+        # Stream existing progress before a timeout can terminate the interpreter.
+        run: uv run --locked --no-sync python -u scripts/scheduled_nightly.py
+      - name: Retain the failed install's redacted capture diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: installer-capture-diagnostics-${{ matrix.platform }}-attempt-${{ github.run_attempt }}
+          path: ${{ env.LLM_WIKI_STATE_ROOT }}/logs/capture-failures.jsonl
+          if-no-files-found: warn
 
   # Tests whose dependency no job installed, so they skipped everywhere and a skip
   # is not a pass. `torch` stays out on purpose: the locked wheel pulls the CUDA
@@ -547,13 +504,75 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22.23.1"
-      - run: uv python install 3.13
-      - run: uv python pin 3.13
+      - run: uv python install 3.14
+      - run: uv python pin 3.14
+      - name: Expose the selected interpreter before changing home
+        shell: bash
+        run: >
+          uv run --no-project --python 3.14 python -c
+          "import pathlib, sys; print(pathlib.Path(sys.executable).parent)" >> "$GITHUB_PATH"
       - run: uv sync --locked --extra lexical-benchmark
       - run: uv run --locked --no-sync pytest tests/test_retrieval_v2_benchmark.py -q -k jieba
       # The explicit operator action, with its pinned tarballs and SRI hashes.
       - run: uv run --locked --no-sync python scripts/install_language_server.py --state-root "${{ env.LLM_WIKI_LSP_TEST_STATE_ROOT }}" --profile typescript
       - run: uv run --locked --no-sync pytest tests/test_typescript_navigation.py -q
+
+  benchmark-data:
+    name: timing::focused::benchmark-data-${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux
+          - os: windows-2025
+            platform: windows
+          - os: macos-15
+            platform: macos
+    runs-on: ${{ matrix.os }}
+    # Existing focused-job ceiling; revise from retained native timing evidence.
+    timeout-minutes: 15
+    env:
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/../llm-wiki-benchmark-data
+      LLM_WIKI_ROOT: ${{ github.workspace }}
+      LLM_WIKI_STATE_ROOT: ${{ github.workspace }}/../llm-wiki-benchmark-data-state
+      LLM_WIKI_TEST_USE_EXTERNAL_STATE: "1"
+      MEMORY_LLM_PROVIDER: fake
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.12.3"
+          enable-cache: true
+      - run: uv python install 3.14
+      - run: uv python pin 3.14
+      - run: uv sync --locked --extra benchmark-data
+      - name: Normalize the external state root
+        shell: bash
+        run: >
+          uv run --locked --no-sync python -c
+          "import os, pathlib;
+          print('LLM_WIKI_STATE_ROOT=' + str(pathlib.Path(os.environ['LLM_WIKI_STATE_ROOT']).resolve()))"
+          >> "$GITHUB_ENV"
+      - run: uv run --locked --no-sync pytest tests/test_beam_becomes_a_question_this_stand_can_read.py tests/modules/beam_data -q
+      # Selecting this nonstandard filename together with its parent directory
+      # can deduplicate it out of collection. Keep the explicit suite separate.
+      - run: uv run --locked --no-sync pytest tests/modules/beam_data/parquet_qualification.py -q --junitxml=beam-parquet.xml
+      - run: uv run --locked --no-sync pytest tests/modules/conflict_fixture_builder/parquet_qualification.py -q --junitxml=conflict-fixture-parquet.xml
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: beam-parquet-${{ matrix.platform }}-attempt-${{ github.run_attempt }}
+          path: beam-parquet.xml
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: conflict-fixture-parquet-${{ matrix.platform }}-attempt-${{ github.run_attempt }}
+          path: conflict-fixture-parquet.xml
+          if-no-files-found: error
 
   pyright-navigation:
     name: timing::focused::pyright-${{ matrix.platform }}
@@ -563,19 +582,19 @@ jobs:
         include:
           - os: ubuntu-24.04
             platform: linux
-            python: "3.10"
+            python: "3.14"
             node: "22.23.1"
             timeout: 15
           # The hosted Windows image runs this suite roughly three times slower
           # than Linux, and the correctness gate follows it inside the same job.
           - os: windows-2025
             platform: windows
-            python: "3.10"
+            python: "3.14"
             node: "22.23.1"
             timeout: 40
           - os: macos-15
             platform: macos
-            python: "3.10"
+            python: "3.14"
             node: "22.23.1"
             timeout: 25
     runs-on: ${{ matrix.os }}
@@ -619,7 +638,7 @@ jobs:
         if: matrix.os == 'ubuntu-24.04'
         run: uv run --locked --no-sync python benchmark/run_code_navigation.py --fixture --qualification --require-gates
 
-  # Branch protection requires status checks by name. Naming all forty-nine
+  # Branch protection requires status checks by name. Naming every
   # matrix jobs by hand is both tedious and silently wrong the moment the
   # matrix changes: a job added later is simply not required, and a red one
   # merges. This job depends on every other job, fails on any result that is
@@ -641,6 +660,7 @@ jobs:
       - installer
       - install-end-to-end
       - lexical-and-typescript
+      - benchmark-data
       - pyright-navigation
     runs-on: ubuntu-24.04
     timeout-minutes: 5

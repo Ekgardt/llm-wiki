@@ -1,0 +1,6 @@
+# Building the resources one install asks for
+
+`scripts/llm_wiki/install_resource_builder.py` and the tests that exercise it most.
+
+The owned files and the complete maintenance context are listed in the `-context.json`
+manifest next to this guide.

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import socket
@@ -27,7 +26,6 @@ from lsp_protocol import (
     SERVER_REQUESTS,
     CancellationSource,
     CancellationToken,
-    JsonRpcFrameReader,
     JsonRpcResponseError,
     LspProtocol,
     PendingRequest,
@@ -35,11 +33,10 @@ from lsp_protocol import (
     ProtocolViolation,
     RequestCancelled,
     ResponseRefused,
-    encode_frame,
-    json_depth,
 )
 
 from tests.fake_lsp_server import FakeLspPeer, FakeLspServer
+from tests.lsp_protocol_helpers import _BlockingReader, _BlockingWriter, _protocol_with_streams
 from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
 
 
@@ -52,7 +49,7 @@ def _close_path(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch)
     every close on Windows CI only (run 36327902173). A case that needs one path
     sets the flag itself; its own monkeypatch runs after this one.
     """
-    monkeypatch.setattr(lsp_protocol, "_CLOSE_WAITS_FOR_A_READ", request.param)
+    monkeypatch.setattr(lsp_protocol, "CLOSE_WAITS_FOR_A_READ", request.param)
 
 
 @pytest.fixture
@@ -60,22 +57,6 @@ def fake_server() -> FakeLspServer:
     server = FakeLspServer()
     yield server
     server.close()
-
-
-def _body_of_size(size: int) -> bytes:
-    prefix = b'{"jsonrpc":"2.0","method":"x","params":{"padding":"'
-    suffix = b'"}}'
-    assert len(prefix) + len(suffix) <= size
-    return prefix + (b"x" * (size - len(prefix) - len(suffix))) + suffix
-
-
-def _framed(body: bytes, extra_headers: bytes = b"") -> io.BytesIO:
-    return io.BytesIO(
-        f"Content-Length: {len(body)}\r\n".encode("ascii")
-        + extra_headers
-        + b"\r\n"
-        + body
-    )
 
 
 def _request(protocol: LspProtocol, method: str = "initialize", timeout: float = 2) -> object:
@@ -201,149 +182,6 @@ def test_request_rejects_callable_cancellation_without_executing_it() -> None:
     assert called is False
     assert writer.frames == []
     protocol.close()
-
-
-def test_frame_reader_accepts_one_strict_lsp_message() -> None:
-    body = b'{"jsonrpc":"2.0","id":1,"result":null}'
-    stream = io.BytesIO(b"Content-Length: 38\r\n\r\n" + body)
-    assert JsonRpcFrameReader(stream).read() == {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "result": None,
-    }
-
-
-def test_encode_frame_is_canonical_utf8_and_byte_counted() -> None:
-    frame = encode_frame({"jsonrpc": "2.0", "method": "example", "params": {"x": "β"}})
-    header, body = frame.split(b"\r\n\r\n", 1)
-    assert header == f"Content-Length: {len(body)}".encode("ascii")
-    assert body == b'{"jsonrpc":"2.0","method":"example","params":{"x":"\xce\xb2"}}'
-
-
-def test_frame_reader_accepts_exactly_eight_mib_and_rejects_one_more() -> None:
-    accepted = _body_of_size(MAX_FRAME_BYTES)
-    assert JsonRpcFrameReader(_framed(accepted)).read()["method"] == "x"
-
-    rejected = _body_of_size(MAX_FRAME_BYTES + 1)
-    with pytest.raises(ProtocolViolation, match="frame"):
-        JsonRpcFrameReader(_framed(rejected)).read()
-
-
-def test_frame_reader_accepts_exactly_eight_kib_header_and_rejects_one_more() -> None:
-    body = b'{"jsonrpc":"2.0","method":"x"}'
-    base = f"Content-Length: {len(body)}\r\n".encode("ascii")
-    exact_padding = MAX_HEADER_BYTES - len(base) - len(b"X-Pad: \r\n") - len(b"\r\n")
-    exact = base + b"X-Pad: " + b"x" * exact_padding + b"\r\n\r\n" + body
-    assert JsonRpcFrameReader(io.BytesIO(exact)).read()["method"] == "x"
-
-    oversized = base + b"X-Pad: " + b"x" * (exact_padding + 1) + b"\r\n\r\n" + body
-    with pytest.raises(ProtocolViolation, match="header"):
-        JsonRpcFrameReader(io.BytesIO(oversized)).read()
-
-
-@pytest.mark.parametrize(
-    "stream",
-    [
-        io.BytesIO(b"Content-Length: 2\n\n{}"),
-        io.BytesIO(b"Content-Length 2\r\n\r\n{}"),
-        io.BytesIO(b"Content-Length: +2\r\n\r\n{}"),
-        io.BytesIO(b"Content-Length: 2 \r\n\r\n{}"),
-        io.BytesIO(b"Content-Length: 2\r\nContent-Length: 2\r\n\r\n{}"),
-        io.BytesIO(b"Content-Type: application/vscode-jsonrpc\r\n\r\n{}"),
-        io.BytesIO(b"\xff: 2\r\nContent-Length: 2\r\n\r\n{}"),
-    ],
-)
-def test_frame_reader_rejects_invalid_headers(stream: io.BytesIO) -> None:
-    with pytest.raises(ProtocolViolation):
-        JsonRpcFrameReader(stream).read()
-
-
-def test_frame_reader_wraps_pathological_content_length_as_protocol_violation() -> None:
-    stream = io.BytesIO(b"Content-Length: " + (b"9" * 5000) + b"\r\n\r\n")
-    with pytest.raises(ProtocolViolation, match="Content-Length"):
-        JsonRpcFrameReader(stream).read()
-
-
-@pytest.mark.parametrize("charset", [b"utf-16", b"ascii", b"latin-1"])
-def test_frame_reader_rejects_wrong_charset(charset: bytes) -> None:
-    header = b"Content-Type: application/vscode-jsonrpc; charset=" + charset + b"\r\n"
-    with pytest.raises(ProtocolViolation, match="charset"):
-        JsonRpcFrameReader(_framed(b"{}", header)).read()
-
-
-def test_content_type_without_charset_uses_utf8_default() -> None:
-    body = b'{"jsonrpc":"2.0","method":"x"}'
-    header = b"Content-Type: application/vscode-jsonrpc\r\n"
-    assert JsonRpcFrameReader(_framed(body, header)).read()["method"] == "x"
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        b"\xff",
-        b"{",
-        b'{"jsonrpc":"2.0","method":NaN}',
-        b'{"jsonrpc":"2.0","method":"a","method":"b"}',
-    ],
-)
-def test_frame_reader_rejects_malformed_utf8_or_json(body: bytes) -> None:
-    with pytest.raises(ProtocolViolation):
-        JsonRpcFrameReader(_framed(body)).read()
-
-
-def test_json_depth_accepts_64_and_rejects_65_without_recursion() -> None:
-    params: object = None
-    for _ in range(62):
-        params = [params]
-    depth_64 = {"jsonrpc": "2.0", "method": "x", "params": [params]}
-    assert json_depth(depth_64) == 64
-    assert JsonRpcFrameReader(_framed(json.dumps(depth_64).encode())).read() == depth_64
-
-    depth_65 = {"jsonrpc": "2.0", "method": "x", "params": [[params]]}
-    assert json_depth(depth_65) == 65
-    with pytest.raises(ProtocolViolation, match="depth"):
-        JsonRpcFrameReader(_framed(json.dumps(depth_65).encode())).read()
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        b"[]",
-        b"null",
-        b'{"jsonrpc":"1.0","method":"x"}',
-        b'{"jsonrpc":2.0,"method":"x"}',
-        b'{"jsonrpc":"2.0"}',
-        b'{"jsonrpc":"2.0","id":true,"result":null}',
-        b'{"jsonrpc":"2.0","id":1.5,"result":null}',
-        b'{"jsonrpc":"2.0","id":null,"result":null}',
-        b'{"jsonrpc":"2.0","id":1,"result":null,"error":{"code":-1,"message":"x"}}',
-        b'{"jsonrpc":"2.0","id":1}',
-        b'{"jsonrpc":"2.0","method":1}',
-        b'{"jsonrpc":"2.0","method":"x","params":1}',
-    ],
-)
-def test_frame_reader_rejects_invalid_json_rpc_shapes(body: bytes) -> None:
-    with pytest.raises(ProtocolViolation):
-        JsonRpcFrameReader(_framed(body)).read()
-
-
-@pytest.mark.parametrize("request_id", [-(2**31), 2**31 - 1, "", "server-request"])
-def test_request_id_edge_values_are_accepted(request_id: int | str) -> None:
-    body = json.dumps(
-        {"jsonrpc": "2.0", "id": request_id, "method": "workspace/configuration"},
-        separators=(",", ":"),
-    ).encode()
-    assert JsonRpcFrameReader(_framed(body)).read()["id"] == request_id
-
-
-@pytest.mark.parametrize("request_id", [-(2**31) - 1, 2**31, True, 1.5, None])
-def test_request_id_values_outside_lsp_contract_are_rejected(request_id: object) -> None:
-    body = json.dumps(
-        {"jsonrpc": "2.0", "id": request_id, "method": "workspace/configuration"},
-        separators=(",", ":"),
-    ).encode()
-    with pytest.raises(ProtocolViolation, match="ID"):
-        JsonRpcFrameReader(_framed(body)).read()
 
 
 @pytest.mark.parametrize(
@@ -679,7 +517,7 @@ def _first_retained_cleanup(errors):
         (
             error
             for error in errors
-            if isinstance(error, lsp_protocol._ProtocolStartupCleanupError)
+            if isinstance(error, lsp_protocol.ProtocolStartupCleanupError)
         ),
         None,
     )
@@ -1226,10 +1064,10 @@ def test_constructor_rollback_rethrows_real_join_interruption_with_owner(
     assert raised_error is not None
     retained = (
         raised_error
-        if isinstance(raised_error, lsp_protocol._ProtocolStartupCleanupError)
+        if isinstance(raised_error, lsp_protocol.ProtocolStartupCleanupError)
         else raised_error.__cause__
     )
-    assert isinstance(retained, lsp_protocol._ProtocolStartupCleanupError)
+    assert isinstance(retained, lsp_protocol.ProtocolStartupCleanupError)
     retained.protocol.close(time.monotonic() + 1)
 
     assert isinstance(raised_error, KeyboardInterrupt)
@@ -1284,10 +1122,10 @@ def test_constructor_startup_interruption_outranks_ordinary_rollback_error(
     assert raised_error is not None
     retained = (
         raised_error
-        if isinstance(raised_error, lsp_protocol._ProtocolStartupCleanupError)
+        if isinstance(raised_error, lsp_protocol.ProtocolStartupCleanupError)
         else raised_error.__cause__
     )
-    assert isinstance(retained, lsp_protocol._ProtocolStartupCleanupError)
+    assert isinstance(retained, lsp_protocol.ProtocolStartupCleanupError)
     retained.protocol.close(time.monotonic() + 1)
 
     assert isinstance(raised_error, KeyboardInterrupt)
@@ -1669,7 +1507,7 @@ def test_constructor_failure_retains_blocked_owner_for_cleanup_retry(
         raise RuntimeError("startup wait failed")
 
     monkeypatch.setattr(LspProtocol, "_wait_owner_started", staticmethod(fail_wait))
-    monkeypatch.setattr(lsp_protocol, "_OWNER_JOIN_SECONDS", 0.02)
+    monkeypatch.setattr(lsp_protocol, "OWNER_JOIN_SECONDS", 0.02)
     try:
         with pytest.raises(RuntimeError) as raised:
             _protocol_with_streams(
@@ -1679,7 +1517,7 @@ def test_constructor_failure_retains_blocked_owner_for_cleanup_retry(
             )
 
         error = raised.value
-        assert isinstance(error, lsp_protocol._ProtocolStartupCleanupError)
+        assert isinstance(error, lsp_protocol.ProtocolStartupCleanupError)
         protocol = error.protocol
         assert protocol.reader_thread.is_alive()
     finally:
@@ -1689,66 +1527,9 @@ def test_constructor_failure_retains_blocked_owner_for_cleanup_retry(
     assert not protocol.writer_thread.is_alive()
 
 
-class _BlockingReader:
-    def __init__(self) -> None:
-        self.started = threading.Event()
-        self.released = threading.Event()
-        self.closed = False
-
-    def read(self, _size: int = -1) -> bytes:
-        self.started.set()
-        self.released.wait(2)
-        return b""
-
-    def close(self) -> None:
-        self.closed = True
-        self.released.set()
-
-
 class _UninterruptibleReader(_BlockingReader):
     def close(self) -> None:
         self.closed = True
-
-
-class _BlockingWriter:
-    def __init__(self, *, block_after: int = 0, fail: bool = False) -> None:
-        self.block_after = block_after
-        self.fail = fail
-        self.frames: list[bytes] = []
-        self.started = threading.Event()
-        self.released = threading.Event()
-        self.closed = False
-
-    def write(self, value: bytes) -> int:
-        if len(self.frames) >= self.block_after:
-            self.started.set()
-            self.released.wait(2)
-            if self.fail or self.closed:
-                raise OSError("blocked writer stopped")
-        self.frames.append(value)
-        return len(value)
-
-    def flush(self) -> None:
-        return None
-
-    def close(self) -> None:
-        self.closed = True
-        self.released.set()
-
-
-def _protocol_with_streams(
-    reader: object,
-    writer: object,
-    *,
-    fatal_callback=lambda _reason: None,
-    generation_nonce: str = "stream-probe",
-) -> LspProtocol:
-    return LspProtocol(
-        reader,  # type: ignore[arg-type]
-        writer,  # type: ignore[arg-type]
-        generation_nonce,
-        fatal_callback=fatal_callback,
-    )
 
 
 def _cancellation_threads() -> tuple[threading.Thread, ...]:
@@ -2116,48 +1897,6 @@ def test_close_from_reader_handler_does_not_deadlock(fake_server: FakeLspServer)
     protocol.reader_thread.join(LONG_TIMEOUT)
     assert not protocol.reader_thread.is_alive()
     assert not protocol.writer_thread.is_alive()
-
-
-def test_encode_frame_rejects_cycles_quickly() -> None:
-    cyclic: list[object] = []
-    cyclic.append(cyclic)
-    started = time.monotonic()
-    with pytest.raises(ProtocolViolation, match="cyclic"):
-        encode_frame({"jsonrpc": "2.0", "method": "x", "params": cyclic})
-    assert time.monotonic() - started < 0.2
-
-
-@pytest.mark.parametrize("number", [float("nan"), float("inf"), float("-inf")])
-def test_encode_frame_rejects_non_finite_numbers_in_values_and_keys(number: float) -> None:
-    for params in ({"number": number}, {number: "value"}):
-        with pytest.raises(ProtocolViolation, match="finite"):
-            encode_frame({"jsonrpc": "2.0", "method": "x", "params": params})
-
-
-@pytest.mark.parametrize("location", ["value", "key"])
-def test_encode_frame_rejects_lone_surrogates_everywhere(location: str) -> None:
-    params = {"value": "\ud800"} if location == "value" else {"\udfff": "value"}
-    with pytest.raises(ProtocolViolation, match="surrogate"):
-        encode_frame({"jsonrpc": "2.0", "method": "x", "params": params})
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        b'{"jsonrpc":"2.0","method":"x","params":{"number":1e999}}',
-        b'{"jsonrpc":"2.0","method":"x","params":{"value":"\\ud800"}}',
-        b'{"jsonrpc":"2.0","method":"x","params":{"\\udfff":"value"}}',
-    ],
-)
-def test_frame_reader_rejects_non_finite_numbers_and_lone_surrogates(body: bytes) -> None:
-    with pytest.raises(ProtocolViolation):
-        JsonRpcFrameReader(_framed(body)).read()
-
-
-def test_frame_reader_accepts_a_valid_escaped_surrogate_pair() -> None:
-    body = b'{"jsonrpc":"2.0","method":"x","params":{"value":"\\ud83d\\ude00"}}'
-    message = JsonRpcFrameReader(_framed(body)).read()
-    assert message["params"]["value"] == "😀"
 
 
 def test_duplicate_cancel_finalization_emits_only_one_cancel_frame() -> None:
@@ -2532,7 +2271,7 @@ def test_ordinary_writes_cannot_consume_reserved_control_capacity() -> None:
     protocol = _protocol_with_streams(reader, writer)
     protocol._write_message({"jsonrpc": "2.0", "method": "test/block"})
     assert writer.started.wait(SHORT_TIMEOUT)
-    ordinary_limit = lsp_protocol._MAX_QUEUED_WRITES - MAX_PENDING_REQUESTS
+    ordinary_limit = lsp_protocol.MAX_QUEUED_WRITES - MAX_PENDING_REQUESTS
 
     for index in range(ordinary_limit):
         protocol._write_message(
@@ -2565,7 +2304,7 @@ def test_full_ordinary_queue_still_accepts_all_active_cancellations() -> None:
         assert len(writer.frames) == MAX_PENDING_REQUESTS
         protocol._write_message({"jsonrpc": "2.0", "method": "test/block"})
         assert writer.started.wait(SHORT_TIMEOUT)
-        ordinary_limit = lsp_protocol._MAX_QUEUED_WRITES - MAX_PENDING_REQUESTS
+        ordinary_limit = lsp_protocol.MAX_QUEUED_WRITES - MAX_PENDING_REQUESTS
         for index in range(ordinary_limit):
             protocol._write_message(
                 {
@@ -2578,7 +2317,7 @@ def test_full_ordinary_queue_still_accepts_all_active_cancellations() -> None:
         assert protocol._ordinary_queued == ordinary_limit
         _cancel_all_and_expect(sources, futures, timeout=0.5)
         assert protocol._control_queued == MAX_PENDING_REQUESTS
-        assert protocol._write_queue.qsize() == lsp_protocol._MAX_QUEUED_WRITES
+        assert protocol._write_queue.qsize() == lsp_protocol.MAX_QUEUED_WRITES
         writer.released.set()
 
     _await_cancel_frames(writer, 32)
@@ -2824,10 +2563,10 @@ def test_windows_owner_handles_are_retained_cancelled_and_closed_once(
     reader = _BlockingReader()
     monkeypatch.setattr(
         lsp_protocol,
-        "_duplicate_current_thread_handle",
+        "duplicate_current_thread_handle",
         lambda: next(duplicated),
     )
-    monkeypatch.setattr(lsp_protocol, "_KERNEL32", FakeKernel32())
+    monkeypatch.setattr(lsp_protocol, "KERNEL32", FakeKernel32())
     protocol = _protocol_with_streams(reader, _BlockingWriter(block_after=100))
     assert reader.started.wait(SHORT_TIMEOUT)
 
@@ -2890,8 +2629,8 @@ class _LateCancelProtocol(LspProtocol):
 
 
 def test_a_lost_cancel_is_repeated_and_a_read_stream_is_never_closed_under_its_reader(monkeypatch) -> None:
-    monkeypatch.setattr(lsp_protocol, "_CLOSE_WAITS_FOR_A_READ", True, raising=False)
-    monkeypatch.setattr(lsp_protocol, "_PIPES_HAVE_NO_SELECT", True, raising=False)
+    monkeypatch.setattr(lsp_protocol, "CLOSE_WAITS_FOR_A_READ", True, raising=False)
+    monkeypatch.setattr(lsp_protocol, "PIPES_HAVE_NO_SELECT", True, raising=False)
     reader = _CrtPipeReader()
     protocol = _LateCancelProtocol(
         reader, _BlockingWriter(block_after=100), "crt-pipe", fatal_callback=lambda _reason: None  # type: ignore[arg-type]
@@ -2943,16 +2682,30 @@ def test_only_a_pipe_is_left_to_its_windows_owner(monkeypatch: pytest.MonkeyPatc
     shutdown disallows only later receives, and the socket stays open while its
     makefile does, so every socket-backed close timed out.
     """
-    monkeypatch.setattr(lsp_protocol, "_CLOSE_WAITS_FOR_A_READ", True)
+    monkeypatch.setattr(lsp_protocol, "CLOSE_WAITS_FOR_A_READ", True)
     left, right = socket.socketpair()
     read_fd, write_fd = os.pipe()
     socket_stream = left.makefile("rb")
     pipe_stream = os.fdopen(read_fd, "rb", buffering=0)
     try:
-        assert (lsp_protocol._fd_stream_held(socket_stream), lsp_protocol._fd_stream_held(pipe_stream)) == (False, True)
+        assert (lsp_protocol.fd_stream_held(socket_stream), lsp_protocol.fd_stream_held(pipe_stream)) == (False, True)
     finally:
         socket_stream.close()
         pipe_stream.close()
         os.close(write_fd)
         left.close()
         right.close()
+
+
+@pytest.mark.parametrize('name', [
+    'ProtocolViolation', 'FrameTooLarge', 'JsonRpcFrameReader', 'encode_frame', 'json_depth',
+])
+def test_public_wire_alias_keeps_object_and_pickle_identity(name: str) -> None:
+    import pickle
+
+    from llm_wiki import lsp_wire
+
+    original = getattr(lsp_protocol, name)
+    assert original is getattr(lsp_wire, name)
+    assert original.__module__ == 'lsp_protocol'
+    assert pickle.loads(pickle.dumps(original)) is original

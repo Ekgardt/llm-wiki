@@ -36,7 +36,7 @@ def _paragraphs(count: int, size: int = 500) -> bytes:
 
 
 def _spans(content: bytes) -> tuple:
-    return corpus_snapshot._retrieval_spans(
+    return corpus_snapshot.retrieval_spans(
         content, 0, heading_enabled=True, deadline=None, cancelled=None
     )
 

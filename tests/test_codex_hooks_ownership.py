@@ -110,7 +110,9 @@ def test_installing_twice_writes_the_same_bytes(tmp_path: Path, codex_hooks: Pat
 def test_a_group_mixing_our_handler_with_the_users_is_refused(
     tmp_path: Path, codex_hooks: Path
 ) -> None:
-    from install_control import InstallControlError
+    from install_state import (
+        InstallControlError,
+    )
 
     codex_hooks.write_text(
         json.dumps(
@@ -144,7 +146,7 @@ def test_the_inline_state_probe_writes_nothing(tmp_path: Path) -> None:
     config.write_text("[features]\nhooks = false\n", encoding="utf-8")
     before = config.read_bytes()
 
-    state = codex_memory._inline_hook_state(config, TEMPLATE)
+    state = codex_memory.inline_hook_state(config, TEMPLATE)
 
     assert state == "disabled"
     assert config.read_bytes() == before
@@ -165,7 +167,7 @@ def test_inline_trust_metadata_is_preserved_and_not_an_event(tmp_path: Path) -> 
     )
     before = config.read_bytes()
 
-    assert codex_memory._inline_hook_state(config, TEMPLATE) == "equivalent"
+    assert codex_memory.inline_hook_state(config, TEMPLATE) == "equivalent"
     assert config.read_bytes() == before
 
 
@@ -176,7 +178,7 @@ def test_inline_state_metadata_requires_a_table(tmp_path: Path, metadata: str) -
     config = tmp_path / "config.toml"
     config.write_text(f"[hooks]\nstate = {metadata}\n", encoding="utf-8")
     with pytest.raises(ValueError, match="invalid Codex hooks config"):
-        codex_memory._inline_hook_state(config, TEMPLATE)
+        codex_memory.inline_hook_state(config, TEMPLATE)
 
 
 @pytest.mark.parametrize("event", ["SessionStart", "unknown", "State", "states"])
@@ -188,4 +190,4 @@ def test_trust_metadata_does_not_hide_malformed_event_tables(
     config = tmp_path / "config.toml"
     config.write_text(f"[hooks.state]\n[hooks.{event}]\nbad = true\n", encoding="utf-8")
     with pytest.raises(ValueError, match="invalid Codex hooks config"):
-        codex_memory._inline_hook_state(config, TEMPLATE)
+        codex_memory.inline_hook_state(config, TEMPLATE)

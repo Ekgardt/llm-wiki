@@ -20,8 +20,9 @@ if str(SCRIPTS) not in sys.path:
 
 import corpus_snapshot  # noqa: E402
 import fact_keys  # noqa: E402
+import generation_fts_validation  # noqa: E402
+import generation_search  # noqa: E402
 import ledger  # noqa: E402
-import search_memory  # noqa: E402
 
 DAILY = "knowledge/daily/2023-03-20.md"
 BODY = (
@@ -65,7 +66,7 @@ def _keyed(state: Path, snapshot) -> int:
 
 def _built(tmp_path: Path, vault: Path, snapshot):
     from evidence_graph_builder import build_full_generation
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
     from repository_scope import resolve_repository_scope
 
     catalog = GenerationCatalog(tmp_path / "state")
@@ -121,10 +122,10 @@ def test_the_artifact_with_a_ledger_table_still_validates_as_a_search_artifact(t
     directory.mkdir()
     rows = [ledger.Record("bike", "road bike", "", "2023-03-20", None, True, False, DAILY, "", 1, 2, "e" * 64).row()]
 
-    search_memory.build_generation_fts(snapshot, directory, ledger_rows=rows)
+    generation_search.build_generation_fts(snapshot, directory, ledger_rows=rows)
 
-    with sqlite3.connect(directory / search_memory.GENERATION_FTS_ARTIFACT) as database:
-        valid = search_memory._valid_fts_schema(database)
+    with sqlite3.connect(directory / generation_fts_validation.GENERATION_FTS_ARTIFACT) as database:
+        valid = generation_fts_validation.valid_fts_schema(database)
         counted = ledger.count(database, "bike")
     assert (valid, counted.things) == (True, 1)
 
@@ -135,9 +136,9 @@ def test_a_build_that_carried_no_ledger_leaves_no_table_behind(tmp_path: Path) -
     directory = tmp_path / "generation"
     directory.mkdir()
 
-    search_memory.build_generation_fts(snapshot, directory)
+    generation_search.build_generation_fts(snapshot, directory)
 
-    with sqlite3.connect(directory / search_memory.GENERATION_FTS_ARTIFACT) as database:
+    with sqlite3.connect(directory / generation_fts_validation.GENERATION_FTS_ARTIFACT) as database:
         assert ledger.count(database, "bike") is None
 
 

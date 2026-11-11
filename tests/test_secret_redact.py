@@ -145,13 +145,18 @@ def test_describe_error_names_the_class_and_the_redacted_message():
     assert "sk-abcdefghijklmnopqrstuvwxyz012345" not in described
 
 
-def test_a_bad_timeout_override_is_refused_by_name(monkeypatch):
-    """Audit L5: `MEMORY_LLM_TIMEOUT_S=abc` names the variable, not `int()`."""
-    import llm_client
-    import pytest
+def test_curl_credentials_after_a_multi_line_quoted_body_are_redacted():
+    from secret_redact import redact_secrets
 
-    monkeypatch.setenv("MEMORY_LLM_TIMEOUT_S", "abc")
-    with pytest.raises(ValueError, match="MEMORY_LLM_TIMEOUT_S must be a positive integer"):
-        llm_client._timeout_s()
-    monkeypatch.setenv("MEMORY_LLM_TIMEOUT_S", "45")
-    assert llm_client._timeout_s() == 45
+    credential = ":".join(("user", "s3cret-value"))
+    redacted = redact_secrets(f"curl -d 'first line\nsecond line' -u {credential} https://example.test")
+
+    assert "s3cret-value" not in redacted
+
+
+def test_an_unterminated_quote_still_ends_the_curl_region_at_its_line():
+    from secret_redact import redact_secrets
+
+    text = "curl -d 'open body\n-u not:an-option stays"
+
+    assert "-u not:an-option stays" in redact_secrets(text)

@@ -10,11 +10,13 @@ import re
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from reliable_memory import validate_schema
+from defusedxml.common import DefusedXmlException
+from defusedxml.ElementTree import parse as parse_xml
+from llm_wiki.formats.schema import validate_schema
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_PATH = ROOT / "benchmark" / "ci-timeout-evidence-v1.schema.json"
@@ -51,24 +53,18 @@ def _positive_integer(value: object, label: str) -> int:
 def _utc_timestamp(value: object, label: str) -> tuple[datetime, str]:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{label} must be a UTC timestamp")
-    parsed = _parsed_utc(value, label).astimezone(timezone.utc)
+    parsed = _parsed_utc(value, label).astimezone(UTC)
     return parsed, parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _parsed_utc(value: str, label: str) -> datetime:
     try:
-        parsed = datetime.fromisoformat(_with_numeric_offset(value))
+        parsed = datetime.fromisoformat(value)
     except ValueError as exc:
         raise ValueError(f"{label} must be a UTC timestamp") from exc
-    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+    if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
         raise ValueError(f"{label} must be a UTC timestamp")
     return parsed
-
-
-def _with_numeric_offset(value: str) -> str:
-    if value.endswith("Z"):
-        return value[:-1] + "+00:00"
-    return value
 
 
 def _finite_nonnegative(value: object, label: str) -> float:
@@ -163,7 +159,7 @@ def _junit_records(
     artifact_name: str,
     job_runtime: float,
 ) -> list[dict[str, Any]]:
-    root = _junit_root(artifact_root, artifact_name)
+    root = junit_root(artifact_root, artifact_name)
     if _suite_seconds(root) > job_runtime:
         raise ValueError(f"JUnit suite time exceeds job runtime: {artifact_name}")
     base = {
@@ -178,13 +174,15 @@ def _junit_records(
     return records
 
 
-def _junit_root(artifact_root: Path, artifact_name: str) -> ET.Element:
+def junit_root(artifact_root: Path, artifact_name: str) -> ET.Element:
     xml_files = sorted(artifact_root.rglob("*.xml")) if artifact_root.is_dir() else []
     if len(xml_files) != 1:
         raise ValueError(f"full job requires exactly one JUnit artifact XML: {artifact_name}")
     try:
-        return ET.parse(xml_files[0]).getroot()
-    except (OSError, ET.ParseError) as exc:
+        return parse_xml(
+            xml_files[0], forbid_dtd=True, forbid_entities=True, forbid_external=True,
+        ).getroot()
+    except (OSError, ET.ParseError, DefusedXmlException) as exc:
         raise ValueError(f"invalid JUnit artifact: {artifact_name}") from exc
 
 
@@ -244,7 +242,7 @@ def _require_head_and_success(payload: dict[str, Any], head_sha: str) -> None:
 
 
 def _generated_at(generated_at: datetime | None) -> datetime:
-    generated = generated_at or datetime.now(timezone.utc).replace(microsecond=0)
+    generated = generated_at or datetime.now(UTC).replace(microsecond=0)
     if generated.tzinfo is None:
         raise ValueError("generated_at must be timezone-aware")
     return generated
@@ -362,7 +360,7 @@ class _TimingEvidence:
         return {
             "schema_version": "ci-timeout-evidence/v1",
             "head_sha": self.head_sha,
-            "generated_at": generated.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "generated_at": generated.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "workflow_attempts": sorted(self.workflow_attempts, key=lambda item: item["run_attempt"]),
             "jobs": sorted(self.jobs, key=lambda item: (item["run_attempt"], item["job_id"])),
             "classes": classes,

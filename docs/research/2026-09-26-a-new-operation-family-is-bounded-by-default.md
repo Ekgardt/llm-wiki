@@ -14,8 +14,8 @@ has a bound.
   `session-evidence` rows, and every family added later, had no bound: the claim
   "every store has a bound" was wrong for them.
 - `project_checkpoints`: 6 570 rows. For each project that has a journal, the sum of
-  its `event_json` equals the journal's size: `agenticos` 305 066 bytes of events,
-  journal 305 690; `no-hands` 4 207 118 vs 4 241 615; `llm-wiki` 4 901 205 vs its
+  its `event_json` equals the journal's size: private project A, 305 066 bytes of events,
+  journal 305 690; private project B, 4 207 118 vs 4 241 615; `llm-wiki` 4 901 205 vs its
   sealed segments plus `journal.md` (4 935 436). Checkpoints are the journal's own
   store — `rebuild_journal` rebuilds a deleted project from them (issue #20) — so
   their size is the owner's project history, not a leak. They stay.

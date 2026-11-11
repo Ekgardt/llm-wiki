@@ -1,0 +1,33 @@
+{
+  "source_commit": "6fe89198",
+  "samples": [
+    {
+      "content": "complete prompt",
+      "head": "knowledge/raw/sessions/2026-09-29/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.breadcrumb.md",
+      "documents": [
+        [
+          "knowledge/raw/sessions/2026-09-29/096bc36ef523be6481737f1db93f918482a8b10a2c0e9e689fe98465c352d301.breadcrumb-part.md",
+          "---\ntype: raw-source\nsource_authority: session\nconfidence: medium\nrecord_schema: breadcrumb-source/v1\n---\n\n# Captured event — part 1\n\nSource: [complete captured event](aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.breadcrumb.md).\n\n## Integrity record\n\n    {\"index\":0,\"intent_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"previous_sha256\":null,\"schema_version\":\"breadcrumb-part/v1\",\"text\":\"complete prompt\"}\n"
+        ],
+        [
+          "knowledge/raw/sessions/2026-09-29/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.breadcrumb.md",
+          "---\ntype: raw-source\nsource_authority: session\nconfidence: medium\nrecord_schema: breadcrumb-source/v1\n---\n\n# Complete captured event\n\nSource: captured event `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`.\n\n[Last part](096bc36ef523be6481737f1db93f918482a8b10a2c0e9e689fe98465c352d301.breadcrumb-part.md)\n\n## Integrity record\n\n    {\"anchor\":{\"accepted_at\":\"2026-09-29T00:00:00+00:00\",\"day\":\"2026-09-29\",\"input_bytes\":15,\"input_sha256\":\"42520994c056c3ca1bcc32e16d5420b5567e8f9ee13f25260507db8ea213e252\",\"intent_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"occurred_at\":\"2026-09-29T00:00:00+00:00\",\"schema_version\":\"breadcrumb-occurrence/v1\",\"time_origin\":\"host\"},\"manifest\":{\"anchor_sha256\":\"162195ed7fdcef9e464469878d29c4d9b7186b8e9f530b1d00b9fc1e6c3ca102\",\"input_bytes\":15,\"input_sha256\":\"42520994c056c3ca1bcc32e16d5420b5567e8f9ee13f25260507db8ea213e252\",\"intent_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"last_part_sha256\":\"096bc36ef523be6481737f1db93f918482a8b10a2c0e9e689fe98465c352d301\",\"part_count\":1,\"schema_version\":\"capture-intent/v2\"},\"schema_version\":\"breadcrumb-source/v1\"}\n"
+        ]
+      ]
+    },
+    {
+      "content": "Привет 日 🧭\n```\n---\n# quoted heading\n\"\\ ",
+      "head": "knowledge/raw/sessions/2026-09-29/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.breadcrumb.md",
+      "documents": [
+        [
+          "knowledge/raw/sessions/2026-09-29/69bcdc6cac59c6d4ba7dd662a3098eac1e36f263ade9389623c8fc82f261bedb.breadcrumb-part.md",
+          "---\ntype: raw-source\nsource_authority: session\nconfidence: medium\nrecord_schema: breadcrumb-source/v1\n---\n\n# Captured event — part 1\n\nSource: [complete captured event](aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.breadcrumb.md).\n\n## Integrity record\n\n    {\"index\":0,\"intent_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"previous_sha256\":null,\"schema_version\":\"breadcrumb-part/v1\",\"text\":\"Привет 日 🧭\\n```\\n---\\n# quoted heading\\n\\\"\\\\ \"}\n"
+        ],
+        [
+          "knowledge/raw/sessions/2026-09-29/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.breadcrumb.md",
+          "---\ntype: raw-source\nsource_authority: session\nconfidence: medium\nrecord_schema: breadcrumb-source/v1\n---\n\n# Complete captured event\n\nSource: captured event `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`.\n\n[Last part](69bcdc6cac59c6d4ba7dd662a3098eac1e36f263ade9389623c8fc82f261bedb.breadcrumb-part.md)\n\n## Integrity record\n\n    {\"anchor\":{\"accepted_at\":\"2026-09-29T00:00:00+00:00\",\"day\":\"2026-09-29\",\"input_bytes\":52,\"input_sha256\":\"b2d457c3c3bdc4b8a8a18ff53096192cc6ba14bc2c74dbd1a552b3524275880f\",\"intent_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"occurred_at\":\"2026-09-29T00:00:00+00:00\",\"schema_version\":\"breadcrumb-occurrence/v1\",\"time_origin\":\"host\"},\"manifest\":{\"anchor_sha256\":\"79c4be206a8fcbe3eb9b27423eb764f16b0af80502f65943edba6b2b84c97bf2\",\"input_bytes\":52,\"input_sha256\":\"b2d457c3c3bdc4b8a8a18ff53096192cc6ba14bc2c74dbd1a552b3524275880f\",\"intent_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"last_part_sha256\":\"69bcdc6cac59c6d4ba7dd662a3098eac1e36f263ade9389623c8fc82f261bedb\",\"part_count\":1,\"schema_version\":\"capture-intent/v2\"},\"schema_version\":\"breadcrumb-source/v1\"}\n"
+        ]
+      ]
+    }
+  ]
+}

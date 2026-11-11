@@ -1,0 +1,276 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/markdown-prepare-context.json",
+    "docs/modules/markdown-prepare.md",
+    "docs/modules/markdown-store.md",
+    "docs/modules/markdown-transaction-tests-markdown-coordinator-parts.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/markdown_prepare.py",
+    "scripts/llm_wiki/markdown_store.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/markdown_coordinator_parts.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/streamed_transaction_image_verification_helpers.py",
+    "tests/test_streamed_transaction_image_creation.py",
+    "tests/test_streamed_transaction_image_verification.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/markdown-prepare-context.json",
+      "docs/modules/markdown-prepare.md",
+      "scripts/llm_wiki/markdown_prepare.py",
+      "tests/streamed_transaction_image_verification_helpers.py",
+      "tests/test_streamed_transaction_image_creation.py",
+      "tests/test_streamed_transaction_image_verification.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "IO_CHUNK_BYTES",
+        "VerifiedByteRange"
+      ],
+      "contract_sha256": "4a64646459359fe274897415c63d1191e2685d683e7be7b9ce6e010205a2a266",
+      "integration_tests": [
+        "tests/test_streamed_transaction_image_creation.py",
+        "tests/test_streamed_transaction_image_verification.py"
+      ]
+    },
+    {
+      "provider": "scripts/iso_time.py",
+      "names": [
+        "utc_text"
+      ],
+      "contract_sha256": "b7151d094646f6efb0895d5e32f0237918a40d0f8e12b5eb0af3e60484d51a03",
+      "integration_tests": [
+        "tests/test_streamed_transaction_image_creation.py",
+        "tests/test_streamed_transaction_image_verification.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_streamed_transaction_image_creation.py",
+        "tests/test_streamed_transaction_image_verification.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/schema.py",
+      "names": [
+        "validate_schema"
+      ],
+      "contract_sha256": "753e4abefcf29389d3fc0c051070bfaa66db14ecb88e1c98fc9b85588a6017cb",
+      "integration_tests": [
+        "tests/test_streamed_transaction_image_creation.py",
+        "tests/test_streamed_transaction_image_verification.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_records.py",
+      "names": [
+        "MarkdownChange",
+        "MarkdownOperation",
+        "OperationBoundElsewhereError",
+        "PreconditionChangedError",
+        "ProjectCheckpointReservation",
+        "ProjectPendingPriorError",
+        "RefusedOperation",
+        "TargetBoundaryFailure",
+        "TargetPathBoundaryError",
+        "TransactionFailure",
+        "TransactionRecord"
+      ],
+      "contract_sha256": "2cfd368600890da45260d6c400f81726c06c9498c735dff0e905974800936cd7",
+      "integration_tests": [
+        "tests/test_streamed_transaction_image_creation.py",
+        "tests/test_streamed_transaction_image_verification.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_streamed_transaction_image_creation.py",
+        "tests/test_streamed_transaction_image_verification.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/test_streamed_transaction_image_creation.py",
+        "tests/test_streamed_transaction_image_verification.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/restricted_paths.py",
+      "names": [
+        "restricted_relative_path"
+      ],
+      "contract_sha256": "da0f32f3b3897cc6b0a148a0ab7dcad5a82bf356267ecd94c5ab0aaab267fd42",
+      "integration_tests": [
+        "tests/test_streamed_transaction_image_creation.py",
+        "tests/test_streamed_transaction_image_verification.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_deadlines.py",
+      "names": [
+        "busy_database"
+      ],
+      "contract_sha256": "c16bee6911734076e435ddf6dbe450d95aa07c94fca70e9934b295ca61ab5643",
+      "integration_tests": [
+        "tests/test_streamed_transaction_image_creation.py",
+        "tests/test_streamed_transaction_image_verification.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_transactions.py",
+      "names": [
+        "begin_immediate"
+      ],
+      "contract_sha256": "fb9ecde177ce133dd8e6e34a67214ca0c051a02d758e8611dac84b568d955373",
+      "integration_tests": [
+        "tests/test_streamed_transaction_image_creation.py",
+        "tests/test_streamed_transaction_image_verification.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/windows_acl.py",
+      "names": [
+        "harden_windows_acl"
+      ],
+      "contract_sha256": "00f5518fe95d49ad1a1cd73f49f5d0a8c78260eccb059bbc0440fe39f8eef9fa",
+      "integration_tests": [
+        "tests/test_streamed_transaction_image_creation.py",
+        "tests/test_streamed_transaction_image_verification.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/windows_native.py",
+      "names": [
+        "windows_kernel32"
+      ],
+      "contract_sha256": "14b51993282554a7a9c7484a32c9a4a0cc4eb28a22d5c9942c166c407fdf1089",
+      "integration_tests": [
+        "tests/test_streamed_transaction_image_creation.py",
+        "tests/test_streamed_transaction_image_verification.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownChange",
+        "MarkdownCoordinator"
+      ],
+      "contract_sha256": "c911f6133147c97bb248fccfab3c4ddd482550716281b1294bf82a8c8161f20e",
+      "integration_tests": [
+        "tests/test_streamed_transaction_image_creation.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "OperationalOwnershipError",
+        "ProcessIdentity",
+        "current_process_identity",
+        "process_identity_state"
+      ],
+      "contract_sha256": "4d48230c514d9819dd89979286313319d144790d7fad1a1f2dc5757d56e2721d",
+      "integration_tests": [
+        "tests/test_streamed_transaction_image_creation.py",
+        "tests/test_streamed_transaction_image_verification.py"
+      ]
+    },
+    {
+      "provider": "scripts/process_liveness.py",
+      "names": [
+        "owner_alive"
+      ],
+      "contract_sha256": "43a93650e5db69f95a022901e1dc186127c6b792e0f8e8f2e13af548be8ebc1b",
+      "integration_tests": [
+        "tests/test_streamed_transaction_image_creation.py",
+        "tests/test_streamed_transaction_image_verification.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "fsync_directory",
+        "fsync_file",
+        "set_owner_only",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "9d704d81be2e6a8ba0a869120ee171a757c0432e9ff20c9f25eb26c254edb2a9",
+      "integration_tests": [
+        "tests/test_streamed_transaction_image_creation.py",
+        "tests/test_streamed_transaction_image_verification.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

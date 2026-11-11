@@ -1,0 +1,280 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/an-earlier-codex-entry-is-rewritten-helpers.md",
+    "docs/modules/codex-memory-context.json",
+    "docs/modules/codex-memory.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/installer-checks.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/codex_memory.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/an_earlier_codex_entry_is_rewritten_helpers.py",
+    "tests/conftest.py",
+    "tests/installer_bootstrap_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/powershell_literal.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_an_earlier_codex_entry_is_rewritten.py",
+    "tests/test_codex_config_status_has_a_platform_independent_newline.py",
+    "tests/test_codex_hooks_ownership.py",
+    "tests/test_daily_result_reporting.py",
+    "tests/the_installer_says_what_it_needs_helpers.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/codex-memory-context.json",
+      "docs/modules/codex-memory.md",
+      "scripts/codex_memory.py",
+      "tests/test_an_earlier_codex_entry_is_rewritten.py",
+      "tests/test_codex_config_status_has_a_platform_independent_newline.py",
+      "tests/test_codex_hooks_ownership.py",
+      "tests/test_daily_result_reporting.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/capture_diagnostics.py",
+      "names": [
+        "record_capture_failure"
+      ],
+      "contract_sha256": "454709501c56cad9797159a61893aabc86a83cb5b8e1da109156fd6f48807484",
+      "integration_tests": [
+        "tests/test_an_earlier_codex_entry_is_rewritten.py",
+        "tests/test_codex_config_status_has_a_platform_independent_newline.py",
+        "tests/test_codex_hooks_ownership.py",
+        "tests/test_daily_result_reporting.py"
+      ]
+    },
+    {
+      "provider": "scripts/codex_config_state.py",
+      "names": [
+        "codex_mcp_config_state",
+        "mcp_expected_args",
+        "read_codex_toml",
+        "require_safe_config"
+      ],
+      "contract_sha256": "c98b2a59dbe9eac79313d062b4bdc77163723c410fe7e7c397d4f5a1e79c801f",
+      "integration_tests": [
+        "tests/test_an_earlier_codex_entry_is_rewritten.py"
+      ]
+    },
+    {
+      "provider": "scripts/codex_hook_identity.py",
+      "names": [
+        "is_llm_wiki_hook"
+      ],
+      "contract_sha256": "26a1e85f5e4031f5791092f80327dbdeee8911bacd901843129f67b0cdeb493b",
+      "integration_tests": [
+        "tests/test_an_earlier_codex_entry_is_rewritten.py",
+        "tests/test_codex_config_status_has_a_platform_independent_newline.py",
+        "tests/test_codex_hooks_ownership.py",
+        "tests/test_daily_result_reporting.py"
+      ]
+    },
+    {
+      "provider": "scripts/codex_turn_end.py",
+      "names": [
+        "claim_quiet_tail",
+        "claim_turn_end",
+        "mark_captured",
+        "restore",
+        "snapshot"
+      ],
+      "contract_sha256": "2d47afc7d5cdde882d2547d97620c1c32f42596d97fe6804cb059a1473113ebe",
+      "integration_tests": [
+        "tests/test_an_earlier_codex_entry_is_rewritten.py",
+        "tests/test_codex_config_status_has_a_platform_independent_newline.py",
+        "tests/test_codex_hooks_ownership.py",
+        "tests/test_daily_result_reporting.py"
+      ]
+    },
+    {
+      "provider": "scripts/install_state.py",
+      "names": [
+        "InstallControlError"
+      ],
+      "contract_sha256": "a3f8e26bc2383cb5aeb82c361465122ee76199faebf8299067de7c63af981106",
+      "integration_tests": [
+        "tests/test_codex_hooks_ownership.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_adapter.py",
+      "names": [
+        "ingest_event",
+        "normalize_occurrence_event"
+      ],
+      "contract_sha256": "1adf64d838f478c7b911eeb50ccc30c70f6285944887a6cf3507a35c9314e2f9",
+      "integration_tests": [
+        "tests/test_an_earlier_codex_entry_is_rewritten.py",
+        "tests/test_codex_config_status_has_a_platform_independent_newline.py",
+        "tests/test_codex_hooks_ownership.py",
+        "tests/test_daily_result_reporting.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_config_backup.py",
+      "names": [
+        "publish_configuration"
+      ],
+      "contract_sha256": "d5faae82d9a0b561078812ee28da89de8f0a8c6e8f6d9d158728ce7f929291a8",
+      "integration_tests": [
+        "tests/test_an_earlier_codex_entry_is_rewritten.py",
+        "tests/test_codex_config_status_has_a_platform_independent_newline.py",
+        "tests/test_codex_hooks_ownership.py",
+        "tests/test_daily_result_reporting.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_integrations.py",
+      "names": [
+        "codex_degraded_result"
+      ],
+      "contract_sha256": "51a03ed362a4b553368639d2de1d3034ae621fffd9308fe15cb913c24008c585",
+      "integration_tests": [
+        "tests/test_an_earlier_codex_entry_is_rewritten.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_an_earlier_codex_entry_is_rewritten.py",
+        "tests/test_codex_config_status_has_a_platform_independent_newline.py",
+        "tests/test_codex_hooks_ownership.py",
+        "tests/test_daily_result_reporting.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "projects_dir",
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "09c4b547a1990d7ce8824ed10a7e58b7851fb9473820397a142e762c214e52a3",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "update_state"
+      ],
+      "contract_sha256": "fbb45de72ebcbcdf6c94abf689410ff0931df029776c2b81febdc718cb1070df",
+      "integration_tests": [
+        "tests/test_an_earlier_codex_entry_is_rewritten.py",
+        "tests/test_codex_config_status_has_a_platform_independent_newline.py",
+        "tests/test_codex_hooks_ownership.py",
+        "tests/test_daily_result_reporting.py"
+      ]
+    },
+    {
+      "provider": "scripts/project_checkpoint.py",
+      "names": [
+        "observe_checkpoint_fail_open"
+      ],
+      "contract_sha256": "f90f85587547b02c02ea5225640505a95bc0c3409cf6196532c15713ce57cddc",
+      "integration_tests": [
+        "tests/test_an_earlier_codex_entry_is_rewritten.py",
+        "tests/test_codex_config_status_has_a_platform_independent_newline.py",
+        "tests/test_codex_hooks_ownership.py",
+        "tests/test_daily_result_reporting.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_an_earlier_codex_entry_is_rewritten.py",
+        "tests/test_codex_config_status_has_a_platform_independent_newline.py",
+        "tests/test_codex_hooks_ownership.py",
+        "tests/test_daily_result_reporting.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_an_earlier_codex_entry_is_rewritten.py",
+        "tests/test_codex_config_status_has_a_platform_independent_newline.py",
+        "tests/test_codex_hooks_ownership.py",
+        "tests/test_daily_result_reporting.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "describe_error_chain",
+        "redact_secrets"
+      ],
+      "contract_sha256": "6e8b2799be2e5b5b21f4d843ee1a4d8e7482ccce6730ebf7688f8bcedd2a63a7",
+      "integration_tests": [
+        "tests/test_an_earlier_codex_entry_is_rewritten.py",
+        "tests/test_codex_config_status_has_a_platform_independent_newline.py",
+        "tests/test_codex_hooks_ownership.py",
+        "tests/test_daily_result_reporting.py"
+      ]
+    },
+    {
+      "provider": "scripts/session_start_project_state.py",
+      "names": [
+        "compute_slug"
+      ],
+      "contract_sha256": "4855577cc2e7bcbebc6509a2c3118af6b9d0c472f5a6cb9a3cc71bc1b1c3f5ae",
+      "integration_tests": [
+        "tests/test_an_earlier_codex_entry_is_rewritten.py",
+        "tests/test_codex_config_status_has_a_platform_independent_newline.py",
+        "tests/test_codex_hooks_ownership.py",
+        "tests/test_daily_result_reporting.py"
+      ]
+    }
+  ]
+}

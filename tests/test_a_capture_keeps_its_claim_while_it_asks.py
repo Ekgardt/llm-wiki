@@ -9,6 +9,8 @@ from __future__ import annotations
 import sqlite3
 import sys
 import threading
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -17,11 +19,15 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+
 import flush_memory  # noqa: E402
 import operational_ownership  # noqa: E402
+from llm_wiki import markdown_store, queue_store, sqlite_transactions  # noqa: E402
+from llm_wiki.markdown_coordinator_base import INTENT_FENCE_SECONDS  # noqa: E402
+from llm_wiki.queue_store import TASK_FENCE_SECONDS  # noqa: E402
 
+from tests.queue_v3_capture_links_helpers import _capture_binding, _coordinator, _queue  # noqa: E402
 from tests.slow_machine import SHORT_TIMEOUT  # noqa: E402
-from tests.test_queue_v3_capture_links import _capture_binding, _coordinator, _queue  # noqa: E402
 
 SCOPE = "worker:capture-keepalive"
 
@@ -92,16 +98,99 @@ class _Recorder:
 def test_the_classifier_call_runs_under_renewals_of_every_claim(monkeypatch):
     beats = threading.Event()
     recorder = _Recorder(beats)
-    monkeypatch.setattr(flush_memory, "CAPTURE_KEEPALIVE_SECONDS", 0.01)
-
-    with flush_memory._CaptureKeepAlive(recorder, recorder, "lease", "task", "intent", "owner"):
+    with flush_memory.CaptureKeepAlive(recorder, recorder, "lease", "task", "intent", "owner", interval=0.01):
         assert beats.wait(timeout=SHORT_TIMEOUT)
 
     assert recorder.calls[:4] == ["owner", "lease", "task", "intent"]
 
 
 def test_a_tier_keeps_its_meaning_through_punctuation_and_an_explanation():
-    parse = flush_memory._parse_capture_wire_output
+    parse = flush_memory.parse_capture_wire_output
 
     assert [parse("FLUSH_OK."), parse("FLUSH_OK\n\nNothing durable here.")] == [("ok", ""), ("ok", "")]
     assert parse("FLUSH_MAJOR: the decision\nand its reason") == ("major", "the decision\nand its reason")
+
+
+def _advance_at_write_admission(monkeypatch, seconds):
+    """Model time spent opening/locking SQLite without a scheduler-dependent sleep."""
+    clock = [datetime.now(UTC)]
+    original = sqlite_transactions.begin_immediate
+
+    @contextmanager
+    def admitted(database, **options):
+        with original(database, **options) as admitted_database:
+            clock[0] += timedelta(seconds=seconds)
+            yield admitted_database
+
+    monkeypatch.setattr(sqlite_transactions, "begin_immediate", admitted)
+    return clock
+
+
+def _advance_queue_clock(monkeypatch, seconds=31):
+    clock = _advance_at_write_admission(monkeypatch, seconds)
+    monkeypatch.setattr(queue_store, "utc_now", lambda: clock[0])
+    return clock
+
+
+def _advance_coordinator_clock(monkeypatch, seconds=31):
+    clock = _advance_at_write_admission(monkeypatch, seconds)
+    monkeypatch.setattr(markdown_store, "utc_now", lambda: clock[0])
+    return clock
+
+
+def _fence_case(kind, queue, coordinator, binding):
+    return {
+        "intent": (_advance_coordinator_clock, INTENT_FENCE_SECONDS, coordinator, binding.intent_id,
+                   "intent_fences", "intent_id"),
+        "task": (_advance_queue_clock, TASK_FENCE_SECONDS, queue, binding.task_id, "task_fences", "task_id"),
+    }[kind]
+
+
+@pytest.mark.parametrize("kind", ["intent", "task"])
+def test_an_expired_fence_cannot_be_renewed_after_waiting_for_write_admission(tmp_path, monkeypatch, kind):
+    queue, coordinator, registry, binding, lease, owner = _held_claims(tmp_path)
+    with queue.queue_owner(role="queue-worker", scope=SCOPE, parent=owner):
+        advance, fence_seconds, store, identity, table, key = _fence_case(kind, queue, coordinator, binding)
+        fence = getattr(store, f"acquire_{kind}_fence")(identity, mode="worker", owner=owner)
+        path = {"intent": coordinator.database_path, "task": queue.db_path}[kind]
+        before = _expiry(path, table, key, identity)
+        advance(monkeypatch, fence_seconds + 1)
+        with pytest.raises(RuntimeError, match="fence_lost"):
+            getattr(store, f"heartbeat_{kind}_fence")(fence, owner)
+        assert _expiry(path, table, key, identity) == before
+        getattr(store, f"release_{kind}_fence")(fence)
+    registry.release(owner)
+
+
+@pytest.mark.parametrize("kind", ["intent"])
+def test_new_fence_expiry_starts_at_write_admission(tmp_path, monkeypatch, kind):
+    queue, coordinator, registry, binding, lease, owner = _held_claims(tmp_path)
+    with queue.queue_owner(role="queue-worker", scope=SCOPE, parent=owner):
+        advance, fence_seconds, store, identity, table, key = _fence_case(kind, queue, coordinator, binding)
+        clock = advance(monkeypatch)
+        fence = getattr(store, f"acquire_{kind}_fence")(identity, mode="worker", owner=owner)
+        assert fence.expires_at == min(owner.expires_at, clock[0] + timedelta(seconds=fence_seconds))
+        getattr(store, f"release_{kind}_fence")(fence)
+    registry.release(owner)
+
+
+def test_expired_intent_cannot_project_a_binding_after_write_admission(tmp_path, monkeypatch):
+    queue, coordinator, registry, binding, lease, owner = _held_claims(tmp_path)
+    with queue.queue_owner(role="queue-worker", scope=SCOPE, parent=owner):
+        fence = coordinator.acquire_intent_fence(binding.intent_id, mode="worker", owner=owner)
+        binding = queue.seal_capture_binding(binding.task_id, consumer_kind="terminal",
+                                             consumer_id="expired-proof", active_link_digest=binding.active_digest)
+        _advance_coordinator_clock(monkeypatch)
+        with pytest.raises(RuntimeError, match="intent_fence_lost"):
+            coordinator.project_capture_binding(binding, intent_fence=fence)
+        coordinator.release_intent_fence(fence)
+    registry.release(owner)
+
+
+def test_expired_queue_owner_cannot_acquire_a_task_fence_after_waiting(tmp_path, monkeypatch):
+    queue, coordinator, registry, binding, lease, owner = _held_claims(tmp_path)
+    with queue.queue_owner(role="queue-worker", scope=SCOPE, parent=owner):
+        _advance_queue_clock(monkeypatch, owner.ttl_seconds + 1)
+        with pytest.raises(RuntimeError, match="queue_owner_fence_lost"):
+            queue.acquire_task_fence(binding.task_id, mode="worker", owner=owner)
+    registry.release(owner)

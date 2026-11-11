@@ -10,45 +10,18 @@ import sys
 import time
 from pathlib import Path
 
-import lsp_process
-import lsp_process_tree
 import pytest
+from llm_wiki import (
+    lsp_process_launch,
+    lsp_process_limits,
+    lsp_process_recovery,
+    lsp_process_requests,
+)
 from lsp_process import GenerationLaunch, LspProcess
 
 from tests.slow_machine import SHORT_TIMEOUT
 
 OWNER_NONCE = "e" * 32
-
-
-class _Entry:
-    """A /proc entry, named like a process, whose `stat` cannot be read."""
-
-    def __init__(self, name: str, path: str) -> None:
-        self.name = name
-        self.path = path
-
-
-def test_a_proc_entry_that_cannot_be_read_leaves_the_group_unknown(
-    tmp_path: Path,
-) -> None:
-    unreadable = tmp_path / "4242"
-    unreadable.mkdir()
-    (unreadable / "stat").mkdir()  # a directory where the file belongs: EISDIR
-    entries = [_Entry("4242", str(unreadable))]
-
-    verdict = lsp_process_tree._scan_proc_entries(entries, 4242)
-
-    assert verdict is None
-
-
-def test_an_entry_proven_outside_the_group_is_passed_over(tmp_path: Path) -> None:
-    gone = tmp_path / "4243"
-    gone.mkdir()
-    entries = [_Entry("4243", str(gone))]
-
-    verdict = lsp_process_tree._scan_proc_entries(entries, 4243)
-
-    assert verdict is True
 
 
 @pytest.mark.parametrize(
@@ -61,8 +34,8 @@ def test_an_entry_proven_outside_the_group_is_passed_over(tmp_path: Path) -> Non
     ],
 )
 def test_only_a_plain_descriptor_number_is_an_inherited_descriptor(name: str) -> None:
-    accepted = lsp_process._is_inherited_descriptor(name, (7,))
-    assert (accepted, lsp_process._is_inherited_descriptor("/proc/self/fd/7", (7,))) == (
+    accepted = lsp_process_launch.is_inherited_descriptor(name, (7,))
+    assert (accepted, lsp_process_launch.is_inherited_descriptor("/proc/self/fd/7", (7,))) == (
         False,
         True,
     )
@@ -79,13 +52,13 @@ def test_a_launch_may_not_name_a_file_behind_a_descriptor_path(tmp_path: Path) -
     launch = GenerationLaunch((traversal, "--stdio"), pass_fds=(7,))
 
     with pytest.raises(ValueError, match="replace the configured executable"):
-        lsp_process._generation_launch(
+        lsp_process_launch.generation_launch(
             ("server",), launch, cwd=tmp_path, owner_root=None
         )
 
 
 def test_the_recovery_beat_doubles_while_the_same_work_stays_owing() -> None:
-    state = lsp_process._RecoveryState(terminal_retry_code="process_exited")
+    state = lsp_process_recovery.RecoveryState(terminal_retry_code="process_exited")
     beats = [state.retry_seconds]
     for _ in range(8):
         state.slow_down()
@@ -93,9 +66,9 @@ def test_the_recovery_beat_doubles_while_the_same_work_stays_owing() -> None:
     state.quicken()
 
     assert (beats[1], max(beats), state.retry_seconds) == (
-        2 * lsp_process._RECOVERY_RETRY_SECONDS,
-        lsp_process._RECOVERY_RETRY_CEILING_SECONDS,
-        lsp_process._RECOVERY_RETRY_SECONDS,
+        2 * lsp_process_limits.RECOVERY_RETRY_SECONDS,
+        lsp_process_limits.RECOVERY_RETRY_CEILING_SECONDS,
+        lsp_process_limits.RECOVERY_RETRY_SECONDS,
     )
 
 
@@ -107,7 +80,7 @@ def test_the_channel_a_request_uses_is_taken_under_the_lifecycle_lock(
     process = LspProcess.start(
         [sys.executable, "-c", server], cwd=tmp_path, owner_root=tmp_path / OWNER_NONCE
     )
-    channel = lsp_process._request_generation(process, time.monotonic() + SHORT_TIMEOUT)
+    channel = lsp_process_requests.request_generation(process, time.monotonic() + SHORT_TIMEOUT)
     try:
         # What a cleanup running on another thread does to the generation it
         # is releasing, landing the instant after the lock was given back.

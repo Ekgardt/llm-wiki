@@ -10,14 +10,14 @@ from __future__ import annotations
 import shutil
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from tests.private_vault_backup_helpers import _restic_restore_fixture
+from tests.reliability_v3_adoption_helpers import _vault, build_adopted_reliability_v3
 from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT
-from tests.test_private_vault_backup import _restic_restore_fixture
-from tests.test_reliability_v3_adoption import _vault, build_adopted_reliability_v3
 
 REAL_SUMMARY = (
     b'{"message_type":"summary","total_files":3,"files_restored":3,'
@@ -48,7 +48,7 @@ def test_a_summary_without_the_zero_counters_restores(tmp_path, monkeypatch):
     target.mkdir()
     commands: list[list[str]] = []
     monkeypatch.setattr(
-        backup, "_run_bounded", _fake_restic(backup, snapshot, target, commands)
+        backup, "run_bounded", _fake_restic(backup, snapshot, target, commands)
     )
 
     receipt = backup.restore_private_vault(
@@ -71,7 +71,7 @@ def test_a_summary_that_names_a_skipped_file_is_still_refused():
     output = REAL_SUMMARY.replace(b'"total_bytes"', b'"files_skipped":1,"total_bytes"')
 
     with pytest.raises(backup.BackupError) as raised:
-        backup._restore_summary(output)
+        backup.restore_summary(output)
 
     assert raised.value.code == "restic_restore_incomplete"
 
@@ -112,7 +112,7 @@ def test_a_real_restic_backs_up_and_restores_the_vault(tmp_path, monkeypatch):
         staging_parent=staging,
         restic_binary=binary,
         repository_file=repository_file,
-        now=datetime(2026, 8, 15, tzinfo=timezone.utc),
+        now=datetime(2026, 8, 15, tzinfo=UTC),
         deadline=time.monotonic() + LONG_TIMEOUT,
     )
     receipt = backup.restore_private_vault(

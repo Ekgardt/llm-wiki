@@ -21,7 +21,7 @@ For this case that means: the patched Python must parse and the patched JSON
 must load, checked before anything relies on them.
 
 **Do not go straight to enforcing.** The staged pattern is dry-run, then
-shadow, then canary, then full enforce. There is one gate here and no traffic
+observation without enforcement, then canary, then full enforce. There is one gate here and no traffic
 to split, so the usable part is the first stage: prove the gate still returns a
 verdict before trusting it to guard anything.
 
@@ -48,8 +48,8 @@ everyone out is survivable.
   non-zero. The backups are the break-glass path, and their location is printed
   on success so it is known before it is needed.
 
-Not adopted: canary and shadow stages. There is a single gate on a single
-machine, so there is no population to split and no shadow traffic to compare
+Not adopted: canary and observation-only stages. There is a single gate on a single
+machine, so there is no population to split and no copied traffic to compare
 against. Saying so is better than pretending a four-stage rollout happened.
 
 ## Sources

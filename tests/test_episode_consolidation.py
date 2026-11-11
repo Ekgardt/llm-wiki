@@ -18,32 +18,14 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import episode_consolidation as consolidation  # noqa: E402
 
-RECORD = """---
-type: raw-source
-session: abc123
----
-
-# Session abc123
-
-**user:** why systemd and not cron?
-
-**assistant:** systemd user timers survive a reboot and cron does not report failures
-"""
+from tests.episode_consolidation_helpers import vault  # noqa: E402, F401
 
 
 def _answer(items) -> str:
     return json.dumps(items, ensure_ascii=False)
 
 
-@pytest.fixture()
-def vault(tmp_path: Path) -> Path:
-    directory = tmp_path / "knowledge/raw/sessions/2026-08-23"
-    directory.mkdir(parents=True)
-    (directory / "abc123.md").write_text(RECORD, encoding="utf-8")
-    return tmp_path
-
-
-def test_a_quoted_item_survives(vault: Path) -> None:
+def test_a_quoted_item_survives(vault: Path) -> None:  # noqa: F811
     lessons = consolidation.grounded_lessons(
         _answer(
             [
@@ -62,7 +44,7 @@ def test_a_quoted_item_survives(vault: Path) -> None:
     assert lessons[0].session == "abc123"
 
 
-def test_an_invented_quote_is_dropped(vault: Path) -> None:
+def test_an_invented_quote_is_dropped(vault: Path) -> None:  # noqa: F811
     """The validation the survey asks for before promotion, done literally."""
     lessons = consolidation.grounded_lessons(
         _answer(
@@ -81,7 +63,7 @@ def test_an_invented_quote_is_dropped(vault: Path) -> None:
     assert lessons == []
 
 
-def test_an_unknown_kind_is_dropped(vault: Path) -> None:
+def test_an_unknown_kind_is_dropped(vault: Path) -> None:  # noqa: F811
     lessons = consolidation.grounded_lessons(
         _answer(
             [
@@ -99,12 +81,12 @@ def test_an_unknown_kind_is_dropped(vault: Path) -> None:
     assert lessons == []
 
 
-def test_a_non_json_answer_is_refused(vault: Path) -> None:
+def test_a_non_json_answer_is_refused(vault: Path) -> None:  # noqa: F811
     with pytest.raises(ValueError, match="JSON array"):
         consolidation.grounded_lessons("I could not do that", [])
 
 
-def test_the_block_is_one_entry_with_its_quotes(vault: Path) -> None:
+def test_the_block_is_one_entry_with_its_quotes(vault: Path) -> None:  # noqa: F811
     lesson = consolidation.Lesson(
         "decision", "systemd over cron", "systemd user timers survive a reboot", "abc123"
     )
@@ -118,17 +100,17 @@ def test_the_block_is_one_entry_with_its_quotes(vault: Path) -> None:
     assert block.count("- `[") == 1, "the compile pipeline binds evidence inside one entry"
 
 
-def test_a_day_with_records_is_consolidated_and_recorded(vault: Path, monkeypatch) -> None:
+def test_a_day_with_records_is_consolidated_and_recorded(vault: Path, monkeypatch) -> None:  # noqa: F811
     written = {}
     recorded = {}
     monkeypatch.setattr(
         consolidation,
-        "_write_block",
+        "write_block",
         lambda day, lessons, moment, key: written.setdefault("day", day) or Path("daily.md"),
     )
     monkeypatch.setattr(
         consolidation,
-        "_record_consolidation",
+        "record_consolidation",
         lambda day, count, records, digest, failed=(): recorded.update(
             day=day, count=count, records=records, digest=digest
         ),
@@ -160,7 +142,7 @@ def test_a_day_with_records_is_consolidated_and_recorded(vault: Path, monkeypatc
     }
 
 
-def test_a_day_already_consolidated_is_left_alone(vault: Path) -> None:
+def test_a_day_already_consolidated_is_left_alone(vault: Path) -> None:  # noqa: F811
     outcome = consolidation.consolidate_day(
         vault,
         "2026-08-23",
@@ -182,12 +164,12 @@ def test_a_day_without_records_costs_nothing(tmp_path: Path) -> None:
     assert outcome == {"status": "skipped", "reason": "no_records", "items": 0}
 
 
-def test_a_day_with_nothing_durable_is_marked_done(vault: Path, monkeypatch) -> None:
+def test_a_day_with_nothing_durable_is_marked_done(vault: Path, monkeypatch) -> None:  # noqa: F811
     """An empty day must not be re-read every night."""
     recorded = {}
     monkeypatch.setattr(
         consolidation,
-        "_record_consolidation",
+        "record_consolidation",
         lambda day, count, records, digest, failed=(): recorded.update(day=day, count=count),
     )
 
@@ -199,7 +181,7 @@ def test_a_day_with_nothing_durable_is_marked_done(vault: Path, monkeypatch) -> 
     assert recorded == {"day": "2026-08-23", "count": 0}
 
 
-def test_the_prompt_carries_the_records(vault: Path) -> None:
+def test_the_prompt_carries_the_records(vault: Path) -> None:  # noqa: F811
     prompt = consolidation.build_prompt(
         "2026-08-23", consolidation.session_records(vault, "2026-08-23")
     )
@@ -222,7 +204,7 @@ def _rule(text: str, trigger: str) -> str:
     )
 
 
-def test_a_rule_needs_a_situation_and_an_instruction(vault: Path) -> None:
+def test_a_rule_needs_a_situation_and_an_instruction(vault: Path) -> None:  # noqa: F811
     """Procedural memory is read before acting, so it must say when and what."""
     lessons = consolidation.grounded_lessons(
         _rule("always prefer a user timer over cron", "scheduling maintenance"),
@@ -233,7 +215,7 @@ def test_a_rule_needs_a_situation_and_an_instruction(vault: Path) -> None:
     assert lessons[0].trigger == "scheduling maintenance"
 
 
-def test_a_rule_without_a_trigger_is_not_a_rule(vault: Path) -> None:
+def test_a_rule_without_a_trigger_is_not_a_rule(vault: Path) -> None:  # noqa: F811
     lessons = consolidation.grounded_lessons(
         _rule("always prefer a user timer over cron", ""),
         consolidation.session_records(vault, "2026-08-23"),
@@ -242,7 +224,7 @@ def test_a_rule_without_a_trigger_is_not_a_rule(vault: Path) -> None:
     assert lessons == []
 
 
-def test_a_rule_that_reads_like_a_note_is_not_a_rule(vault: Path) -> None:
+def test_a_rule_that_reads_like_a_note_is_not_a_rule(vault: Path) -> None:  # noqa: F811
     """`build_guardrails` recognises rules by these words; without one it is a lesson."""
     lessons = consolidation.grounded_lessons(
         _rule("user timers are nicer than cron", "scheduling maintenance"),
@@ -252,7 +234,7 @@ def test_a_rule_that_reads_like_a_note_is_not_a_rule(vault: Path) -> None:
     assert lessons == []
 
 
-def test_a_rule_states_its_situation_first(vault: Path) -> None:
+def test_a_rule_states_its_situation_first(vault: Path) -> None:  # noqa: F811
     lesson = consolidation.Lesson(
         "rule",
         "always prefer a user timer over cron",
@@ -268,7 +250,7 @@ def test_a_rule_states_its_situation_first(vault: Path) -> None:
     assert "**Rule** — When scheduling maintenance: always prefer a user timer" in block
 
 
-def test_a_rule_summary_is_shaped_for_the_session_start_surface(vault: Path) -> None:
+def test_a_rule_summary_is_shaped_for_the_session_start_surface(vault: Path) -> None:  # noqa: F811
     """The loop only closes if `build_guardrails` would pick the page up."""
     import re
 
@@ -294,7 +276,7 @@ def test_a_busy_day_is_read_in_batches_not_truncated(tmp_path, monkeypatch):
     """
     import episode_consolidation
 
-    vault = tmp_path / "vault"
+    vault = tmp_path / "vault"  # noqa: F811
     day = "2026-08-23"
     directory = vault / "knowledge/raw/sessions" / day
     directory.mkdir(parents=True)
@@ -319,7 +301,7 @@ def test_a_busy_day_is_read_in_batches_not_truncated(tmp_path, monkeypatch):
 def test_pending_days_are_the_ones_never_consolidated(tmp_path):
     import episode_consolidation
 
-    vault = tmp_path / "vault"
+    vault = tmp_path / "vault"  # noqa: F811
     for day in ("2026-08-06", "2026-08-08", "2026-08-16"):
         directory = vault / "knowledge/raw/sessions" / day
         directory.mkdir(parents=True)
@@ -342,7 +324,7 @@ def test_two_batches_of_one_day_get_distinct_timestamps(tmp_path, monkeypatch):
     """
     import episode_consolidation
 
-    vault = tmp_path / "vault"
+    vault = tmp_path / "vault"  # noqa: F811
     day = "2026-08-23"
     directory = vault / "knowledge/raw/sessions" / day
     directory.mkdir(parents=True)
@@ -355,10 +337,10 @@ def test_two_batches_of_one_day_get_distinct_timestamps(tmp_path, monkeypatch):
     moments: list = []
     monkeypatch.setattr(
         episode_consolidation,
-        "_write_block",
+        "write_block",
         lambda day, lessons, moment, key: moments.append(moment) or Path("daily.md"),
     )
-    monkeypatch.setattr(episode_consolidation, "_record_consolidation", lambda *a: None)
+    monkeypatch.setattr(episode_consolidation, "record_consolidation", lambda *a: None)
     monkeypatch.setattr(
         episode_consolidation,
         "grounded_lessons",

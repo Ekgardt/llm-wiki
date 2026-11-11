@@ -1,0 +1,625 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/coordinator-validation.md",
+    "docs/modules/formats.md",
+    "docs/modules/install-models.md",
+    "docs/modules/markdown-store.md",
+    "docs/modules/markdown-transaction.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-capture-admission-does-not-scan-retained-history-context.json",
+    "docs/modules/test-capture-admission-does-not-scan-retained-history.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/coordinator_validation.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/markdown_store.py",
+    "scripts/markdown_transaction.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/doctor_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_capture_admission_does_not_scan_retained_history.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-capture-admission-does-not-scan-retained-history-context.json",
+      "docs/modules/test-capture-admission-does-not-scan-retained-history.md",
+      "tests/test_capture_admission_does_not_scan_retained_history.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "IO_CHUNK_BYTES",
+        "VerifiedByteRange"
+      ],
+      "contract_sha256": "4a64646459359fe274897415c63d1191e2685d683e7be7b9ce6e010205a2a266",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/claims.py",
+      "names": [
+        "ClaimIndex"
+      ],
+      "contract_sha256": "c66d3b1b1d8bfad960288ad5ea53a74adcb686e240fe70cc4bb08d27c96b80b0",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "collect_corpus"
+      ],
+      "contract_sha256": "7ea12368f51c070a84b0754260f0a82db5ac44b0395b95eabcb01e5053c9f0bb",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_graph_builder.py",
+      "names": [
+        "build_full_generation"
+      ],
+      "contract_sha256": "056e93b70cc341eb253323f95833791e52929a5e343d4f8e53acd37f1b2004cd",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_maintenance.py",
+      "names": [
+        "maintenance_extractor_identity"
+      ],
+      "contract_sha256": "6155b9fd16203e4406c49671a0456a9248cc335753aafc2e1375508b2b9c75fb",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/install_models.py",
+      "names": [
+        "hub_library",
+        "pinned_models"
+      ],
+      "contract_sha256": "9a6c3545cdbff6160d81687d42bfb1947647503068382262658d5bc5d97a7e2f",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_a_check_is_judged_when_it_ends.py",
+        "tests/test_a_check_names_its_cause.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py"
+      ]
+    },
+    {
+      "provider": "scripts/iso_time.py",
+      "names": [
+        "utc_text"
+      ],
+      "contract_sha256": "b7151d094646f6efb0895d5e32f0237918a40d0f8e12b5eb0af3e60484d51a03",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/adoption_admission.py",
+      "names": [
+        "ReliabilityV3ValidationError",
+        "require_reliability_v3_adopted"
+      ],
+      "contract_sha256": "44d00cc3a9ea7ea9c0867e17c18b1e8d9e854a75ceb59aeceda003aa3fae40ae",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/coordinator_invariants.py",
+      "names": [
+        "coordinator_migration_error",
+        "coordinator_v3_base_cross_table_invariant",
+        "coordinator_v3_blackboard_invariant",
+        "coordinator_v3_cross_table_invariant",
+        "coordinator_v3_row_counts",
+        "require_v3_integrity",
+        "require_v3_invariants",
+        "v3_operation_violations"
+      ],
+      "contract_sha256": "d248b48f121aa90b19b33a8103da9f548d5236ba3ab94ce057665810d7017f9c",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/coordinator_schema.py",
+      "names": [
+        "COORDINATOR_V3_CONTRACT",
+        "COORDINATOR_V3_INDEXES",
+        "COORDINATOR_V3_INDEX_SQL",
+        "COORDINATOR_V3_SCHEMA_SHA256",
+        "COORDINATOR_V3_TABLES",
+        "COORDINATOR_V3_TABLE_SQL",
+        "coordinator_v3_object_matches",
+        "coordinator_v3_schema_complete",
+        "coordinator_v3_statements",
+        "coordinator_v3_tables_match",
+        "ensure_coordinator_v3_indexes",
+        "known_coordinator_index",
+        "normalized_coordinator_sql",
+        "only_known_indexes",
+        "schema_objects",
+        "tables_of"
+      ],
+      "contract_sha256": "85029d249d093012c2f159db538337665a940d03d412017532cbdfbe4ecab19d",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_abort.py",
+      "names": [
+        "TransactionAbort"
+      ],
+      "contract_sha256": "82b47aaa177387b36976705e12f5ad65de1a108cff540c10ee885071b463d50d",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_admission.py",
+      "names": [
+        "ADOPTION_VALIDATION_LOCK",
+        "active_markdown_coordinator",
+        "active_or_legacy_coordinator",
+        "decoded_image_bytes",
+        "default_coordinator",
+        "require_adopted_once",
+        "require_adopted_through_contention",
+        "retire_strays_before_validation",
+        "retry_adoption_validation",
+        "stable_operation_id",
+        "transient_adoption_contention"
+      ],
+      "contract_sha256": "b3e0aec228babeb48b3dca7fe718d4fccce1143cf80410179b10a67a86c8cdd0",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_append.py",
+      "names": [
+        "append_candidate_id",
+        "append_captured_knowledge",
+        "append_knowledge",
+        "append_owned_knowledge",
+        "append_preconditions",
+        "append_until_committed",
+        "committed_append_content_matches",
+        "refused_parent",
+        "run_append_candidate"
+      ],
+      "contract_sha256": "64e4c26c01868bb3a04d52d990c95b8410776ef67fd600a6e432244c37c02c95",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_busy_append_repeats_its_attempt.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_apply.py",
+      "names": [
+        "TransactionApplication"
+      ],
+      "contract_sha256": "ea11a0da128295320be7280bff838ab889cb81d7e2792d7097b3fd0def4f4d1e",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_checkpoints.py",
+      "names": [
+        "ProjectCheckpointOperations"
+      ],
+      "contract_sha256": "2d9a8e8ae46e2d1eb74373b6c2579a872de1d61254925bb1f94a2debce6025a8",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_coordinator.py",
+      "names": [
+        "MarkdownCoordinator"
+      ],
+      "contract_sha256": "5033973391b97bc338d02eed2a773ad25883e89b8325a9ccc726cd9e537f58ee",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_busy_append_repeats_its_attempt.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_coordinator_base.py",
+      "names": [
+        "MarkdownCoordinatorFoundation"
+      ],
+      "contract_sha256": "13444416043976782cd32d7fcaecc834591b6eab1d2d652510970f8af9e9247b",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_migration.py",
+      "names": [
+        "coordinator_table_columns",
+        "drop_objects_of_kind",
+        "expiry_is_live",
+        "initialize_coordinator_v3_candidate",
+        "require_rebuildable_schema",
+        "table_has_rows"
+      ],
+      "contract_sha256": "036474cdafa7836a52edbd45390f88a77ff551259f2a7008339948d40177b8e3",
+      "integration_tests": [
+        "tests/test_a_check_is_judged_when_it_ends.py",
+        "tests/test_a_check_names_its_cause.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_mutation.py",
+      "names": [
+        "mutate_knowledge",
+        "mutate_knowledge_in_transaction",
+        "mutate_owned_knowledge",
+        "settle_operation"
+      ],
+      "contract_sha256": "3268fbcd6e69ece0e212348340c1754359914fb2a983337e5cd0d007d062ffdc",
+      "integration_tests": [
+        "tests/test_a_block_opens_one_entry.py",
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_busy_append_repeats_its_attempt.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_operations.py",
+      "names": [
+        "OperationExecution"
+      ],
+      "contract_sha256": "db34e84ad368b4fc5d92876c9678fee71bd21800d82b67218703f7fdce19845b",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_preconditions.py",
+      "names": [
+        "PreconditionChecks"
+      ],
+      "contract_sha256": "5785c3bc3a1123cb603e6df8e8dc1ea6acc09242210e9ad5724d36ef6d8cddc0",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_prepare.py",
+      "names": [
+        "TransactionPreparation"
+      ],
+      "contract_sha256": "8abc26957279ec06ab6c361f5e3c7ba6a8e4e5db3b90d53712212afc797f0a27",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_records.py",
+      "names": [
+        "ChangeKind",
+        "CommittedWriteAuthority",
+        "IntentFence",
+        "MarkdownChange",
+        "MarkdownOperation",
+        "OperationBoundElsewhereError",
+        "PreconditionChangedError",
+        "ProjectCheckpointReservation",
+        "ProjectPendingPriorError",
+        "RefusedArgument",
+        "RefusedOperation",
+        "TargetBoundaryFailure",
+        "TargetPathBoundaryError",
+        "TargetStateMismatch",
+        "TargetTooLargeError",
+        "TransactionAbortReceipt",
+        "TransactionDriftError",
+        "TransactionFailure",
+        "TransactionImageError",
+        "TransactionRecord",
+        "TransactionStateError",
+        "WriterAdmissionTimeout",
+        "require_bytes"
+      ],
+      "contract_sha256": "208b3cb8eac6c23e11274c9847f75006729bf40e6339ae40dcb97983fec8a030",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_records_access.py",
+      "names": [
+        "TransactionRecordOperations"
+      ],
+      "contract_sha256": "8d744ddf100d6075441d4a53eab37ed42074ba1c433bd8edff7fd490c60f32ef",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_recovery.py",
+      "names": [
+        "TransactionRecovery"
+      ],
+      "contract_sha256": "7ea6fffa4c257c68457708e84c0d173457a6303fb11543f7c0804ed9d20f8dd0",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_targets.py",
+      "names": [
+        "TargetCaptureOperations"
+      ],
+      "contract_sha256": "d472e81c11a5508e92eb79efa95fc0497fc5080017e5054eee9c9318dcd58777",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_undo.py",
+      "names": [
+        "TransactionUndoAndPrune"
+      ],
+      "contract_sha256": "672ad4ee1f51d22ed1a0c5ae47e6d2be202249893c3170aa205a3a315f0dbca4",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_writer_gate.py",
+      "names": [
+        "WriterGateOperations"
+      ],
+      "contract_sha256": "e88da4d4989942b7445e73fa60d7e3668d6fd297396126bbde2aeda0d7779301",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "904b31835161d11b79ab937c4651d91dd6966bdaa1f33e93b9ea768f519d2d3b",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_bad_model_file_is_fetched_again.py",
+        "tests/test_a_block_opens_one_entry.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_contracts.py",
+      "names": [
+        "OperationalDatabaseContract"
+      ],
+      "contract_sha256": "819cca1e291f921a6fb6e6e90a16fb4a05b0659e020227653689af60d484a1a8",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_deadlines.py",
+      "names": [
+        "busy_database"
+      ],
+      "contract_sha256": "c16bee6911734076e435ddf6dbe450d95aa07c94fca70e9934b295ca61ab5643",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_io.py",
+      "names": [
+        "open_readonly_operational_db"
+      ],
+      "contract_sha256": "ee94d29558e055bbff68f8247575ed84ab6d84b559eebf24b508977d35bc91db",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_transactions.py",
+      "names": [
+        "begin_immediate"
+      ],
+      "contract_sha256": "fb9ecde177ce133dd8e6e34a67214ca0c051a02d758e8611dac84b568d955373",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/windows_acl.py",
+      "names": [
+        "acl_entry_lines",
+        "acl_failure",
+        "acl_line_names_owner",
+        "acl_lines_naming",
+        "acl_output_encodings",
+        "acl_output_text",
+        "acl_permission",
+        "apply_windows_acl",
+        "console_code_page",
+        "harden_windows_acl",
+        "names_identity",
+        "read_windows_acl",
+        "require_verified_windows_owner_acl",
+        "run_acl_command",
+        "verified_owner_acl_line",
+        "verify_no_other_acl",
+        "verify_windows_owner_acl",
+        "windows_acl_identity"
+      ],
+      "contract_sha256": "fab8755350792d8a3f388a2f0f5c19fb2b4fe45f9de319f756d367e4cd44adbb",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/windows_native.py",
+      "names": [
+        "WINDOWS_KERNEL32_PROTOTYPES",
+        "WindowsDispositionInformation",
+        "WindowsFileInformation",
+        "windows_kernel32"
+      ],
+      "contract_sha256": "a73e70bd50b004e687cc17b7ecc88f38ea52220565e7e2da48fc04b124fecf08",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "ProcessIdentity",
+        "process_identity_state"
+      ],
+      "contract_sha256": "ad2b4e680b4994b37496b0612fe6cfa831f3d1ba487957e02e55e7d921a75305",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/process_liveness.py",
+      "names": [
+        "owner_alive",
+        "pid_alive"
+      ],
+      "contract_sha256": "b9acd61c3227e990f65c461abf6dae58203d1ff6d3374df48431a980e541a787",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "active_memory_queue"
+      ],
+      "contract_sha256": "11258c8692aee5dfd1b79560234b5b904f6ad67572a2a07c430f063a374f7682",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_blocked_task_has_a_way_back.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "OperationalDatabaseContractError",
+        "set_owner_only",
+        "validate_state_root"
+      ],
+      "contract_sha256": "8fdf8ce1eff8d11e9256af50b19ed077443020803ddab6f270c1558fff6dad90",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "983dd096d99bafff98ca0aaa2cd722477333e30eed4bfa9297d1830c635e8d90",
+      "integration_tests": [
+        "tests/test_capture_admission_does_not_scan_retained_history.py"
+      ]
+    }
+  ]
+}

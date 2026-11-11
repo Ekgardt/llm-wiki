@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.compile_paths import compile_pipeline_binds
+
 
 @pytest.fixture(autouse=True)
 def _no_operator_dlp_policy(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -84,11 +86,10 @@ def _write_dlp_policy(path: Path, *, literals: list[str], fingerprints: list[str
 
 
 def test_compile_memory_removes_heuristic_lifecycle_mutation():
-    import compile_memory
 
-    assert not hasattr(compile_memory, "_check_contradictions_pre_write")
-    assert not hasattr(compile_memory, "_mark_superseded")
-    assert not hasattr(compile_memory, "_mark_refined")
+    assert not compile_pipeline_binds("_check_contradictions_pre_write")
+    assert not compile_pipeline_binds("_mark_superseded")
+    assert not compile_pipeline_binds("_mark_refined")
 
 
 @pytest.mark.parametrize(
@@ -108,7 +109,7 @@ def test_export_verification_blocks_secret_content_without_echoing_it(
         {"knowledge/notes/example.md": f"token={secret}".encode()},
     )
 
-    result = export_vault._verify_archive(archive)
+    result = export_vault.verify_archive(archive)
     output = capsys.readouterr()
 
     assert result == 1
@@ -130,7 +131,7 @@ def test_export_verification_blocks_global_tar_metadata_without_echoing_it(tmp_p
         info.size = 5
         archive.addfile(info, io.BytesIO(b"clean"))
 
-    result = export_vault._verify_archive(archive_path)
+    result = export_vault.verify_archive(archive_path)
     output = capsys.readouterr()
 
     assert result == 1
@@ -147,7 +148,7 @@ def test_export_verification_uses_literals_and_exact_member_fingerprints(tmp_pat
     _write_dlp_policy(policy, literals=["ALPHA-PRIVATE"], fingerprints=[])
     monkeypatch.setenv("LLM_WIKI_DLP_POLICY", str(policy))
 
-    assert export_vault._verify_archive(archive) == 1
+    assert export_vault.verify_archive(archive) == 1
 
     allowed = hashlib.sha256(protected).hexdigest()
     _write_dlp_policy(
@@ -155,7 +156,7 @@ def test_export_verification_uses_literals_and_exact_member_fingerprints(tmp_pat
         literals=["ALPHA-PRIVATE"],
         fingerprints=[allowed],
     )
-    assert export_vault._verify_archive(archive) == 0
+    assert export_vault.verify_archive(archive) == 0
 
 
 def test_export_verification_rejects_ambiguous_member_paths(tmp_path):
@@ -164,7 +165,7 @@ def test_export_verification_rejects_ambiguous_member_paths(tmp_path):
     archive = tmp_path / "export.zip"
     _write_test_archive(archive, "zip", {"../outside.md": b"clean"})
 
-    assert export_vault._verify_archive(archive) == 1
+    assert export_vault.verify_archive(archive) == 1
 
 
 @pytest.mark.parametrize(("archive_format", "suffix"), (("zip", ".zip"), ("tar", ".tar")))
@@ -174,7 +175,7 @@ def test_export_verification_rejects_link_members(tmp_path, archive_format, suff
     archive = tmp_path / f"export{suffix}"
     _write_link_archive(archive, archive_format)
 
-    assert export_vault._verify_archive(archive) == 1
+    assert export_vault.verify_archive(archive) == 1
 
 
 def test_export_verification_bounds_uncompressed_member_reads(tmp_path, monkeypatch):
@@ -184,7 +185,7 @@ def test_export_verification_bounds_uncompressed_member_reads(tmp_path, monkeypa
     _write_test_archive(archive, "zip", {"notes/large.md": b"12345"})
     monkeypatch.setattr(export_vault, "MAX_MEMBER_BYTES", 4, raising=False)
 
-    assert export_vault._verify_archive(archive) == 1
+    assert export_vault.verify_archive(archive) == 1
 
 
 def test_export_verification_bounds_archive_member_count(tmp_path, monkeypatch):
@@ -194,7 +195,7 @@ def test_export_verification_bounds_archive_member_count(tmp_path, monkeypatch):
     _write_test_archive(archive, "zip", {"one.md": b"1", "two.md": b"2"})
     monkeypatch.setattr(export_vault, "MAX_ARCHIVE_MEMBERS", 1)
 
-    assert export_vault._verify_archive(archive) == 1
+    assert export_vault.verify_archive(archive) == 1
 
 
 def test_export_verification_bounds_total_uncompressed_size(tmp_path, monkeypatch):
@@ -204,7 +205,7 @@ def test_export_verification_bounds_total_uncompressed_size(tmp_path, monkeypatc
     _write_test_archive(archive, "zip", {"one.md": b"123", "two.md": b"456"})
     monkeypatch.setattr(export_vault, "MAX_TOTAL_UNCOMPRESSED_BYTES", 5)
 
-    assert export_vault._verify_archive(archive) == 1
+    assert export_vault.verify_archive(archive) == 1
 
 
 def test_export_no_verify_cannot_publish_failed_archive(tmp_path, monkeypatch):
@@ -224,8 +225,8 @@ def test_export_no_verify_cannot_publish_failed_archive(tmp_path, monkeypatch):
         _write_test_archive(output, "zip", {"notes/private.md": secret})
 
     monkeypatch.setattr(export_vault, "parse_args", lambda: args)
-    monkeypatch.setattr(export_vault, "_require_git", lambda: None)
-    monkeypatch.setattr(export_vault, "_git_archive", build)
+    monkeypatch.setattr(export_vault, "require_git", lambda: None)
+    monkeypatch.setattr(export_vault, "git_archive", build)
 
     assert export_vault.main() == 1
     assert not final.exists()

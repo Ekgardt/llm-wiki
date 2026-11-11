@@ -14,38 +14,41 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import memory_queue  # noqa: E402
-from memory_queue import MemoryQueue  # noqa: E402
+import queue_core  # noqa: E402
+from queue_core import (  # noqa: E402
+    MemoryQueue,
+)
 
 
 def _worker_with_seconds_left(tmp_path: Path, monkeypatch, seconds: float):
     queue = MemoryQueue(tmp_path)
     queue.enqueue("query", 1, {})
-    monkeypatch.setattr(memory_queue, "_queue", lambda **kwargs: queue)
-    summary = memory_queue.run_worker(
+    monkeypatch.setattr(queue_core, "default_queue", lambda **kwargs: queue)
+    summary = queue_core.run_worker(
         lambda task: True,
         max_tasks=1,
         max_seconds=int(seconds),
         monotonic=lambda: 0.0,
-        processor_runner=memory_queue._run_processor_inline,
-        min_claim_seconds=memory_queue.WORKER_MIN_CLAIM_SECONDS,
+        processor_runner=queue_core.run_processor_inline,
+        min_claim_seconds=queue_core.WORKER_MIN_CLAIM_SECONDS,
     )
     return summary, queue
 
 
 def test_too_little_time_left_claims_nothing_and_spends_no_attempt(tmp_path, monkeypatch):
-    summary, queue = _worker_with_seconds_left(tmp_path, monkeypatch, memory_queue.WORKER_MIN_CLAIM_SECONDS - 1)
+    summary, queue = _worker_with_seconds_left(tmp_path, monkeypatch, queue_core.WORKER_MIN_CLAIM_SECONDS - 1)
     task = queue.list_tasks(states=("ready",))[0]
 
     assert (summary.processed, task.attempts) == (0, 0)
 
 
 def test_enough_time_left_still_works(tmp_path, monkeypatch):
-    summary, _queue = _worker_with_seconds_left(tmp_path, monkeypatch, memory_queue.WORKER_MIN_CLAIM_SECONDS + 1)
+    summary, _queue = _worker_with_seconds_left(tmp_path, monkeypatch, queue_core.WORKER_MIN_CLAIM_SECONDS + 1)
 
     assert summary.succeeded == 1
 
 
 def test_the_work_command_keeps_the_margin_by_default():
-    arguments = memory_queue._build_cli_parser().parse_args(["work"])
+    arguments = memory_queue.build_cli_parser().parse_args(["work"])
 
-    assert arguments.min_claim_seconds == memory_queue.WORKER_MIN_CLAIM_SECONDS
+    assert arguments.min_claim_seconds == queue_core.WORKER_MIN_CLAIM_SECONDS

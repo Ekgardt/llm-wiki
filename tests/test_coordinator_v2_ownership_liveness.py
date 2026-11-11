@@ -20,7 +20,7 @@ fails closed — an expiry that is absent or unreadable counts as live.
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import markdown_transaction
@@ -42,7 +42,7 @@ def state_root(tmp_path: Path) -> Path:
 
 
 def _stamp(offset: timedelta) -> str:
-    moment = datetime.now(timezone.utc) + offset
+    moment = datetime.now(UTC) + offset
     return moment.isoformat().replace("+00:00", "Z")
 
 
@@ -53,7 +53,7 @@ def _ownership_sql(table: str, expires_at: str) -> str:
             f"('demo', 'token', 1, 'actor', '{expires_at}', '{expires_at}')"
         ),
         "writer_owners": (
-            "INSERT INTO writer_owners VALUES "
+            "INSERT INTO writer_owners (gate_name, owner_token, process_id, thread_id, acquired_at, heartbeat_at, expires_at, fencing_epoch) VALUES "
             f"('global', 'token', 1, 2, '{expires_at}', '{expires_at}', "
             f"'{expires_at}', 1)"
         ),
@@ -117,7 +117,7 @@ def test_an_unreadable_expiry_counts_as_live(vault: Path, state_root: Path) -> N
 def _widen_maintenance_owners(coordinator: MarkdownCoordinator) -> None:
     """Mirror the live shape: the expiry columns arrived by a later ALTER."""
     with sqlite3.connect(coordinator.database_path) as database:
-        columns = markdown_transaction._coordinator_table_columns(
+        columns = markdown_transaction.coordinator_table_columns(
             database, "maintenance_owners"
         )
         added = {"heartbeat_at": "TEXT", "expires_at": "TEXT", "fencing_epoch": "INTEGER"}
@@ -178,10 +178,10 @@ def test_an_owner_row_without_an_expiry_column_still_blocks(
 
 def test_a_naive_expiry_is_read_as_utc(vault: Path, state_root: Path) -> None:
     """Some v2 rows carry no offset; every writer of these tables meant UTC."""
-    naive = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(tzinfo=None)
+    naive = (datetime.now(UTC) - timedelta(hours=1)).replace(tzinfo=None)
 
-    live = markdown_transaction._expiry_is_live(
-        naive.isoformat(), datetime.now(timezone.utc)
+    live = markdown_transaction.expiry_is_live(
+        naive.isoformat(), datetime.now(UTC)
     )
 
     assert live is False

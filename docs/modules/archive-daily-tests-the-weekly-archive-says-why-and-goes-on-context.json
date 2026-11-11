@@ -1,0 +1,264 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/archive-daily-tests-the-weekly-archive-says-why-and-goes-on-context.json",
+    "docs/modules/archive-daily-tests-the-weekly-archive-says-why-and-goes-on.md",
+    "docs/modules/archive-daily.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/archive_daily.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_the_weekly_archive_says_why_and_goes_on.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/archive-daily-tests-the-weekly-archive-says-why-and-goes-on-context.json",
+      "docs/modules/archive-daily-tests-the-weekly-archive-says-why-and-goes-on.md",
+      "tests/test_the_weekly_archive_says_why_and_goes_on.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "immutable_source_digest",
+        "open_stable_range",
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "6c6cdc14f0986be35c678ee13ae8f9a0a20fd0b7f6cd45fe0d45f15dfbd1ed6a",
+      "integration_tests": [
+        "tests/test_the_weekly_archive_says_why_and_goes_on.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_receipts.py",
+      "names": [
+        "compile_receipt_path",
+        "iter_daily_parts",
+        "read_compile_receipt_v3",
+        "receipt_predicate"
+      ],
+      "contract_sha256": "36e25ac8e8a006d2edbe6a73ed53473a9f8a8f971a1b542aa968e316a89a6cfd",
+      "integration_tests": [
+        "tests/test_the_weekly_archive_says_why_and_goes_on.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_resolver.py",
+      "names": [
+        "EvidenceResolutionError",
+        "MAX_DAILY_BYTES",
+        "bounded_directory_entries",
+        "compile_authority_attestation",
+        "daily_entries",
+        "line_span",
+        "owned_source_newlines",
+        "regular_directory",
+        "require_payload_evidence",
+        "source_chunks",
+        "source_range_digest",
+        "validate_bag"
+      ],
+      "contract_sha256": "b874d5b7dcde22fbf0f73cb0321ea2eb6e4a06fdaad1a1936c203a6790338802",
+      "integration_tests": [
+        "tests/test_the_weekly_archive_says_why_and_goes_on.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_receipt_authority.py",
+      "names": [
+        "read_compile_receipt_version"
+      ],
+      "contract_sha256": "fefb0c1793f868e2cf9b6d894731a17d4d2564c66b083678e3588cc0872274de",
+      "integration_tests": [
+        "tests/test_the_weekly_archive_says_why_and_goes_on.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_the_weekly_archive_says_why_and_goes_on.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/receipts.py",
+      "names": [
+        "compile_source_identity"
+      ],
+      "contract_sha256": "ffc783170676fc14822542045b6ba88e5cab904fc5b3c0eda72d2b1d7708a500",
+      "integration_tests": [
+        "tests/test_the_weekly_archive_says_why_and_goes_on.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_the_weekly_archive_says_why_and_goes_on.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_contracts.py",
+      "names": [
+        "QueueOperationError",
+        "SourceFence"
+      ],
+      "contract_sha256": "485876c5651edf5cb6ae1adc754c4fef4dc06677329d1ad76e21ee00f40ecce8",
+      "integration_tests": [
+        "tests/test_the_weekly_archive_says_why_and_goes_on.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/test_the_weekly_archive_says_why_and_goes_on.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "904b31835161d11b79ab937c4651d91dd6966bdaa1f33e93b9ea768f519d2d3b",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_deadlines.py",
+      "names": [
+        "operational_deadline_active"
+      ],
+      "contract_sha256": "b6a31ad07e6c587aeabfc49f66f512ca222ed88ce0bd8a29eafe6eaca6ed4838",
+      "integration_tests": [
+        "tests/test_the_weekly_archive_says_why_and_goes_on.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/windows_acl.py",
+      "names": [
+        "acl_lines_naming",
+        "acl_output_text",
+        "run_acl_command",
+        "windows_acl_identity"
+      ],
+      "contract_sha256": "3fc1cceebe389725c3588e7e74c574298af163f4bc06fde0f2d47877fc2e7850",
+      "integration_tests": [
+        "tests/test_the_weekly_archive_says_why_and_goes_on.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownChange",
+        "UNDO_RETENTION_DAYS",
+        "active_or_legacy_coordinator",
+        "harden_owner_only"
+      ],
+      "contract_sha256": "83823e161bc3c228d1696f4def27a84378e993149eb90fbc83a7643f40165fd9",
+      "integration_tests": [
+        "tests/test_the_weekly_archive_says_why_and_goes_on.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "MemoryQueue",
+        "active_or_legacy_memory_queue"
+      ],
+      "contract_sha256": "d8218ead7196682a810f414ed0776ad4dcfe31caa20ccb1385040dbf91c13a0c",
+      "integration_tests": [
+        "tests/test_the_weekly_archive_says_why_and_goes_on.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "fsync_directory",
+        "fsync_file",
+        "set_owner_only",
+        "validate_state_root"
+      ],
+      "contract_sha256": "575bb4bd4b47590359ce571f827fed40aab97e03ec032f4fc7831664009c692e",
+      "integration_tests": [
+        "tests/test_the_weekly_archive_says_why_and_goes_on.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "describe_error"
+      ],
+      "contract_sha256": "fb304f29eb5f060ccb0503f24561dd6ee4cfb07e2c36b130c00ad9e1c9000eaf",
+      "integration_tests": [
+        "tests/test_the_weekly_archive_says_why_and_goes_on.py"
+      ]
+    }
+  ]
+}

@@ -56,13 +56,13 @@ def test_every_live_answer_skips_the_same_directories(tmp_path):
 
 def _parse_counter(monkeypatch) -> list[str]:
     parsed: list[str] = []
-    real = code_graph._parse_file
+    real = code_graph.parse_file_in_workspace
 
     def counting(path, registry, workspace_root):
         parsed.append(Path(path).name)
         return real(path, registry, workspace_root)
 
-    monkeypatch.setattr(code_graph, "_parse_file", counting)
+    monkeypatch.setattr("llm_wiki.code_graph_parse.parse_file_in_workspace", counting)
     return parsed
 
 
@@ -96,7 +96,7 @@ PYTHON = (
 
 def _without_grammars(monkeypatch) -> None:
     """The documented fallback: a machine with no tree-sitter grammar."""
-    monkeypatch.setattr(code_graph, "_get_parser", lambda language: None)
+    monkeypatch.setattr("llm_wiki.code_graph_parse.parser_attempt", lambda language: (None, None))
 
 
 def test_a_function_found_by_the_regex_fallback_has_an_end(tmp_path, monkeypatch):

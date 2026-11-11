@@ -1,0 +1,316 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/lsp-process-limits.md",
+    "docs/modules/lsp-process-tests-lsp-process-helpers.md",
+    "docs/modules/lsp-process-tests-lsp-process-scenario-helpers.md",
+    "docs/modules/lsp-protocol.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-lsp-process-protocol-violation-context.json",
+    "docs/modules/test-lsp-process-protocol-violation.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/lsp_process_limits.py",
+    "scripts/lsp_protocol.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/lsp_process_helpers.py",
+    "tests/lsp_process_scenario_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_lsp_process_protocol_violation.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-lsp-process-protocol-violation-context.json",
+      "docs/modules/test-lsp-process-protocol-violation.md",
+      "tests/test_lsp_process_protocol_violation.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_cache.py",
+      "names": [
+        "acl_output_text",
+        "acl_principal",
+        "run_acl_command",
+        "verify_owner_only",
+        "windows_acl_identity"
+      ],
+      "contract_sha256": "ca41e72e60467958b7d47ca768c8b6be44cb6827e15858bdc5c08c34d7d3cda7",
+      "integration_tests": [
+        "tests/test_compile_cache.py",
+        "tests/test_compile_critic_drop_cannot_complete_source_work.py",
+        "tests/test_compile_hardening.py"
+      ]
+    },
+    {
+      "provider": "scripts/interruption.py",
+      "names": [
+        "exception_reaches",
+        "interruption_in_chain"
+      ],
+      "contract_sha256": "288b7463bff31b2c554d75143cbdba78b132dcc3d0575468eecff830bd9b4ab9",
+      "integration_tests": [
+        "tests/modules/interruption/test_errors.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_process_cleanup.py",
+      "names": [
+        "StartupCleanupError",
+        "drive_cleanup",
+        "retry_startup_cleanup",
+        "terminal_failure_lsp_process"
+      ],
+      "contract_sha256": "f880d0cbae6712b5d5700b69055554e41380d366ce1d3e352dbbdc9db3777078",
+      "integration_tests": [
+        "tests/test_lsp_process.py",
+        "tests/test_lsp_process_cleanup_errors.py",
+        "tests/test_lsp_process_lease_and_evidence.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_process_failure.py",
+      "names": [
+        "stop_recovery_owner"
+      ],
+      "contract_sha256": "995f2a25af73f86e0305c21a6317a384dc9c218b3213727c88140d976c765278",
+      "integration_tests": [
+        "tests/test_lsp_process.py",
+        "tests/test_lsp_process_autonomous_bootstrap.py",
+        "tests/test_lsp_process_cleanup_errors.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_process_generation.py",
+      "names": [
+        "prepare_generation"
+      ],
+      "contract_sha256": "6fcf8f1228bda72fb3fe0a4a5442ebfbb9241285df3fe2d9b9f6b92bc04832c9",
+      "integration_tests": [
+        "tests/test_a_protocol_warning_reaches_the_log.py",
+        "tests/test_lsp_process.py",
+        "tests/test_lsp_process_autonomous_bootstrap.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_process_launch.py",
+      "names": [
+        "fresh_cleanup_deadline"
+      ],
+      "contract_sha256": "f0f812588dee7ef72525c1aa67a2a9490bdd8e8d6c3eb8a5728a544d16a3ced5",
+      "integration_tests": [
+        "tests/test_an_unread_proc_entry_never_calls_a_group_inert.py",
+        "tests/test_lsp_process.py",
+        "tests/test_lsp_process_autonomous_bootstrap.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_process_owner.py",
+      "names": [
+        "OwnerDirectory"
+      ],
+      "contract_sha256": "2c686e21ebf05f4663ceee2afcc660a187ac20ef27561c68d79be41f33e332fa",
+      "integration_tests": [
+        "tests/test_a_native_server_copy_leaves_with_its_owner.py",
+        "tests/test_lsp_process.py",
+        "tests/test_lsp_process_autonomous_bootstrap.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_process_recovery.py",
+      "names": [
+        "start_lifecycle_workers"
+      ],
+      "contract_sha256": "f96c45e869ac5ca290482d4c44aa8349b1554d543972943222d0f244fe05c00e",
+      "integration_tests": [
+        "tests/test_an_unread_proc_entry_never_calls_a_group_inert.py",
+        "tests/test_lsp_process.py",
+        "tests/test_lsp_process_autonomous_bootstrap.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_process_restart.py",
+      "names": [
+        "restart_generation"
+      ],
+      "contract_sha256": "8d59a786d95a2223613adbd24dfd773c21d90341aeb07aa48a74e1ed9458b36a",
+      "integration_tests": [
+        "tests/test_lsp_process.py",
+        "tests/test_lsp_process_autonomous_bootstrap.py",
+        "tests/test_lsp_process_protocol_violation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_process_state.py",
+      "names": [
+        "FailureEvidenceIdentity",
+        "Generation",
+        "LifecycleCoordinator",
+        "LifecyclePhase",
+        "ProcessTree",
+        "coordinator_has_ownership",
+        "mark_generation_expected_exit",
+        "pending_startup_cleanup_snapshot",
+        "queue_generation_failure",
+        "queue_owner_failure",
+        "release_lifecycle",
+        "remember_background_cleanup_error",
+        "subprocess",
+        "validate_failure_record"
+      ],
+      "contract_sha256": "3b76ee4208d3978032fce19821bc0d4110f520b3aeec51625b12befdb261b538",
+      "integration_tests": [
+        "tests/test_a_retained_cleanup_owner_leaves_the_module_registry.py",
+        "tests/test_a_stranded_session_close_is_retried_by_the_next_caller.py",
+        "tests/test_lsp_process.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/lsp_wire.py",
+      "names": [
+        "FrameTooLarge",
+        "JSON_RPC_INTEGER_MAX",
+        "JsonRpcFrameReader",
+        "MAX_FRAME_BYTES",
+        "MAX_HEADER_BYTES",
+        "MAX_JSON_DEPTH",
+        "MAX_SKIPPED_FRAME_BYTES",
+        "ProtocolViolation",
+        "encode_frame",
+        "json_depth"
+      ],
+      "contract_sha256": "828591752c1c468fa2ef87c1eb990efb86277f6fc6720292d5c424a6fae72bec",
+      "integration_tests": [
+        "tests/modules/lsp_wire/test_wire.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_process.py",
+      "names": [
+        "LspProcess",
+        "ProcessState"
+      ],
+      "contract_sha256": "d0659bb09e58f95c71a9cb944cb009342a15d23b8c4aaa826120a974180d3165",
+      "integration_tests": [
+        "tests/test_a_dead_owner_root_is_swept_when_the_next_server_starts.py",
+        "tests/test_a_failed_server_is_started_again.py",
+        "tests/test_a_failed_server_leaves_its_redacted_last_words.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_profiles.py",
+      "names": [
+        "server_notification_union"
+      ],
+      "contract_sha256": "74fdcd7bc1dd21b34cd2403e710b76b641c939fd537d32c034c0bff481808cfb",
+      "integration_tests": [
+        "tests/modules/lsp_profiles/test_registry.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_platform_without_a_pin_is_refused_by_name.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_security.py",
+      "names": [
+        "redact_lsp_text"
+      ],
+      "contract_sha256": "a31622c6f2f15f192191200f623f9a6844bd45a1b8b9bf6bd6a3c7474eff2593",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_failed_server_leaves_its_redacted_last_words.py",
+        "tests/test_a_refused_path_names_its_component_and_its_rule.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    },
+    {
+      "provider": "scripts/windows_workspace.py",
+      "names": [
+        "close_handle",
+        "create_file",
+        "delete_handle",
+        "flush_directory",
+        "flush_file",
+        "identity",
+        "open_deletable_file",
+        "publish_file",
+        "replace_file",
+        "write_all"
+      ],
+      "contract_sha256": "5c6666bfa6390b74ec8ecacbd5b03ff32bded46c5400cb8458354ef248893221",
+      "integration_tests": [
+        "tests/modules/queue_artifacts/test_artifacts.py",
+        "tests/modules/runtime_fingerprints/test_fingerprints.py",
+        "tests/modules/runtime_fingerprints/test_windows_metadata.py"
+      ]
+    }
+  ]
+}

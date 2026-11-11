@@ -16,6 +16,9 @@ if str(ROOT / "scripts") not in sys.path:
 
 import integration_hook_config  # noqa: E402
 
+pytestmark = pytest.mark.usefixtures("unconfigured_model_settings")
+
+
 LOCAL_ONLY = {
     "MEMORY_LLM_PROVIDER": "ollama",
     "OLLAMA_NO_CLOUD": "1",
@@ -71,11 +74,11 @@ def test_the_test_provider_still_persists_nothing(monkeypatch) -> None:
 
 
 def test_a_scheduler_unit_carries_the_local_only_switch(tmp_path, monkeypatch) -> None:
-    import install_control
+    from llm_wiki import install_scheduler_render
 
     _install_environment(monkeypatch, LOCAL_ONLY)
 
-    unit = install_control._systemd_service(
+    unit = install_scheduler_render.systemd_service(
         tmp_path, tmp_path / "state", tmp_path / "uv", "nightly"
     ).decode()
 

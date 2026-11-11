@@ -1,0 +1,235 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/corpus-snapshot-tests-a-lagging-index-never-quotes-stale-text-context.json",
+    "docs/modules/corpus-snapshot-tests-a-lagging-index-never-quotes-stale-text.md",
+    "docs/modules/corpus-snapshot.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/corpus_snapshot.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_lagging_index_never_quotes_stale_text.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/corpus-snapshot-tests-a-lagging-index-never-quotes-stale-text-context.json",
+      "docs/modules/corpus-snapshot-tests-a-lagging-index-never-quotes-stale-text.md",
+      "tests/test_a_lagging_index_never_quotes_stale_text.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "MAX_KNOWLEDGE_PAGE_BYTES",
+        "SourceChangedDuringRead",
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "6dfa51ce4d38c93aedec8d178d2d08b9706e7741bd22279f96a51fb8d1f68691",
+      "integration_tests": [
+        "tests/test_a_lagging_index_never_quotes_stale_text.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_evidence.py",
+      "names": [
+        "archived_source_path",
+        "is_breadcrumb_document",
+        "restore_source"
+      ],
+      "contract_sha256": "6964f02b971a06d24e50725722573d396570017536787a0703d3c65ad54c1e58",
+      "integration_tests": [
+        "tests/test_a_lagging_index_never_quotes_stale_text.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_protocol.py",
+      "names": [
+        "RECORD_PARSING",
+        "RecordParsing",
+        "using_record_parsing"
+      ],
+      "contract_sha256": "cecd7f6b4a927713e68c8ea2f733741abf677dc7071d31d42e897484bf955b0b",
+      "integration_tests": [
+        "tests/test_a_lagging_index_never_quotes_stale_text.py"
+      ]
+    },
+    {
+      "provider": "scripts/code_languages.py",
+      "names": [
+        "language_for_path"
+      ],
+      "contract_sha256": "de9eb32f9279792e1fa43cf95f5fbff42305ca46106873d8ba5ff3bf7d614d2b",
+      "integration_tests": [
+        "tests/test_a_lagging_index_never_quotes_stale_text.py"
+      ]
+    },
+    {
+      "provider": "scripts/event_envelope.py",
+      "names": [
+        "native_frame_heading",
+        "native_physical_user_text"
+      ],
+      "contract_sha256": "b1a10802304e4452c78e45021c34c3ebd8bd03a7eecea0460655469f5589683c",
+      "integration_tests": [
+        "tests/test_a_lagging_index_never_quotes_stale_text.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/corpus_membership_policy.py",
+      "names": [
+        "APPROVED_CODE_ROOTS",
+        "ARCHIVE_DIRECTORIES",
+        "GENERATED_DIRECTORIES",
+        "PROJECT_FILES",
+        "VAULT_CODE_ROOTS",
+        "VAULT_SKIP_DIRECTORIES"
+      ],
+      "contract_sha256": "921dbbbaa241dc4ac79d8e69a5fa75ecb9c2eda124a4680409adee343b276a50",
+      "integration_tests": [
+        "tests/test_a_lagging_index_never_quotes_stale_text.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/evidence_reference.py",
+      "names": [
+        "MAX_DAILY_BYTES"
+      ],
+      "contract_sha256": "67bdf6c1a8f32fcf2f7d79b17ad45deed31ece6af1fbd94c3aeb0c3003073943",
+      "integration_tests": [
+        "tests/test_a_lagging_index_never_quotes_stale_text.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/extractor_versions.py",
+      "names": [
+        "CORPUS_EXTRACTOR_VERSION"
+      ],
+      "contract_sha256": "42806c73be5e8cdb642eab60a5d3e608bc965d03ab0d69a519839acf5fb237a6",
+      "integration_tests": [
+        "tests/test_generation_catalog.py",
+        "tests/test_generation_maintenance.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_fences.py",
+      "names": [
+        "closing_fence",
+        "opening_fence"
+      ],
+      "contract_sha256": "f38ec6e20b913f2a661d9c5bf53e1f23159d54bfbe2ed6f3e15c7a832389f789",
+      "integration_tests": [
+        "tests/test_a_lagging_index_never_quotes_stale_text.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_lagging_index_never_quotes_stale_text.py"
+      ]
+    },
+    {
+      "provider": "scripts/page_status.py",
+      "names": [
+        "is_retired"
+      ],
+      "contract_sha256": "49ad14e3e3d61b1a684408df0b40800edf20acd42b02998db97d07538d63ebe8",
+      "integration_tests": [
+        "tests/test_a_lagging_index_never_quotes_stale_text.py"
+      ]
+    },
+    {
+      "provider": "scripts/query_memory.py",
+      "names": [
+        "build_grounded_context"
+      ],
+      "contract_sha256": "d01c911801d68f88b120aa383f7f250a522136a4556bb9fe9995f6d9a1ac5b65",
+      "integration_tests": [
+        "tests/test_a_lagging_index_never_quotes_stale_text.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_lagging_index_never_quotes_stale_text.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_lagging_index_never_quotes_stale_text.py"
+      ]
+    },
+    {
+      "provider": "scripts/settings.py",
+      "names": [
+        "MAX_CORPUS_INSPECTED_ENTRIES",
+        "raise_hint",
+        "setting_value"
+      ],
+      "contract_sha256": "aa2d54b7450f92d2bc91de52f433ebd61f85ef40557866b0f883ce966c1326b7",
+      "integration_tests": [
+        "tests/test_a_lagging_index_never_quotes_stale_text.py"
+      ]
+    },
+    {
+      "provider": "scripts/vault_editorial.py",
+      "names": [
+        "EDITORIAL_NAMES"
+      ],
+      "contract_sha256": "077ffd345188bc0a58980339e0b3573ab5ffa108410f0104e75efdbfefd94e57",
+      "integration_tests": [
+        "tests/test_a_lagging_index_never_quotes_stale_text.py"
+      ]
+    }
+  ]
+}

@@ -13,7 +13,7 @@ import unicodedata
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,6 +23,10 @@ if TYPE_CHECKING:
 
 from bounded_io import MAX_KNOWLEDGE_PAGE_BYTES
 from iso_time import utc_text
+from llm_wiki import runtime_roots
+from llm_wiki.formats.canonical import canonical_json_bytes, sha256_bytes
+from llm_wiki.formats.schema import validate_schema
+from llm_wiki.sqlite_transactions import begin_immediate
 from markdown_transaction import (
     ABSENT,
     MarkdownChange,
@@ -32,12 +36,6 @@ from markdown_transaction import (
     ProjectPendingPriorError,
     TransactionFailure,
     active_or_legacy_coordinator,
-)
-from reliable_memory import (
-    begin_immediate,
-    canonical_json_bytes,
-    sha256_bytes,
-    validate_schema,
 )
 
 JOURNAL_HEADER = """---
@@ -142,7 +140,7 @@ class CheckpointDecision:
     next_token_threshold: int | None = None
 
 
-def _yaml_scalar(value: str) -> str:
+def yaml_scalar(value: str) -> str:
     """One double-quoted YAML scalar.
 
     A project slug is not guaranteed to be plain text: redaction can leave
@@ -275,8 +273,6 @@ class CheckpointReducer:
         if event_id in self.observed_event_ids:
             return True
         self.observed_event_ids[event_id] = None
-        while len(self.observed_event_ids) > 256:
-            self.observed_event_ids.pop(next(iter(self.observed_event_ids)))
         return False
 
     def _decide(
@@ -311,7 +307,8 @@ class CheckpointReducer:
         dirty = event.get("dirty")
         if dirty is True and self.dirty_since is None:
             self.dirty_since = current_time
-        elif dirty is False:
+            return _dirty_active(dirty, self.dirty_since)
+        if dirty is False:
             self.dirty_since = None
             self.dirty_thresholds.clear()
         return _dirty_active(dirty, self.dirty_since)
@@ -440,10 +437,10 @@ class CheckpointReducer:
             "progress_signal_observed": self.host_progress_signals,
             "significant_count": self.significant_count,
             "token_threshold": self.token_threshold,
-            "dirty_since": _timestamp(self.dirty_since) if self.dirty_since else None,
+            "dirty_since": timestamp(self.dirty_since) if self.dirty_since else None,
             "dirty_thresholds": sorted(self.dirty_thresholds),
             "last_checkpoint_at": (
-                _timestamp(self.last_checkpoint_at) if self.last_checkpoint_at else None
+                timestamp(self.last_checkpoint_at) if self.last_checkpoint_at else None
             ),
             "observed_event_ids": list(self.observed_event_ids),
         }
@@ -469,7 +466,7 @@ def _observation_time(event: Mapping[str, object], now: datetime | None) -> date
     current_time = now or _utc_now()
     if current_time.tzinfo is None or current_time.utcoffset() is None:
         raise ValueError("checkpoint observation time must be timezone-aware")
-    return current_time.astimezone(timezone.utc)
+    return current_time.astimezone(UTC)
 
 
 def _observation_outcome(decision: CheckpointDecision) -> str:
@@ -587,7 +584,7 @@ def build_handoff_items(
     )
 
 
-def _render_handoff_items(
+def render_handoff_items(
     items: Sequence[ContextItem],
     *,
     max_chars: int,
@@ -661,7 +658,7 @@ def _degraded_handoff(
         return ProjectHandoffResult(
             "", degraded=True, legacy=legacy, items=(*items, warning_item)
         )
-    handoff = _render_handoff_items(
+    handoff = render_handoff_items(
         items, max_chars=max_chars - len(warning) - 2
     )
     return ProjectHandoffResult(
@@ -698,24 +695,24 @@ def recover_project_handoff(
             render_context=render_context,
         )
     return ProjectHandoffResult(
-        _render_handoff_items(items, max_chars=max_chars) if render_context else "",
+        render_handoff_items(items, max_chars=max_chars) if render_context else "",
         legacy=legacy,
         items=items,
     )
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
-def _timestamp(value: datetime) -> str:
+def timestamp(value: datetime) -> str:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("project lease times must be timezone-aware")
     return utc_text(value)
 
 
 def _parse_timestamp(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return datetime.fromisoformat(value)
 
 
 def _require_journal_bytes(content: bytes) -> None:
@@ -765,9 +762,17 @@ def _validated_journal_event(
     return event
 
 
+def _validated_checkpoint_record(text: str, slug: str, sequence: int) -> dict[str, object]:
+    """Check stored payload syntax and bind it to its actual checkpoint row."""
+    event = _validated_journal_event(text, slug, sequence - 1)
+    if event["sequence"] != sequence:
+        raise ValueError("checkpoint event sequence differs from its stored row")
+    return event
+
+
 def parse_journal_events(slug: str, content: bytes) -> list[dict[str, object]]:
     """Validate and return canonical events from immutable journal bytes."""
-    _require_slug(slug)
+    require_slug(slug)
     _require_journal_bytes(content)
     if not content:
         return []
@@ -881,14 +886,14 @@ def _require_portable_slug(slug: str) -> None:
     _require_unreserved_slug(slug)
 
 
-def _require_slug(slug: str) -> str:
+def require_slug(slug: str) -> str:
     _require_slug_identity(slug)
     _require_slug_path_component(slug)
     _require_portable_slug(slug)
     return slug
 
 
-def _bootstrap_event_identity(slug: str, content: str) -> tuple[str, str, str]:
+def bootstrap_event_identity(slug: str, content: str) -> tuple[str, str, str]:
     normalized = unicodedata.normalize("NFC", slug)
     digest = hashlib.sha256(f"{normalized}\0{content}".encode()).hexdigest()
     return (
@@ -1176,8 +1181,8 @@ def _state_header_lines(project: str, project_root: str, last_sequence: int) -> 
     return [
         "---",
         "type: project-state",
-        f"title: {_yaml_scalar(f'{project} - State')}",
-        f"project: {_yaml_scalar(project)}",
+        f"title: {yaml_scalar(f'{project} - State')}",
+        f"project: {yaml_scalar(project)}",
         "generated: true",
         f"last_applied_sequence: {last_sequence}",
         "---",
@@ -1362,7 +1367,7 @@ def _bootstrap_event_from_state(
     text = state.decode("utf-8", errors="replace")
     if not _owns_legacy_state(text, provenance.get("worktree")):
         return None
-    occurrence_id, idempotency_key, stable_hash = _bootstrap_event_identity(slug, text)
+    occurrence_id, idempotency_key, stable_hash = bootstrap_event_identity(slug, text)
     sections = _legacy_sections(text)
     fields = _legacy_fields(sections)
     legacy_context = _legacy_context_text(text, sections)
@@ -1394,12 +1399,12 @@ def _legacy_probe_event(project_root: Path | str) -> dict[str, object]:
     }
 
 
-def _project_lease_precondition(slug: str, lease: ProjectLease) -> dict[str, object]:
+def project_lease_precondition(slug: str, lease: ProjectLease) -> dict[str, object]:
     return {
         "project": slug,
         "lease_token": lease.token,
         "fencing_epoch": lease.epoch,
-        "expires_at": _timestamp(lease.expires_at),
+        "expires_at": timestamp(lease.expires_at),
     }
 
 
@@ -1680,7 +1685,7 @@ def _checkpoint_preconditions(
 ) -> dict[str, object]:
     return {
         **_sealed_precondition(sealed),
-        "project_lease": _project_lease_precondition(slug, lease),
+        "project_lease": project_lease_precondition(slug, lease),
         f"knowledge/projects/{slug}/journal.md": _hash_or_absent(
             current_journal, bool(current_journal)
         ),
@@ -1690,7 +1695,7 @@ def _checkpoint_preconditions(
     }
 
 
-def _apply_transaction(
+def apply_transaction(
     coordinator: MarkdownCoordinator,
     transaction_id: str,
     writer_wait_seconds: float | None,
@@ -1736,7 +1741,7 @@ class ProjectStore:
         self._clock = clock
 
     @classmethod
-    def _from_v3_candidate(
+    def from_v3_candidate(
         cls,
         vault: Path,
         *,
@@ -1745,7 +1750,7 @@ class ProjectStore:
     ) -> ProjectStore:
         candidate = Path(state_root) / "run/markdown-transactions-v3.candidate.sqlite3"
         store = cls.__new__(cls)
-        store.coordinator = MarkdownCoordinator._from_v3_candidate(
+        store.coordinator = MarkdownCoordinator.from_v3_candidate(
             candidate, state_root=Path(state_root)
         )
         store.vault = Path(vault).resolve(strict=True)
@@ -1755,7 +1760,7 @@ class ProjectStore:
         return store
 
     def _project_directory(self, slug: str) -> Path:
-        slug = _require_slug(slug)
+        slug = require_slug(slug)
         projects = self.vault / "knowledge" / "projects"
         target = projects / slug
         try:
@@ -1775,7 +1780,7 @@ class ProjectStore:
         now: datetime | None = None,
         ownership: OwnerLease | None = None,
     ) -> ProjectLease:
-        slug = _require_slug(slug)
+        slug = require_slug(slug)
         self._project_directory(slug)
         owner = _require_owner(owner)
         _require_lease_ttl(ttl)
@@ -1853,8 +1858,8 @@ class ProjectStore:
                 token,
                 epoch,
                 owner,
-                _timestamp(expires_at),
-                _timestamp(current_time),
+                timestamp(expires_at),
+                timestamp(current_time),
             ),
         )
         return token, epoch
@@ -1875,16 +1880,16 @@ class ProjectStore:
             "UPDATE project_leases SET expires_at = ?, heartbeat_at = ? "
             "WHERE project = ? AND lease_token = ? AND fencing_epoch = ?",
             (
-                _timestamp(expires_at),
-                _timestamp(current_time),
+                timestamp(expires_at),
+                timestamp(current_time),
                 slug,
                 token,
                 row["fencing_epoch"],
             ),
         )
         renewed = dict(row)
-        renewed["expires_at"] = _timestamp(expires_at)
-        renewed["heartbeat_at"] = _timestamp(current_time)
+        renewed["expires_at"] = timestamp(expires_at)
+        renewed["heartbeat_at"] = timestamp(current_time)
         return _lease_from_row(renewed)
 
     def _ownership_registry(self, clock: Callable[[], datetime] | None = None):
@@ -1901,7 +1906,7 @@ class ProjectStore:
         effective = utc_now if clock is None else clock
         if getattr(self.coordinator, "_database_contract", None) is None:
             return OwnershipRegistry(self.state_root, clock=effective)
-        return OwnershipRegistry._from_adopted_database(
+        return OwnershipRegistry.from_adopted_database(
             self.state_root, self.coordinator.database_path, clock=effective
         )
 
@@ -2019,7 +2024,7 @@ class ProjectStore:
         updated = database.execute(
             "UPDATE project_leases SET expires_at=?,heartbeat_at=? "
             "WHERE project=? AND lease_token=? AND fencing_epoch=?",
-            (_timestamp(expires_at), _timestamp(now), slug, token, epoch),
+            (timestamp(expires_at), timestamp(now), slug, token, epoch),
         ).rowcount
         if updated != 1:
             raise ProjectFenceError("project lease is stale or expired")
@@ -2056,8 +2061,8 @@ class ProjectStore:
                 lease.token,
                 lease.epoch,
                 lease.owner,
-                _timestamp(lease.expires_at),
-                _timestamp(lease.heartbeat_at),
+                timestamp(lease.expires_at),
+                timestamp(lease.heartbeat_at),
                 ownership.role,
                 ownership.scope,
                 ownership.actor_id,
@@ -2096,8 +2101,8 @@ class ProjectStore:
                 "UPDATE project_leases SET expires_at=?, heartbeat_at=? "
                 "WHERE project=? AND lease_token=? AND fencing_epoch=?",
                 (
-                    _timestamp(expires_at),
-                    _timestamp(current_time),
+                    timestamp(expires_at),
+                    timestamp(current_time),
                     lease.slug,
                     lease.token,
                     lease.epoch,
@@ -2121,13 +2126,13 @@ class ProjectStore:
                 "WHERE project = ? AND lease_token = ? AND fencing_epoch = ? "
                 "AND owner = ? AND expires_at > ?",
                 (
-                    _timestamp(expires_at),
-                    _timestamp(current_time),
+                    timestamp(expires_at),
+                    timestamp(current_time),
                     lease.slug,
                     lease.token,
                     lease.epoch,
                     lease.owner,
-                    _timestamp(current_time),
+                    timestamp(current_time),
                 ),
             ).rowcount
             if updated != 1:
@@ -2149,7 +2154,7 @@ class ProjectStore:
         *,
         writer_wait_seconds: float | None = None,
     ) -> CheckpointReceipt:
-        slug = _require_slug(slug)
+        slug = require_slug(slug)
         _require_owner(owner)
         normalized_event = self.coordinator.normalize_project_checkpoint(slug, event)
         self.recover(slug, writer_wait_seconds=writer_wait_seconds)
@@ -2294,7 +2299,7 @@ class ProjectStore:
     def _require_recover_scope(self, slug: str | None) -> None:
         if slug is None:
             return
-        _require_slug(slug)
+        require_slug(slug)
         self._project_directory(slug)
 
     def _pending_candidates(self, slug: str | None) -> set[tuple[str, int]]:
@@ -2481,7 +2486,7 @@ class ProjectStore:
         `repair_orphaned_checkpoint_names` gives a row by hand.
         """
         fresh = self.coordinator.retry_unsettled_sequence(
-            row.project, row.sequence, _project_lease_precondition(row.project, lease)
+            row.project, row.sequence, project_lease_precondition(row.project, lease)
         )
         if fresh is None:
             return None
@@ -2550,14 +2555,14 @@ class ProjectStore:
 
     def committed_events(self, slug: str) -> list[dict[str, object]]:
         """Every committed checkpoint event of the slug, in sequence order."""
-        slug = _require_slug(slug)
+        slug = require_slug(slug)
         with self.coordinator._connect() as database:
             rows = database.execute(
-                "SELECT event_json FROM project_checkpoints WHERE project = ? "
+                "SELECT sequence, event_json FROM project_checkpoints WHERE project = ? "
                 "AND state = 'committed' ORDER BY sequence",
                 (slug,),
             ).fetchall()
-        return [json.loads(row[0]) for row in rows]
+        return [_validated_checkpoint_record(row[1], slug, row[0]) for row in rows]
 
     def rebuild_journal(self, slug: str) -> dict[str, object]:
         """Write the journal and its projection back from the committed checkpoints.
@@ -2572,7 +2577,7 @@ class ProjectStore:
         read and the write was left out of the rebuilt journal. See
         `docs/research/2026-09-18-a-rebuild-takes-the-lease-its-siblings-take.md`.
         """
-        slug = _require_slug(slug)
+        slug = require_slug(slug)
         lease = self.acquire_lease(slug, "journal-rebuild")
         try:
             return self._rebuild_under_lease(slug)
@@ -2580,7 +2585,7 @@ class ProjectStore:
             self._release(lease)
 
     def _rebuild_under_lease(self, slug: str) -> dict[str, object]:
-        from markdown_transaction import _mutate_knowledge
+        from markdown_transaction import mutate_knowledge_in_transaction
 
         events = self.committed_events(slug)
         if not events:
@@ -2594,7 +2599,7 @@ class ProjectStore:
         for segment_path, segment_bytes in sealed:
             changes[self.vault / segment_path] = segment_bytes
         last = int(records[-1]["sequence"])
-        transaction = _mutate_knowledge(
+        transaction = mutate_knowledge_in_transaction(
             self.coordinator, f"journal-rebuild:{slug}:{last}:{uuid.uuid4().hex}", changes, (), None
         )
         released = self._release_parked_checkpoints(slug, last)
@@ -2680,7 +2685,7 @@ class ProjectStore:
             "project": slug,
             "lease_token": lease.token,
             "fencing_epoch": lease.epoch,
-            "expires_at": _timestamp(lease.expires_at),
+            "expires_at": timestamp(lease.expires_at),
         }
         reservation = self.coordinator.reserve_project_checkpoint(
             slug, event, precondition
@@ -2696,7 +2701,7 @@ class ProjectStore:
         writer_wait_seconds: float | None = None,
     ) -> CheckpointReceipt:
         slug = row.project
-        event = json.loads(row.event_json)
+        event = _validated_checkpoint_record(row.event_json, slug, row.sequence)
         with self.coordinator._connect() as database:
             self.coordinator._check_project_head(database, slug, row.sequence)
         lease = self.heartbeat(lease)
@@ -2728,19 +2733,23 @@ class ProjectStore:
             writer_wait_seconds,
         )
 
-    def _checkpoint_writer_gate(self, lease: ProjectLease):
-        """The gate this store already owns, or none at all before adoption.
+    def _checkpoint_writer_gate(
+        self, lease: ProjectLease, writer_wait_seconds: float | None
+    ):
+        """Keep the caller's wait budget when lending the adopted owner's gate.
 
         The canonical registry allows one owner row per actor, and a v3 project
         lease is that row. Letting `prepare` claim a second `markdown-writer`
         row fails with `owner_identity_conflict`, so the adopted path lends the
         gate the owner it already holds, exactly as `mutate_owned_knowledge`
-        does for the capture worker. Before adoption there is no canonical
-        owner and `prepare` claims the legacy gate itself, as it always did.
+        does for the capture worker. Before adoption prepare and apply acquire
+        their own gate with the caller's budget, preserving their separate leases.
         """
         if lease._ownership is None:
             return contextlib.nullcontext()
-        return self.coordinator.writer_gate(owner=lease._ownership)
+        return self.coordinator.writer_gate(
+            owner=lease._ownership, wait_seconds=writer_wait_seconds
+        )
 
     def _committed_checkpoint(
         self,
@@ -2750,12 +2759,13 @@ class ProjectStore:
         preconditions: dict[str, object],
         writer_wait_seconds: float | None,
     ) -> CheckpointReceipt:
-        with self._checkpoint_writer_gate(lease):
+        with self._checkpoint_writer_gate(lease, writer_wait_seconds):
             transaction = self.coordinator.prepare(
                 changes,
                 operation_id=row.operation_id,
                 preconditions=preconditions,
                 project_reservation=row,
+                writer_wait_seconds=writer_wait_seconds,
             )
             return self._apply_checkpoint(
                 row, lease, transaction, writer_wait_seconds
@@ -2772,7 +2782,7 @@ class ProjectStore:
         # narrows the window between the last heartbeat and the apply.
         lease = self._refreshed_lease_precondition(row.project, lease, transaction.id)
         lease = self._refreshed_lease_precondition(row.project, lease, transaction.id)
-        committed = _apply_transaction(
+        committed = apply_transaction(
             self.coordinator, transaction.id, writer_wait_seconds
         )
         if committed.state != "committed":
@@ -2784,7 +2794,7 @@ class ProjectStore:
     ) -> ProjectLease:
         lease = self.heartbeat(lease)
         self.coordinator.refresh_project_lease_precondition(
-            transaction_id, _project_lease_precondition(slug, lease)
+            transaction_id, project_lease_precondition(slug, lease)
         )
         return lease
 
@@ -2800,7 +2810,7 @@ class ProjectStore:
             database.execute(
                 "UPDATE project_leases SET expires_at = ? WHERE project = ? "
                 "AND lease_token = ? AND fencing_epoch = ?",
-                (_timestamp(now), lease.slug, lease.token, lease.epoch),
+                (timestamp(now), lease.slug, lease.token, lease.epoch),
             )
 
     def _release_v3(self, database, lease: ProjectLease) -> None:
@@ -2869,13 +2879,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     import argparse
 
-    from memory_state import ROOT, STATE_ROOT
 
     parser = argparse.ArgumentParser(description=main.__doc__)
     parser.add_argument("--rebuild", metavar="SLUG", required=True, help="project slug to rebuild")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    store = ProjectStore(ROOT, STATE_ROOT)
+    store = ProjectStore(runtime_roots.vault_root(), runtime_roots.state_root())
     report = store.rebuild_journal(args.rebuild)
     report["recovered"] = len(store.recover(args.rebuild))
     print(json.dumps(report, ensure_ascii=False) if args.json else f"rebuilt {report['project']}: {report['events']} events, head {report['last_sequence']}, {report['recovered']} pending settled")

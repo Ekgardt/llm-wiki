@@ -15,7 +15,7 @@ hook failures accumulated over a day, one per session end.
 
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -24,7 +24,7 @@ import repair_orphaned_checkpoint_names as repair  # noqa: E402
 
 BATCH = repair.BATCH_NAME_PREFIX + "32a76d16c2"
 LEGACY = "event:abcdef0123"
-NOW = datetime(2026, 9, 7, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
 
 
 def _stamp(when: datetime) -> str:
@@ -44,13 +44,13 @@ def _row(**overrides):
 def test_a_reservation_a_live_writer_holds_is_left_alone():
     live = frozenset({"a-live-token"})
 
-    assert not repair._is_orphaned(
+    assert not repair.is_orphaned(
         _row(lease_token="a-live-token", created_at=None), NOW.timestamp(), live
     )
 
 
 def test_a_reservation_whose_lease_is_gone_is_taken():
-    assert repair._is_orphaned(
+    assert repair.is_orphaned(
         _row(lease_token="an-expired-token", created_at=None),
         NOW.timestamp(),
         frozenset(),
@@ -60,27 +60,27 @@ def test_a_reservation_whose_lease_is_gone_is_taken():
 def test_a_fresh_batch_row_is_left_alone_until_it_ages():
     fresh = _row(created_at=_stamp(NOW - timedelta(minutes=5)))
 
-    assert not repair._is_orphaned(fresh, NOW.timestamp(), frozenset())
+    assert not repair.is_orphaned(fresh, NOW.timestamp(), frozenset())
 
 
 def test_an_aged_batch_row_is_taken():
     aged = _row(created_at=_stamp(NOW - timedelta(minutes=31)))
 
-    assert repair._is_orphaned(aged, NOW.timestamp(), frozenset())
+    assert repair.is_orphaned(aged, NOW.timestamp(), frozenset())
 
 
 def test_a_name_no_request_can_bear_is_taken_whatever_its_age():
     """The August renaming left rows no future request can produce."""
     fresh = _row(occurrence_id=LEGACY, created_at=_stamp(NOW))
 
-    assert repair._is_orphaned(fresh, NOW.timestamp(), frozenset())
+    assert repair.is_orphaned(fresh, NOW.timestamp(), frozenset())
 
 
 def test_a_live_lease_outranks_even_a_name_nothing_can_bear():
     live = frozenset({"held"})
     fresh = _row(occurrence_id=LEGACY, lease_token="held", created_at=_stamp(NOW))
 
-    assert not repair._is_orphaned(fresh, NOW.timestamp(), live)
+    assert not repair.is_orphaned(fresh, NOW.timestamp(), live)
 
 
 def test_only_unexpired_leases_count_as_live():
@@ -89,8 +89,8 @@ def test_only_unexpired_leases_count_as_live():
     database.executemany(
         "INSERT INTO project_leases VALUES (?, ?)",
         [
-            ("still-held", _stamp(datetime.now(timezone.utc) + timedelta(hours=1))),
-            ("long-gone", _stamp(datetime.now(timezone.utc) - timedelta(hours=1))),
+            ("still-held", _stamp(datetime.now(UTC) + timedelta(hours=1))),
+            ("long-gone", _stamp(datetime.now(UTC) - timedelta(hours=1))),
         ],
     )
 
@@ -99,8 +99,8 @@ def test_only_unexpired_leases_count_as_live():
 
 def test_the_nightly_runs_it():
     """It stopped being a rescue somebody has to remember to run."""
-    import scheduled_nightly
+    import nightly_budget
 
-    labels = [step.label for step in scheduled_nightly._post_compile_steps()]
+    labels = [step.label for step in nightly_budget.post_compile_steps()]
 
     assert "checkpoints" in labels

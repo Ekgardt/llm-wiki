@@ -84,9 +84,9 @@ def test_episodes_with_no_records_is_a_clean_step(tmp_path):
 
 
 def test_the_fact_keys_budget_leaves_the_margin_every_nightly_step_keeps():
-    import fact_keys
-    import scheduled_nightly
+    import nightly_budget
+    from llm_wiki import step_budgets
 
-    inside = fact_keys.DEFAULT_BUDGET_SECONDS + scheduled_nightly.STEP_START_MARGIN_SECONDS
+    inside = step_budgets.DEFAULT_BUDGET_SECONDS + nightly_budget.STEP_START_MARGIN_SECONDS
 
-    assert inside <= scheduled_nightly._fact_keys_step().timeout
+    assert inside <= nightly_budget.fact_keys_step().timeout

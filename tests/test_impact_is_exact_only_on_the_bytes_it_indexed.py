@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from impact_analysis import analyze_impact
 
-from tests.test_impact_analysis import _Graph, _repository
+from tests.impact_analysis_helpers import _Graph, _repository
 
 
 class _OlderGeneration(_Graph):

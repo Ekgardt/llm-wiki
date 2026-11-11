@@ -189,14 +189,14 @@ def test_the_reason_of_a_total_refusal_is_parsed_into_gates() -> None:
         "reason": "no claim survived its citation gates: gate one; gate two; gate one"
     }
 
-    assert query_memory._refused_gates(answer) == ["gate one", "gate two"]
+    assert query_memory.refused_gates(answer) == ["gate one", "gate two"]
 
 
 def test_an_ordinary_abstention_is_not_a_gate_refusal() -> None:
     import query_memory
 
-    assert query_memory._refused_gates({"reason": "The evidence does not say."}) == []
-    assert query_memory._refused_gates({"reason": None}) == []
+    assert query_memory.refused_gates({"reason": "The evidence does not say."}) == []
+    assert query_memory.refused_gates({"reason": None}) == []
 
 
 def test_the_disposition_multiplies_the_fused_score(monkeypatch) -> None:
@@ -208,8 +208,7 @@ def test_the_disposition_multiplies_the_fused_score(monkeypatch) -> None:
     import retrieval
 
     monkeypatch.setattr(
-        retrieval,
-        "_standing_disposition",
+        "llm_wiki.retrieval_graph.standing_disposition",
         lambda query: {"knowledge/notes/alpha.md": 1.25},
     )
     scores = {"a": 1.0, "b": 1.0}
@@ -218,7 +217,7 @@ def test_the_disposition_multiplies_the_fused_score(monkeypatch) -> None:
         "b": {"relative_path": "knowledge/notes/beta.md"},
     }
 
-    weighted = retrieval._weigh_by_trust(scores, meta, curated_first=False, query="q")
+    weighted = retrieval.weigh_by_trust(scores, meta, curated_first=False, query="q")
 
     assert weighted["a"] > weighted["b"]
     assert meta["a"]["carried_weight"] == 1.25
@@ -229,11 +228,11 @@ def test_a_search_still_works_when_there_is_no_history(monkeypatch) -> None:
     """A vault that has never answered anything must rank exactly as before."""
     import retrieval
 
-    monkeypatch.setattr(retrieval, "_standing_disposition", lambda query: {})
+    monkeypatch.setattr("llm_wiki.retrieval_graph.standing_disposition", lambda query: {})
     scores = {"a": 2.0}
     meta = {"a": {"relative_path": "knowledge/notes/alpha.md", "authority": "ai-derived"}}
 
-    weighted = retrieval._weigh_by_trust(scores, meta, curated_first=False, query="q")
+    weighted = retrieval.weigh_by_trust(scores, meta, curated_first=False, query="q")
 
     assert weighted["a"] == 2.0
     assert meta["a"]["carried_weight"] == 1.0

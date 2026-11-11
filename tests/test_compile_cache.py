@@ -302,33 +302,33 @@ def test_broadened_windows_acl_is_not_owner_only(monkeypatch, tmp_path):
         "             BUILTIN\\Users:(RX)\r\n"
         "Successfully processed 1 files\r\n"
     ).encode("ascii")
-    monkeypatch.setattr(compile_cache, "_windows_acl_identity", lambda: "DOMAIN\\user")
+    monkeypatch.setattr(compile_cache, "windows_acl_identity", lambda: "DOMAIN\\user")
     monkeypatch.setattr(
         compile_cache,
-        "_run_acl_command",
+        "run_acl_command",
         lambda command: SimpleNamespace(returncode=0, stdout=output, stderr=b""),
     )
 
-    assert compile_cache._windows_acl_is_owner_only(tmp_path) is False
+    assert compile_cache.windows_acl_is_owner_only(tmp_path) is False
 
 
 def test_similar_windows_acl_identity_is_not_treated_as_owner(monkeypatch, tmp_path):
     output = f"{tmp_path} DOMAIN\\user-backup:(F)\r\n".encode("ascii")
-    monkeypatch.setattr(compile_cache, "_windows_acl_identity", lambda: "DOMAIN\\user")
+    monkeypatch.setattr(compile_cache, "windows_acl_identity", lambda: "DOMAIN\\user")
     monkeypatch.setattr(
         compile_cache,
-        "_run_acl_command",
+        "run_acl_command",
         lambda command: SimpleNamespace(returncode=0, stdout=output, stderr=b""),
     )
 
-    assert compile_cache._windows_acl_is_owner_only(tmp_path) is False
+    assert compile_cache.windows_acl_is_owner_only(tmp_path) is False
 
 
 def test_broadened_acl_cache_hit_fails_closed(tmp_path, monkeypatch):
     cache = CompileCache(tmp_path)
     action = _action()
     cache.put(action, _plan())
-    monkeypatch.setattr(compile_cache, "_is_owner_only", lambda path, mode: False)
+    monkeypatch.setattr(compile_cache, "is_owner_only", lambda path, mode: False)
 
     assert cache.get(action, _accept_application) is None
 
@@ -336,7 +336,7 @@ def test_broadened_acl_cache_hit_fails_closed(tmp_path, monkeypatch):
 def test_remote_state_root_rejects_write_and_hit(tmp_path, monkeypatch):
     cache = CompileCache(tmp_path)
     action = _action()
-    monkeypatch.setattr(compile_cache, "_known_network_path", lambda path: True)
+    monkeypatch.setattr(compile_cache, "known_network_path", lambda path: True)
 
     with pytest.raises(PermissionError, match="local state root"):
         cache.put(action, _plan())
@@ -522,7 +522,24 @@ def test_fd_read_rejects_same_inode_change_between_lstat_and_open(tmp_path, monk
     _rewrite_when_opened(monkeypatch, path, lambda: path.write_bytes(changed))
 
     with pytest.raises(PermissionError, match="changed before open"):
-        compile_cache._read_cache_entry(path)
+        compile_cache.read_cache_entry(path)
+
+
+def test_get_rejects_changed_schema_with_matching_stat_identity(tmp_path):
+    cache = CompileCache(tmp_path)
+    action = _action()
+    path = cache.put(action, _plan())
+    original = path.read_bytes()
+    before = path.stat()
+    changed = original.replace(b'"schema_version":1', b'"schema_version":2')
+    assert changed != original
+    assert len(changed) == len(original)
+    path.write_bytes(changed)
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert compile_cache.file_identity(path.stat())[:4] == compile_cache.file_identity(before)[:4]
+    validator_calls = []
+    assert cache.get(action, lambda plan: validator_calls.append(plan) or True) is None
+    assert validator_calls == []
 
 
 @pytest.mark.skipif(
@@ -549,7 +566,7 @@ def test_fd_read_rejects_same_size_rewrite_that_keeps_its_mtime(
     _rewrite_when_opened(monkeypatch, path, rewrite_keeping_size_and_mtime)
 
     with pytest.raises(PermissionError, match="changed before open"):
-        compile_cache._read_cache_entry(path)
+        compile_cache.read_cache_entry(path)
 
 
 def test_entry_stamped_in_the_future_is_a_hit(tmp_path: Path) -> None:
@@ -582,7 +599,7 @@ def test_entry_still_being_written_after_the_budget_is_a_miss(
     monkeypatch.setattr(bounded_io.time, "sleep", rewrite_while_waiting)
 
     with pytest.raises(bounded_io.SourceChangedDuringRead, match="still being written"):
-        compile_cache._read_cache_entry(path)
+        compile_cache.read_cache_entry(path)
     assert cache.get(action, _accept_application) is None
 
 

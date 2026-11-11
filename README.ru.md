@@ -1,7 +1,7 @@
 # LLM Wiki
 
 [![Tests](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml/badge.svg)](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
+[![Python](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-5.0.0-blue.svg)](CHANGELOG.md)
 
@@ -55,7 +55,7 @@ OpenCode, Codex, Claude, OpenAI и Ollama. Локальна только Ollama,
 
 ### Что нужно
 
-- Python 3.10+ и git
+- Python 3.14 и git. Установщик выбирает эту версию явно; установить её можно командой `uv python install 3.14`.
 - [uv](https://docs.astral.sh/uv/) ровно 0.12.3 — оба установщика отказываются от любой другой версии
 - Агент, которым вы уже пользуетесь: Claude Code, Codex или OpenCode
 - Node 22 — только для точной навигации по TypeScript и Python (см. ниже)
@@ -108,10 +108,12 @@ uv run python scripts/search_memory.py "auth"
 ### Профили зависимостей
 
 MCP входит в production-базу; `mcp-server` остаётся как compatibility alias.
-Установщик делает это сам; вручную:
+Установщик ставит все компоненты (дополнение `full`: поиск по смыслу, переранжирование,
+индекс кода) и Pyright для кода на Python; на Linux torch берётся из CPU-сборки
+PyTorch. Вручную:
 
 ```bash
-uv sync --locked --no-default-groups
+uv sync --locked --no-default-groups --inexact --extra full
 uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120
 uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json
 ```
@@ -122,11 +124,28 @@ uv run --locked --no-sync python scripts/repair_installed_memory.py --check --js
 работа, он сначала просит подтвердить, что ни один агент не запущен. Знания и `run/`
 она никогда не удаляет.
 
-Дополнения добавляются к установленному и сохраняют то, что вы уже выбрали:
+Модель выбирается один раз в `llm-wiki.toml`: эту настройку читают ручные запуски,
+hooks, MCP и планировщик. Установщик использует ту же команду. Каталог содержит
+кандидатов; перед сохранением выбранная модель проверяется одним коротким запросом
+через текущую подписку.
 
 ```bash
-uv sync --locked --no-default-groups --inexact --extra hybrid      # векторы + reranker
-uv sync --locked --no-default-groups --inexact --extra code-graph  # индекс кода
+uv run python scripts/choose_model.py show
+uv run python scripts/choose_model.py list --provider codex
+uv run python scripts/choose_model.py set codex/gpt-6.1-sol --reasoning medium
+```
+
+`select` открывает интерактивный выбор. Неудачная проверка сохраняет прежнюю
+настройку. Сохранённый выбор важнее старых копий переменных модели и провайдера;
+адрес подключения и правила DLP настраиваются отдельно. При переходе на новый
+формат сначала остановите старые фоновые задания. Штатный MCP автоматически
+обновит рабочий процесс при следующем запросе без незавершённых вызовов;
+клиенты без supervisor нужно перезапустить.
+
+Навигация по коду на другом языке — по одной команде на язык, когда она нужна:
+
+```bash
+uv run --locked --no-sync python scripts/install_language_server.py --profile typescript     # или gopls, rust-analyzer
 ```
 
 Разработчики ставят группу разработки и запускают полный регрессионный набор:

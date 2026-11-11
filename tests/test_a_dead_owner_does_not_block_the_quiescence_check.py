@@ -9,7 +9,7 @@ from __future__ import annotations
 import contextlib
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import markdown_transaction  # noqa: E402
 import operational_ownership as ownership  # noqa: E402
 
-START = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)
+START = datetime(2026, 9, 17, 12, tzinfo=UTC)
 
 
 def _registry(state_root: Path, *, at: datetime, probe: str) -> ownership.OwnershipRegistry:
@@ -68,3 +68,26 @@ def test_an_expired_owner_whose_process_lives_still_refuses(tmp_path):
 
     assert refused.value.code == "runtime_deletion_check_requires_quiescence"
     assert _roles(state_root) == ["queue-worker"]
+
+
+@pytest.mark.parametrize('name', [
+    'AcquireRequest', 'row_process', 'next_owner_epoch', 'insert_owner_row',
+    'owner_key', 'delete_owner_projections',
+])
+def test_historical_row_helpers_keep_identity_and_serialization(name):
+    import pickle
+
+    from llm_wiki import ownership_rows
+
+    helper = getattr(ownership_rows, name)
+    assert getattr(ownership, name) is helper
+    assert pickle.loads(pickle.dumps(helper)) is helper
+
+
+@pytest.mark.parametrize('name', [
+    'OWNER_PROJECTIONS', 'OWNER_PROJECTION_DELETES', 'OWNER_BINDING_DELETE',
+])
+def test_projection_sql_is_reexported_without_copying(name):
+    from llm_wiki import ownership_rows
+
+    assert getattr(ownership, name) is getattr(ownership_rows, name)

@@ -25,14 +25,13 @@ def _recorded_call(monkeypatch, name: str) -> list:
         calls.append(options)
         return None
 
-    monkeypatch.setattr(code_graph, name, recorded)
+    monkeypatch.setattr(sys.modules[getattr(code_graph, name).__module__], name, recorded)
     return calls
 
 
 def _cancelled_flag(monkeypatch) -> None:
-    import mcp_server
 
-    monkeypatch.setattr(mcp_server, "_operation_cancelled", lambda: _stopped)
+    monkeypatch.setattr("llm_wiki.mcp_server_workers.operation_cancelled", lambda: _stopped)
 
 
 def _stopped() -> bool:
@@ -48,7 +47,7 @@ def test_the_data_flow_mode_passes_the_callers_deadline_and_cancellation(
     _cancelled_flag(monkeypatch)
     deadline = time.monotonic() + 3
 
-    answer = mcp_server._data_flow_architecture_call(
+    answer = mcp_server.data_flow_architecture_call(
         {"directory": str(tmp_path), "symbol": "alpha"}, deadline
     )
 
@@ -68,7 +67,7 @@ def test_the_cross_service_mode_passes_the_callers_deadline_and_cancellation(
     _cancelled_flag(monkeypatch)
     deadline = time.monotonic() + 3
 
-    answer = mcp_server._cross_service_architecture_call(
+    answer = mcp_server.cross_service_architecture_call(
         {"directory": str(tmp_path), "symbol": "alpha"}, deadline
     )
 
@@ -83,16 +82,15 @@ def test_an_expired_deadline_stops_the_walk_instead_of_holding_the_slot(
     tmp_path, monkeypatch
 ):
     """The walk itself raises; the mode does not swallow it into an empty answer."""
-    import code_graph
     import pytest
 
     def expired(symbol, directory, **options):
         raise TimeoutError("generation catalog deadline reached")
 
-    monkeypatch.setattr(code_graph, "find_argument_flows", expired)
+    monkeypatch.setattr("llm_wiki.code_graph_flows.find_argument_flows", expired)
     import mcp_server
 
     with pytest.raises(TimeoutError):
-        mcp_server._data_flow_architecture_call(
+        mcp_server.data_flow_architecture_call(
             {"directory": str(tmp_path), "symbol": "alpha"}, time.monotonic() - 1
         )

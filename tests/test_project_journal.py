@@ -7,7 +7,7 @@ import threading
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import markdown_transaction
@@ -30,96 +30,22 @@ from project_journal import (
 )
 from reliable_memory import SchemaValidationError, canonical_json_bytes, validate_schema
 
+from tests.markdown_coordinator_parts import patch_coordinator
+from tests.project_journal_helpers import (
+    checkpoint_event,
+    state_body,
+    state_root,  # noqa: F401
+    vault,  # noqa: F401
+)
+from tests.project_journal_helpers import project_store as project_store
+from tests.simultaneous_projectors_helpers import journal_records, run_simultaneous_projectors
 from tests.slow_machine import LONG_TIMEOUT
 
 
-@pytest.fixture
-def vault(tmp_path: Path) -> Path:
-    root = tmp_path / "vault"
-    (root / "knowledge/projects/demo").mkdir(parents=True)
-    return root
-
-
-@pytest.fixture
-def state_root(tmp_path: Path) -> Path:
-    return tmp_path / "state"
-
-
-@pytest.fixture
-def project_store(vault: Path, state_root: Path) -> ProjectStore:
-    return ProjectStore(vault, state_root)
-
-
-def checkpoint_event(
-    occurrence_id: str = "evt-1",
-    idempotency_key: str = "task:task-1:active",
-    *,
-    delta: dict[str, object] | None = None,
-) -> dict[str, object]:
-    complete_delta: dict[str, object] = {
-        "goal": {"id": "goal-1", "action": "upsert", "value": "Ship Stage 2"},
-        "phase": {"id": "phase-1", "action": "upsert", "value": "Implementation"},
-        "current_task": {
-            "id": "task-1",
-            "action": "upsert",
-            "value": "Build project journals",
-        },
-        "next_actions": [
-            {"id": "next-1", "action": "upsert", "value": "Run recovery tests"}
-        ],
-        "decisions": [
-            {
-                "id": "decision-1",
-                "action": "upsert",
-                "value": "Use fenced Markdown transactions",
-            }
-        ],
-        "blockers": [
-            {"id": "blocker-1", "action": "upsert", "value": "None"}
-        ],
-        "changed_files": [
-            {
-                "id": "file-1",
-                "action": "upsert",
-                "value": "scripts/project_journal.py",
-            }
-        ],
-        "commands": [
-            {"id": "command-1", "action": "upsert", "value": "uv run pytest"}
-        ],
-        "verification": [
-            {"id": "verify-1", "action": "upsert", "value": "project tests pass"}
-        ],
-    }
-    if delta:
-        complete_delta.update(delta)
-    return {
-        "schema_version": "project-checkpoint/v1",
-        "occurrence_id": occurrence_id,
-        "idempotency_key": idempotency_key,
-        "provenance": {
-            "agent": "agent-a",
-            "session": "session-1",
-            "worktree": "D:/work/wiki",
-            "branch": "feature/journal",
-            "source_event": "tool-42",
-        },
-        "trigger": "task_completed",
-        "reason": "durable progress",
-        "delta": complete_delta,
-        "evidence_event_ids": ["tool-41", "tool-42"],
-    }
-
-
-def journal_records(store: ProjectStore, slug: str = "demo") -> list[dict[str, object]]:
-    text = store.read_journal(slug)
-    return [json.loads(line) for line in text.removeprefix(JOURNAL_HEADER).splitlines()]
-
-
 def test_generated_projection_preserves_project_slug_ownership(
-    project_store: ProjectStore, vault: Path, tmp_path: Path
+    project_store: ProjectStore, vault: Path, tmp_path: Path  # noqa: F811
 ):
-    from session_start_project_state import _compute_slug
+    from session_start_project_state import compute_slug
 
     project_dir = tmp_path / "demo"
     project_dir.mkdir()
@@ -130,7 +56,7 @@ def test_generated_projection_preserves_project_slug_ownership(
 
     state = vault / "knowledge/projects/demo/state.md"
     assert f"- Project root: `{project_dir}`" in state.read_text(encoding="utf-8")
-    assert _compute_slug(project_dir, vault / "knowledge/projects") == "demo"
+    assert compute_slug(project_dir, vault / "knowledge/projects") == "demo"
 
 
 def _assert_canonical_row_matches_domain_row(database) -> None:
@@ -164,12 +90,12 @@ def _assert_no_rows_for_project(database, project: str) -> None:
 def test_direct_project_acquisition_inserts_canonical_and_domain_rows_atomically(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    vault = tmp_path / "vault"
-    state_root = tmp_path / "state"
+    vault = tmp_path / "vault"  # noqa: F811
+    state_root = tmp_path / "state"  # noqa: F811
     (vault / "knowledge/projects").mkdir(parents=True)
     candidate = state_root / "run/markdown-transactions-v3.candidate.sqlite3"
     markdown_transaction.initialize_coordinator_v3_candidate(candidate, source_v2=None)
-    store = ProjectStore._from_v3_candidate(vault, state_root=state_root)
+    store = ProjectStore.from_v3_candidate(vault, state_root=state_root)
 
     lease = store.acquire_lease("alpha", "test-owner")
     with sqlite3.connect(candidate) as database:
@@ -183,6 +109,7 @@ def test_direct_project_acquisition_inserts_canonical_and_domain_rows_atomically
     assert renewed_by_token.token == lease.token
     lease = renewed_by_token
     store._release(lease)
+    real_insert = store._insert_project_projection
 
     def fail_projection(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("injected project projection failure")
@@ -192,8 +119,6 @@ def test_direct_project_acquisition_inserts_canonical_and_domain_rows_atomically
         store.acquire_lease("beta", "test-owner")
     with sqlite3.connect(candidate) as database:
         _assert_no_rows_for_project(database, "beta")
-
-    real_insert = ProjectStore._insert_project_projection
 
     def fail_after_projection(*args: object, **kwargs: object) -> None:
         real_insert(*args, **kwargs)
@@ -211,12 +136,12 @@ def test_nested_project_lease_projects_parent_without_releasing_it(
 ) -> None:
     import operational_ownership
 
-    vault = tmp_path / "vault"
-    state_root = tmp_path / "state"
+    vault = tmp_path / "vault"  # noqa: F811
+    state_root = tmp_path / "state"  # noqa: F811
     (vault / "knowledge/projects").mkdir(parents=True)
     candidate = state_root / "run/markdown-transactions-v3.candidate.sqlite3"
     markdown_transaction.initialize_coordinator_v3_candidate(candidate, source_v2=None)
-    store = ProjectStore._from_v3_candidate(vault, state_root=state_root)
+    store = ProjectStore.from_v3_candidate(vault, state_root=state_root)
     registry = operational_ownership.OwnershipRegistry(state_root)
     parent = registry.acquire("project", scope="project:alpha")
 
@@ -240,9 +165,9 @@ def _parse_test_timestamp(value: str) -> datetime:
 
 
 def test_lease_uses_random_token_monotonic_epoch_and_default_timing(
-    vault: Path, state_root: Path
+    vault: Path, state_root: Path  # noqa: F811
 ):
-    now = datetime(2026, 7, 13, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 13, tzinfo=UTC)
     store = ProjectStore(vault, state_root, clock=lambda: now)
 
     first = store.acquire_lease("demo", "agent-a")
@@ -256,7 +181,7 @@ def test_lease_uses_random_token_monotonic_epoch_and_default_timing(
 
 
 def test_coordinator_reserves_idempotency_sequence_and_preparation_binding(
-    vault: Path, state_root: Path
+    vault: Path, state_root: Path  # noqa: F811
 ):
     store = ProjectStore(vault, state_root)
     lease = store.acquire_lease("demo", "agent-a")
@@ -296,9 +221,9 @@ def test_coordinator_reserves_idempotency_sequence_and_preparation_binding(
 
 
 def test_active_lease_is_exclusive_and_heartbeat_extends_it(
-    vault: Path, state_root: Path
+    vault: Path, state_root: Path  # noqa: F811
 ):
-    now = datetime(2026, 7, 13, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 13, tzinfo=UTC)
     store = ProjectStore(vault, state_root, clock=lambda: now)
     lease = store.acquire_lease("demo", "agent-a")
 
@@ -312,9 +237,9 @@ def test_active_lease_is_exclusive_and_heartbeat_extends_it(
 
 
 def test_same_owner_cannot_alias_active_lease_and_exact_token_can_renew(
-    vault: Path, state_root: Path
+    vault: Path, state_root: Path  # noqa: F811
 ):
-    now = datetime(2026, 7, 13, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 13, tzinfo=UTC)
     store = ProjectStore(vault, state_root, clock=lambda: now)
     lease = store.acquire_lease("demo", "agent-a")
 
@@ -361,17 +286,17 @@ def _assert_checkpoint_landed_for_slug(receipt, projects, slug) -> None:
 
 @pytest.mark.parametrize("existing_state", [False, True])
 def test_cyrillic_computed_slug_supports_new_and_existing_project_state(
-    vault: Path,
-    state_root: Path,
+    vault: Path,  # noqa: F811
+    state_root: Path,  # noqa: F811
     tmp_path: Path,
     existing_state: bool,
 ):
-    from session_start_project_state import _compute_slug
+    from session_start_project_state import compute_slug
 
     project_dir = tmp_path / "Тесты"
     project_dir.mkdir()
     projects = vault / "knowledge/projects"
-    slug = _compute_slug(project_dir, projects)
+    slug = compute_slug(project_dir, projects)
     assert slug == "тесты"
     if existing_state:
         target = projects / slug
@@ -379,7 +304,7 @@ def test_cyrillic_computed_slug_supports_new_and_existing_project_state(
         (target / "state.md").write_text(
             f"# {slug}\n- Project root: `{project_dir}`\n", encoding="utf-8"
         )
-        assert _compute_slug(project_dir, projects) == slug
+        assert compute_slug(project_dir, projects) == slug
 
     event = checkpoint_event(f"evt-{existing_state}", f"unicode:{existing_state}")
     event["provenance"]["worktree"] = str(project_dir)
@@ -388,7 +313,7 @@ def test_cyrillic_computed_slug_supports_new_and_existing_project_state(
     _assert_checkpoint_landed_for_slug(receipt, projects, slug)
 
 
-def test_project_slug_rejects_existing_case_alias(vault: Path, state_root: Path):
+def test_project_slug_rejects_existing_case_alias(vault: Path, state_root: Path):  # noqa: F811
     alias = vault / "knowledge/projects/CASEALIAS"
     alias.mkdir()
 
@@ -467,7 +392,7 @@ def test_event_is_normalized_before_reservation(project_store: ProjectStore):
 
 
 def test_journal_read_rejects_symlink(
-    vault: Path, state_root: Path, tmp_path: Path
+    vault: Path, state_root: Path, tmp_path: Path  # noqa: F811
 ):
     store = ProjectStore(vault, state_root)
     journal = vault / "knowledge/projects/demo/journal.md"
@@ -483,7 +408,7 @@ def test_journal_read_rejects_symlink(
     assert linked.value.code == "unsafe_path"
 
 
-def test_journal_read_rejects_non_regular_file(vault: Path, state_root: Path):
+def test_journal_read_rejects_non_regular_file(vault: Path, state_root: Path):  # noqa: F811
     journal = vault / "knowledge/projects/demo/journal.md"
     journal.mkdir()
     with pytest.raises(ProjectJournalReadError) as directory:
@@ -492,7 +417,7 @@ def test_journal_read_rejects_non_regular_file(vault: Path, state_root: Path):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="FIFO test requires POSIX")
-def test_journal_read_rejects_fifo_without_blocking(vault: Path, state_root: Path):
+def test_journal_read_rejects_fifo_without_blocking(vault: Path, state_root: Path):  # noqa: F811
     journal = vault / "knowledge/projects/demo/journal.md"
     os.mkfifo(journal)
 
@@ -502,7 +427,7 @@ def test_journal_read_rejects_fifo_without_blocking(vault: Path, state_root: Pat
     assert failure.value.code == "not_regular"
 
 
-def test_journal_read_and_event_count_are_bounded(vault: Path, state_root: Path):
+def test_journal_read_and_event_count_are_bounded(vault: Path, state_root: Path):  # noqa: F811
     store = ProjectStore(vault, state_root)
     journal = vault / "knowledge/projects/demo/journal.md"
     journal.write_bytes(b"x" * (MAX_JOURNAL_BYTES + 1))
@@ -531,11 +456,11 @@ def test_journal_read_and_event_count_are_bounded(vault: Path, state_root: Path)
 
 
 def test_journal_read_rejects_file_change_during_read(
-    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ):
     journal = vault / "knowledge/projects/demo/journal.md"
     journal.write_bytes(JOURNAL_HEADER.encode("utf-8"))
-    fstat = project_journal.os.fstat
+    fstat = os.fstat
     calls = 0
 
     def changed_after_read(descriptor: int):
@@ -548,7 +473,7 @@ def test_journal_read_rejects_file_change_during_read(
             return os.stat_result(values)
         return metadata
 
-    monkeypatch.setattr(project_journal.os, "fstat", changed_after_read)
+    monkeypatch.setattr(os, "fstat", changed_after_read)
 
     with pytest.raises(ProjectJournalReadError) as changed:
         ProjectStore(vault, state_root).read_journal("demo")
@@ -557,7 +482,7 @@ def test_journal_read_rejects_file_change_during_read(
 
 
 def test_projection_read_rejects_symlink(
-    vault: Path, state_root: Path, tmp_path: Path
+    vault: Path, state_root: Path, tmp_path: Path  # noqa: F811
 ):
     projection = vault / "knowledge/projects/demo/state.md"
     outside = tmp_path / "outside.md"
@@ -576,7 +501,7 @@ def test_projection_read_rejects_symlink(
     assert outside.read_text(encoding="utf-8") == "private"
 
 
-def test_projection_read_rejects_non_regular_file(vault: Path, state_root: Path):
+def test_projection_read_rejects_non_regular_file(vault: Path, state_root: Path):  # noqa: F811
     (vault / "knowledge/projects/demo/state.md").mkdir()
 
     with pytest.raises(ProjectJournalReadError) as directory:
@@ -588,7 +513,7 @@ def test_projection_read_rejects_non_regular_file(vault: Path, state_root: Path)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="FIFO test requires POSIX")
-def test_projection_read_rejects_fifo_without_blocking(vault: Path, state_root: Path):
+def test_projection_read_rejects_fifo_without_blocking(vault: Path, state_root: Path):  # noqa: F811
     os.mkfifo(vault / "knowledge/projects/demo/state.md")
 
     with pytest.raises(ProjectJournalReadError) as failure:
@@ -599,38 +524,13 @@ def test_projection_read_rejects_fifo_without_blocking(vault: Path, state_root: 
     assert failure.value.code == "not_regular"
 
 
-def test_projection_read_rejects_oversize_before_hash(
-    vault: Path,
-    state_root: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    projection = vault / "knowledge/projects/demo/state.md"
-    projection.write_bytes(b"x" * (project_journal.MAX_PROJECTION_BYTES + 1))
-    hashed: list[bytes] = []
-    sha256_bytes = project_journal.sha256_bytes
-
-    def track_hash(content: bytes) -> str:
-        hashed.append(content)
-        return sha256_bytes(content)
-
-    monkeypatch.setattr(project_journal, "sha256_bytes", track_hash)
-
-    with pytest.raises(ProjectJournalReadError) as oversized:
-        ProjectStore(vault, state_root).checkpoint(
-            "demo", checkpoint_event(), "agent-a"
-        )
-
-    assert oversized.value.code == "too_large"
-    assert projection.read_bytes() not in hashed
-
-
 def test_projection_read_rejects_file_change_during_read(
-    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ):
     projection = vault / "knowledge/projects/demo/state.md"
     projection.write_bytes(b"old projection\n")
-    open_file = project_journal.os.open
-    fstat = project_journal.os.fstat
+    open_file = os.open
+    fstat = os.fstat
     projection_descriptors: set[int] = set()
     calls: dict[int, int] = {}
 
@@ -651,8 +551,8 @@ def test_projection_read_rejects_file_change_during_read(
             return os.stat_result(values)
         return metadata
 
-    monkeypatch.setattr(project_journal.os, "open", track_open)
-    monkeypatch.setattr(project_journal.os, "fstat", changed_after_read)
+    monkeypatch.setattr(os, "open", track_open)
+    monkeypatch.setattr(os, "fstat", changed_after_read)
 
     with pytest.raises(ProjectJournalReadError) as changed:
         ProjectStore(vault, state_root).checkpoint(
@@ -670,8 +570,8 @@ def test_projection_read_rejects_file_change_during_read(
     ],
 )
 def test_prepare_rejects_project_file_growth_without_new_artifact(
-    vault: Path,
-    state_root: Path,
+    vault: Path,  # noqa: F811
+    state_root: Path,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
     name: str,
     limit: int,
@@ -701,8 +601,8 @@ def test_prepare_rejects_project_file_growth_without_new_artifact(
 
 @pytest.mark.parametrize("name", ["journal.md", "state.md"])
 def test_prepare_rejects_project_file_replacement_without_new_artifact(
-    vault: Path,
-    state_root: Path,
+    vault: Path,  # noqa: F811
+    state_root: Path,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
     name: str,
 ):
@@ -738,7 +638,7 @@ def _assert_first_checkpoint_materialized(project, receipt) -> None:
 
 
 def test_absent_journal_under_missing_project_directory_is_valid(
-    vault: Path, state_root: Path
+    vault: Path, state_root: Path  # noqa: F811
 ):
     project = vault / "knowledge/projects/new-project"
     assert not project.exists()
@@ -750,216 +650,10 @@ def test_absent_journal_under_missing_project_directory_is_valid(
     _assert_first_checkpoint_materialized(project, receipt)
 
 
-def test_a_full_journal_is_sealed_and_the_next_event_lands(
-    vault: Path,
-    state_root: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """A full journal used to be the end of the project's record.
-
-    Appending past the bound was refused and nothing rotated, so the refusal
-    was permanent. Measured on the live vault 2026-08-29:
-    `knowledge/projects/llm-wiki/journal.md` held exactly the bound, 4 698
-    checkpoint events waited behind that refusal, `run/state.json` reached
-    10 MB, and the failure repeated every ten seconds into a log no health
-    check read.
-    """
-    monkeypatch.setattr(project_journal, "MAX_JOURNAL_EVENTS", 2)
-    store = ProjectStore(vault, state_root)
-
-    first = store.checkpoint("demo", checkpoint_event(), "agent-a")
-    second = store.checkpoint(
-        "demo", checkpoint_event("evt-2", "limit:event-2"), "agent-a"
-    )
-    third = store.checkpoint(
-        "demo", checkpoint_event("evt-3", "limit:event-3"), "agent-a"
-    )
-
-    journal = vault / "knowledge/projects/demo/journal.md"
-    segment = vault / "knowledge/projects/demo/journal.000001-000002.md"
-    assert [first.sequence, second.sequence, third.sequence] == [1, 2, 3]
-    assert segment.is_file()
-    _assert_sealed_and_live(segment, journal)
-
-
-def _sequences(path: Path) -> list[int]:
-    events = project_journal.parse_journal_events("demo", path.read_bytes())
-    return [int(item["sequence"]) for item in events]
-
-
-def _assert_sealed_and_live(segment: Path, journal: Path) -> None:
-    """The sealed range, and a live journal that opens with its restated fold."""
-    live = project_journal.parse_journal_events("demo", journal.read_bytes())
-    assert _sequences(segment) == [1, 2]
-    assert _sequences(journal) == [2, 3]
-    assert live[0]["trigger"] == "journal_rotation"
-
-
-def test_rotation_does_not_change_the_projection(
-    vault: Path,
-    state_root: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """The whole point: the fold of the live segment must equal the fold of all."""
-    monkeypatch.setattr(project_journal, "MAX_JOURNAL_EVENTS", 1000)
-    store = ProjectStore(vault, state_root)
-    for index in range(1, 4):
-        store.checkpoint(
-            "demo", checkpoint_event(f"evt-{index}", f"rot:event-{index}"), "agent-a"
-        )
-    journal = vault / "knowledge/projects/demo/journal.md"
-    whole = project_journal.parse_journal_events("demo", journal.read_bytes())
-    expected = store.render_state(whole, _validated=True)
-
-    monkeypatch.setattr(project_journal, "MAX_JOURNAL_EVENTS", 3)
-    store.checkpoint("demo", checkpoint_event("evt-4", "rot:event-4"), "agent-a")
-
-    live = project_journal.parse_journal_events("demo", journal.read_bytes())
-    rolled = store.render_state(live[:1], _validated=True)
-    assert _state_body(rolled) == _state_body(expected)
-
-
-def test_a_journal_rolls_by_size_before_it_rolls_by_count(
-    vault: Path,
-    state_root: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Two events in, the third finds the journal past the byte bound and seals it."""
-    monkeypatch.setattr(project_journal, "MAX_JOURNAL_EVENTS", 1000)
-    store = ProjectStore(vault, state_root)
-    for index in range(1, 3):
-        store.checkpoint("demo", checkpoint_event(f"evt-{index}", f"size:event-{index}"), "agent-a")
-    journal = vault / "knowledge/projects/demo/journal.md"
-    whole = project_journal.parse_journal_events("demo", journal.read_bytes())
-    expected = store.render_state(whole, _validated=True)
-
-    monkeypatch.setattr(project_journal, "ROTATE_ABOVE_BYTES", 1)
-    store.checkpoint("demo", checkpoint_event("evt-3", "size:event-3"), "agent-a")
-
-    live = project_journal.parse_journal_events("demo", journal.read_bytes())
-    assert live[0]["trigger"] == "journal_rotation"
-    assert (vault / "knowledge/projects/demo/journal.000001-000002.md").exists()
-    assert _state_body(store.render_state(live[:1], _validated=True)) == _state_body(expected)
-
-
-def _state_body(state: bytes) -> list[str]:
-    """The rendered sections, without the sequence line that legitimately moves."""
-    return [
-        line
-        for line in state.decode("utf-8").splitlines()
-        if not line.startswith("last_applied_sequence:")
-    ]
-
-
-def test_a_sealed_segment_is_never_overwritten(
-    vault: Path,
-    state_root: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Create, never replace: a segment that could be rewritten is not sealed."""
-    monkeypatch.setattr(project_journal, "MAX_JOURNAL_EVENTS", 2)
-    store = ProjectStore(vault, state_root)
-    store.checkpoint("demo", checkpoint_event(), "agent-a")
-    store.checkpoint("demo", checkpoint_event("evt-2", "seal:event-2"), "agent-a")
-    segment = vault / "knowledge/projects/demo/journal.000001-000002.md"
-    segment.parent.mkdir(parents=True, exist_ok=True)
-    segment.write_bytes(b"# occupied\n")
-
-    with pytest.raises(Exception):
-        store.checkpoint("demo", checkpoint_event("evt-3", "seal:event-3"), "agent-a")
-
-    assert segment.read_bytes() == b"# occupied\n"
-
-
-def test_the_byte_bound_still_refuses_without_writing(
-    vault: Path,
-    state_root: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Rotation answers a full count, not an oversized file; that bound stands."""
-    monkeypatch.setattr(project_journal, "MAX_JOURNAL_BYTES", 200)
-    store = ProjectStore(vault, state_root)
-    journal = vault / "knowledge/projects/demo/journal.md"
-
-    with pytest.raises(ProjectJournalReadError) as failure:
-        store.checkpoint("demo", checkpoint_event(), "agent-a")
-
-    assert failure.value.code == "too_large"
-    assert not journal.exists()
-
-
-def _assert_rejected_without_journal(too_small, journal_path) -> None:
-    assert too_small.value.code == "too_large"
-    assert not journal_path.exists()
-
-
-def _assert_exact_fit_committed(exact, small_journal, exact_size) -> None:
-    assert exact.sequence == 1
-    assert len(small_journal.read_bytes()) == exact_size
-
-
-def _assert_overflow_left_journal_intact(overflow, small_journal, before) -> None:
-    assert overflow.value.code == "too_large"
-    assert small_journal.read_bytes() == before
-
-
-def test_prospective_byte_limit_allows_exact_size_and_rejects_overflow(
-    vault: Path,
-    state_root: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    store = ProjectStore(vault, state_root)
-    store.checkpoint("calib", checkpoint_event(), "agent-a")
-    exact_size = len(
-        (vault / "knowledge/projects/calib/journal.md").read_bytes()
-    )
-
-    monkeypatch.setattr(project_journal, "MAX_JOURNAL_BYTES", exact_size - 1)
-    with pytest.raises(ProjectJournalReadError) as too_small:
-        store.checkpoint("small", checkpoint_event(), "agent-a")
-    _assert_rejected_without_journal(
-        too_small, vault / "knowledge/projects/small/journal.md"
-    )
-
-    monkeypatch.setattr(project_journal, "MAX_JOURNAL_BYTES", exact_size)
-    exact = store.checkpoint("small", checkpoint_event(), "agent-a")
-    small_journal = vault / "knowledge/projects/small/journal.md"
-    _assert_exact_fit_committed(exact, small_journal, exact_size)
-    before = small_journal.read_bytes()
-
-    with pytest.raises(ProjectJournalReadError) as overflow:
-        store.checkpoint(
-            "small", checkpoint_event("evt-2", "bytes:event-2"), "agent-a"
-        )
-    _assert_overflow_left_journal_intact(overflow, small_journal, before)
-
-
-def test_existing_journal_line_is_validated_once_per_checkpoint(
-    project_store: ProjectStore, monkeypatch: pytest.MonkeyPatch
-):
-    project_store.checkpoint("demo", checkpoint_event(), "agent-a")
-    validate = project_journal.validate_schema
-    existing_validations = 0
-
-    def count_existing(instance, schema):
-        nonlocal existing_validations
-        if isinstance(instance, dict) and instance.get("occurrence_id") == "evt-1":
-            existing_validations += 1
-        return validate(instance, schema)
-
-    monkeypatch.setattr(project_journal, "validate_schema", count_existing)
-
-    project_store.checkpoint(
-        "demo", checkpoint_event("evt-2", "single-parse:event-2"), "agent-a"
-    )
-
-    assert existing_validations == 1
-
-
 def test_slow_checkpoint_phases_renew_lease_before_apply(
-    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     store = ProjectStore(vault, state_root, clock=lambda: now)
     heartbeat = store.heartbeat
     heartbeats: list[datetime] = []
@@ -1106,7 +800,7 @@ def test_goal_and_phase_transition_lists_do_not_resurrect_closed_values(
 
 
 def test_owned_legacy_state_is_bootstrapped_before_first_empty_checkpoint(
-    project_store: ProjectStore, vault: Path, tmp_path: Path
+    project_store: ProjectStore, vault: Path, tmp_path: Path  # noqa: F811
 ):
     project_root = tmp_path / "legacy-project"
     project_root.mkdir()
@@ -1191,7 +885,7 @@ def test_owned_legacy_state_is_bootstrapped_before_first_empty_checkpoint(
 )
 def test_shipped_legacy_state_fixtures_preserve_every_nonempty_section(
     project_store: ProjectStore,
-    vault: Path,
+    vault: Path,  # noqa: F811
     tmp_path: Path,
     fixture_name: str,
     expected: list[str],
@@ -1240,16 +934,16 @@ def _assert_identity_is_bounded(occurrence_id, idempotency_key, stable_hash) -> 
 
 
 def test_bootstrap_identity_hashes_256_character_unicode_slug():
-    from project_journal import _bootstrap_event_identity
+    from project_journal import bootstrap_event_identity
 
     slug = "я" * 256
-    occurrence_id, idempotency_key, stable_hash = _bootstrap_event_identity(
+    occurrence_id, idempotency_key, stable_hash = bootstrap_event_identity(
         slug, "meaningful legacy content"
     )
 
     _assert_identity_conceals_slug(slug, occurrence_id, idempotency_key)
     _assert_identity_is_bounded(occurrence_id, idempotency_key, stable_hash)
-    assert (occurrence_id, idempotency_key, stable_hash) == _bootstrap_event_identity(
+    assert (occurrence_id, idempotency_key, stable_hash) == bootstrap_event_identity(
         slug, "meaningful legacy content"
     )
 
@@ -1337,7 +1031,7 @@ def test_render_state_is_deterministic_and_bounded(project_store: ProjectStore):
 
 
 def test_final_apply_rechecks_lease_and_rejects_stale_epoch(
-    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ):
     store = ProjectStore(vault, state_root)
     real_apply = store.coordinator.apply
@@ -1360,7 +1054,7 @@ def test_final_apply_rechecks_lease_and_rejects_stale_epoch(
 
 
 def test_fenced_reservation_blocks_later_sequence_until_replayed(
-    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ):
     store = ProjectStore(vault, state_root)
     real_apply = store.coordinator.apply
@@ -1401,20 +1095,20 @@ def test_fenced_reservation_blocks_later_sequence_until_replayed(
     assert [event["last_applied_sequence"] for event in events] == [0, 0]
 
 
-def _assert_recovery_replayed_nothing(transaction_id, recovered, vault) -> None:
+def _assert_recovery_replayed_nothing(transaction_id, recovered, vault) -> None:  # noqa: F811
     assert transaction_id
     assert recovered == []
     assert not (vault / "knowledge/projects/demo/journal.md").exists()
 
 
-def _assert_forward_replay_committed(vault, state_root, replayed) -> None:
+def _assert_forward_replay_committed(vault, state_root, replayed) -> None:  # noqa: F811
     assert replayed.sequence == 1
     assert len(journal_records(ProjectStore(vault, state_root))) == 1
     assert (vault / "knowledge/projects/demo/state.md").exists()
 
 
 def test_released_prepared_checkpoint_requires_forward_replay(
-    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ):
     store = ProjectStore(vault, state_root)
     transaction_id = ""
@@ -1440,7 +1134,7 @@ def test_released_prepared_checkpoint_requires_forward_replay(
 
 
 def test_new_epoch_wins_before_recovery_and_old_checkpoint_touches_nothing(
-    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ):
     store = ProjectStore(vault, state_root)
 
@@ -1494,7 +1188,7 @@ def _assert_current_names_forward_attempt(current, attempt, receipt) -> None:
 
 
 def test_expired_prepared_checkpoint_replays_same_reservation_with_new_attempt(
-    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ):
     store = ProjectStore(vault, state_root)
     event = checkpoint_event()
@@ -1552,7 +1246,7 @@ def _rewind_checkpoint_row(store: ProjectStore) -> None:
 
 
 def test_a_replay_over_a_committed_transaction_is_a_duplicate_not_a_quarantine(
-    vault: Path, state_root: Path
+    vault: Path, state_root: Path  # noqa: F811
 ):
     """CI 34655557302, Windows: the row lagged the transaction and lost the work.
 
@@ -1578,7 +1272,7 @@ def test_a_replay_over_a_committed_transaction_is_a_duplicate_not_a_quarantine(
 
 
 def test_concurrent_duplicate_replay_creates_one_forward_attempt(
-    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ):
     store = ProjectStore(vault, state_root)
     event = checkpoint_event()
@@ -1621,13 +1315,13 @@ def test_concurrent_duplicate_replay_creates_one_forward_attempt(
     assert attempts == [(1, "quarantined"), (2, "committed")]
 
 
-def _assert_blocked_on_pending_prior(blocked, vault) -> None:
+def _assert_blocked_on_pending_prior(blocked, vault) -> None:  # noqa: F811
     assert blocked.value.code == "pending_prior"
     assert blocked.value.prior_sequence == 1
     assert not (vault / "knowledge/projects/demo/journal.md").exists()
 
 
-def _assert_ordered_append_after_replay(first, second, vault, state_root) -> None:
+def _assert_ordered_append_after_replay(first, second, vault, state_root) -> None:  # noqa: F811
     assert [first.sequence, second.sequence] == [1, 2]
     assert [
         record["sequence"]
@@ -1636,7 +1330,7 @@ def _assert_ordered_append_after_replay(first, second, vault, state_root) -> Non
 
 
 def test_newer_sequence_waits_for_quarantined_prior_then_appends_in_order(
-    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ):
     store = ProjectStore(vault, state_root)
     first_event = checkpoint_event("evt-first", "head:first")
@@ -1674,7 +1368,7 @@ def test_newer_sequence_waits_for_quarantined_prior_then_appends_in_order(
 
 
 def test_concurrent_newer_sequence_retries_after_crashed_head(
-    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ):
     store = ProjectStore(vault, state_root)
     first_event = checkpoint_event("evt-first", "race:first")
@@ -1725,7 +1419,7 @@ def test_concurrent_newer_sequence_retries_after_crashed_head(
 
 
 def test_legacy_out_of_order_journal_is_quarantined_without_rewriting_bytes(
-    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ):
     store = ProjectStore(vault, state_root)
     first_event = checkpoint_event("evt-first", "legacy:first")
@@ -1782,7 +1476,7 @@ def test_legacy_out_of_order_journal_is_quarantined_without_rewriting_bytes(
 
 
 def test_recover_replays_reservation_left_before_prepare(
-    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ):
     store = ProjectStore(vault, state_root)
 
@@ -1805,51 +1499,77 @@ def test_recover_replays_reservation_left_before_prepare(
     assert len(journal_records(ProjectStore(vault, state_root))) == 1
 
 
-def test_simultaneous_projectors_append_once_per_event(vault: Path, state_root: Path):
-    barrier = threading.Barrier(2)
+def test_checkpoint_honors_writer_wait_during_prepare(vault, state_root, monkeypatch):  # noqa: F811
+    # Make a lost explicit budget observable without a wall-clock sleep.
+    patch_coordinator(monkeypatch, 'WRITER_WAIT_SECONDS', 0)
+    store = ProjectStore(vault, state_root)
+    rival = ProjectStore(vault, state_root)
+    held, release = threading.Event(), threading.Event()
+    commit = store._committed_checkpoint
+    claim = store.coordinator._try_claim_legacy_gate
+    collisions = []
 
-    def write(index: int):
-        store = ProjectStore(vault, state_root)
-        barrier.wait()
-        for _ in range(100):
+    def hold():
+        with rival.coordinator.writer_gate():
+            held.set()
+            assert release.wait(LONG_TIMEOUT)
+
+    def contend(owner, deadline):
+        outcome = claim(owner, deadline)
+        if outcome is None:
+            collisions.append(owner)
+            release.set()
+        return outcome
+
+    def commit_with_rival(*args, **kwargs):
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(hold)
             try:
-                return store.checkpoint(
-                    "demo",
-                    checkpoint_event(f"evt-{index}", f"event-{index}"),
-                    f"agent-{index}",
-                )
-            except (ProjectLeaseBusy, ProjectFenceError, ProjectPendingPriorError):
-                # CI run 33039646439 (Windows py3.12-s2) lost this two-writer
-                # race as ProjectFenceError, and a local run on 2026-08-27
-                # lost it as ProjectPendingPriorError. All three are legal
-                # losses of one round, and the product is right to raise them:
-                # ProjectLeaseBusy (a ProjectFenceError subclass) - the rival
-                # writer holds the project lease right now;
-                # ProjectFenceError - the rival re-acquired the lease between
-                # our reservation and apply, so our quarantined attempt must
-                # be replayed forward by the next round;
-                # ProjectPendingPriorError - the rival reserved the prior
-                # sequence and has not committed it yet.
-                # The append-once postcondition below is unchanged.
-                continue
-        raise AssertionError("project lease never became available")
+                assert held.wait(LONG_TIMEOUT)
+                return commit(*args, **kwargs)
+            finally:
+                release.set()
+                future.result(timeout=LONG_TIMEOUT)
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        receipts = list(pool.map(write, range(2)))
-
-    assert sorted(receipt.sequence for receipt in receipts) == [1, 2]
-    records = journal_records(ProjectStore(vault, state_root))
-    assert {record["occurrence_id"] for record in records} == {"evt-0", "evt-1"}
-    assert [record["sequence"] for record in records] == [1, 2]
-    assert all(
-        canonical_json_bytes(record).decode()
-        in ProjectStore(vault, state_root).read_journal("demo")
-        for record in records
+    monkeypatch.setattr(store.coordinator, "_try_claim_legacy_gate", contend)
+    monkeypatch.setattr(store, "_committed_checkpoint", commit_with_rival)
+    receipt = store.checkpoint(
+        "demo", checkpoint_event(), "agent", writer_wait_seconds=LONG_TIMEOUT,
     )
+    assert collisions
+    assert receipt.sequence == 1
+    assert len(journal_records(store)) == 1
+
+
+def test_simultaneous_projectors_append_once_per_event(vault: Path, state_root: Path):  # noqa: F811
+    run_simultaneous_projectors(vault, state_root)
+
+
+@pytest.mark.parametrize('loss,args', [
+    (ProjectLeaseBusy, ('controlled contention',)),
+    (ProjectFenceError, ('controlled contention',)),
+    (ProjectPendingPriorError, ('demo', 2, 1)),
+])
+def test_simultaneous_projectors_do_not_exhaust_a_counter_before_a_legal_retry(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch, loss, args  # noqa: F811
+):
+    checkpoint = ProjectStore.checkpoint
+    attempts = {}
+
+    def transient_loss(store, project, event, owner, *, writer_wait_seconds=None):
+        attempts[owner] = attempts.get(owner, 0) + 1
+        if attempts[owner] <= 100:
+            raise loss(*args)
+        return checkpoint(store, project, event, owner, writer_wait_seconds=writer_wait_seconds)
+
+    monkeypatch.setattr(ProjectStore, 'checkpoint', transient_loss)
+    test_simultaneous_projectors_append_once_per_event(vault, state_root)
+    assert set(attempts) == {'agent-0', 'agent-1'}
+    assert all(count > 100 for count in attempts.values())
 
 
 def test_same_owner_simultaneous_projectors_retry_without_sharing_lease(
-    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ):
     first_store = ProjectStore(vault, state_root)
     second_store = ProjectStore(vault, state_root)
@@ -1894,7 +1614,7 @@ def test_same_owner_simultaneous_projectors_retry_without_sharing_lease(
 
 
 def test_checkpoint_failure_releases_lease_for_immediate_retry(
-    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ):
     failing = ProjectStore(vault, state_root)
 
@@ -1914,8 +1634,8 @@ def test_checkpoint_failure_releases_lease_for_immediate_retry(
 
 @pytest.mark.parametrize("phase", ["prepare", "apply"])
 def test_prepare_and_apply_failures_release_lease_for_retry(
-    vault: Path,
-    state_root: Path,
+    vault: Path,  # noqa: F811
+    state_root: Path,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
     phase: str,
 ):
@@ -1938,7 +1658,7 @@ def test_prepare_and_apply_failures_release_lease_for_retry(
 
 
 def test_recover_failure_releases_lease_for_immediate_retry(
-    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ):
     store = ProjectStore(vault, state_root)
 
@@ -1968,7 +1688,7 @@ def test_recover_failure_releases_lease_for_immediate_retry(
 
 
 def test_releasing_stale_token_never_releases_successor(
-    vault: Path, state_root: Path
+    vault: Path, state_root: Path  # noqa: F811
 ):
     store = ProjectStore(vault, state_root)
     stale = store.acquire_lease("demo", "agent-a")
@@ -2009,9 +1729,9 @@ def test_successful_checkpoint_releases_lease_once(
 
 
 def test_post_prepare_heartbeat_refreshes_persisted_lease_precondition(
-    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     store = ProjectStore(vault, state_root, clock=lambda: now)
     real_prepare = store.coordinator.prepare
     initial_expiry = ""
@@ -2039,7 +1759,7 @@ def test_post_prepare_heartbeat_refreshes_persisted_lease_precondition(
         def now(cls, tz=None):
             return now if tz is not None else now.replace(tzinfo=None)
 
-    monkeypatch.setattr(markdown_transaction, "datetime", FakeDateTime)
+    patch_coordinator(monkeypatch, 'datetime', FakeDateTime)
     monkeypatch.setattr(store.coordinator, "prepare", slow_prepare)
     monkeypatch.setattr(
         store.coordinator,
@@ -2063,7 +1783,7 @@ def test_post_prepare_heartbeat_refreshes_persisted_lease_precondition(
 
 
 def test_prepared_lease_refresh_rejects_successor_token(
-    vault: Path, state_root: Path
+    vault: Path, state_root: Path  # noqa: F811
 ):
     store = ProjectStore(vault, state_root)
     lease = store.acquire_lease("demo", "agent-a")
@@ -2096,7 +1816,7 @@ def test_prepared_lease_refresh_rejects_successor_token(
                 "lease_token": "successor",
                 "fencing_epoch": 2,
                 "expires_at": (
-                    datetime.now(timezone.utc) + timedelta(minutes=1)
+                    datetime.now(UTC) + timedelta(minutes=1)
                 ).isoformat().replace("+00:00", "Z"),
             },
         )
@@ -2106,23 +1826,23 @@ def test_prepared_lease_refresh_rejects_successor_token(
 
 def test_a_generated_state_page_quotes_a_slug_that_would_parse_as_a_list() -> None:
     """Redaction can leave brackets in a slug, and `[x]` unquoted is a YAML list."""
-    from project_journal import _yaml_scalar
+    from project_journal import yaml_scalar
 
-    assert _yaml_scalar("[redacted-api-key]") == '"[redacted-api-key]"'
-    assert _yaml_scalar('has "quotes"') == '"has \\"quotes\\""'
-    assert _yaml_scalar("back\\slash") == '"back\\\\slash"'
+    assert yaml_scalar("[redacted-api-key]") == '"[redacted-api-key]"'
+    assert yaml_scalar('has "quotes"') == '"has \\"quotes\\""'
+    assert yaml_scalar("back\\slash") == '"back\\\\slash"'
 
 
-def test_the_vault_root_is_never_a_project(vault: Path) -> None:
+def test_the_vault_root_is_never_a_project(vault: Path) -> None:  # noqa: F811
     """Issue #20: a hook run from the vault minted a project named after it."""
-    from session_start_project_state import _compute_slug
+    from session_start_project_state import compute_slug
 
     with pytest.raises(ValueError, match="vault root is not a project"):
-        _compute_slug(vault, vault / "knowledge/projects")
+        compute_slug(vault, vault / "knowledge/projects")
     # Since 2026-09-23 a directory inside the vault is refused too: a benchmark
     # run under `cache/` and a transaction directory under `run/` had become projects.
     with pytest.raises(ValueError, match="inside the vault is not a project"):
-        _compute_slug(vault / "sub-project", vault / "knowledge/projects")
+        compute_slug(vault / "sub-project", vault / "knowledge/projects")
 
 
 def _checkpoints(store: ProjectStore, count: int) -> None:
@@ -2131,7 +1851,7 @@ def _checkpoints(store: ProjectStore, count: int) -> None:
 
 
 def test_a_deleted_project_directory_is_rebuilt_from_its_committed_checkpoints(
-    vault: Path, state_root: Path
+    vault: Path, state_root: Path  # noqa: F811
 ) -> None:
     """Issue #20: the journal is a projection of the store; the store rebuilds it."""
     import shutil
@@ -2151,6 +1871,57 @@ def test_a_deleted_project_directory_is_rebuilt_from_its_committed_checkpoints(
         3,
         3,
     )
-    assert _state_body(store.render_state(rebuilt, _validated=True)) == _state_body(expected_state)
+    assert state_body(store.render_state(rebuilt, _validated=True)) == state_body(expected_state)
     store.checkpoint("demo", checkpoint_event("evt-4", "rb:event-4"), "agent-a")
     assert len(project_journal.parse_journal_events("demo", journal.read_bytes())) == 4
+
+
+def _corrupt_checkpoint(store: ProjectStore, replacement: dict) -> None:
+    _checkpoints(store, 1)
+    _replace_checkpoint_payload(store, replacement)
+
+
+def _replace_checkpoint_payload(store: ProjectStore, replacement: dict) -> None:
+    with store.coordinator._connect() as database:
+        event = json.loads(database.execute(
+            "SELECT event_json FROM project_checkpoints WHERE project='demo' AND sequence=1"
+        ).fetchone()[0])
+        event.update(replacement)
+        database.execute(
+            "UPDATE project_checkpoints SET event_json=? WHERE project='demo' AND sequence=1",
+            (canonical_json_bytes(event).decode(),),
+        )
+        database.commit()
+
+
+@pytest.mark.parametrize("replacement", [{"project": "other"}, {"sequence": 2}, {"delta": []}])
+def test_committed_checkpoint_reader_rejects_corrupt_payload(project_store, replacement):
+    _corrupt_checkpoint(project_store, replacement)
+    with pytest.raises((ValueError, SchemaValidationError)):
+        project_store.committed_events("demo")
+
+
+@pytest.mark.parametrize("replacement", [{"project": "other"}, {"sequence": 2}, {"delta": []}])
+def test_rebuild_refuses_corrupt_checkpoint_without_replacing_markdown(
+    project_store, vault, replacement  # noqa: F811
+):
+    _corrupt_checkpoint(project_store, replacement)
+    paths = [vault / "knowledge/projects/demo" / name for name in ("journal.md", "state.md")]
+    before = [path.read_bytes() for path in paths]
+    with pytest.raises((ValueError, SchemaValidationError)):
+        project_store.rebuild_journal("demo")
+    assert [path.read_bytes() for path in paths] == before
+
+
+@pytest.mark.parametrize("replacement", [{"project": "other"}, {"sequence": 2}, {"delta": []}])
+def test_pending_checkpoint_recovery_refuses_corrupt_payload(project_store, vault, replacement):  # noqa: F811
+    lease = project_store.acquire_lease("demo", "test-recovery")
+    try:
+        project_store._reserve("demo", checkpoint_event(), lease)
+    finally:
+        project_store._release(lease)
+    _replace_checkpoint_payload(project_store, replacement)
+    with pytest.raises((ValueError, SchemaValidationError)):
+        project_store.recover("demo")
+    assert not (vault / "knowledge/projects/demo/journal.md").exists()
+    assert not (vault / "knowledge/projects/demo/state.md").exists()

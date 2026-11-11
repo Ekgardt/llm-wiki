@@ -126,14 +126,14 @@ def test_publish_configuration_cas_rejects_race_after_backup(
     destination = tmp_path / "hooks.json"
     original = b'{"before":true}\n'
     destination.write_bytes(original)
-    create_backup = backup_module._create_verified_backup
+    create_backup = backup_module.create_verified_backup
 
     def race(path: Path, value: bytes) -> Path:
         backup = create_backup(path, value)
         destination.write_bytes(b'{"racer":true}\n')
         return backup
 
-    monkeypatch.setattr(backup_module, "_create_verified_backup", race)
+    monkeypatch.setattr(backup_module, "create_verified_backup", race)
 
     with pytest.raises(Exception, match="changed concurrently"):
         backup_module.publish_configuration(
@@ -192,7 +192,7 @@ def test_hook_resource_cas_preserves_concurrent_user_edit(
         encoding="utf-8",
     )
     resource = _codex_resource(hooks, destination)
-    create_backup = backup_module._create_verified_backup
+    create_backup = backup_module.create_verified_backup
 
     def race(path: Path, value: bytes) -> Path:
         backup = create_backup(path, value)
@@ -202,7 +202,7 @@ def test_hook_resource_cas_preserves_concurrent_user_edit(
         )
         return backup
 
-    monkeypatch.setattr(backup_module, "_create_verified_backup", race)
+    monkeypatch.setattr(backup_module, "create_verified_backup", race)
 
     with pytest.raises(Exception, match="changed concurrently"):
         resource.write_owned(resource.desired)

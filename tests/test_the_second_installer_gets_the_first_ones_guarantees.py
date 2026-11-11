@@ -197,32 +197,8 @@ def _lock_file(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-class _StubOpener:
-    def open(self, request: object, timeout: float | None = None) -> object:
-        return request
 
 
-def test_the_pinned_opener_carries_no_proxy_and_refuses_a_redirect(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: list[object] = []
-
-    def build_opener(*handlers: object) -> _StubOpener:
-        captured.extend(handlers)
-        return _StubOpener()
-
-    monkeypatch.setattr(pinned_download.urllib.request, "build_opener", build_opener)
-
-    pinned_download.open_pinned_url(
-        urllib.request.Request(SERVER_URL), timeout=SHORT_TIMEOUT
-    )
-
-    kinds = [type(handler) for handler in captured]
-    assert (
-        urllib.request.ProxyHandler in kinds,
-        pinned_download.RejectRedirect in kinds,
-    ) == (True, True)
-    assert captured[0].proxies == {}
 
 
 def test_the_archive_is_streamed_in_chunks_instead_of_read_whole(
@@ -260,16 +236,18 @@ def test_a_second_installer_is_refused_by_the_lock_its_sibling_holds(
     tmp_path: Path,
 ) -> None:
     lock = _lock_file(tmp_path)
-    held = installer._acquire_lock(lock, time.monotonic() + SHORT_TIMEOUT)
+    held = installer.acquire_lock(lock, time.monotonic() + SHORT_TIMEOUT)
 
     with pytest.raises(installer.InstallError):
-        installer._acquire_lock(lock, time.monotonic())
+        installer.acquire_lock(lock, time.monotonic())
 
-    installer._release_lock(held)
+    installer.release_lock(held)
     assert not lock.exists()
 
 
 def test_a_lock_whose_owner_is_gone_is_reclaimed(tmp_path: Path) -> None:
+    from tests.process_identity_fixture import reused_current_process_identity
+
     lock = _lock_file(tmp_path)
     lock.write_bytes(
         canonical_json_bytes(
@@ -277,15 +255,15 @@ def test_a_lock_whose_owner_is_gone_is_reclaimed(tmp_path: Path) -> None:
                 "acquired_at_unix_ns": 0,
                 "nonce": "a" * 32,
                 "pid": os.getpid(),
-                "process_start": "a process that started at another time",
+                "process_start": reused_current_process_identity(),
             }
         )
     )
 
-    claimed = installer._acquire_lock(lock, time.monotonic() + SHORT_TIMEOUT)
+    claimed = installer.acquire_lock(lock, time.monotonic() + SHORT_TIMEOUT)
 
     assert claimed.nonce != "a" * 32
-    installer._release_lock(claimed)
+    installer.release_lock(claimed)
     assert not lock.exists()
 
 

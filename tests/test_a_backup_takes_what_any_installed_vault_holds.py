@@ -7,13 +7,13 @@ from __future__ import annotations
 import contextlib
 import sqlite3
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import installed_memory_repair
+import reliability_v3_validation
 
+from tests.reliability_v3_adoption_helpers import _vault, build_adopted_reliability_v3
 from tests.slow_machine import LONG_TIMEOUT
-from tests.test_reliability_v3_adoption import _vault, build_adopted_reliability_v3
 
 PRUNED_ROWS = 10_050
 
@@ -36,10 +36,10 @@ def _ledger(state_root: Path, now: datetime) -> None:
 def test_a_ledger_past_the_row_bound_is_read_by_what_it_holds(tmp_path: Path) -> None:
     root, state_root = _vault(tmp_path)
     build_adopted_reliability_v3(root, state_root)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     _ledger(state_root, now)
 
-    blockers = installed_memory_repair.validate_coordinator_v3_runtime(
+    blockers = reliability_v3_validation.validate_coordinator_v3_runtime(
         state_root=state_root, now=now, deadline=time.monotonic() + LONG_TIMEOUT, excluded_owner=None
     )
 

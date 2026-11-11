@@ -85,7 +85,7 @@ def _completed(cmd: list[str], cwd: Path | None, text: bool) -> subprocess.Compl
         raise RuntimeError(f"command timed out: {' '.join(cmd)}") from error
 
 
-def _run(cmd: list[str], cwd: Path | None = None) -> str:
+def run(cmd: list[str], cwd: Path | None = None) -> str:
     result = _completed(cmd, cwd, text=True)
     if result.returncode != 0:
         raise RuntimeError(
@@ -95,7 +95,7 @@ def _run(cmd: list[str], cwd: Path | None = None) -> str:
     return result.stdout.rstrip("\n")
 
 
-def _run_bytes(cmd: list[str], cwd: Path | None = None) -> bytes:
+def run_bytes(cmd: list[str], cwd: Path | None = None) -> bytes:
     result = _completed(cmd, cwd, text=False)
     if result.returncode != 0:
         error = result.stderr.decode("utf-8", errors="replace").strip()
@@ -103,9 +103,9 @@ def _run_bytes(cmd: list[str], cwd: Path | None = None) -> bytes:
     return result.stdout
 
 
-def _try_run(cmd: list[str], cwd: Path | None = None) -> str | None:
+def try_run(cmd: list[str], cwd: Path | None = None) -> str | None:
     try:
-        return _run(cmd, cwd=cwd)
+        return run(cmd, cwd=cwd)
     except RuntimeError:
         return None
 
@@ -171,7 +171,7 @@ def _worktree_of(record: dict[str, str | bool], index: int) -> WorktreeInfo | No
 
 
 def list_worktrees(repo_root: Path) -> list[WorktreeInfo]:
-    raw = _run_bytes(
+    raw = run_bytes(
         ["git", "worktree", "list", "--porcelain", "-z"], cwd=repo_root
     )
     found = [
@@ -182,7 +182,7 @@ def list_worktrees(repo_root: Path) -> list[WorktreeInfo]:
 
 
 def check_clean(wt: WorktreeInfo) -> bool:
-    status = _try_run(["git", "status", "--porcelain"], cwd=wt.path)
+    status = try_run(["git", "status", "--porcelain"], cwd=wt.path)
     if status is None:
         return False
     return status == ""
@@ -191,7 +191,7 @@ def check_clean(wt: WorktreeInfo) -> bool:
 def _contained_by(branch: str, target: str, repo_root: Path) -> bool:
     """Whether `target` already holds every commit of `branch`."""
     return (
-        _try_run(
+        try_run(
             ["git", "merge-base", "--is-ancestor", branch, target], cwd=repo_root
         )
         is not None
@@ -269,9 +269,9 @@ def format_report(worktrees: list[WorktreeInfo], actions: list[str]) -> str:
     return "\n".join(lines)
 
 def remove_worktree(wt: WorktreeInfo, repo_root: Path) -> str:
-    _run(["git", "worktree", "remove", "--", str(wt.path)], cwd=repo_root)
+    run(["git", "worktree", "remove", "--", str(wt.path)], cwd=repo_root)
     if wt.branch:
-        _run(["git", "branch", "-d", "--", wt.branch], cwd=repo_root)
+        run(["git", "branch", "-d", "--", wt.branch], cwd=repo_root)
         return f"removed {wt.path} and branch {wt.branch}"
     return f"removed {wt.path} (no branch)"
 
@@ -339,13 +339,13 @@ def _classify(worktree: WorktreeInfo, repo_root: Path) -> None:
 
 
 def _force_remove(worktree: WorktreeInfo, repo_root: Path) -> str:
-    _run(
+    run(
         ["git", "worktree", "remove", "--force", "--", str(worktree.path)],
         cwd=repo_root,
     )
     if not worktree.branch:
         return f"force-removed {worktree.path}"
-    _run(["git", "branch", "-D", "--", worktree.branch], cwd=repo_root)
+    run(["git", "branch", "-D", "--", worktree.branch], cwd=repo_root)
     return f"force-removed {worktree.path} and branch {worktree.branch}"
 
 
@@ -376,7 +376,7 @@ def _prune_metadata(repo_root: Path, apply: bool) -> str:
     if not apply:
         command.insert(3, "--dry-run")
         action = "reported stale worktree metadata"
-    output = _run(command, cwd=repo_root)
+    output = run(command, cwd=repo_root)
     return f"{action}: {output}" if output else action
 
 
@@ -431,7 +431,7 @@ def _reported(worktrees: list[WorktreeInfo], actions: list[str], apply: bool) ->
 
 
 def _repository_root() -> Path | None:
-    value = _try_run(["git", "rev-parse", "--show-toplevel"])
+    value = try_run(["git", "rev-parse", "--show-toplevel"])
     return None if value is None else Path(value).resolve()
 
 

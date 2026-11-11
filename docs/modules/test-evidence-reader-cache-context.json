@@ -1,0 +1,140 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/evidence-graph-tests-evidence-graph-recovery-helpers.md",
+    "docs/modules/generation-catalog-tests-code-graph-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-evidence-reader-cache-context.json",
+    "docs/modules/test-evidence-reader-cache.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/code_graph_helpers.py",
+    "tests/conftest.py",
+    "tests/evidence_graph_recovery_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_evidence_reader_cache.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-evidence-reader-cache-context.json",
+      "docs/modules/test-evidence-reader-cache.md",
+      "tests/test_evidence_reader_cache.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/code_graph.py",
+      "names": [
+        "active_evidence_graph",
+        "find_callers"
+      ],
+      "contract_sha256": "0c04880b837c0ba8217db6b3f7a58fb92ba043d8c668c882c215650fdf5808e3",
+      "integration_tests": [
+        "tests/test_a_code_root_named_knowledge_is_code.py",
+        "tests/test_a_cut_says_what_it_left_out.py",
+        "tests/test_a_dead_code_claim_names_what_it_checked.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "COLLECTOR_VERSION",
+        "EXTRACTOR_VERSION",
+        "canonical_source_manifest"
+      ],
+      "contract_sha256": "0cc87152075558d99d4b0d2b958e1f0e14b22fad8777cbca4377e198dd0a442f",
+      "integration_tests": [
+        "tests/test_evidence_reader_cache.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_graph.py",
+      "names": [
+        "EvidenceGraph",
+        "create_generation_database"
+      ],
+      "contract_sha256": "3ae18a853f43a4f9019db12c56bb9c89ce5c48f48c788963e9b49541e35579e8",
+      "integration_tests": [
+        "tests/test_evidence_reader_cache.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_reader_cache.py",
+      "names": [
+        "cached_entries",
+        "clear"
+      ],
+      "contract_sha256": "2b1018f404e815138149b9db6b71a50e373cfed6f52f47835587390b30e45f5d",
+      "integration_tests": [
+        "tests/test_evidence_reader_cache.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_evidence_reader_cache.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "7bba4b535d3f0a73445fece541c540939989b41456c9a79a67f82634748be36b",
+      "integration_tests": [
+        "tests/test_evidence_reader_cache.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "983dd096d99bafff98ca0aaa2cd722477333e30eed4bfa9297d1830c635e8d90",
+      "integration_tests": [
+        "tests/test_evidence_reader_cache.py"
+      ]
+    }
+  ]
+}

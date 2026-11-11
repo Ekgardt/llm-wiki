@@ -51,6 +51,6 @@ def test_the_import_reader_and_the_parse_probe_answer_for_it(tmp_path: Path) -> 
     path.write_bytes(DEEP)
 
     assert import_resolver.resolve_python_imports_and_calls(path) == ([], [])
-    kinds = [error["kind"] for error in path_coverage._python_parse(DEEP)["errors"]]
+    kinds = [error["kind"] for error in path_coverage.python_parse(DEEP)["errors"]]
     # Every interpreter refuses it, 3.10 through python_parse.parse_python.
     assert kinds == ["RecursionError"]

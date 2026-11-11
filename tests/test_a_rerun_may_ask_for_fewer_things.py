@@ -17,11 +17,21 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
-import install_control  # noqa: E402
-from install_control import ManagedResource  # noqa: E402
+import install_state  # noqa: E402
+from install_state import (  # noqa: E402
+    ManagedResource,
+)
+from llm_wiki import (  # noqa: E402
+    install_release,
+    install_requests,
+    install_resource_builder,
+    install_v2_transactions,
+)
 
 PLUGIN_SOURCE = "const _EMBEDDED_ROOT = null; // llm-wiki:embedded-root\n"
 BACKEND_OF = {"native": "systemd_user", "cron": "cron"}
+# cron's kind: a cron table entry cannot be read back, so a change to it is taken back first.
+SCHEDULER_KIND = {"cron": "cron_scheduler"}
 RELEASE = {
     "commit_oid": "a" * 40,
     "project_version": "0.0.0",
@@ -43,7 +53,7 @@ def _file_scheduler(directory: Path, backend: str) -> ManagedResource:
 
     return ManagedResource(
         resource_id=f"{backend}-scheduler",
-        kind="test_scheduler",
+        kind=SCHEDULER_KIND.get(backend, "test_scheduler"),
         locator=str(target),
         desired=backend.encode(),
         read_owned=lambda: target.read_bytes() if target.exists() else None,
@@ -60,13 +70,13 @@ def machine(tmp_path: Path, monkeypatch) -> Path:
     )
     (tmp_path / "home").mkdir()
     (tmp_path / "sched").mkdir()
-    monkeypatch.setattr(install_control, "_selected_backend", BACKEND_OF.__getitem__)
+    monkeypatch.setattr(install_resource_builder, "selected_backend", BACKEND_OF.__getitem__)
     monkeypatch.setattr(
-        install_control,
-        "_posix_scheduler_resource",
+        install_resource_builder,
+        "posix_scheduler_resource",
         lambda *, backend, **_rest: _file_scheduler(tmp_path / "sched", backend),
     )
-    monkeypatch.setattr(install_control, "build_release_identity", lambda _root: RELEASE)
+    monkeypatch.setattr(install_release, "build_release_identity", lambda _root: RELEASE)
     return tmp_path
 
 
@@ -83,11 +93,11 @@ def _install(machine: Path, *, scheduler: str, profile: str, plugin: bool) -> di
         claude_settings=False,
         codex_hooks=False,
     )
-    return install_control._install_from_args(args)
+    return install_requests.install_from_args(args)
 
 
 def _plugin(machine: Path) -> Path:
-    return install_control._opencode_plugin_destination(machine / "home")
+    return install_resource_builder.opencode_plugin_destination(machine / "home")
 
 
 def test_a_rerun_without_an_agent_takes_its_plugin_back(machine: Path) -> None:
@@ -127,20 +137,30 @@ def test_the_same_request_is_not_a_replacement(machine: Path) -> None:
 
 
 def test_a_failed_replacement_puts_the_previous_install_back(machine: Path, monkeypatch) -> None:
-    """Research: docs/research/2026-09-25-a-failed-reinstall-puts-the-old-one-back.md."""
+    """Research: docs/research/2026-09-25-a-failed-reinstall-puts-the-old-one-back.md.
+
+    A change that involves a cron entry is still taken back before its replacement is
+    written: a cron entry cannot be read back as it is. Any other set change is one
+    update and needs no restore (`tests/test_an_update_replaces_what_it_owns.py`).
+    """
     _install(machine, scheduler="native", profile=".bashrc", plugin=True)
-    real_install = install_control.install_resources
+    real_install = install_v2_transactions.install_resources
     calls: list[int] = []
 
     def fail_first(**options):
         calls.append(len(options["resources"]))
         if len(calls) == 1:
-            raise install_control.InstallControlError("injected_install_failure")
+            raise install_state.InstallControlError("injected_install_failure")
         return real_install(**options)
 
-    monkeypatch.setattr(install_control, "install_resources", fail_first)
+    monkeypatch.setattr(install_v2_transactions, "install_resources", fail_first)
 
-    with pytest.raises(install_control.InstallControlError, match="injected_install_failure"):
-        _install(machine, scheduler="native", profile=".bashrc", plugin=False)
+    with pytest.raises(install_state.InstallControlError, match="injected_install_failure"):
+        _install(machine, scheduler="cron", profile=".bashrc", plugin=True)
 
-    assert (_plugin(machine).exists(), (machine / "sched" / "systemd_user.txt").exists(), len(calls)) == (True, True, 2)
+    assert (
+        _plugin(machine).exists(),
+        (machine / "sched" / "systemd_user.txt").exists(),
+        (machine / "sched" / "cron.txt").exists(),
+        len(calls),
+    ) == (True, True, False, 2)

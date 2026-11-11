@@ -1,6 +1,6 @@
 """NEW-116 — a who-calls question must not read the whole CALLS set.
 
-`_store_find_callers`/`_store_find_callees` used to pull every resolved CALLS
+`store_find_callers`/`store_find_callees` used to pull every resolved CALLS
 assertion out of the active generation and filter it in a Python loop. On this
 repository's live generation that is 35,313 rows against a 10,000-row ceiling,
 so `EvidenceGraph._execute` raised `Evidence Graph query row ceiling exceeded`
@@ -225,10 +225,10 @@ def _refuse_unanchored_calls(monkeypatch):
 def test_who_calls_no_longer_reads_the_whole_calls_set(tmp_path, monkeypatch):
     import code_graph
 
-    from tests.test_code_graph import _activate_graph
+    from tests.code_graph_helpers import _activate_graph
 
     catalog = _activate_graph(tmp_path)
-    monkeypatch.setattr(code_graph, "_generation_catalog", lambda directory: catalog)
+    monkeypatch.setattr("llm_wiki.code_graph_generation.generation_catalog", lambda directory: catalog)
     seen = _refuse_unanchored_calls(monkeypatch)
 
     callers = code_graph.find_callers("callee", tmp_path)
@@ -240,10 +240,10 @@ def test_who_calls_no_longer_reads_the_whole_calls_set(tmp_path, monkeypatch):
 def test_what_x_calls_no_longer_reads_the_whole_calls_set(tmp_path, monkeypatch):
     import code_graph
 
-    from tests.test_code_graph import _activate_graph
+    from tests.code_graph_helpers import _activate_graph
 
     catalog = _activate_graph(tmp_path)
-    monkeypatch.setattr(code_graph, "_generation_catalog", lambda directory: catalog)
+    monkeypatch.setattr("llm_wiki.code_graph_generation.generation_catalog", lambda directory: catalog)
     seen = _refuse_unanchored_calls(monkeypatch)
 
     callees = code_graph.find_callees("caller", tmp_path)

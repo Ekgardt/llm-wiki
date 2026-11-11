@@ -30,7 +30,7 @@ def test_a_long_summary_ends_on_a_whole_word():
 
     text = "Decided that the slow-transaction logging threshold must be derived from research rather than picked, because a threshold set too low is worse than none"
 
-    clipped = build_guardrails._clipped(text)
+    clipped = build_guardrails.clipped(text)
 
     assert (len(clipped) <= build_guardrails.SUMMARY_MAX_CHARS, clipped.endswith("…"), text.startswith(clipped[:-1])) == (True, True, True)
     assert text[len(clipped) - 1] == " "
@@ -40,10 +40,9 @@ def test_the_hook_leaves_its_payload_where_the_docs_say(tmp_path, monkeypatch):
     import integration_adapter
     import session_start_context
 
-    monkeypatch.setattr(session_start_context, "DEBUG_DIR", tmp_path / "logs")
-    monkeypatch.setattr(session_start_context, "DEBUG_FILE", tmp_path / "logs" / "session-start-last.txt")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     monkeypatch.setattr(session_start_context, "latest_daily", lambda: None)
 
-    integration_adapter._write_session_start_debug("# Project memory context")
+    integration_adapter.write_session_start_debug("# Project memory context")
 
     assert "# Project memory context" in (tmp_path / "logs" / "session-start-last.txt").read_text(encoding="utf-8")

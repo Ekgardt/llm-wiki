@@ -1,0 +1,292 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/build-context.md",
+    "docs/modules/context-budget.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/session-start-context.md",
+    "docs/modules/test-context-noise-context.json",
+    "docs/modules/test-context-noise.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/build_context.py",
+    "scripts/context_budget.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/session_start_context.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_context_noise.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-context-noise-context.json",
+      "docs/modules/test-context-noise.md",
+      "tests/test_context_noise.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/build_advisory.py",
+      "names": [
+        "build_advisory"
+      ],
+      "contract_sha256": "2a214c6d4890af8972f6ebf7130c1f888a6d9b317a025b43a65189fa4e2c6c76",
+      "integration_tests": [
+        "tests/test_context_noise.py"
+      ]
+    },
+    {
+      "provider": "scripts/build_guardrails.py",
+      "names": [
+        "build_guardrails"
+      ],
+      "contract_sha256": "9868de30be8fd25ed36fb6cef1c70c9465033345808af2dfbbc34265e8783c7d",
+      "integration_tests": [
+        "tests/test_context_noise.py"
+      ]
+    },
+    {
+      "provider": "scripts/capture_diagnostics.py",
+      "names": [
+        "capture_failure_line",
+        "record_hook_error"
+      ],
+      "contract_sha256": "c6e70eedde550b687d0ec40e63ae66dc5ba045e550b9613edce9558f397df9fe",
+      "integration_tests": [
+        "tests/test_context_noise.py"
+      ]
+    },
+    {
+      "provider": "scripts/context_compiler.py",
+      "names": [
+        "compile_context_items"
+      ],
+      "contract_sha256": "23b1ffbfd102d5b171b6535f6c6997b12c598befccfd3dc0c9d8afaef214fe00",
+      "integration_tests": [
+        "tests/test_context_noise.py"
+      ]
+    },
+    {
+      "provider": "scripts/doctor.py",
+      "names": [
+        "degraded_summary",
+        "run_doctor"
+      ],
+      "contract_sha256": "70eb5162dd90eb33afac7e928ba93eb6c059602e61674971e8caa2d46a405982",
+      "integration_tests": [
+        "tests/test_context_noise.py"
+      ]
+    },
+    {
+      "provider": "scripts/impact_analysis.py",
+      "names": [
+        "analyze_impact",
+        "format_for_advisory"
+      ],
+      "contract_sha256": "29ef96edce70f7407200bdd870440650f2563bf2e124b50b37170fd69094157a",
+      "integration_tests": [
+        "tests/test_context_noise.py"
+      ]
+    },
+    {
+      "provider": "scripts/integration_adapter.py",
+      "names": [
+        "append_context",
+        "recovered_project_handoff"
+      ],
+      "contract_sha256": "62e37085757af44c9a7204d96957743f19f10ad14fb724e04b65c8e796a57607",
+      "integration_tests": [
+        "tests/test_a_capture_that_fails_says_so.py",
+        "tests/test_a_checkpoint_records_what_was_done.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/integration_session_start.py",
+      "names": [
+        "ProjectStore",
+        "recover_project_handoff"
+      ],
+      "contract_sha256": "9781d698eda60655eb4f3d8c0841cd2852c965f211412f1098bedf867e1c4578",
+      "integration_tests": [
+        "tests/test_a_capture_that_fails_says_so.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_missed_nightly_is_caught_up.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_context_noise.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "daily_dir",
+        "index_file",
+        "notes_dir",
+        "projects_dir",
+        "reports_dir",
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "4bb2b7bc601c61b39d4e4cafb545a750b90c5b29151f149c40cf917560d6d8ec",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_bad_model_file_is_fetched_again.py",
+        "tests/test_a_block_opens_one_entry.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownCoordinator",
+        "active_or_legacy_coordinator",
+        "mutate_knowledge",
+        "stable_operation_id"
+      ],
+      "contract_sha256": "744aaf622dea5064a678b282aa3924b68d8f68c8209195f829f2fc692b66f451",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "HOOK_STATE_LOCK_TIMEOUT",
+        "load_state",
+        "save_state",
+        "spawn_detached",
+        "state_file",
+        "update_state"
+      ],
+      "contract_sha256": "97a7812a16cda50a890214de690ebbb922c4575e9cd951ab28ec3ab5d5e53c84",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_blocked_task_has_a_way_back.py"
+      ]
+    },
+    {
+      "provider": "scripts/project_checkpoint.py",
+      "names": [
+        "ProjectStore"
+      ],
+      "contract_sha256": "33a03e00e50d0b3dcef7c8f0a1e1e1b91b94693f7e3eae4827b6c2817e23955f",
+      "integration_tests": [
+        "tests/test_a_backlog_drains_in_windows.py",
+        "tests/test_a_batch_is_named_after_the_batch.py",
+        "tests/test_a_capture_that_fails_says_so.py"
+      ]
+    },
+    {
+      "provider": "scripts/project_journal.py",
+      "names": [
+        "ProjectHandoffResult",
+        "ProjectProjection",
+        "build_handoff_items"
+      ],
+      "contract_sha256": "633eef9b26b37adb769105029f152f7bf6179e64d2b8e0b345803fd097954b5c",
+      "integration_tests": [
+        "tests/test_context_noise.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_runtime_file",
+        "validate_state_root"
+      ],
+      "contract_sha256": "8d6496bf7c816260fcc296ec050a67bb532dbd88e54cd15a47ff34c033488c8d",
+      "integration_tests": [
+        "tests/test_context_noise.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_context_noise.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "describe_error",
+        "redact_secrets"
+      ],
+      "contract_sha256": "15e80f37cf33a095390aff6e606c20403cc8c70ffb9983c3c8594ba3d1d1ae67",
+      "integration_tests": [
+        "tests/test_context_noise.py"
+      ]
+    },
+    {
+      "provider": "scripts/session_start_project_state.py",
+      "names": [
+        "MAX_PROJECT_ROOT_CHARS",
+        "clip",
+        "is_native_absolute_root",
+        "resolve_project_dir"
+      ],
+      "contract_sha256": "cf846cbd4d79f509cb379e9e62fa3d5af6a97f4e12243e40594700548ef73a6c",
+      "integration_tests": [
+        "tests/test_context_noise.py"
+      ]
+    },
+    {
+      "provider": "scripts/vault_log.py",
+      "names": [
+        "LOG_RELATIVE",
+        "vault_log_path"
+      ],
+      "contract_sha256": "086a356f42414596795ac6c01efceae390b56978f04f1e384b4b9619ded7eb9b",
+      "integration_tests": [
+        "tests/test_context_noise.py"
+      ]
+    }
+  ]
+}

@@ -37,24 +37,24 @@ FIXTURE_KEY = "sk-" + "a" * 40
 def _finding_policy(*spans: str) -> DLPPolicy:
     return DLPPolicy(
         allow_finding_fingerprints=frozenset(
-            model_dlp._fingerprint(span) for span in spans
+            model_dlp.fingerprint(span) for span in spans
         )
     )
 
 
 def test_an_allowlisted_finding_passes() -> None:
     text = f"token = \"{FIXTURE_KEY}\"\n"
-    scrubbed = model_dlp._scrubbed(text, DLPPolicy())
+    scrubbed = model_dlp.scrubbed_text(text, DLPPolicy())
     assert scrubbed != text, "the fixture must actually be a finding"
-    spans = model_dlp._finding_spans(text, scrubbed)
+    spans = model_dlp.finding_spans(text, scrubbed)
     require_safe_model_output(text, _finding_policy(*spans))
 
 
 def test_an_edit_elsewhere_in_the_file_survives() -> None:
     """The whole point: the unlock is stable under unrelated edits."""
     original = f"# comment\ntoken = \"{FIXTURE_KEY}\"\n"
-    scrubbed = model_dlp._scrubbed(original, DLPPolicy())
-    policy = _finding_policy(*model_dlp._finding_spans(original, scrubbed))
+    scrubbed = model_dlp.scrubbed_text(original, DLPPolicy())
+    policy = _finding_policy(*model_dlp.finding_spans(original, scrubbed))
 
     edited = f"# a completely rewritten comment, twice as long\ntoken = \"{FIXTURE_KEY}\"\nprint('new code')\n"
     require_safe_content(edited.encode(), policy)
@@ -62,8 +62,8 @@ def test_an_edit_elsewhere_in_the_file_survives() -> None:
 
 def test_a_new_secret_still_blocks() -> None:
     original = f"token = \"{FIXTURE_KEY}\"\n"
-    scrubbed = model_dlp._scrubbed(original, DLPPolicy())
-    policy = _finding_policy(*model_dlp._finding_spans(original, scrubbed))
+    scrubbed = model_dlp.scrubbed_text(original, DLPPolicy())
+    policy = _finding_policy(*model_dlp.finding_spans(original, scrubbed))
 
     second = original + "other = \"sk-" + "b" * 40 + "\"\n"
     with pytest.raises(DLPContentBlocked):
@@ -103,8 +103,8 @@ def test_a_finding_policy_loads_and_unlocks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     text = f"token = \"{FIXTURE_KEY}\"\n"
-    scrubbed = model_dlp._scrubbed(text, DLPPolicy())
-    spans = model_dlp._finding_spans(text, scrubbed)
+    scrubbed = model_dlp.scrubbed_text(text, DLPPolicy())
+    spans = model_dlp.finding_spans(text, scrubbed)
     path = _policy_file(
         tmp_path,
         {
@@ -112,7 +112,7 @@ def test_a_finding_policy_loads_and_unlocks(
             "literals": [],
             "allow_fingerprints": [],
             "allow_finding_fingerprints": sorted(
-                model_dlp._fingerprint(span) for span in spans
+                model_dlp.fingerprint(span) for span in spans
             ),
         },
     )
@@ -127,7 +127,7 @@ def test_a_tampered_finding_list_is_refused(
         tmp_path,
         {"version": 1, "literals": [], "allow_fingerprints": []},
     )
-    document = json.loads(path.read_text())
+    document = json.loads(path.read_text(encoding='utf-8'))
     document["allow_finding_fingerprints"] = ["c" * 64]
     path.write_text(json.dumps(document))
     monkeypatch.setenv("LLM_WIKI_DLP_POLICY", str(path))

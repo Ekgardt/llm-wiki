@@ -25,7 +25,7 @@ for directory in (TESTS.parent / "scripts", TESTS):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
-from test_repository_index import _repository  # noqa: E402
+from tests.repository_index_helpers import _repository  # noqa: E402
 
 ENVIRONMENT_MODULE = "vendor/lib/python3/site-packages/dep.py"
 

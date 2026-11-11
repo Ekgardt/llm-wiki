@@ -106,7 +106,7 @@ def pruned_spans(
     spans = sentence_spans(content, start, end)
     texts = [content[s:e].decode("utf-8", errors="replace") for s, e in spans]
     ranked = _ranked(_scores(question, texts, encode))
-    chosen = _within_budget(spans, [0, *ranked])
+    chosen = within_budget(spans, [0, *ranked])
     return _merged([spans[index] for index in sorted(chosen)])
 
 
@@ -124,7 +124,7 @@ def _ranked(scores: np.ndarray) -> list[int]:
 MIN_SENTENCES = 2
 
 
-def _within_budget(spans: Sequence[tuple[int, int]], order: Sequence[int]) -> set[int]:
+def within_budget(spans: Sequence[tuple[int, int]], order: Sequence[int]) -> set[int]:
     """The first sentence and then the best ones, until KEEP_BYTES are spent."""
     chosen: set[int] = set()
     spent = 0

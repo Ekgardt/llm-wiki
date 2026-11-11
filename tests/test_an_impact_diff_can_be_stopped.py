@@ -21,7 +21,7 @@ def test_a_file_of_repeated_lines_is_diffed_before_its_deadline_and_exactly() ->
     old, new = _every_seventh_changed(10_000)
     deadline = time.monotonic() + SHORT_TIMEOUT
 
-    ranges = impact_analysis._changed_ranges(old, new, deadline=deadline)
+    ranges = impact_analysis.changed_ranges(old, new, deadline=deadline)
 
     assert (time.monotonic() < deadline, len(ranges)) == (True, len(range(0, 10_000, 7)))
 
@@ -32,7 +32,7 @@ def test_each_hunk_names_its_own_line() -> None:
         f"value_{index} = {index + 1 if index % 7 == 0 else index}\n".encode() for index in range(50)
     )
 
-    hunks = impact_analysis._hunks(
+    hunks = impact_analysis.diff_hunks(
         old.splitlines(keepends=True), new.splitlines(keepends=True), 0, 0, (None, None)
     )
 

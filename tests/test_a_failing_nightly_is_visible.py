@@ -17,11 +17,13 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import UTC
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
+
 
 import session_start_context  # noqa: E402
 
@@ -30,7 +32,7 @@ def _state(tmp_path: Path, monkeypatch, payload: object) -> None:
     run = tmp_path / "run"
     run.mkdir(parents=True, exist_ok=True)
     (run / "state.json").write_text(json.dumps(payload), encoding="utf-8")
-    monkeypatch.setattr(session_start_context, "STATE_ROOT", tmp_path)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
 
 
 def test_a_failing_nightly_is_named_with_its_last_success(tmp_path, monkeypatch) -> None:
@@ -40,7 +42,7 @@ def test_a_failing_nightly_is_named_with_its_last_success(tmp_path, monkeypatch)
         {"last_nightly_status": "failed", "last_nightly_date": "2026-08-30"},
     )
 
-    line = session_start_context._nightly_line()
+    line = session_start_context.nightly_line()
 
     assert "nightly maintenance is failing" in line
     assert "2026-08-30" in line
@@ -49,7 +51,7 @@ def test_a_failing_nightly_is_named_with_its_last_success(tmp_path, monkeypatch)
 def test_a_nightly_that_never_ran_still_names_the_failure(tmp_path, monkeypatch) -> None:
     _state(tmp_path, monkeypatch, {"last_nightly_status": "failed"})
 
-    assert "never" in session_start_context._nightly_line()
+    assert "never" in session_start_context.nightly_line()
 
 
 def test_a_healthy_nightly_says_nothing(tmp_path, monkeypatch) -> None:
@@ -60,13 +62,13 @@ def test_a_healthy_nightly_says_nothing(tmp_path, monkeypatch) -> None:
         {"last_nightly_status": "success", "last_nightly_date": "2026-09-05"},
     )
 
-    assert session_start_context._nightly_line() == ""
+    assert session_start_context.nightly_line() == ""
 
 
 def test_unreadable_state_says_nothing_rather_than_guessing(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(session_start_context, "STATE_ROOT", tmp_path / "absent")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "absent"))
 
-    assert session_start_context._nightly_line() == ""
+    assert session_start_context.nightly_line() == ""
 
 
 def test_the_unmeasured_block_carries_the_nightly_line(tmp_path, monkeypatch) -> None:
@@ -76,14 +78,17 @@ def test_the_unmeasured_block_carries_the_nightly_line(tmp_path, monkeypatch) ->
         {"last_nightly_status": "failed", "last_nightly_date": "2026-08-30"},
     )
 
-    block = session_start_context._unmeasured_health_block(9, 18)
+    block = session_start_context.operational_health_block({
+        "overall_status": "degraded",
+        "checks": [{"details": {"budget_exhausted": True}}] * 9 + [{"status": "ok"}] * 9,
+    })
 
     assert "nightly maintenance is failing" in block
-    assert "9 of 18 checks" in block
+    assert "9 of 18" in block
 
 
 def _stored_report(tmp_path, monkeypatch, written_at: str, status: str = "degraded") -> None:
-    monkeypatch.setattr(session_start_context, "STATE_ROOT", tmp_path)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
     report = {
         "overall_status": status,
@@ -95,13 +100,14 @@ def _stored_report(tmp_path, monkeypatch, written_at: str, status: str = "degrad
     )
 
 
-def test_session_start_reads_the_nightly_report_instead_of_measuring(tmp_path, monkeypatch) -> None:
+def test_session_start_labels_the_historical_nightly_report(tmp_path, monkeypatch) -> None:
     """Issue #23.5: 'not measured' every morning on a healthy vault."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    written = datetime.now(timezone.utc) - timedelta(hours=6)
+    written = datetime.now(UTC) - timedelta(hours=6)
     _stored_report(tmp_path, monkeypatch, written.isoformat(timespec="seconds"))
 
+    monkeypatch.setattr(session_start_context, "measured_health_block", lambda: "")
     block = session_start_context.health_block()
 
     assert "index (degraded): stale" in block
@@ -110,17 +116,18 @@ def test_session_start_reads_the_nightly_report_instead_of_measuring(tmp_path, m
 
 
 def test_a_healthy_nightly_report_says_nothing(tmp_path, monkeypatch) -> None:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    _stored_report(tmp_path, monkeypatch, datetime.now(timezone.utc).isoformat(), status="ok")
+    _stored_report(tmp_path, monkeypatch, datetime.now(UTC).isoformat(), status="ok")
 
+    monkeypatch.setattr(session_start_context, "measured_health_block", lambda: "")
     assert session_start_context.health_block() == ""
 
 
 def test_a_stale_nightly_report_is_not_trusted(tmp_path, monkeypatch) -> None:
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    written = datetime.now(timezone.utc) - timedelta(hours=40)
+    written = datetime.now(UTC) - timedelta(hours=40)
     _stored_report(tmp_path, monkeypatch, written.isoformat(timespec="seconds"))
 
-    assert session_start_context._stored_health_report() is None
+    assert session_start_context.stored_health_report() is None

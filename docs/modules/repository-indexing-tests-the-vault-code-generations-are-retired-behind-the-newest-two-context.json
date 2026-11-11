@@ -1,0 +1,198 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/generation-catalog-tests-generation-catalog-helpers.md",
+    "docs/modules/memory-state-tests-repository-index-helpers.md",
+    "docs/modules/memory-state-tests-repository-refresh-helpers.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/repository-indexing-tests-the-vault-code-generations-are-retired-behind-the-newest-two-context.json",
+    "docs/modules/repository-indexing-tests-the-vault-code-generations-are-retired-behind-the-newest-two.md",
+    "docs/modules/repository-retention.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/generation_catalog_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/repository_index_helpers.py",
+    "tests/repository_refresh_helpers.py",
+    "tests/repository_retention_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_the_vault_code_generations_are_retired_behind_the_newest_two.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/repository-indexing-tests-the-vault-code-generations-are-retired-behind-the-newest-two-context.json",
+      "docs/modules/repository-indexing-tests-the-vault-code-generations-are-retired-behind-the-newest-two.md",
+      "tests/test_the_vault_code_generations_are_retired_behind_the_newest_two.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/code_hints.py",
+      "names": [
+        "hints_path"
+      ],
+      "contract_sha256": "551967981f998c8de3e83658032df2c1ff7accd4f7f8631d4c40982086b59bc1",
+      "integration_tests": [
+        "tests/test_the_vault_code_generations_are_retired_behind_the_newest_two.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "canonical_source_manifest",
+        "collect_corpus"
+      ],
+      "contract_sha256": "6f1af8b5d6e29a6eaebcd144bf94853e4b167148485f11c44b06bf8f4c21604d",
+      "integration_tests": [
+        "tests/test_the_vault_code_generations_are_retired_behind_the_newest_two.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_graph.py",
+      "names": [
+        "GRAPH_SCHEMA_VERSION",
+        "create_generation_database"
+      ],
+      "contract_sha256": "89e205850c231804d8c65759f029246f8d981164fe97f6250aa48f942c0c9359",
+      "integration_tests": [
+        "tests/test_the_vault_code_generations_are_retired_behind_the_newest_two.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_reader_cache.py",
+      "names": [
+        "clear"
+      ],
+      "contract_sha256": "cdd812311d91649d0430a6cedc6c4fa018d9844fc1220a6ce945244f4bb67409",
+      "integration_tests": [
+        "tests/test_the_vault_code_generations_are_retired_behind_the_newest_two.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_fts_validation.py",
+      "names": [
+        "GENERATION_TOKENIZER_CONFIG_SHA256",
+        "GENERATION_TOKENIZER_VERSION"
+      ],
+      "contract_sha256": "41a5ba6fcba2b0852a5187a5c47402f077682f14e1f983941f7647502022a803",
+      "integration_tests": [
+        "tests/test_the_vault_code_generations_are_retired_behind_the_newest_two.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_search.py",
+      "names": [
+        "build_generation_fts"
+      ],
+      "contract_sha256": "b2391df99aa883af90d0b8cd8ab8c5b7e83a8d39521b0fa0af81f0a449783354",
+      "integration_tests": [
+        "tests/test_the_vault_code_generations_are_retired_behind_the_newest_two.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_the_vault_code_generations_are_retired_behind_the_newest_two.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_the_vault_code_generations_are_retired_behind_the_newest_two.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "7bba4b535d3f0a73445fece541c540939989b41456c9a79a67f82634748be36b",
+      "integration_tests": [
+        "tests/test_the_vault_code_generations_are_retired_behind_the_newest_two.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_indexing.py",
+      "names": [
+        "index_repository",
+        "open_catalog",
+        "refresh_repository"
+      ],
+      "contract_sha256": "38e88b6d2261ef45699f17d59dfa7fed79b2aa74584d438bb5eeb5a407224e97",
+      "integration_tests": [
+        "tests/test_the_vault_code_generations_are_retired_behind_the_newest_two.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_retention.py",
+      "names": [
+        "retire_repositories"
+      ],
+      "contract_sha256": "be72f69255a4e4b21c74f50525eee3aa7c81887a2b1264c8fcf7c8f5eded2089",
+      "integration_tests": [
+        "tests/test_the_vault_code_generations_are_retired_behind_the_newest_two.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "RepositoryScope",
+        "SCHEMA_VERSION",
+        "derive_checkout_id",
+        "derive_repository_id",
+        "resolve_repository_scope",
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "98d98af2c6ea84a103c5c8463e8dc6a995656f82b7f67a22c295feed5d7a3e6e",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

@@ -37,18 +37,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
+from llm_wiki import runtime_roots  # noqa: E402
+from llm_wiki.formats.canonical import sha256_bytes  # noqa: E402
+from llm_wiki.markdown_store import MAX_KNOWLEDGE_TARGET_BYTES  # noqa: E402
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
-from memory_state import ROOT  # noqa: E402
-from reliable_memory import sha256_bytes  # noqa: E402
 from vault_editorial import EDITORIAL_NAMES  # noqa: E402
 
 # Reserved OKF filenames — no frontmatter allowed at bundle level.
 RESERVED_NAMES = frozenset({"index.md", "log.md"})
-# One page read whole for frontmatter migration; above MAX_KNOWLEDGE_PAGE_BYTES (8 MiB), which
-# every other reader uses. Basis unknown: value predates measurement; review when it is aligned
-# with that ceiling.
-MAX_MIGRATION_PAGE_BYTES = 16 * 1024 * 1024
-
 # Editorial / contract files at the vault root — left alone.
 #
 # `EDITORIAL_NAMES` (imported above) covers the ones that are editorial wherever
@@ -86,21 +82,18 @@ TYPE_INFERENCE = [
     ("knowledge/notes/", "concept"),
 ]
 
-# Per-scope glob roots (used by --scope filter).
-SCOPE_ROOTS = {
-    "wiki": [ROOT / "knowledge" / "notes"],
-    "memory": [ROOT / "knowledge" / "notes"],
-    "notes": [ROOT / "knowledge" / "notes"],
-    "skills": [ROOT / "skills"],
-    "rules": [ROOT / "rules"],
-    "projects": [ROOT / "knowledge" / "projects"],
-    "all": [
-        ROOT / "knowledge" / "notes",
-        ROOT / "knowledge" / "projects",
-        ROOT / "skills",
-        ROOT / "rules",
-    ],
-}
+SCOPE_NAMES = ("wiki", "memory", "notes", "skills", "rules", "projects", "all")
+
+
+def scope_roots(scope: str) -> list[Path]:
+    """The directories a `--scope` value walks."""
+    vault = runtime_roots.vault_root()
+    notes, projects = runtime_roots.notes_dir(), runtime_roots.projects_dir()
+    single = {"wiki": notes, "memory": notes, "notes": notes, "projects": projects,
+              "skills": vault / "skills", "rules": vault / "rules"}
+    if scope == "all":
+        return [notes, projects, vault / "skills", vault / "rules"]
+    return [single[scope]]
 
 
 H1_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
@@ -120,7 +113,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--scope",
-        choices=list(SCOPE_ROOTS.keys()),
+        choices=list(SCOPE_NAMES),
         default="all",
         help="Limit migration to a subtree (default: all).",
     )
@@ -198,7 +191,7 @@ def build_frontmatter(
 
 
 def _root_contract_status(path: Path) -> str | None:
-    if path.name in ROOT_LEVEL_SKIP and path.parent == ROOT:
+    if path.name in ROOT_LEVEL_SKIP and path.parent == runtime_roots.vault_root():
         return "skip_root_contract"
     return None
 
@@ -216,14 +209,6 @@ def _skip_status(path: Path) -> str | None:
     if path.name in EDITORIAL_NAMES:
         return "skip_editorial"
     return _root_contract_status(path)
-
-
-def _read_page(path: Path) -> tuple[str, str | None]:
-    """(status, text) — the status is empty when the read succeeded."""
-    try:
-        return "", path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as e:
-        return (f"error_read:{type(e).__name__}", None)
 
 
 def _added_field(body: str, field: str, value: str) -> str:
@@ -295,19 +280,14 @@ def migrate_file(path: Path) -> tuple[str, str | None]:
         ("skip_no_type_rule", None)  — path doesn't match any TYPE_INFERENCE entry
         ("migrate", new_content)     — frontmatter to prepend
     """
-    skipped = _skip_status(path)
-    if skipped is not None:
-        return (skipped, None)
-    status, content = _read_page(path)
-    if content is None:
-        return (status, None)
-    return _content_migration(path, content)
+    status, content, _digest = _planned_page(path)
+    return status, content
 
 
 def _content_migration(path: Path, content: str) -> tuple[str, str | None]:
     if has_okf_type(content):
         return ("skip_already_okf", None)
-    type_name = infer_type(path.relative_to(ROOT).as_posix())
+    type_name = infer_type(path.relative_to(runtime_roots.vault_root()).as_posix())
     if not type_name:
         return ("skip_no_type_rule", None)
     return ("migrate", _page_migration(path, content, type_name))
@@ -320,23 +300,32 @@ def _scope_pages(root: Path) -> list[Path]:
 def collect_files(scope: str) -> list[Path]:
     """All .md files in scope, in order, without duplicates."""
     pages: list[Path] = []
-    for root in SCOPE_ROOTS[scope]:
+    for root in scope_roots(scope):
         if root.exists():
             pages.extend(_scope_pages(root))
     return list(dict.fromkeys(pages))
 
 
 def _rel(path: Path) -> str:
-    return path.relative_to(ROOT).as_posix()
+    return path.relative_to(runtime_roots.vault_root()).as_posix()
 
 
-def _source_hash(path: Path) -> tuple[str, str | None]:
-    """(status, digest) — the status is empty when the hash was taken."""
+def _planned_page(path: Path) -> tuple[str, str | None, str | None]:
+    skipped = _skip_status(path)
+    if skipped is not None:
+        return skipped, None, None
+    return _read_planned_page(path)
+
+
+def _read_planned_page(path: Path) -> tuple[str, str | None, str | None]:
+    """Bind the migration and its CAS precondition to one stable byte read."""
     try:
-        data = read_stable_bytes(path, MAX_MIGRATION_PAGE_BYTES, label="migration page")
-    except (OSError, ValueError) as exc:
-        return (f"error_read:{type(exc).__name__}", None)
-    return "", sha256_bytes(data)
+        data = read_stable_bytes(path, MAX_KNOWLEDGE_TARGET_BYTES, label="migration page")
+        source = data.decode("utf-8")
+    except (OSError, ValueError) as error:
+        return f"error_read:{type(error).__name__}", None, None
+    status, content = _content_migration(path, source)
+    return status, content, sha256_bytes(data)
 
 
 class MigrationPlan:
@@ -366,15 +355,12 @@ class MigrationPlan:
             self.skipped.append((status, path))
 
 
-def _plan_migration(files: list[Path]) -> MigrationPlan:
+def plan_migration(files: list[Path]) -> MigrationPlan:
     plan = MigrationPlan()
     for path in files:
-        status, digest = _source_hash(path)
-        if digest is None:
-            plan.record(status, path, None)
-            continue
-        plan.source_hashes[path] = digest
-        status, content = migrate_file(path)
+        status, content, digest = _planned_page(path)
+        if digest is not None:
+            plan.source_hashes[path] = digest
         plan.record(status, path, content)
     return plan
 
@@ -431,7 +417,7 @@ def main() -> int:
     args = parse_args()
     files = collect_files(args.scope)
     print(f"migrate_to_okf: scanned {len(files)} file(s) under scope={args.scope}")
-    plan = _plan_migration(files)
+    plan = plan_migration(files)
     _print_summary(plan)
     if not args.apply:
         return _dry_run(plan, args.report)
@@ -447,12 +433,7 @@ def _write_report(
     applied: bool,
 ) -> None:
     """Write a migration report under the state root."""
-    import os
-
-    state_root = Path(
-        os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT))
-    )
-    reports = state_root / "logs"
+    reports = runtime_roots.reports_dir()
     reports.mkdir(parents=True, exist_ok=True)
     today = datetime.now().strftime("%Y-%m-%d")
     report = reports / f"okf-migration-{today}.md"
@@ -473,7 +454,7 @@ def _write_report(
         "",
     ]
     for path, _ in plan:
-        rel = path.relative_to(ROOT).as_posix()
+        rel = path.relative_to(runtime_roots.vault_root()).as_posix()
         lines.append(f"- `{rel}`")
     report.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"Report written to: {report}")

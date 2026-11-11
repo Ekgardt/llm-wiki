@@ -1,0 +1,196 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/markdown-transaction-tests-every-store-has-a-bound-helpers.md",
+    "docs/modules/memory-state-tests-every-store-has-a-bound-context.json",
+    "docs/modules/memory-state-tests-every-store-has-a-bound.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/every_store_has_a_bound_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_every_store_has_a_bound.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/memory-state-tests-every-store-has-a-bound-context.json",
+      "docs/modules/memory-state-tests-every-store-has-a-bound.md",
+      "tests/test_every_store_has_a_bound.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_undo.py",
+      "names": [
+        "HISTORY_RETENTION_DAYS"
+      ],
+      "contract_sha256": "17ff7d18a099467dc4e1cb65f5cea61dc31ec15e70e5a2183147f393d5110bb6",
+      "integration_tests": [
+        "tests/test_every_store_has_a_bound.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_every_store_has_a_bound.py"
+      ]
+    },
+    {
+      "provider": "scripts/maintenance_helpers.py",
+      "names": [
+        "ROTATED_LOG_NAMES"
+      ],
+      "contract_sha256": "f6d8d4f7988b70c06874bb91e52e1ff3d5752bb71a1882319e99b8decd8d62cb",
+      "integration_tests": [
+        "tests/test_every_store_has_a_bound.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownCoordinator",
+        "append_until_committed"
+      ],
+      "contract_sha256": "2573e2d8e8a2a4c24a5dbf51a4ab662d350da764d09ed52a175089541c799222",
+      "integration_tests": [
+        "tests/test_every_store_has_a_bound.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "keep_previous"
+      ],
+      "contract_sha256": "441dc6a198b84b102aaf618a86597db34e6ff0c5ff627aa3f50f316737c49024",
+      "integration_tests": [
+        "tests/test_a_corrupt_state_is_not_replaced_by_an_empty_one.py",
+        "tests/test_a_discarded_receipt_reopens_its_day.py",
+        "tests/test_a_lock_is_released_even_while_somebody_is_reading_it.py"
+      ]
+    },
+    {
+      "provider": "scripts/reclaim_runtime_state.py",
+      "names": [
+        "remove_empty_intent_shards",
+        "sweep_orphan_temporaries"
+      ],
+      "contract_sha256": "8c851dea1abf6bbe3ba40752cde1d908b2e0e7bf58900fe8811938ae1647c8fc",
+      "integration_tests": [
+        "tests/test_every_store_has_a_bound.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_every_store_has_a_bound.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_index.py",
+      "names": [
+        "refresh_row"
+      ],
+      "contract_sha256": "dfa0f803ba8a3cbaa6413de698e302b250f014fab2ca36cfb202691844be3e98",
+      "integration_tests": [
+        "tests/test_every_store_has_a_bound.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_retention.py",
+      "names": [
+        "kept_count",
+        "retention_verdict"
+      ],
+      "contract_sha256": "9c38d5fac3e8a3a82c2cdd893dd1fbadc60e76e61e2fd2b0fb044dc90351f03d",
+      "integration_tests": [
+        "tests/test_every_store_has_a_bound.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_every_store_has_a_bound.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_worktrees.py",
+      "names": [
+        "Worktree",
+        "indexable"
+      ],
+      "contract_sha256": "c8a233c57ec64f833eaa2a24cd2bfc3e2e779d18409ea3807dd160aefac20693",
+      "integration_tests": [
+        "tests/test_every_store_has_a_bound.py"
+      ]
+    },
+    {
+      "provider": "scripts/retire_benchmark_runs.py",
+      "names": [
+        "DATASET_CACHES",
+        "retire"
+      ],
+      "contract_sha256": "f6aba180289feac96d1d9489ca539d32b5c040bd14612494d226d7f59e5e152e",
+      "integration_tests": [
+        "tests/test_every_store_has_a_bound.py"
+      ]
+    },
+    {
+      "provider": "scripts/weekly_budget.py",
+      "names": [
+        "script_steps"
+      ],
+      "contract_sha256": "4f125536b1c97a722f874e122cc79212b08d3c8ae5384ecab9ece9630d2cfb53",
+      "integration_tests": [
+        "tests/test_every_store_has_a_bound.py"
+      ]
+    }
+  ]
+}

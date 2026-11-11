@@ -20,7 +20,9 @@ for entry in (str(SCRIPTS_DIR), str(TESTS)):
 
 import markdown_transaction  # noqa: E402
 import operational_ownership as ownership  # noqa: E402
-from test_writer_gate_reclaims_a_dead_projection import (  # noqa: E402
+from llm_wiki import markdown_writer_gate  # noqa: E402
+
+from tests.writer_gate_reclaims_a_dead_projection_helpers import (  # noqa: E402
     PROJECT_SCOPE,
     _candidate,
     _coordinator,
@@ -60,7 +62,7 @@ def test_the_same_lease_enters_again_and_leaves_no_row(tmp_path, monkeypatch) ->
 def test_a_row_without_a_recorded_failure_is_not_removed(tmp_path, monkeypatch) -> None:
     """A row that only looks like ours may be a live gate; it is judged by the registry."""
     coordinator, owner = _failed_release(tmp_path, monkeypatch)
-    markdown_transaction._UNRELEASED_PROJECTIONS.clear()
+    markdown_writer_gate.UNRELEASED_PROJECTIONS.clear()
 
     with pytest.raises((TimeoutError, RuntimeError, sqlite3.IntegrityError)):
         with coordinator.writer_gate(owner=owner, wait_seconds=0.2):

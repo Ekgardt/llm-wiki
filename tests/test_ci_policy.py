@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path
 
 import yaml
@@ -101,7 +102,9 @@ def test_job_level_env_avoids_contexts_unavailable_before_runner_assignment() ->
     assert invalid == []
 
 
-SHARD_COUNT = 4
+# Minimal count from current measured costs and unchanged job budgets; see
+# docs/research/2026-10-13-five-shards-follow-the-measured-full-suite-cost.md.
+SHARD_COUNT = 5
 
 
 def test_full_suite_matrix_contains_every_supported_python_endpoint() -> None:
@@ -110,13 +113,6 @@ def test_full_suite_matrix_contains_every_supported_python_endpoint() -> None:
     assert job["timeout-minutes"] == "${{ matrix.timeout }}"
     assert job["strategy"]["fail-fast"] is False
     assert job["strategy"]["matrix"]["include"] == [
-        {
-            "target": "linux-py3.10",
-            "os": "ubuntu-24.04",
-            "python": "3.10",
-            "timeout": 20,
-            "class": "linux_full",
-        },
         {
             "target": "linux-py3.14",
             "os": "ubuntu-24.04",
@@ -128,46 +124,11 @@ def test_full_suite_matrix_contains_every_supported_python_endpoint() -> None:
         # took 45 on a slow runner, which the cap turned into a cancelled job
         # nobody can re-run — docs/research/2026-09-13-a-shorter-answer-and-a-fresher-line.md.
         {
-            "target": "windows-py3.10",
-            "os": "windows-2025",
-            "python": "3.10",
-            "timeout": 60,
-            "class": "windows_full",
-        },
-        {
-            "target": "windows-py3.11",
-            "os": "windows-2025",
-            "python": "3.11",
-            "timeout": 60,
-            "class": "windows_full",
-        },
-        {
-            "target": "windows-py3.12",
-            "os": "windows-2025",
-            "python": "3.12",
-            "timeout": 60,
-            "class": "windows_full",
-        },
-        {
-            "target": "windows-py3.13",
-            "os": "windows-2025",
-            "python": "3.13",
-            "timeout": 60,
-            "class": "windows_full",
-        },
-        {
             "target": "windows-py3.14",
             "os": "windows-2025",
             "python": "3.14",
             "timeout": 60,
             "class": "windows_full",
-        },
-        {
-            "target": "macos-py3.10",
-            "os": "macos-15",
-            "python": "3.10",
-            "timeout": 20,
-            "class": "macos_full",
         },
         {
             "target": "macos-py3.14",
@@ -226,7 +187,6 @@ def _assert_clean_production(job: dict[str, object]) -> None:
     include = job["strategy"]["matrix"]["include"]
     assert {entry["os"] for entry in include} == RUNNERS
     assert _linux_entries(include) == [
-        {"os": "ubuntu-24.04", "python": "3.10", "label": "py3.10"},
         {"os": "ubuntu-24.04", "python": "3.14", "label": "py3.14"},
     ]
     assert len({entry["label"] for entry in include}) == len(include)
@@ -236,7 +196,7 @@ def _assert_clean_production(job: dict[str, object]) -> None:
 def _assert_clean_profile(job: dict[str, object], extra: str | None) -> None:
     assert job["runs-on"] == "ubuntu-24.04"
     assert job["timeout-minutes"] == 20
-    assert job["strategy"]["matrix"]["python"] == ["3.10", "3.14"]
+    assert job["strategy"]["matrix"]["python"] == ["3.14"]
     commands = _commands(job)
     assert "uv sync --locked --no-default-groups" in commands
     assert extra is None or f"--extra {extra}" in commands
@@ -284,6 +244,22 @@ def test_native_installer_matrix_covers_every_platform_the_contract_names() -> N
         "tests/test_dependency_environments.py",
     ):
         assert path in commands
+
+
+def test_optional_beam_parquet_is_required_on_all_supported_platforms():
+    jobs = _workflow()['jobs']
+    job = jobs['benchmark-data']
+    assert _runner_values(job) == RUNNERS
+    assert job['strategy']['fail-fast'] is False
+    assert 'benchmark-data' in jobs['all-green']['needs']
+    commands = _commands(job)
+    assert 'uv sync --locked --extra benchmark-data' in commands
+    assert 'tests/modules/beam_data/parquet_qualification.py' in commands
+    assert 'pytest tests/modules/beam_data/parquet_qualification.py -q' in commands
+    assert 'tests/test_beam_becomes_a_question_this_stand_can_read.py' in commands
+    assert '--junitxml=beam-parquet.xml' in commands
+    assert 'pytest tests/modules/conflict_fixture_builder/parquet_qualification.py -q' in commands
+    assert '--junitxml=conflict-fixture-parquet.xml' in commands
 
 
 def test_job_timeouts_names_and_timing_artifacts_match_approved_classes() -> None:
@@ -406,3 +382,43 @@ def test_the_whole_lock_is_audited_by_a_hash_pinned_auditor() -> None:
     assert "uv export --locked --all-extras --all-groups --no-emit-project" in commands
     assert "pip-audit --requirement" in commands and "--disable-pip" in commands
     assert re.search(r'(?m)^audit = \[\n    "pip-audit[^"]*",\n\]', project)
+
+
+def _dependency_audit_arguments() -> list[list[str]]:
+    commands = _commands(_workflow()["jobs"]["dependency-audit"]).splitlines()
+    return [shlex.split(command) for command in commands if "pip-audit --requirement" in command]
+
+
+def test_local_builds_are_audited_without_removing_the_pypi_pass() -> None:
+    audits = _dependency_audit_arguments()
+
+    assert any("osv" not in arguments for arguments in audits)
+    required = {"--vulnerability-service", "osv", "--strict", "--disable-pip"}
+    assert any(required <= set(arguments) for arguments in audits)
+
+
+def test_end_to_end_installer_pins_python_before_changing_home():
+    steps = _workflow()['jobs']['install-end-to-end']['steps']
+    commands = [step.get('run', '') for step in steps]
+    install = commands.index('uv python install 3.14')
+    pin = commands.index('uv python pin 3.14')
+    home = next(index for index, step in enumerate(steps) if 'HOME' in step.get('env', {}))
+    assert install < pin < home
+
+
+def _audit_commands_containing(text):
+    commands = _commands(_workflow()['jobs']['dependency-audit']).splitlines()
+    return [line for line in commands if text in line]
+
+
+def _universal_audit_arguments():
+    return [shlex.split(line) for line in _audit_commands_containing('pip-audit --locked')]
+
+
+def test_dependency_audit_covers_all_marker_variants():
+    export = _audit_commands_containing('--format pylock.toml')[0]
+    assert {'--locked', '--all-extras', '--all-groups', '--no-emit-project'} <= set(shlex.split(export))
+    audits = _universal_audit_arguments()
+    assert any('osv' not in args for args in audits)
+    assert any({'--vulnerability-service', 'osv', '--strict', '--format', 'json'} <= set(args) for args in audits)
+    assert _audit_commands_containing('scripts/check_dependency_audit.py uv.lock')

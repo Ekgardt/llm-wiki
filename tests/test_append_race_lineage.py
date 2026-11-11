@@ -4,7 +4,7 @@
 quarantined and the next candidate id repeats the work, so no bytes are lost.
 But until the retry names the attempt it follows, doctor sees a quarantined row
 it can never clear — an append to an existing daily log is a `replace`, so the
-outcome proof in `doctor._unresolved_quarantine` (which reads `create`
+outcome proof in `doctor_transactions.unresolved_quarantine` (which reads `create`
 operations) cannot speak for it, and the lineage proof has no parent to read.
 The live vault reached `transactions (error)` this way with three refusals
 whose retries had all committed.
@@ -22,15 +22,18 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-import time
 from pathlib import Path
 
-import doctor
-import markdown_transaction
-import pytest
 from markdown_transaction import MarkdownCoordinator
 
-from tests.slow_machine import LONG_TIMEOUT
+from tests.append_race_lineage_helpers import (
+    _APPEND_BUDGET_SECONDS,
+    _DAILY,
+    _append,
+    _unresolved,
+    state_root,  # noqa: F401
+    vault,  # noqa: F401
+)
 
 # Bounds a hang on the slowest supported machine, not the expected duration, so
 # it comes from `tests/slow_machine.py` like every other hang bound. The literal
@@ -40,35 +43,8 @@ from tests.slow_machine import LONG_TIMEOUT
 # failed `test_concurrent_appends_lose_no_bytes` and then, because the timed-out
 # retry never named the attempt it followed,
 # `test_every_refused_append_is_named_by_the_retry_that_replaced_it`.
-_APPEND_BUDGET_SECONDS = LONG_TIMEOUT
-_DAILY = "knowledge/daily/2026-08-25.md"
 _WORKERS = 4
 _ROUNDS = 4
-
-
-@pytest.fixture
-def vault(tmp_path: Path) -> Path:
-    root = tmp_path / "vault"
-    for relative in ("knowledge/daily", "knowledge/notes", "knowledge/projects"):
-        (root / relative).mkdir(parents=True)
-    (root / _DAILY).write_bytes(b"# 2026-08-25\n")
-    return root
-
-
-@pytest.fixture
-def state_root(tmp_path: Path) -> Path:
-    return tmp_path / "state"
-
-
-def _append(coordinator: MarkdownCoordinator, operation_id: str, block: bytes):
-    return markdown_transaction._append_until_committed(
-        coordinator,
-        operation_id,
-        _DAILY,
-        block,
-        deadline=time.monotonic() + _APPEND_BUDGET_SECONDS,
-        cancelled=None,
-    )
 
 
 def _transactions(coordinator: MarkdownCoordinator) -> list[tuple]:
@@ -77,14 +53,6 @@ def _transactions(coordinator: MarkdownCoordinator) -> list[tuple]:
             "SELECT id, operation_id, state, error_code, parent_transaction_id "
             'FROM "transaction" ORDER BY created_at'
         ).fetchall()
-
-
-def _unresolved(coordinator: MarkdownCoordinator) -> int:
-    with sqlite3.connect(coordinator.database_path) as database:
-        columns = {
-            row[1] for row in database.execute('PRAGMA table_info("transaction")')
-        }
-        return doctor._unresolved_quarantine(database, columns)
 
 
 def _refusals(rows: list[tuple]) -> list[tuple]:
@@ -154,12 +122,12 @@ def _expected_lines() -> set[str]:
     }
 
 
-def _written_lines(vault: Path) -> set[str]:
+def _written_lines(vault: Path) -> set[str]:  # noqa: F811
     text = (vault / _DAILY).read_text(encoding="utf-8")
     return {line for line in text.splitlines() if line.startswith("line-")}
 
 
-def test_concurrent_appends_lose_no_bytes(vault: Path, state_root: Path) -> None:
+def test_concurrent_appends_lose_no_bytes(vault: Path, state_root: Path) -> None:  # noqa: F811
     coordinator = MarkdownCoordinator(vault, state_root)
 
     failures = _run_concurrent_appends(coordinator)
@@ -169,7 +137,7 @@ def test_concurrent_appends_lose_no_bytes(vault: Path, state_root: Path) -> None
 
 
 def test_every_refused_append_is_named_by_the_retry_that_replaced_it(
-    vault: Path, state_root: Path
+    vault: Path, state_root: Path  # noqa: F811
 ) -> None:
     coordinator = MarkdownCoordinator(vault, state_root)
 
@@ -180,7 +148,7 @@ def test_every_refused_append_is_named_by_the_retry_that_replaced_it(
 
 
 def test_doctor_reports_no_open_quarantine_after_concurrent_appends(
-    vault: Path, state_root: Path
+    vault: Path, state_root: Path  # noqa: F811
 ) -> None:
     coordinator = MarkdownCoordinator(vault, state_root)
 

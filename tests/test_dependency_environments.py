@@ -2,15 +2,10 @@ from __future__ import annotations
 
 import json
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib
-
 from installer_config import resolve_uv_project_environment, uv_sync_arguments
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -42,7 +37,7 @@ def test_semantic_extra_owns_every_import_of_the_encoder() -> None:
     names = {re.split(r"[<>=!~;\s\[]", value, maxsplit=1)[0].casefold() for value in semantic}
 
     assert names == {"huggingface-hub", "numpy", "onnxruntime", "tokenizers"}
-    assert sum(value.startswith("onnxruntime") for value in semantic) == 2
+    assert [value for value in semantic if value.startswith("onnxruntime")] == ["onnxruntime>=1.18,<2"]
 
 
 @pytest.mark.parametrize("override", [None, "relative environment"])
@@ -75,6 +70,8 @@ def test_fresh_install_is_locked_without_default_groups(tmp_path: Path) -> None:
         "--locked",
         "--no-default-groups",
         "--quiet",
+        "--extra",
+        "full",
     ]
 
 
@@ -94,6 +91,8 @@ def test_reinstall_is_locked_inexact_and_preserves_selected_extras(
         "--locked",
         "--no-default-groups",
         "--quiet",
+        "--extra",
+        "full",
     ]
 
 
@@ -147,31 +146,35 @@ def test_codex_wrapper_unattended_commands_are_locked_and_no_sync() -> None:
 
 
 def test_generated_mcp_entries_use_exact_arguments(tmp_path: Path) -> None:
-    import codex_memory
+    import codex_config_state
     from installer_config import expected_opencode_entry
+    from integration_hook_config import codex_launch_args, codex_launch_bundle
 
     root = tmp_path / "ROOT"
     expected = [value.replace(str(root), "ROOT") for value in expected_opencode_entry(root)["command"]]
     assert expected[1:] == EXPECTED_MCP_ARGS
 
     config = tmp_path / "config.toml"
-    root_literal = str(root).replace("\\", "\\\\")
-    args_literal = json.dumps(EXPECTED_MCP_ARGS).replace("ROOT", root_literal)
+    codex_args = codex_launch_args(root, "mcp_server.py", (), {}, relative_target=True)
+    assert [value.replace(str(root), "ROOT") for value in codex_args[:6]] == EXPECTED_MCP_ARGS[:6]
+    assert codex_args[9:] == ["scripts/mcp_server.py"]
+    assert codex_launch_bundle(codex_args, root) == {}
+    args_literal = json.dumps(codex_args)
     config.write_text(
         '[mcp_servers.llm-wiki]\ncommand = "uv"\n'
         f"args = {args_literal}\n"
         "enabled = true\n",
         encoding="utf-8",
     )
-    assert codex_memory.codex_mcp_config_state(config, root) == "equivalent"
+    assert codex_config_state.codex_mcp_config_state(config, root, {}) == "equivalent"
 
 
-def test_installer_optional_commands_are_additive() -> None:
-    expected = {
-        f"uv sync --locked --no-default-groups --inexact --extra {extra}"
-        for extra in ("hybrid", "code-graph", "reranker")
-    }
+def test_installers_offer_no_optional_extras_only_language_servers() -> None:
+    """Every component is installed (2026-09-29); a language server is the one thing left to add.
+
+    See docs/research/2026-09-29-every-install-brings-every-component.md.
+    """
     for installer in ("install.sh", "install.ps1"):
         source = (ROOT / installer).read_text(encoding="utf-8")
-        commands = set(re.findall(r'"  (uv sync --locked[^"\r\n]+)"', source))
-        assert expected <= commands
+        offered = set(re.findall(r'"  (uv sync --locked[^"\r\n]+)"', source))
+        assert (offered, "install_language_server.py --profile" in source) == (set(), True)

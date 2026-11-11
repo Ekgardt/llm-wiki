@@ -1,0 +1,275 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/claims-tests-contradiction-pipeline-helpers.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/contradiction-pipeline-context.json",
+    "docs/modules/contradiction-pipeline.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/contradiction_pipeline.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/contradiction_pipeline_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_contradiction_adopted_coordinator.py",
+    "tests/test_contradiction_pipeline.py",
+    "tests/test_one_iso_reading_for_every_python.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/contradiction-pipeline-context.json",
+      "docs/modules/contradiction-pipeline.md",
+      "scripts/contradiction_pipeline.py",
+      "tests/test_contradiction_adopted_coordinator.py",
+      "tests/test_contradiction_pipeline.py",
+      "tests/test_one_iso_reading_for_every_python.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "e570dc41e0fd70556ec6a4e887a3da194bcc13122684e515651b13dd19d7d5c1",
+      "integration_tests": [
+        "tests/test_contradiction_adopted_coordinator.py",
+        "tests/test_contradiction_pipeline.py",
+        "tests/test_one_iso_reading_for_every_python.py"
+      ]
+    },
+    {
+      "provider": "scripts/claim_tree_manifest.py",
+      "names": [
+        "snapshot_claim_tree"
+      ],
+      "contract_sha256": "7543b2c0a23d6d90d0c8ddb99da8efcab699eab0961a1bf803de27529e27554a",
+      "integration_tests": [
+        "tests/test_contradiction_adopted_coordinator.py",
+        "tests/test_contradiction_pipeline.py",
+        "tests/test_one_iso_reading_for_every_python.py"
+      ]
+    },
+    {
+      "provider": "scripts/claims.py",
+      "names": [
+        "ClaimIndex",
+        "ClaimPipeline",
+        "IndexedClaim",
+        "MAX_CLAIM_PAGE_BYTES",
+        "NormalizedClaim",
+        "claim_json_bytes",
+        "claim_ledger_document",
+        "is_substantive",
+        "parse_claim_ledger",
+        "validate_claim_candidate",
+        "validate_claim_record"
+      ],
+      "contract_sha256": "c46c78372f59a98c0904bff4cf85fff26be9eb172e53450d93ae6d6fd4da4dbe",
+      "integration_tests": [
+        "tests/test_contradiction_pipeline.py"
+      ]
+    },
+    {
+      "provider": "scripts/evidence_resolver.py",
+      "names": [
+        "EvidenceResolver"
+      ],
+      "contract_sha256": "7a2b1b64ac5ceb634f09f7bb276f120132db5ff7ddbac14fe3fe3bb3d9948b13",
+      "integration_tests": [
+        "tests/test_contradiction_adopted_coordinator.py",
+        "tests/test_contradiction_pipeline.py",
+        "tests/test_one_iso_reading_for_every_python.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_search.py",
+      "names": [
+        "MAX_PAGE_BYTES",
+        "check_legacy_stop",
+        "collect_pages",
+        "extract_title_and_summary",
+        "strip_frontmatter"
+      ],
+      "contract_sha256": "77395b59a6090e26e7d0e220b9eb243b1d9ea80b4b6e75cc8fe92f023d8e63bd",
+      "integration_tests": [
+        "tests/test_contradiction_pipeline.py"
+      ]
+    },
+    {
+      "provider": "scripts/iso_time.py",
+      "names": [
+        "parse_instant"
+      ],
+      "contract_sha256": "17cc527638c458e4db3e6a981ae7307f7e270d05d630c1f7b80c99aa3db79e66",
+      "integration_tests": [
+        "tests/test_contradiction_adopted_coordinator.py",
+        "tests/test_contradiction_pipeline.py",
+        "tests/test_one_iso_reading_for_every_python.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "LLMResult",
+        "ProviderDescriptor",
+        "call_candidate",
+        "chain_stops_after",
+        "probe_candidate",
+        "provider_candidates"
+      ],
+      "contract_sha256": "2c4504d0962384b54b472314ebd3b6759cfd81fcc7d47b916046079789d51ad5",
+      "integration_tests": [
+        "tests/test_contradiction_pipeline.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/claim_ledger.py",
+      "names": [
+        "claim_ledger_match"
+      ],
+      "contract_sha256": "3d4dceb9c02424023e469ef3c60c1015d22417cbacb8482f48281fcb2e005808",
+      "integration_tests": [
+        "tests/test_contradiction_adopted_coordinator.py",
+        "tests/test_contradiction_pipeline.py",
+        "tests/test_one_iso_reading_for_every_python.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_contradiction_adopted_coordinator.py",
+        "tests/test_contradiction_pipeline.py",
+        "tests/test_one_iso_reading_for_every_python.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_contradiction_adopted_coordinator.py",
+        "tests/test_contradiction_pipeline.py",
+        "tests/test_one_iso_reading_for_every_python.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "904b31835161d11b79ab937c4651d91dd6966bdaa1f33e93b9ea768f519d2d3b",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "MarkdownChange",
+        "MarkdownCoordinator",
+        "TransactionFailure",
+        "active_or_legacy_coordinator"
+      ],
+      "contract_sha256": "74b71d9a7d5a4695f36c3838c9dc9d0164a25ee9e28bd948cc41d848d629dbad",
+      "integration_tests": [
+        "tests/test_contradiction_pipeline.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes",
+        "validate_schema",
+        "validate_state_root"
+      ],
+      "contract_sha256": "5cab01a93df30c6518bbd6217537038e8a8c100db97dd8bafbc9f6ccf38b3f27",
+      "integration_tests": [
+        "tests/test_contradiction_pipeline.py"
+      ]
+    },
+    {
+      "provider": "scripts/reply_json.py",
+      "names": [
+        "object_with",
+        "reply_document"
+      ],
+      "contract_sha256": "8f583612dc5c3481df19cd07f7450613b82b5e9e5fb9625bb05cbf500d261853",
+      "integration_tests": [
+        "tests/test_contradiction_adopted_coordinator.py",
+        "tests/test_contradiction_pipeline.py",
+        "tests/test_one_iso_reading_for_every_python.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_contradiction_adopted_coordinator.py",
+        "tests/test_contradiction_pipeline.py",
+        "tests/test_one_iso_reading_for_every_python.py"
+      ]
+    },
+    {
+      "provider": "scripts/search_memory.py",
+      "names": [
+        "search"
+      ],
+      "contract_sha256": "efe0ddba8dce468d10c7eeff2eb2fbf29bc71d796b221d57d352be2ff915ab46",
+      "integration_tests": [
+        "tests/test_contradiction_pipeline.py"
+      ]
+    }
+  ]
+}

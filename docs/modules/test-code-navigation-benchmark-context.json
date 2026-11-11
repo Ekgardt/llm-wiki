@@ -1,0 +1,208 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "benchmark/__init__.py",
+    "benchmark/navigation_benchmark_metrics.py",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/benchmark-run-benchmark.md",
+    "docs/modules/code-navigation-benchmark-helpers.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/python-qualification-corpus.md",
+    "docs/modules/run-code-navigation.md",
+    "docs/modules/test-code-navigation-benchmark-context.json",
+    "docs/modules/test-code-navigation-benchmark.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/code_navigation_benchmark_helpers.py",
+    "tests/code_navigation_benchmark_runtime_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/modules/__init__.py",
+    "tests/modules/python_qualification_corpus/__init__.py",
+    "tests/modules/python_qualification_corpus/support.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_code_navigation_benchmark.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/test-code-navigation-benchmark-context.json",
+      "docs/modules/test-code-navigation-benchmark.md",
+      "tests/code_navigation_benchmark_runtime_helpers.py",
+      "tests/test_code_navigation_benchmark.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "benchmark/generate_python_qualification.py",
+      "names": [
+        "CALL_QUERIES",
+        "DEFINITION_QUERIES",
+        "GoldLocation",
+        "GoldQuery",
+        "PYRIGHT_VERSION",
+        "QualificationRepository",
+        "REFERENCE_QUERIES",
+        "generate_qualification_repository",
+        "gold_payload"
+      ],
+      "contract_sha256": "ab89d04bcb0e375406333c7f3288bcb8590bc0ac0f6aaddc2a42b1c50650b01e",
+      "integration_tests": [
+        "tests/test_an_ownership_failure_says_what_and_when.py",
+        "tests/test_an_ownership_probe_says_why_it_measured_nothing.py",
+        "tests/test_code_navigation_benchmark.py"
+      ]
+    },
+    {
+      "provider": "benchmark/navigation_benchmark_git.py",
+      "names": [
+        "FixtureIdentityError",
+        "initialize_deterministic_git",
+        "verify_repository_identity"
+      ],
+      "contract_sha256": "9a0147517e6d5a4477c7113b6b9db035b13d3307e8910f012f10363efc9d7f69",
+      "integration_tests": [
+        "tests/test_code_navigation_benchmark.py",
+        "tests/test_code_navigation_benchmark_mutation_and_tokens.py",
+        "tests/test_code_navigation_benchmark_operator_corpus.py"
+      ]
+    },
+    {
+      "provider": "benchmark/navigation_benchmark_schema.py",
+      "names": [
+        "load_manifest",
+        "validate_gold",
+        "validate_manifest"
+      ],
+      "contract_sha256": "e444ebbe8c9e3cb69bc10ae5e5ebcefad0999e8d875ff916d97493388658794c",
+      "integration_tests": [
+        "tests/test_an_ownership_failure_says_what_and_when.py",
+        "tests/test_an_ownership_probe_says_why_it_measured_nothing.py",
+        "tests/test_code_navigation_benchmark.py"
+      ]
+    },
+    {
+      "provider": "scripts/code_intelligence.py",
+      "names": [
+        "Capability",
+        "PositionEncoding",
+        "PositionRange"
+      ],
+      "contract_sha256": "b2fc717f75a37e3d8abca34979b8a1c165463997148c0091a04f1ec918dbbb25",
+      "integration_tests": [
+        "tests/test_code_intelligence.py",
+        "tests/test_code_navigation.py",
+        "tests/test_code_navigation_benchmark_gates_and_schemas.py"
+      ]
+    },
+    {
+      "provider": "scripts/code_navigation.py",
+      "names": [
+        "NavigationLocation",
+        "NavigationResult",
+        "NavigationStatus",
+        "Provenance",
+        "ResolutionLabel"
+      ],
+      "contract_sha256": "ea28c6afc629487ecf69e3ac7f81009ec8bfed660c3215a7223eeaafefedcddc",
+      "integration_tests": [
+        "tests/test_an_answer_without_a_provider_is_not_fresh.py",
+        "tests/test_an_unclaimed_file_is_unsupported.py",
+        "tests/test_code_navigation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/lsp_positions.py",
+      "names": [
+        "LspPosition",
+        "LspRange",
+        "path_to_file_uri"
+      ],
+      "contract_sha256": "08f67b4f962bf808461d82ebad9d70ae7d8e3e41924d4920c6f8e10f0bea5caa",
+      "integration_tests": [
+        "tests/test_a_position_names_its_units.py",
+        "tests/test_code_navigation.py",
+        "tests/test_code_navigation_fault_paths.py"
+      ]
+    },
+    {
+      "provider": "scripts/pyright_session.py",
+      "names": [
+        "LspLocation"
+      ],
+      "contract_sha256": "69a10e98a3abd54c8601a74db76372b1dd7280362bab99b786e36ee0f32d0056",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_failed_server_is_started_again.py",
+        "tests/test_a_lapsed_deadline_is_not_a_torn_stream.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

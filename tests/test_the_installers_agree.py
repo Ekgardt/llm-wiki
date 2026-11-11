@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import install_control
+from llm_wiki import install_launchd
 
 INSTALLER_PS1 = (Path(__file__).resolve().parent.parent / "install.ps1").read_text(encoding="utf-8")
 
@@ -34,7 +34,7 @@ def test_a_job_launchd_no_longer_has_does_not_block_the_uninstall(tmp_path: Path
         (tmp_path / name).write_bytes(body)
     launchd = _StrictLaunchd({"io.test.weekly"})
 
-    install_control._uninstall_launchd(tmp_path, definitions, launchd, "launchctl", "gui/501")
+    install_launchd.uninstall_launchd(tmp_path, definitions, launchd, "launchctl", "gui/501")
 
     assert (launchd.active, sorted(path.name for path in tmp_path.iterdir())) == (set(), [])
 

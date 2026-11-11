@@ -11,10 +11,11 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from tests import test_repository_index as _index_tests  # noqa: E402
-from tests.test_repository_index import ALPHA, _repository  # noqa: E402
+from tests import repository_index_helpers as _index_tests_helpers  # noqa: E402
+from tests.code_hints_helpers import _meta  # noqa: E402
+from tests.repository_index_helpers import ALPHA, _repository  # noqa: E402
 
-vault = _index_tests.vault
+vault = _index_tests_helpers.vault
 
 
 @pytest.fixture(autouse=True)
@@ -34,12 +35,12 @@ def _checkout_id(repository: Path) -> str:
 
 def test_an_index_build_exports_the_symbols_its_generation_holds(vault, tmp_path):
     import code_hints
-    import repository_index
+    import repository_indexing
 
     _root, state = vault
     repository = _repository(tmp_path / "repo", {"pkg/alpha.py": ALPHA})
 
-    receipt = repository_index.index_repository(repository, state_root=state)
+    receipt = repository_indexing.index_repository(repository, state_root=state)
     answer = code_hints.lookup_symbol(state, _checkout_id(repository), "helper")
 
     assert (receipt["hints"]["status"], receipt["hints"]["generation_id"]) == ("written", receipt["generation_id"])
@@ -49,15 +50,15 @@ def test_an_index_build_exports_the_symbols_its_generation_holds(vault, tmp_path
 
 def test_a_fresh_refresh_repairs_a_missing_table_and_keeps_a_current_one(vault, tmp_path):
     import code_hints
-    import repository_index
+    import repository_indexing
 
     _root, state = vault
     repository = _repository(tmp_path / "repo", {"pkg/alpha.py": ALPHA})
-    built = repository_index.index_repository(repository, state_root=state)
+    built = repository_indexing.index_repository(repository, state_root=state)
 
-    current = repository_index.refresh_repository(repository, state_root=state)["hints"]
+    current = repository_indexing.refresh_repository(repository, state_root=state)["hints"]
     code_hints.remove_hints(state, _checkout_id(repository))
-    repaired = repository_index.refresh_repository(repository, state_root=state)["hints"]
+    repaired = repository_indexing.refresh_repository(repository, state_root=state)["hints"]
 
     assert (current["status"], repaired["status"]) == ("current", "written")
     assert repaired["generation_id"] == built["generation_id"]
@@ -80,16 +81,3 @@ def test_a_foreign_or_stale_table_answers_nothing(tmp_path):
     assert code_hints.lookup_symbol(tmp_path, checkout_id, "helper") is None
 
 
-def _meta(checkout_id: str) -> dict[str, str]:
-    import code_hints
-
-    return {
-        "schema_version": code_hints.SCHEMA_VERSION,
-        "generation_id": "generation-x",
-        "repository_id": "repository:" + "0" * 64,
-        "checkout_id": checkout_id,
-        "checkout_root": "/nowhere",
-        "git_commit": "",
-        "symbols": "0",
-        "written_at": "0",
-    }

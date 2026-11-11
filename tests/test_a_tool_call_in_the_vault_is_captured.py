@@ -14,15 +14,20 @@ import capture_diagnostics
 import post_tool_capture
 import user_prompt_capture
 
+from tests.breadcrumb_worker_helpers import ingress as ingress
+from tests.capture_hooks_helpers import _published_content
+from tests.script_sources import script_files, script_key
+
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 
 
-def test_a_tool_call_made_inside_the_vault_has_a_context() -> None:
-    hook = {"tool_name": "Edit", "tool_input": {"file_path": "scripts/x.py"}, "cwd": str(post_tool_capture.ROOT)}
+def test_a_tool_call_made_inside_the_vault_is_durably_captured(ingress) -> None:
+    import json
 
-    context = post_tool_capture._tool_context(hook)
-
-    assert context is not None and context[0] == "Edit"
+    hook = {"tool_name": "Edit", "tool_input": {"file_path": "scripts/x.py"}, "cwd": str(ingress[0].vault)}
+    post_tool_capture.capture_tool(hook)
+    payload = json.loads(_published_content(ingress[0]))['payload']
+    assert payload['tool_name'] == 'Edit' and payload['target'] == 'scripts/x.py'
 
 
 def test_the_capture_hooks_record_failures_with_the_real_recorder() -> None:
@@ -48,6 +53,6 @@ def _stand_ins(path: Path) -> list[int]:
 
 
 def test_no_module_replaces_a_failed_import_with_a_stand_in() -> None:
-    found = {path.name: _stand_ins(path) for path in sorted(SCRIPTS.glob("*.py"))}
+    found = {script_key(path): _stand_ins(path) for path in script_files()}
 
     assert {name: lines for name, lines in found.items() if lines} == {}

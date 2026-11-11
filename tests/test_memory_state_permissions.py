@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 
+import process_liveness
 import pytest
 
 
@@ -13,9 +14,7 @@ def test_update_state_honors_lock_timeout(tmp_path, monkeypatch):
     lock_file = state_dir / "state.json.lock"
     state_dir.mkdir()
     lock_file.write_text(str(os.getpid()), encoding="utf-8")
-    monkeypatch.setattr(memory_state, "STATE_DIR", state_dir)
-    monkeypatch.setattr(memory_state, "STATE_FILE", state_dir / "state.json")
-    monkeypatch.setattr(memory_state, "LOCK_FILE", lock_file)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
 
     started = time.perf_counter()
     with pytest.raises(TimeoutError):
@@ -33,8 +32,7 @@ def _permission_error(winerror: int | None) -> PermissionError:
 def test_state_lock_retries_windows_sharing_violation(tmp_path, monkeypatch):
     import memory_state
 
-    monkeypatch.setattr(memory_state, "STATE_DIR", tmp_path / "run")
-    monkeypatch.setattr(memory_state, "LOCK_FILE", tmp_path / "run" / "state.json.lock")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     monkeypatch.setattr(memory_state.sys, "platform", "win32")
     real_open = os.open
     attempts = 0
@@ -47,7 +45,7 @@ def test_state_lock_retries_windows_sharing_violation(tmp_path, monkeypatch):
         return real_open(path, flags)
 
     monkeypatch.setattr(memory_state.os, "open", sharing_once)
-    with memory_state._state_lock(timeout=0.2, poll=0):
+    with memory_state.state_lock(timeout=0.2, poll=0):
         pass
     assert attempts == 2
 
@@ -55,8 +53,7 @@ def test_state_lock_retries_windows_sharing_violation(tmp_path, monkeypatch):
 def test_state_lock_retries_windows_eacces_without_winerror(tmp_path, monkeypatch):
     import memory_state
 
-    monkeypatch.setattr(memory_state, "STATE_DIR", tmp_path / "run")
-    monkeypatch.setattr(memory_state, "LOCK_FILE", tmp_path / "run" / "state.json.lock")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     monkeypatch.setattr(memory_state.sys, "platform", "win32")
     real_open = os.open
     attempts = 0
@@ -69,7 +66,7 @@ def test_state_lock_retries_windows_eacces_without_winerror(tmp_path, monkeypatc
         return real_open(path, flags)
 
     monkeypatch.setattr(memory_state.os, "open", eacces_once)
-    with memory_state._state_lock(timeout=0.2, poll=0):
+    with memory_state.state_lock(timeout=0.2, poll=0):
         pass
     assert attempts == 2
 
@@ -79,8 +76,7 @@ def test_state_lock_retries_permission_race_after_observed_contention(
 ):
     import memory_state
 
-    monkeypatch.setattr(memory_state, "STATE_DIR", tmp_path / "run")
-    monkeypatch.setattr(memory_state, "LOCK_FILE", tmp_path / "run" / "state.json.lock")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     real_open = os.open
     attempts = 0
 
@@ -94,7 +90,7 @@ def test_state_lock_retries_permission_race_after_observed_contention(
         return real_open(path, flags)
 
     monkeypatch.setattr(memory_state.os, "open", transient_sequence)
-    with memory_state._state_lock(timeout=0.2, poll=0):
+    with memory_state.state_lock(timeout=0.2, poll=0):
         pass
     assert attempts == 3
 
@@ -102,14 +98,13 @@ def test_state_lock_retries_permission_race_after_observed_contention(
 def test_state_lock_fails_fast_for_acl_permission_error(tmp_path, monkeypatch):
     import memory_state
 
-    monkeypatch.setattr(memory_state, "STATE_DIR", tmp_path / "run")
-    monkeypatch.setattr(memory_state, "LOCK_FILE", tmp_path / "run" / "state.json.lock")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     monkeypatch.setattr(
         memory_state.os, "open", lambda *args: (_ for _ in ()).throw(_permission_error(5))
     )
 
     with pytest.raises(PermissionError):
-        with memory_state._state_lock(timeout=0.2, poll=0):
+        with memory_state.state_lock(timeout=0.2, poll=0):
             pass
 
 
@@ -159,8 +154,7 @@ def test_save_state_routes_through_atomic_write(tmp_path, monkeypatch):
     state_dir = tmp_path / "run"
     state_file = state_dir / "state.json"
     calls = []
-    monkeypatch.setattr(memory_state, "STATE_DIR", state_dir)
-    monkeypatch.setattr(memory_state, "STATE_FILE", state_file)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     monkeypatch.setattr(
         memory_state,
         "atomic_write",
@@ -198,30 +192,33 @@ def test_a_stale_lock_is_retired_only_while_it_holds_the_judged_bytes(tmp_path):
 
 
 def test_a_dead_state_lock_is_retired_and_a_live_one_waited_out(tmp_path, monkeypatch):
-    """A lock with no identity line: the PID probe, then the 30 s rule.
-
-    The probe is substituted where the operating system is actually asked,
-    `process_liveness.process_state` — the seam
-    `test_the_three_legacy_locks_ask_the_same_probe` uses. It used to be
-    substituted at `memory_state._is_pid_alive`, which `_owner_alive` stopped
-    calling when a lock learned to name its process, so this test asked the real
-    machine whether PID 777 was running and passed only where it was not. It is
-    not, here; on a Windows runner it was, and the lock stayed.
-
-    The live half is asserted too, which the name promised and the body did not.
-    """
+    """Compare valid same-scope identities, preserving both live and reused PID cases."""
     import memory_state
     import process_liveness
 
     lock = tmp_path / "state.json.lock"
-    monkeypatch.setattr(memory_state, "LOCK_FILE", lock)
-    monkeypatch.setattr(memory_state, "_lock_age", lambda: memory_state._STALE_LOCK_SECONDS + 1)
-    lock.write_bytes(b"777")
-    monkeypatch.setattr(process_liveness, "process_state", lambda _pid: "alive")
-    memory_state._await_lock_turn(deadline=time.time() + 0.2, poll=0.01)
+    monkeypatch.setattr(memory_state, "lock_age", lambda _lock: memory_state.STALE_LOCK_SECONDS + 1)
+    identity = process_liveness.process_start_identity(os.getpid())
+    lock.write_bytes(f"{os.getpid()}\n{identity}\n".encode())
+    memory_state.await_lock_turn(lock, deadline=time.time() + 0.2, poll=0.01)
     waited_out = lock.exists()
 
-    monkeypatch.setattr(process_liveness, "process_state", lambda _pid: "dead")
-    memory_state._await_lock_turn(deadline=time.time() + 5, poll=0.01)
+    from tests.process_identity_fixture import reused_current_process_identity
+
+    lock.write_bytes(f"{os.getpid()}\n{reused_current_process_identity()}\n".encode())
+    memory_state.await_lock_turn(lock, deadline=time.time() + 5, poll=0.01)
 
     assert (waited_out, lock.exists()) == (True, False)
+
+
+def test_the_three_legacy_locks_ask_the_same_probe(monkeypatch) -> None:
+    """Audit OPS-08: memory_state, markdown_transaction and doctor delegate."""
+    import markdown_transaction
+    import memory_state
+    from llm_wiki import doctor_lsp
+
+    monkeypatch.setattr(process_liveness, "process_state", lambda _pid: "unknown")
+
+    assert memory_state.is_pid_alive(4242) is True
+    assert markdown_transaction.pid_alive(4242) is True
+    assert doctor_lsp.lsp_pid_state(4242) == "unknown"

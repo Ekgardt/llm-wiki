@@ -19,11 +19,10 @@ from vault_editorial import EDITORIAL_NAMES  # noqa: E402
 
 @pytest.fixture()
 def notes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    import migrate_to_okf
 
     directory = tmp_path / "knowledge" / "notes"
     directory.mkdir(parents=True)
-    monkeypatch.setattr(migrate_to_okf, "ROOT", tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     return directory
 
 

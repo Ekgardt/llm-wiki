@@ -15,10 +15,18 @@ for directory in (TESTS.parent / "scripts", TESTS):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
-from test_an_abandoned_publication_is_collected import _age  # noqa: E402
-from test_generation_catalog import _scope_at_commit  # noqa: E402
-from test_prune_generations import _catalog, _chain, _footprint, _publish  # noqa: E402
-from test_repository_index import ALPHA, _repository, vault  # noqa: E402,F401
+from tests.an_abandoned_publication_is_collected_helpers import _age  # noqa: E402
+from tests.generation_catalog_helpers import (  # noqa: E402
+    _catalog,  # noqa: E402
+    _publish,  # noqa: E402
+    _scope_at_commit,  # noqa: E402
+)
+from tests.prune_generations_helpers import _chain, _footprint  # noqa: E402
+from tests.repository_index_helpers import (  # noqa: E402,F401
+    ALPHA,
+    _repository,
+    vault,  # noqa: E402,F401
+)
 
 
 def _with_code(directory: Path, scope: dict) -> None:
@@ -46,17 +54,17 @@ def test_a_day_old_code_generation_survives_the_prune_that_removes_an_abandoned_
 
 
 def test_detection_reads_the_code_generation_when_a_memory_one_is_newer(vault):  # noqa: F811 - the fixture
-    import generation_catalog
-    import repository_index
+    import repository_indexing
+    from llm_wiki import generation_catalog_store
     from repository_scope import resolve_repository_scope
 
     root, state = vault
     _repository(root, {"scripts/alpha.py": ALPHA})
-    receipt = repository_index.index_repository(root, roots=["scripts"], state_root=state)
-    catalog = generation_catalog.GenerationCatalog(state)
+    receipt = repository_indexing.index_repository(root, roots=["scripts"], state_root=state)
+    catalog = generation_catalog_store.GenerationCatalog(state)
     _publish(catalog, "gen-memory", repository_scope=resolve_repository_scope(root).as_dict())
     catalog.register("gen-memory")
 
-    detected = repository_index.detect_repository_changes(root, state_root=state)
+    detected = repository_indexing.detect_repository_changes(root, state_root=state)
 
     assert (detected["generation_id"], detected["code_roots"], detected["stale"]) == (receipt["generation_id"], ["scripts"], False)

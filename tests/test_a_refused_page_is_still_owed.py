@@ -8,6 +8,7 @@ pages it had already produced. On this vault that lost two notes on
 """
 
 import json
+import lzma
 import sqlite3
 import sys
 from pathlib import Path
@@ -15,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import repair_refused_page_creation as repair  # noqa: E402
-from markdown_transaction import _compressed_image  # noqa: E402
+from llm_wiki.markdown_prepare import IMAGE_COMPRESSION_PRESET  # noqa: E402
 from reliable_memory import sha256_bytes  # noqa: E402
 
 PAGE = b"---\ntype: decision\n---\n\n# A page that was owed\n"
@@ -39,7 +40,7 @@ def _created(path: str, content: bytes, artifact: str) -> dict:
 def _with_image(directory: Path, artifact: str, content: bytes) -> None:
     target = directory / artifact
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(_compressed_image(content))
+    target.write_bytes(lzma.compress(content, preset=IMAGE_COMPRESSION_PRESET))
 
 
 def test_a_page_the_vault_does_not_have_is_owed(tmp_path):
@@ -49,7 +50,7 @@ def test_a_page_the_vault_does_not_have_is_owed(tmp_path):
     )
     _with_image(directory, "after/000000.bin", PAGE)
 
-    owed = repair._owed_pages(directory, tmp_path / "vault")
+    owed = repair.owed_pages(directory, tmp_path / "vault")
 
     assert owed == [("knowledge/notes/owed.md", PAGE)]
 
@@ -64,7 +65,7 @@ def test_a_page_that_exists_today_is_left_alone(tmp_path):
     )
     _with_image(directory, "after/000000.bin", PAGE)
 
-    assert repair._owed_pages(directory, vault) == []
+    assert repair.owed_pages(directory, vault) == []
 
 
 def test_a_replace_is_never_restored(tmp_path):
@@ -73,7 +74,7 @@ def test_a_replace_is_never_restored(tmp_path):
     directory = _transaction(tmp_path / "txn", [operation])
     _with_image(directory, "after/000000.bin", PAGE)
 
-    assert repair._owed_pages(directory, tmp_path / "vault") == []
+    assert repair.owed_pages(directory, tmp_path / "vault") == []
 
 
 def test_an_image_that_no_longer_hashes_to_its_plan_is_refused(tmp_path):
@@ -83,7 +84,7 @@ def test_an_image_that_no_longer_hashes_to_its_plan_is_refused(tmp_path):
     )
     _with_image(directory, "after/000000.bin", b"different bytes")
 
-    assert repair._owed_pages(directory, tmp_path / "vault") == []
+    assert repair.owed_pages(directory, tmp_path / "vault") == []
 
 
 def test_a_path_outside_knowledge_is_refused(tmp_path):
@@ -92,11 +93,11 @@ def test_a_path_outside_knowledge_is_refused(tmp_path):
     )
     _with_image(directory, "after/000000.bin", PAGE)
 
-    assert repair._owed_pages(directory, tmp_path / "vault") == []
+    assert repair.owed_pages(directory, tmp_path / "vault") == []
 
 
 def test_a_transaction_with_no_plan_owes_nothing(tmp_path):
-    assert repair._owed_pages(tmp_path / "missing", tmp_path / "vault") == []
+    assert repair.owed_pages(tmp_path / "missing", tmp_path / "vault") == []
 
 
 def test_only_a_race_is_replayable_never_a_dlp_refusal():
@@ -115,4 +116,4 @@ def test_only_a_race_is_replayable_never_a_dlp_refusal():
         ],
     )
 
-    assert repair._quarantined_ids(database) == ["raced"]
+    assert repair.quarantined_ids(database) == ["raced"]

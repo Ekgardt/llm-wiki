@@ -21,10 +21,11 @@ for _path in (BENCHMARK_ROOT, SCRIPTS_ROOT):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
-import run_code_navigation as benchmark_runner  # noqa: E402
-from run_code_navigation import GATE_THRESHOLDS, evaluate_gates, validate_report  # noqa: E402
+import navigation_benchmark_gates as gates  # noqa: E402
+from navigation_benchmark_gates import GATE_THRESHOLDS, evaluate_gates  # noqa: E402
+from navigation_benchmark_schema import validate_report  # noqa: E402
 
-from tests.test_code_navigation_benchmark import _measured_report  # noqa: E402
+from tests.code_navigation_benchmark_helpers import _measured_report  # noqa: E402
 
 # run, cold readiness s, direct p95 ms, facade p50 ms, facade p95 ms, our overhead p95 ms
 RECORDED_RUNS = (
@@ -96,7 +97,7 @@ def test_a_fast_machine_is_still_held_to_the_floor() -> None:
 
 def test_the_published_bound_is_the_approved_floor_and_share() -> None:
     """Both halves of the bound are published in docs/CODE-NAVIGATION.md."""
-    share = getattr(benchmark_runner, "WARM_OVERHEAD_MAX_SHARE_OF_DIRECT", None)
+    share = getattr(gates, "WARM_OVERHEAD_MAX_SHARE_OF_DIRECT", None)
     assert (GATE_THRESHOLDS["warm_overhead_p95_ms"], share) == (30, 0.90)
 
 

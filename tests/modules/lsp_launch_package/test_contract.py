@@ -1,0 +1,197 @@
+"""The launch strategy for a server that must run from inside a package root.
+
+`CODE-08` measured that the descriptor launch -- copy aside, unlink, hand `node`
+a file descriptor -- cannot execute `typescript-language-server` at all, because
+its ESM entry reads `new URL('../package.json', import.meta.url)` and a
+descriptor path has no directory to resolve that against. These tests pin what
+replaced it and, more importantly, what did **not** change:
+
+* Pyright still takes the descriptor launch. That is the complete TOCTOU
+  closure and nothing here may weaken it.
+* The bytes executed are still the digest-verified bytes, checked once more
+  *through the sealed path* so what is verified is what `node` will open.
+* `package.json` is authored from the profile, never copied, so no unverified
+  byte of the operator-writable install root is read at exec time.
+
+The window this reopens is written down, with its platform, in
+`docs/research/2026-08-29-launching-a-verified-server-without-a-toctou-window.md`.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+
+import lsp_launch_package
+import pytest
+
+from tests.modules.lsp_launch_package.contract_helpers import (
+    _MANIFEST,
+    _SERVER_BYTES,
+    _digest,
+    _launch,
+)
+from tests.slow_machine import LONG_TIMEOUT
+
+pytestmark = pytest.mark.skipif(
+    os.name != "posix", reason="the package launch is the POSIX branch only"
+)
+
+
+def _snapshot(tmp_path: Path, payload: bytes = _SERVER_BYTES) -> tuple[Path, int]:
+    """A stand-in for the verified copy the guard has already made and hashed."""
+    path = tmp_path / "snapshot.tmp"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    return path, os.open(path, os.O_RDONLY)
+
+
+def _nothing() -> None:
+    """The guard's deadline checkpoint, with no deadline to enforce."""
+
+
+def _create(tmp_path: Path, expected: str, payload: bytes = _SERVER_BYTES):
+    owner = tmp_path / "owner"
+    owner.mkdir(parents=True, exist_ok=True)
+    snapshot_path, descriptor = _snapshot(tmp_path, payload)
+    try:
+        return lsp_launch_package.create_launch_tree(
+            owner,
+            _launch(),
+            snapshot_path=snapshot_path,
+            snapshot_descriptor=descriptor,
+            expected_sha256=expected,
+            checkpoint=_nothing,
+        )
+    finally:
+        os.close(descriptor)
+
+
+def test_the_entry_runs_from_a_directory_that_holds_a_package_manifest(
+    tmp_path: Path,
+) -> None:
+    """The whole point: a real path whose `..` contains a `package.json`."""
+    tree = _create(tmp_path, _digest())
+    assert tree.entry.read_bytes() == _SERVER_BYTES
+    assert (tree.entry.parent.parent / "package.json").is_file()
+    assert tree.entry.name == "cli.mjs"
+
+
+def test_the_manifest_is_authored_not_copied(tmp_path: Path) -> None:
+    """Copying the shipped one would carry unverified install-root bytes."""
+    tree = _create(tmp_path, _digest())
+    manifest = json.loads((tree.root / "package.json").read_text("utf-8"))
+    assert manifest == _MANIFEST
+
+
+def test_the_tree_is_sealed_read_only(tmp_path: Path) -> None:
+    """`0500` is what stops an entry being replaced inside the directory."""
+    tree = _create(tmp_path, _digest())
+    entry_mode = stat.S_IMODE(tree.entry.stat().st_mode)
+    directory_modes = {stat.S_IMODE(item.stat().st_mode) for item in tree.directories}
+    assert entry_mode == lsp_launch_package.SEALED_FILE_MODE
+    assert directory_modes == {lsp_launch_package.SEALED_DIRECTORY_MODE}
+
+
+def test_the_launch_root_is_private_to_this_owner(tmp_path: Path) -> None:
+    """A fresh nonce per launch, under the owner's own scratch root."""
+    first = _create(tmp_path / "a", _digest())
+    second = _create(tmp_path / "b", _digest())
+    assert first.root.name.startswith(lsp_launch_package.LAUNCH_PREFIX)
+    assert first.root.name != second.root.name
+
+
+def test_bytes_that_do_not_match_the_pin_are_refused(tmp_path: Path) -> None:
+    """The digest check is not weakened by moving the file into a package root."""
+    with pytest.raises(lsp_launch_package.LaunchTreeError):
+        _create(tmp_path, "0" * 64)
+
+
+def test_a_refused_launch_leaves_nothing_behind(tmp_path: Path) -> None:
+    """A half-built tree would be a sealed directory nobody ever removes."""
+    with pytest.raises(lsp_launch_package.LaunchTreeError):
+        _create(tmp_path, "0" * 64)
+    assert list((tmp_path / "owner").iterdir()) == []
+
+
+def test_the_tree_is_removed_when_the_guard_closes(tmp_path: Path) -> None:
+    tree = _create(tmp_path, _digest())
+    assert lsp_launch_package.remove_launch_tree(tree) is None
+    assert not tree.root.exists()
+
+
+def test_removing_something_that_is_not_a_tree_is_not_an_error() -> None:
+    """`close()` passes whatever it holds, including nothing."""
+    assert lsp_launch_package.remove_launch_tree(None) is None
+
+
+def test_the_sealed_path_is_verified_not_just_the_copy(tmp_path: Path) -> None:
+    """What is checked has to be what `node` will open, reached by path.
+
+    Substituting the entry after sealing has to fail the read-back, which is the
+    property that makes the sealed tree worth building at all.
+    """
+    tree = _create(tmp_path, _digest())
+    os.chmod(tree.root / "lib", lsp_launch_package.PRIVATE_DIRECTORY_MODE)
+    tree.entry.unlink()
+    tree.entry.write_bytes(b"impostor\n")
+    with pytest.raises(lsp_launch_package.LaunchTreeError):
+        lsp_launch_package.verify_sealed_entry(
+            tree, _identity_of(tree), _digest(), _nothing
+        )
+
+
+def _identity_of(tree: lsp_launch_package.LaunchTree) -> tuple[int, int]:
+    info = tree.entry.stat()
+    return (info.st_dev, info.st_ino)
+
+
+def _file_size_limit(limit: int) -> None:
+    import resource
+    import signal
+
+    _soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (limit, hard))
+    signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+
+
+def _limited_launch_outcome(owner: Path, snapshot: Path, descriptor: int) -> dict:
+    try:
+        tree = lsp_launch_package.create_launch_tree(
+            owner, _launch(), snapshot_path=snapshot, snapshot_descriptor=descriptor,
+            expected_sha256=_digest(), checkpoint=_nothing,
+        )
+    except OSError as error:
+        return {'errno': error.errno, 'remaining': [p.name for p in owner.iterdir()]}
+    return {'errno': None, 'manifest_bytes': (tree.root / 'package.json').stat().st_size}
+
+
+def _limited_manifest_probe() -> None:
+    root = Path(sys.argv[1])
+    owner = root / 'owner'
+    owner.mkdir()
+    snapshot, descriptor = _snapshot(root)
+    try:
+        _file_size_limit(int(sys.argv[2]))
+        outcome = _limited_launch_outcome(owner, snapshot, descriptor)
+        print(json.dumps(outcome))
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.parametrize('limit', [0, 3, 51])
+def test_incomplete_manifest_refuses_launch_and_removes_its_tree(tmp_path, limit):
+    import errno
+    import subprocess
+
+    root = Path(__file__).resolve().parents[3]
+    command = 'from tests.modules.lsp_launch_package.test_contract import _limited_manifest_probe; _limited_manifest_probe()'
+    result = subprocess.run(
+        [sys.executable, '-c', command, str(tmp_path), str(limit)],
+        cwd=root, env={**os.environ, 'PYTHONPATH': os.pathsep.join((str(root / 'scripts'), str(root)))},
+        capture_output=True, text=True, check=True, timeout=LONG_TIMEOUT,
+    )
+    assert json.loads(result.stdout) == {'errno': errno.EFBIG, 'remaining': []}

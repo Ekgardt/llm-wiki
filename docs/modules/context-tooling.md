@@ -1,0 +1,179 @@
+# Maintenance context qualification
+
+This is the current qualification contract for every module packet. The original
+pilot research stays intact in the repository and in the formats and tooling
+packets. Selecting relevant maintenance context does not delete that history.
+Full AGENTS.md, CLAUDE.md, development-laws.md and STRUCTURE.md remain in every
+packet. Their authority, security, recovery and deployment rules are not replaced
+by this guide. The approved completion plan permits internal boundary refinement;
+installation in the live vault still needs separate owner permission.
+
+## Responsibility and compatibility
+
+There is one product and installation. Split by a coherent responsibility and
+state owner, not by line count or a prescribed module quota. Keep public commands,
+formats, schemas, environment contracts, runtime roots, ownership fences and
+Markdown/Git authority. Do not add services, a second coordinator, generic buses
+or interface layers merely to obtain smaller files. Existing independent files
+can be qualified in place. Python 3.14 is the approved runtime series (2026-11-03); dependency and platform
+changes still need evidence and explicit authorization.
+
+Every implementation has one owner. Retain public aliases only for demonstrated
+consumers and serialization/patch compatibility, state their removal condition,
+and remove duplicate bodies. Qualify real callers and integration behavior, not
+only static imports. A discovered bug needs reproduction before correction and a
+regression detecting the original failure. Exact transfers and behavior fixes are
+separate claims. Run actual CCN <=5 and shape analysis on changed functions; no
+exemptions, test weakening, artificial delays or invented resource bounds.
+
+## Complete packets and exact measurement
+
+Both owned material and the complete maintenance packet must fit 100000
+`o200k_base` tokens, the user's ceiling. Ownership must be a subset of the packet.
+Use `encode_ordinary` on the actual serialized bytes decoded as UTF-8, including
+paths, separators and manifest. Count full required sources, owner research,
+contracts, test/support code, fixtures, schemas and instructions. Never replace
+needed source by a summary or quietly omit expensive tests to pass the ceiling.
+
+`tests/module_context.py` resolves contained files/directories, refuses missing
+files and requires its own source, the codec, the manifest and this full guide.
+A file a test opens by a computed path, which no import names, is declared in
+`reads`; the planner keeps it in `files` on every replan and the declared reader
+accepts it, so an undeclared read still fails instead of being guessed.
+It requires actual ancestor conftests and recursive literal pytest plugins.
+Dynamic plugin registration is refused rather than guessed. Bootstrap sources
+are included in full; their operational import closure is infrastructure, not
+owned by each pure module. Explicit test imports cannot use that exception.
+Installed dependency source is not vendored into packets; declarations and the
+whole-project lockfile obligation remain visible in the ownership registry.
+
+Source closure conservatively follows production and test/support AST imports:
+eager, lazy and conditional imports, relative helpers, imported submodules and
+package initializers for every declared contained Python file. Absolute names
+conservatively include candidates in the importing directory and the repository's
+scripts/, tests/, benchmark/ and root launch paths; ambiguous local names require
+all candidates. Relative imports stay inside the repository. These paths reflect
+current Python entry points; a new launch root needs explicit qualification.
+A source that loads modules by file path (`spec_from_file_location`, `run_path`,
+`SourceFileLoader`) also requires every script under scripts/ or benchmark/ that one
+of its string constants names by repository path or by a file name only one script
+carries; a shared name such as `__init__.py` identifies none. A name in a subprocess
+command crosses a command-line boundary, and a path used as data or read as text to
+check a rule executes nothing, so neither requires the named source.
+The same path load also counts as reaching around the loaded module's public names:
+nothing it uses can be listed, so its source is held whole and never described. A
+described provider is the one module a bare import name means under scripts/ or
+benchmark/ (`tests/module_interface.py::provider_path`); a name both carry means none.
+Cycles terminate through visited paths. A dependency's full owner guide and recursively declared shared contracts
+are required. Every owned context file and selected owned logical record requires
+its full owner guide through the explicit ownership registries, regardless of
+directory, language or extension. A catalog owner does not replace record ownership. Every guide is reachable from STRUCTURE.md. Dynamic loading,
+config-selected providers, external processes, resources and side effects still
+need explicit investigation: the static graph is not a complete runtime oracle.
+
+The boundary helper can start an import-guarded subprocess with an explicit local
+module allowlist. Allowing a dependency does not allow its whole package. Import
+checks do not substitute for file, database, deadline, security, fencing or
+recovery behavior. Mixed facade and end-to-end tests retain all assertions.
+Moving a test outside a pure packet never makes the project complete.
+
+`exact-duplicates/v1` writes full first occurrences and references only identical
+byte sequences when that representation is shorter. The reader must reconstruct
+every original path and byte. No minification, normalization, gzip or text summary
+is used. Round-trip success proves serialization fidelity, not context sufficiency;
+closure, contracts and behavioral qualification remain separate gates.
+
+## Ownership and completion
+
+Each manifest declares unique ownership separately from shared context.
+`tests/module_ownership.py` checks claims against the tracked Git index and packet,
+refusing duplicate, missing, untracked or outside claims. Shared dependencies can
+appear in many contexts but have one owner. Tests, fixtures, benchmarks, adapters,
+docs, history and dependency artifacts count; only third-party data pinned per file
+by URL and SHA-256 (`PINNED_VOCABULARIES`) is covered without an owner. Large
+authoritative artifacts cannot be declared owned by including only a convenient excerpt; any logical views need independently
+verified complete coverage and exact reconstruction of the original.
+
+`python -m tests.module_ownership` can report `complete: false` successfully as
+an inventory. `--check-complete` fails until every tracked file has a qualified
+owner or is pinned vendored data. No common bucket satisfies completion. A passing
+module or subplan is not completion of the entire project.
+
+## Evidence and useful token efficiency
+
+For each boundary record precise symbols, consumers, necessary context, baseline,
+compatibility and negative boundary checks before claiming isolation. Preserve
+behavioral assertions and qualify related consumers, then the full regression
+suite. Record the tested revision. Platform skips are not Windows/macOS passes;
+unavailable native qualification remains explicit. Keep the built-in index current
+and supplement incomplete graph observations with actual source and runtime facts.
+
+Packet totals overlap and are not unique repository size, provider billing or
+proven savings over a real task. Evaluate efficiency with paired tasks of equivalent
+quality, counting the complete cycle: all input/output, retries, corrections,
+verification and cached tokens without double counting. Also record latency,
+resources and operator work. Do not promise a percentage or invent a sample quota.
+Reducing one prompt is not an improvement if correctness or total task cost worsens.
+
+## Checks and provenance
+
+Run `uv run pytest tests/test_module_context_bootstrap.py
+ tests/test_module_context_dependencies.py tests/test_module_boundary_checks.py
+ tests/test_module_contract_docs.py tests/test_module_ownership.py
+ tests/modules/context_tooling -q` as one command. Run each packet's budget check
+and reconstruct emitted bundles. `python -m tests.module_packet_plan [--write]
+<manifest>...` re-derives a packet from its ownership to the fixed point this
+measurement checks; for a refused packet it names the largest borrowed whole
+files and why each could not be described. The measurement tools are test-only; they do not
+change product behavior or runtime state.
+
+Sources: the approved decomposition completion plan and research documents on
+context-source-closure, module-file-ownership, module-contract-documentation,
+test-import-context-closure and canonical-module-qualification-context. The three
+2026-11-02 pilot documents remain full historical evidence in formats/tooling.
+
+Shared canonical contract: [Exact record contexts](context-records.md).
+
+## Source inspection
+
+`context_reader(root, manifest_path)` binds UTF-8 source reads to the packet's
+whole-file declaration. Resolving the target prevents a symlink from adding an
+external input. Undeclared files are refused even when present in the checkout.
+Boundary tests must use this reader instead of direct file reads. The static
+regression checks read_text/read_bytes/open calls in their Python AST; it does
+not claim arbitrary IO or subprocess string analysis. Existing subprocess
+fixture reads use declared fixtures; isolated imports remain separately guarded.
+
+Consumer source assertions live in `tests/test_{queue,runtime,windows,lsp,renderer,formats}_module_consumer_boundaries.py`.
+Run all six integration files together with `tests/test_module_registry_integration.py`
+and the packet checks; they preserve the former assertions and are still part of
+the full suite. Each has a module owner, like every other tracked test.
+
+The existing file inventory and its complete synthetic-repository tests now have
+[their own maintenance owner](context-ownership.md). Their original paths and
+commands above remain. Source/byte/token qualification stays here; no full-source
+closure or complete-project assertion is relaxed by that responsibility split.
+
+Module test directories using the shared boundary-test filenames must retain their
+package markers. The real registry guard checks this before a full pytest run:
+under the existing prepend import mode, unqualified duplicate basenames collide
+even when each owner passes alone. Both owner checks and whole-tree collection
+remain required after adding or moving a module's tests.
+
+New test files also require measured CI weights before checkout qualification.
+Run `python -m tests.shard_plan --weigh <new test files>` with the qualified Python
+and normal guarded pytest environment, then include
+`tests/test_every_test_file_has_a_weight.py` in the checkout-level checks.
+Do not invent weights or discard slower platform measurements. The existing
+full-suite guard rejects omissions; passing isolated owner tests alone does not
+satisfy this repository-wide CI requirement.
+
+JSON fixtures and source-inspection text reads must name UTF-8 explicitly (or
+read bytes for the JSON decoder). Include
+`tests/test_json_reads_use_explicit_encoding.py` in checkout qualification,
+including after adding baseline fixtures. Its repository-wide guard caught two
+implicit reads that isolated packet checks did not detect; keep this guard and
+its assertions unchanged rather than relying on the host's default encoding.
+
+Explicit qualified dependencies require fresh publication through contract qualification.
+The full-source serializer refuses them; a static qualified layout is never a passing receipt.

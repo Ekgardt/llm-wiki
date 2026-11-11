@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -12,43 +12,32 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+import capture_intent_records  # noqa: E402
 import flush_memory  # noqa: E402
-import llm_client  # noqa: E402
-import memory_queue  # noqa: E402
 import operational_ownership  # noqa: E402
+import queue_core  # noqa: E402
 from reliable_memory import (  # noqa: E402
     canonical_json_bytes,
     publish_runtime_file,
     sha256_bytes,
 )
 
-from tests.test_queue_v3_capture_links import (  # noqa: E402
-    _capture_binding,
+from tests.capture_terminal_helpers import (  # noqa: E402
+    _assert_completed_capture,
+    _assert_major_daily_file_once,
+    _crash_before_ledger,
+    _expire_capture_lease,
+    _FakeNoContentProvider,
+    _NoContentProcessor,
+    _own_session_vault,  # noqa: F401
+    _ready_intent_binding,
+    _TimedCaptureProcessor,
+)
+from tests.queue_v3_capture_links_helpers import (  # noqa: E402
+    _capture_binding,  # noqa: E402
     _coordinator,
     _queue,
 )
-
-
-@pytest.fixture(autouse=True)
-def _own_session_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Keep the session record these tests provoke out of the owner's vault.
-
-    `process_new_capture` keeps the session before anything judges it, and it
-    writes to `flush_memory.ROOT` — a module-level constant, not the vault the
-    coordinator under test is bound to. This checkout has been the live vault
-    since 2026-08-21, so every run left a record in it; two of them were still
-    there on 2026-08-26, under `2026-08-16` and today's date, invented sessions
-    named `session-1` with bodies reading `debug evidence` and `status only`.
-    The writer never raises by contract, so nothing said so.
-
-    Pointing `ROOT` at a directory outside the vault is enough: the transaction
-    refuses a target outside its own vault and the writer swallows that, which
-    is exactly the no-op these tests always assumed they were getting.
-    """
-    vault = tmp_path / "session-record-vault"
-    (vault / "knowledge" / "raw" / "sessions").mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(flush_memory, "ROOT", vault)
-    return vault
 
 
 def _publish_decision(
@@ -107,144 +96,6 @@ def _terminal_bytes(binding, decision) -> bytes:
     )
 
 
-def _ready_intent_binding(queue, coordinator, registry, text: str):
-    evidence = [{"role": "transcript", "parts": [{"type": "text", "text": text}]}]
-    source = {
-        "source_occurrence_id": "occurrence-1",
-        "source_event_id": "event-1",
-        "occurred_at": None,
-        "host": "opencode",
-        "event": "session_end",
-        "session": "session-1",
-        "project_slug": "project-1",
-        "worktree": None,
-        "trigger": "session-end",
-        "checkpoint_reason": None,
-        "chunk_index": 0,
-        "chunk_count": 1,
-        "evidence": evidence,
-    }
-    complete_digest = sha256_bytes(canonical_json_bytes(source))
-    chunk_digest = sha256_bytes(canonical_json_bytes(evidence))
-    identity = {
-        "schema_version": "capture-intent/v1",
-        "source_occurrence_id": source["source_occurrence_id"],
-        "source_event_id": source["source_event_id"],
-        "occurred_at": source["occurred_at"],
-        "checkpoint_reason": source["checkpoint_reason"],
-        "chunk_index": source["chunk_index"],
-        "chunk_sha256": chunk_digest,
-    }
-    intent_id = sha256_bytes(canonical_json_bytes(identity))
-    record = {
-        "schema_version": "capture-intent/v1",
-        "intent_id": intent_id,
-        **source,
-        "complete_input_sha256": complete_digest,
-        "chunk_sha256": chunk_digest,
-    }
-    encoded = canonical_json_bytes(record)
-    pending = f"run/capture-intents/pending/{intent_id[:2]}/{intent_id}.json"
-    ready = f"run/capture-intents/ready/{intent_id[:2]}/{intent_id}.json"
-    (queue.state_root / ready).parent.mkdir(parents=True)
-    queue.index_capture_intent_pending(
-        intent_id=intent_id,
-        pending_path=pending,
-        ready_path=ready,
-        intent_sha256=sha256_bytes(encoded),
-        byte_size=len(encoded),
-    )
-    publish_runtime_file(
-        queue.state_root / ready,
-        encoded,
-        state_root=queue.state_root,
-        create_only=True,
-    )
-    queue.mark_capture_intent_ready(
-        intent_id=intent_id,
-        pending_path=pending,
-        ready_path=ready,
-        intent_sha256=sha256_bytes(encoded),
-        byte_size=len(encoded),
-    )
-    owner = registry.acquire("capture", scope=f"intent:{intent_id}")
-    fence = coordinator.acquire_intent_fence(intent_id, mode="capture", owner=owner)
-    binding = queue.enqueue_capture_task_replay_safe(
-        "flush",
-        1,
-        {
-            "intent_id": intent_id,
-            "intent_path": ready,
-            "intent_sha256": sha256_bytes(encoded),
-        },
-        intent_id=intent_id,
-        intent_path=ready,
-        intent_sha256=sha256_bytes(encoded),
-        capture_fence=fence,
-        owner=owner,
-    )
-    coordinator.release_intent_fence(fence)
-    registry.release(owner)
-    return binding
-
-
-class _FakeNoContentProvider:
-    def __init__(self, response: str = "FLUSH_OK") -> None:
-        self.descriptor = llm_client.provider_candidates("fake", max_tokens=1500)[0]
-        self.calls: list[str] = []
-        self.response = response
-
-    def __call__(self, prompt: str, system_prompt: str, max_tokens: int):
-        self.calls.append(prompt)
-        assert system_prompt
-        assert max_tokens == 1500
-        return llm_client.LLMResult(
-            self.descriptor,
-            self.response,
-            True,
-            None,
-            "prompt",
-        )
-
-
-class _NoContentProcessor:
-    def __init__(self, queue, coordinator, provider) -> None:
-        self.queue = queue
-        self.coordinator = coordinator
-        self.provider = provider
-
-    def __call__(self, lease, active, task_fence, intent_fence, owner):
-        return flush_memory.process_new_capture(
-            self.queue,
-            self.coordinator,
-            lease,
-            active,
-            task_fence,
-            intent_fence,
-            owner,
-            llm_call=self.provider,
-        )
-
-
-class _TimedCaptureProcessor(_NoContentProcessor):
-    def __init__(self, queue, coordinator, provider, chosen_at: datetime) -> None:
-        super().__init__(queue, coordinator, provider)
-        self.chosen_at = chosen_at
-
-    def __call__(self, lease, active, task_fence, intent_fence, owner):
-        return flush_memory.process_new_capture(
-            self.queue,
-            self.coordinator,
-            lease,
-            active,
-            task_fence,
-            intent_fence,
-            owner,
-            llm_call=self.provider,
-            now=lambda: self.chosen_at,
-        )
-
-
 def _publish_terminal_file(
     queue, coordinator, binding, lease, owner, task_fence, intent_fence
 ):
@@ -273,7 +124,7 @@ def _stage_capture_terminal(
 ) -> str:
     with queue.queue_owner(
         role="queue-worker", scope=scope, parent=owner
-    ), memory_queue.capture_task_fences(
+    ), queue_core.capture_task_fences(
         queue,
         coordinator,
         binding.task_id,
@@ -294,39 +145,8 @@ def _stage_capture_terminal(
     return relative
 
 
-def _expire_capture_lease(queue, task_id: str) -> None:
-    """Make the crashed task claimable again, whichever way the crash left it.
-
-    A crash used to abandon the lease, and this helper's old assertion pinned
-    that: recovery had to find exactly one expired lease. Since 2026-08-27 the
-    worker settles its claim on failure (`processor_failed`, immediate retry),
-    so a crashed task is usually already `ready` and recovery finds nothing.
-    Since 2026-09-14 a `ready` retry waits a backoff
-    (`docs/research/2026-09-14-the-small-integrity-gaps.md`); the wait is moved to the past.
-    """
-    with sqlite3.connect(queue.db_path) as database:
-        database.execute(
-            "UPDATE tasks SET lease_expires_at=? WHERE id=? AND state='leased'",
-            ("2000-01-01T00:00:00+00:00", task_id),
-        )
-        database.execute(
-            "UPDATE tasks SET available_at=? WHERE id=? AND state='ready'",
-            ("2000-01-01T00:00:00+00:00", task_id),
-        )
-    queue.recover_expired_leases()
-    with sqlite3.connect(queue.db_path) as database:
-        state = database.execute(
-            "SELECT state FROM tasks WHERE id=?", (task_id,)
-        ).fetchone()[0]
-    assert state == "ready", f"task must be claimable again, found {state!r}"
-
-
 def _crash_before_terminal(*_args):
     raise RuntimeError("injected terminal publication crash")
-
-
-def _crash_before_ledger(*_args, **_kwargs):
-    raise RuntimeError("injected decision ledger crash")
 
 
 def _require_value(value):
@@ -374,18 +194,6 @@ def _assert_capture_decision(queue, binding) -> None:
     assert decision["operation_plan"] == []
 
 
-def _assert_completed_capture(queue, binding, relative) -> None:
-    assert relative == f"run/queue-results/capture-{binding.intent_id}.json"
-    with sqlite3.connect(queue.db_path) as database:
-        assert database.execute(
-            "SELECT state,result_reference FROM tasks WHERE id=?", (binding.task_id,)
-        ).fetchone() == ("succeeded", relative)
-        assert database.execute(
-            "SELECT COUNT(*) FROM semantic_decisions WHERE intent_id=?",
-            (binding.intent_id,),
-        ).fetchone() == (1,)
-
-
 def _assert_worker_idle(queue, coordinator, processor) -> None:
     assert flush_memory.run_capture_worker_once(
         queue,
@@ -423,12 +231,6 @@ def _assert_major_daily_file(path: Path, intent_id: str) -> None:
     assert "## [12:34:56] session-end | session-1" in content
     assert "- **Decisions made** - keep this" in content
     assert f"- Capture intent: `{intent_id}`" in content
-
-
-def _assert_major_daily_file_once(path: Path, intent_id: str) -> None:
-    content = path.read_text(encoding="utf-8")
-    assert content.count("- **Decisions made** - keep this") == 1
-    assert content.count(f"- Capture intent: `{intent_id}`") == 1
 
 
 def _assert_minor_daily_file(path: Path, intent_id: str) -> None:
@@ -517,7 +319,7 @@ def test_terminal_file_is_bound_before_task_success(tmp_path: Path) -> None:
 
     with queue.queue_owner(
         role="queue-worker", scope="worker:capture-terminal", parent=owner
-    ), memory_queue.capture_task_fences(
+    ), queue_core.capture_task_fences(
         queue,
         coordinator,
         binding.task_id,
@@ -594,7 +396,7 @@ def test_terminal_completion_rejects_lost_intent_fence(tmp_path: Path) -> None:
         )
         coordinator.release_intent_fence(intent_fence)
 
-        with pytest.raises(memory_queue.QueueOperationError, match="intent_fence_lost"):
+        with pytest.raises(queue_core.QueueOperationError, match="intent_fence_lost"):
             queue.complete_capture_terminal(
                 lease,
                 intent_id=binding.intent_id,
@@ -722,9 +524,9 @@ def test_capture_worker_reuses_decision_after_terminal_publish_crash(
     provider = _FakeNoContentProvider()
     processor = _NoContentProcessor(queue, coordinator, provider)
 
-    real_publish_terminal = flush_memory._publish_no_content_terminal
+    real_publish_terminal = flush_memory.publish_no_content_terminal
     monkeypatch.setattr(
-        flush_memory, "_publish_no_content_terminal", _crash_before_terminal
+        flush_memory, "publish_no_content_terminal", _crash_before_terminal
     )
     with pytest.raises(RuntimeError, match="injected terminal publication crash"):
         flush_memory.run_capture_worker_once(
@@ -738,7 +540,7 @@ def test_capture_worker_reuses_decision_after_terminal_publish_crash(
     _assert_decision_count(queue, binding.intent_id, 1)
     _expire_capture_lease(queue, binding.task_id)
     monkeypatch.setattr(
-        flush_memory, "_publish_no_content_terminal", real_publish_terminal
+        flush_memory, "publish_no_content_terminal", real_publish_terminal
     )
 
     relative = flush_memory.run_capture_worker_once(
@@ -793,7 +595,7 @@ def test_capture_worker_commits_major_daily_block_and_terminal(tmp_path: Path) -
     provider = _FakeNoContentProvider(
         "FLUSH_MAJOR\n- **Decisions made** - keep this"
     )
-    chosen_at = datetime(2026, 8, 16, 12, 34, 56, tzinfo=timezone.utc)
+    chosen_at = datetime(2026, 8, 16, 12, 34, 56, tzinfo=UTC)
     processor = _TimedCaptureProcessor(queue, coordinator, provider, chosen_at)
 
     relative = flush_memory.run_capture_worker_once(
@@ -823,11 +625,11 @@ def test_capture_worker_reuses_markdown_after_terminal_publish_crash(
     provider = _FakeNoContentProvider(
         "FLUSH_MAJOR\n- **Decisions made** - keep this"
     )
-    chosen_at = datetime(2026, 8, 16, 12, 34, 56, tzinfo=timezone.utc)
+    chosen_at = datetime(2026, 8, 16, 12, 34, 56, tzinfo=UTC)
     processor = _TimedCaptureProcessor(queue, coordinator, provider, chosen_at)
-    real_publish_terminal = flush_memory._publish_capture_terminal
+    real_publish_terminal = flush_memory.publish_capture_terminal
     monkeypatch.setattr(
-        flush_memory, "_publish_capture_terminal", _crash_before_terminal
+        flush_memory, "publish_capture_terminal", _crash_before_terminal
     )
 
     with pytest.raises(RuntimeError, match="injected terminal publication crash"):
@@ -842,7 +644,7 @@ def test_capture_worker_reuses_markdown_after_terminal_publish_crash(
     _assert_major_daily_file_once(daily_path, binding.intent_id)
     _expire_capture_lease(queue, binding.task_id)
     monkeypatch.setattr(
-        flush_memory, "_publish_capture_terminal", real_publish_terminal
+        flush_memory, "publish_capture_terminal", real_publish_terminal
     )
 
     relative = flush_memory.run_capture_worker_once(
@@ -865,7 +667,7 @@ def test_capture_worker_commits_minor_daily_block_and_terminal(tmp_path: Path) -
     provider = _FakeNoContentProvider(
         "FLUSH_MINOR\n- **Gotchas / debugging** - keep this"
     )
-    chosen_at = datetime(2026, 8, 16, 12, 34, 56, tzinfo=timezone.utc)
+    chosen_at = datetime(2026, 8, 16, 12, 34, 56, tzinfo=UTC)
     processor = _TimedCaptureProcessor(queue, coordinator, provider, chosen_at)
 
     relative = flush_memory.run_capture_worker_once(
@@ -960,11 +762,11 @@ def test_ordinary_purge_removes_terminal_proven_capture_sources_but_retains_term
     export = tmp_path / "exports" / "capture"
 
     receipt = queue.purge(
-        terminal_before=datetime(2001, 1, 1, tzinfo=timezone.utc),
+        terminal_before=datetime(2001, 1, 1, tzinfo=UTC),
         export_path=export,
     )
 
-    assert receipt == memory_queue.PurgeReceipt(1, (binding.task_id,))
+    assert receipt == queue_core.PurgeReceipt(1, (binding.task_id,))
     _assert_capture_tables(queue, tasks=0, intents=0, decisions=0)
     _assert_sources_purged_terminal_retained(
         intent_path, decision_path, terminal_path
@@ -986,10 +788,10 @@ def test_ordinary_purge_rejects_capture_terminal_without_exact_task_binding(
     export = tmp_path / "exports" / "unbound-capture"
 
     with pytest.raises(
-        memory_queue.QueueOperationError, match="capture_terminal_unbound"
+        queue_core.QueueOperationError, match="capture_terminal_unbound"
     ):
         queue.purge(
-            terminal_before=datetime(2001, 1, 1, tzinfo=timezone.utc),
+            terminal_before=datetime(2001, 1, 1, tzinfo=UTC),
             export_path=export,
         )
 
@@ -1016,22 +818,22 @@ def test_ordinary_purge_resumes_after_export_publication_crash(
     monkeypatch.setattr(queue, "_commit_ordinary_purge", crash_before_commit)
     with pytest.raises(RuntimeError, match="injected crash before purge commit"):
         queue.purge(
-            terminal_before=datetime(2001, 1, 1, tzinfo=timezone.utc),
+            terminal_before=datetime(2001, 1, 1, tzinfo=UTC),
             export_path=export,
         )
 
     assert export.is_dir()
     _assert_sources_retained(intent_path, decision_path, terminal_path)
-    resumed = memory_queue.MemoryQueue._from_v3_candidate(
+    resumed = queue_core.MemoryQueue.from_v3_candidate(
         queue.db_path, state_root=tmp_path
     )
 
     receipt = resumed.purge(
-        terminal_before=datetime(2001, 1, 1, tzinfo=timezone.utc),
+        terminal_before=datetime(2001, 1, 1, tzinfo=UTC),
         export_path=export,
     )
 
-    assert receipt == memory_queue.PurgeReceipt(1, (binding.task_id,))
+    assert receipt == queue_core.PurgeReceipt(1, (binding.task_id,))
     _assert_sources_purged_terminal_retained(
         intent_path, decision_path, terminal_path
     )
@@ -1054,7 +856,7 @@ def test_ordinary_purge_resumes_partial_cleanup_after_database_commit(
     monkeypatch.setattr(queue, "_cleanup_ordinary_purge_artifacts", crash_during_cleanup)
     with pytest.raises(RuntimeError, match="injected crash during purge cleanup"):
         queue.purge(
-            terminal_before=datetime(2001, 1, 1, tzinfo=timezone.utc),
+            terminal_before=datetime(2001, 1, 1, tzinfo=UTC),
             export_path=export,
         )
 
@@ -1065,15 +867,15 @@ def test_ordinary_purge_resumes_partial_cleanup_after_database_commit(
         export, tmp_path, intent_path, decision_path
     )
 
-    resumed = memory_queue.MemoryQueue._from_v3_candidate(
+    resumed = queue_core.MemoryQueue.from_v3_candidate(
         queue.db_path, state_root=tmp_path
     )
     receipt = resumed.purge(
-        terminal_before=datetime(2001, 1, 1, tzinfo=timezone.utc),
+        terminal_before=datetime(2001, 1, 1, tzinfo=UTC),
         export_path=export,
     )
 
-    assert receipt == memory_queue.PurgeReceipt(1, (binding.task_id,))
+    assert receipt == queue_core.PurgeReceipt(1, (binding.task_id,))
     _assert_purge_authorizations(queue, 0)
     _assert_sources_purged_terminal_retained(
         intent_path, decision_path, terminal_path
@@ -1088,19 +890,19 @@ def test_a_flush_body_that_ends_in_a_newline_is_kept(tmp_path: Path) -> None:
     output`. The wire grammar is still closed: the tier token must open the
     output, and a body that is only whitespace is still refused.
     """
-    assert flush_memory._parse_capture_wire_output("FLUSH_MAJOR\nkept\n") == (
+    assert flush_memory.parse_capture_wire_output("FLUSH_MAJOR\nkept\n") == (
         "major",
         "kept",
     )
-    assert flush_memory._parse_capture_wire_output(
+    assert flush_memory.parse_capture_wire_output(
         "FLUSH_MINOR\n  spaced out  "
     ) == ("minor", "spaced out")
 
     with pytest.raises(RuntimeError, match="empty flush body"):
-        flush_memory._parse_capture_wire_output("FLUSH_MAJOR\n   \n  ")
+        flush_memory.parse_capture_wire_output("FLUSH_MAJOR\n   \n  ")
 
     with pytest.raises(RuntimeError, match="invalid flush output"):
-        flush_memory._parse_capture_wire_output("here you go\nFLUSH_MAJOR\nbody")
+        flush_memory.parse_capture_wire_output("here you go\nFLUSH_MAJOR\nbody")
 
 
 def test_a_tier_a_model_put_in_bold_is_still_that_tier() -> None:
@@ -1110,16 +912,32 @@ def test_a_tier_a_model_put_in_bold_is_still_that_tier() -> None:
     in. Under the literal rule both of those sessions would have been
     destroyed as invalid output.
     """
-    assert flush_memory._parse_capture_wire_output("**FLUSH_MAJOR**\nkept") == (
+    assert flush_memory.parse_capture_wire_output("**FLUSH_MAJOR**\nkept") == (
         "major",
         "kept",
     )
-    assert flush_memory._parse_capture_wire_output("`FLUSH_MINOR`\nkept") == (
+    assert flush_memory.parse_capture_wire_output("`FLUSH_MINOR`\nkept") == (
         "minor",
         "kept",
     )
     oks = ("**FLUSH_OK**", "FLUSH_OK\n  ", "FLUSH_OK\ntrailing content")
-    assert {flush_memory._parse_capture_wire_output(reply) for reply in oks} == {("ok", "")}
+    assert {flush_memory.parse_capture_wire_output(reply) for reply in oks} == {("ok", "")}
 
     with pytest.raises(RuntimeError, match="invalid flush output"):
-        flush_memory._parse_capture_wire_output("Sure! Here is my answer\nFLUSH_MAJOR")
+        flush_memory.parse_capture_wire_output("Sure! Here is my answer\nFLUSH_MAJOR")
+
+
+def test_flush_decision_path_uses_the_shared_queue_wire_contract(monkeypatch):
+    from llm_wiki import queue_validation
+
+    calls = []
+
+    def shared_path(intent_id, stage):
+        calls.append((intent_id, stage))
+        return 'shared-contract-path'
+
+    monkeypatch.setattr(queue_validation, 'capture_decision_relative_path', shared_path)
+
+    result = capture_intent_records.capture_decision_relative_path('intent')
+
+    assert (result, calls) == ('shared-contract-path', [('intent', 'flush')])

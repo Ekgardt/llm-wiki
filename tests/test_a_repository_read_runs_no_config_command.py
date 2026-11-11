@@ -43,11 +43,11 @@ def test_the_hostile_fixture_does_run_its_hook_for_plain_git(tmp_path):
 
 def test_the_indexer_and_the_cleaner_do_not_run_it(tmp_path):
     import cleanup_worktrees
-    import repository_index
+    import repository_indexing
 
     repo, marker = _hostile_repository(tmp_path)
 
-    repository_index._git_text(repo, "ls-files", "-z")
-    cleanup_worktrees._run(["git", "status", "--porcelain"], cwd=repo)
+    repository_indexing.git_text(repo, "ls-files", "-z")
+    cleanup_worktrees.run(["git", "status", "--porcelain"], cwd=repo)
 
     assert not marker.exists()

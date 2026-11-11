@@ -4,11 +4,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-_PAGE = "---\ntype: decision\n---\n# Target\n\nBody.\n"
+_PAGE = "---\ntype: concept\n---\n# Target\n\nBody.\n"
 
 
 def _source_page(root: Path, name: str) -> Path:
@@ -51,21 +53,20 @@ def test_a_link_that_is_already_there_is_not_added_twice():
     assert twice == once
 
 
-def test_the_owed_backlink_is_written_through_a_transaction(tmp_path, monkeypatch):
-    import lint_memory
-    import repair_backlinks
+def _isolated_vault(tmp_path, monkeypatch):
 
     vault = tmp_path / "vault"
     notes = vault / "knowledge" / "notes"
     notes.mkdir(parents=True)
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
-    for module in (repair_backlinks, lint_memory):
-        monkeypatch.setattr(module, "ROOT", vault, raising=False)
-        monkeypatch.setattr(module, "VAULT", vault / "knowledge", raising=False)
-        monkeypatch.setattr(module, "NOTES", notes, raising=False)
-    monkeypatch.setattr(repair_backlinks, "VAULT", vault / "knowledge")
-    monkeypatch.setattr(repair_backlinks, "NOTES", notes)
+    return vault
+
+
+def test_the_owed_backlink_is_written_through_a_transaction(tmp_path, monkeypatch):
+    import repair_backlinks
+
+    vault = _isolated_vault(tmp_path, monkeypatch)
     source = _source_page(vault, "source.md")
     target = _source_page(vault, "target.md")
     source.write_text(
@@ -83,15 +84,48 @@ def test_the_owed_backlink_is_written_through_a_transaction(tmp_path, monkeypatc
     assert repair_backlinks.repair(apply=False) == []
 
 
+@pytest.mark.parametrize("declared_type", ["decision", '"decision"', "decision # accepted history"])
+def test_an_active_decision_is_not_rewritten_for_a_backlink(tmp_path, monkeypatch, declared_type):
+    import repair_backlinks
+
+    vault = _isolated_vault(tmp_path, monkeypatch)
+    source = _source_page(vault, "source.md")
+    target = _source_page(vault, "target.md")
+    source.write_text("---\ntype: concept\n---\nSee [[knowledge/notes/target]].\n", encoding="utf-8")
+    before = f"---\ntype: {declared_type}\nstatus: accepted\n---\n# Decision\n".encode()
+    target.write_bytes(before)
+
+    assert repair_backlinks.repair(apply=False) == []
+    assert repair_backlinks.repair(apply=True) == []
+    assert target.read_bytes() == before
+    assert "[[knowledge/notes/target]]" in source.read_text(encoding="utf-8")
+
+
+def test_a_target_that_became_a_decision_is_refused_at_the_write_boundary(tmp_path, monkeypatch):
+    import repair_backlinks
+
+    vault = _isolated_vault(tmp_path, monkeypatch)
+    source = _source_page(vault, "source.md")
+    target = _source_page(vault, "target.md")
+    source.write_text("---\ntype: concept\n---\nSee [[knowledge/notes/target]].\n", encoding="utf-8")
+    target.write_text(_PAGE, encoding="utf-8")
+    assert len(repair_backlinks.repair(apply=False)) == 1
+    before = b"---\ntype: decision\nstatus: accepted\n---\n# Decision\n"
+    target.write_bytes(before)
+
+    with pytest.raises(ValueError, match="immutable"):
+        repair_backlinks.repair_pair(source, target)
+
+    assert target.read_bytes() == before
+
+
 def test_a_superseded_page_is_not_asked_to_link_forward(tmp_path, monkeypatch):
     """History is not rewritten to satisfy a linter."""
     import lint_memory
 
     notes = tmp_path / "knowledge" / "notes"
     notes.mkdir(parents=True)
-    monkeypatch.setattr(lint_memory, "ROOT", tmp_path)
-    monkeypatch.setattr(lint_memory, "VAULT", tmp_path / "knowledge")
-    monkeypatch.setattr(lint_memory, "NOTES", notes)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     successor = notes / "successor.md"
     retired = notes / "retired.md"
     successor.write_text(

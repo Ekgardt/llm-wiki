@@ -20,7 +20,7 @@ def _pairs(lengths):
 
 
 def test_batches_hold_passages_of_similar_length():
-    batches = reranker._batches_by_length(_pairs([500, 60, 400, 70]))
+    batches = reranker.batches_by_length(_pairs([500, 60, 400, 70]))
 
     lengths = [[len(_pairs([500, 60, 400, 70])[i][1]) for i in b] for b in batches]
     assert lengths == [[60, 70], [400, 500]]
@@ -29,7 +29,7 @@ def test_batches_hold_passages_of_similar_length():
 def test_every_pair_is_scored_exactly_once():
     pairs = _pairs([500, 60, 400, 70, 90])
 
-    batches = reranker._batches_by_length(pairs)
+    batches = reranker.batches_by_length(pairs)
 
     assert sorted(index for batch in batches for index in batch) == list(range(5))
 
@@ -38,21 +38,21 @@ def test_a_score_comes_back_to_the_position_its_pair_came_from(monkeypatch):
     pairs = _pairs([500, 60, 400])
     monkeypatch.setattr(
         reranker,
-        "_batch_logits",
+        "batch_logits",
         lambda bundle, chosen: [float(len(pair[1])) for pair in chosen],
     )
 
-    scores = reranker._cross_encoder_scores({}, pairs)
+    scores = reranker.cross_encoder_scores({}, pairs)
 
     assert scores == [500.0, 60.0, 400.0]
 
 
 def test_an_empty_candidate_list_scores_to_nothing(monkeypatch):
     monkeypatch.setattr(
-        reranker, "_batch_logits", lambda bundle, chosen: [0.0] * len(chosen)
+        reranker, "batch_logits", lambda bundle, chosen: [0.0] * len(chosen)
     )
 
-    assert reranker._cross_encoder_scores({}, []) == []
+    assert reranker.cross_encoder_scores({}, []) == []
 
 
 def test_a_rerank_past_its_budget_leaves_the_fused_order(monkeypatch):
@@ -62,10 +62,10 @@ def test_a_rerank_past_its_budget_leaves_the_fused_order(monkeypatch):
         for length in (500, 60, 400)
     ]
     monkeypatch.setattr(
-        reranker, "_get_reranker_bundle", lambda: {"model_id": "m", "model_revision": "r"}
+        reranker, "get_reranker_bundle", lambda: {"model_id": "m", "model_revision": "r"}
     )
     monkeypatch.setattr(
-        reranker, "_batch_logits", lambda bundle, chosen: [0.0] * len(chosen)
+        reranker, "batch_logits", lambda bundle, chosen: [0.0] * len(chosen)
     )
 
     ranked = reranker.rerank(
@@ -86,11 +86,11 @@ def test_a_rerank_inside_its_budget_still_applies(monkeypatch):
         for length in (500, 60, 400)
     ]
     monkeypatch.setattr(
-        reranker, "_get_reranker_bundle", lambda: {"model_id": "m", "model_revision": "r"}
+        reranker, "get_reranker_bundle", lambda: {"model_id": "m", "model_revision": "r"}
     )
     monkeypatch.setattr(
         reranker,
-        "_batch_logits",
+        "batch_logits",
         lambda bundle, chosen: [float(len(pair[1])) for pair in chosen],
     )
 

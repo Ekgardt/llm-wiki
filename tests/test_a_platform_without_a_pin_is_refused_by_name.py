@@ -47,7 +47,7 @@ def test_a_profile_pinned_once_for_every_platform_is_not_refused(
 ) -> None:
     _on_an_unpinned_platform(monkeypatch)
 
-    installer._require_pinned_platform(lsp_profiles.REGISTRY.get("typescript"))
+    installer.require_pinned_platform(lsp_profiles.REGISTRY.get("typescript"))
 
 
 def test_the_pyright_release_is_typed_once() -> None:

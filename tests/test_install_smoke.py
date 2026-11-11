@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -41,7 +40,7 @@ def test_run_smoke_uses_one_deadline_and_retains_degraded_evidence(
     monkeypatch.setattr(install_smoke.time, "monotonic", lambda: next(times))
     monkeypatch.setattr(
         install_smoke,
-        "_production_imports",
+        "production_imports",
         lambda: {"mcp": True, "mcp_server": True},
     )
 
@@ -53,8 +52,8 @@ def test_run_smoke_uses_one_deadline_and_retains_degraded_evidence(
         observed.append(("mcp", timeout))
         return install_smoke.EXPECTED_TOOL_NAMES
 
-    monkeypatch.setattr(install_smoke, "_doctor_report", doctor)
-    monkeypatch.setattr(install_smoke, "_mcp_tool_names", mcp)
+    monkeypatch.setattr(install_smoke, "doctor_report", doctor)
+    monkeypatch.setattr(install_smoke, "mcp_tool_names", mcp)
 
     report = install_smoke.run_smoke(root, state_root, deadline_seconds=10.0)
 
@@ -87,12 +86,12 @@ def test_doctor_rejects_error_exit_malformed_json_and_invalid_schema(
     state_root.mkdir()
     monkeypatch.setattr(
         install_smoke,
-        "_run_process_tree",
+        "run_process_tree",
         lambda *args, **kwargs: subprocess.CompletedProcess(args[0], returncode, stdout, ""),
     )
 
     with pytest.raises(RuntimeError, match=message):
-        install_smoke._doctor_report(root, state_root, 5.0)
+        install_smoke.doctor_report(root, state_root, 5.0)
 
 
 def test_doctor_accepts_returncode_one_only_for_degraded_report(
@@ -108,13 +107,13 @@ def test_doctor_accepts_returncode_one_only_for_degraded_report(
     expected = _doctor_report("degraded")
     monkeypatch.setattr(
         install_smoke,
-        "_run_process_tree",
+        "run_process_tree",
         lambda *args, **kwargs: subprocess.CompletedProcess(
             args[0], 1, json.dumps(expected), "warning"
         ),
     )
 
-    assert install_smoke._doctor_report(root, state_root, 5.0) == expected
+    assert install_smoke.doctor_report(root, state_root, 5.0) == expected
 
 
 def test_real_stdio_mcp_initializes_and_lists_exact_tool_surface(
@@ -123,7 +122,7 @@ def test_real_stdio_mcp_initializes_and_lists_exact_tool_surface(
     import install_smoke
 
     root = Path(__file__).resolve().parent.parent
-    names = install_smoke._mcp_tool_names(root, tmp_path, 20.0)
+    names = install_smoke.mcp_tool_names(root, tmp_path, 20.0)
 
     assert set(names) == set(install_smoke.EXPECTED_TOOL_NAMES)
     assert len(names) == len(install_smoke.EXPECTED_TOOL_NAMES)
@@ -141,12 +140,11 @@ def test_tool_contract_rejects_same_size_surface_with_wrong_name() -> None:
 def test_production_import_probe_has_no_pytest_dependency() -> None:
     import install_smoke
 
-    imports = install_smoke._production_imports()
+    imports = install_smoke.production_imports()
     source = Path(install_smoke.__file__).read_text(encoding="utf-8")
 
-    needs_tomli = sys.version_info < (3, 11)
     assert (imports["mcp"], imports["mcp_server"], "import pytest" in source) == (True, True, False)
-    assert imports.get("tomli", False) is True or not needs_tomli
+    assert "tomli" not in imports
 
 
 def test_cli_emits_one_json_object_or_bounded_failure(

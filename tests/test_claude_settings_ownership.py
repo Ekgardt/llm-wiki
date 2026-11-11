@@ -138,7 +138,9 @@ def test_a_block_mixing_our_hook_with_the_users_is_refused(
     tmp_path: Path, user_settings: Path
 ) -> None:
     """Stripping it rewrites their block; keeping it double-fires ours."""
-    from install_control import InstallControlError
+    from install_state import (
+        InstallControlError,
+    )
 
     user_settings.write_text(
         json.dumps(
@@ -195,9 +197,9 @@ def test_uninstall_rebuilds_every_resource_the_manifest_names(
     """
     import argparse
 
-    import install_control
+    from llm_wiki import install_rebuild, install_record_reader, install_resource_builder
 
-    monkeypatch.setattr(install_control, "_base_install_resources", lambda **_kwargs: [])
+    monkeypatch.setattr(install_resource_builder, "base_install_resources", lambda **_kwargs: [])
     record = {
         "vault_root": str(tmp_path / "vault"),
         "state_root": str(tmp_path / "state"),
@@ -207,7 +209,7 @@ def test_uninstall_rebuilds_every_resource_the_manifest_names(
             {"id": "claude-user-settings", "metadata": {"config_existed": False}},
         ],
     }
-    monkeypatch.setattr(install_control, "_existing_record", lambda *_args: record)
+    monkeypatch.setattr(install_record_reader, "existing_record", lambda *_args: record)
     root = tmp_path / "vault"
     (root / "scripts").mkdir(parents=True)
     (root / "scripts" / "llm-wiki-memory-opencode.js").write_text(
@@ -226,7 +228,7 @@ def test_uninstall_rebuilds_every_resource_the_manifest_names(
         powershell_path=None,
     )
 
-    resources = install_control._resources_from_existing_args(args, "uninstall")
+    resources = install_rebuild.resources_from_existing_args(args, "uninstall")
 
     identifiers = [resource.resource_id for resource in resources]
     assert identifiers == ["opencode-plugin", "claude-user-settings"]
@@ -240,9 +242,9 @@ def test_the_opencode_destination_resolves_on_this_platform(tmp_path: Path) -> N
     Passing `sys.platform` straight through made `--opencode-plugin` raise on
     every platform there is, which no test noticed because none called it.
     """
-    import install_control
+    from llm_wiki import install_resource_builder
 
-    destination = install_control._opencode_plugin_destination(tmp_path)
+    destination = install_resource_builder.opencode_plugin_destination(tmp_path)
 
     assert destination.name == "llm-wiki-memory.js"
     assert destination.parent.name == "plugins"

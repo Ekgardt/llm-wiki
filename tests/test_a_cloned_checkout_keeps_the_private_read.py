@@ -44,7 +44,7 @@ class _FcntlWithoutSeals:
 def test_a_config_a_clone_writes_keeps_the_private_read(tmp_path):
     import workspace_revision
 
-    accepted = workspace_revision._safe_private_git_config(
+    accepted = workspace_revision.safe_private_git_config(
         CLONE_CONFIG, hash_name="sha1"
     )
 
@@ -62,7 +62,7 @@ def test_a_remote_that_can_fetch_during_a_read_still_refuses_it(setting):
         b"\tfetch = +refs/heads/*:refs/remotes/origin/*\n\t" + setting.encode() + b"\n",
     )
 
-    assert workspace_revision._safe_private_git_config(config, hash_name="sha1") is False
+    assert workspace_revision.safe_private_git_config(config, hash_name="sha1") is False
 
 
 def test_a_section_that_can_run_a_command_still_refuses_the_private_read():
@@ -70,7 +70,7 @@ def test_a_section_that_can_run_a_command_still_refuses_the_private_read():
 
     config = CLONE_CONFIG + b'[filter "lfs"]\n\tclean = git-lfs clean -- %f\n'
 
-    assert workspace_revision._safe_private_git_config(config, hash_name="sha1") is False
+    assert workspace_revision.safe_private_git_config(config, hash_name="sha1") is False
 
 
 @pytest.mark.skipif(
@@ -82,12 +82,12 @@ def test_an_interpreter_without_the_seal_constants_still_seals(monkeypatch):
 
     import workspace_revision
 
-    monkeypatch.setattr(workspace_revision, "_fcntl", _FcntlWithoutSeals(fcntl))
+    monkeypatch.setattr(workspace_revision, "fcntl", _FcntlWithoutSeals(fcntl))
     descriptor = os.memfd_create("llm-wiki-test", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
 
     try:
-        available = workspace_revision._private_index_runtime_available()
-        sealed = workspace_revision._seal_private_index(descriptor)
+        available = workspace_revision.private_index_runtime_available()
+        sealed = workspace_revision.seal_private_index(descriptor)
     finally:
         os.close(descriptor)
 

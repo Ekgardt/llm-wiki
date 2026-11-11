@@ -4,8 +4,7 @@ The scheduler is Task Scheduler on Windows, a user LaunchAgent on macOS, a
 user systemd timer on Linux, cron as the explicit degraded fallback
 (`install_control.py`). The pass runs, in order: capture-intent adoption,
 runtime reclaim, the deferred memory queue, pending session consolidation;
-the compile (spawned through `maybe_compile`, followed until it finishes or
-the wait bound passes) and user-turn keying; then the steps that read the
+user-turn keying and the compile (an owned child whose exit is observed directly); then the steps that read the
 compile's output — structural lint, backlink repair, registered-repository
 refresh and retention, generation pruning, orphaned-checkpoint clearing, LSP
 failure-evidence retirement, retirement of the memory's own call transcripts,
@@ -18,79 +17,61 @@ $LLM_WIKI_STATE_ROOT/logs/nightly-YYYY-MM-DD.md.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
-import subprocess
 import sys
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import maybe_compile  # noqa: E402
+import python_series  # noqa: E402
+
+python_series.require_supported_python(Path(__file__).resolve().parent.parent)
+
+from datetime import UTC, datetime  # noqa: E402
+
+import compile_lock  # noqa: E402
+import nightly_budget  # noqa: E402
 import process_liveness  # noqa: E402
-from doctor import run_generation_maintenance  # noqa: E402
+from generation_maintenance import (  # noqa: E402
+    run_generation_maintenance,
+)
+from llm_wiki import runtime_roots  # noqa: E402
+from llm_wiki.runtime_publication import write_all  # noqa: E402
 from maintenance_helpers import prune_maintenance_output, trim_scheduler_logs  # noqa: E402
 from maintenance_helpers import run_step as _run_step  # noqa: E402
-from maintenance_helpers import wait_for_compile_idle as _wait_for_compile_idle
-from memory_state import (  # noqa: E402
-    REPORTS_DIR,
-    ROOT,
-    STATE_ROOT,
-    load_state,
-    update_state,
-)
+from maintenance_helpers import wait_for_compile_idle as _wait_for_compile_idle  # noqa: E402
+from markdown_transaction import active_or_legacy_coordinator  # noqa: E402
+from memory_state import load_state, update_state  # noqa: E402
 from operational_ownership import (  # noqa: E402
     OperationalOwnershipError,
     OwnerLease,
+    OwnershipRegistry,
     acquire_scheduled_owner,
-    adopted_ownership_registry,
     heartbeat_owner,
     release_marker_owner,
 )
-from reclaim_runtime_state import RECLAIM_STEP_SECONDS  # noqa: E402
-from repository_index import REFRESH_ALL_BUDGET_SECONDS  # noqa: E402
-from repository_retention import RETIRE_BUDGET_SECONDS  # noqa: E402
 from secret_redact import describe_error  # noqa: E402
 from settings import setting_value  # noqa: E402
 
-# How long the nightly pass will spend rebuilding the evidence generation.
-# The interactive default is one minute, which is the right bound for a doctor
-# run someone is waiting on. A nightly window is not that: on this vault a full
-# build of 762 sources takes 98 seconds, so a one-minute bound deferred every
-# night and the generation was never rebuilt at all. The unit itself has no
-# start timeout, so the only bound that matters is this one.
-NIGHTLY_GENERATION_BUDGET_SECONDS = 15 * 60
-# The refresh of every registered foreign repository shares one bound, the
-# child's own (`repository_index.REFRESH_ALL_BUDGET_SECONDS`); the refresh is
-# incremental (measured 2026-09-10: 16 s after one edited file in a 1 022-file
-# repository, against 60 s for the full build), and a repository that does
-# not fit is deferred to the next night, never half-built. The step's kill
-# timeout sits above that budget by a margin for interpreter start-up and
-# the deferral report, so the child's graceful deferral runs before the
-# parent's kill (audit OPS-10).
-STEP_START_MARGIN_SECONDS = 120
-# The prune's kill timeout; its own budget ends a margin before it. See
-# `docs/research/2026-09-14-a-prune-inside-its-step.md`.
-PRUNE_STEP_SECONDS = 300
 
-
-def _generation_result() -> dict:
+def generation_result() -> dict:
     """The shared builder takes its own `repair` owner; the pass passes none."""
     return run_generation_maintenance(
-        root=ROOT,
-        state_root=STATE_ROOT,
-        time_budget_seconds=NIGHTLY_GENERATION_BUDGET_SECONDS,
-        max_sources=setting_value("corpus.max_files", ROOT),
+        root=runtime_roots.vault_root(),
+        state_root=runtime_roots.state_root(),
+        time_budget_seconds=setting_value("generation.nightly_seconds", runtime_roots.vault_root()),
+        max_sources=setting_value("corpus.max_files", runtime_roots.vault_root()),
     )
 
 
-def _refresh_generation(log) -> int:
+def refresh_generation(log) -> int:
     """Run the shared bounded builder under its fenced maintenance owner."""
-    result = _generation_result()
+    result = generation_result()
     status = result["status"]
     generation = result.get("generation_id") or "none"
     log(
@@ -114,49 +95,63 @@ def _log_generation_details(log, result: dict) -> None:
     log(f"  generation: details {details}")
 
 
-def _utc_now() -> str:
+def utc_now() -> str:
     """Every instant in the state is UTC with its offset; a date stays the local calendar day.
 
     `skipped_at` and `failed_at` were local and `last_nightly_at` UTC, and doctor
     compared them as strings (audit C-30,
     docs/research/2026-09-25-the-scheduler-state-keeps-one-clock.md).
     """
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-def _record_nightly_result(today: str, failures: int, error: str | None = None) -> None:
-    """Release today's catchup lease and persist the terminal result."""
-    timestamp = _utc_now()
+def record_nightly_result(today: str, failures: int, error: str | None = None, *, deferred=()) -> None:
+    """Release the claim; only a complete pass advances the success timestamp."""
+    timestamp = utc_now()
 
-    def _mutate(state: dict) -> None:
-        claim = state.get("nightly_catchup_claim", {})
-        if claim.get("date") == today:
-            state.pop("nightly_catchup_claim", None)
-        if failures:
-            state["last_nightly_status"] = "failed"
-            state["last_nightly_failure"] = {
-                "date": today,
-                "failed_at": timestamp,
-                "failures": failures,
-                **({"error": error} if error else {}),
-            }
-        else:
-            state["last_nightly_status"] = "success"
-            state["last_nightly_date"] = today
-            # The date alone cannot say whether a 03:00 run is late; the health
-            # check needs an instant to measure an interval against.
-            state["last_nightly_at"] = timestamp
-            # From the first scheduled night on, a weekly is due; doctor measures a
-            # weekly that never completed against this (audit 2026-09-27 B-15).
-            state.setdefault("weekly_due_since", timestamp)
-            state.pop("last_nightly_failure", None)
+    def mutate(state):
+        _release_nightly_claim(state, today)
+        status = _nightly_completion_status(failures, deferred)
+        state["last_nightly_status"] = status
+        state["last_nightly_result"] = {"date": today, "at": timestamp, "status": status,
+                                        "failures": failures, "deferred": list(deferred), "error": error}
+        _record_completion_fields(state, today, timestamp, status, failures, error)
 
-    update_state(_mutate)
+    update_state(mutate)
+
+
+def _release_nightly_claim(state, today):
+    if state.get("nightly_catchup_claim", {}).get("date") == today:
+        state.pop("nightly_catchup_claim", None)
+
+
+def _nightly_completion_status(failures, deferred):
+    if failures:
+        return "failed"
+    if deferred:
+        return "deferred"
+    return "success"
+
+
+def _record_completion_fields(state, today, timestamp, status, failures, error):
+    if status == "failed":
+        state["last_nightly_failure"] = {"date": today, "failed_at": timestamp,
+                                         "failures": failures, **({"error": error} if error else {})}
+        return
+    if status == "success":
+        _record_nightly_success(state, today, timestamp)
+
+
+def _record_nightly_success(state, today, timestamp):
+    state.update(last_nightly_date=today, last_nightly_at=timestamp)
+    state.setdefault("weekly_due_since", timestamp)
+    state.pop("last_nightly_failure", None)
+    state.pop("nightly_deferred_compile", None)
 
 
 def _record_nightly_skip(today: str, reason: str) -> None:
     """Release today's claim without replacing the last execution result."""
-    timestamp = _utc_now()
+    timestamp = utc_now()
 
     def _mutate(state: dict) -> None:
         claim = state.get("nightly_catchup_claim", {})
@@ -183,6 +178,7 @@ class StepLog:
     def __init__(self, log: Callable[[str], None]) -> None:
         self._log = log
         self._count = 0
+        self.deferred: list[str] = []
 
     def __call__(self, message: str) -> None:
         self._log(message)
@@ -193,333 +189,12 @@ class StepLog:
 
 
 @dataclass(frozen=True)
-class _Step:
-    """One nightly subprocess step: what to announce, run, and how long to wait."""
-
-    message: str
-    label: str
-    command: list[str]
-    timeout: int
+class _PassResult:
+    failures: int
+    deferred: tuple[str, ...] = ()
 
 
-def _script(name: str) -> list[str]:
-    return [sys.executable, str(ROOT / "scripts" / name)]
-
-
-def _capture_adoption_step() -> _Step:
-    """Dispatch intents published durably but never given a task.
-
-    The capture worker sweeps these too, but it only runs when a capture wakes
-    it. If the failure that orphaned an intent is the same one stopping captures
-    from finishing, nothing would ever run the sweeper — so recovery cannot
-    depend on another capture arriving. This is the pass that does not.
-    """
-    return _Step(
-        "adopting undispatched capture intents...",
-        "capture_adoption",
-        _script("capture_adoption.py"),
-        120,
-    )
-
-
-def _reclaim_step() -> _Step:
-    """Finish what a hook is too impatient to finish, before anything else runs.
-
-    A hook drains the project-checkpoint queue with a 0.5 s state-lock budget
-    because a person is waiting on it; a backlog therefore outlives every hook
-    and grows `run/state.json`, which makes the next hook slower still. Nothing
-    else in this pass breaks that loop, and every later step reads the state
-    file this one shrinks.
-    """
-    return _Step(
-        "reclaiming runtime state...",
-        "reclaim",
-        _script("reclaim_runtime_state.py"),
-        RECLAIM_STEP_SECONDS,
-    )
-
-
-# The queue worker's wall time ends a margin before this step is killed. See
-# `docs/research/2026-09-14-no-task-is-claimed-to-be-killed.md`.
-QUEUE_STEP_SECONDS = 600
-
-
-# How long reading the checkout's HEAD commit time may take.
-HEAD_TIME_TIMEOUT_SECONDS = 10
-
-
-def _git_line(root: Path, *arguments: str) -> str | None:
-    """One line of a bounded git answer, or None when git cannot give it."""
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(root), *arguments],
-            capture_output=True,
-            text=True,
-            timeout=HEAD_TIME_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip() or None
-
-
-def head_arrival_time(root: Path = ROOT) -> str | None:
-    """When HEAD last moved in this checkout (its reflog), else its commit time.
-
-    The commit time is earlier than the fast-forward that brought the fix here,
-    so captures that died on the old code in between never got their redrive
-    (audit 2026-09-26 B-28,
-    docs/research/2026-09-26-a-fix-arrives-when-the-checkout-moves.md).
-    """
-    selector = _git_line(root, "reflog", "-1", "--date=iso-strict", "--format=%gd", "HEAD")
-    if selector is not None and selector.startswith("HEAD@{") and selector.endswith("}"):
-        return _offset_spelling(selector[len("HEAD@{") : -1])
-    return _git_line(root, "log", "-1", "--format=%cI", "HEAD")
-
-
-def _offset_spelling(moment: str) -> str:
-    """Git spells UTC `Z`; Python 3.10's `fromisoformat` reads only `+00:00`."""
-    return moment[:-1] + "+00:00" if moment.endswith("Z") else moment
-
-
-def _dead_capture_redrive_steps() -> list[_Step]:
-    """Give dead captures their one redrive once the code changed after they died.
-
-    Runs before the queue worker so the redriven captures are worked the same
-    night. No readable HEAD means no known code change, so no step. See
-    `docs/research/2026-09-25-a-dead-capture-gets-its-second-chance-after-a-fix.md`.
-    """
-    changed_after = head_arrival_time()
-    if changed_after is None:
-        return []
-    return [
-        _Step(
-            "redriving dead captures the code has changed since...",
-            "dead_capture_redrive",
-            _script("memory_queue.py") + ["redrive-dead-captures", "--changed-after", changed_after],
-            120,
-        )
-    ]
-
-
-def _intake_steps() -> list[_Step]:
-    """The steps that take in what arrived since the last pass, in order."""
-    return [
-        _capture_adoption_step(),
-        _reclaim_step(),
-        *_dead_capture_redrive_steps(),
-        _queue_step(),
-        _episode_step(),
-    ]
-
-
-def _queue_step() -> _Step:
-    return _Step(
-        "working deferred memory queue...",
-        "work",
-        _script("memory_queue.py")
-        + ["work", "--max-seconds", str(QUEUE_STEP_SECONDS - STEP_START_MARGIN_SECONDS)],
-        QUEUE_STEP_SECONDS,
-    )
-
-
-# The consolidation starts no new batch after this; one batch (a model call and its
-# write) fits in the margin before the step's kill. See
-# `docs/research/2026-09-14-every-budget-inside-its-step.md`.
-EPISODE_BUDGET_SECONDS = 180
-
-
-def provider_margin_seconds() -> int:
-    """What a step must leave after its child's budget for one model call.
-
-    The child stops starting work at its budget with one call possibly in
-    flight, and one call is not one provider: in auto mode it walks the whole
-    order. The flat 120 s covered the interpreter and one provider only.
-    Research: docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
-    """
-    from llm_client import worst_case_call_seconds
-
-    return STEP_START_MARGIN_SECONDS + worst_case_call_seconds()
-
-
-def _episode_step() -> _Step:
-    """Consolidate every day still pending before compile reads the daily log.
-
-    Sessions are kept verbatim whatever the classifier thought of them; this is
-    where a day of them becomes durable knowledge, in the window where nobody is
-    waiting. Every promoted item must quote the record it came from. It used to
-    take yesterday only, so a day that failed once was never read again; five
-    such days were found on 2026-09-14. See
-    `docs/research/2026-09-14-a-day-that-failed-is-tried-again.md`.
-    """
-    return _Step(
-        "consolidating pending sessions...",
-        "episodes",
-        _script("episode_consolidation.py")
-        + ["--all-pending", "--budget-seconds", str(EPISODE_BUDGET_SECONDS)],
-        EPISODE_BUDGET_SECONDS + provider_margin_seconds(),
-    )
-
-
-def _compile_step() -> _Step:
-    return _Step(
-        "triggering compile (if needed)...",
-        "maybe_compile",
-        _script("maybe_compile.py"),
-        60,
-    )
-
-
-def _fact_keys_step() -> _Step:
-    """Key the user turns of new daily entries, so retrieval can find a fact by its statement.
-
-    One provider call per twenty-five turns, in this window where nobody is
-    waiting; a turn is keyed once. See `fact_keys`.
-    """
-    from fact_keys import DEFAULT_BUDGET_SECONDS
-
-    return _Step(
-        "keying new user turns...",
-        "fact_keys",
-        _script("fact_keys.py"),
-        int(DEFAULT_BUDGET_SECONDS) + provider_margin_seconds(),
-    )
-
-
-def _checkpoint_step() -> _Step:
-    """Clear a checkpoint sequence whose own request is never coming back.
-
-    The design clears a quarantined or reserved sequence the right way: the
-    original request arrives again, re-derives the same name, and is given a
-    fresh attempt. A session-end checkpoint has no such second arrival — the
-    session is over — so a sequence that loses its race stays unsettled and
-    blocks every sequence behind it for that project.
-
-    Measured on this vault on 2026-09-07: `llm-wiki` 2214 lost a precondition
-    during the benchmark runs and 2215 sat reserved behind it, `another-project` 830
-    likewise. Six hundred hook failures accumulated over a day, one per
-    session end, and clearing it took a person running a repair script by
-    hand — which is the thing this pass exists to stop needing.
-
-    Safe to run every night: it takes only rows no live lease owns, and does
-    nothing on a vault that has none.
-    """
-    return _Step(
-        "clearing checkpoints nothing will settle...",
-        "checkpoints",
-        _script("repair_orphaned_checkpoint_names.py"),
-        120,
-    )
-
-
-def _own_calls_step() -> _Step:
-    """Retire the transcripts the memory's own provider calls left outside the vault.
-
-    `--no-session-persistence` stopped new ones on 2026-09-14; the 1 082 old ones
-    waited for a hand until 2026-09-23. Nothing the memory leaves behind is the
-    operator's chore. See `docs/research/2026-09-23-the-memory-retires-its-own-residue.md`.
-    """
-    return _Step(
-        "retiring the memory's own call transcripts...",
-        "own_calls",
-        _script("retire_own_call_transcripts.py"),
-        60,
-    )
-
-
-def _benchmark_runs_step() -> _Step:
-    """Retire benchmark run directories untouched for a month; dataset caches stay.
-
-    1.5 GB under `cache/benchmarks/` on 2026-09-24 with nothing removing any of it.
-    See `docs/research/2026-09-24-every-store-has-a-bound.md`.
-    """
-    return _Step(
-        "retiring old benchmark run directories...",
-        "benchmark_runs",
-        _script("retire_benchmark_runs.py"),
-        120,
-    )
-
-
-def _lsp_evidence_step() -> _Step:
-    """Retire LSP failure roots older than two weeks beyond the newest twenty.
-
-    They were "left for the operator", who had no command for them: 80 roots on
-    2026-09-23. See `docs/research/2026-09-23-the-rest-of-the-live-audit.md`.
-    """
-    return _Step(
-        "retiring old LSP failure evidence...",
-        "lsp_evidence",
-        _script("retire_lsp_evidence.py"),
-        60,
-    )
-
-
-def _post_compile_steps() -> list[_Step]:
-    return [
-        _Step(
-            "structural lint...",
-            "lint",
-            _script("lint_memory.py"),
-            120,
-        ),
-        _Step(
-            "repairing owed backlinks...",
-            "backlinks",
-            _script("repair_backlinks.py") + ["--apply"],
-            120,
-        ),
-        _Step(
-            # Issue #24, section A: the timer half of the background refresh.
-            # Every registered repository whose checkout still exists is looked
-            # at and rebuilt incrementally only when its sources changed, each
-            # under its own per-repository fence.
-            "refreshing registered repository generations...",
-            "repositories",
-            _script("repository_index.py")
-            + ["refresh-all", "--budget-seconds", str(REFRESH_ALL_BUDGET_SECONDS)],
-            REFRESH_ALL_BUDGET_SECONDS + STEP_START_MARGIN_SECONDS,
-        ),
-        _Step(
-            # Issue #24, section D1: a foreign generation is never activated,
-            # so the pruner below reports it pending and keeps it forever.
-            # This retires, per checkout, every generation of a checkout that
-            # is gone or marked not indexed and all but the newest two of the
-            # rest, each repository under its own fence.
-            "retiring repository generations no checkout reads...",
-            "repository_retention",
-            _script("repository_index.py") + ["retire"],
-            RETIRE_BUDGET_SECONDS + STEP_START_MARGIN_SECONDS,
-        ),
-        _Step(
-            # Every refresh publishes a new immutable generation and nothing
-            # removed the old ones: five in one day, 1.05 GB, on the vault of
-            # issue #29. The pruner keeps the active generation and one ancestor.
-            "pruning superseded evidence generations...",
-            "prune_generations",
-            _script("prune_generations.py")
-            + ["--apply", "--budget-seconds", str(PRUNE_STEP_SECONDS - STEP_START_MARGIN_SECONDS)],
-            PRUNE_STEP_SECONDS,
-        ),
-        _checkpoint_step(),
-        _lsp_evidence_step(),
-        _own_calls_step(),
-        _benchmark_runs_step(),
-        _Step(
-            # The read path loads weights local-only; a cache that lacks the
-            # two pinned models answers by words alone. Present files are not
-            # fetched again, so this is a no-op on every night but the first.
-            "fetching missing model weights...",
-            "models",
-            _script("install_models.py"),
-            1800,
-        ),
-    ]
-
-
-def _run_steps(run_step, log, steps: list[_Step]) -> int:
+def run_steps(run_step, log, steps: list[nightly_budget.Step]) -> int:
     """Run each step in order and count the ones that failed."""
     failures = 0
     for step in steps:
@@ -528,100 +203,12 @@ def _run_steps(run_step, log, steps: list[_Step]) -> int:
     return failures
 
 
-def _compile_running() -> bool:
-    """Best effort: an unreadable status counts as finished, as before."""
-    try:
-        return bool(maybe_compile.status()["compile_running"])
-    except Exception:  # noqa: BLE001
-        return False
+def compile_running() -> bool:
+    """Unreadable ownership cannot establish that a compiler finished."""
+    return bool(compile_lock.process_status()["compile_running"])
 
 
-def _safe_state() -> dict:
-    """State is a report here, never a precondition; unreadable means unknown."""
-    try:
-        return load_state()
-    except Exception:  # noqa: BLE001 - a nightly pass never fails on diagnostics
-        return {}
-
-
-COMPILE_DIED_WITHOUT_OUTCOME = "compile exited without recording an outcome"
-
-
-def _compile_failed_this_pass(
-    before: str | None, started_before: str | None = None
-) -> str | None:
-    """The error of a compile that ran in this pass, or None.
-
-    `maybe_compile` spawns the compile and returns 0 as soon as it is running,
-    so the step it belongs to says nothing about the outcome. Waiting for the
-    process to stop says nothing either. On 2026-08-22 that let a nightly pass
-    report `failures=0` for a night whose compile had died a second in. The
-    stamp comparison keeps last night's error out of tonight's count, and a
-    compile killed before it could write any outcome is counted by its start
-    stamp (docs/research/2026-09-11-the-seven-questions-the-audits-left-open.md).
-    """
-    state = _safe_state()
-    if _compile_died_this_pass(state, started_before):
-        return COMPILE_DIED_WITHOUT_OUTCOME
-    return _recorded_compile_error(state, before)
-
-
-def _recorded_compile_error(state: dict, before: str | None) -> str | None:
-    finished = state.get("last_compile_finished_at")
-    if not finished or str(finished) == before:
-        return None
-    if state.get("last_compile_status") != "error":
-        return None
-    return str(state.get("last_compile_error") or "unknown")
-
-
-def _compile_died_this_pass(state: dict, started_before: str | None) -> bool:
-    """A compile started in this pass, is not running, and never left `running`."""
-    started = state.get("last_compile_started_at")
-    if not started or str(started) == started_before:
-        return False
-    return state.get("last_compile_status") == "running" and not _compile_running()
-
-
-def _last_compile_finished() -> str | None:
-    finished = _safe_state().get("last_compile_finished_at")
-    return str(finished) if finished else None
-
-
-def _last_compile_started() -> str | None:
-    started = _safe_state().get("last_compile_started_at")
-    return str(started) if started else None
-
-
-# How long a nightly pass follows a running compile before deferring the
-# steps that read its output. Five minutes was the old bound; issue #21
-# measured a healthy compile of one daily log at 6.5 minutes through the
-# Claude CLI and the pass recorded it as two failures. Thirty minutes is
-# the new floor, and an operator sets `MEMORY_COMPILE_WAIT_SECONDS`.
-COMPILE_WAIT_SECONDS = 1800.0
-COMPILE_WAIT_ENV = "MEMORY_COMPILE_WAIT_SECONDS"
-
-
-def compile_wait_seconds() -> float:
-    """`MEMORY_COMPILE_WAIT_SECONDS`, else `COMPILE_WAIT_SECONDS`: how long one compile may run."""
-    raw = os.environ.get(COMPILE_WAIT_ENV, "").strip()
-    try:
-        return max(0.0, float(raw))
-    except ValueError:
-        return COMPILE_WAIT_SECONDS
-
-
-def _wait_compile_finished() -> bool:
-    """Follow a running compile until it stops or the wait bound passes."""
-    deadline = time.monotonic() + compile_wait_seconds()
-    while _compile_running():
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(5)
-    return True
-
-
-def _compact_telemetry(log) -> None:
+def compact_telemetry(log) -> None:
     """Compact disposable telemetry without touching knowledge."""
     try:
         from retrieval_telemetry import compact
@@ -631,81 +218,66 @@ def _compact_telemetry(log) -> None:
         log(f"  telemetry: failed ({e}) — skipping")
 
 
-def _post_compile_pass(run_step, log) -> int:
-    failures = _run_steps(run_step, log, _post_compile_steps())
+def post_compile_pass(run_step, log) -> int:
+    failures = run_steps(run_step, log, nightly_budget.post_compile_steps())
 
     # refresh one immutable generation under the shared fence.
     log.step("refreshing immutable evidence generation...")
-    failures += _refresh_generation(log)
+    failures += refresh_generation(log)
 
     # compact disposable telemetry without touching knowledge.
     log.step("compacting retrieval telemetry...")
-    _compact_telemetry(log)
+    compact_telemetry(log)
 
-    # one full health report, read at session start instead of measured there.
+    # Full diagnosis supplements the current operational check at session start.
     log.step("writing the health report...")
-    _write_health_report(log)
-    return failures
+    health = write_health_report(log)
+    if health == "deferred":
+        log.deferred.append("full_health_incomplete")
+    return failures + int(health == "failed")
 
 
 # Issue #23.5: session start allows the doctor 0.1 s and said "not measured"
 # every morning. The night has the time; the morning reads what it wrote.
 HEALTH_REPORT_NAME = "doctor-report.json"
-HEALTH_REPORT_BUDGET_SECONDS = 60
-# `maintenance_helpers.wait_for_compile_idle`: three tries, ten seconds each.
-COMPILE_IDLE_WAIT_SECONDS = 30
-
-
-# The two tail tasks are bounded by work rather than by wall time: the telemetry
-# compaction deletes at most `retrieval_telemetry.DEFAULT_MAX_DELETE` rows under
-# a 5 s busy timeout, and the retention pass looks at at most
-# `retention.report_files` reports (a setting; raising it far lengthens this tail). This is what the pass
-# allows them together; outliving it is caught at the next step boundary.
-MAINTENANCE_TAIL_BUDGET_SECONDS = 120
-
-
-def worst_case_seconds() -> float:
-    """The longest a pass can run by its own bounds, as configured right now.
-
-    Every step's timeout (with the margin a provider call really needs), every
-    wait as the environment sets it, the generation and health budgets, the
-    checkout update by its own timeouts, and the tail allowance. The pass stops
-    itself at this bound, and a scheduler's limit sits above it. See
-    `docs/research/2026-09-14-the-scheduler-outlasts-the-pass.md` and
-    `docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md`.
-    """
-    from self_update import WORST_CASE_SECONDS as UPDATE_SECONDS
-
-    steps = [*_intake_steps(), _compile_step(), _fact_keys_step(), *_post_compile_steps()]
-    waits = COMPILE_IDLE_WAIT_SECONDS + compile_wait_seconds()
-    budgets = NIGHTLY_GENERATION_BUDGET_SECONDS + HEALTH_REPORT_BUDGET_SECONDS
-    tail = MAINTENANCE_TAIL_BUDGET_SECONDS + UPDATE_SECONDS
-    return float(sum(step.timeout for step in steps) + waits + budgets + tail)
-
-
-def _write_health_report(log) -> None:
-    """A full doctor run, written where session start can read it. Never fails the night."""
+def write_health_report(log) -> str:
+    """Persist full diagnosis and report whether its requested checks finished."""
     from doctor import run_doctor
 
     try:
         report = run_doctor(
-            root=ROOT, state_root=STATE_ROOT, time_budget_seconds=HEALTH_REPORT_BUDGET_SECONDS
+            root=runtime_roots.vault_root(), state_root=runtime_roots.state_root(), time_budget_seconds=setting_value("doctor.nightly_seconds", runtime_roots.vault_root()), scope="full"
         )
         payload = {
             "schema_version": "health-report/v1",
-            "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "written_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "report": report,
         }
-        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-        (REPORTS_DIR / HEALTH_REPORT_NAME).write_text(
+        runtime_roots.reports_dir().mkdir(parents=True, exist_ok=True)
+        (runtime_roots.reports_dir() / HEALTH_REPORT_NAME).write_text(
             json.dumps(payload, sort_keys=True, default=str), encoding="utf-8"
         )
         log(f"  health: {report.get('overall_status', 'unknown')}")
-    except Exception as exc:  # noqa: BLE001 - a report is never a reason to fail
-        log(f"  health report skipped: {describe_error(exc)}")
+        return health_report_outcome(report)
+    except Exception as exc:  # noqa: BLE001 - report failure is counted by the pass
+        log(f"  health report failed: {describe_error(exc)}")
+        return "failed"
 
 
-def _update_code(log) -> None:
+def health_report_outcome(report):
+    checks = report["checks"]
+    if any(check.get("details", {}).get("budget_exhausted") for check in checks):
+        return "deferred"
+    if any(_health_check_failed(check.get("details", {})) for check in checks):
+        return "failed"
+    return "complete"
+
+
+def _health_check_failed(details):
+    return bool(details.get("exception") or details.get("read_error"))
+
+
+def update_code(log) -> None:
     """Advance the checkout last, so changed code takes effect next pass.
 
     An update is never a reason to fail the night: a diverged branch, an offline
@@ -716,18 +288,24 @@ def _update_code(log) -> None:
 
     log.step("updating the vault code...")
     previous = load_state().get("last_update")
-    outcome = _carried_forward(update_checkout(ROOT), previous)
+    outcome = carried_forward(update_checkout(runtime_roots.vault_root()), previous)
     update_state(lambda state: state.__setitem__("last_update", update_record(outcome)))
     log(f"  update: {outcome['status']} ({outcome.get('reason') or 'none'})")
-    if outcome.get("detail"):
-        log(f"  update: {outcome['detail']}")
-    _log_update_aftermath(log, outcome)
+    for said in filter(None, (outcome.get("detail"), _required_python_line(outcome))):
+        log(f"  update: {said}")
+    log_update_aftermath(log, outcome)
 
 
-UPDATE_RECORD_FIELDS = ("status", "reason", "dependencies", "resources", "resources_since")
+def _required_python_line(outcome: dict) -> str | None:
+    if not outcome.get("required"):
+        return None
+    return f"the next commit requires Python {outcome['required']}"
 
 
-def _carried_forward(outcome: dict, previous: object) -> dict:
+UPDATE_RECORD_FIELDS = ("status", "reason", "required", "dependencies", "resources", "resources_since")
+
+
+def carried_forward(outcome: dict, previous: object) -> dict:
     """What an earlier update left undone stays named until it is done.
 
     A night with nothing to fetch overwrote the record, and "dependencies were
@@ -746,7 +324,7 @@ def _pending_dependencies(previous: dict) -> dict:
 
     if previous.get("dependencies") != "stale":
         return {}
-    return {"dependencies": sync_dependencies(ROOT)}
+    return {"dependencies": sync_dependencies(runtime_roots.vault_root())}
 
 
 def _pending_resources(previous: dict) -> dict:
@@ -759,9 +337,9 @@ def _pending_resources(previous: dict) -> dict:
 def _installed_since(moment: object) -> bool:
     """Whether the installer committed after `moment`; doubt keeps the warning."""
     try:
-        manifest = json.loads((STATE_ROOT / "run" / "install" / "manifest.json").read_text(encoding="utf-8"))
-        installed = datetime.fromisoformat(str(manifest["committed_at"]).replace("Z", "+00:00"))
-        return installed > datetime.fromisoformat(str(moment).replace("Z", "+00:00"))
+        manifest = json.loads((runtime_roots.state_root() / "run" / "install" / "manifest.json").read_text(encoding="utf-8"))
+        installed = datetime.fromisoformat(str(manifest["committed_at"]))
+        return installed > datetime.fromisoformat(str(moment))
     except (OSError, ValueError, KeyError, TypeError):
         return False
 
@@ -772,11 +350,11 @@ def update_record(outcome: dict) -> dict:
     See `docs/research/2026-09-25-the-scheduler-says-what-the-night-could-not-do.md`.
     """
     record = {field: outcome.get(field) for field in UPDATE_RECORD_FIELDS}
-    record["at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    record["at"] = datetime.now(UTC).isoformat(timespec="seconds")
     return record
 
 
-def _log_update_aftermath(log, outcome: dict) -> None:
+def log_update_aftermath(log, outcome: dict) -> None:
     """What the update brought in but did not bring into force.
 
     See `docs/research/2026-09-17-an-update-says-what-it-did-not-bring-into-force.md`.
@@ -788,83 +366,32 @@ def _log_update_aftermath(log, outcome: dict) -> None:
     log(f"  update: owned resources {outcome.get('resources')}")
 
 
-def _prune_reports(log) -> None:
+def prune_reports(log) -> None:
     """Retention over every maintenance report family and its artifacts."""
     log.step("pruning maintenance reports and artifacts...")
     log(f"  pruned {prune_maintenance_output()} old file(s)")
     log(f"  trimmed {trim_scheduler_logs()} byte(s) from the scheduler logs")
 
 
-def _nightly_steps(run_step, log, _ownership: OwnerLease | None = None) -> int:
-    failures = _run_steps(run_step, log, _intake_steps())
-
-    # The compile step must not be skipped just because a hook-triggered one runs.
+def nightly_steps(run_step, log, _ownership: OwnerLease | None = None) -> int:
+    failures = run_steps(run_step, log, nightly_budget.intake_steps())
     _wait_for_compile_idle(log)
-    before = _last_compile_finished()
-    started_before = _last_compile_started()
-    failures += _run_steps(run_step, log, [_compile_step(), _fact_keys_step()])
-
-    log.step("waiting for compile to finish...")
-    if not _wait_compile_finished():
-        # A compile that is still running is deferred, not failed: its outcome
-        # is unknown, and the steps that read its output wait for the next
-        # pass. Counting it as a failure turned a slow healthy night red (#21).
-        log("WARNING: compile still running past the wait bound — lint/index/graph deferred to the next pass")
-        log("  a service manager that owns this pass (systemd) stops that compile when the pass exits")
-        _remember_deferred_compile(log)
+    if _defer_entity_writes_for_running_compile(log):
         return failures
-    failures += _report_compile_outcome(log, before, started_before) + _report_deferred_loss(log)
-    return failures + _post_compile_pass(run_step, log)
+    failures += run_steps(run_step, log, [nightly_budget.fact_keys_step()])
+    compile_failures = run_steps(run_step, log, [nightly_budget.compile_step()])
+    if compile_failures:
+        return failures + compile_failures
+    return failures + post_compile_pass(run_step, log)
 
 
-DEFERRED_COMPILE_KEY = "nightly_deferred_compile"
-
-
-def _remember_deferred_compile(log) -> None:
-    """Keep the deferred compile's start stamp, so the next pass can miss it.
-
-    Under systemd the unit ends here and the compile ends with it; the loss used
-    to be invisible, because the next pass compares against its own start stamp.
-    Research: docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
-    """
-    started = _last_compile_started()
-    if started is None:
-        return
-    try:
-        update_state(lambda state: state.__setitem__(DEFERRED_COMPILE_KEY, started))
-    except Exception as exc:  # noqa: BLE001 - a note about a loss is never a failure
-        log(f"  deferred compile not recorded: {describe_error(exc)}")
-
-
-def _report_deferred_loss(log) -> int:
-    """Report a compile a previous pass deferred that never recorded an outcome."""
-    state = _safe_state()
-    deferred = state.get(DEFERRED_COMPILE_KEY)
-    if not deferred:
-        return 0
-    lost = str(deferred) == str(state.get("last_compile_started_at") or "") and (
-        state.get("last_compile_status") == "running"
-    )
-    _forget_deferred_compile(log)
-    if not lost:
-        return 0
-    log(f"  compile: FAILED — a compile deferred at {deferred} never finished")
-    return 1
-
-
-def _forget_deferred_compile(log) -> None:
-    try:
-        update_state(lambda state: state.pop(DEFERRED_COMPILE_KEY, None))
-    except Exception as exc:  # noqa: BLE001 - as above
-        log(f"  deferred compile not cleared: {describe_error(exc)}")
-
-
-def _report_compile_outcome(log, before: str | None, started_before: str | None = None) -> int:
-    error = _compile_failed_this_pass(before, started_before)
-    if error is None:
-        return 0
-    log(f"  compile: FAILED — {error}")
-    return 1
+def _defer_entity_writes_for_running_compile(log) -> bool:
+    if not compile_running():
+        return False
+    log("WARNING: compile still running after idle wait — entity writes and compile deferred to the next pass")
+    log("  compile outcome is unknown; the idle wait does not establish that its owner finished")
+    log.deferred.append("compile_busy")
+    return True
 
 
 def _require_nightly_owner(ownership: OwnerLease | None) -> None:
@@ -906,7 +433,7 @@ def _require_within_bound(deadline: float | None) -> None:
         raise PassBoundExceeded("the pass outlived its own worst case")
 
 
-def _fenced_step_runner(fence: threading.Event | None, deadline: float | None = None):
+def fenced_step_runner(fence: threading.Event | None, deadline: float | None = None):
     def run_step(command, log, name, *, timeout):
         _require_fence(fence)
         _require_within_bound(deadline)
@@ -924,24 +451,24 @@ def _terminal_error(error: str | None, fence: threading.Event | None) -> str | N
     return None
 
 
-def _run_nightly_body(
+def run_nightly_body(
     *, ownership: OwnerLease | None, fence: threading.Event | None = None
 ) -> int:
     today = datetime.now().strftime("%Y-%m-%d")
     _require_nightly_owner(ownership)
-    deadline = time.monotonic() + worst_case_seconds()
-    run_step = _fenced_step_runner(fence, deadline)
+    deadline = time.monotonic() + nightly_budget.worst_case_seconds()
+    run_step = fenced_step_runner(fence, deadline)
 
-    failures = 1
+    result = _PassResult(1)
     terminal_error = None
     try:
-        failures = _nightly_pass(today, run_step, ownership, fence, deadline)
-        return 1 if failures else 0
+        result = _nightly_pass(today, run_step, ownership, fence, deadline)
+        return 1 if result.failures else 0
     except Exception as exc:
         terminal_error = f"{type(exc).__name__}: {exc}"
         raise
     finally:
-        _record_result_quietly(today, failures, _terminal_error(terminal_error, fence))
+        _record_result_quietly(today, result, _terminal_error(terminal_error, fence))
 
 
 def _nightly_pass(
@@ -950,24 +477,25 @@ def _nightly_pass(
     ownership: OwnerLease | None,
     fence,
     deadline: float | None = None,
-) -> int:
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    log = StepLog(_nightly_logger(REPORTS_DIR / f"nightly-{today}.md"))
+) -> _PassResult:
+    runtime_roots.reports_dir().mkdir(parents=True, exist_ok=True)
+    log = StepLog(_nightly_logger(runtime_roots.reports_dir() / f"nightly-{today}.md"))
     log(f"=== Nightly consolidation pass — {today} ===")
-    failures = _nightly_steps(run_step, log, ownership)
+    failures = nightly_steps(run_step, log, ownership)
     _require_fence(fence)
     _require_within_bound(deadline)
-    failures += int(not _housekeeping(log, "pruning", _prune_reports))
+    failures += int(not _housekeeping(log, "pruning", prune_reports))
     # An update is never a reason to fail the night; its failure is named only.
-    _housekeeping(log, "update", _update_code)
-    log(f"=== Nightly pass complete (failures={failures}) ===")
-    return failures
+    _housekeeping(log, "update", update_code)
+    status = _nightly_completion_status(failures, log.deferred)
+    log(f"=== Nightly pass {status} (failures={failures}, deferred={log.deferred}) ===")
+    return _PassResult(failures, tuple(log.deferred))
 
 
 def _housekeeping(log, label: str, step) -> bool:
     """Run a step after the counted ones; its exception is named, never the night's end.
 
-    `_update_code` promised never to fail the night, and a busy state lock in its
+    `update_code` promised never to fail the night, and a busy state lock in its
     one `update_state` did exactly that (audit 2026-09-26, regress 8,
     docs/research/2026-09-26-a-housekeeping-step-names-its-failure.md).
     """
@@ -979,9 +507,9 @@ def _housekeeping(log, label: str, step) -> bool:
     return True
 
 
-def _record_result_quietly(today: str, failures: int, error: str | None) -> None:
+def _record_result_quietly(today: str, result: _PassResult, error: str | None) -> None:
     try:
-        _record_nightly_result(today, failures or int(error is not None), error)
+        record_nightly_result(today, result.failures or int(error is not None), error, deferred=result.deferred)
     except Exception as exc:
         print(f"scheduled_nightly: could not record result: {exc}", file=sys.stderr)
 
@@ -993,13 +521,13 @@ def run_nightly(
 ) -> int:
     """Run the pass, refreshing its nightly lease while it runs."""
     if ownership is None:
-        return _run_nightly_body(ownership=None)
+        return run_nightly_body(ownership=None)
     lost = threading.Event()
     with heartbeat_owner(ownership, registry=registry, lost=lost):
-        return _run_nightly_body(ownership=ownership, fence=lost)
+        return run_nightly_body(ownership=ownership, fence=lost)
 
 
-def _write_marker(marker: Path) -> bool:
+def write_marker(marker: Path) -> bool:
     """Create the marker exclusively and stamp it with this process.
 
     The descriptor is binary so that Windows writes the payload's newlines as
@@ -1012,7 +540,7 @@ def _write_marker(marker: Path) -> bool:
     except FileExistsError:
         return False
     try:
-        os.write(descriptor, marker_payload())
+        write_all(descriptor, marker_payload())
     finally:
         os.close(descriptor)
     return True
@@ -1070,13 +598,13 @@ def _steal_marker(marker: Path) -> bool:
     judged = _abandoned_marker_bytes(marker)
     if judged is None or not retire_stale_lock(marker, judged):
         return False
-    return _write_marker(marker)
+    return write_marker(marker)
 
 
 def _acquire_legacy_maintenance_marker() -> Path | None:
-    marker = STATE_ROOT / "run/maintenance.lock"
+    marker = runtime_roots.state_root() / "run/maintenance.lock"
     marker.parent.mkdir(parents=True, exist_ok=True)
-    if _write_marker(marker):
+    if write_marker(marker):
         return marker
     return marker if _steal_marker(marker) else None
 
@@ -1101,7 +629,7 @@ class ScheduledFence:
 
 
 def _canonical_fence(role: str, registry) -> ScheduledFence:
-    lease, marker = acquire_scheduled_owner(role, state_root=STATE_ROOT, registry=registry)
+    lease, marker = acquire_scheduled_owner(role, state_root=runtime_roots.state_root(), registry=registry)
 
     def release() -> None:
         # A fence already lost or taken over is reported, not raised again:
@@ -1121,6 +649,20 @@ def _legacy_fence() -> ScheduledFence | None:
     return ScheduledFence(None, None, lambda: _release_legacy_maintenance_marker(marker))
 
 
+def adopted_ownership_registry(vault: Path, state_root: Path) -> OwnershipRegistry | None:
+    """The adopted coordinator's registry, or None on a vault without V3 adoption.
+
+    The same rule the doctor applies: an adopted vault holds its owners in the
+    active `markdown-transactions-v3.sqlite3`, not in the pre-adoption candidate.
+    """
+    coordinator = active_or_legacy_coordinator(
+        Path(vault), Path(state_root)
+    )
+    if getattr(coordinator, "_database_contract", None) is None:
+        return None
+    return coordinator._ownership_registry()  # noqa: SLF001 - the coordinator's own rule
+
+
 def take_scheduled_fence(role: str) -> ScheduledFence | None:
     """The fence for `role`: canonical where the vault is adopted, legacy otherwise.
 
@@ -1128,7 +670,7 @@ def take_scheduled_fence(role: str) -> ScheduledFence | None:
     `OperationalOwnershipError` with the registry's reason.
     Decision: knowledge/notes/nightly-takes-the-canonical-fence-decision.md
     """
-    registry = adopted_ownership_registry(ROOT, STATE_ROOT)
+    registry = adopted_ownership_registry(runtime_roots.vault_root(), runtime_roots.state_root())
     if registry is None:
         return _legacy_fence()
     return _canonical_fence(role, registry)
@@ -1155,12 +697,13 @@ def record_scheduled_failure(today: str, exc: BaseException) -> None:
 
     print(f"scheduled_nightly: could not take the fence: {describe_error(exc)}", file=sys.stderr)
     try:
-        _record_nightly_result(today, 1, error=describe_error_chain(exc))
+        record_nightly_result(today, 1, error=describe_error_chain(exc))
     except Exception as failure:  # noqa: BLE001 - the original error is what matters
         print(f"scheduled_nightly: could not record failure: {failure}", file=sys.stderr)
 
 
-def main() -> int:
+def main(argv: list[str] | tuple[str, ...] = ()) -> int:
+    argparse.ArgumentParser(description=__doc__).parse_args(argv)
     today = datetime.now().strftime("%Y-%m-%d")
     try:
         fence = take_scheduled_fence("nightly")
@@ -1180,4 +723,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

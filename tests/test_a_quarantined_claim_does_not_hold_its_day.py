@@ -7,17 +7,17 @@ docs/research/2026-09-25-a-quarantined-claim-does-not-hold-its-day.md.
 
 from __future__ import annotations
 
-import compile_memory
+from llm_wiki import compile_pipeline_claims, compile_pipeline_sources
 
 
-def _published(*touched: str) -> compile_memory.CompileApplyResult:
-    return compile_memory.CompileApplyResult(
+def _published(*touched: str) -> compile_pipeline_sources.CompileApplyResult:
+    return compile_pipeline_sources.CompileApplyResult(
         "t", "compile:" + "a" * 64, "committed", touched, 1, "2026-09-25T00:00:00Z", "b" * 64
     )
 
 
 def test_a_batch_with_a_held_claim_says_it_published_and_what_it_held(capsys) -> None:
-    outcome = compile_memory._committed_outcome(
+    outcome = compile_pipeline_claims.committed_outcome(
         _published("knowledge/notes/page.md", "knowledge/index.md", "knowledge/inbox/claims/x.md")
     )
 
@@ -26,6 +26,6 @@ def test_a_batch_with_a_held_claim_says_it_published_and_what_it_held(capsys) ->
 
 
 def test_a_batch_with_no_held_claim_says_only_what_it_published(capsys) -> None:
-    compile_memory._committed_outcome(_published("knowledge/notes/page.md"))
+    compile_pipeline_claims.committed_outcome(_published("knowledge/notes/page.md"))
 
     assert capsys.readouterr().out.strip() == "compile_memory: batch published 1 page(s)."

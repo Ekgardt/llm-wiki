@@ -16,72 +16,22 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-import tree_sitter_bash
-from tree_sitter import Language, Node, Parser
+
+from tests.shell_functions_stay_simple_helpers import (
+    _ccn,
+    _functions,
+    _name,
+    _shape_violations,
+    _violations,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
-MAX_CCN = 5
-MAX_NESTING = 2
 CODE_ZONES = ("scripts", "tests", "docs", "skills", "rules", "integrations", "benchmark")
-DECISIONS = frozenset({
-    "if_statement", "elif_clause", "while_statement", "for_statement",
-    "c_style_for_statement", "&&", "||",
-})
-NESTING = frozenset({"if_statement", "while_statement", "for_statement", "c_style_for_statement"})
-PARSER = Parser(Language(tree_sitter_bash.language()))
 
 
 def _shell_files() -> list[Path]:
     nested = [path for zone in CODE_ZONES for path in (ROOT / zone).rglob("*.sh")]
     return sorted([*ROOT.glob("*.sh"), *nested])
-
-
-def _own_nodes(node: Node) -> list[Node]:
-    """Every node inside a function body, but not inside a function nested in it."""
-    found = []
-    for child in node.children:
-        if child.type != "function_definition":
-            found += [child, *_own_nodes(child)]
-    return found
-
-
-def _functions(source: bytes) -> list[Node]:
-    return [node for node in _all_nodes(PARSER.parse(source).root_node) if node.type == "function_definition"]
-
-
-def _all_nodes(node: Node) -> list[Node]:
-    return [node, *(found for child in node.children for found in _all_nodes(child))]
-
-
-def _is_catch_all(arm: Node) -> bool:
-    patterns = arm.children_by_field_name("value")
-    return len(patterns) == 1 and patterns[0].text == b"*"
-
-
-def _is_decision(node: Node) -> bool:
-    """A `case` arm is one outcome of a multiway decision; an explicit `*)` is its default."""
-    if node.type == "case_item":
-        return not _is_catch_all(node)
-    return node.type in DECISIONS
-
-
-def _ccn(function: Node) -> int:
-    return 1 + sum(1 for node in _own_nodes(function) if _is_decision(node))
-
-
-def _nesting(node: Node, depth: int = 0) -> int:
-    inner = depth + (node.type in NESTING)
-    children = [child for child in node.children if child.type != "function_definition"]
-    return max([inner, *(_nesting(child, inner) for child in children)])
-
-
-def _name(function: Node) -> str:
-    return function.child_by_field_name("name").text.decode()
-
-
-def _violations(source: bytes) -> dict[str, tuple[int, int]]:
-    measured = {_name(fn): (_ccn(fn), _nesting(fn)) for fn in _functions(source)}
-    return {name: pair for name, pair in measured.items() if pair[0] > MAX_CCN or pair[1] > MAX_NESTING}
 
 
 def test_the_installer_is_among_the_measured_files() -> None:
@@ -91,6 +41,15 @@ def test_the_installer_is_among_the_measured_files() -> None:
 @pytest.mark.parametrize("path", _shell_files(), ids=lambda path: path.relative_to(ROOT).as_posix())
 def test_every_shipped_shell_function_is_under_the_ceiling(path: Path) -> None:
     assert _violations(path.read_bytes()) == {}
+    assert _shape_violations(path.read_bytes()) == []
+
+
+@pytest.mark.parametrize("body", [
+    "if a; then :; fi; if b; then :; fi; if c; then :; fi",
+    "if a; then :; elif b; then :; fi",
+])
+def test_forbidden_shell_branch_shapes_are_detected(body):
+    assert _shape_violations(f"bad() {{ {body}; }}".encode())
 
 
 @pytest.mark.parametrize(

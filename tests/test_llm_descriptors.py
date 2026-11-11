@@ -11,23 +11,7 @@ import pytest
 from context_budget import TokenCount, TokenUsage
 from reliable_memory import canonical_json_bytes
 
-
-def _write_dlp_policy(
-    path: Path,
-    *,
-    literals: tuple[str, ...] = (),
-    allow_fingerprints: tuple[str, ...] = (),
-) -> None:
-    payload = {
-        "version": 1,
-        "literals": list(literals),
-        "allow_fingerprints": list(allow_fingerprints),
-    }
-    policy = {
-        **payload,
-        "sha256": hashlib.sha256(canonical_json_bytes(payload)).hexdigest(),
-    }
-    path.write_text(json.dumps(policy), encoding="utf-8")
+from tests.llm_descriptors_helpers import _write_dlp_policy
 
 
 def test_candidate_zero_has_known_identity_and_no_fallback(monkeypatch):
@@ -55,9 +39,9 @@ def test_next_candidate_records_ordered_identity_and_failure_before_call(monkeyp
 
 def test_call_candidate_reports_unavailable_without_calling_backend(monkeypatch):
     descriptor = llm_client.provider_candidates("codex", max_tokens=10)[0]
-    monkeypatch.setitem(llm_client._PROBES, "codex", lambda descriptor: False)
+    monkeypatch.setitem(llm_client.PROBES, "codex", lambda descriptor: False)
     monkeypatch.setitem(
-        llm_client._BACKENDS,
+        llm_client.BACKENDS,
         "codex",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("called")),
     )
@@ -78,8 +62,8 @@ def test_explicit_probe_then_call_does_not_probe_twice(monkeypatch):
         assert actual_descriptor is descriptor
         return True
 
-    monkeypatch.setitem(llm_client._PROBES, "codex", probe)
-    monkeypatch.setitem(llm_client._BACKENDS, "codex", lambda *args: "answer")
+    monkeypatch.setitem(llm_client.PROBES, "codex", probe)
+    monkeypatch.setitem(llm_client.BACKENDS, "codex", lambda *args: "answer")
 
     available = llm_client.probe_candidate(descriptor)
     result = llm_client.call_candidate(
@@ -96,8 +80,8 @@ def test_explicit_probe_then_call_does_not_probe_twice(monkeypatch):
 
 def test_call_candidate_returns_actual_identity_and_native_structured_mode(monkeypatch):
     descriptor = llm_client.provider_candidates("openai", max_tokens=10)[0]
-    monkeypatch.setitem(llm_client._PROBES, "openai", lambda descriptor: True)
-    monkeypatch.setitem(llm_client._BACKENDS, "openai", lambda *args, **kwargs: '{"ok":true}')
+    monkeypatch.setitem(llm_client.PROBES, "openai", lambda descriptor: True)
+    monkeypatch.setitem(llm_client.BACKENDS, "openai", lambda *args, **kwargs: '{"ok":true}')
 
     result = llm_client.call_candidate(
         descriptor,
@@ -114,8 +98,8 @@ def test_call_candidate_returns_actual_identity_and_native_structured_mode(monke
 
 def test_call_llm_result_preserves_selected_provider_descriptor(monkeypatch):
     monkeypatch.setenv("MEMORY_LLM_PROVIDER", "fake")
-    monkeypatch.setitem(llm_client._PROBES, "fake", lambda descriptor: True)
-    monkeypatch.setitem(llm_client._BACKENDS, "fake", lambda *args: "answer")
+    monkeypatch.setitem(llm_client.PROBES, "fake", lambda descriptor: True)
+    monkeypatch.setitem(llm_client.BACKENDS, "fake", lambda *args: "answer")
 
     result = llm_client.call_llm_result("prompt", "system", max_tokens=10)
 
@@ -138,7 +122,7 @@ def test_call_candidate_redacts_builtins_and_policy_literals_before_transport(
         captured.append((prompt, system_prompt, schema))
         return "answer"
 
-    monkeypatch.setitem(llm_client._BACKENDS, "fake", backend)
+    monkeypatch.setitem(llm_client.BACKENDS, "fake", backend)
 
     result = llm_client.call_candidate(
         descriptor,
@@ -178,7 +162,7 @@ def test_call_candidate_fails_closed_before_transport_for_invalid_policy(
         calls.append(args)
         return "answer"
 
-    monkeypatch.setitem(llm_client._BACKENDS, "fake", backend)
+    monkeypatch.setitem(llm_client.BACKENDS, "fake", backend)
 
     result = llm_client.call_candidate(
         descriptor, "prompt", "system", max_tokens=10, available=True
@@ -193,7 +177,7 @@ def test_call_candidate_blocks_sensitive_provider_output(monkeypatch: pytest.Mon
     monkeypatch.delenv("LLM_WIKI_DLP_POLICY", raising=False)
     descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
     monkeypatch.setitem(
-        llm_client._BACKENDS,
+        llm_client.BACKENDS,
         "fake",
         lambda *args: "Authorization: Bearer provider-output-secret",
     )
@@ -215,12 +199,12 @@ def test_call_candidate_allows_only_exact_fingerprinted_output(
     _write_dlp_policy(policy_path, allow_fingerprints=(fingerprint,))
     monkeypatch.setenv("LLM_WIKI_DLP_POLICY", str(policy_path))
     descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
-    monkeypatch.setitem(llm_client._BACKENDS, "fake", lambda *args: response)
+    monkeypatch.setitem(llm_client.BACKENDS, "fake", lambda *args: response)
 
     allowed = llm_client.call_candidate(
         descriptor, "prompt", "system", max_tokens=10, available=True
     )
-    monkeypatch.setitem(llm_client._BACKENDS, "fake", lambda *args: response + " changed")
+    monkeypatch.setitem(llm_client.BACKENDS, "fake", lambda *args: response + " changed")
     blocked = llm_client.call_candidate(
         descriptor, "prompt", "system", max_tokens=10, available=True
     )
@@ -234,13 +218,13 @@ def test_call_candidate_allows_only_exact_fingerprinted_output(
 def test_prompt_structured_mode_passes_schema_instruction_to_legacy_backend(monkeypatch):
     descriptor = llm_client.provider_candidates("codex", max_tokens=10)[0]
     captured = []
-    monkeypatch.setitem(llm_client._PROBES, "codex", lambda descriptor: True)
+    monkeypatch.setitem(llm_client.PROBES, "codex", lambda descriptor: True)
 
     def backend(descriptor, prompt, system_prompt, schema):
         captured.append(system_prompt)
         return '{"ok":true}'
 
-    monkeypatch.setitem(llm_client._BACKENDS, "codex", backend)
+    monkeypatch.setitem(llm_client.BACKENDS, "codex", backend)
 
     result = llm_client.call_candidate(
         descriptor,
@@ -287,13 +271,13 @@ def test_call_candidate_uses_resolved_model_and_settings_after_env_changes(monke
     descriptor = llm_client.provider_candidates("openai", max_tokens=321)[0]
     monkeypatch.setenv("MEMORY_LLM_MODEL", "changed-model")
     captured = []
-    monkeypatch.setitem(llm_client._PROBES, "openai", lambda descriptor: True)
+    monkeypatch.setitem(llm_client.PROBES, "openai", lambda descriptor: True)
 
     def backend(actual_descriptor, prompt, system_prompt, schema):
         captured.append(actual_descriptor)
         return "answer"
 
-    monkeypatch.setitem(llm_client._BACKENDS, "openai", backend)
+    monkeypatch.setitem(llm_client.BACKENDS, "openai", backend)
 
     result = llm_client.call_candidate(descriptor, "prompt", "system")
 
@@ -343,8 +327,8 @@ def test_healthy_opencode_is_not_blocked_by_invalid_lower_http_candidates(monkey
     secret = "do-not-log-this-secret"
     monkeypatch.delenv("MEMORY_LLM_PROVIDER", raising=False)
     monkeypatch.setenv("MEMORY_LLM_BASE_URL", f"https://example.com/v1?token={secret}")
-    monkeypatch.setitem(llm_client._PROBES, "opencode", lambda descriptor: True)
-    monkeypatch.setitem(llm_client._BACKENDS, "opencode", lambda *args: "answer")
+    monkeypatch.setitem(llm_client.PROBES, "opencode", lambda descriptor: True)
+    monkeypatch.setitem(llm_client.BACKENDS, "opencode", lambda *args: "answer")
 
     assert llm_client.call_llm("prompt") == "answer"
 
@@ -362,7 +346,7 @@ def test_forced_invalid_http_provider_returns_none_without_secret_log(
 
 
 def test_invalid_candidate_failure_is_added_to_later_fallback_lineage(monkeypatch):
-    original = llm_client._provider_configuration
+    original = llm_client.provider_configuration
     seen = []
 
     def configuration(provider, max_tokens):
@@ -381,7 +365,7 @@ def test_invalid_candidate_failure_is_added_to_later_fallback_lineage(monkeypatc
         return llm_client.LLMResult(descriptor, "answer", True, None, "prompt")
 
     monkeypatch.delenv("MEMORY_LLM_PROVIDER", raising=False)
-    monkeypatch.setattr(llm_client, "_provider_configuration", configuration)
+    monkeypatch.setattr(llm_client, "provider_configuration", configuration)
     monkeypatch.setattr(llm_client, "call_candidate", call)
 
     assert llm_client.call_llm("prompt") == "answer"
@@ -409,8 +393,8 @@ def test_cli_call_allows_requested_tokens_but_result_keeps_actual_descriptor(
     provider, monkeypatch
 ):
     descriptor = llm_client.provider_candidates(provider, max_tokens=321)[0]
-    monkeypatch.setitem(llm_client._PROBES, provider, lambda descriptor: True)
-    monkeypatch.setitem(llm_client._BACKENDS, provider, lambda *args: "answer")
+    monkeypatch.setitem(llm_client.PROBES, provider, lambda descriptor: True)
+    monkeypatch.setitem(llm_client.BACKENDS, provider, lambda *args: "answer")
 
     result = llm_client.call_candidate(
         descriptor,
@@ -430,7 +414,7 @@ def test_http_backend_uses_captured_endpoint_after_env_drift(provider, monkeypat
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     descriptor = llm_client.provider_candidates(provider, max_tokens=321)[0]
     monkeypatch.setenv("MEMORY_LLM_BASE_URL", "https://second.example/v1")
-    monkeypatch.setitem(llm_client._PROBES, provider, lambda descriptor: True)
+    monkeypatch.setitem(llm_client.PROBES, provider, lambda descriptor: True)
     requests = []
 
     class Response:
@@ -451,7 +435,7 @@ def test_http_backend_uses_captured_endpoint_after_env_drift(provider, monkeypat
         requests.append(request)
         return Response()
 
-    monkeypatch.setattr(llm_client.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(llm_client, "open_provider_request", urlopen)
 
     result = llm_client.call_candidate(descriptor, "prompt", "system")
 
@@ -478,7 +462,7 @@ def test_ollama_probe_uses_captured_remote_endpoint_after_env_drift(monkeypatch)
         requests.append((request, timeout))
         return Response()
 
-    monkeypatch.setattr(llm_client.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(llm_client, "open_provider_request", urlopen)
 
     assert llm_client.probe_candidate(descriptor) is True
     assert requests[0][0].full_url == "http://remote.example:22123/api/tags"
@@ -532,7 +516,7 @@ def test_forced_ollama_local_only_accepts_only_local_model_metadata(monkeypatch)
                 }
             ).encode("utf-8")
 
-    monkeypatch.setattr(llm_client.urllib.request, "urlopen", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(llm_client, "open_provider_request", lambda *args, **kwargs: Response())
 
     assert descriptor.capabilities["local_only_status"] == "external_runtime_unverified"
     assert llm_client.probe_candidate(descriptor) is True
@@ -571,9 +555,9 @@ def test_call_candidate_cannot_bypass_local_only_remote_model_check(monkeypatch)
                 }
             ).encode("utf-8")
 
-    monkeypatch.setattr(llm_client.urllib.request, "urlopen", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(llm_client, "open_provider_request", lambda *args, **kwargs: Response())
     monkeypatch.setitem(
-        llm_client._BACKENDS,
+        llm_client.BACKENDS,
         "ollama",
         lambda *args: backend_calls.append(args) or "answer",
     )
@@ -681,7 +665,7 @@ def test_call_candidate_accepts_response_envelope_and_plain_string(monkeypatch):
     descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
     usage = TokenUsage(input_tokens=4, output_tokens=2)
     responses = [llm_client.BackendResponse("first", usage), "second"]
-    monkeypatch.setitem(llm_client._BACKENDS, "fake", lambda *args: responses.pop(0))
+    monkeypatch.setitem(llm_client.BACKENDS, "fake", lambda *args: responses.pop(0))
 
     first = llm_client.call_candidate(descriptor, "prompt", "system", available=True)
     second = llm_client.call_candidate(descriptor, "prompt", "system", available=True)
@@ -697,7 +681,7 @@ def test_call_candidate_counts_injected_schema_text_with_model_adapter(monkeypat
     monkeypatch.setenv("MEMORY_CODEX_MODEL", "known-model")
     descriptor = llm_client.provider_candidates("codex", max_tokens=10)[0]
     counted = []
-    monkeypatch.setitem(llm_client._BACKENDS, "codex", lambda *args: "answer")
+    monkeypatch.setitem(llm_client.BACKENDS, "codex", lambda *args: "answer")
 
     def adapter(text):
         counted.append(text)
@@ -728,7 +712,7 @@ def test_native_schema_is_counted_once_as_compact_sorted_json(monkeypatch):
     }
     schema_json = json.dumps(schema, sort_keys=True, separators=(",", ":"))
     counted = []
-    monkeypatch.setitem(llm_client._BACKENDS, "openai", lambda *args: "answer")
+    monkeypatch.setitem(llm_client.BACKENDS, "openai", lambda *args: "answer")
 
     def adapter(text):
         counted.append(text)
@@ -759,7 +743,7 @@ def test_unserializable_native_schema_counts_unknown_then_reaches_provider_bound
         called.append(True)
         raise TypeError("schema is not serializable")
 
-    monkeypatch.setitem(llm_client._BACKENDS, "openai", backend)
+    monkeypatch.setitem(llm_client.BACKENDS, "openai", backend)
 
     result = llm_client.call_candidate(
         descriptor,
@@ -776,7 +760,7 @@ def test_unserializable_native_schema_counts_unknown_then_reaches_provider_bound
 
 def test_surrogate_input_count_fails_closed_without_crashing_candidate(monkeypatch):
     descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
-    monkeypatch.setitem(llm_client._BACKENDS, "fake", lambda *args: "answer")
+    monkeypatch.setitem(llm_client.BACKENDS, "fake", lambda *args: "answer")
 
     result = llm_client.call_candidate(
         descriptor, "prompt\ud800", "system", available=True
@@ -805,7 +789,7 @@ def _http_call(monkeypatch, provider, response_data):
         requests.append(request)
         return Response()
 
-    monkeypatch.setattr(llm_client.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(llm_client, "open_provider_request", urlopen)
     result = llm_client.call_candidate(
         descriptor, "prompt", "system", available=True, max_tokens=37
     )
@@ -924,7 +908,7 @@ def test_opencode_aggregate_usage_wins_over_part_usage(monkeypatch):
             return Response({})
         return Response(responses.pop(0))
 
-    monkeypatch.setattr(llm_client.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(llm_client, "open_provider_request", urlopen)
     result = llm_client.call_candidate(descriptor, "prompt", "", available=True)
 
     assert result.text == "answer"
@@ -956,7 +940,7 @@ def test_opencode_sums_part_usage_only_when_aggregate_is_absent(monkeypatch):
         ]
     }
 
-    assert llm_client._parse_opencode_usage(data) == TokenUsage(
+    assert llm_client.parse_opencode_usage(data) == TokenUsage(
         input_tokens=3,
         output_tokens=4,
         cache_read_tokens=1,
@@ -965,7 +949,7 @@ def test_opencode_sums_part_usage_only_when_aggregate_is_absent(monkeypatch):
 
 
 def test_opencode_aggregate_parses_reported_cost_and_elapsed_milliseconds():
-    usage = llm_client._parse_opencode_usage(
+    usage = llm_client.parse_opencode_usage(
         {
             "info": {
                 "tokens": {"input": 3, "output": 2},
@@ -998,7 +982,7 @@ def test_opencode_aggregate_parses_reported_cost_and_elapsed_milliseconds():
 def test_opencode_malformed_cost_and_time_are_independent(
     cost, time, expected_cost, expected_kind, expected_duration
 ):
-    usage = llm_client._parse_opencode_usage(
+    usage = llm_client.parse_opencode_usage(
         {"info": {"tokens": {"input": 3}, "cost": cost, "time": time}}
     )
 
@@ -1012,7 +996,7 @@ def test_opencode_large_positive_finite_elapsed_time_is_floored():
     created = 1e308
     completed = 1.7e308
 
-    usage = llm_client._parse_opencode_usage(
+    usage = llm_client.parse_opencode_usage(
         {
             "info": {
                 "tokens": {"input": 3},
@@ -1063,7 +1047,7 @@ def test_opencode_only_invalid_text_returns_empty_with_reported_usage(monkeypatc
             return Response({})
         return Response(responses.pop(0))
 
-    monkeypatch.setattr(llm_client.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(llm_client, "open_provider_request", urlopen)
     result = llm_client.call_candidate(descriptor, "prompt", "", available=True)
 
     assert result.failure_class == "empty_response"
@@ -1074,7 +1058,7 @@ def test_opencode_only_invalid_text_returns_empty_with_reported_usage(monkeypatc
 @pytest.mark.parametrize("provider", ["codex", "claude"])
 def test_cli_text_response_does_not_fabricate_usage(provider, monkeypatch):
     descriptor = llm_client.provider_candidates(provider, max_tokens=37)[0]
-    monkeypatch.setitem(llm_client._BACKENDS, provider, lambda *args: "answer")
+    monkeypatch.setitem(llm_client.BACKENDS, provider, lambda *args: "answer")
 
     result = llm_client.call_candidate(descriptor, "prompt", "system", available=True)
 
@@ -1087,7 +1071,7 @@ def test_cli_text_response_does_not_fabricate_usage(provider, monkeypatch):
 def test_provider_error_preserves_pre_call_estimate(monkeypatch):
     descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
     monkeypatch.setitem(
-        llm_client._BACKENDS,
+        llm_client.BACKENDS,
         "fake",
         lambda *args: (_ for _ in ()).throw(RuntimeError("provider detail")),
     )
@@ -1103,7 +1087,7 @@ def test_provider_error_preserves_pre_call_estimate(monkeypatch):
 
 def test_empty_response_preserves_pre_call_estimate(monkeypatch):
     descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
-    monkeypatch.setitem(llm_client._BACKENDS, "fake", lambda *args: "")
+    monkeypatch.setitem(llm_client.BACKENDS, "fake", lambda *args: "")
 
     result = llm_client.call_candidate(descriptor, "prompt", "system", available=True)
 
@@ -1118,7 +1102,7 @@ def test_empty_envelope_preserves_usage_and_reported_input_count(monkeypatch):
     descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
     usage = TokenUsage(input_tokens=9, output_tokens=3)
     monkeypatch.setitem(
-        llm_client._BACKENDS,
+        llm_client.BACKENDS,
         "fake",
         lambda *args: llm_client.BackendResponse("", usage),
     )
@@ -1134,7 +1118,7 @@ def test_whitespace_envelope_preserves_partial_usage_and_pre_call_count(monkeypa
     descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
     usage = TokenUsage(output_tokens=3, cache_read_tokens=2)
     monkeypatch.setitem(
-        llm_client._BACKENDS,
+        llm_client.BACKENDS,
         "fake",
         lambda *args: llm_client.BackendResponse("  \n", usage),
     )
@@ -1150,7 +1134,7 @@ def test_non_string_envelope_text_fails_safely_without_losing_usage(monkeypatch)
     descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
     usage = TokenUsage(input_tokens=5, cache_write_tokens=1)
     monkeypatch.setitem(
-        llm_client._BACKENDS,
+        llm_client.BACKENDS,
         "fake",
         lambda *args: llm_client.BackendResponse(None, usage),
     )
@@ -1171,24 +1155,24 @@ def test_the_claude_call_does_not_inherit_the_operator_persona(monkeypatch):
     нужно" — instead of the JSON plan the schema asked for.
     """
     monkeypatch.setattr(
-        llm_client, "_claude_cli_flags", lambda: frozenset({"--system-prompt", "--setting-sources"})
+        llm_client, "claude_cli_flags", lambda: frozenset({"--system-prompt", "--setting-sources"})
     )
 
-    command = llm_client._claude_command("/usr/bin/claude", "some-model", "BE A COMPILER")
+    command = llm_client.claude_command("/usr/bin/claude", "some-model", "BE A COMPILER")
 
     assert command[command.index("--system-prompt") + 1].startswith("BE A COMPILER\n\n")
     assert command[command.index("--setting-sources") + 1] == ""
     # The system text travels once, through the flag rather than the prompt.
-    assert llm_client._claude_stdin("BE A COMPILER", "work") == "<task>\nwork\n</task>"
+    assert llm_client.claude_stdin("BE A COMPILER", "work") == "<task>\nwork\n</task>"
 
 
 def test_an_older_claude_cli_still_gets_the_system_text(monkeypatch):
-    monkeypatch.setattr(llm_client, "_claude_cli_flags", lambda: frozenset())
+    monkeypatch.setattr(llm_client, "claude_cli_flags", lambda: frozenset())
 
-    command = llm_client._claude_command("/usr/bin/claude", None, "BE A COMPILER")
+    command = llm_client.claude_command("/usr/bin/claude", None, "BE A COMPILER")
 
     assert "--system-prompt" not in command
-    assert llm_client._claude_stdin("BE A COMPILER", "work").startswith("<system>BE A COMPILER\n\n")
+    assert llm_client.claude_stdin("BE A COMPILER", "work").startswith("<system>BE A COMPILER\n\n")
 
 
 def _descriptor_for(provider: str) -> object:
@@ -1224,13 +1208,13 @@ def test_the_environment_still_chooses_the_reader(monkeypatch):
 
 
 def test_the_command_carries_the_model_the_operator_named():
-    command = llm_client._claude_command("/bin/claude", "claude-sonnet-5", "")
+    command = llm_client.claude_command("/bin/claude", "claude-sonnet-5", "")
 
     assert "--model" in command
     assert "claude-sonnet-5" in command
 
 
 def test_the_command_names_no_model_when_none_was_configured():
-    command = llm_client._claude_command("/bin/claude", None, "")
+    command = llm_client.claude_command("/bin/claude", None, "")
 
     assert "--model" not in command

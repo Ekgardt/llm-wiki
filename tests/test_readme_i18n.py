@@ -18,7 +18,7 @@ README_FILES = [
 ]
 SHARED_COMMANDS = (
     "uv sync --locked --no-default-groups",
-    "uv sync --locked --no-default-groups --inexact --extra hybrid",
+    "uv sync --locked --no-default-groups --inexact --extra full",
     "uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120",
     "uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json",
 )
@@ -318,8 +318,8 @@ def test_all_readmes_share_locked_dependency_profiles_and_smoke_contract() -> No
     commands = (
         "uv sync --locked --no-default-groups",
         "uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds 120",
-        "uv sync --locked --no-default-groups --inexact --extra hybrid",
-        "uv sync --locked --no-default-groups --inexact --extra code-graph",
+        "uv sync --locked --no-default-groups --inexact --extra full",
+        "scripts/install_language_server.py --profile typescript",
         "uv sync --locked",
         "uv run --locked --no-sync pytest -q",
         # the MCP compatibility alias and its semantics, the bounded smoke, and the
@@ -360,9 +360,9 @@ def test_ci_qualifies_real_pyright_on_all_supported_os_families():
 
     assert facts == (
         [
-            ("ubuntu-24.04", "linux", "3.10", "22.23.1"),
-            ("windows-2025", "windows", "3.10", "22.23.1"),
-            ("macos-15", "macos", "3.10", "22.23.1"),
+            ("ubuntu-24.04", "linux", "3.14", "22.23.1"),
+            ("windows-2025", "windows", "3.14", "22.23.1"),
+            ("macos-15", "macos", "3.14", "22.23.1"),
         ],
         [True, True, True],
         "${{ matrix.timeout }}",
@@ -386,9 +386,9 @@ def test_ci_runs_a_whole_installer_on_every_supported_os_family():
     job = workflow["jobs"]["pyright-navigation"]
     entries = job["strategy"]["matrix"]["include"]
     assert _matrix_rows(entries) == [
-        ("ubuntu-24.04", "linux", "3.10", "22.23.1"),
-        ("windows-2025", "windows", "3.10", "22.23.1"),
-        ("macos-15", "macos", "3.10", "22.23.1"),
+        ("ubuntu-24.04", "linux", "3.14", "22.23.1"),
+        ("windows-2025", "windows", "3.14", "22.23.1"),
+        ("macos-15", "macos", "3.14", "22.23.1"),
     ]
     # The budget is per platform, because the same suite takes about three
     # times longer on the hosted Windows image. Every family declares one.

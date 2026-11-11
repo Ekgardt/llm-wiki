@@ -16,7 +16,7 @@ import math
 import os
 import re
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, NamedTuple
 
 from provenance import authority_weight, type_weight
@@ -24,9 +24,9 @@ from provenance import authority_weight, type_weight
 # Lazy-loaded model + tokenizer cache (kept together), and the reason the one
 # load attempt failed when it did — a load that failed once fails the same way
 # on every question, so it is not retried per question (the encoder in
-# `search_memory._get_embedder` records its reason the same way).
-_reranker_bundle: dict[str, Any] | None = None
-_reranker_unavailable_reason: str | None = None
+# `search_memory.get_embedder` records its reason the same way).
+reranker_bundle: dict[str, Any] | None = None
+reranker_failure_reason: str | None = None
 
 IMMUTABLE_REVISION = re.compile(r"^[0-9a-f]{40}$")
 # The product default (owner's decision 2026-09-10): the matrix-approved
@@ -51,7 +51,7 @@ DEFAULT_RERANK_DEPTH = 10
 RERANK_MAX_TOKENS = 512
 # Pairs scored together. Small enough that a short passage does not pay for
 # a long one, large enough to keep the four cores of the slowest supported
-# machine busy. See `_cross_encoder_scores`.
+# machine busy. See `cross_encoder_scores`.
 RERANK_BATCH_PAIRS = 2
 RERANK_BLEND_RERANK = 0.6
 RERANK_BLEND_RRF = 0.4
@@ -85,7 +85,7 @@ def _explicit_identity(model: str, revision: str) -> tuple[str, str] | None:
     return model, revision
 
 
-def _have_reranker_deps() -> bool:
+def have_reranker_deps() -> bool:
     try:
         import torch  # noqa: F401
         import transformers  # noqa: F401
@@ -117,7 +117,7 @@ def _loaded_bundle(model_name: str, revision: str) -> dict[str, Any]:
         model_name, dtype=torch.float32, **common
     )
     model.eval()
-    model, precision = _cpu_precision(model)
+    model, precision = cpu_precision(model)
     return {
         "model": model,
         "tokenizer": tokenizer,
@@ -146,7 +146,7 @@ def requested_precision() -> str:
     return INT8_DYNAMIC
 
 
-def _cpu_precision(model: Any) -> tuple[Any, str]:
+def cpu_precision(model: Any) -> tuple[Any, str]:
     """The model at the requested precision, and the name of what it got."""
     import torch
 
@@ -184,38 +184,40 @@ def _release_heap() -> None:
         return
 
 
-def _get_reranker_bundle() -> dict[str, Any] | None:
+def get_reranker_bundle() -> dict[str, Any] | None:
     """Lazy-load model and tokenizer together. Returns None if unavailable."""
-    if _reranker_bundle is not None or _reranker_unavailable_reason is not None:
-        return _reranker_bundle
+    if reranker_bundle is not None or reranker_failure_reason is not None:
+        return reranker_bundle
     return _load_reranker_bundle()
 
 
 def _load_reranker_bundle() -> dict[str, Any] | None:
     """Load once; a failure is remembered so the stage degrades instead of retrying."""
-    global _reranker_bundle, _reranker_unavailable_reason
+    global reranker_bundle, reranker_failure_reason
     identity = _loadable_identity()
     if identity is None:
         return None
     try:
-        _reranker_bundle = _loaded_bundle(*identity)
+        reranker_bundle = _loaded_bundle(*identity)
     except Exception as exc:  # noqa: BLE001 - an unloadable reranker degrades one stage
-        _reranker_unavailable_reason = f"{type(exc).__name__}: {exc}"[:512]
+        from secret_redact import describe_error
+
+        reranker_failure_reason = describe_error(exc)[:512]
         return None
-    return _reranker_bundle
+    return reranker_bundle
 
 
 def _loadable_identity() -> tuple[str, str] | None:
     """The configured identity when the libraries that load it are present."""
     identity = configured_reranker_identity()
-    if identity is None or not _have_reranker_deps():
+    if identity is None or not have_reranker_deps():
         return None
     return identity
 
 
 def reranker_unavailable_reason() -> str | None:
     """Why the configured reranker could not be loaded, once it was tried."""
-    return _reranker_unavailable_reason
+    return reranker_failure_reason
 
 
 def _recorded_weight(item: dict, key: str, fallback: float) -> float:
@@ -235,7 +237,7 @@ def _trust_weight_of(item: dict) -> float:
     return authority * page
 
 
-def _sigmoid(x: float) -> float:
+def sigmoid(x: float) -> float:
     if x >= 0:
         return 1.0 / (1.0 + math.exp(-x))
     exp_x = math.exp(x)
@@ -266,13 +268,13 @@ def reranker_installed() -> bool:
     Without it the stage was still asked for and reported a timeout that never
     happened (audit 2026-09-26 B-16, docs/research/2026-09-26-a-rerank-is-tried-again.md).
     """
-    if configured_reranker_identity() is None or _reranker_unavailable_reason is not None:
+    if configured_reranker_identity() is None or reranker_failure_reason is not None:
         return False
-    return _libraries_importable()
+    return libraries_importable()
 
 
 @functools.lru_cache(maxsize=1)
-def _libraries_importable() -> bool:
+def libraries_importable() -> bool:
     return all(importlib.util.find_spec(name) is not None for name in ("torch", "transformers"))
 
 
@@ -352,8 +354,8 @@ def _score_with_scorer(
     pairs = _query_pairs(head, query, text_field)
     try:
         scores = [float(value) for value in scorer(pairs)]
-    except Exception:  # noqa: BLE001 - a failed scorer keeps the fused order
-        return _Scoring(None, model_id, model_revision, "reranker_error")
+    except Exception as exc:  # noqa: BLE001 - a failed scorer keeps the fused order
+        return _failed_scoring(exc, model_id, model_revision)
     return _Scoring(
         scores,
         model_id or "fake-cross-encoder",
@@ -366,12 +368,18 @@ class _OutOfTime(Exception):
     """The rerank budget ran out; the fused order stands unchanged."""
 
 
-def _require_time(deadline: float | None) -> None:
+class _RerankCancelled(TimeoutError):
+    """Cooperating caller cancelled; no partial scoring may become authority."""
+
+
+def _require_time(deadline: float | None, cancelled: Callable[[], bool] | None = None) -> None:
+    if cancelled is not None and cancelled():
+        raise _RerankCancelled("rerank cancelled")
     if deadline is not None and time.monotonic() >= deadline:
         raise _OutOfTime("rerank budget exhausted")
 
 
-def _batch_logits(bundle: Mapping[str, Any], pairs: list) -> list[float]:
+def batch_logits(bundle: Mapping[str, Any], pairs: list) -> list[float]:
     """Raw logits for one batch, padded to the longest passage it contains."""
     import torch
 
@@ -392,7 +400,7 @@ def _batch_logits(bundle: Mapping[str, Any], pairs: list) -> list[float]:
     return [float(value) for value in logits]
 
 
-def _batches_by_length(pairs: list) -> list[list[int]]:
+def batches_by_length(pairs: list) -> list[list[int]]:
     """Positions grouped so each batch pads only to its own longest passage."""
     order = sorted(range(len(pairs)), key=lambda index: len(pairs[index][1]))
     return [
@@ -401,8 +409,9 @@ def _batches_by_length(pairs: list) -> list[list[int]]:
     ]
 
 
-def _cross_encoder_scores(
-    bundle: Mapping[str, Any], pairs: list, *, deadline: float | None = None
+def cross_encoder_scores(
+    bundle: Mapping[str, Any], pairs: list, *, deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None
 ) -> list[float]:
     """Raw logits for (query, passage) pairs; the caller squashes them.
 
@@ -415,10 +424,12 @@ def _cross_encoder_scores(
     orders agree to 1e-5, which is float noise and not a rank.
     """
     scores = [0.0] * len(pairs)
-    for batch in _batches_by_length(pairs):
-        _require_time(deadline)
+    for batch in batches_by_length(pairs):
+        _require_time(deadline, cancelled)
         chosen = [pairs[index] for index in batch]
-        for index, score in zip(batch, _batch_logits(bundle, chosen)):
+        logits = batch_logits(bundle, chosen)
+        _require_time(deadline, cancelled)
+        for index, score in zip(batch, logits):
             scores[index] = score
     return scores
 
@@ -429,6 +440,7 @@ def _score_with_bundle(
     query: str,
     text_field: str,
     deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> _Scoring:
     """Scores for the head, or a named reason the fused order should stand.
 
@@ -444,12 +456,29 @@ def _score_with_bundle(
     if not pairs:
         return _Scoring([], model_id, revision, None)
     try:
-        scores = _cross_encoder_scores(bundle, pairs, deadline=deadline)
+        scores = cross_encoder_scores(bundle, pairs, deadline=deadline, cancelled=cancelled)
+    except _RerankCancelled:
+        return _Scoring(None, model_id, revision, "reranker_cancelled")
     except _OutOfTime:
         return _Scoring(None, model_id, revision, "reranker_deadline")
-    except Exception:  # noqa: BLE001 - a failed reranker keeps the fused order
-        return _Scoring(None, model_id, revision, "reranker_error")
+    except Exception as exc:  # noqa: BLE001 - a failed reranker keeps the fused order
+        return _failed_scoring(exc, model_id, revision)
     return _Scoring(scores, model_id, revision, None)
+
+
+def _failed_scoring(
+    error: Exception, model_id: str | None, model_revision: str | None
+) -> _Scoring:
+    """The fused order stands, and the cause is recorded where degradations are read.
+
+    The answer says `reranker_error`; `vault_status.retrieval_degradations` says
+    which error it was. A code with no cause behind it left nobody able to act.
+    See `docs/research/2026-09-28-a-check-names-its-cause.md`.
+    """
+    import generation_search
+
+    generation_search.note_degradation("reranker_scoring", error)
+    return _Scoring(None, model_id, model_revision, "reranker_error")
 
 
 def _mark_not_applied(documents: list[dict], reason: str) -> None:
@@ -481,7 +510,7 @@ def _scored_item(
     doc: Mapping[str, Any], raw: float, scoring: _Scoring, depth: int, duration_ms: int
 ) -> dict:
     item = dict(doc)
-    normalized = _sigmoid(raw)
+    normalized = sigmoid(raw)
     # Typed provenance weighs on the score that decides the order here too, or a
     # reranked list would silently drop the trust contract that fusion applied.
     # The weight is the one fusion computed for this candidate.
@@ -537,7 +566,27 @@ def _kept_tail(
     return tail_kept
 
 
+def _cancelled_scoring(scoring: _Scoring | None, cancelled: Callable[[], bool] | None) -> _Scoring | None:
+    if cancelled is not None and cancelled():
+        return _Scoring(None, getattr(scoring, "model_id", None),
+                        getattr(scoring, "model_revision", None), "reranker_cancelled")
+    return scoring
+
+
 def _scoring_for(
+    head: Sequence[Mapping[str, Any]], query: str, text_field: str,
+    scorer: Any | None, model_id: str | None, model_revision: str | None,
+    deadline: float | None = None, cancelled: Callable[[], bool] | None = None,
+) -> _Scoring | None:
+    refusal = _cancelled_scoring(None, cancelled)
+    if refusal is not None:
+        return refusal
+    scoring = _ready_scoring_for(head, query, text_field, scorer, model_id,
+                                 model_revision, deadline, cancelled)
+    return _cancelled_scoring(scoring, cancelled)
+
+
+def _ready_scoring_for(
     head: Sequence[Mapping[str, Any]],
     query: str,
     text_field: str,
@@ -545,16 +594,17 @@ def _scoring_for(
     model_id: str | None,
     model_revision: str | None,
     deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> _Scoring | None:
     """None means there is no reranker at all, which is not a failure."""
     if scorer is not None:
         return _score_with_scorer(
             scorer, head, query, text_field, model_id, model_revision
         )
-    bundle = _get_reranker_bundle()
+    bundle = get_reranker_bundle()
     if bundle is None:
         return None
-    return _score_with_bundle(bundle, head, query, text_field, deadline)
+    return _score_with_bundle(bundle, head, query, text_field, deadline, cancelled)
 
 
 def rerank(
@@ -568,6 +618,7 @@ def rerank(
     model_id: str | None = None,
     model_revision: str | None = None,
     deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[dict]:
     """Re-rank documents; preserve tail beyond depth; blend into final_score.
 
@@ -582,7 +633,7 @@ def rerank(
     started = time.perf_counter()
     depth = max(1, int(depth))
     scoring = _scoring_for(
-        documents[:depth], query, text_field, scorer, model_id, model_revision, deadline
+        documents[:depth], query, text_field, scorer, model_id, model_revision, deadline, cancelled
     )
     if scoring is None:
         _mark_not_applied(documents, "reranker_unavailable")
@@ -605,16 +656,22 @@ def _reranked(
 
 def reranker_available() -> bool:
     """Quick probe: is the reranker model loaded and ready?"""
-    return _get_reranker_bundle() is not None
+    return get_reranker_bundle() is not None
+
+
+def _installed_reranker_status() -> str:
+    if reranker_available():
+        return "Reranker loaded locally."
+    return "Reranker configured but not present locally."
+
+
+def reranker_status() -> str:
+    if configured_reranker_identity() is None:
+        return "Reranker not configured."
+    if not have_reranker_deps():
+        return "Reranker dependencies not installed."
+    return _installed_reranker_status()
 
 
 if __name__ == "__main__":
-    identity = configured_reranker_identity()
-    if identity is None:
-        print("Reranker not configured.")
-    elif not _have_reranker_deps():
-        print("Reranker dependencies not installed.")
-    elif reranker_available():
-        print("Reranker loaded locally.")
-    else:
-        print("Reranker configured but not present locally.")
+    print(reranker_status())

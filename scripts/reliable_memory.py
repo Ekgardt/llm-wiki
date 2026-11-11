@@ -2,1768 +2,226 @@
 
 from __future__ import annotations
 
-import contextlib
-import ctypes
-import errno
-import hashlib
-import json
-import math
-import os
-import platform
-import re
-import secrets
-import sqlite3
-import stat
-import subprocess
-import time
-import unicodedata
-import warnings
-from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
-from typing import Any, Literal
-
-
-# The Reliability v3 contract's coordination values, fixed in its plan
-# (docs/superpowers/plans/2026-07-13-reliable-memory.md) and pinned by
-# tests/test_reliable_memory.py. They are not operator settings (law 9 class c, kept):
-# leases and heartbeats are pairs whose ratio every live owner relies on (a heartbeat
-# at a third of its lease), attempt counts, busy waits and worker bounds are the
-# plan's, and retention days are the contract's undo/archive windows (CLAUDE.md,
-# Stage 2: "Archives keep 90 hot days"). Changing one means changing the contract.
-@dataclass(frozen=True)
-class ReliableMemoryDefaults:
-    markdown_busy_ms: int = 10_000
-    queue_busy_ms: int = 5_000
-    transaction_retention_days: int = 30
-    artifact_retention_days: int = 30
-    archive_hot_days: int = 90
-    project_lease_seconds: int = 30
-    project_heartbeat_seconds: int = 10
-    checkpoint_debounce_seconds: int = 30
-    checkpoint_fallback_events: int = 20
-    queue_lease_seconds: int = 120
-    queue_heartbeat_seconds: int = 40
-    queue_max_attempts: int = 8
-    retry_base_seconds: int = 30
-    retry_cap_seconds: int = 3_600
-    worker_max_tasks: int = 20
-    worker_max_seconds: int = 600
-    worker_idle_seconds: int = 2
-    priority_min: int = -100
-    priority_max: int = 100
-    queue_result_retention_days: int = 30
-    dead_task_retention_days: int | None = None
-
-
-DEFAULTS = ReliableMemoryDefaults()
-
-# The one bound on a capture decision file, for the writer and every reader. The
-# indexer read it with 64 KiB while the writer allowed 1 MiB, so a verbose classifier
-# answer (43 KB, stored twice: the wire answer and the plan) failed every retry and
-# the day's summary was lost (audit 2026-09-27 B-3,
-# docs/research/2026-09-27-one-file-one-bound.md). 1 MiB is the writer's bound, kept:
-# about 170 times the 1 500-token answer the classifier asks for, so it refuses only an
-# answer no summary needs, and CLI providers do not enforce the request's token cap.
-MAX_CAPTURE_DECISION_BYTES = 1024 * 1024
-
-
-def _require_positive_int(name: str, value: object) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise ValueError(f"{name} must be a positive integer")
-
-
-def _require_migration_text(name: object, sql: object) -> None:
-    if not isinstance(name, str) or not name:
-        raise ValueError("migration statement name must be non-empty")
-    if not isinstance(sql, str) or not sql.strip():
-        raise ValueError("migration statement SQL must be non-empty")
-
-
-class UnsafeStateRoot(ValueError):
-    """Raised when runtime state cannot safely use local SQLite locking."""
-
-
-class SchemaValidationError(ValueError):
-    """Raised when an instance does not satisfy a committed schema."""
-
-
-class MetadataDurabilityUnavailable(OSError):
-    """Raised when the platform cannot prove the requested metadata boundary."""
-
-    code = "metadata_durability_unavailable"
-
-
-class OperationalDatabaseContractError(sqlite3.DatabaseError):
-    """Raised when an operational database or migration violates its contract."""
-
-    code = "operational_database_contract_mismatch"
-
-
-@dataclass(frozen=True)
-class OperationalDatabaseContract:
-    application_id: int
-    user_version: int = 3
-
-    def __post_init__(self) -> None:
-        _require_positive_int("application_id", self.application_id)
-        _require_positive_int("user_version", self.user_version)
-
-
-@dataclass(frozen=True)
-class MigrationStatement:
-    name: str
-    sql: str
-    completed: Callable[[sqlite3.Connection], bool] = field(compare=False, repr=False)
-    parameters: Sequence[object] = ()
-
-    def __post_init__(self) -> None:
-        _require_migration_text(self.name, self.sql)
-        if not callable(self.completed):
-            raise TypeError("migration statement completed invariant must be callable")
-
-
-@dataclass(frozen=True)
-class RuntimeFileIdentity:
-    platform: str
-    volume: str
-    file_id: str
-    size: int
-    mtime_ns: int
-
-
-def _canonical_key(key: object, seen: dict[str, object]) -> str:
-    """One NFC-normalized object key, refusing a collision the encoding hides."""
-    if not isinstance(key, str):
-        raise TypeError("canonical JSON object keys must be strings")
-    normalized = unicodedata.normalize("NFC", key)
-    if normalized in seen:
-        raise ValueError(f"normalized object-key collision: {normalized!r}")
-    return normalized
-
-
-def _canonical_mapping(value: dict) -> dict[str, object]:
-    normalized: dict[str, object] = {}
-    for key, item in value.items():
-        normalized[_canonical_key(key, normalized)] = _canonical_value(item)
-    return normalized
-
-
-def _canonical_number(value: object) -> object:
-    """Floats are refused: they have no canonical decimal form."""
-    if isinstance(value, float):
-        raise TypeError("canonical JSON does not permit float values")
-    return value
-
-
-def _canonical_atom(value: object) -> object:
-    """None and booleans pass through; the caller has already excluded the rest."""
-    if isinstance(value, (int, float)):
-        return _canonical_number(value)
-    if isinstance(value, str):
-        return unicodedata.normalize("NFC", value)
-    raise TypeError(f"canonical JSON does not permit {type(value).__name__} values")
-
-
-def _canonical_scalar(value: object) -> object:
-    """The scalar cases, kept apart so the shape of the domain reads at a glance."""
-    if value is None:
-        return value
-    if isinstance(value, bool):
-        return value
-    return _canonical_atom(value)
-
-
-def _canonical_value(value: object) -> object:
-    if isinstance(value, list):
-        return [_canonical_value(item) for item in value]
-    if isinstance(value, dict):
-        return _canonical_mapping(value)
-    return _canonical_scalar(value)
-
-
-def canonical_json_bytes(value: object) -> bytes:
-    """Encode the restricted JSON domain deterministically as UTF-8."""
-    normalized = _canonical_value(value)
-    return json.dumps(
-        normalized,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-
-
-def sha256_bytes(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
-
-
-def _windows_network_anchor(path: Path) -> bool:
-    anchor = path.resolve(strict=False).anchor
-    if not anchor:
-        return False
-    drive_type_remote = 4
-    return ctypes.windll.kernel32.GetDriveTypeW(anchor) == drive_type_remote
-
-
-def _posix_mount_table() -> list[tuple[str, str]]:
-    mount_data, is_mountinfo = _read_posix_mount_data()
-    mounts = _parse_posix_mounts(mount_data, is_mountinfo=is_mountinfo)
-    if mounts or _platform_system() != "Darwin":
-        return mounts
-    return _parse_darwin_mounts(_query_darwin_mounts())
-
-
-def _posix_network_path(path: Path) -> bool:
-    target = str(path.resolve(strict=False)).replace("\\", "/")
-    matching = [entry for entry in _posix_mount_table() if _path_is_under(target, entry[0])]
-    if not matching:
-        return False
-    _mount_point, filesystem = max(matching, key=lambda entry: len(entry[0]))
-    return _is_network_filesystem(filesystem)
-
-
-def _known_network_path(path: Path) -> bool:
-    if str(path).startswith(("\\\\", "//")):
-        return True
-    if _platform_system() == "Windows":
-        return _windows_network_anchor(path)
-    return _posix_network_path(path)
-
-
-def _platform_system() -> str:
-    return platform.system()
-
-
-def _read_posix_mount_data() -> tuple[str, bool]:
-    for path, is_mountinfo in (
-        (Path("/proc/self/mountinfo"), True),
-        (Path("/proc/mounts"), False),
-    ):
-        try:
-            return path.read_text(encoding="utf-8"), is_mountinfo
-        except OSError:
-            continue
-    return "", True
-
-
-def _query_darwin_mounts() -> str:
-    try:
-        result = subprocess.run(
-            ["/sbin/mount"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=2.0,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    if result.returncode != 0:
-        return ""
-    return result.stdout[:1_048_576]
-
-
-def _parse_posix_mounts(data: str, *, is_mountinfo: bool) -> list[tuple[str, str]]:
-    mounts: list[tuple[str, str]] = []
-    for line in data.splitlines():
-        try:
-            if is_mountinfo:
-                left, right = line.split(" - ", 1)
-                mount_point = left.split()[4]
-                filesystem = right.split()[0]
-            else:
-                _source, mount_point, filesystem, *_rest = line.split()
-        except (IndexError, ValueError):
-            continue
-        mounts.append((_decode_mount_path(mount_point), filesystem.casefold()))
-    return mounts
-
-
-def _parse_darwin_mounts(data: str) -> list[tuple[str, str]]:
-    mounts: list[tuple[str, str]] = []
-    for line in data.splitlines():
-        match = re.match(r"^.* on (.+) \(([^,()]+)(?:,|\))", line)
-        if match is None:
-            continue
-        mount_point, filesystem = match.groups()
-        mounts.append((_decode_mount_path(mount_point), filesystem.casefold()))
-    return mounts
-
-
-def _is_network_filesystem(filesystem: str) -> bool:
-    return filesystem in {
-        "9p",
-        "afpfs",
-        "ceph",
-        "cifs",
-        "nfs",
-        "nfs4",
-        "smbfs",
-        "sshfs",
-        "webdav",
-    } or filesystem.endswith(".sshfs")
-
-
-def _decode_mount_path(value: str) -> str:
-    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), value)
-
-
-def _path_is_under(path: str, mount_point: str) -> bool:
-    mount_point = mount_point.rstrip("/") or "/"
-    return mount_point == "/" or path == mount_point or path.startswith(f"{mount_point}/")
-
-
-def _has_reparse_attribute(candidate: Path) -> bool:
-    if not candidate.exists():
-        return False
-    attributes = getattr(candidate.stat(follow_symlinks=False), "st_file_attributes", 0)
-    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    return bool(attributes & reparse_flag)
-
-
-def _windows_reparse_point(path: Path) -> bool:
-    if os.name != "nt":
-        return False
-    current = path.absolute()
-    candidates = [current, *current.parents]
-    return any(_has_reparse_attribute(candidate) for candidate in candidates)
-
-
-def _second_writer_is_blocked(second: sqlite3.Connection) -> bool:
-    """Whether a second immediate transaction is refused, which is the point."""
-    try:
-        second.execute("BEGIN IMMEDIATE")
-    except sqlite3.OperationalError as exc:
-        return "locked" in str(exc).lower() or "busy" in str(exc).lower()
-    second.rollback()
-    return False
-
-
-def _close_probe_connections(connections: list[sqlite3.Connection]) -> None:
-    for connection in connections:
-        with contextlib.suppress(sqlite3.Error):
-            connection.rollback()
-        with contextlib.suppress(sqlite3.Error):
-            connection.close()
-
-
-def _remove_probe_files(probe: Path) -> None:
-    for suffix in ("", "-journal", "-shm", "-wal"):
-        with contextlib.suppress(OSError):
-            Path(f"{probe}{suffix}").unlink()
-
-
-def _opened_probe(
-    probe: Path, deadline: float, connections: list[sqlite3.Connection]
-) -> sqlite3.Connection | None:
-    """One probe connection, or None when the bounded probe has run out of time."""
-    if time.monotonic() >= deadline:
-        return None
-    connection = sqlite3.connect(probe, timeout=0)
-    connections.append(connection)
-    return connection
-
-
-def _run_lock_probe(
-    probe: Path, deadline: float, connections: list[sqlite3.Connection]
-) -> bool | None:
-    first = _opened_probe(probe, deadline, connections)
-    second = _opened_probe(probe, deadline, connections)
-    if first is None or second is None:
-        return None
-    first.execute("PRAGMA journal_mode=DELETE")
-    first.execute("BEGIN IMMEDIATE")
-    if time.monotonic() >= deadline:
-        return None
-    return _second_writer_is_blocked(second)
-
-
-def _sqlite_lock_probe(root: Path, *, deadline: float = float("inf")) -> bool | None:
-    """Return lock support, or ``None`` when a bounded probe cannot complete."""
-    probe = root / f".llm-wiki-lock-probe-{secrets.token_hex(16)}.sqlite3"
-    connections: list[sqlite3.Connection] = []
-    try:
-        return _run_lock_probe(probe, deadline, connections)
-    except (OSError, sqlite3.Error):
-        return None
-    finally:
-        _close_probe_connections(connections)
-        _remove_probe_files(probe)
-
-
-_CLOUD_DIRECTORY_NAMES = frozenset(
-    {"dropbox", "googledrive", "google drive", "iclouddrive", "onedrive"}
+import ctypes as ctypes
+import os as os
+import sqlite3 as sqlite3
+import subprocess as subprocess
+import time as time
+
+from bounded_io import IO_CHUNK_BYTES as IO_CHUNK_BYTES
+from llm_wiki.formats.canonical import (
+    canonical_json_bytes as canonical_json_bytes,
 )
-
-
-def _require_local_non_reparse_root(path: Path) -> None:
-    if _windows_reparse_point(path):
-        raise UnsafeStateRoot(f"state root must not traverse a Windows reparse point: {path}")
-    if _known_network_path(path):
-        raise UnsafeStateRoot(f"state root must use a local filesystem: {path}")
-
-
-def _warn_if_cloud_synchronized(path: Path) -> None:
-    """Cloud sync is detected by name only; locking there is probed, not proven."""
-    if not any(part.casefold() in _CLOUD_DIRECTORY_NAMES for part in path.parts):
-        return
-    warnings.warn(
-        f"state root appears to be cloud-synchronized; local locking is only probed: {path}",
-        RuntimeWarning,
-        stacklevel=3,
-    )
-
-
-def validate_state_root(path: Path) -> None:
-    """Fail closed when a runtime root lacks known-safe local lock semantics."""
-    path = Path(path)
-    _require_local_non_reparse_root(path)
-    _warn_if_cloud_synchronized(path)
-    path.mkdir(parents=True, exist_ok=True)
-    _set_owner_only(path, 0o700)
-    if _sqlite_lock_probe(path) is not True:
-        raise UnsafeStateRoot(f"state root failed the SQLite two-connection locking probe: {path}")
-
-
-def _owner_permissions_supported(path: Path) -> bool:
-    return _platform_system() != "Windows" and os.name == "posix"
-
-
-def _chmod_or_warn(path: Path, mode: int) -> bool:
-    """Apply `mode`; False (with the warning) when the filesystem has no permission bits."""
-    try:
-        path.chmod(mode)
-    except OSError as exc:
-        unsupported = {errno.ENOSYS, errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)}
-        if exc.errno not in unsupported:
-            raise
-        warnings.warn(
-            f"owner-only permission bits are unsupported for {path}",
-            RuntimeWarning,
-            stacklevel=3,
-        )
-        return False
-    return True
-
-
-def _require_applied_mode(path: Path, mode: int) -> None:
-    actual = stat.S_IMODE(path.stat().st_mode)
-    if actual != mode:
-        raise PermissionError(f"owner-only mode {mode:o} was not applied to {path}: got {actual:o}")
-
-
-def _set_owner_only(path: Path, mode: int) -> bool:
-    if not _owner_permissions_supported(path):
-        return False
-    if not _chmod_or_warn(path, mode):
-        return False
-    _require_applied_mode(path, mode)
-    return True
-
-
-def _harden_runtime_owner_only(path: Path, mode: int) -> None:
-    if os.name == "nt":
-        from memory_queue import _harden_owner_only
-
-        _harden_owner_only(Path(path), mode)
-        return
-    _set_owner_only(Path(path), mode)
-
-
-def open_operational_db(
-    path: Path,
-    *,
-    busy_ms: int,
-    contract: OperationalDatabaseContract | None = None,
-    initialize_contract: bool = False,
-) -> sqlite3.Connection:
-    """Open an owner-restricted rollback-journal operational database."""
-    _require_operational_open_arguments(busy_ms, contract, initialize_contract)
-    path = Path(path)
-    validate_state_root(path.parent)
-    expected = _operational_db_identity(path)
-    connection = sqlite3.connect(
-        path,
-        timeout=busy_ms / 1_000,
-        isolation_level=None,
-    )
-    try:
-        _configure_operational_connection(
-            connection,
-            path,
-            expected,
-            busy_ms=busy_ms,
-            contract=contract,
-            initialize_contract=initialize_contract,
-        )
-        return connection
-    except Exception:
-        connection.close()
-        raise
-
-
-def _require_operational_open_arguments(
-    busy_ms: int,
-    contract: OperationalDatabaseContract | None,
-    initialize_contract: bool,
-) -> None:
-    if busy_ms < 0:
-        raise ValueError("busy_ms must be non-negative")
-    if initialize_contract and contract is None:
-        raise ValueError("initialize_contract requires an operational database contract")
-
-
-def _operational_db_identity(path: Path) -> os.stat_result:
-    """Create the database file, or validate an existing one without a probe."""
-    flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    try:
-        descriptor = os.open(path, flags, 0o600)
-    except FileExistsError:
-        return validate_operational_db_file(path, path.parent, max_bytes=1 << 50)
-    # O_EXCL proves this inode was just created here, so no connection in this
-    # process can hold locks on it and closing the descriptor strips nothing.
-    os.close(descriptor)
-    return path.stat(follow_symlinks=False)
-
-
-def _apply_operational_pragmas(connection: sqlite3.Connection, busy_ms: int) -> None:
-    connection.row_factory = sqlite3.Row
-    connection.execute(f"PRAGMA busy_timeout={busy_ms:d}")
-    mode = connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
-    if str(mode).casefold() != "delete":
-        raise sqlite3.OperationalError(f"SQLite refused journal_mode=DELETE: {mode}")
-    connection.execute("PRAGMA synchronous=FULL")
-    connection.execute("PRAGMA foreign_keys=ON")
-    connection.execute("PRAGMA trusted_schema=OFF")
-    _require_pragma(connection, "synchronous", 2)
-    _require_pragma(connection, "foreign_keys", 1)
-    _require_pragma(connection, "trusted_schema", 0)
-    _require_pragma(connection, "busy_timeout", busy_ms)
-
-
-def _configure_operational_connection(
-    connection: sqlite3.Connection,
-    path: Path,
-    expected: os.stat_result,
-    *,
-    busy_ms: int,
-    contract: OperationalDatabaseContract | None,
-    initialize_contract: bool,
-) -> None:
-    current = path.stat(follow_symlinks=False)
-    if not os.path.samestat(expected, current):
-        raise PermissionError("operational database identity changed while opening")
-    _apply_operational_pragmas(connection, busy_ms)
-    if contract is not None:
-        _validate_or_initialize_operational_contract(
-            connection,
-            contract,
-            initialize=initialize_contract,
-        )
-    _set_owner_only(path, 0o600)
-
-
-def _pragma_integer(connection: sqlite3.Connection, name: str) -> int:
-    row = connection.execute(f"PRAGMA {name}").fetchone()
-    if row is None or isinstance(row[0], bool) or not isinstance(row[0], int):
-        raise OperationalDatabaseContractError(
-            f"operational database PRAGMA {name} returned an invalid value"
-        )
-    return row[0]
-
-
-def _require_pragma(
-    connection: sqlite3.Connection,
-    name: str,
-    expected: int,
-) -> None:
-    actual = _pragma_integer(connection, name)
-    if actual != expected:
-        raise OperationalDatabaseContractError(
-            f"operational database PRAGMA {name} mismatch: expected {expected}, got {actual}"
-        )
-
-
-def _validate_or_initialize_operational_contract(
-    connection: sqlite3.Connection,
-    contract: OperationalDatabaseContract,
-    *,
-    initialize: bool,
-) -> None:
-    identity = (
-        _pragma_integer(connection, "application_id"),
-        _pragma_integer(connection, "user_version"),
-    )
-    if initialize:
-        identity = _initialized_contract_identity(connection, contract, identity)
-    if identity != (contract.application_id, contract.user_version):
-        raise OperationalDatabaseContractError(
-            "operational database application_id or user_version mismatch"
-        )
-
-
-def _initialized_contract_identity(
-    connection: sqlite3.Connection,
-    contract: OperationalDatabaseContract,
-    identity: tuple[int, int],
-) -> tuple[int, int]:
-    """Stamp an empty database with the contract; refuse one stamped otherwise."""
-    if identity == (0, 0):
-        connection.execute(f"PRAGMA application_id={contract.application_id:d}")
-        connection.execute(f"PRAGMA user_version={contract.user_version:d}")
-        return (
-            _pragma_integer(connection, "application_id"),
-            _pragma_integer(connection, "user_version"),
-        )
-    if identity != (contract.application_id, contract.user_version):
-        raise OperationalDatabaseContractError(
-            "cannot initialize a conflicting operational database contract"
-        )
-    return identity
-
-
-def _migration_incomplete(message: str) -> OperationalDatabaseContractError:
-    error = OperationalDatabaseContractError(message)
-    error.code = "operational_migration_incomplete"
-    return error
-
-
-def _require_unique_statement_names(statements: Sequence[MigrationStatement]) -> None:
-    names = [statement.name for statement in statements]
-    if any(not name for name in names):
-        raise ValueError("migration statement name must be non-empty")
-    if len(names) != len(set(names)):
-        raise ValueError("migration statement names must be unique")
-
-
-def _apply_one_migration_statement(
-    connection: sqlite3.Connection, statement: MigrationStatement, emit
-) -> None:
-    """One statement in one transaction, skipped when its invariant already holds."""
-    if statement.completed(connection):
-        return
-    emit(f"before:{statement.name}")
-    with begin_immediate(connection):
-        connection.execute(statement.sql, tuple(statement.parameters))
-        if not statement.completed(connection):
-            raise _migration_incomplete(
-                f"migration statement invariant is incomplete: {statement.name}"
-            )
-        emit(f"after_execute:{statement.name}")
-    emit(f"after_commit:{statement.name}")
-
-
-def _require_final_invariant(connection: sqlite3.Connection, final_invariant) -> None:
-    if final_invariant(connection):
-        return
-    raise _migration_incomplete("operational migration final invariant is incomplete")
-
-
-def run_resumable_migration(
-    connection: sqlite3.Connection,
-    statements: Sequence[MigrationStatement],
-    *,
-    final_invariant: Callable[[sqlite3.Connection], bool],
-    killpoint: Callable[[str], None] | None = None,
-) -> None:
-    """Apply incomplete migration statements one transaction at a time."""
-    _require_unique_statement_names(statements)
-    emit = killpoint or (lambda _event: None)
-    for statement in statements:
-        _apply_one_migration_statement(connection, statement, emit)
-    _require_final_invariant(connection, final_invariant)
-
-
-def _contained_runtime_metadata(path: Path, state_root: Path) -> os.stat_result:
-    root = Path(state_root).resolve(strict=True)
-    try:
-        path.parent.resolve(strict=True).relative_to(root)
-        return path.lstat()
-    except (OSError, ValueError) as exc:
-        raise PermissionError("runtime file is outside the configured state root") from exc
-
-
-def _require_bounded_regular_file(
-    path: Path, metadata: os.stat_result, max_bytes: int
-) -> None:
-    if (
-        stat.S_ISLNK(metadata.st_mode)
-        or _windows_reparse_point(path)
-        or not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_size > max_bytes
-    ):
-        raise PermissionError("runtime file must be a bounded regular file")
-
-
-def _require_windows_owner_only(path: Path) -> None:
-    from memory_queue import _is_owner_only
-
-    if not _is_owner_only(path):
-        raise PermissionError("runtime file must be owner-only")
-
-
-def _require_owner_only_file(path: Path, metadata: os.stat_result) -> None:
-    if os.name == "nt":
-        _require_windows_owner_only(path)
-        return
-    mode = stat.S_IMODE(metadata.st_mode)
-    if mode & 0o077 or mode & 0o600 != 0o600:
-        raise PermissionError("runtime file must be owner-only")
-
-
-def _validated_runtime_metadata(
-    path: Path,
-    state_root: Path,
-    *,
-    max_bytes: int,
-    owner_only: bool,
-) -> os.stat_result:
-    """Validate a bounded regular runtime file from metadata alone."""
-    if max_bytes < 0:
-        raise ValueError("max_bytes must be non-negative")
-    metadata = _contained_runtime_metadata(path, state_root)
-    _require_bounded_regular_file(path, metadata, max_bytes)
-    if owner_only:
-        _require_owner_only_file(path, metadata)
-    return metadata
-
-
-def _confirm_runtime_identity(path: Path, metadata: os.stat_result) -> None:
-    """Prove the validated metadata still describes the file behind the path.
-
-    Never call this for a file that may already have an open SQLite connection
-    in this process. Closing any descriptor releases every POSIX advisory lock
-    the process holds on that inode, whichever descriptor took them, so this
-    probe would silently strip the locks a live connection depends on.
-    """
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
-    try:
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(metadata, opened):
-            raise PermissionError("runtime file identity changed during validation")
-    finally:
-        os.close(descriptor)
-
-
-def validate_runtime_file(
-    path: Path,
-    state_root: Path,
-    *,
-    max_bytes: int,
-    owner_only: bool = False,
-) -> os.stat_result:
-    """Validate one bounded regular runtime file without following links."""
-    path = Path(path)
-    metadata = _validated_runtime_metadata(
-        path, state_root, max_bytes=max_bytes, owner_only=owner_only
-    )
-    _confirm_runtime_identity(path, metadata)
-    return metadata
-
-
-def validate_operational_db_file(
-    path: Path,
-    state_root: Path,
-    *,
-    max_bytes: int,
-    owner_only: bool = False,
-) -> os.stat_result:
-    """Validate an operational database without opening a second descriptor.
-
-    `validate_runtime_file` proves identity by opening and closing its own
-    descriptor. On POSIX that close drops every advisory lock this process holds
-    on the inode, including the locks an already-open SQLite connection relies
-    on, so concurrent writers stop excluding each other and one of them deletes
-    the rollback journal underneath a live transaction. The database openers
-    bracket `sqlite3.connect` with `lstat` and `samestat` instead, which proves
-    the same identity across the connect without touching a descriptor.
-    """
-    return _validated_runtime_metadata(
-        Path(path), state_root, max_bytes=max_bytes, owner_only=owner_only
-    )
-
-
-# A crashed writer leaves a rollback journal beside the database, and SQLite
-# can only replay one by opening read-write. Every read-only open afterwards
-# fails with "attempt to write a readonly database" — and the callers here are
-# validators, so the whole memory write path fences itself off behind a message
-# about an invalid adoption record, which names neither the file nor the cause.
-#
-# Seen twice on the live vault on 2026-08-29, at 03:58 and again at 15:08. Both
-# times no process held the journal; both times one read-write open cleared it
-# and `PRAGMA integrity_check` answered `ok`. Nothing in the product did that,
-# so the vault stayed fenced — the second time a day of project checkpoints
-# piled up undrained — until a person went looking.
-#
-# The recovery is attempted only when the journal is actually there, only once,
-# and only if the write lock is free within a quarter second. A live writer
-# legitimately holds a hot journal, and there the original refusal is right.
-_JOURNAL_REPLAY_BUSY_MS = 250
-
-
-def _hot_journal(path: Path) -> Path:
-    return Path(f"{Path(path)}-journal")
-
-
-def _readonly_write_refusal(error: BaseException) -> bool:
-    return "readonly database" in str(error)
-
-
-def _replayed_hot_journal(path: Path) -> bool:
-    """Let SQLite replay a stranded journal; True when it is gone afterwards."""
-    try:
-        database = sqlite3.connect(
-            str(Path(path)), timeout=_JOURNAL_REPLAY_BUSY_MS / 1_000
-        )
-    except sqlite3.Error:
-        return False
-    try:
-        database.execute("PRAGMA journal_mode")
-    except sqlite3.Error:
-        return False
-    finally:
-        database.close()
-    return not _hot_journal(path).exists()
-
-
-def _require_replayed_journal(path: Path, error: sqlite3.OperationalError) -> None:
-    """Re-raise the original refusal unless a stranded journal explains it."""
-    if not _readonly_write_refusal(error) or not _hot_journal(path).exists():
-        raise error
-    if not _replayed_hot_journal(path):
-        raise error
-
-
-# Rows fetched per step of a streamed scan of an operational table, so memory holds one
-# batch rather than a table: doctor's materialised scan peaked at 67 MB of Python
-# objects on the 29 275-row installed vault. 1 000 rows keep a batch well under 1 MB at
-# the measured 291-byte mean preconditions and bound the time between stop checks;
-# review if a batch's rows grow past that mean by orders of magnitude.
-OPERATIONAL_SCAN_BATCH_ROWS = 1_000
-
-
-def streamed_rows(
-    database: sqlite3.Connection,
-    query: str,
-    parameters: Sequence[object] = (),
-    *,
-    stop: Callable[[], None],
-) -> Iterator[sqlite3.Row]:
-    """Every row of the query, one batch in memory at a time.
-
-    `stop` runs before each batch is handed out and raises to end the scan (a
-    deadline). No row count is capped: a table that grows with use is read whole
-    rather than refused past a number, which is how doctor and the installed-vault
-    check both misjudged a busy vault. See
-    `docs/research/2026-09-27-doctor-reads-every-transaction.md`.
-    """
-    cursor = database.execute(query, tuple(parameters))
-    while batch := cursor.fetchmany(OPERATIONAL_SCAN_BATCH_ROWS):
-        stop()
-        yield from batch
-
-
-def open_readonly_operational_db(
-    path: Path,
-    state_root: Path,
-    *,
-    max_bytes: int,
-    owner_only: bool = False,
-    busy_ms: int = 0,
-    contract: OperationalDatabaseContract | None = None,
-) -> sqlite3.Connection:
-    """Open a validated runtime SQLite database read-only and fail on path races.
-
-    One stranded rollback journal is replayed and the open retried once; see
-    `_require_replayed_journal` for why, and for what is deliberately not done.
-    """
-    if busy_ms < 0:
-        raise ValueError("busy_ms must be non-negative")
-    arguments = {
-        "max_bytes": max_bytes,
-        "owner_only": owner_only,
-        "busy_ms": busy_ms,
-        "contract": contract,
-    }
-    try:
-        return _opened_readonly_operational_db(path, state_root, **arguments)
-    except sqlite3.OperationalError as error:
-        _require_replayed_journal(Path(path), error)
-    return _opened_readonly_operational_db(path, state_root, **arguments)
-
-
-def _opened_readonly_operational_db(
-    path: Path,
-    state_root: Path,
-    *,
-    max_bytes: int,
-    owner_only: bool,
-    busy_ms: int,
-    contract: OperationalDatabaseContract | None,
-) -> sqlite3.Connection:
-    """Validate the file and open it read-only, once, with no recovery."""
-    expected = validate_operational_db_file(
-        path, state_root, max_bytes=max_bytes, owner_only=owner_only
-    )
-    database = sqlite3.connect(
-        f"{Path(path).resolve(strict=True).as_uri()}?mode=ro",
-        uri=True,
-        timeout=busy_ms / 1_000,
-        isolation_level=None,
-    )
-    try:
-        current = Path(path).stat(follow_symlinks=False)
-        if not os.path.samestat(expected, current):
-            raise PermissionError("runtime database identity changed while opening")
-        _apply_readonly_operational_pragmas(database, busy_ms)
-        if contract is not None:
-            _validate_or_initialize_operational_contract(
-                database, contract, initialize=False
-            )
-        return database
-    except Exception:
-        database.close()
-        raise
-
-
-def _apply_readonly_operational_pragmas(
-    database: sqlite3.Connection, busy_ms: int
-) -> None:
-    database.row_factory = sqlite3.Row
-    database.execute(f"PRAGMA busy_timeout={busy_ms:d}")
-    database.execute("PRAGMA foreign_keys=ON")
-    database.execute("PRAGMA trusted_schema=OFF")
-    database.execute("PRAGMA query_only=ON")
-    mode = database.execute("PRAGMA journal_mode").fetchone()[0]
-    if str(mode).casefold() != "delete":
-        raise OperationalDatabaseContractError(
-            f"operational database journal_mode mismatch: expected delete, got {mode}"
-        )
-    _require_pragma(database, "synchronous", 2)
-    _require_pragma(database, "foreign_keys", 1)
-    _require_pragma(database, "trusted_schema", 0)
-    _require_pragma(database, "busy_timeout", busy_ms)
-
-
-def _require_stable_read(opened, after, length: int, max_bytes: int) -> None:
-    """The file did not change under the descriptor, and the read stayed bounded."""
-    moved = not os.path.samestat(opened, after) or (
-        opened.st_size,
-        opened.st_mtime_ns,
-    ) != (after.st_size, after.st_mtime_ns)
-    if moved or length > max_bytes:
-        raise PermissionError("runtime file changed during bounded read")
-
-
-def read_runtime_bytes(
-    path: Path,
-    state_root: Path,
-    *,
-    max_bytes: int,
-    owner_only: bool = False,
-) -> bytes:
-    """Read stable bounded runtime bytes through a no-follow descriptor."""
-    expected = validate_runtime_file(path, state_root, max_bytes=max_bytes, owner_only=owner_only)
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
-    try:
-        opened = os.fstat(descriptor)
-        if not os.path.samestat(expected, opened):
-            raise PermissionError("runtime file identity changed before read")
-        data = os.read(descriptor, max_bytes + 1)
-        _require_stable_read(opened, os.fstat(descriptor), len(data), max_bytes)
-        return data
-    finally:
-        os.close(descriptor)
-
-
-def _windows_runtime_identity_names(target: Path) -> tuple[str, str]:
-    """Volume and file id for one open runtime file, writers still allowed."""
-    import windows_workspace
-
-    handle = windows_workspace.open_shared_readonly_runtime_file(target)
-    try:
-        volume, file_id, is_directory = windows_workspace.identity(
-            handle, directory=False
-        )
-    finally:
-        windows_workspace.close_handle(handle)
-    if is_directory:
-        raise PermissionError("runtime artifact must be a regular file")
-    return f"volume:{volume}", f"file-id:{file_id.hex()}"
-
-
-def _posix_runtime_identity_names(current: os.stat_result) -> tuple[str, str]:
-    return f"dev:{current.st_dev}", f"ino:{current.st_ino}"
-
-
-def capture_runtime_file_identity(
-    path: Path, *, state_root: Path
-) -> RuntimeFileIdentity:
-    """Capture stable platform file identity for one runtime artifact."""
-    target = Path(path)
-    root = Path(state_root).resolve(strict=True)
-    metadata = validate_runtime_file(target, root, max_bytes=1 << 50)
-    on_windows = os.name == "nt"
-    names = _windows_runtime_identity_names(target) if on_windows else None
-    current = target.stat(follow_symlinks=False)
-    if not os.path.samestat(metadata, current):
-        raise PermissionError("runtime file identity changed during capture")
-    if names is None:
-        names = _posix_runtime_identity_names(current)
-    volume_name, file_name = names
-    return RuntimeFileIdentity(
-        platform="windows" if on_windows else "posix",
-        volume=volume_name,
-        file_id=file_name,
-        size=current.st_size,
-        mtime_ns=current.st_mtime_ns,
-    )
-
-
-@contextlib.contextmanager
-def begin_immediate(
-    connection: sqlite3.Connection,
-    *,
-    before_commit: Callable[[], None] | None = None,
-) -> Iterator[sqlite3.Connection]:
-    connection.execute("BEGIN IMMEDIATE")
-    try:
-        yield connection
-        if before_commit is not None:
-            before_commit()
-        connection.commit()
-    except BaseException as original:
-        try:
-            connection.rollback()
-        except BaseException as rollback_error:
-            original.__context__ = rollback_error
-        raise
-
-
-def fsync_file(path: Path) -> None:
-    with Path(path).open("rb+") as handle:
-        os.fsync(handle.fileno())
-
-
-def _fsync_directory_windows(path: Path) -> None:
-    import windows_workspace
-
-    handle: int | None = None
-    try:
-        handle = windows_workspace.open_writable_directory_path(Path(path))
-        if not windows_workspace.flush_directory(handle):
-            raise ctypes.WinError(ctypes.get_last_error())
-    except (OSError, RuntimeError) as exc:
-        raise _metadata_durability_error("Windows directory flush failed", exc) from exc
-    finally:
-        _close_windows_handle(windows_workspace, handle)
-
-
-def _close_windows_handle(windows_workspace, handle: int | None) -> None:
-    if handle is None:
-        return
-    windows_workspace.close_handle(handle)
-
-
-def _opened_directory_descriptor(path: Path) -> int:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    try:
-        return os.open(Path(path), flags)
-    except OSError as exc:
-        raise _metadata_durability_error("directory open for fsync failed", exc) from exc
-
-
-def _fsync_directory_posix(path: Path) -> None:
-    descriptor = _opened_directory_descriptor(path)
-    try:
-        os.fsync(descriptor)
-    except OSError as exc:
-        raise _metadata_durability_error("directory fsync failed", exc) from exc
-    finally:
-        os.close(descriptor)
-
-
-def fsync_directory(path: Path) -> None:
-    """Sync directory metadata or fail when the platform cannot prove it."""
-    if os.name == "nt":
-        _fsync_directory_windows(path)
-        return
-    _fsync_directory_posix(path)
-
-
-def _metadata_durability_error(
-    message: str,
-    error: BaseException,
-) -> MetadataDurabilityUnavailable:
-    error_number = getattr(error, "errno", None)
-    if error_number is None:
-        result = MetadataDurabilityUnavailable(f"{message}: {error}")
-    else:
-        result = MetadataDurabilityUnavailable(error_number, f"{message}: {error}")
-    if getattr(error, "winerror", None) is not None:
-        result.winerror = error.winerror
-    return result
-
-
-def _publication_digest(path: Path, parent: Path, *, max_bytes: int) -> str | None:
-    try:
-        path.lstat()
-    except FileNotFoundError:
-        return None
-    return sha256_bytes(read_runtime_bytes(path, parent, max_bytes=max_bytes))
-
-
-def durable_publish_file(
-    staged: Path,
-    destination: Path,
-    *,
-    replace: bool,
-    expected_sha256: str,
-    max_bytes: int,
-) -> Literal["published", "adopted", "duplicate"]:
-    """Publish one sibling file and return published, adopted, or duplicate."""
-    _require_publication_arguments(replace, expected_sha256, max_bytes)
-    staged, destination, parent = _resolved_sibling_pair(staged, destination)
-    settled = _settled_publication(staged, destination, parent, expected_sha256, max_bytes)
-    if settled is not None:
-        return settled
-    _move_into_place(staged, destination, parent, replace=replace)
-    if _publication_digest(destination, parent, max_bytes=max_bytes) != expected_sha256:
-        raise RuntimeError("durable publication conflict: destination read-back failed")
-    return "published"
-
-
-def _require_publication_arguments(
-    replace: object, expected_sha256: str, max_bytes: object
-) -> None:
-    if not isinstance(replace, bool):
-        raise TypeError("replace must be a boolean")
-    if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
-        raise ValueError("expected_sha256 must be lowercase 64-hex")
-    _require_positive_int("max_bytes", max_bytes)
-
-
-def _resolved_parents(staged: Path, destination: Path) -> tuple[Path, Path]:
-    try:
-        return staged.parent.resolve(strict=True), destination.parent.resolve(strict=True)
-    except OSError as exc:
-        raise PermissionError("publication parent must exist") from exc
-
-
-def _require_distinct_siblings(
-    staged: Path, destination: Path, staged_parent: Path, destination_parent: Path
-) -> None:
-    if staged_parent != destination_parent:
-        raise ValueError("staged and destination must be sibling paths")
-    if os.path.normcase(staged.name) == os.path.normcase(destination.name):
-        raise ValueError("staged and destination must be distinct names")
-
-
-def _resolved_sibling_pair(staged: Path, destination: Path) -> tuple[Path, Path, Path]:
-    """Both paths under one resolved local parent, or a refusal naming why not."""
-    staged = Path(staged)
-    destination = Path(destination)
-    staged_parent, destination_parent = _resolved_parents(staged, destination)
-    _require_distinct_siblings(staged, destination, staged_parent, destination_parent)
-    if _known_network_path(staged_parent) or _windows_reparse_point(staged_parent):
-        raise UnsafeStateRoot("durable publication requires one local non-reparse parent")
-    return staged_parent / staged.name, staged_parent / destination.name, staged_parent
-
-
-def _adopted_or_duplicate(staged_digest: object, expected_sha256: str, parent: Path):
-    """The destination already holds the expected bytes; what the staged file adds."""
-    if staged_digest is None:
-        _fsync_parent_on_posix(parent)
-        return "adopted"
-    if staged_digest == expected_sha256:
-        return "duplicate"
-    raise RuntimeError("durable publication conflict: staged bytes do not match")
-
-
-def _fsync_parent_on_posix(parent: Path) -> None:
-    if os.name == "nt":
-        return
-    fsync_directory(parent)
-
-
-def _settled_publication(
-    staged: Path, destination: Path, parent: Path, expected_sha256: str, max_bytes: int
-):
-    """An outcome reached without moving anything, or None when a move is due."""
-    staged_digest = _publication_digest(staged, parent, max_bytes=max_bytes)
-    destination_digest = _publication_digest(destination, parent, max_bytes=max_bytes)
-    if destination_digest == expected_sha256:
-        return _adopted_or_duplicate(staged_digest, expected_sha256, parent)
-    if staged_digest != expected_sha256:
-        raise RuntimeError("durable publication conflict: expected bytes are unavailable")
-    return None
-
-
-def _move_windows(staged: Path, destination: Path, *, replace: bool) -> None:
-    import windows_workspace
-
-    try:
-        windows_workspace.flush_file_path(staged)
-        windows_workspace.move_file_write_through(staged, destination, replace=replace)
-    except FileExistsError:
-        raise
-    except (OSError, RuntimeError) as exc:
-        raise _metadata_durability_error("Windows metadata publication failed", exc) from exc
-
-
-def _replace_in_place(staged: Path, destination: Path) -> None:
-    try:
-        os.replace(staged, destination)
-    except OSError as exc:
-        raise _metadata_durability_error("metadata replacement failed", exc) from exc
-
-
-def _unlink_staged(staged: Path, parent: Path) -> None:
-    try:
-        os.unlink(staged)
-    except OSError:
-        fsync_directory(parent)
-        raise
-
-
-def _link_then_unlink(staged: Path, destination: Path, parent: Path) -> None:
-    try:
-        os.link(staged, destination, follow_symlinks=False)
-    except FileExistsError:
-        raise
-    except OSError as exc:
-        raise _metadata_durability_error("metadata publication link failed", exc) from exc
-    _unlink_staged(staged, parent)
-
-
-def _move_posix(staged: Path, destination: Path, parent: Path, *, replace: bool) -> None:
-    try:
-        fsync_file(staged)
-    except OSError as exc:
-        raise _metadata_durability_error("staged file fsync failed", exc) from exc
-    if replace:
-        _replace_in_place(staged, destination)
-    else:
-        _link_then_unlink(staged, destination, parent)
-    fsync_directory(parent)
-
-
-def _move_into_place(
-    staged: Path, destination: Path, parent: Path, *, replace: bool
-) -> None:
-    if os.name == "nt":
-        _move_windows(staged, destination, replace=replace)
-        return
-    _move_posix(staged, destination, parent, replace=replace)
-
-
-def publish_runtime_file(
-    path: Path,
-    data: bytes,
-    *,
-    state_root: Path,
-    create_only: bool,
-    expected: RuntimeFileIdentity | None = None,
-    expected_sha256: str | None = None,
-    mode: int = 0o600,
-) -> RuntimeFileIdentity:
-    """Publish runtime bytes through the shared checked durability primitive."""
-    _require_runtime_arguments(data, create_only, mode, expected, expected_sha256)
-    root = Path(state_root).resolve(strict=True)
-    parent, destination = _resolved_runtime_destination(path, root)
-    _require_replacement_evidence(
-        destination, root, create_only, expected, expected_sha256
-    )
-    staged = parent / f".{destination.name}.{secrets.token_hex(16)}.tmp"
-    _write_staged_bytes(staged, data, mode)
-    _harden_runtime_owner_only(staged, mode)
-    _publish_staged(staged, destination, parent, data, create_only, expected)
-    _harden_runtime_owner_only(destination, mode)
-    published = capture_runtime_file_identity(destination, state_root=root)
-    if published.size != len(data):
-        raise RuntimeError("published runtime file size changed during read-back")
-    return published
-
-
-def _require_runtime_mode(mode: object) -> None:
-    if isinstance(mode, bool) or not isinstance(mode, int) or not 0 <= mode <= 0o777:
-        raise ValueError("mode must be a valid permission mode")
-
-
-def _require_create_only_carries_no_evidence(
-    create_only: bool, expected: object, expected_sha256: object
-) -> None:
-    if not create_only:
-        return
-    if expected is not None or expected_sha256 is not None:
-        raise ValueError("create-only publication does not accept replacement evidence")
-
-
-def _require_replacement_carries_evidence(
-    create_only: bool, expected: object, expected_sha256: object
-) -> None:
-    if create_only:
-        return
-    if expected is None or expected_sha256 is None:
-        raise ValueError("replacement requires expected identity and SHA-256")
-
-
-def _require_replacement_shape(
-    create_only: bool, expected: object, expected_sha256: object
-) -> None:
-    _require_create_only_carries_no_evidence(create_only, expected, expected_sha256)
-    _require_replacement_carries_evidence(create_only, expected, expected_sha256)
-
-
-def _require_runtime_payload(data: object, create_only: object) -> None:
-    if not isinstance(data, bytes):
-        raise TypeError("runtime file data must be bytes")
-    if not isinstance(create_only, bool):
-        raise TypeError("create_only must be a boolean")
-
-
-def _require_runtime_arguments(
-    data: object,
-    create_only: object,
-    mode: object,
-    expected: object,
-    expected_sha256: object,
-) -> None:
-    _require_runtime_payload(data, create_only)
-    _require_runtime_mode(mode)
-    _require_replacement_shape(create_only, expected, expected_sha256)
-    if expected_sha256 is not None and re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
-        raise ValueError("expected_sha256 must be lowercase 64-hex")
-
-
-def _resolved_runtime_destination(path: Path, root: Path) -> tuple[Path, Path]:
-    destination = Path(path)
-    try:
-        parent = destination.parent.resolve(strict=True)
-        parent.relative_to(root)
-    except (OSError, ValueError) as exc:
-        raise PermissionError("runtime publication path is outside the state root") from exc
-    return parent, parent / destination.name
-
-
-def _require_unchanged_identity(current: object, expected: object) -> None:
-    if current != expected:
-        raise PermissionError("runtime file identity changed before publication")
-
-
-def _require_replacement_evidence(
-    destination: Path,
-    root: Path,
-    create_only: bool,
-    expected: object,
-    expected_sha256: object,
-) -> None:
-    """The file being replaced is still the one the caller measured."""
-    if create_only:
-        return
-    current = capture_runtime_file_identity(destination, state_root=root)
-    _require_unchanged_identity(current, expected)
-    current_bytes = read_runtime_bytes(destination, root, max_bytes=max(1, current.size))
-    if sha256_bytes(current_bytes) != expected_sha256:
-        raise PermissionError("runtime file bytes changed before publication")
-
-
-def _write_all(descriptor: int, data: bytes) -> None:
-    view = memoryview(data)
-    while view:
-        written = os.write(descriptor, view)
-        if written <= 0:
-            raise OSError("runtime staging write made no progress")
-        view = view[written:]
-
-
-def _write_staged_bytes(staged: Path, data: bytes, mode: int) -> None:
-    descriptor = os.open(
-        staged,
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_NOFOLLOW", 0),
-        mode,
-    )
-    try:
-        _write_all(descriptor, data)
-        os.fsync(descriptor)
-    except BaseException:
-        os.close(descriptor)
-        _discard_staged(staged)
-        raise
-    else:
-        os.close(descriptor)
-
-
-def _discard_staged(staged: Path) -> None:
-    with contextlib.suppress(OSError):
-        staged.unlink()
-
-
-def _publish_staged(
-    staged: Path,
-    destination: Path,
-    parent: Path,
-    data: bytes,
-    create_only: bool,
-    expected: object,
-) -> None:
-    max_bytes = max(1, len(data), 0 if expected is None else expected.size)
-    try:
-        outcome = durable_publish_file(
-            staged,
-            destination,
-            replace=not create_only,
-            expected_sha256=sha256_bytes(data),
-            max_bytes=max_bytes,
-        )
-    except BaseException:
-        _discard_staged(staged)
-        raise
-    if outcome != "duplicate":
-        return
-    staged.unlink()
-    fsync_directory(parent)
-
-
-def sync_runtime_directory(path: Path) -> None:
-    """Expose the shared checked metadata sync boundary to runtime publishers."""
-    fsync_directory(Path(path))
-
-
-def _is_posix_relative_text(value: object) -> bool:
-    if not isinstance(value, str) or not value:
-        return False
-    return "\\" not in value and "//" not in value
-
-
-def _require_posix_relative_text(value: object) -> None:
-    if not _is_posix_relative_text(value):
-        raise ValueError("path must be a non-empty normalized POSIX relative path")
-    if re.match(r"^[A-Za-z]:", value):
-        raise ValueError("drive-qualified paths are forbidden")
-
-
-def _require_normalized_relative(path: PurePosixPath, value: str) -> None:
-    unnormalized = (
-        path.is_absolute()
-        or str(path) != value
-        or any(part in {"", ".", ".."} for part in path.parts)
-    )
-    if unnormalized:
-        raise ValueError("path must be normalized and relative")
-
-
-def _under_root(path: PurePosixPath, root: PurePosixPath) -> bool:
-    return path == root or root in path.parents
-
-
-def _require_inside_a_root(path: PurePosixPath, allowed_roots: tuple[str, ...]) -> None:
-    roots = tuple(PurePosixPath(root) for root in allowed_roots)
-    if not roots or not any(_under_root(path, root) for root in roots):
-        raise ValueError("path is outside every allowed root")
-
-
-def restricted_relative_path(value: str, allowed_roots: tuple[str, ...]) -> PurePosixPath:
-    _require_posix_relative_text(value)
-    path = PurePosixPath(value)
-    _require_normalized_relative(path, value)
-    _require_inside_a_root(path, allowed_roots)
-    return path
-
-
-def validate_schema(instance: object, schema_path: Path) -> None:
-    """Validate the closed JSON Schema subset used by committed contracts."""
-    try:
-        schema = json.loads(Path(schema_path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SchemaValidationError(f"cannot load schema {schema_path}: {exc}") from exc
-    validate_schema_object(instance, schema)
-
-
-def validate_schema_object(instance: object, schema: object) -> None:
-    """Validate against an already captured and parsed closed schema."""
-    if not isinstance(schema, dict):
-        raise SchemaValidationError("schema root must be an object")
-    _validate_rule(instance, schema, "$", root=schema)
-
-
-def _ref_step(target: object, raw_part: str, reference: str, location: str) -> object:
-    part = raw_part.replace("~1", "/").replace("~0", "~")
-    if not isinstance(target, dict) or part not in target:
-        raise SchemaValidationError(f"{location}: unresolved schema ref {reference}")
-    return target[part]
-
-
-def _resolved_ref_target(reference: object, root: dict, location: str) -> dict:
-    """The schema a `$ref` names, resolved against the document root."""
-    if not isinstance(reference, str) or not reference.startswith("#/"):
-        raise SchemaValidationError(
-            f"{location}: only internal JSON Pointer refs are supported"
-        )
-    target: object = root
-    for raw_part in reference[2:].split("/"):
-        target = _ref_step(target, raw_part, reference, location)
-    if not isinstance(target, dict):
-        raise SchemaValidationError(f"{location}: schema ref {reference} is not an object")
-    return target
-
-
-def _option_matches(instance: object, option: dict, location: str, root: dict) -> bool:
-    try:
-        _validate_rule(instance, option, location, root=root)
-    except SchemaValidationError:
-        return False
-    return True
-
-
-def _require_one_of(instance: object, rule: dict, location: str, root: dict) -> None:
-    matches = sum(
-        _option_matches(instance, option, location, root) for option in rule["oneOf"]
-    )
-    if matches != 1:
-        raise SchemaValidationError(
-            f"{location}: expected exactly one oneOf match, got {matches}"
-        )
-
-
-def _require_const(instance: object, rule: dict, location: str) -> None:
-    if "const" not in rule:
-        return
-    if not _json_equal(instance, rule["const"]):
-        raise SchemaValidationError(f"{location}: expected const {rule['const']!r}")
-
-
-def _require_enum(instance: object, rule: dict, location: str) -> None:
-    if "enum" not in rule:
-        return
-    if not any(_json_equal(instance, candidate) for candidate in rule["enum"]):
-        raise SchemaValidationError(f"{location}: value is not in enum")
-
-
-def _require_const_and_enum(instance: object, rule: dict, location: str) -> None:
-    _require_const(instance, rule, location)
-    _require_enum(instance, rule, location)
-
-
-def _expected_types(instance: object, rule: dict, location: str) -> tuple[str, ...]:
-    expected = rule.get("type")
-    if expected is None:
-        return ()
-    types = _schema_types(expected)
-    if not _matches_type(instance, expected):
-        raise SchemaValidationError(f"{location}: expected {expected}")
-    return types
-
-
-def _require_required_properties(instance: dict, rule: dict, location: str) -> None:
-    missing = [key for key in rule.get("required", []) if key not in instance]
-    if missing:
-        raise SchemaValidationError(f"{location}: missing required properties {missing}")
-
-
-def _require_no_unknown_properties(instance: dict, rule: dict, location: str) -> None:
-    if rule.get("additionalProperties") is not False:
-        return
-    unknown = sorted(set(instance) - set(rule.get("properties", {})))
-    if unknown:
-        raise SchemaValidationError(f"{location}: unknown properties {unknown}")
-
-
-def _validate_property(
-    key: str, value: object, properties: dict, location: str, root: dict
-) -> None:
-    if key not in properties:
-        return
-    _validate_rule(value, properties[key], f"{location}.{key}", root=root)
-
-
-def _validate_object(instance: object, rule: dict, location: str, root: dict) -> None:
-    assert isinstance(instance, dict)
-    _require_required_properties(instance, rule, location)
-    _require_no_unknown_properties(instance, rule, location)
-    properties = rule.get("properties", {})
-    for key, value in instance.items():
-        _validate_property(key, value, properties, location, root)
-
-
-def _require_item_is_new(
-    item: object, earlier: list, index: int, location: str
-) -> None:
-    if any(_json_equal(item, previous) for previous in earlier):
-        raise SchemaValidationError(
-            f"{location}: expected uniqueItems, duplicate at index {index}"
-        )
-
-
-def _require_unique_items(instance: list, rule: dict, location: str) -> None:
-    if rule.get("uniqueItems") is not True:
-        return
-    for index, item in enumerate(instance):
-        _require_item_is_new(item, instance[:index], index, location)
-
-
-def _validate_array(instance: object, rule: dict, location: str, root: dict) -> None:
-    assert isinstance(instance, list)
-    _check_bound(len(instance), rule, "minItems", "maxItems", location)
-    _require_unique_items(instance, rule, location)
-    if "items" not in rule:
-        return
-    for index, item in enumerate(instance):
-        _validate_rule(item, rule["items"], f"{location}[{index}]", root=root)
-
-
-def _validate_string(instance: object, rule: dict, location: str, root: dict) -> None:
-    del root
-    assert isinstance(instance, str)
-    _check_bound(len(instance), rule, "minLength", "maxLength", location)
-    if "pattern" in rule and re.search(rule["pattern"], instance) is None:
-        raise SchemaValidationError(f"{location}: string does not match pattern")
-
-
-def _validate_number(instance: object, rule: dict, location: str, root: dict) -> None:
-    del root
-    _check_bound(instance, rule, "minimum", "maximum", location)
-    if "exclusiveMinimum" in rule and instance <= rule["exclusiveMinimum"]:
-        raise SchemaValidationError(f"{location}: below exclusiveMinimum")
-    if "exclusiveMaximum" in rule and instance >= rule["exclusiveMaximum"]:
-        raise SchemaValidationError(f"{location}: above exclusiveMaximum")
-
-
-def _is_json_number(instance: object) -> bool:
-    return isinstance(instance, (int, float)) and not isinstance(instance, bool)
-
-
-# Which validator a typed rule selects, in declaration order. A table rather
-# than a chain: the chain was five `and`-joined branches in one function and
-# carried most of this module's measured complexity.
-_TYPE_VALIDATORS = (
-    (lambda types, value: "object" in types and isinstance(value, dict), _validate_object),
-    (lambda types, value: "array" in types and isinstance(value, list), _validate_array),
-    (lambda types, value: "string" in types and isinstance(value, str), _validate_string),
-    (
-        lambda types, value: bool({"integer", "number"}.intersection(types))
-        and _is_json_number(value),
-        _validate_number,
-    ),
+from llm_wiki.formats.canonical import (
+    sha256_bytes as sha256_bytes,
 )
-
-
-def _validate_typed(
-    instance: object, rule: dict, location: str, root: dict, types: tuple[str, ...]
-) -> None:
-    for selects, validator in _TYPE_VALIDATORS:
-        if selects(types, instance):
-            validator(instance, rule, location, root)
-            return
-
-
-def _validate_resolved_rule(
-    instance: object, rule: dict[str, Any], location: str, root: dict[str, Any]
-) -> None:
-    """Everything a rule says once any `$ref` has been followed."""
-    if "oneOf" in rule:
-        _require_one_of(instance, rule, location, root)
-    _require_const_and_enum(instance, rule, location)
-    types = _expected_types(instance, rule, location)
-    _validate_typed(instance, rule, location, root, types)
-
-
-def _validate_rule(
-    instance: object,
-    rule: dict[str, Any],
-    location: str,
-    *,
-    root: dict[str, Any] | None = None,
-) -> None:
-    if root is None:
-        root = rule
-    reference = rule.get("$ref")
-    if reference is not None:
-        target = _resolved_ref_target(reference, root, location)
-        _validate_rule(instance, target, location, root=root)
-        return
-    _validate_resolved_rule(instance, rule, location, root)
-
-
-def _require_string_type_names(expected: list) -> None:
-    if not expected:
-        raise SchemaValidationError("schema type array must not be empty")
-    if not all(isinstance(value, str) for value in expected):
-        raise SchemaValidationError("schema type array must contain only strings")
-
-
-def _schema_type_array(expected: list) -> tuple[str, ...]:
-    _require_string_type_names(expected)
-    if len(set(expected)) != len(expected):
-        raise SchemaValidationError("schema type array must contain unique values")
-    return tuple(expected)
-
-
-def _named_schema_types(expected: object) -> tuple[str, ...]:
-    if isinstance(expected, str):
-        return (expected,)
-    if isinstance(expected, list):
-        return _schema_type_array(expected)
-    raise SchemaValidationError("schema type must be a string or array of strings")
-
-
-def _schema_types(expected: object) -> tuple[str, ...]:
-    values = _named_schema_types(expected)
-    unknown = [value for value in values if value not in _SCHEMA_TYPE_CHECKS]
-    if unknown:
-        raise SchemaValidationError(f"unsupported schema type: {unknown[0]}")
-    return values
-
-
-def _matches_type(instance: object, expected: object) -> bool:
-    return _matches_types(instance, _schema_types(expected))
-
-
-def _matches_types(instance: object, expected: tuple[str, ...]) -> bool:
-    return any(_SCHEMA_TYPE_CHECKS[value](instance) for value in expected)
-
-
-_SCHEMA_TYPE_CHECKS = {
-    "object": lambda value: isinstance(value, dict),
-    "array": lambda value: isinstance(value, list),
-    "string": lambda value: isinstance(value, str),
-    "integer": lambda value: isinstance(value, int) and not isinstance(value, bool),
-    "number": lambda value: (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and (not isinstance(value, float) or math.isfinite(value))
-    ),
-    "boolean": lambda value: isinstance(value, bool),
-    "null": lambda value: value is None,
-}
-
-
-def _json_equal(left: object, right: object) -> bool:
-    if isinstance(left, bool) or isinstance(right, bool):
-        return type(left) is type(right) and left == right
-    return left == right
-
-
-def _check_bound(
-    value: int | float,
-    rule: dict[str, Any],
-    minimum_name: str,
-    maximum_name: str,
-    location: str,
-) -> None:
-    if minimum_name in rule and value < rule[minimum_name]:
-        raise SchemaValidationError(f"{location}: below {minimum_name}")
-    if maximum_name in rule and value > rule[maximum_name]:
-        raise SchemaValidationError(f"{location}: above {maximum_name}")
+from llm_wiki.formats.schema import (
+    SchemaValidationError as SchemaValidationError,
+)
+from llm_wiki.formats.schema import (
+    validate_schema as validate_schema,
+)
+from llm_wiki.formats.schema import (
+    validate_schema_object as validate_schema_object,
+)
+from llm_wiki.reliability_defaults import DEFAULTS as DEFAULTS
+from llm_wiki.reliability_defaults import MAX_CAPTURE_DECISION_BYTES as MAX_CAPTURE_DECISION_BYTES
+from llm_wiki.reliability_defaults import ReliableMemoryDefaults as ReliableMemoryDefaults
+from llm_wiki.restricted_paths import is_posix_relative_text as is_posix_relative_text
+from llm_wiki.restricted_paths import require_inside_a_root as require_inside_a_root
+from llm_wiki.restricted_paths import require_normalized_relative as require_normalized_relative
+from llm_wiki.restricted_paths import require_posix_relative_text as require_posix_relative_text
+from llm_wiki.restricted_paths import restricted_relative_path as restricted_relative_path
+from llm_wiki.restricted_paths import under_root as under_root
+from llm_wiki.runtime_contracts import (
+    MetadataDurabilityUnavailable as MetadataDurabilityUnavailable,
+)
+from llm_wiki.runtime_contracts import RuntimeFileIdentity as RuntimeFileIdentity
+from llm_wiki.runtime_contracts import UnsafeStateRoot as UnsafeStateRoot
+from llm_wiki.runtime_environment import CLOUD_DIRECTORY_NAMES as CLOUD_DIRECTORY_NAMES
+from llm_wiki.runtime_environment import chmod_or_warn as chmod_or_warn
+from llm_wiki.runtime_environment import decode_mount_path as decode_mount_path
+from llm_wiki.runtime_environment import harden_runtime_owner_only as harden_runtime_owner_only
+from llm_wiki.runtime_environment import has_reparse_attribute as has_reparse_attribute
+from llm_wiki.runtime_environment import is_network_filesystem as is_network_filesystem
+from llm_wiki.runtime_environment import known_network_path as known_network_path
+from llm_wiki.runtime_environment import (
+    owner_permissions_supported as owner_permissions_supported,
+)
+from llm_wiki.runtime_environment import parse_darwin_mounts as parse_darwin_mounts
+from llm_wiki.runtime_environment import parse_posix_mounts as parse_posix_mounts
+from llm_wiki.runtime_environment import path_is_under as path_is_under
+from llm_wiki.runtime_environment import platform_system as platform_system
+from llm_wiki.runtime_environment import posix_mount_table as posix_mount_table
+from llm_wiki.runtime_environment import posix_network_path as posix_network_path
+from llm_wiki.runtime_environment import query_darwin_mounts as query_darwin_mounts
+from llm_wiki.runtime_environment import read_posix_mount_data as read_posix_mount_data
+from llm_wiki.runtime_environment import require_applied_mode as require_applied_mode
+from llm_wiki.runtime_environment import (
+    require_local_non_reparse_root as require_local_non_reparse_root,
+)
+from llm_wiki.runtime_environment import require_owner_only_file as require_owner_only_file
+from llm_wiki.runtime_environment import require_windows_owner_only as require_windows_owner_only
+from llm_wiki.runtime_environment import set_owner_only as set_owner_only
+from llm_wiki.runtime_environment import warn_if_cloud_synchronized as warn_if_cloud_synchronized
+from llm_wiki.runtime_environment import windows_network_anchor as windows_network_anchor
+from llm_wiki.runtime_environment import windows_reparse_point as windows_reparse_point
+from llm_wiki.runtime_fingerprints import digest_runtime_descriptor as digest_runtime_descriptor
+from llm_wiki.runtime_fingerprints import fingerprint_metadata as fingerprint_metadata
+from llm_wiki.runtime_fingerprints import fingerprint_regular_file as fingerprint_regular_file
+from llm_wiki.runtime_fingerprints import fingerprint_runtime_file as fingerprint_runtime_file
+from llm_wiki.runtime_fingerprints import (
+    require_fingerprint_metadata as require_fingerprint_metadata,
+)
+from llm_wiki.runtime_fingerprints import verified_runtime_digest as verified_runtime_digest
+from llm_wiki.runtime_publication import adopted_or_duplicate as adopted_or_duplicate
+from llm_wiki.runtime_publication import discard_staged as discard_staged
+from llm_wiki.runtime_publication import durable_publish_file as durable_publish_file
+from llm_wiki.runtime_publication import fsync_parent_on_posix as fsync_parent_on_posix
+from llm_wiki.runtime_publication import link_then_unlink as link_then_unlink
+from llm_wiki.runtime_publication import move_into_place as move_into_place
+from llm_wiki.runtime_publication import move_posix as move_posix
+from llm_wiki.runtime_publication import move_windows as move_windows
+from llm_wiki.runtime_publication import publication_digest as publication_digest
+from llm_wiki.runtime_publication import publish_runtime_file as publish_runtime_file
+from llm_wiki.runtime_publication import publish_staged as publish_staged
+from llm_wiki.runtime_publication import replace_in_place as replace_in_place
+from llm_wiki.runtime_publication import (
+    require_create_only_carries_no_evidence as require_create_only_carries_no_evidence,
+)
+from llm_wiki.runtime_publication import require_distinct_siblings as require_distinct_siblings
+from llm_wiki.runtime_publication import (
+    require_publication_arguments as require_publication_arguments,
+)
+from llm_wiki.runtime_publication import (
+    require_replacement_carries_evidence as require_replacement_carries_evidence,
+)
+from llm_wiki.runtime_publication import (
+    require_replacement_evidence as require_replacement_evidence,
+)
+from llm_wiki.runtime_publication import require_replacement_shape as require_replacement_shape
+from llm_wiki.runtime_publication import require_runtime_arguments as require_runtime_arguments
+from llm_wiki.runtime_publication import require_runtime_mode as require_runtime_mode
+from llm_wiki.runtime_publication import require_runtime_payload as require_runtime_payload
+from llm_wiki.runtime_publication import require_unchanged_identity as require_unchanged_identity
+from llm_wiki.runtime_publication import resolved_parents as resolved_parents
+from llm_wiki.runtime_publication import (
+    resolved_runtime_destination as resolved_runtime_destination,
+)
+from llm_wiki.runtime_publication import resolved_sibling_pair as resolved_sibling_pair
+from llm_wiki.runtime_publication import settled_publication as settled_publication
+from llm_wiki.runtime_publication import unlink_staged as unlink_staged
+from llm_wiki.runtime_publication import (
+    verify_published_runtime_permissions as verify_published_runtime_permissions,
+)
+from llm_wiki.runtime_publication import write_all as write_all
+from llm_wiki.runtime_publication import write_staged_bytes as write_staged_bytes
+from llm_wiki.runtime_records import (
+    capture_operational_database_identity as capture_operational_database_identity,
+)
+from llm_wiki.runtime_records import capture_runtime_file_identity as capture_runtime_file_identity
+from llm_wiki.runtime_records import confirm_runtime_identity as confirm_runtime_identity
+from llm_wiki.runtime_records import contained_runtime_metadata as contained_runtime_metadata
+from llm_wiki.runtime_records import posix_runtime_identity_names as posix_runtime_identity_names
+from llm_wiki.runtime_records import read_runtime_bytes as read_runtime_bytes
+from llm_wiki.runtime_records import require_bounded_regular_file as require_bounded_regular_file
+from llm_wiki.runtime_records import require_file_size_budget as require_file_size_budget
+from llm_wiki.runtime_records import (
+    require_nonnegative_file_budget as require_nonnegative_file_budget,
+)
+from llm_wiki.runtime_records import (
+    require_runtime_parent_containment as require_runtime_parent_containment,
+)
+from llm_wiki.runtime_records import require_stable_read as require_stable_read
+from llm_wiki.runtime_records import (
+    runtime_identity_from_metadata as runtime_identity_from_metadata,
+)
+from llm_wiki.runtime_records import validate_operational_db_file as validate_operational_db_file
+from llm_wiki.runtime_records import validate_runtime_file as validate_runtime_file
+from llm_wiki.runtime_records import validated_runtime_metadata as validated_runtime_metadata
+from llm_wiki.runtime_records import (
+    windows_runtime_identity_names as windows_runtime_identity_names,
+)
+from llm_wiki.runtime_sync import close_windows_handle as close_windows_handle
+from llm_wiki.runtime_sync import file_sync_mode as file_sync_mode
+from llm_wiki.runtime_sync import fsync_directory as fsync_directory
+from llm_wiki.runtime_sync import fsync_directory_posix as fsync_directory_posix
+from llm_wiki.runtime_sync import fsync_directory_windows as fsync_directory_windows
+from llm_wiki.runtime_sync import fsync_file as fsync_file
+from llm_wiki.runtime_sync import metadata_durability_error as metadata_durability_error
+from llm_wiki.runtime_sync import opened_directory_descriptor as opened_directory_descriptor
+from llm_wiki.runtime_sync import sync_runtime_directory as sync_runtime_directory
+from llm_wiki.sqlite_contracts import MigrationStatement as MigrationStatement
+from llm_wiki.sqlite_contracts import OperationalDatabaseContract as OperationalDatabaseContract
+from llm_wiki.sqlite_contracts import (
+    OperationalDatabaseContractError as OperationalDatabaseContractError,
+)
+from llm_wiki.sqlite_contracts import quote_sqlite_identifier as quote_sqlite_identifier
+from llm_wiki.sqlite_contracts import require_migration_text as require_migration_text
+from llm_wiki.sqlite_contracts import require_positive_int as require_positive_int
+from llm_wiki.sqlite_deadlines import (
+    OPERATIONAL_PROGRESS_VM_STEPS as OPERATIONAL_PROGRESS_VM_STEPS,
+)
+from llm_wiki.sqlite_deadlines import (
+    configure_operational_deadline as configure_operational_deadline,
+)
+from llm_wiki.sqlite_deadlines import operational_busy_ms as operational_busy_ms
+from llm_wiki.sqlite_deadlines import operational_deadline_active as operational_deadline_active
+from llm_wiki.sqlite_deadlines import refresh_operational_deadline as refresh_operational_deadline
+from llm_wiki.sqlite_io import JOURNAL_REPLAY_BUSY_MS as JOURNAL_REPLAY_BUSY_MS
+from llm_wiki.sqlite_io import OPERATIONAL_SCAN_BATCH_ROWS as OPERATIONAL_SCAN_BATCH_ROWS
+from llm_wiki.sqlite_io import cleanup_lock_probe as cleanup_lock_probe
+from llm_wiki.sqlite_io import close_probe_connections as close_probe_connections
+from llm_wiki.sqlite_io import (
+    configure_operational_connection as configure_operational_connection,
+)
+from llm_wiki.sqlite_io import contained_lock_probe as contained_lock_probe
+from llm_wiki.sqlite_io import hot_journal as hot_journal
+from llm_wiki.sqlite_io import initialize_probe_directory as initialize_probe_directory
+from llm_wiki.sqlite_io import open_operational_db as open_operational_db
+from llm_wiki.sqlite_io import open_readonly_operational_db as open_readonly_operational_db
+from llm_wiki.sqlite_io import opened_probe as opened_probe
+from llm_wiki.sqlite_io import opened_readonly_operational_db as opened_readonly_operational_db
+from llm_wiki.sqlite_io import operational_db_identity as operational_db_identity
+from llm_wiki.sqlite_io import (
+    prepare_local_database_directory as prepare_local_database_directory,
+)
+from llm_wiki.sqlite_io import probe_directory as probe_directory
+from llm_wiki.sqlite_io import probe_directory_identity as probe_directory_identity
+from llm_wiki.sqlite_io import readonly_write_refusal as readonly_write_refusal
+from llm_wiki.sqlite_io import remove_probe_files as remove_probe_files
+from llm_wiki.sqlite_io import replayed_hot_journal as replayed_hot_journal
+from llm_wiki.sqlite_io import (
+    require_operational_open_arguments as require_operational_open_arguments,
+)
+from llm_wiki.sqlite_io import require_probe_component as require_probe_component
+from llm_wiki.sqlite_io import require_probe_root_chain as require_probe_root_chain
+from llm_wiki.sqlite_io import require_replayed_journal as require_replayed_journal
+from llm_wiki.sqlite_io import require_same_probe_directory as require_same_probe_directory
+from llm_wiki.sqlite_io import run_lock_probe as run_lock_probe
+from llm_wiki.sqlite_io import second_writer_is_blocked as second_writer_is_blocked
+from llm_wiki.sqlite_io import sqlite_directory_lock_probe as sqlite_directory_lock_probe
+from llm_wiki.sqlite_io import sqlite_lock_probe as sqlite_lock_probe
+from llm_wiki.sqlite_io import streamed_rows as streamed_rows
+from llm_wiki.sqlite_io import validate_database_directory as validate_database_directory
+from llm_wiki.sqlite_io import validate_state_root as validate_state_root
+from llm_wiki.sqlite_migrations import (
+    apply_one_migration_statement as apply_one_migration_statement,
+)
+from llm_wiki.sqlite_migrations import migration_incomplete as migration_incomplete
+from llm_wiki.sqlite_migrations import require_final_invariant as require_final_invariant
+from llm_wiki.sqlite_migrations import (
+    require_unique_statement_names as require_unique_statement_names,
+)
+from llm_wiki.sqlite_migrations import run_resumable_migration as run_resumable_migration
+from llm_wiki.sqlite_pragmas import apply_operational_pragmas as apply_operational_pragmas
+from llm_wiki.sqlite_pragmas import (
+    apply_readonly_operational_pragmas as apply_readonly_operational_pragmas,
+)
+from llm_wiki.sqlite_pragmas import initialized_contract_identity as initialized_contract_identity
+from llm_wiki.sqlite_pragmas import pragma_integer as pragma_integer
+from llm_wiki.sqlite_pragmas import require_pragma as require_pragma
+from llm_wiki.sqlite_pragmas import (
+    validate_or_initialize_operational_contract as validate_or_initialize_operational_contract,
+)
+from llm_wiki.sqlite_transactions import begin_immediate as begin_immediate

@@ -1,0 +1,264 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/doctor-queue-context.json",
+    "docs/modules/doctor-queue.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/doctor_queue.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_cut_in_the_core_says_what_it_left_out.py",
+    "tests/test_a_failure_in_the_night_is_named.py",
+    "tests/test_a_queue_health_scan_has_no_row_ceiling.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/doctor-queue-context.json",
+      "docs/modules/doctor-queue.md",
+      "scripts/llm_wiki/doctor_queue.py",
+      "tests/test_a_cut_in_the_core_says_what_it_left_out.py",
+      "tests/test_a_failure_in_the_night_is_named.py",
+      "tests/test_a_queue_health_scan_has_no_row_ceiling.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/breadcrumb_storage.py",
+      "names": [
+        "inspect_pending_sources"
+      ],
+      "contract_sha256": "4a3c505920491decfd169ee579fc306d473c91f011b3b837e108e347bfa645d2",
+      "integration_tests": [
+        "tests/test_a_cut_in_the_core_says_what_it_left_out.py",
+        "tests/test_a_failure_in_the_night_is_named.py",
+        "tests/test_a_queue_health_scan_has_no_row_ceiling.py"
+      ]
+    },
+    {
+      "provider": "scripts/generation_maintenance.py",
+      "names": [
+        "database_table_columns",
+        "live_owner",
+        "parse_utc",
+        "result",
+        "safe_kind"
+      ],
+      "contract_sha256": "6fd10b2f48c23718d50e4e4645eb3b25bbf6d2c8477b191dd9bba470c079d877",
+      "integration_tests": [
+        "tests/test_a_cut_in_the_core_says_what_it_left_out.py",
+        "tests/test_a_failure_in_the_night_is_named.py",
+        "tests/test_a_queue_health_scan_has_no_row_ceiling.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "describe_failure"
+      ],
+      "contract_sha256": "a21b1bad13bba8c26fbfa0da372aacd36a4a72c19ad79b27666682b2e3c48992",
+      "integration_tests": [
+        "tests/test_a_cut_in_the_core_says_what_it_left_out.py",
+        "tests/test_a_failure_in_the_night_is_named.py",
+        "tests/test_a_queue_health_scan_has_no_row_ceiling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_claims.py",
+      "names": [
+        "DROPPED_CLAIMS"
+      ],
+      "contract_sha256": "e6d1253adfbcd1250ac1d984d33117b2278b9803c3338903177efe686d71e34a",
+      "integration_tests": [
+        "tests/test_a_cut_in_the_core_says_what_it_left_out.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_prompts.py",
+      "names": [
+        "admitted_candidates"
+      ],
+      "contract_sha256": "eaaedda148606c770fd2ede171cda52abb878b2b3e51087290b46366ad349d29",
+      "integration_tests": [
+        "tests/test_a_cut_in_the_core_says_what_it_left_out.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_base.py",
+      "names": [
+        "MAX_MANIFEST_BYTES",
+        "MAX_OPERATIONAL_ROWS",
+        "QUEUE_STATES",
+        "archive_path",
+        "database_sidecar_present",
+        "database_tables",
+        "owner_row_known",
+        "read_bounded_json",
+        "readonly_database"
+      ],
+      "contract_sha256": "51720984b8228d4eba7992b4972056f546b7fe2960c5a033a5691b25d1186b2f",
+      "integration_tests": [
+        "tests/test_a_cut_in_the_core_says_what_it_left_out.py",
+        "tests/test_a_failure_in_the_night_is_named.py",
+        "tests/test_a_queue_health_scan_has_no_row_ceiling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_transactions.py",
+      "names": [
+        "QUEUE_COUNT_QUERIES",
+        "operational_database_path"
+      ],
+      "contract_sha256": "456725d675765dab75cade2db7b2ebfd0417e709168ccfca67677e6f9733754f",
+      "integration_tests": [
+        "tests/test_a_cut_in_the_core_says_what_it_left_out.py",
+        "tests/test_a_failure_in_the_night_is_named.py",
+        "tests/test_a_queue_health_scan_has_no_row_ceiling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_cut_in_the_core_says_what_it_left_out.py",
+        "tests/test_a_failure_in_the_night_is_named.py",
+        "tests/test_a_queue_health_scan_has_no_row_ceiling.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/monotonic_deadline.py",
+      "names": [
+        "deadline_reached"
+      ],
+      "contract_sha256": "780a284b7c14768802bc81209d0e77dcd0f7a79885a4888eaaca663eda331414",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_backup_snapshots_what_hooks_write.py",
+        "tests/test_a_backup_takes_what_any_installed_vault_holds.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_v3_readers.py",
+      "names": [
+        "audit_compile_progress"
+      ],
+      "contract_sha256": "0cf9ab0c4f239a0f60ed02125216c190cae1dc71a682e29d760f55fa01af3be5",
+      "integration_tests": [
+        "tests/test_a_cut_in_the_core_says_what_it_left_out.py",
+        "tests/test_a_failure_in_the_night_is_named.py",
+        "tests/test_a_queue_health_scan_has_no_row_ceiling.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "reliability_v3_records_present"
+      ],
+      "contract_sha256": "b57abf408ab90945850557632852412f103b11ec19e2f6390bc2434608e1645a",
+      "integration_tests": [
+        "tests/test_a_cut_in_the_core_says_what_it_left_out.py",
+        "tests/test_a_failure_in_the_night_is_named.py",
+        "tests/test_a_queue_health_scan_has_no_row_ceiling.py"
+      ]
+    },
+    {
+      "provider": "scripts/mcp_server.py",
+      "names": [
+        "collected_call_locations"
+      ],
+      "contract_sha256": "14f65992674b707a3dc27da0d17e2948f5d0b8caf87314b61ae61c32c456feef",
+      "integration_tests": [
+        "tests/test_a_cut_in_the_core_says_what_it_left_out.py"
+      ]
+    },
+    {
+      "provider": "scripts/reclaim_runtime_state.py",
+      "names": [
+        "failures",
+        "report"
+      ],
+      "contract_sha256": "0dc04912223fe16ecbd047eda22884d02572649d172d5c99c511bc8ca82282c0",
+      "integration_tests": [
+        "tests/test_a_failure_in_the_night_is_named.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliability_v3_validation.py",
+      "names": [
+        "capture_intent_blockers"
+      ],
+      "contract_sha256": "9cf3d4f216f3303676fd9ca00c148df8cea669e4a5148fe94615ef7139718a85",
+      "integration_tests": [
+        "tests/test_a_cut_in_the_core_says_what_it_left_out.py",
+        "tests/test_a_failure_in_the_night_is_named.py",
+        "tests/test_a_queue_health_scan_has_no_row_ceiling.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "read_runtime_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "cf90b78952d9666346ec1ee0d3b9e8f93c9ae9e75a93f4b9e3ad440a06041d17",
+      "integration_tests": [
+        "tests/test_a_cut_in_the_core_says_what_it_left_out.py",
+        "tests/test_a_failure_in_the_night_is_named.py",
+        "tests/test_a_queue_health_scan_has_no_row_ceiling.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_cut_in_the_core_says_what_it_left_out.py",
+        "tests/test_a_failure_in_the_night_is_named.py",
+        "tests/test_a_queue_health_scan_has_no_row_ceiling.py"
+      ]
+    }
+  ]
+}

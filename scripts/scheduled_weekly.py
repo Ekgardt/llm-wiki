@@ -18,111 +18,31 @@ Designed to run unattended. Logs to $LLM_WIKI_STATE_ROOT/logs/weekly-YYYY-MM-DD.
 """
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import scheduled_nightly  # noqa: E402
+from llm_wiki import runtime_roots
 from maintenance_helpers import wait_for_compile_idle as _wait_for_compile_idle
-from memory_state import REPORTS_DIR, ROOT, update_state  # noqa: E402
+from memory_state import update_state  # noqa: E402
 from operational_ownership import (  # noqa: E402
     OwnerLease,
     heartbeat_owner,
 )
 from scheduled_nightly import StepLog  # noqa: E402
-
-# Reflection calls the model once per page; the pass stops starting pages after this.
-# See `docs/research/2026-09-14-the-weekly-task-outlasts-its-pass.md`.
-REFLECTION_BUDGET_SECONDS = 1800
-CONTRADICTIONS_STEP_SECONDS = 1800
-# A weekly that met the nightly holding the shared fence skipped the whole week
-# (audit 2026-09-26 B-20). It now asks again every minute, for as long as the
-# nightly can run by its own bounds; the scheduler's limit counts that wait.
-# Research: docs/research/2026-09-26-a-weekly-waits-for-the-nightly.md
-FENCE_POLL_SECONDS = 60.0
-
-
-# The queue keeps finished work for `queue_result_retention_days`; the designed
-# purge exports it (intents and decisions included) to the private raw archive and
-# only then deletes it from `run/`. Nothing ran it until 2026-09-24. See
-# `docs/research/2026-09-24-every-store-has-a-bound.md`.
-QUEUE_ARCHIVE = ROOT / "knowledge" / "raw" / "queue-archive"
-
-
-def _queue_purge_command(script: Path) -> list[str]:
-    from reliable_memory import DEFAULTS
-
-    now = datetime.now(timezone.utc)
-    before = now - timedelta(days=DEFAULTS.queue_result_retention_days)
-    return [
-        sys.executable,
-        str(script / "memory_queue.py"),
-        "purge",
-        "--terminal-before",
-        before.isoformat(timespec="seconds"),
-        "--export",
-        str(QUEUE_ARCHIVE / now.strftime("%Y-%m-%d")),
-        "--include-dead",
-    ]
-
-
-def _script_steps() -> list[tuple[str, str, list[str], int]]:
-    """(message, label, command, timeout) for every subprocess step, in order."""
-    script = ROOT / "scripts"
-    return [
-        (
-            "OKF conformance sweep (migrate_to_okf --apply)...",
-            "okf",
-            [sys.executable, str(script / "migrate_to_okf.py"), "--apply"],
-            120,
-        ),
-        (
-            "reporting memory queue status...",
-            "status",
-            [sys.executable, str(script / "memory_queue.py"), "status"],
-            60,
-        ),
-        (
-            "archiving and purging queue work finished past its retention...",
-            "queue_purge",
-            _queue_purge_command(script),
-            600,
-        ),
-        (
-            "auto-archiving stale pages (>180 days)...",
-            "archive",
-            [sys.executable, str(script / "archive_stale.py"), "--days", "180", "--apply"],
-            120,
-        ),
-        (
-            "archiving session records (>90 days)...",
-            "sessions",
-            [sys.executable, str(script / "archive_sessions.py"), "--apply"],
-            300,
-        ),
-        (
-            # "Archives keep 90 hot days" is a contract, and nothing ran the
-            # archiver, so `knowledge/daily/` grew without bound and every
-            # compile trigger hashed all of it. Research:
-            # docs/research/2026-09-18-a-pass-that-knows-how-long-it-can-be.md
-            "archiving daily logs past the hot window...",
-            "daily_archive",
-            [sys.executable, str(script / "archive_daily.py"), "--commit"],
-            600,
-        ),
-        (
-            "pruning superseded evidence-graph generations...",
-            "generations",
-            # Its own budget ends two minutes before this step is killed. See
-            # `docs/research/2026-09-14-a-prune-inside-its-step.md`.
-            [sys.executable, str(script / "prune_generations.py"), "--apply", "--budget-seconds", "1080"],
-            1200,
-        ),
-    ]
+from weekly_budget import (
+    CONTRADICTIONS_STEP_SECONDS,
+    FENCE_POLL_SECONDS,
+    REFLECTION_BUDGET_SECONDS,
+    fence_wait_seconds,
+    script_steps,
+)
 
 
 def _contradictions_wanted() -> bool:
@@ -142,7 +62,7 @@ def _require_weekly_owner(ownership: OwnerLease | None) -> None:
 
 def _step_runner(fence: threading.Event | None):
     """Run one subprocess step; a lost fence stops the pass before the next."""
-    return scheduled_nightly._fenced_step_runner(fence)
+    return scheduled_nightly.fenced_step_runner(fence)
 
 
 def _logger(log_file: Path):
@@ -157,7 +77,7 @@ def _logger(log_file: Path):
 
 def _run_script_steps(run_step, log: StepLog) -> int:
     failures = 0
-    for message, label, command, timeout in _script_steps():
+    for message, label, command, timeout in script_steps():
         log.step(message)
         failures += int(bool(run_step(command, log, label, timeout=timeout)))
     return failures
@@ -168,7 +88,7 @@ def _run_contradictions(run_step, log: StepLog) -> int:
         log.step("contradiction check SKIPPED (set MEMORY_WEEKLY_CONTRADICTIONS=1 to enable)")
         return 0
     log.step("LLM contradiction check (opt-in)...")
-    command = [sys.executable, str(ROOT / "scripts" / "lint_memory.py"), "--contradictions"]
+    command = [sys.executable, str(runtime_roots.vault_root() / "scripts" / "lint_memory.py"), "--contradictions"]
     return int(bool(run_step(command, log, "contradictions", timeout=CONTRADICTIONS_STEP_SECONDS)))
 
 
@@ -181,14 +101,14 @@ def _reflect(log: StepLog) -> int:
     """
     log.step("A-MEM reflection (page consolidation)...")
     try:
-        _reflect_candidates(log)
+        reflect_candidates(log)
     except Exception as error:  # noqa: BLE001 - one step, counted below
         log(f"  reflection: failed ({error})")
         return 1
     return 0
 
 
-def _reflect_candidates(log) -> None:
+def reflect_candidates(log) -> None:
     from reflection import find_reflection_candidates, reflect_page
 
     candidates = find_reflection_candidates()
@@ -204,21 +124,7 @@ def _reflect_candidates(log) -> None:
         log(f"  {reflect_page(candidate['path'], apply=True)}")
 
 
-def worst_case_seconds() -> float:
-    """The longest the weekly pass can run by its own bounds; the scheduler's limit sits above it."""
-    from llm_client import DEFAULT_TIMEOUT_S
-
-    steps = sum(timeout for _message, _label, _command, timeout in _script_steps())
-    reflection = REFLECTION_BUDGET_SECONDS + DEFAULT_TIMEOUT_S
-    waits = scheduled_nightly.COMPILE_IDLE_WAIT_SECONDS + _fence_wait_seconds() + FENCE_POLL_SECONDS
-    return float(waits + steps + CONTRADICTIONS_STEP_SECONDS + reflection)
-
-
-def _fence_wait_seconds() -> float:
-    return scheduled_nightly.worst_case_seconds()
-
-
-def _fence_unless_busy():
+def fence_unless_busy():
     """The weekly fence, or None while another pass holds it; any other refusal raises."""
     from operational_ownership import OperationalOwnershipError
 
@@ -230,17 +136,17 @@ def _fence_unless_busy():
         return None
 
 
-def _fence_after_waiting(sleep=time.sleep, clock=time.monotonic):
+def fence_after_waiting(sleep=time.sleep, clock=time.monotonic):
     """Wait out a nightly that holds the fence; None only once it outlasted its own bounds."""
-    deadline = clock() + _fence_wait_seconds()
+    deadline = clock() + fence_wait_seconds()
     while True:
-        fence = _fence_unless_busy()
+        fence = fence_unless_busy()
         if fence is not None or clock() >= deadline:
             return fence
         sleep(FENCE_POLL_SECONDS)
 
 
-def _build_tiers(log: StepLog) -> int:
+def build_tiers(log: StepLog) -> int:
     """Generate L1 tier overviews; a failure is counted, not only logged."""
     log.step("generating L1 tier overviews...")
     try:
@@ -256,7 +162,7 @@ def _build_tiers(log: StepLog) -> int:
 
 def record_weekly_result(failures: int, error: str | None = None) -> None:
     """The weekly's own terminal record; a failure never overwrites the nightly's."""
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
 
     def _mutate(state: dict) -> None:
         if not failures:
@@ -277,13 +183,13 @@ def record_weekly_result(failures: int, error: str | None = None) -> None:
 def record_weekly_start() -> None:
     """A weekly that starts says so: one killed before its record is then visible
     (audit 2026-09-27 B-15, docs/research/2026-09-27-a-weekly-that-never-finishes-is-seen.md)."""
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     update_state(lambda state: state.__setitem__("last_weekly_started_at", now))
 
 
 def record_weekly_skip(reason: str) -> None:
     """A weekly that did not run says so, so a stale weekly names why."""
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
 
     def _mutate(state: dict) -> None:
         state["last_weekly_skip"] = {"skipped_at": now, "reason": reason}
@@ -312,7 +218,7 @@ def _run_weekly_steps(run_step, log: StepLog) -> int:
     failures = _run_script_steps(run_step, log)
     failures += _run_contradictions(run_step, log)
     failures += _reflect(log)
-    failures += _build_tiers(log)
+    failures += build_tiers(log)
     return failures
 
 
@@ -322,8 +228,8 @@ def _run_weekly_body(
     _require_weekly_owner(ownership)
     run_step = _step_runner(fence)
     today = datetime.now().strftime("%Y-%m-%d")
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    log = StepLog(_logger(REPORTS_DIR / f"weekly-{today}.md"))
+    runtime_roots.reports_dir().mkdir(parents=True, exist_ok=True)
+    log = StepLog(_logger(runtime_roots.reports_dir() / f"weekly-{today}.md"))
 
     log(f"=== Weekly deep maintenance — {today} ===")
     failures = 1
@@ -345,13 +251,14 @@ def run_weekly(
         return _run_weekly_body(ownership=ownership, fence=lost)
 
 
-def main() -> int:
+def main(argv: list[str] | tuple[str, ...] = ()) -> int:
     """The weekly fence: canonical on an adopted vault, the legacy marker otherwise."""
+    argparse.ArgumentParser(description=__doc__).parse_args(argv)
     from operational_ownership import OperationalOwnershipError
     from secret_redact import describe_error_chain
 
     try:
-        fence = _fence_after_waiting()
+        fence = fence_after_waiting()
     except OperationalOwnershipError as exc:
         return _skipped(str(exc.code))
     except Exception as exc:
@@ -367,4 +274,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

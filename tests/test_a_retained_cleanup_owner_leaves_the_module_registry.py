@@ -12,9 +12,9 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-import lsp_process
+from llm_wiki import lsp_process_state
+from llm_wiki.pyright_session_core import PyrightSession
 from lsp_process import StartupCleanupError
-from pyright_session import PyrightSession
 from repository_scope import resolve_repository_scope
 
 from tests.code_kernel_helpers import create_python_repository
@@ -24,13 +24,13 @@ from tests.slow_machine import SHORT_TIMEOUT
 def _registered() -> set[int]:
     return {
         id(coordinator)
-        for coordinator in lsp_process._pending_startup_cleanup_snapshot()
+        for coordinator in lsp_process_state.pending_startup_cleanup_snapshot()
     }
 
 
-def _registered_coordinator() -> lsp_process._LifecycleCoordinator:
-    coordinator = lsp_process._LifecycleCoordinator(None)
-    lsp_process._register_startup_cleanup(coordinator)
+def _registered_coordinator() -> lsp_process_state.LifecycleCoordinator:
+    coordinator = lsp_process_state.LifecycleCoordinator(None)
+    lsp_process_state.register_startup_cleanup(coordinator)
     return coordinator
 
 
@@ -45,7 +45,7 @@ def test_transfer_removes_the_owner_from_the_module_registry() -> None:
             False,
         )
     finally:
-        lsp_process._unregister_startup_cleanup(coordinator)
+        lsp_process_state.unregister_startup_cleanup(coordinator)
 
 
 def test_transfer_without_an_owner_changes_nothing() -> None:
@@ -90,6 +90,6 @@ def test_a_session_that_retains_an_owner_transfers_it(
             id(coordinator) in _registered(),
         ) == (True, False)
     finally:
-        lsp_process._unregister_startup_cleanup(coordinator)
+        lsp_process_state.unregister_startup_cleanup(coordinator)
         session._startup_cleanup_error = None
         session.close(deadline=time.monotonic() + SHORT_TIMEOUT)

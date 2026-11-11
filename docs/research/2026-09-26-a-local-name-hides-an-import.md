@@ -1,7 +1,7 @@
 # A local name hides an import
 
-Date: 2026-09-26. Audit 2026-09-26, finding C-9 ("local assignment does not shadow
-an imported name -> false caller").
+Date: 2026-09-26. Audit 2026-09-26, finding C-9: a local assignment failed to hide
+an imported name, producing a false caller.
 
 ## What was wrong
 

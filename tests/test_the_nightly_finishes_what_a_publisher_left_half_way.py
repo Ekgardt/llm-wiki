@@ -8,22 +8,13 @@ import inspect
 
 import capture_adoption
 import capture_diagnostics
-import markdown_transaction
-import memory_queue
 
-from tests.test_a_publication_that_stopped_half_way_is_finished import (
+from tests.a_publication_that_stopped_half_way_is_finished_helpers import (
     _pending_ids,
     _publish_pending_intent,
 )
-from tests.test_capture_intent_adoption import _coordinator, _queue
-
-
-def _active_vault(tmp_path, monkeypatch, queue, coordinator) -> None:
-    monkeypatch.setattr("integration_adapter.STATE_ROOT", tmp_path)
-    monkeypatch.setattr(capture_adoption, "ROOT", tmp_path)
-    monkeypatch.setattr(capture_adoption, "STATE_ROOT", tmp_path)
-    monkeypatch.setattr(memory_queue, "active_memory_queue", lambda _vault, _state: queue)
-    monkeypatch.setattr(markdown_transaction, "active_markdown_coordinator", lambda _vault, _state: coordinator)
+from tests.capture_intent_adoption_helpers import _coordinator, _queue
+from tests.the_nightly_finishes_what_a_publisher_left_half_way_helpers import _active_vault
 
 
 def test_the_nightly_command_finishes_a_half_published_intent(tmp_path, monkeypatch) -> None:
@@ -35,8 +26,13 @@ def test_the_nightly_command_finishes_a_half_published_intent(tmp_path, monkeypa
 
     results = capture_adoption.adopt_in_active_vault()
 
-    finished = [entry["intent_id"] for entry in results["complete_pending_capture_intents"]["completed"]]
+    finished = results["recover_unindexed_capture_intents"]["recovered"]
     assert (finished, _pending_ids(queue)) == ([half["intent_id"]], [])
+    assert results["complete_pending_capture_intents"]["completed"] == []
+    lease = queue.claim_capture("nightly-proof", handler_versions=(1,))
+    assert lease is not None
+    assert lease.payload["intent_id"] == half["intent_id"]
+    assert queue.claim_capture("nightly-proof", handler_versions=(1,)) is None
 
 
 def test_the_nightly_command_writes_down_an_intent_it_could_not_recover(tmp_path, monkeypatch) -> None:

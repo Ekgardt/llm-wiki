@@ -14,7 +14,7 @@ TESTS = Path(__file__).resolve().parent
 if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
 
-from test_generation_catalog import _catalog, _publish  # noqa: E402
+from tests.generation_catalog_helpers import _catalog, _publish  # noqa: E402
 
 
 def test_a_rebuild_without_a_parent_keeps_the_previous_activation(tmp_path: Path) -> None:

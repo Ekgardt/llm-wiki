@@ -1,0 +1,418 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/breadcrumb-decision-tests.md",
+    "docs/modules/breadcrumb-documents.md",
+    "docs/modules/compile-claims-producer-helpers.md",
+    "docs/modules/compile-paths.md",
+    "docs/modules/compile-pipeline-apply-tests.md",
+    "docs/modules/compile-pipeline-prompts-tests-compile-critic-preserves-native-claim-origin-helpers.md",
+    "docs/modules/compile-pipeline-prompts-tests-critic-sizing-owns-immutable-native-parsing-context.json",
+    "docs/modules/compile-pipeline-prompts-tests-critic-sizing-owns-immutable-native-parsing.md",
+    "docs/modules/compile-pipeline-sources-tests-native-compile-projection-has-complete-citation-address-helpers.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/critic-sizing-owns-immutable-native-parsing-helpers.md",
+    "docs/modules/evidence-resolver.md",
+    "docs/modules/fact-keys.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/native-event-reader.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/script-sources.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/evidence_resolver.py",
+    "scripts/fact_keys.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "tests/__init__.py",
+    "tests/compile_claims_producer_helpers.py",
+    "tests/compile_critic_preserves_native_claim_origin_helpers.py",
+    "tests/compile_paths.py",
+    "tests/conftest.py",
+    "tests/critic_sizing_owns_immutable_native_parsing_helpers.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/modules/__init__.py",
+    "tests/modules/breadcrumb_documents/__init__.py",
+    "tests/modules/breadcrumb_documents/contract_helpers.py",
+    "tests/modules/native_event_reader/__init__.py",
+    "tests/modules/native_event_reader/contract_helpers.py",
+    "tests/native_compile_projection_has_complete_citation_address_helpers.py",
+    "tests/native_compile_uses_whole_container_helpers.py",
+    "tests/native_user_frames_keep_their_physical_evidence_helpers.py",
+    "tests/script_sources.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-pipeline-prompts-tests-critic-sizing-owns-immutable-native-parsing-context.json",
+      "docs/modules/compile-pipeline-prompts-tests-critic-sizing-owns-immutable-native-parsing.md",
+      "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/bounded_io.py",
+      "names": [
+        "IO_CHUNK_BYTES",
+        "VerifiedByteRange",
+        "open_stable_range",
+        "read_stable_bytes"
+      ],
+      "contract_sha256": "4a6829341c107f2363b914401ba8933b0dd4075d611dfa31dd2b2cb622911872",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_decision.py",
+      "names": [
+        "journal_block"
+      ],
+      "contract_sha256": "d9c930484c634bdb57dbd893d182a3cb86d6d5b4893041035de163552c86eebc",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_evidence.py",
+      "names": [
+        "read_head",
+        "read_permanent_source",
+        "read_source_document",
+        "restore_source"
+      ],
+      "contract_sha256": "cac9f206ece04de409398a0a39a09f229a15fb0e517ed6266dd034b1a6b67beb",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/breadcrumb_protocol.py",
+      "names": [
+        "encode_parts",
+        "make_anchor",
+        "make_manifest"
+      ],
+      "contract_sha256": "d9092eee738a1a4113c9bf87afe3ae4ad27a6f4bb640b6b8040da43b1d304729",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_cache.py",
+      "names": [
+        "CompileCache"
+      ],
+      "contract_sha256": "2f950a945aecf6065663cf128b0cdc4db8f0e8cf0f8d1f1057cc0d1e52d56c95",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/corpus_snapshot.py",
+      "names": [
+        "collect_corpus"
+      ],
+      "contract_sha256": "7ea12368f51c070a84b0754260f0a82db5ac44b0395b95eabcb01e5053c9f0bb",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/event_envelope.py",
+      "names": [
+        "native_physical_user_text",
+        "native_selected_user_text"
+      ],
+      "contract_sha256": "13fa9b072d9808890ed7cbb3bcdadff6cf4c2686d679430155e0d1f3809e4743",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/ledger.py",
+      "names": [
+        "ensure_table",
+        "extend_entity_pages",
+        "post",
+        "records_of",
+        "rows_in_store"
+      ],
+      "contract_sha256": "94e6322790ac02a3f976e91ce47774fd7d078e524eec1add8ff4a47269b5f00b",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_client.py",
+      "names": [
+        "ProviderDescriptor",
+        "call_llm"
+      ],
+      "contract_sha256": "3384d22d24fd9dbb21df3ab53950b91a430801d379face9ab48b93c1a0342bd6",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/archive_read_only.py",
+      "names": [
+        "archive_path_is_read_only"
+      ],
+      "contract_sha256": "85986bb504972ac3d082400d9ff876e51f5767fb625a6c1190c00bbeba2858bc",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_check_is_judged_when_it_ends.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/breadcrumb_documents.py",
+      "names": [
+        "source_documents",
+        "source_path"
+      ],
+      "contract_sha256": "9c32d29ba0229ab4fd59256dd23d9ea9fb8fde486cddde3ce431f64e296ab907",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_apply.py",
+      "names": [
+        "apply_compile_plan"
+      ],
+      "contract_sha256": "129ecd76764fbd203f197468ec01d03833729ef205c00c26dd60fb67025303bb",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_claims.py",
+      "names": [
+        "SOURCE_CHOICE_RESOLVER"
+      ],
+      "contract_sha256": "46ae3f6dc0210a480f59beef7508f66b6139eb8f8fd2085a0098250c4dfda1a5",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_operations.py",
+      "names": [
+        "with_derived_claims"
+      ],
+      "contract_sha256": "930269ecbb09f9c38ace6e7f6a5cf3b2ecf6eecf7604d6b372849c21e950e0e5",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_prompts.py",
+      "names": [
+        "CompileAttempt",
+        "critique_prompt",
+        "expand_choice_fields",
+        "source_line_choices"
+      ],
+      "contract_sha256": "d96eaf54c70b5073cabac7c4452a30859a019fd31943347a951ab61ccbedda33",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "SOURCE_CHOICE_PARSING",
+        "snapshot_compile_inputs",
+        "subset_compile_inputs"
+      ],
+      "contract_sha256": "a08cc7cc47bec8e44b480e327efc5ba44e4f533cbad24f023108e6c62caa7cab",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_receipt_authority.py",
+      "names": [
+        "read_compile_receipt_version"
+      ],
+      "contract_sha256": "fefb0c1793f868e2cf9b6d894731a17d4d2564c66b083678e3588cc0872274de",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/evidence_reference.py",
+      "names": [
+        "BLOCK_ID_RE",
+        "EvidenceRef",
+        "EvidenceResolutionError",
+        "MAX_DAILY_BYTES",
+        "SHA256_PATTERN",
+        "is_plain_int"
+      ],
+      "contract_sha256": "d84342b414335dca58fb9e154e525b323ee09216ef517bcd28c5aa869fc16693",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "canonical_json_bytes",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "2e42a7aefcb66ac2515f6665a03feae34e6f7bad4807787a789ce031f9f3a9c1",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/receipts.py",
+      "names": [
+        "compile_source_identity",
+        "parse_compile_receipt_version"
+      ],
+      "contract_sha256": "8955de2c64a9187a42ad6634b50d67f6673f00257f427099833d6ba58b46c1f2",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/schema.py",
+      "names": [
+        "validate_schema"
+      ],
+      "contract_sha256": "753e4abefcf29389d3fc0c051070bfaa66db14ecb88e1c98fc9b85588a6017cb",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/restricted_paths.py",
+      "names": [
+        "restricted_relative_path"
+      ],
+      "contract_sha256": "da0f32f3b3897cc6b0a148a0ab7dcad5a82bf356267ecd94c5ab0aaab267fd42",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "state_root",
+        "vault_root"
+      ],
+      "contract_sha256": "904b31835161d11b79ab937c4651d91dd6966bdaa1f33e93b9ea768f519d2d3b",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/step_budgets.py",
+      "names": [
+        "DEFAULT_BUDGET_SECONDS"
+      ],
+      "contract_sha256": "23b826ee5651324ed20ec4b1e3c5b1c2044e9fb1e0f46d058351c3df11b4d031",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "active_or_legacy_coordinator"
+      ],
+      "contract_sha256": "c925a7d2a81ec95533c80abc3906d8b8f0c1422d98e7175814de9a57f0ec45ec",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/memory_state.py",
+      "names": [
+        "daily_logs"
+      ],
+      "contract_sha256": "85eb7649be6f2700cea30c4dd25477777814ae031cf438d73e4e4a6bfb02dfb6",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/reply_json.py",
+      "names": [
+        "reply_document"
+      ],
+      "contract_sha256": "f22f350c4ed3bc3f62231939d1d10afa6e81a60b08b65de60783121e8d560c93",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_critic_sizing_owns_immutable_native_parsing.py"
+      ]
+    }
+  ]
+}

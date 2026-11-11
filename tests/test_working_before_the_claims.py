@@ -18,7 +18,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from corpus_snapshot import collect_corpus  # noqa: E402
-from query_memory import ANSWER_SCHEMA, _qa_system_prompt, grounded_qa  # noqa: E402
+from query_memory import ANSWER_SCHEMA, grounded_qa, qa_system_prompt  # noqa: E402
 from reliable_memory import validate_schema  # noqa: E402
 
 
@@ -42,7 +42,7 @@ def test_the_schema_takes_a_working_note_or_none() -> None:
 
 
 def test_the_prompt_asks_for_the_working_first() -> None:
-    prompt = _qa_system_prompt()
+    prompt = qa_system_prompt()
 
     asked = "Write the working field first, inside the JSON document"
 

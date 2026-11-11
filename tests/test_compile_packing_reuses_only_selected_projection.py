@@ -1,0 +1,89 @@
+from dataclasses import replace
+
+import compile_receipts
+import pytest
+from llm_wiki import (
+    compile_pipeline_base,
+    compile_pipeline_batches,
+    compile_pipeline_operations,
+    compile_pipeline_prompts,
+    compile_pipeline_sources,
+)
+from reliable_memory import sha256_bytes
+
+from tests.compile_paths import point_compile_path
+from tests.native_compile_uses_whole_container_helpers import (
+    _frame_covering_keys,
+    _native_inputs,
+    _native_operation,
+)
+
+
+def _setup(root, monkeypatch):
+    inputs, _ = _native_inputs(root, monkeypatch, "First.\nActual observation.")
+    context = compile_receipts.SourceSnapshot("knowledge/notes/context.md", b"context", sha256_bytes(b"context"))
+    return replace(inputs, sources=(*inputs.sources, context))
+
+
+def _observe(monkeypatch):
+    seen = []
+    original = compile_pipeline_sources.native_unit_source
+
+    def forwarded(parts, **kwargs):
+        seen.append(tuple(id(part) for part in parts))
+        return original(parts, **kwargs)
+
+    point_compile_path(monkeypatch, "native_unit_source", forwarded)
+    return seen
+
+
+def test_optional_context_reuses_one_verified_projection(tmp_path, monkeypatch):
+    inputs = _setup(tmp_path, monkeypatch)
+    keys = _frame_covering_keys(inputs, inputs.dailies[0].original_content)
+    expected = [len(compile_pipeline_prompts.draft_prompt_text(compile_pipeline_sources.subset_compile_inputs(inputs, keys, paths)).encode())
+                for paths in (set(), {"knowledge/notes/context.md"}, set())]
+    seen = _observe(monkeypatch)
+    measure = compile_pipeline_prompts.ByteBatchMeasure(inputs)
+    actual = [measure(keys, paths) for paths in (set(), {"knowledge/notes/context.md"}, set())]
+    assert actual == expected
+    assert len(seen) == 1
+
+
+def test_changed_selection_replaces_the_projection(tmp_path, monkeypatch):
+    inputs = _setup(tmp_path, monkeypatch)
+    plain = compile_pipeline_sources.daily_parts("knowledge/daily/2026-10-03.md", b"# Day\nPlain fact.\n")[0]
+    inputs = replace(inputs, dailies=(*inputs.dailies, plain))
+    native = _frame_covering_keys(inputs, inputs.dailies[0].original_content)
+    selections = (native, {plain.part_key}, native)
+    expected = [len(compile_pipeline_prompts.draft_prompt_text(compile_pipeline_sources.subset_compile_inputs(inputs, keys)).encode())
+                for keys in selections]
+    seen = _observe(monkeypatch)
+    measure = compile_pipeline_prompts.ByteBatchMeasure(inputs)
+    assert [measure(keys) for keys in selections] == expected
+    assert len(seen) == 3  # Exactly one producer call per changed sizing selection.
+
+
+def test_replaced_same_key_forged_frame_is_not_cached(tmp_path, monkeypatch):
+    inputs = _setup(tmp_path, monkeypatch)
+    keys = _frame_covering_keys(inputs, inputs.dailies[0].original_content)
+    measure = compile_pipeline_prompts.ByteBatchMeasure(inputs)
+    measure(keys)
+    frame = replace(inputs.dailies[0].native_frames[0], text="Forged.")
+    for key in keys:
+        measure.dailies[key] = [replace(part, native_frames=(frame,)) for part in measure.dailies[key]]
+    with pytest.raises(ValueError, match="native frame cache"):
+        measure(keys)
+
+
+def test_final_subset_and_binding_recheck_changed_permanent_head(tmp_path, monkeypatch):
+    inputs = _setup(tmp_path, monkeypatch)
+    keys = _frame_covering_keys(inputs, inputs.dailies[0].original_content)
+    measure = compile_pipeline_prompts.ByteBatchMeasure(inputs)
+    measure(keys)
+    head = next(tmp_path.glob("knowledge/raw/sessions/**/*.breadcrumb.md"))
+    head.write_bytes(head.read_bytes() + b"tampered\n")
+    with pytest.raises(ValueError):
+        compile_pipeline_batches.compile_batch(inputs, keys, compile_pipeline_base.compile_budget(None), None, None)
+    operation = _native_operation(inputs, "Actual observation.")
+    with pytest.raises(ValueError):
+        compile_pipeline_operations.evidence_binding(operation["evidence"][0], inputs)

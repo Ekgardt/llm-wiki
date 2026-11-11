@@ -58,7 +58,7 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT  # noqa: E402
+from llm_wiki import runtime_roots  # noqa: E402
 from model_dlp import (  # noqa: E402
     DLPPolicy,
     load_policy,
@@ -197,7 +197,7 @@ def _run(*cmd: str, check: bool = True, capture: bool = False) -> subprocess.Com
     print(f"$ {' '.join(cmd)}")
     return subprocess.run(
         list(cmd),
-        cwd=str(ROOT),
+        cwd=str(runtime_roots.vault_root()),
         check=check,
         text=True,
         capture_output=capture,
@@ -205,7 +205,7 @@ def _run(*cmd: str, check: bool = True, capture: bool = False) -> subprocess.Com
     )
 
 
-def _require_git() -> None:
+def require_git() -> None:
     if shutil.which("git") is None:
         print("export_vault: `git` not found on PATH.", file=sys.stderr)
         sys.exit(2)
@@ -216,7 +216,7 @@ def _short_sha(ref: str) -> str:
     return out.stdout.strip()
 
 
-def _paths_differing_from_ref(ref: str) -> tuple[str, ...]:
+def paths_differing_from_ref(ref: str) -> tuple[str, ...]:
     """Tracked paths whose working copy differs from the ref being archived.
 
     `git status --porcelain` was the wrong question twice over. It reports
@@ -251,10 +251,10 @@ FORMAT_EXTENSIONS = {"zip": "zip", "tar": "tar", "tar.gz": "tar.gz"}
 def _default_output(ref: str, fmt: str) -> Path:
     sha = _short_sha(ref)
     ext = FORMAT_EXTENSIONS[_require_supported_format(fmt)]
-    return (ROOT.parent / f"llm-wiki-export-{sha}.{ext}").resolve()
+    return (runtime_roots.vault_root().parent / f"llm-wiki-export-{sha}.{ext}").resolve()
 
 
-def _git_archive(ref: str, fmt: str, output: Path) -> None:
+def git_archive(ref: str, fmt: str, output: Path) -> None:
     # `git archive` format names differ slightly: accepts `zip`, `tar`,
     # and `tar.gz` (as of git 2.20+). `--output` takes the destination.
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -437,7 +437,7 @@ def _scan_archive(output: Path, archive_format: str, policy: DLPPolicy) -> tuple
     return scanner(output, policy)
 
 
-def _verify_archive(output: Path, requested_format: str | None = None) -> int:
+def verify_archive(output: Path, requested_format: str | None = None) -> int:
     """Fail closed unless every bounded archive member passes path and DLP checks."""
     try:
         if output.stat().st_size > MAX_ARCHIVE_BYTES:
@@ -471,13 +471,13 @@ def _staging_path(output: Path) -> Path:
 def _build_verified_archive(args: argparse.Namespace, output: Path) -> int:
     staging = _staging_path(output)
     try:
-        _git_archive(args.ref, args.format, staging)
+        git_archive(args.ref, args.format, staging)
         if not args.verify:
             print(
                 "export_vault: --no-verify is deprecated; security checks remain mandatory",
                 file=sys.stderr,
             )
-        if _verify_archive(staging, args.format) != 0:
+        if verify_archive(staging, args.format) != 0:
             return 1
         os.replace(staging, output)
         return 0
@@ -490,21 +490,25 @@ def _build_verified_archive(args: argparse.Namespace, output: Path) -> int:
 
 def _collect_finding_fingerprints(archive: Path, policy: DLPPolicy) -> set[str]:
     """Fingerprints of every finding the scan would refuse in this archive."""
-    from model_dlp import _finding_spans, _fingerprint, _scrubbed
-
     fingerprints: set[str] = set()
     with zipfile.ZipFile(archive) as opened:
         for info in opened.infolist():
-            if info.is_dir():
-                continue
-            text = opened.read(info).decode("utf-8", errors="surrogateescape")
-            scrubbed = _scrubbed(text, policy)
-            if scrubbed == text:
-                continue
-            fingerprints.update(
-                _fingerprint(span) for span in _finding_spans(text, scrubbed)
-            )
+            fingerprints.update(_member_finding_fingerprints(opened, info, policy))
     return fingerprints
+
+
+def _member_finding_fingerprints(
+    opened: zipfile.ZipFile, info: zipfile.ZipInfo, policy: DLPPolicy
+) -> set[str]:
+    from model_dlp import finding_spans, fingerprint, scrubbed_text
+
+    if info.is_dir():
+        return set()
+    text = opened.read(info).decode("utf-8", errors="surrogateescape")
+    scrubbed = scrubbed_text(text, policy)
+    if scrubbed == text:
+        return set()
+    return {fingerprint(span) for span in finding_spans(text, scrubbed)}
 
 
 def _write_allow_policy(destination: Path, ref: str) -> int:
@@ -519,11 +523,11 @@ def _write_allow_policy(destination: Path, ref: str) -> int:
     """
     import tempfile
 
-    from reliable_memory import canonical_json_bytes
+    from llm_wiki.formats.canonical import canonical_json_bytes
 
     with tempfile.TemporaryDirectory() as scratch:
         archive = Path(scratch) / "probe.zip"
-        _git_archive(ref, "zip", archive)
+        git_archive(ref, "zip", archive)
         found = _collect_finding_fingerprints(archive, DLPPolicy())
     payload = {
         "version": 1,
@@ -543,7 +547,7 @@ def _write_allow_policy(destination: Path, ref: str) -> int:
 
 def main() -> int:
     args = parse_args()
-    _require_git()
+    require_git()
 
     policy_destination = getattr(args, "write_allow_policy", None)
     if policy_destination is not None:
@@ -553,7 +557,7 @@ def main() -> int:
 
 
 def _run_export(args: argparse.Namespace) -> int:
-    drifted = _paths_differing_from_ref(args.ref) if args.strict else ()
+    drifted = paths_differing_from_ref(args.ref) if args.strict else ()
     if drifted:
         _report_strict_drift(args.ref, drifted)
         return 2

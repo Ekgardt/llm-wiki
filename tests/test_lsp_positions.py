@@ -220,15 +220,15 @@ def test_lsp_range_rejects_out_of_range_positions() -> None:
 
 
 def test_repeated_large_second_line_reuses_index_without_copying_content(monkeypatch) -> None:
-    lsp_positions._clear_line_boundary_cache()
-    original = lsp_positions._build_line_boundary_index
+    lsp_positions.clear_line_boundary_cache()
+    original = lsp_positions.build_line_boundary_index
     builds: list[tuple[bytes, int, int]] = []
 
     def counted(content: bytes, start: int, end: int):
         builds.append((content, start, end))
         return original(content, start, end)
 
-    monkeypatch.setattr(lsp_positions, "_build_line_boundary_index", counted)
+    monkeypatch.setattr(lsp_positions, "build_line_boundary_index", counted)
     line = ("a😀" * 10_000).encode()
     content = b"first\n" + line
     document = SourceDocument.from_bytes("large.py", content)
@@ -242,16 +242,16 @@ def test_repeated_large_second_line_reuses_index_without_copying_content(monkeyp
     assert len(builds) == 1
     assert builds[0][0] is document.content
     assert builds[0][1:] == (6, len(content))
-    with lsp_positions._LINE_BOUNDARY_CACHE_LOCK:
-        keys = tuple(lsp_positions._LINE_BOUNDARY_INDEXES)
-        index = next(iter(lsp_positions._LINE_BOUNDARY_INDEXES.values()))
+    with lsp_positions.LINE_BOUNDARY_CACHE_LOCK:
+        keys = tuple(lsp_positions.LINE_BOUNDARY_INDEXES)
+        index = next(iter(lsp_positions.LINE_BOUNDARY_INDEXES.values()))
     assert keys == ((document.source_sha256, 1),)
     assert not any(isinstance(part, bytes) for key in keys for part in key)
     assert len(index.byte_offsets) <= 10_000 // 100
 
 
 def test_line_boundary_cache_is_bounded_and_thread_safe() -> None:
-    lsp_positions._clear_line_boundary_cache()
+    lsp_positions.clear_line_boundary_cache()
     documents = tuple(
         SourceDocument.from_bytes(f"line-{line}.py", f"{line}😀".encode())
         for line in range(200)
@@ -265,11 +265,11 @@ def test_line_boundary_cache_is_bounded_and_thread_safe() -> None:
         results = tuple(executor.map(convert, documents))
 
     assert results == (PositionRange(0, 1),) * 200
-    with lsp_positions._LINE_BOUNDARY_CACHE_LOCK:
-        assert len(lsp_positions._LINE_BOUNDARY_INDEXES) == 128
+    with lsp_positions.LINE_BOUNDARY_CACHE_LOCK:
+        assert len(lsp_positions.LINE_BOUNDARY_INDEXES) == 128
         assert all(
             isinstance(key[0], str) and isinstance(key[1], int)
-            for key in lsp_positions._LINE_BOUNDARY_INDEXES
+            for key in lsp_positions.LINE_BOUNDARY_INDEXES
         )
 
 

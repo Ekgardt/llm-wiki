@@ -1,0 +1,304 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/queue-reader-tasks-context.json",
+    "docs/modules/queue-reader-tasks.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/queue_reader_tasks.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/queue-reader-tasks-context.json",
+      "docs/modules/queue-reader-tasks.md",
+      "scripts/llm_wiki/queue_reader_tasks.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_progress.py",
+      "names": [
+        "QUEUE_SCHEMA_VERSION"
+      ],
+      "contract_sha256": "79a2c5f096934f895c7832bab6331aa13259f15bb322dfce5fdfcd4b8756a9a6",
+      "integration_tests": [
+        "tests/compile_call_controller_helpers.py",
+        "tests/compile_progress_admission_helpers.py",
+        "tests/test_compile_artifact_retention.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "sha256_bytes"
+      ],
+      "contract_sha256": "7d34a853c5a6f1be8b00805b2e865ac2a5ca5a6fe3ca141de97ebda61d2a85cf",
+      "integration_tests": [
+        "tests/modules/formats/test_primitives.py",
+        "tests/modules/formats/test_queue_payload.py",
+        "tests/modules/pyright_configuration/test_configuration.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_flow_walk_stops_when_its_caller_has.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_artifacts.py",
+      "names": [
+        "harden_owner_only",
+        "read_stable_owner_file",
+        "write_durable_file"
+      ],
+      "contract_sha256": "1aa13560819db14c85354c20dd1bf2ebf269f89a223190501fa48bd76e0e5f4e",
+      "integration_tests": [
+        "tests/modules/queue_artifacts/test_artifacts.py",
+        "tests/test_memory_queue.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_attempts.py",
+      "names": [
+        "apply_failure_state",
+        "attempt_histories",
+        "record_acknowledged_attempt",
+        "record_cancelled_attempt",
+        "record_failed_attempt"
+      ],
+      "contract_sha256": "5dfd940784a1eb0395fd4a89d23817c009c7908c92720d5566129151ffbd310c",
+      "integration_tests": [
+        "tests/modules/queue_attempts/test_attempts.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_contracts.py",
+      "names": [
+        "LeaseFenceError",
+        "MAX_RESULT_BYTES",
+        "QueueFailure",
+        "QueueLease",
+        "QueueOperationError",
+        "QueueTask",
+        "RestoreReceipt",
+        "ResultConflictError"
+      ],
+      "contract_sha256": "1b598e3b0ab899fe076b881ef84f25d1f49323bcd351fea3454572a9088baab4",
+      "integration_tests": [
+        "tests/test_capture_diagnostics.py",
+        "tests/test_memory_queue.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_database_contract.py",
+      "names": [
+        "QUEUE_V3_CONTRACT"
+      ],
+      "contract_sha256": "205311193a082af82090a2ab122a74c30fe31b2df1219c8cbb8cdee96e08e562",
+      "integration_tests": [
+        "tests/modules/queue_database_contract/test_contract.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_sources.py",
+      "names": [
+        "normalized_source_links"
+      ],
+      "contract_sha256": "d0b10f9f53a2b9b90c60d92081a78008b6592b94f1263b2815a729c3020cfaf2",
+      "integration_tests": [
+        "tests/modules/queue_sources/test_sources.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_store.py",
+      "names": [
+        "RETAINING_QUEUE_QUERIES",
+        "TERMINAL_STATES",
+        "V3_WORK_CLAIMABLE",
+        "age_filter_clause",
+        "check_claim_arguments",
+        "claim_task_filter",
+        "directory_holds_anything",
+        "register_source_reference",
+        "require_active",
+        "require_adopted_retry_policy",
+        "restore_from_export",
+        "unblock_in",
+        "utc_now",
+        "v3_dedupe_match",
+        "validated_listed_states",
+        "validated_payload_bytes"
+      ],
+      "contract_sha256": "92da43b38eed02d20b85e5a0319abb6429d59de6df2d5bba382a1ab73df24d01",
+      "integration_tests": [
+        "tests/test_a_redrive_carries_the_intent_it_was_for.py",
+        "tests/test_queue_lease_input_binding.py",
+        "tests/test_queue_v3_corruption.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_task_lineage.py",
+      "names": [
+        "require_complete_compile_attestation"
+      ],
+      "contract_sha256": "71db5db4f31ef0fabd7e98a45ffd4b9ffde2d8dc729e06d30806c38b800cab25",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_task_records.py",
+      "names": [
+        "task_record"
+      ],
+      "contract_sha256": "d2da075879451329feec4b9c20330e52d499346057ea1e8dcaecf3c191986a9d",
+      "integration_tests": [
+        "tests/modules/queue_task_records/test_records.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_timing.py",
+      "names": [
+        "as_utc",
+        "timestamp"
+      ],
+      "contract_sha256": "a0b786400560771d24ad9950559a3f4ccf999a083035209a233c16fcbe1e118e",
+      "integration_tests": [
+        "tests/modules/queue_attempts/test_attempts.py",
+        "tests/modules/queue_timing/test_timing.py",
+        "tests/test_a_failed_capture_does_not_block_other_ready_captures.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_validation.py",
+      "names": [
+        "check_result_operation",
+        "check_result_request",
+        "require_enqueue_arguments",
+        "require_positive_task_lease"
+      ],
+      "contract_sha256": "e783f58a8962a1e1879999e04f55b80ec4f6957501100234fea68f3addc3a708",
+      "integration_tests": [
+        "tests/modules/queue_validation/test_capture_checks.py",
+        "tests/modules/queue_validation/test_validation.py",
+        "tests/test_capture_terminal.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/test_one_file_one_bound.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_contracts.py",
+      "names": [
+        "OperationalDatabaseContract"
+      ],
+      "contract_sha256": "819cca1e291f921a6fb6e6e90a16fb4a05b0659e020227653689af60d484a1a8",
+      "integration_tests": [
+        "tests/modules/coordinator_validation/test_database.py",
+        "tests/modules/queue_database_contract/test_contract.py",
+        "tests/modules/queue_migration_plan/test_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_transactions.py",
+      "names": [
+        "begin_immediate"
+      ],
+      "contract_sha256": "fb9ecde177ce133dd8e6e34a67214ca0c051a02d758e8611dac84b568d955373",
+      "integration_tests": [
+        "tests/test_sqlite_transaction_compatibility.py"
+      ]
+    },
+    {
+      "provider": "scripts/operational_ownership.py",
+      "names": [
+        "OwnerLease"
+      ],
+      "contract_sha256": "7e48dfb05434c2c448a04b79b773b33da0786c3efbd0e2f3c100df849b1f3d0d",
+      "integration_tests": [
+        "tests/operational_ownership_helpers.py",
+        "tests/test_a_breadcrumb_has_one_publication_owner.py",
+        "tests/test_a_capture_keeps_its_claim_while_it_asks.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/a_publication_that_stopped_half_way_is_finished_helpers.py",
+        "tests/capture_intent_adoption_helpers.py",
+        "tests/capture_terminal_helpers.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

@@ -11,17 +11,17 @@ trimmer only knows the dedupe and reducer maps.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import integration_adapter  # noqa: E402
+import project_checkpoint  # noqa: E402
 from project_journal import CheckpointReducer  # noqa: E402
 
-NOW = datetime(2026, 8, 26, 21, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 26, 21, 0, tzinfo=UTC)
 
 
 def _items(count: int) -> list[dict[str, object]]:
@@ -45,17 +45,37 @@ def _reducers() -> dict[str, CheckpointReducer]:
 
 
 def test_a_short_queue_still_waits_for_its_debounce_window() -> None:
-    index, decision, waiting = integration_adapter._debounce_due(
+    index, decision, waiting = project_checkpoint.debounce_due(
         _items(5), _reducers()
     )
     assert (index, decision, waiting) == (None, None, True)
 
 
 def test_the_queue_checkpoints_once_it_would_outgrow_the_state_file() -> None:
-    count = integration_adapter.MAX_PENDING_CHECKPOINT_ITEMS
-    index, decision, waiting = integration_adapter._debounce_due(
+    count = project_checkpoint.MAX_PENDING_CHECKPOINT_ITEMS
+    index, decision, waiting = project_checkpoint.debounce_due(
         _items(count), _reducers()
     )
     assert waiting is False
     assert index == count - 1
     assert decision is not None and decision.reason == "debounce_flush"
+
+
+def test_maintenance_time_releases_an_elapsed_quiet_queue():
+    items = _items(5)
+    index, decision, waiting = project_checkpoint.debounce_due(items, _reducers(), now=NOW + timedelta(days=1))
+    assert waiting is False and index == 4
+    assert decision.checkpoint_at == datetime.fromisoformat(str(items[-1]["occurred_at"]))
+
+
+def test_maintenance_time_does_not_flush_before_existing_debounce():
+    result = project_checkpoint.debounce_due(_items(5), _reducers(), now=NOW + timedelta(seconds=29))
+    assert result == (None, None, True)
+
+
+def test_maintenance_time_does_not_replace_a_later_event_time():
+    items = _items(5)
+    items[-1]["occurred_at"] = (NOW + timedelta(seconds=30)).isoformat()
+    index, decision, waiting = project_checkpoint.debounce_due(items, _reducers(), now=NOW - timedelta(days=1))
+    assert waiting is False and index == 4
+    assert decision.checkpoint_at == NOW + timedelta(seconds=30)

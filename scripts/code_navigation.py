@@ -47,7 +47,7 @@ from workspace_revision import (
 )
 
 
-class NavigationStatus(str, Enum):
+class NavigationStatus(str, Enum):  # noqa: UP042 - preserve existing Enum string and format behavior
     OK = "ok"
     PARTIAL = "partial"
     UNSUPPORTED = "unsupported"
@@ -57,7 +57,7 @@ class NavigationStatus(str, Enum):
     ERROR = "error"
 
 
-class ResolutionLabel(str, Enum):
+class ResolutionLabel(str, Enum):  # noqa: UP042 - preserve existing Enum string and format behavior
     LSP_CONFIRMED = "lsp_confirmed"
     GRAPH_CONFIRMED = "graph_confirmed"
     LSP_AND_GRAPH = "lsp_and_graph"
@@ -68,7 +68,7 @@ class ResolutionLabel(str, Enum):
     UNSUPPORTED = "unsupported"
 
 
-_CAPABILITY_DIRECTION: Mapping[Capability, str | None] = MappingProxyType(
+CAPABILITY_DIRECTION: Mapping[Capability, str | None] = MappingProxyType(
     {
         Capability.DEFINITIONS: None,
         Capability.REFERENCES: None,
@@ -85,8 +85,8 @@ _CAPABILITY_DIRECTION: Mapping[Capability, str | None] = MappingProxyType(
 # same 10 000 as mcp_server.MAX_NAVIGATION_GRAPH_FACTS (a hundred times the rows an
 # answer renders). The input bound predates measurement; review if a real symbol
 # reports truncated input.
-_MAX_NAVIGATION_FACTS = 10_000
-_MAX_NAVIGATION_INPUT_VALUES = 100_000
+MAX_NAVIGATION_FACTS = 10_000
+MAX_NAVIGATION_INPUT_VALUES = 100_000
 # The largest source navigation reads, as mcp_server.MAX_NAVIGATION_SOURCE_BYTES.
 _MAX_NAVIGATION_SOURCE_BYTES = 16 * 1024 * 1024
 # The per-session source-document cache (LRU): at most 128 documents and 16 MiB of
@@ -95,8 +95,8 @@ _MAX_NAVIGATION_SOURCE_BYTES = 16 * 1024 * 1024
 # overhead per document, 128 bytes per line span (a CPython tuple of two ints is
 # 56 + 2 x 28 = 112 bytes) and 4 bytes per retained character (CPython's widest string storage,
 # PEP 393), so it errs high. The two caps predate measurement.
-_MAX_SOURCE_DOCUMENT_CACHE_ENTRIES = 128
-_MAX_SOURCE_DOCUMENT_CACHE_BYTES = 16 * 1024 * 1024
+MAX_SOURCE_DOCUMENT_CACHE_ENTRIES = 128
+MAX_SOURCE_DOCUMENT_CACHE_BYTES = 16 * 1024 * 1024
 _SOURCE_DOCUMENT_CACHE_FIXED_BYTES = 512
 _SOURCE_DOCUMENT_LINE_SPAN_BYTES = 128
 _SOURCE_DOCUMENT_CACHE_CHARACTER_BYTES = 4  # PEP 393: the widest CPython str storage
@@ -123,14 +123,14 @@ def _index_revision_entries(
     return entries
 
 
-def _bounded_callback_values(
+def _bounded_callback_values(  # noqa: UP047 - preserve runtime TypeVar annotations
     values: Iterable[_T],
     *,
     deadline: float | None,
 ) -> tuple[tuple[_T, ...], bool]:
     iterator = iter(values)
     result: list[_T] = []
-    for _ in range(_MAX_NAVIGATION_INPUT_VALUES):
+    for _ in range(MAX_NAVIGATION_INPUT_VALUES):
         _check_deadline(deadline)
         try:
             value = next(iterator)
@@ -519,11 +519,11 @@ class NavigationInterruption(Exception):
     """Raised to stop a navigation attempt cleanly without partial publication."""
 
 
-class _RevisionMismatch(Exception):
+class RevisionMismatch(Exception):
     """Raised when bytes read inside an attempt do not match its revision."""
 
 
-class _AttemptDocuments(dict[str, SourceDocument | None]):
+class AttemptDocuments(dict[str, SourceDocument | None]):
     def __init__(
         self,
         touch: Callable[[tuple[str, str, int], SourceDocument], bool] | None = None,
@@ -659,7 +659,7 @@ def _provider_source(
     repository: RepositoryScope,
     uri: str,
 ) -> RepositorySource | None:
-    if isinstance(documents, _AttemptDocuments):
+    if isinstance(documents, AttemptDocuments):
         return documents.normalize_provider_source(repository, uri)
     return normalize_provider_uri(repository, uri)
 
@@ -730,7 +730,7 @@ def _consume_attempt_document(
     uri: str,
     document: SourceDocument | None,
 ) -> None:
-    if isinstance(documents, _AttemptDocuments) and document is not None:
+    if isinstance(documents, AttemptDocuments) and document is not None:
         documents.consume(uri, document)
 
 
@@ -751,7 +751,7 @@ def _bounded_source_size(size: object) -> bool:
 def _read_revision_bytes(
     source: RepositorySource, entry: RevisionEntry, deadline: float | None
 ) -> bytes:
-    """The recorded bytes of `source`, or `_RevisionMismatch` if they moved."""
+    """The recorded bytes of `source`, or `RevisionMismatch` if they moved."""
     try:
         _check_deadline(deadline)
         content = read_stable_bytes(
@@ -764,12 +764,12 @@ def _read_revision_bytes(
     except TimeoutError:
         raise
     except (OSError, ValueError) as exc:
-        raise _RevisionMismatch from exc
+        raise RevisionMismatch from exc
     _check_deadline(deadline)
     content_sha256 = hashlib_sha256(content)
     _check_deadline(deadline)
     if len(content) != entry.size or content_sha256 != entry.sha256:
-        raise _RevisionMismatch
+        raise RevisionMismatch
     return content
 
 
@@ -785,7 +785,7 @@ def _revision_document(
     return document
 
 
-def _byte_position(
+def byte_position(
     document: SourceDocument,
     byte_offset: int,
 ) -> tuple[int, int] | None:
@@ -899,7 +899,7 @@ def _cached_path_document(
     documents: dict[str, SourceDocument | None], path_key: str
 ) -> SourceDocument | None:
     document = documents[path_key]
-    if isinstance(documents, _AttemptDocuments) and document is not None:
+    if isinstance(documents, AttemptDocuments) and document is not None:
         documents.consume_document(document)
     return document
 
@@ -911,9 +911,9 @@ def _graph_candidate_location(
     deadline: float | None,
 ) -> NavigationLocation | None:
     _check_deadline(deadline)
-    start = _byte_position(document, location.range.byte_start)
+    start = byte_position(document, location.range.byte_start)
     _check_deadline(deadline)
-    end = _byte_position(document, location.range.byte_end)
+    end = byte_position(document, location.range.byte_end)
     _check_deadline(deadline)
     if start is None or end is None:
         return None
@@ -946,7 +946,7 @@ def _load_revision_document(
         raise
     except (OSError, UnicodeError, ValueError, RuntimeError, TypeError):
         if recorded_source:
-            raise _RevisionMismatch from None
+            raise RevisionMismatch from None
         return None, None
     return source, _load_revision_source(
         source,
@@ -956,7 +956,7 @@ def _load_revision_document(
     )
 
 
-def _validate_revision_anchor(
+def validate_revision_anchor(
     repository: RepositoryScope,
     anchor: SourceAnchor,
     revision_entries: Mapping[str, RevisionEntry],
@@ -1062,10 +1062,10 @@ class _DiagnosticNormalizer:
         self, diagnostics: tuple[LspDiagnostic, ...]
     ) -> tuple[tuple[NavigationDiagnostic, ...], bool]:
         deadline = self.ctx.deadline
-        self.partial = len(diagnostics) > _MAX_NAVIGATION_FACTS
-        for diagnostic in diagnostics[:_MAX_NAVIGATION_FACTS]:
+        self.partial = len(diagnostics) > MAX_NAVIGATION_FACTS
+        for diagnostic in diagnostics[:MAX_NAVIGATION_FACTS]:
             _check_deadline(deadline)
-            if self.fact_count >= _MAX_NAVIGATION_FACTS:
+            if self.fact_count >= MAX_NAVIGATION_FACTS:
                 self.partial = True
                 break
             self._add(diagnostic)
@@ -1107,14 +1107,14 @@ class _DiagnosticNormalizer:
             severity,
             diagnostic.code,
             diagnostic.message,
-            _dedupe_locations(tuple(related), deadline=self.ctx.deadline),
+            dedupe_locations(tuple(related), deadline=self.ctx.deadline),
             self.ctx.provenance,
         )
         return value, len(related)
 
     def _related(self, diagnostic: LspDiagnostic) -> list[NavigationLocation]:
         related: list[NavigationLocation] = []
-        remaining_related = _MAX_NAVIGATION_FACTS - self.fact_count - 1
+        remaining_related = MAX_NAVIGATION_FACTS - self.fact_count - 1
         if len(diagnostic.related) > remaining_related:
             self.partial = True
         for value in diagnostic.related[:remaining_related]:
@@ -1153,7 +1153,7 @@ def _location_provider(location: NavigationLocation) -> str:
     return "|".join(sorted({item.provider for item in location.provenance}))
 
 
-def _location_key(location: NavigationLocation) -> tuple[object, ...]:
+def location_key(location: NavigationLocation) -> tuple[object, ...]:
     return (
         location.path,
         location.range.byte_start,
@@ -1165,7 +1165,7 @@ def _location_key(location: NavigationLocation) -> tuple[object, ...]:
 
 def _location_tie_break(location: NavigationLocation) -> tuple[object, ...]:
     return (
-        *_location_key(location),
+        *location_key(location),
         location.line,
         location.character,
         (
@@ -1177,7 +1177,7 @@ def _location_tie_break(location: NavigationLocation) -> tuple[object, ...]:
     )
 
 
-def _dedupe_locations(
+def dedupe_locations(
     locations: tuple[NavigationLocation, ...],
     *,
     deadline: float | None = None,
@@ -1188,7 +1188,7 @@ def _dedupe_locations(
     _check_deadline(deadline)
     for location in ordered:
         _check_deadline(deadline)
-        key = _location_key(location)
+        key = location_key(location)
         if key not in result:
             result[key] = location
         _check_deadline(deadline)
@@ -1225,8 +1225,8 @@ def _merge_locations(
     *,
     deadline: float | None = None,
 ) -> tuple[tuple[NavigationLocation, ...], bool]:
-    lsp = _dedupe_locations(lsp_locations, deadline=deadline)
-    graph = _dedupe_locations(graph_locations, deadline=deadline)
+    lsp = dedupe_locations(lsp_locations, deadline=deadline)
+    graph = dedupe_locations(graph_locations, deadline=deadline)
     graph_by_span: dict[tuple[str, int, int], list[NavigationLocation]] = {}
     for location in graph:
         _check_deadline(deadline)
@@ -1245,11 +1245,11 @@ def _merge_locations(
     ]
     _check_deadline(deadline)
     merged = (*confirmed, *candidates)
-    truncated = len(merged) > _MAX_NAVIGATION_FACTS
-    return tuple(merged[:_MAX_NAVIGATION_FACTS]), truncated
+    truncated = len(merged) > MAX_NAVIGATION_FACTS
+    return tuple(merged[:MAX_NAVIGATION_FACTS]), truncated
 
 
-def _compute_revision(
+def compute_revision(
     repository: RepositoryScope,
     *,
     deadline: float | None,
@@ -1257,7 +1257,7 @@ def _compute_revision(
     return compute_workspace_revision(repository, deadline=deadline)
 
 
-def _compute_post_revision(
+def compute_post_revision(
     repository: RepositoryScope,
     expected: WorkspaceRevision,
     *,
@@ -1272,7 +1272,7 @@ def _compute_post_revision(
             return expected
     except (TypeError, ValueError):
         pass
-    return _compute_revision(repository, deadline=deadline)
+    return compute_revision(repository, deadline=deadline)
 
 
 def _require_session_binding(
@@ -1406,22 +1406,29 @@ class CodeNavigation:
     def _seed_source_documents(
         self,
         revision_entries: Mapping[str, RevisionEntry],
-    ) -> _AttemptDocuments:
-        documents = _AttemptDocuments(self._touch_source_document)
+    ) -> AttemptDocuments:
+        documents = AttemptDocuments(self._touch_source_document)
         with self._lock:
             if self._closed:
                 return documents
-            for key, document in self._source_document_cache.items():
-                if self._source_document_cache_key(
-                    key[0], document, revision_entries
-                ) == key:
-                    documents.seed(key[0], key, document)
+            self._seed_current_documents_locked(revision_entries, documents)
         return documents
+
+    def _seed_current_documents_locked(
+        self,
+        revision_entries: Mapping[str, RevisionEntry],
+        documents: AttemptDocuments,
+    ) -> None:
+        for key, document in self._source_document_cache.items():
+            if self._source_document_cache_key(
+                key[0], document, revision_entries
+            ) == key:
+                documents.seed(key[0], key, document)
 
     def _publish_source_documents(
         self,
         revision_entries: Mapping[str, RevisionEntry],
-        documents: _AttemptDocuments,
+        documents: AttemptDocuments,
     ) -> None:
         candidates = self._publishable_documents(revision_entries, documents)
         if not candidates:
@@ -1435,7 +1442,7 @@ class CodeNavigation:
     def _publishable_documents(
         self,
         revision_entries: Mapping[str, RevisionEntry],
-        documents: _AttemptDocuments,
+        documents: AttemptDocuments,
     ) -> dict[tuple[str, str, int], SourceDocument]:
         candidates: dict[tuple[str, str, int], SourceDocument] = {}
         for uri, document in documents.consumed.items():
@@ -1448,7 +1455,7 @@ class CodeNavigation:
         self, key: tuple[str, str, int], document: SourceDocument
     ) -> bool:
         retained = self._source_document_retained_bytes(key, document)
-        return retained <= _MAX_SOURCE_DOCUMENT_CACHE_BYTES
+        return retained <= MAX_SOURCE_DOCUMENT_CACHE_BYTES
 
     def _cache_source_document(self, key: tuple[str, str, int], document: SourceDocument) -> None:
         """Caller holds the lock."""
@@ -1470,8 +1477,8 @@ class CodeNavigation:
     def _evict_source_documents(self) -> None:
         """Caller holds the lock."""
         while (
-            len(self._source_document_cache) > _MAX_SOURCE_DOCUMENT_CACHE_ENTRIES
-            or self._source_document_cache_bytes > _MAX_SOURCE_DOCUMENT_CACHE_BYTES
+            len(self._source_document_cache) > MAX_SOURCE_DOCUMENT_CACHE_ENTRIES
+            or self._source_document_cache_bytes > MAX_SOURCE_DOCUMENT_CACHE_BYTES
         ):
             old_key, old_document = self._source_document_cache.popitem(last=False)
             self._source_document_cache_bytes -= (
@@ -1666,11 +1673,11 @@ class CodeNavigation:
         raw_candidates, input_truncated, resolver_failure = self._resolver_values(run)
         documents = self._seed_source_documents(run.revision_entries)
         candidates, filtered = _symbol_candidates(run, raw_candidates, documents)
-        candidates = _dedupe_locations(candidates, deadline=run.deadline)
+        candidates = dedupe_locations(candidates, deadline=run.deadline)
         _check_deadline(run.deadline)
-        truncated = len(candidates) > _MAX_NAVIGATION_FACTS
+        truncated = len(candidates) > MAX_NAVIGATION_FACTS
         candidates, resolution = _labeled_candidates(
-            candidates[:_MAX_NAVIGATION_FACTS], input_truncated
+            candidates[:MAX_NAVIGATION_FACTS], input_truncated
         )
         _check_deadline(run.deadline)
         run.prove_unchanged()
@@ -1697,7 +1704,7 @@ class CodeNavigation:
 
     def _resolver_values(
         self, run: _StructuralRun
-    ) -> tuple[tuple[NavigationLocation, ...], bool, NavigationStatus | None]:
+    ) -> tuple[tuple[NavigationLocation, ...], bool, _CallbackFailure | None]:
         """Bounded resolver output; a failure keeps whatever was already bounded."""
         if self._symbol_resolver is None:
             return (), False, None
@@ -1713,11 +1720,12 @@ class CodeNavigation:
             )
             _check_deadline(run.deadline)
         except TimeoutError:
-            return raw_candidates, input_truncated, NavigationStatus.TIMEOUT
+            return raw_candidates, input_truncated, _RESOLVER_TIMED_OUT
         except NavigationInterruption:
             raise
-        except Exception:
-            return raw_candidates, input_truncated, NavigationStatus.ERROR
+        except Exception as exc:
+            failure = _callback_error("symbol resolver failed", exc)
+            return raw_candidates, input_truncated, failure
         return raw_candidates, input_truncated, None
 
     def verify_edge(
@@ -1767,29 +1775,29 @@ class CodeNavigation:
         source: SourceAnchor,
         target: SourceAnchor,
         anchors_valid: bool,
-    ) -> tuple[bool | None, NavigationStatus | None]:
+    ) -> tuple[bool | None, _CallbackFailure | None]:
         if not anchors_valid or self._edge_verifier is None:
             return None, None
         return self._call_edge_verifier(run, source, target)
 
     def _call_edge_verifier(
         self, run: _StructuralRun, source: SourceAnchor, target: SourceAnchor
-    ) -> tuple[bool | None, NavigationStatus | None]:
+    ) -> tuple[bool | None, _CallbackFailure | None]:
         try:
             _check_deadline(run.deadline)
             value = self._edge_verifier(source, target, run.repository, run.deadline)
             _check_deadline(run.deadline)
             _require_instance(value, bool, "edge verifier result must be boolean")
         except TimeoutError:
-            return None, NavigationStatus.TIMEOUT
+            return None, _VERIFIER_TIMED_OUT
         except NavigationInterruption:
             raise
-        except Exception:
-            return None, NavigationStatus.ERROR
+        except Exception as exc:
+            return None, _callback_error("edge verifier failed", exc)
         return value, None
 
     def _confirmed_edge(
-        self, run: _StructuralRun, target: SourceAnchor, documents: _AttemptDocuments
+        self, run: _StructuralRun, target: SourceAnchor, documents: AttemptDocuments
     ) -> NavigationResult:
         provenance = _graph_provenance("edge_verification")
         location = NavigationLocation(
@@ -1870,12 +1878,33 @@ _COVERAGE_STATUS: Mapping[str, NavigationStatus] = MappingProxyType(
         "not_ready": NavigationStatus.NOT_READY,
     }
 )
-_VERIFIER_WARNINGS: Mapping[NavigationStatus, str] = MappingProxyType(
-    {
-        NavigationStatus.TIMEOUT: "edge verifier timed out",
-        NavigationStatus.ERROR: "edge verifier failed",
-    }
-)
+
+
+@dataclass(frozen=True, slots=True)
+class _CallbackFailure:
+    """A structural callback that did not answer: its status and the warning saying why."""
+
+    status: NavigationStatus
+    warning: str
+
+
+_RESOLVER_TIMED_OUT = _CallbackFailure(NavigationStatus.TIMEOUT, "symbol resolver timed out")
+_VERIFIER_TIMED_OUT = _CallbackFailure(NavigationStatus.TIMEOUT, "edge verifier timed out")
+
+
+def _callback_error(prefix: str, error: Exception) -> _CallbackFailure:
+    """An error answer whose warning names the class of the callback's exception.
+
+    `symbol resolver failed` alone dropped the exception. Its message stays out:
+    a callback's exception text may quote any path or value, and no callback text
+    crosses this boundary (`test_callback_exceptions_are_redacted_at_every_boundary`).
+    See `docs/research/2026-09-28-a-check-names-its-cause.md`.
+    """
+    return _CallbackFailure(NavigationStatus.ERROR, _failure_text(prefix, error))
+
+
+def _failure_text(prefix: str, error: BaseException) -> str:
+    return f"{prefix}: {type(error).__name__}"
 _SYMBOL_MESSAGES: Mapping[str, str] = MappingProxyType(
     {
         "revision_timeout": "symbol revision computation timed out",
@@ -1948,7 +1977,7 @@ def _location_outcome(
     )
 
 
-def _guarded_provider_call(
+def _guarded_provider_call(  # noqa: UP047 - preserve runtime TypeVar annotations
     call: Callable[[], _T],
     fallback: Callable[[], _T],
     deadline: float,
@@ -2056,7 +2085,7 @@ def _fit_fact_budget(
 ) -> tuple[tuple[NavigationLocation, ...], bool]:
     """Locations that still fit after the diagnostics took their share of the fact limit."""
     diagnostic_fact_count = sum(1 + len(diagnostic.related) for diagnostic in diagnostics)
-    remaining_locations = max(0, _MAX_NAVIGATION_FACTS - diagnostic_fact_count)
+    remaining_locations = max(0, MAX_NAVIGATION_FACTS - diagnostic_fact_count)
     if len(locations) > remaining_locations:
         return locations[:remaining_locations], True
     return locations, False
@@ -2105,7 +2134,7 @@ def _require_unchanged_entry(
     if source_entry is None or source_entry.sha256 is None:
         return
     if source_entry.size != len(document.content) or source_entry.sha256 != source_sha256:
-        raise _RevisionMismatch
+        raise RevisionMismatch
 
 
 def _entry_binds(
@@ -2193,7 +2222,7 @@ class _QueryAttempts:
     def _revision(self) -> WorkspaceRevision:
         try:
             _check_deadline(self.deadline)
-            revision = _compute_revision(self.navigation._repository, deadline=self.deadline)
+            revision = compute_revision(self.navigation._repository, deadline=self.deadline)
             _check_deadline(self.deadline)
         except TimeoutError:
             raise _Finished(
@@ -2221,7 +2250,7 @@ class _QueryAttempts:
                     with_provider=True,
                 )
             ) from None
-        except _RevisionMismatch:
+        except RevisionMismatch:
             if attempt == 0:
                 raise _Retry from None
             raise _Finished(
@@ -2256,7 +2285,8 @@ class _QueryAttempt:
         self.validation_warning: str | None = None
         self.anchor: SourceAnchor | None = None
         self.raw_graph_locations: tuple[NavigationLocation, ...] = ()
-        self.structural_failed = False
+        # Empty while the structural fallback has not failed; then its warning.
+        self.structural_failure = ""
         self.structural_input_truncated = False
 
     def finish(self, status: NavigationStatus, warning: str, revision_after: str) -> NoReturn:
@@ -2417,8 +2447,8 @@ class _QueryAttempt:
             raise
         except NavigationInterruption:
             raise
-        except Exception:
-            self.structural_failed = True
+        except Exception as exc:
+            self.structural_failure = _failure_text("structural fallback failed", exc)
 
     def _provider_facts(
         self, outcome: _ProviderOutcome, encoding: object, lsp_provenance: tuple[Provenance, ...]
@@ -2491,7 +2521,7 @@ class _QueryAttempt:
                 (partial_locations, "provider locations partially filtered"),
                 (partial_diagnostics, "provider diagnostics partially filtered"),
                 (partial_hover, "provider hover range was filtered"),
-                (self.structural_failed, "structural fallback failed"),
+                (self.structural_failure, self.structural_failure),
                 (self.structural_input_truncated, "structural callback input bound reached"),
                 (partial_graph, "structural candidates partially filtered"),
             )),
@@ -2528,7 +2558,7 @@ class _QueryAttempt:
         _check_deadline(self.deadline)
         try:
             _check_deadline(self.deadline)
-            after_revision = _compute_post_revision(
+            after_revision = compute_post_revision(
                 self.navigation._repository,
                 self.before_revision,
                 deadline=self.deadline,
@@ -2696,7 +2726,7 @@ class _StructuralRun:
         prior = self.prior_revision
         try:
             _check_deadline(self.deadline)
-            self.before = _compute_revision(self.navigation._repository, deadline=self.deadline)
+            self.before = compute_revision(self.navigation._repository, deadline=self.deadline)
             _check_deadline(self.deadline)
         except TimeoutError:
             self.finish(NavigationStatus.TIMEOUT, self.messages["revision_timeout"], prior, prior)
@@ -2728,7 +2758,7 @@ class _StructuralRun:
         before = self.revision_before
         try:
             _check_deadline(self.deadline)
-            after = _compute_post_revision(
+            after = compute_post_revision(
                 self.navigation._repository,
                 self.before,
                 deadline=self.deadline,
@@ -2757,7 +2787,7 @@ class _StructuralRun:
 def _symbol_candidates(
     run: _StructuralRun,
     raw_candidates: tuple[NavigationLocation, ...],
-    documents: _AttemptDocuments,
+    documents: AttemptDocuments,
 ) -> tuple[tuple[NavigationLocation, ...], bool]:
     try:
         return _normalize_structural_locations(
@@ -2775,7 +2805,7 @@ def _symbol_candidates(
             run.revision_before,
             run.revision_before,
         )
-    except _RevisionMismatch:
+    except RevisionMismatch:
         run.changed("symbol target changed during resolution", run.revision_before)
 
 
@@ -2794,7 +2824,7 @@ def _labeled_candidates(
 
 
 def _symbol_warnings(
-    resolver_failure: NavigationStatus | None,
+    resolver_failure: _CallbackFailure | None,
     filtered: bool,
     input_truncated: bool,
     truncated: bool,
@@ -2802,8 +2832,7 @@ def _symbol_warnings(
 ) -> tuple[str, ...]:
     none_found = not candidates and resolver_failure is None
     return _flagged((
-        (resolver_failure is NavigationStatus.TIMEOUT, "symbol resolver timed out"),
-        (resolver_failure is NavigationStatus.ERROR, "symbol resolver failed"),
+        (resolver_failure is not None, _failure_warning(resolver_failure)),
         (filtered, "symbol candidates partially filtered"),
         (input_truncated, "symbol callback input bound reached"),
         (truncated, "symbol candidate limit reached"),
@@ -2812,13 +2841,19 @@ def _symbol_warnings(
     ))
 
 
+def _failure_warning(failure: _CallbackFailure | None) -> str:
+    if failure is None:
+        return ""
+    return failure.warning
+
+
 def _symbol_status(
-    resolver_failure: NavigationStatus | None,
+    resolver_failure: _CallbackFailure | None,
     candidates: tuple[NavigationLocation, ...],
     warnings: tuple[str, ...],
 ) -> NavigationStatus:
     if resolver_failure is not None and not candidates:
-        return resolver_failure
+        return resolver_failure.status
     if len(candidates) == 1 and not warnings:
         return NavigationStatus.OK
     return NavigationStatus.PARTIAL
@@ -2828,13 +2863,13 @@ def _edge_anchors_valid(
     run: _StructuralRun,
     source: SourceAnchor,
     target: SourceAnchor,
-    documents: _AttemptDocuments,
+    documents: AttemptDocuments,
 ) -> bool:
     try:
-        source_valid = _validate_revision_anchor(
+        source_valid = validate_revision_anchor(
             run.repository, source, run.revision_entries, documents, deadline=run.deadline
         )
-        target_valid = _validate_revision_anchor(
+        target_valid = validate_revision_anchor(
             run.repository, target, run.revision_entries, documents, deadline=run.deadline
         )
     except TimeoutError:
@@ -2844,13 +2879,13 @@ def _edge_anchors_valid(
             run.revision_before,
             run.revision_before,
         )
-    except _RevisionMismatch:
+    except RevisionMismatch:
         run.changed("edge target changed during verification", run.revision_before)
     return source_valid and target_valid
 
 
 def _require_edge_proof(
-    run: _StructuralRun, anchors_valid: bool, verifier_failure: NavigationStatus | None
+    run: _StructuralRun, anchors_valid: bool, verifier_failure: _CallbackFailure | None
 ) -> None:
     if not anchors_valid:
         run.finish(
@@ -2861,8 +2896,8 @@ def _require_edge_proof(
         )
     if verifier_failure is not None:
         run.finish(
-            verifier_failure,
-            _VERIFIER_WARNINGS[verifier_failure],
+            verifier_failure.status,
+            verifier_failure.warning,
             run.revision_before,
             run.revision_after,
         )

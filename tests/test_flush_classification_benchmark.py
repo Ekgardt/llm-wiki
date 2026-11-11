@@ -12,6 +12,7 @@ BENCHMARK = ROOT / "benchmark"
 if str(BENCHMARK) not in sys.path:
     sys.path.insert(0, str(BENCHMARK))
 
+import build_flush_corpus  # noqa: E402
 import run_flush_classification as stand  # noqa: E402
 
 
@@ -199,12 +200,6 @@ def test_an_unknown_schema_version_is_refused(tmp_path):
 def test_the_corpus_builder_skips_the_memory_s_own_provider_calls(tmp_path: Path) -> None:
     """39 of the 40 live cases were `claude -p` calls of the classifier itself (2026-09-23)."""
     import json as _json
-    import sys as _sys
-
-    benchmark = Path(__file__).resolve().parent.parent / "benchmark"
-    if str(benchmark) not in _sys.path:
-        _sys.path.insert(0, str(benchmark))
-    import build_flush_corpus
 
     own = tmp_path / "a" / "own.jsonl"
     held = tmp_path / "a" / "held.jsonl"
@@ -215,53 +210,19 @@ def test_the_corpus_builder_skips_the_memory_s_own_provider_calls(tmp_path: Path
     assert build_flush_corpus._transcripts(tmp_path, 10) == [held]
 
 
-def _builder():
-    benchmark = Path(__file__).resolve().parent.parent / "benchmark"
-    if str(benchmark) not in sys.path:
-        sys.path.insert(0, str(benchmark))
-    import build_flush_corpus
-
-    return build_flush_corpus
 
 
-SESSION = "user: WAL or rollback?\n\nassistant: Rollback journal with synchronous FULL, because WAL breaks on network disks."
 
 
-def test_a_quote_the_transcript_does_not_carry_voids_the_reading():
-    """An invented passage is not a wrong label; it is no label at all."""
-    builder = _builder()
-    invented = '{"quote": "We chose WAL for its speed.", "keeps": "much"}'
-    verbatim = '{"quote": "Rollback journal with   synchronous FULL, because WAL", "keeps": "much"}'
-
-    assert builder.parse_quote_reading(invented, SESSION).tier is None
-    assert builder.parse_quote_reading(verbatim, SESSION).tier == "major"
-    assert builder.parse_quote_reading('{"quote": "", "keeps": "nothing"}', SESSION).tier == "ok"
 
 
-def test_a_stitched_quote_with_one_real_sentence_is_grounded():
-    """Four of seven voided quotes on 2026-09-23 joined two real, non-adjacent sentences."""
-    builder = _builder()
-    stitched = "We chose WAL for its speed. Rollback journal with synchronous FULL, because WAL breaks on network disks."
-
-    assert builder.quote_is_verbatim(stitched, SESSION) is True
-    assert builder.quote_is_verbatim("synchronous FULL", SESSION) is False
-
-
-def test_commentary_after_the_json_does_not_lose_the_reading():
-    """One reading answered its JSON and then argued with itself in prose with braces."""
-    builder = _builder()
-    answer = '{"quote": "WAL breaks on network disks.", "keeps": "much"}\n\nWait — {the text} says "rollback".'
-
-    reading = builder.parse_quote_reading(answer, SESSION)
-
-    assert (reading.tier, reading.passage) == ("major", "WAL breaks on network disks.")
 
 
 def test_the_case_carries_the_text_the_product_classifies(tmp_path: Path):
     """Raw host JSONL is not what the classifier reads since 2026-09-06."""
     import flush_memory
 
-    builder = _builder()
+    builder = build_flush_corpus
     noise = {"type": "file-history-snapshot", "snapshot": {"x": "y" * 300}}
     said = {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "We chose lzma."}]}}
     path = tmp_path / "s.jsonl"
@@ -269,30 +230,93 @@ def test_the_case_carries_the_text_the_product_classifies(tmp_path: Path):
 
     excerpt = builder._excerpt(path)
 
-    assert excerpt == flush_memory._readable_evidence(path.read_text(encoding="utf-8")).strip()
+    assert excerpt == flush_memory.readable_evidence(path.read_text(encoding="utf-8")).strip()
     assert ("We chose lzma." in excerpt, "file-history-snapshot" in excerpt) == (True, False)
 
 
-def test_two_readings_that_disagree_make_a_contested_case(tmp_path: Path):
-    builder = _builder()
-    verdict = builder.Verdict(tier="major", kinds=("decision",), phrases=("rollback journal",))
 
-    agreed = builder.build_case(
-        tmp_path / "a.jsonl", 1, SESSION, verdict, builder.QuoteReading("major", "WAL breaks")
+
+
+
+def test_builder_keeps_label_aliases_and_actual_text_orchestration(tmp_path, monkeypatch):
+    import flush_corpus_labels as labels
+
+    builder = build_flush_corpus
+    assert builder.Verdict is labels.Verdict
+    assert builder.QuoteReading is labels.QuoteReading
+    assert builder.parse_verdict is labels.parse_verdict
+    assert builder.parse_quote_reading is labels.parse_quote_reading
+    assert builder.build_case is labels.build_case
+    assert builder.agreement is labels.agreement
+    path = tmp_path / 'held.jsonl'
+    message = 'We chose rollback journal for durable writes.'
+    path.write_text(json.dumps({'type': 'user', 'message': {'role': 'user', 'content': message}}) + '\n', encoding='utf-8')
+    monkeypatch.setattr(builder, '_judge', lambda text: '{"keeps":"much","kinds":["decision"],"phrases":["rollback journal"]}')
+    monkeypatch.setattr(builder, '_quote_reader', lambda text: json.dumps({'keeps': 'much', 'quote': message}))
+    case = builder._labelled_case(path, 1)
+    assert case['label_status'] == 'confirmed'
+    assert case['required_markers'] == ['rollback journal']
+    assert message in case['transcript']
+
+
+def test_builder_label_imports_work_from_a_neutral_directory(tmp_path):
+    import subprocess
+
+    result = subprocess.run(
+        [sys.executable, str(BENCHMARK / 'build_flush_corpus.py'), '--help'],
+        cwd=tmp_path, capture_output=True, text=True,
     )
-    contested = builder.build_case(
-        tmp_path / "b.jsonl", 2, SESSION, verdict, builder.QuoteReading(None, "We chose WAL")
+    assert result.returncode == 0, result.stderr
+    assert '--transcripts' in result.stdout
+
+
+def test_builder_namespace_import_shares_the_canonical_label_types(tmp_path):
+    import subprocess
+
+    program = (
+        'import sys; sys.path.insert(0, sys.argv[1]); '
+        'import benchmark.build_flush_corpus as builder; import flush_corpus_labels as labels; '
+        'assert builder.Verdict is labels.Verdict; assert builder.QuoteReading is labels.QuoteReading'
     )
-    summary = builder.agreement([agreed, contested])
+    result = subprocess.run(
+        [sys.executable, '-c', program, str(ROOT)], cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
-    assert (agreed["label_status"], contested["label_status"]) == ("confirmed", "contested")
-    assert contested["readings"] == {"rubric": "major", "quote": None, "passage": "We chose WAL"}
-    assert summary == {"confirmed": 1, "contested": 1, "kappa": None}
+
+def test_runner_keeps_scoring_aliases():
+    import flush_classification_metrics as metrics
+
+    assert stand.CaseOutcome is metrics.CaseOutcome
+    assert stand.score_case is metrics.score_case
+    assert stand.confirmed_cases is metrics.confirmed_cases
+    assert stand.label_state is metrics.label_state
+    assert stand.measure is metrics.measure
+    assert stand.evaluate is metrics.evaluate
 
 
-def test_the_readings_kappa_is_reported_from_thirty_cases():
-    builder = _builder()
-    pairs = [("major", "major"), ("ok", "ok"), ("minor", "major")] * 10
+def test_runner_executes_from_neutral_directory(tmp_path):
+    import subprocess
 
-    assert builder.cohens_kappa(pairs[:29]) is None
-    assert builder.cohens_kappa(pairs) == 0.5
+    result = subprocess.run(
+        [sys.executable, str(BENCHMARK / 'run_flush_classification.py'), '--json'],
+        cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)['gates']['passed'] is True
+
+
+def test_runner_namespace_import_shares_scoring_type(tmp_path):
+    import subprocess
+
+    program = (
+        'import sys; sys.path.insert(0, sys.argv[1]); '
+        'import benchmark.run_flush_classification as runner; '
+        'import flush_classification_metrics as metrics; '
+        'assert runner.CaseOutcome is metrics.CaseOutcome; '
+        'assert runner.run(runner.load_corpus(runner.CORPUS), runner.ADAPTERS["canned"])["gates"]["passed"]'
+    )
+    result = subprocess.run(
+        [sys.executable, '-c', program, str(ROOT)], cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr

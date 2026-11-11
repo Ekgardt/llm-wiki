@@ -1,0 +1,31 @@
+{
+  "source_commit": "38ef80e6",
+  "source_sha256": "f1b3a06532929fd7f4d68f8371278a2317933d6e02052489c7e29012352c9e43",
+  "definitions": {
+    "_rate": "2c282f5ad659ff595680df0ef1ddcea02c397e85bfbe978dd6bfdc685820309c",
+    "_counted": "31d8a367114cf900570dc040487add8cadbd79ed9d60b75ec25b7303eb9ca52b",
+    "_usable": "2dbc6428e2f2dcb9cda8e7089c6b9772c463cb6479ccd459eb1ca22915760da6",
+    "cohort_summary": "ed4c41edcdc0b214f498fd2e92afec2229058834548d426944a8e77b40160409",
+    "_supersession_metrics": "025356373390f066afca3f4e557436e90868584e61af7804b4cad0ec0028a72e",
+    "_paired": "e6a73bb839bfba78c9ba45c9671c50357cf8d0ae29d1219e1d823fa2441b1b02",
+    "_ageing_metrics": "8ea1ee1ba00d704151e88299f6ea6406ef1d7b01612518fad7ff6685a5cf43d6",
+    "_restore_metrics": "ce36d699a5554ee5bbe603413b16025b2a11ba0c311113d611efe693dec35d7a",
+    "_legacy_metrics": "179e1171b9685676d26e424f878f76bd197465537b2bfc5979d7283c99fb2aa2",
+    "_sessions_metrics": "cc6ff3f0e55b24597dd11fe72479333f29be3f99142702266da429344af51791",
+    "_METRIC_BUILDERS": "3a7c0563251842782cf0aaecefc8593a582fb300f1c51b446c90614ee3777b90",
+    "_phase_metrics": "05b9987954ba4e069b20c39518cabbaa9ba048025d1bb31c6a01c735feda190d",
+    "_gate_rows": "b9d583c59bdda9cb3e0da77ad50a131e548a2d3e3617f749d569f076f1d4056e",
+    "_rate_gate": "51a32924bbe86645df75f4c074a499a508df45c0c15a06994502571f9b4cf02b",
+    "_session_gates": "9e1d958b3a6809939cea3709990a8c9411e352c401fbf920f097b4158122db2d",
+    "_forgetting_gates": "70a98635dfce67dc7ecb6aff3d969482047cb6f312cc0db867d437f0c67afb5c",
+    "_reprieve_gate": "2851f2e2e6397c800474290f84577bc0cd339534ab87e62df9a92a0178565a78",
+    "_restore_gates": "d56fc6aca091278faa8bf34e694808ee02ff67b2993e81ec2e527156aade2821",
+    "_legacy_gates": "6e9180cc3c432dba6bccba8253fdd5fe0a7db345c9681e473c960aeb53935564",
+    "_GATE_BUILDERS": "6080fadbbbc24b490b9e8bc2c03e2b2707a6062449b5f2edc1b03eda0612bf60",
+    "_gates_for": "19b7fa7cf3c2574fd19c6895c4de12f5cd553ca4959d0b2066ae827c9afaae4a",
+    "_all_metrics": "726b67e8303f9b7abe2647e2a7c844e39405f9b31d886e860654bf7479fd1aca",
+    "_gate_records": "9e760d01f0b186074890cd0686c0d3144d1456d7813c793cf17c092e7e1ba907",
+    "_errored": "cfccabfbd2f6f0da629ce6fab3e6f14a754dc67b3fb372da2d8d7ff286bd13bf"
+  },
+  "ast_format": "Python 3.14 ast.dump(include_attributes=False)"
+}

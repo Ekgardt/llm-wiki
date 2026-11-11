@@ -44,7 +44,7 @@ def test_a_directory_inside_the_vault_is_not_a_project(tmp_path: Path, relative:
     inside.mkdir(parents=True, exist_ok=True)
 
     with pytest.raises(project_state.NotAProject, match=message):
-        project_state._compute_slug(inside, vault / "knowledge" / "projects")
+        project_state.compute_slug(inside, vault / "knowledge" / "projects")
 
 
 def test_a_direct_child_of_the_platform_temp_directory_is_not_a_project(tmp_path: Path, monkeypatch) -> None:
@@ -56,7 +56,7 @@ def test_a_direct_child_of_the_platform_temp_directory_is_not_a_project(tmp_path
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(fake_temp))
 
     with pytest.raises(project_state.NotAProject, match="temporary directory"):
-        project_state._compute_slug(provider, vault / "knowledge" / "projects")
+        project_state.compute_slug(provider, vault / "knowledge" / "projects")
 
 
 def test_a_deeper_temp_tree_is_left_alone(tmp_path: Path, monkeypatch) -> None:
@@ -67,7 +67,7 @@ def test_a_deeper_temp_tree_is_left_alone(tmp_path: Path, monkeypatch) -> None:
     deep.mkdir(parents=True)
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(fake_temp))
 
-    assert project_state._compute_slug(deep, vault / "knowledge" / "projects") == "demo"
+    assert project_state.compute_slug(deep, vault / "knowledge" / "projects") == "demo"
 
 
 def test_the_home_directory_is_not_a_project(tmp_path: Path, monkeypatch) -> None:
@@ -77,7 +77,7 @@ def test_the_home_directory_is_not_a_project(tmp_path: Path, monkeypatch) -> Non
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
 
     with pytest.raises(project_state.NotAProject, match="home directory"):
-        project_state._compute_slug(home, vault / "knowledge" / "projects")
+        project_state.compute_slug(home, vault / "knowledge" / "projects")
 
 
 def test_the_refusal_is_a_value_error_every_caller_already_catches() -> None:

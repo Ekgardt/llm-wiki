@@ -12,6 +12,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import compile_receipts
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import claim_tree_manifest  # noqa: E402
@@ -40,8 +42,8 @@ def test_the_claim_readers_share_one_file_set_and_it_has_no_journal(tmp_path: Pa
     for name in ("context.md", "journal.md", "state.md", "other.md"):
         (project / name).write_text("---\ntype: project-state\n---\n# X\n", encoding="utf-8")
     projects = tmp_path / "knowledge" / "projects"
-    assert [p.name for p in lint_memory._project_claim_pages(projects)] == ["context.md", "state.md"]
-    assert sorted(p.name for p in claims._project_pages(projects)) == ["context.md", "state.md"]
+    assert [p.name for p in lint_memory.project_claim_pages(projects)] == ["context.md", "state.md"]
+    assert sorted(p.name for p in claims.project_pages(projects)) == ["context.md", "state.md"]
 
 
 def test_a_journal_past_every_cap_no_longer_stops_a_claim_rebuild(tmp_path: Path) -> None:
@@ -61,11 +63,11 @@ def test_every_reader_of_a_knowledge_page_shares_one_ceiling() -> None:
     """Audit M4: the family, not the pair — one ceiling declared in bounded_io."""
     import access_tracking
     import bounded_io
-    import compile_memory
     import corpus_snapshot
+    import generation_search
     import rebuild_memory_index
     import repair_backlinks
-    import search_memory
+    from llm_wiki import compile_pipeline_apply
 
     ceilings = {
         "journal": project_journal.MAX_JOURNAL_BYTES,
@@ -73,9 +75,8 @@ def test_every_reader_of_a_knowledge_page_shares_one_ceiling() -> None:
         "guardrails": claim_tree_manifest.MAX_GUARDRAIL_SOURCE_FILE_BYTES,
         "claims": claims.MAX_CLAIM_PAGE_BYTES,
         "lint": lint_memory.MAX_LINT_PAGE_BYTES,
-        "corpus": corpus_snapshot.MAX_CORPUS_FILE_BYTES,
-        "search": search_memory.MAX_PAGE_BYTES,
-        "after_image": compile_memory.MAX_AFTER_IMAGE_BYTES,
+        "search": generation_search.MAX_PAGE_BYTES,
+        "after_image": compile_pipeline_apply.MAX_AFTER_IMAGE_BYTES,
         "index": rebuild_memory_index.MAX_PAGE_BYTES,
         "backlinks": repair_backlinks.MAX_PAGE_BYTES,
         "access": access_tracking.MAX_ACCESS_PAGE_BYTES,
@@ -83,3 +84,8 @@ def test_every_reader_of_a_knowledge_page_shares_one_ceiling() -> None:
 
     assert set(ceilings.values()) == {bounded_io.MAX_KNOWLEDGE_PAGE_BYTES}
     assert bounded_io.MAX_KNOWLEDGE_PAGE_BYTES == 8 * 1024 * 1024
+    # The corpus also reads immutable daily evidence, whose separate budget is
+    # deliberately larger. The page writer remains in the exact family above.
+    assert corpus_snapshot.MAX_CORPUS_FILE_BYTES == max(
+        bounded_io.MAX_KNOWLEDGE_PAGE_BYTES, compile_receipts.MAX_DAILY_BYTES
+    )

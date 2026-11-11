@@ -6,9 +6,9 @@ from __future__ import annotations
 
 import os
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-import scheduled_nightly
+import nightly_budget
 
 
 def _git(root, *arguments, env=None) -> None:
@@ -26,6 +26,6 @@ def test_a_commit_made_long_ago_arrives_when_head_moves(tmp_path) -> None:
     _git(tmp_path, "checkout", "-q", "-")
     _git(tmp_path, "merge", "-q", "--ff-only", "incoming")
 
-    arrived = datetime.fromisoformat(scheduled_nightly.head_arrival_time(tmp_path))
+    arrived = datetime.fromisoformat(nightly_budget.head_arrival_time(tmp_path))
 
-    assert datetime.now(timezone.utc) - arrived < timedelta(minutes=5)
+    assert datetime.now(UTC) - arrived < timedelta(minutes=5)

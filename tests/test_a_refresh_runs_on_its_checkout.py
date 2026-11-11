@@ -30,14 +30,14 @@ def test_each_worktree_is_refreshed_from_its_root(tmp_path: Path, monkeypatch) -
         spawned.append(args)
         return 4242
 
-    monkeypatch.setattr(memory_state, "STATE_ROOT", tmp_path, raising=False)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     monkeypatch.setattr(memory_state, "spawn_detached", spawn)
-    monkeypatch.setattr(mcp_server, "_REFRESH_REQUESTED", {})
+    monkeypatch.setattr("llm_wiki.mcp_server_architecture.REFRESH_REQUESTED", {})
     first, second = _checkout(tmp_path, "main"), _checkout(tmp_path, "feature")
 
     answers = [
-        mcp_server._request_repository_refresh(first),
-        mcp_server._request_repository_refresh(second),
+        mcp_server.request_repository_refresh(first),
+        mcp_server.request_repository_refresh(second),
     ]
 
     assert (answers, [args[-1] for args in spawned]) == (

@@ -28,7 +28,7 @@ that is not the symbol the line belongs to.
    and `fresh_positions` keeps the *first* definition of a bare name
    (`setdefault`). With `A.run` and `B.run` in a stale file, the snippet for
    `B.run` is the source of `A.run`, marked `precision: "exact"`. The same
-   `setdefault` lets a method that comes first shadow a module-level function of
+   `setdefault` lets a method that comes first hide a module-level function of
    the same name, in both the span and the line tables.
 
 ## Sources

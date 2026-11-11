@@ -26,14 +26,14 @@ def test_a_decision_answer_says_it_fell_back(monkeypatch) -> None:
     import search_memory
 
     monkeypatch.setattr(search_memory, "search", _fake_search)
-    data, _clamped = mcp_server._tool_get_decisions({"query": "choice"}, time.monotonic() + 30)
-    quality = mcp_server._quality_of_results("get_decisions", data, {}, False)
+    data, _clamped = mcp_server.tool_get_decisions({"query": "choice"}, time.monotonic() + 30)
+    quality = mcp_server.quality_of_results("get_decisions", data, {}, False)
 
     assert data["retrieval_trace"]["fallback_reason"] == "generation_vectors_unavailable"
     assert (quality.get("fallback"), [row["path"] for row in data["results"]]) == (
         True, ["knowledge/notes/a-decision.md"]
     )
-    assert mcp_server._answer_generation("get_decisions", data) == "generation-x"
+    assert mcp_server.answer_generation("get_decisions", data) == "generation-x"
 
 
 def _imports_search(node: ast.AST) -> bool:
@@ -46,13 +46,18 @@ def _calls_search_itself(function: ast.FunctionDef) -> bool:
     return any(map(_imports_search, ast.walk(function)))
 
 
+def _server_functions(source: Path) -> list[ast.FunctionDef]:
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    return [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+
+
 def _direct_search_callers() -> set[str]:
-    """Functions of mcp_server that import `search` from search_memory themselves."""
-    tree = ast.parse((SCRIPTS / "mcp_server.py").read_text(encoding="utf-8"))
-    functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+    """Functions of the MCP server parts that import `search` from search_memory themselves."""
+    sources = [SCRIPTS / "mcp_server.py", *sorted((SCRIPTS / "llm_wiki").glob("mcp_server_*.py"))]
+    functions = [function for source in sources for function in _server_functions(source)]
     return {function.name for function in functions if _calls_search_itself(function)}
 
 
 def test_every_tool_reaches_the_corpus_through_the_one_planner() -> None:
-    # The warm-up is not an answer; every tool goes through `_search_vault`.
-    assert _direct_search_callers() == {"_run_vault_search", "_warmup_pass"}
+    # The warm-up is not an answer; every tool goes through `search_vault`.
+    assert _direct_search_callers() == {"run_vault_search", "warmup_pass"}

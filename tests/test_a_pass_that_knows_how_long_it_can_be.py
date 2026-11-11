@@ -20,8 +20,9 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import llm_client  # noqa: E402
+import nightly_budget  # noqa: E402
 import scheduled_nightly  # noqa: E402
-import self_update  # noqa: E402
+from llm_wiki import step_budgets  # noqa: E402
 
 
 def test_one_call_is_every_candidate_in_turn(monkeypatch) -> None:
@@ -39,47 +40,49 @@ def test_an_operator_timeout_widens_the_margin_it_would_have_broken(monkeypatch)
     monkeypatch.setenv("MEMORY_LLM_PROVIDER", "claude")
     monkeypatch.setenv("MEMORY_LLM_TIMEOUT_S", "600")
 
-    margin = scheduled_nightly.provider_margin_seconds()
+    margin = nightly_budget.provider_margin_seconds()
 
-    assert margin == scheduled_nightly.STEP_START_MARGIN_SECONDS + 600
+    assert margin == nightly_budget.STEP_START_MARGIN_SECONDS + 600
 
 
 def test_a_step_that_stops_at_its_budget_leaves_room_for_the_last_call(monkeypatch) -> None:
     monkeypatch.delenv("MEMORY_LLM_PROVIDER", raising=False)
     monkeypatch.delenv("MEMORY_LLM_TIMEOUT_S", raising=False)
-    from fact_keys import DEFAULT_BUDGET_SECONDS
+    from llm_wiki.step_budgets import (
+        DEFAULT_BUDGET_SECONDS,
+    )
 
-    episodes = scheduled_nightly._episode_step()
-    keys = scheduled_nightly._fact_keys_step()
-    room = scheduled_nightly.provider_margin_seconds()
+    episodes = nightly_budget.episode_step()
+    keys = nightly_budget.fact_keys_step()
+    room = nightly_budget.provider_margin_seconds()
 
-    assert episodes.timeout - scheduled_nightly.EPISODE_BUDGET_SECONDS == room
+    assert episodes.timeout - nightly_budget.EPISODE_BUDGET_SECONDS == room
     assert keys.timeout - int(DEFAULT_BUDGET_SECONDS) == room
 
 
 def test_the_sum_counts_the_checkout_update_and_the_tail(monkeypatch) -> None:
     monkeypatch.delenv("MEMORY_COMPILE_WAIT_SECONDS", raising=False)
-    update = self_update.WORST_CASE_SECONDS
-    counted = scheduled_nightly.worst_case_seconds()
+    update = step_budgets.WORST_CASE_SECONDS
+    counted = nightly_budget.worst_case_seconds()
 
-    monkeypatch.setattr(self_update, "WORST_CASE_SECONDS", 0.0)
+    monkeypatch.setattr(step_budgets, "WORST_CASE_SECONDS", 0.0)
 
-    assert counted - scheduled_nightly.worst_case_seconds() == update
-    assert update == 1 * 120.0 + 600.0 + 16 * 60.0
+    assert counted - nightly_budget.worst_case_seconds() == update
+    assert update == 1 * 120.0 + 600.0 + 60.0 + 17 * 60.0
 
 
 def test_the_sum_follows_the_wait_the_operator_set(monkeypatch) -> None:
     monkeypatch.delenv("MEMORY_COMPILE_WAIT_SECONDS", raising=False)
-    default = scheduled_nightly.worst_case_seconds()
+    default = nightly_budget.worst_case_seconds()
 
     monkeypatch.setenv("MEMORY_COMPILE_WAIT_SECONDS", "3600")
-    widened = scheduled_nightly.worst_case_seconds()
+    widened = nightly_budget.worst_case_seconds()
 
-    assert widened - default == 3600 - scheduled_nightly.COMPILE_WAIT_SECONDS
+    assert widened - default == 3600 - nightly_budget.COMPILE_WAIT_SECONDS
 
 
 def test_a_pass_past_its_own_bound_stops_at_the_next_step() -> None:
-    run_step = scheduled_nightly._fenced_step_runner(None, deadline=0.0)
+    run_step = scheduled_nightly.fenced_step_runner(None, deadline=0.0)
 
     with pytest.raises(scheduled_nightly.PassBoundExceeded):
         run_step(["true"], print, "step", timeout=1)
@@ -90,7 +93,7 @@ def test_a_pass_inside_its_bound_runs_its_step(monkeypatch) -> None:
     monkeypatch.setattr(
         scheduled_nightly, "_run_step", lambda command, log, name, *, timeout: seen.append(name) or 0
     )
-    run_step = scheduled_nightly._fenced_step_runner(None, deadline=float("inf"))
+    run_step = scheduled_nightly.fenced_step_runner(None, deadline=float("inf"))
 
     assert run_step(["true"], print, "step", timeout=1) == 0
     assert seen == ["step"]

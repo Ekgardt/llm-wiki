@@ -36,7 +36,8 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 
 import repair_journal_gap as repair  # noqa: E402
 from project_journal import JOURNAL_HEADER, ProjectStore  # noqa: E402
-from test_project_journal import checkpoint_event  # noqa: E402
+
+from tests.project_journal_helpers import checkpoint_event  # noqa: E402
 
 
 @pytest.fixture

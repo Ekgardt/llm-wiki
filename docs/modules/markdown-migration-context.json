@@ -1,0 +1,220 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/formats.md",
+    "docs/modules/markdown-migration-context.json",
+    "docs/modules/markdown-migration.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/llm_wiki/formats/__init__.py",
+    "scripts/llm_wiki/markdown_migration.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/markdown-migration-context.json",
+      "docs/modules/markdown-migration.md",
+      "scripts/llm_wiki/markdown_migration.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/coordinator_invariants.py",
+      "names": [
+        "coordinator_migration_error",
+        "coordinator_v3_cross_table_invariant",
+        "coordinator_v3_row_counts"
+      ],
+      "contract_sha256": "dadb796055b1395a5a8023e535fabef8d921d15e1b4085382fb78e0e0507feca",
+      "integration_tests": [
+        "tests/modules/coordinator_invariants/test_integrity.py",
+        "tests/modules/coordinator_invariants/test_rows.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/coordinator_schema.py",
+      "names": [
+        "COORDINATOR_V3_CONTRACT",
+        "COORDINATOR_V3_TABLE_SQL",
+        "coordinator_v3_object_matches",
+        "coordinator_v3_schema_complete",
+        "coordinator_v3_statements",
+        "known_coordinator_index"
+      ],
+      "contract_sha256": "269f0ac0d459ec9aaa4f19bd16c0eaa895617748a095b1e052c7d4ce1cee33ce",
+      "integration_tests": [
+        "tests/modules/coordinator_schema/test_contract.py",
+        "tests/modules/coordinator_validation/test_database.py",
+        "tests/modules/ownership_rows/test_rows.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/coordinator_validation.py",
+      "names": [
+        "validate_coordinator_v3_database"
+      ],
+      "contract_sha256": "ab2e08ef73191e0598e9305281b91f0cb80e01cf5c023afc835e4830a6b6e81f",
+      "integration_tests": [
+        "tests/modules/coordinator_validation/test_database.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/formats/canonical.py",
+      "names": [
+        "sha256_bytes"
+      ],
+      "contract_sha256": "7d34a853c5a6f1be8b00805b2e865ac2a5ca5a6fe3ca141de97ebda61d2a85cf",
+      "integration_tests": [
+        "tests/modules/formats/test_primitives.py",
+        "tests/modules/formats/test_queue_payload.py",
+        "tests/modules/pyright_configuration/test_configuration.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/markdown_store.py",
+      "names": [
+        "harden_owner_only",
+        "parse_stored_timestamp"
+      ],
+      "contract_sha256": "ca3046fc8c242392f6b881b6ff5cebe7de8c47613bbf4f6cd9a27ad5223075b5",
+      "integration_tests": [
+        "tests/test_a_missing_file_is_not_a_moved_parent.py",
+        "tests/test_a_stray_candidate_is_retired_where_it_refuses.py",
+        "tests/test_an_append_keeps_only_what_it_added.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/reliability_defaults.py",
+      "names": [
+        "DEFAULTS"
+      ],
+      "contract_sha256": "f37296a83c15073e42a6cc8b86b88c2d19c548ac19a4ef6d0ca2f7af925c90c8",
+      "integration_tests": [
+        "tests/modules/queue_worker_state/test_values.py",
+        "tests/modules/reliability_defaults/test_defaults.py",
+        "tests/test_breadcrumb_decision.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_contracts.py",
+      "names": [
+        "MigrationStatement",
+        "quote_sqlite_identifier"
+      ],
+      "contract_sha256": "a5b605f3d21c8ed16a6b866f4f23d922a7de6973eb6f6ff53b48b1583e0118f0",
+      "integration_tests": [
+        "tests/modules/coordinator_validation/test_database.py",
+        "tests/modules/queue_database_contract/test_contract.py",
+        "tests/modules/queue_migration_plan/test_planning.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_io.py",
+      "names": [
+        "open_readonly_operational_db"
+      ],
+      "contract_sha256": "ee94d29558e055bbff68f8247575ed84ab6d84b559eebf24b508977d35bc91db",
+      "integration_tests": [
+        "tests/modules/coordinator_validation/test_database.py",
+        "tests/modules/sqlite_io/test_connections.py",
+        "tests/modules/sqlite_io/test_probe.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_migrations.py",
+      "names": [
+        "run_resumable_migration"
+      ],
+      "contract_sha256": "30c15d0705e81ce74eb63d8a47f06cfd6e6fad20e2e2b9d5f5c859505acd7c52",
+      "integration_tests": [
+        "tests/modules/sqlite_migrations/test_migrations.py",
+        "tests/test_sqlite_control_compatibility.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/sqlite_transactions.py",
+      "names": [
+        "begin_immediate"
+      ],
+      "contract_sha256": "fb9ecde177ce133dd8e6e34a67214ca0c051a02d758e8611dac84b568d955373",
+      "integration_tests": [
+        "tests/modules/queue_attempts/test_attempts.py",
+        "tests/modules/sqlite_transactions/test_transactions.py",
+        "tests/test_sqlite_transaction_compatibility.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "open_operational_db",
+        "validate_state_root"
+      ],
+      "contract_sha256": "3a57a18111cd0980447975f9084c937d0e2d6d93eea660e9a34cb71287190af1",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

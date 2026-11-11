@@ -42,9 +42,9 @@ def _symbol_pattern(symbol: str) -> re.Pattern[str]:
 
 def _graph_locations(directory: Path, symbol: str, deadline: float) -> list[dict]:
     """Where the symbol lives, from the active generation; empty when absent."""
-    from code_graph import _active_evidence_graph
+    from llm_wiki.code_graph_generation import active_evidence_graph
 
-    graph = _active_evidence_graph(directory)
+    graph = active_evidence_graph(directory)
     if graph is None:
         return []
     try:

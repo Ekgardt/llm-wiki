@@ -12,21 +12,25 @@ import sys
 from pathlib import Path
 
 import pytest
+import queue_core  # noqa: E402
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-import memory_queue  # noqa: E402
-from memory_queue import MemoryQueue, QueueFailure, QueueOperationError  # noqa: E402
+from queue_core import (  # noqa: E402
+    MemoryQueue,
+    QueueFailure,
+    QueueOperationError,
+)
 
 PAST = "2000-01-01T00:00:00+00:00"
 
 
 def _v3_queue(tmp_path: Path):
     candidate = tmp_path / "run" / "queue-v3.candidate.sqlite3"
-    memory_queue.initialize_queue_v3_candidate(candidate, source_v2=None)
-    return MemoryQueue._from_v3_candidate(candidate, state_root=tmp_path)
+    queue_core.initialize_queue_v3_candidate(candidate, source_v2=None)
+    return MemoryQueue.from_v3_candidate(candidate, state_root=tmp_path)
 
 
 def _killed(queue, payload: dict) -> str:
@@ -71,7 +75,7 @@ def test_a_lease_that_expired_on_the_last_attempt_leaves_a_dead_task(tmp_path):
     queue = _v3_queue(tmp_path)
     task_id = queue.enqueue("query", 1, {"case": "last"})
     queue.claim("worker")
-    _expire(queue, task_id, memory_queue.DEFAULTS.queue_max_attempts)
+    _expire(queue, task_id, queue_core.DEFAULTS.queue_max_attempts)
 
     queue.recover_expired_leases()
 

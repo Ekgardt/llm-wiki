@@ -9,7 +9,7 @@
 # Remote bootstrap requires LLM_WIKI_COMMIT to be a full commit OID.
 #
 # What this does:
-#   1. Checks prerequisites (Python 3.10+, uv, git)
+#   1. Checks prerequisites (Python 3.14, uv, git)
 #   2. Installs the locked production dependency baseline
 #   3. Runs a bounded production smoke
 #   4. Persists roots through the resumable install control plane
@@ -33,9 +33,17 @@ CALLER_CWD="$(pwd -P)"
 INSTALLER_CREATED_CLONE="${LLM_WIKI_INSTALLER_CREATED_CLONE:-0}"
 PROTECT_PUSH=0
 AGENTS_STOPPED=0
+REPLACE_CODEX_MCP=0
+CODEX_MCP_STATE=unverified
 SCHEDULER_MODE=native
 EXPECT_SCHEDULER_VALUE=0
 EXPECT_ADOPT_VALUE=0
+EXPECT_MODEL_VALUE=0
+EXPECT_COMPILE_BACKUP_VALUE=0
+COMPILE_BACKUP_IMAGE=""
+# `--model <name>`: the memory model, checked with one short call; without it the
+# installer asks on a terminal (docs/research/2026-09-29-the-installer-asks-which-model.md).
+MODEL_ARGS=()
 # `--adopt <resource-id>`: the operator takes over a file changed outside the installer as it
 # is now; see docs/research/2026-09-28-a-rollback-undoes-only-what-it-did.md.
 ADOPT_ARGS=()
@@ -51,6 +59,11 @@ fail()  { echo -e "${RED}[FAIL]${NC} $1"; exit 1; }
 # See docs/research/2026-09-17-the-installer-runs-on-the-bash-macos-ships.md.
 
 for argument in "$@"; do
+  if [[ "$EXPECT_COMPILE_BACKUP_VALUE" -eq 1 ]]; then
+    COMPILE_BACKUP_IMAGE="$argument"
+    EXPECT_COMPILE_BACKUP_VALUE=0
+    continue
+  fi
   if [[ "$EXPECT_SCHEDULER_VALUE" -eq 1 ]]; then
     SCHEDULER_MODE="$argument"
     EXPECT_SCHEDULER_VALUE=0
@@ -61,18 +74,33 @@ for argument in "$@"; do
     EXPECT_ADOPT_VALUE=0
     continue
   fi
+  if [[ "$EXPECT_MODEL_VALUE" -eq 1 ]]; then
+    MODEL_ARGS=(--model "$argument")
+    EXPECT_MODEL_VALUE=0
+    continue
+  fi
   case "$argument" in
     --protect-push) PROTECT_PUSH=1 ;;
     --confirm-all-agents-stopped) AGENTS_STOPPED=1 ;;
+    --replace-codex-mcp) REPLACE_CODEX_MCP=1 ;;
     --scheduler) EXPECT_SCHEDULER_VALUE=1 ;;
     --scheduler=*) SCHEDULER_MODE="${argument#--scheduler=}" ;;
     --adopt) EXPECT_ADOPT_VALUE=1 ;;
     --adopt=*) ADOPT_ARGS+=(--adopt "${argument#--adopt=}") ;;
+    --model) EXPECT_MODEL_VALUE=1 ;;
+    --model=*) MODEL_ARGS=(--model "${argument#--model=}") ;;
+    --compile-backup-image) EXPECT_COMPILE_BACKUP_VALUE=1 ;;
+    --compile-backup-image=*) COMPILE_BACKUP_IMAGE="${argument#--compile-backup-image=}" ;;
     *) fail "Unknown installer argument: $argument" ;;
   esac
 done
 [[ "$EXPECT_SCHEDULER_VALUE" -eq 0 ]] || fail "--scheduler requires native or cron"
 [[ "$EXPECT_ADOPT_VALUE" -eq 0 ]] || fail "--adopt requires a resource id"
+[[ "$EXPECT_MODEL_VALUE" -eq 0 ]] || fail "--model requires a model name"
+[[ "$EXPECT_COMPILE_BACKUP_VALUE" -eq 0 ]] || fail "--compile-backup-image requires an external image directory"
+if [[ -n "$COMPILE_BACKUP_IMAGE" && "$AGENTS_STOPPED" -ne 1 ]]; then
+  fail "--compile-backup-image requires --confirm-all-agents-stopped"
+fi
 case "$SCHEDULER_MODE" in
   native|cron) ;;
   *) fail "--scheduler requires native or cron" ;;
@@ -141,22 +169,29 @@ write_codex_mcp_block() {
 
 add_codex_mcp_block() {
   local vault_root="$1" config="$2"
-  local vault_json block
+  local block
   mkdir -p "$(dirname "$config")" || return 1
-  vault_json="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$vault_root")" || return 1
-  block="$(printf '%s\n' \
-    '[mcp_servers.llm-wiki]' \
-    'command = "uv"' \
-    "args = [\"run\", \"--locked\", \"--no-sync\", \"--directory\", $vault_json, \"python\", \"scripts/mcp_server.py\"]")"
+  block="$(uv run --locked --no-sync --directory "$vault_root" python scripts/codex_memory.py \
+    config-block --vault-root "$vault_root")" || return 1
   write_codex_mcp_block "$block" "$config"
 }
 
 codex_mcp_state_status() {
   case "$1" in
-    equivalent) return 0 ;;
-    conflict|invalid) return 2 ;;
-    *) return 1 ;;
+    equivalent|replaced) return 0 ;;
+    *) return 2 ;;
   esac
+}
+
+# This product's own earlier entry (`stale`) is rewritten to this vault's; an entry the
+# operator wrote is replaced only with --replace-codex-mcp. Either way the previous file
+# is kept as a verified preimage beside config.toml.
+# See docs/research/2026-09-28-a-check-names-its-cause.md.
+replace_codex_mcp() {
+  local vault_root="$1" config="$2" foreign=()
+  [ "${REPLACE_CODEX_MCP:-0}" -eq 1 ] && foreign=(--foreign)
+  uv run --locked --no-sync --directory "$vault_root" python "$vault_root/scripts/codex_memory.py" \
+    config-replace --config "$config" --vault-root "$vault_root" ${foreign[@]+"${foreign[@]}"}
 }
 
 configure_codex_mcp() {
@@ -169,6 +204,10 @@ configure_codex_mcp() {
     add_codex_mcp_block "$vault_root" "$config"
     return
   fi
+  case "$state" in
+    stale|conflict) state="$(replace_codex_mcp "$vault_root" "$config")" || return 1 ;;
+  esac
+  CODEX_MCP_STATE="$state"
   codex_mcp_state_status "$state"
 }
 
@@ -304,18 +343,6 @@ fi
 
 info "Checking prerequisites..."
 
-# Python 3.10+
-if ! command -v python3 &>/dev/null; then
-  fail "Python 3 is required but not installed. Install from https://python.org"
-fi
-PY_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-PY_MAJOR=$(echo "$PY_VERSION" | cut -d. -f1)
-PY_MINOR=$(echo "$PY_VERSION" | cut -d. -f2)
-if [[ "$PY_MAJOR" -lt 3 ]] || { [[ "$PY_MAJOR" -eq 3 ]] && [[ "$PY_MINOR" -lt 10 ]]; }; then
-  fail "Python 3.10+ required, found $PY_VERSION"
-fi
-ok "Python $PY_VERSION"
-
 # git
 if ! command -v git &>/dev/null; then
   fail "git is required but not installed."
@@ -332,17 +359,23 @@ if [ "$installedUvVersion" != "$UV_VERSION" ]; then
 fi
 ok "uv ${installedUvVersion}"
 
+# One interpreter series for bootstrap and the project environment.
+if ! BOOTSTRAP_PYTHON="$(uv python find 3.14)"; then
+  fail "Python 3.14 is required. Run: uv python install 3.14"
+fi
+ok "Python $("$BOOTSTRAP_PYTHON" --version)"
+
 # ─── 3. Install dependencies ───────────────────────────────────────
 
 info "Installing locked production dependencies..."
-SYNC_PLAN="$(python3 "$VAULT_ROOT/scripts/installer_config.py" sync-args \
+SYNC_PLAN="$("$BOOTSTRAP_PYTHON" "$VAULT_ROOT/scripts/installer_config.py" sync-args \
   --root "$VAULT_ROOT" --environment "${UV_PROJECT_ENVIRONMENT:-}")"
-PROJECT_ENVIRONMENT="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["environment"])' "$SYNC_PLAN")"
+PROJECT_ENVIRONMENT="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1])["environment"])' "$SYNC_PLAN")"
 SYNC_ARGS=()
 while IFS= read -r sync_argument; do
   SYNC_ARGS+=("$sync_argument")
-done < <(python3 -c 'import json, sys; print(*json.loads(sys.argv[1])["arguments"], sep="\n")' "$SYNC_PLAN")
-IGNORED_ENVIRONMENT="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["ignored_environment"] or "")' "$SYNC_PLAN")"
+done < <("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(*json.loads(sys.argv[1])["arguments"], sep="\n")' "$SYNC_PLAN")
+IGNORED_ENVIRONMENT="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1])["ignored_environment"] or "")' "$SYNC_PLAN")"
 if [ -n "$IGNORED_ENVIRONMENT" ]; then
   # Timers, hooks and the MCP server run the vault from its own .venv (audit B-26).
   warn "UV_PROJECT_ENVIRONMENT=$IGNORED_ENVIRONMENT is not used: the vault runs from $PROJECT_ENVIRONMENT"
@@ -409,13 +442,15 @@ stop_test_process() {
   send_signal TERM "$testPid"
   send_signal CONT "$testPid"
 }
+stop_live_test_tree() {
+  if ! test_tree_alive; then return; fi
+  if test_group_is_own; then stop_test_group; else stop_test_process; fi
+}
 stop_test_child() {
   if [ -z "$testPid" ]; then
     return
   fi
-  if test_tree_alive; then
-    if test_group_is_own; then stop_test_group; else stop_test_process; fi
-  fi
+  stop_live_test_tree
   if wait "$testPid" 2>/dev/null; then :; fi
   testPid=""
   testPgid=""
@@ -453,7 +488,8 @@ start_test_child() {
     *m*) testMonitorMode=on ;;
     *) testMonitorMode=off; set -m ;;
   esac
-  uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds "$smokeDeadlineSeconds" &
+  uv run --locked --no-sync python scripts/install_smoke.py --deadline-seconds "$smokeDeadlineSeconds" \
+    --report "$STATE_ROOT/logs/install-smoke.json" &
   testPid=$! testPgid=$!
   (
     trap 'exit 0' HUP INT TERM
@@ -563,6 +599,22 @@ if [ "$CODEX_HOOKS_OWNED" -eq 1 ]; then
   IDE_HOOK_ARGS+=(--codex-hooks)
 fi
 
+# ─── 5a. Choose the memory model ───────────────────────────────────
+
+# The chooser saves one vault setting; hooks and schedulers read it at runtime.
+info "Choosing the model the memory pipeline calls..."
+MODEL_CHOICE="$(uv run --locked --no-sync --directory "$VAULT_ROOT" python \
+  "$VAULT_ROOT/scripts/choose_model.py" --home "$HOME" \
+  ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"})" || fail "Model choice failed"
+MODEL_VALUE="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1])["model"])' "$MODEL_CHOICE")"
+if [ -n "$MODEL_VALUE" ]; then
+  ok "Memory model saved in llm-wiki.toml: $MODEL_VALUE"
+fi
+MODEL_REASON="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1]).get("reason", ""))' "$MODEL_CHOICE")"
+if [ -n "$MODEL_REASON" ]; then
+  warn "The memory model was not changed: $MODEL_REASON"
+fi
+
 # ─── 6. Set up scheduled maintenance ────────────────────────────────
 
 info "Setting up scheduled maintenance..."
@@ -578,7 +630,7 @@ INSTALL_CONTROL_RESULT="$(uv run --locked --no-sync --directory "$VAULT_ROOT" py
   --profile "$PROFILE" \
   ${IDE_HOOK_ARGS[@]+"${IDE_HOOK_ARGS[@]}"} \
   ${ADOPT_ARGS[@]+"${ADOPT_ARGS[@]}"})" || fail "Install ownership transaction failed"
-SCHEDULER_BACKEND="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["scheduler_backend"])' "$INSTALL_CONTROL_RESULT")"
+SCHEDULER_BACKEND="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1])["scheduler_backend"])' "$INSTALL_CONTROL_RESULT")"
 case "$SCHEDULER_BACKEND" in
   launchd|systemd_user|cron) ;;
   *) fail "Install control returned an invalid scheduler backend" ;;
@@ -590,13 +642,13 @@ ok "Environment roots and $SCHEDULER_BACKEND maintenance are verified"
 info "Detecting installed agents..."
 
 AGENT_STATUSES=()
-VAULT_JSON=$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$VAULT_ROOT")
+VAULT_JSON=$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$VAULT_ROOT")
 
 # OpenCode configuration is merged structurally and verified after all precedence layers.
 OPENCODE_RESULT="$(uv run --locked --no-sync --directory "$VAULT_ROOT" python \
   "$VAULT_ROOT/scripts/installer_config.py" opencode \
   --root "$VAULT_ROOT" --state-root "$STATE_ROOT" --cwd "$CALLER_CWD")"
-OPENCODE_STATUS="$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["status"])' "$OPENCODE_RESULT")"
+OPENCODE_STATUS="$("$BOOTSTRAP_PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1])["status"])' "$OPENCODE_RESULT")"
 case "$OPENCODE_STATUS" in
   active)
     AGENT_STATUSES+=("OpenCode: active automatic")
@@ -628,11 +680,10 @@ if command -v codex &>/dev/null; then
     ok "Codex MCP config verified: $CODEX_CONFIG"
   else
     mcp_exit=$?
-    if [ "$mcp_exit" -eq 2 ]; then
-      warn "Existing Codex MCP entry conflicts with LLM-Wiki; config.toml was not changed. Merge manually."
-    else
-      warn "Codex MCP config could not be verified; config.toml was not changed."
-    fi
+    # The helper's own line for the state the entry was left in; none asks for a manual merge.
+    [ "$mcp_exit" -eq 2 ] || CODEX_MCP_STATE=unverified
+    warn "$(uv run --locked --no-sync --directory "$VAULT_ROOT" python "$VAULT_ROOT/scripts/codex_memory.py" \
+      config-advice --state "$CODEX_MCP_STATE")"
   fi
   CODEX_HOOKS="$HOME/.codex/hooks.json"
   case "$CODEX_HOOKS_STATE" in
@@ -734,7 +785,7 @@ mkdir -p "$STATE_ROOT/logs"
 adoption_state_of() {
   local report
   report="$(uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --check --json 2>>"$ADOPTION_ERR" || true)"
-  printf '%s' "$report" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("details", {}).get("adoption_state", "unknown"))' 2>>"$ADOPTION_ERR" || echo unknown
+  printf '%s' "$report" | "$BOOTSTRAP_PYTHON" -c 'import json,sys; print(json.load(sys.stdin).get("details", {}).get("adoption_state", "unknown"))' 2>>"$ADOPTION_ERR" || echo unknown
 }
 ADOPTION_STATE="$(adoption_state_of)"
 adoption_tail() {
@@ -782,11 +833,42 @@ case "$(adoption_plan "$ADOPTION_STATE" "$AGENTS_STOPPED")" in
     ;;
   *)
     SYNC_WARNING=1
-    warn "Reliability V3 state is '${ADOPTION_STATE}'; session capture is disabled until adoption runs:"
-    warn "  uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json"
+    # The check's own line says what the state means; the installer claims no more.
+    # See docs/research/2026-09-28-a-check-names-its-cause.md.
+    warn "$(uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --check --summary 2>>"$ADOPTION_ERR" || true)"
+    warn "  details: uv run --locked --no-sync python scripts/repair_installed_memory.py --check --json"
     adoption_tail
     ;;
 esac
+
+compile_progress_state_of() {
+  local report
+  report="$(uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --check --json 2>>"$ADOPTION_ERR" || true)"
+  printf '%s' "$report" | "$BOOTSTRAP_PYTHON" -c 'import json,sys; print(json.load(sys.stdin).get("details", {}).get("compile_progress", "unknown"))' 2>>"$ADOPTION_ERR" || echo unknown
+}
+apply_compile_progress_upgrade() {
+  if uv run --locked --no-sync python "$VAULT_ROOT/scripts/repair_installed_memory.py" --apply --upgrade-compile-progress --backup-image "$COMPILE_BACKUP_IMAGE" --confirm-all-agents-stopped >>"$ADOPTION_ERR" 2>&1; then
+    ok "Compile journal upgraded; retain its backup image"
+    return
+  fi
+  SYNC_WARNING=1
+  warn "Compile migration did not complete; retain the image and resume with the same arguments."
+  adoption_tail
+}
+upgrade_compile_progress() {
+  if [[ "$(compile_progress_state_of)" == upgraded ]]; then
+    ok "Compile journal is ready"
+    return
+  fi
+  if [[ -z "$COMPILE_BACKUP_IMAGE" || "$AGENTS_STOPPED" -ne 1 ]]; then
+    SYNC_WARNING=1
+    warn "Compilation needs an offline journal upgrade. Stop agents, then rerun with --confirm-all-agents-stopped --compile-backup-image <absolute-external-directory>."
+    warn "Use an empty directory for a new migration, or its exact retained image to resume."
+    return
+  fi
+  apply_compile_progress_upgrade
+}
+upgrade_compile_progress
 
 # ─── 8a. Pinned model weights ──────────────────────────────────────
 # The read path loads weights local-only. Every pinned model whose runtime is
@@ -805,6 +887,19 @@ case "$MODELS_EXIT" in
   *) warn "Model weights incomplete; run: uv run --locked --no-sync python scripts/install_models.py" ;;
 esac
 
+# A managed Pyright the operator installed earlier is validated, and repaired when
+# its receipt is from before the tree digest (`install_pyright.py` retires such an
+# install and reinstalls the pinned release). Nothing is installed where the operator
+# never installed it: that stays an explicit action.
+# See docs/research/2026-09-28-a-check-names-its-cause.md.
+if [ -d "$STATE_ROOT/cache/code-tools/pyright" ]; then
+  if PYRIGHT_REPORT="$(uv run --locked --no-sync python "$VAULT_ROOT/scripts/install_pyright.py" --state-root "$STATE_ROOT" 2>&1 >/dev/null)"; then
+    ok "Managed Pyright verified"
+  else
+    warn "Managed Pyright could not be verified or repaired: ${PYRIGHT_REPORT}"
+  fi
+fi
+
 # ─── 8b. Bounded runtime sync ──────────────────────────────────────
 
 info "Synchronizing runtime state and derived indexes..."
@@ -819,21 +914,15 @@ case "$SYNC_EXIT" in
   *) fail "Runtime synchronization failed" ;;
 esac
 
-# ─── 9. Optional: semantic + hybrid search ─────────────────────────
-
-info "Optional: install hybrid search (BM25 + vector + reranker)?"
-info "  uv sync --locked --no-default-groups --inexact --extra hybrid"
-info "  uv sync --locked --no-default-groups --inexact --extra code-graph"
-info "  uv sync --locked --no-default-groups --inexact --extra reranker"
-
-# ─── 10. Print summary ─────────────────────────────────────────────
+# ─── 9. Print summary ─────────────────────────────────────────────
 
 echo ""
 echo "=============================================="
 if [ "$SYNC_WARNING" -eq 1 ]; then
   echo -e "${YELLOW}  LLM-Wiki installed with warnings${NC}"
-  echo "  The runtime synchronization ran after every other step and named the checks that need"
-  echo "  attention (the doctor line above). For the state now: uv run --locked --no-sync python scripts/doctor.py"
+  echo "  The install completed; this is not a failure (a failure stops with [FAIL] and exit 1)."
+  echo "  The [WARN] lines above and the doctor line name what needs attention now."
+  echo "  For the state now: uv run --locked --no-sync python scripts/doctor.py"
 else
   echo -e "${GREEN}  LLM-Wiki installed successfully!${NC}"
 fi
@@ -862,9 +951,7 @@ echo "  uv run --locked --no-sync python scripts/build_advisory.py              
 echo "  uv run --locked --no-sync python scripts/build_guardrails.py             # learned rules"
 echo "  uv run --locked --no-sync python benchmark/run_benchmark.py              # run benchmark"
 echo ""
-echo "MCP baseline: 12 local task-shaped tools (installed)"
-echo "Optional enhancements:"
-echo "  uv sync --locked --no-default-groups --inexact --extra hybrid"
-echo "  uv sync --locked --no-default-groups --inexact --extra code-graph"
-echo "  uv sync --locked --no-default-groups --inexact --extra reranker"
+echo "MCP: 12 local task-shaped tools; every component is installed, with Pyright for Python"
+echo "Code navigation in another language (one command each, when you need it):"
+echo "  uv run --locked --no-sync python scripts/install_language_server.py --profile <typescript|gopls|rust-analyzer>"
 echo ""

@@ -16,7 +16,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 def test_archived_pages_are_documented_as_excluded_from_active_search(tmp_path):
     import archive_stale
-    import search_memory
+    import generation_search
 
     notes = tmp_path / "knowledge" / "notes"
     notes.mkdir(parents=True)
@@ -28,7 +28,7 @@ def test_archived_pages_are_documented_as_excluded_from_active_search(tmp_path):
         encoding="utf-8",
     )
 
-    assert search_memory._collect_pages(knowledge_dir=notes, root=tmp_path) == [active]
+    assert generation_search.collect_pages(knowledge_dir=notes, root=tmp_path) == [active]
     documentation = (archive_stale.__doc__ or "").casefold()
     assert "excluded from active search" in documentation
     assert "remain searchable" not in documentation
@@ -66,7 +66,7 @@ def test_debugging_archives_at_60_days(fake_file):
 
     md = fake_file("test-debug.md", "debugging", age_days=65)
     cutoff = datetime.now().timestamp() - (180 * 86400)  # default 180
-    assert archive_stale._is_stale(md, cutoff, 180) is True
+    assert archive_stale.is_stale(md, cutoff, 180) is True
 
 
 def test_debugging_not_stale_at_30_days(fake_file):
@@ -75,7 +75,7 @@ def test_debugging_not_stale_at_30_days(fake_file):
 
     md = fake_file("test-debug.md", "debugging", age_days=30)
     cutoff = datetime.now().timestamp() - (180 * 86400)
-    assert archive_stale._is_stale(md, cutoff, 180) is False
+    assert archive_stale.is_stale(md, cutoff, 180) is False
 
 
 def test_decision_never_archives(fake_file):
@@ -84,7 +84,7 @@ def test_decision_never_archives(fake_file):
 
     md = fake_file("old-decision.md", "decision", age_days=999)
     cutoff = datetime.now().timestamp() - (180 * 86400)
-    assert archive_stale._is_stale(md, cutoff, 180) is False
+    assert archive_stale.is_stale(md, cutoff, 180) is False
 
 
 def test_concept_never_archives(fake_file):
@@ -93,7 +93,7 @@ def test_concept_never_archives(fake_file):
 
     md = fake_file("old-concept.md", "concept", age_days=999)
     cutoff = datetime.now().timestamp() - (180 * 86400)
-    assert archive_stale._is_stale(md, cutoff, 180) is False
+    assert archive_stale.is_stale(md, cutoff, 180) is False
 
 
 def test_superseded_not_archived_again(fake_file):
@@ -107,7 +107,7 @@ def test_superseded_not_archived_again(fake_file):
     md.write_text(content)
 
     cutoff = datetime.now().timestamp() - (180 * 86400)
-    assert archive_stale._is_stale(md, cutoff, 180) is False
+    assert archive_stale.is_stale(md, cutoff, 180) is False
 
 
 def test_already_archived_skipped(fake_file):
@@ -120,7 +120,7 @@ def test_already_archived_skipped(fake_file):
     md.write_text(content)
 
     cutoff = datetime.now().timestamp() - (180 * 86400)
-    assert archive_stale._is_stale(md, cutoff, 180) is False
+    assert archive_stale.is_stale(md, cutoff, 180) is False
 
 
 def test_skill_never_archives(fake_file):
@@ -129,7 +129,7 @@ def test_skill_never_archives(fake_file):
 
     md = fake_file("my-skill.md", "skill", age_days=999)
     cutoff = datetime.now().timestamp() - (180 * 86400)
-    assert archive_stale._is_stale(md, cutoff, 180) is False
+    assert archive_stale.is_stale(md, cutoff, 180) is False
 
 
 def test_qa_uses_365_threshold(fake_file):
@@ -139,7 +139,7 @@ def test_qa_uses_365_threshold(fake_file):
     md = fake_file("old-qa.md", "qa", age_days=200)
     cutoff = datetime.now().timestamp() - (180 * 86400)
     # 200 days < 365 threshold → NOT stale
-    assert archive_stale._is_stale(md, cutoff, 180) is False
+    assert archive_stale.is_stale(md, cutoff, 180) is False
 
 
 def test_pattern_uses_180_threshold(fake_file):
@@ -148,18 +148,18 @@ def test_pattern_uses_180_threshold(fake_file):
 
     md = fake_file("old-pattern.md", "pattern", age_days=185)
     cutoff = datetime.now().timestamp() - (180 * 86400)
-    assert archive_stale._is_stale(md, cutoff, 180) is True
+    assert archive_stale.is_stale(md, cutoff, 180) is True
 
 
 def test_type_threshold_lookup():
     """Type-specific thresholds are correct."""
     import archive_stale
 
-    assert archive_stale._get_type_threshold("debugging") == 60
-    assert archive_stale._get_type_threshold("gap") == 90
-    assert archive_stale._get_type_threshold("pattern") == 180
-    assert archive_stale._get_type_threshold("qa") == 365
-    assert archive_stale._get_type_threshold("unknown") == 180  # default
+    assert archive_stale.get_type_threshold("debugging") == 60
+    assert archive_stale.get_type_threshold("gap") == 90
+    assert archive_stale.get_type_threshold("pattern") == 180
+    assert archive_stale.get_type_threshold("qa") == 365
+    assert archive_stale.get_type_threshold("unknown") == 180  # default
     # Decision and concept are EVERGREEN — never archived (no threshold needed).
     assert "decision" in archive_stale.NEVER_ARCHIVE_TYPES
 
@@ -170,11 +170,8 @@ def test_archive_page_actually_moves_file(fake_file, tmp_path, monkeypatch):
     import archive_stale
 
     # Point archive_stale at tmp_path so we don't touch the real vault.
-    monkeypatch.setattr(archive_stale, "ROOT", tmp_path)
-    monkeypatch.setattr(archive_stale, "KNOWLEDGE", tmp_path / "knowledge" / "notes")
-    archive_dir = tmp_path / "knowledge" / "notes" / "archive"
-    monkeypatch.setattr(archive_stale, "ARCHIVE_ROOT", archive_dir)
     monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+    archive_dir = tmp_path / "knowledge" / "notes" / "archive"
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "runtime"))
 
     # Create a stale debugging page (65 days old).
@@ -183,7 +180,7 @@ def test_archive_page_actually_moves_file(fake_file, tmp_path, monkeypatch):
     md.parent.mkdir(parents=True)
     fixture_page.replace(md)
 
-    result = archive_stale._archive_page(md, apply=True)
+    result = archive_stale.archive_page(md, apply=True)
 
     # Original file must be gone.
     assert not md.exists(), f"original file still at {md}"
@@ -203,14 +200,12 @@ def test_archive_page_dry_run_does_not_move(fake_file, tmp_path, monkeypatch):
     """When apply=False (dry-run), the file stays put."""
     import archive_stale
 
-    monkeypatch.setattr(archive_stale, "ROOT", tmp_path)
-    monkeypatch.setattr(archive_stale, "KNOWLEDGE", tmp_path / "knowledge" / "notes")
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     archive_dir = tmp_path / "knowledge" / "notes" / "archive"
-    monkeypatch.setattr(archive_stale, "ARCHIVE_ROOT", archive_dir)
 
     md = fake_file("stale-debug.md", "debugging", age_days=65)
 
-    result = archive_stale._archive_page(md, apply=False)
+    result = archive_stale.archive_page(md, apply=False)
 
     # Original file must still exist.
     assert md.exists(), "original file was moved during dry-run"
@@ -235,9 +230,6 @@ def test_archive_page_conflict_preserves_concurrent_user_bytes(
     state = tmp_path / "state"
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
-    monkeypatch.setattr(archive_stale, "ROOT", vault)
-    monkeypatch.setattr(archive_stale, "KNOWLEDGE", notes)
-    monkeypatch.setattr(archive_stale, "ARCHIVE_ROOT", notes / "archive")
     source = notes / "page.md"
     source.write_text("---\ntype: debugging\n---\n# Original\n", encoding="utf-8")
     destination = notes / "archive" / datetime.now().strftime("%Y") / source.name
@@ -251,7 +243,7 @@ def test_archive_page_conflict_preserves_concurrent_user_bytes(
         return original_mutate(operation_id, changes, **kwargs)
 
     monkeypatch.setattr(archive_stale, "mutate_knowledge", race)
-    result = archive_stale._archive_page(source, apply=True)
+    result = archive_stale.archive_page(source, apply=True)
 
     assert result.startswith("WRITE_ERROR:")
     if race_target == "source":
@@ -273,9 +265,6 @@ def _archive_vault(tmp_path, monkeypatch):
     (archive / "old-lesson.md").write_text(
         "---\ntype: debugging\nstatus: archived\n---\n# Old lesson\n", encoding="utf-8"
     )
-    monkeypatch.setattr(archive_stale, "ROOT", vault)
-    monkeypatch.setattr(archive_stale, "KNOWLEDGE", notes)
-    monkeypatch.setattr(archive_stale, "ARCHIVE_ROOT", notes / "archive")
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
     return archive_stale, vault
@@ -299,3 +288,51 @@ def test_restoring_a_page_that_was_never_archived_says_so(tmp_path, monkeypatch)
     archive_stale, _vault = _archive_vault(tmp_path, monkeypatch)
 
     assert archive_stale.restore_page("never-seen", apply=True) == "NOT ARCHIVED: never-seen"
+
+
+def _large_archive_vault(tmp_path, monkeypatch):
+    import archive_stale
+
+    notes = tmp_path / "knowledge" / "notes"
+    notes.mkdir(parents=True)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "runtime"))
+    return archive_stale, notes
+
+
+def test_archive_and_restore_a_page_admitted_by_the_transaction(tmp_path, monkeypatch):
+    archive, notes = _large_archive_vault(tmp_path, monkeypatch)
+    source = notes / "large.md"
+    content = b"---\ntype: debugging\n---\n# Large\n" + b"x" * (17 * 1024 * 1024)
+    source.write_bytes(content)
+    result = archive.archive_page(source, apply=True)
+    assert result.startswith("ARCHIVED:"), result
+    assert not source.exists()
+    result = archive.restore_page("large", apply=True)
+    assert result.startswith("RESTORED:"), result
+    assert source.read_bytes() == content
+
+
+def test_restore_a_large_existing_archive_without_a_private_read_limit(tmp_path, monkeypatch):
+    archive, notes = _large_archive_vault(tmp_path, monkeypatch)
+    source = archive.archive_root() / "2025" / "large.md"
+    source.parent.mkdir(parents=True)
+    content = b"---\ntype: debugging\nstatus: archived\n---\n# Large\n" + b"x" * (17 * 1024 * 1024)
+    source.write_bytes(content)
+    result = archive.restore_page("large", apply=True)
+    assert result.startswith("RESTORED:"), result
+    assert not source.exists()
+    assert (notes / "large.md").read_bytes() == content.replace(b"status: archived\n", b"")
+
+
+def test_archive_still_refuses_above_the_transaction_target_budget(tmp_path, monkeypatch):
+    from llm_wiki.markdown_store import MAX_KNOWLEDGE_TARGET_BYTES
+
+    archive, notes = _large_archive_vault(tmp_path, monkeypatch)
+    source = notes / "too-large.md"
+    with source.open("wb") as stream:
+        stream.truncate(MAX_KNOWLEDGE_TARGET_BYTES + 1)
+    result = archive.archive_page(source, apply=True)
+    assert result.startswith("READ_ERROR:"), result
+    assert source.stat().st_size == MAX_KNOWLEDGE_TARGET_BYTES + 1
+    assert not archive.archive_root().exists()

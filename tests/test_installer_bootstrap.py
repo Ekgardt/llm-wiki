@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-import json
 import os
-import re
-import shutil
 import subprocess
 import textwrap
-from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
+from tests.installer_bootstrap_helpers import _bash, _powershell_functions, _pwsh, _shell_function
 from tests.powershell_literal import ps_literal
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -92,78 +89,6 @@ def _bare_repository(tmp_path: Path, *, missing: str | None = None) -> tuple[Pat
     _git(source, "remote", "add", "origin", str(remote))
     _git(source, "push", "origin", "HEAD:refs/heads/main")
     return remote, oid
-
-
-def _bash() -> str | None:
-    if os.name == "nt":
-        return None
-    return shutil.which("bash")
-
-
-def _pwsh() -> str | None:
-    return shutil.which("pwsh") or shutil.which("powershell")
-
-
-@dataclass
-class _ShellScan:
-    """Where a shell-function scan is: brace depth, open quote, pending escape."""
-
-    depth: int = 0
-    quoted: str | None = None
-    escaped: bool = False
-
-
-_BRACE_DEPTH = {"{": 1, "}": -1}
-
-
-def _scan_unquoted(state: _ShellScan, char: str) -> bool:
-    """Advance outside quotes; True when the function's closing brace was read."""
-    if char in "'\"":
-        state.quoted = char
-        return False
-    state.depth += _BRACE_DEPTH.get(char, 0)
-    return char == "}" and state.depth == 0
-
-
-def _scan_char(state: _ShellScan, char: str) -> bool:
-    """Advance one character; True when the function ends here."""
-    if state.escaped or char == "\\":
-        state.escaped = char == "\\"
-        return False
-    if state.quoted:
-        state.quoted = None if char == state.quoted else state.quoted
-        return False
-    return _scan_unquoted(state, char)
-
-
-def _shell_function(source: str, name: str) -> str:
-    match = re.search(rf"^{re.escape(name)}\(\) \{{", source, re.MULTILINE)
-    assert match is not None, f"missing shell function {name}"
-    state = _ShellScan()
-    for index in range(match.start(), len(source)):
-        if _scan_char(state, source[index]):
-            return source[match.start() : index + 1]
-    raise AssertionError(f"unterminated shell function {name}")
-
-
-def _powershell_functions(source: Path, names: tuple[str, ...]) -> str:
-    return textwrap.dedent(
-        f"""
-        $tokens = $null
-        $errors = $null
-        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            {ps_literal(str(source))}, [ref]$tokens, [ref]$errors)
-        if ($errors.Count) {{ throw ($errors | Out-String) }}
-        foreach ($name in @({', '.join(json.dumps(name) for name in names)})) {{
-            $fn = $ast.Find({{ param($node)
-                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-                $node.Name -eq $name
-            }}, $true)
-            if ($null -eq $fn) {{ throw "missing PowerShell function $name" }}
-            Invoke-Expression $fn.Extent.Text
-        }}
-        """
-    )
 
 
 def _bash_stdin_command() -> list[str]:
@@ -294,7 +219,6 @@ def shlex_quote(value: str) -> str:
     return shlex.quote(value)
 
 
-
 @pytest.mark.parametrize("shell", ["bash", "powershell"])
 def test_remote_bootstrap_rejects_missing_required_file(
     tmp_path: Path, shell: str
@@ -388,7 +312,8 @@ def _pwsh_push_helper(repository: Path, *, created: bool, explicit: bool):
         pytest.skip("PowerShell unavailable")
     command = _powershell_functions(
         ROOT / "install.ps1",
-        ("Invoke-NativeCommand", "Protect-PushUrls", "Protect-PushUrlsIfAuthorized"),
+        ("Invoke-NativeCommand", "Invoke-NativeProcess", "Write-NativeResult",
+         "Protect-PushUrls", "Protect-PushUrlsIfAuthorized"),
     ) + textwrap.dedent(
         f"""
         Protect-PushUrlsIfAuthorized `

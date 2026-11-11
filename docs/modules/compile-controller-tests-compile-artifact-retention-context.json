@@ -1,0 +1,219 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/compile-controller-tests-compile-artifact-retention-context.json",
+    "docs/modules/compile-controller-tests-compile-artifact-retention.md",
+    "docs/modules/compile-progress-tests.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/installed-memory-repair-tests.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/adopted_vault.py",
+    "tests/compile_progress_admission_helpers.py",
+    "tests/conftest.py",
+    "tests/legacy_adopted_vault.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_compile_artifact_retention.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/compile-controller-tests-compile-artifact-retention-context.json",
+      "docs/modules/compile-controller-tests-compile-artifact-retention.md",
+      "tests/test_compile_artifact_retention.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/compile_controller.py",
+      "names": [
+        "CompileDependencies",
+        "begin_compile_work",
+        "compile_inputs_digest",
+        "confirm_compile_work",
+        "save_compile_inputs"
+      ],
+      "contract_sha256": "86165f52fdc77aa4a12d6e8748d1f45acaa5b3d2dbe860b8619e5859a773b478",
+      "integration_tests": [
+        "tests/test_compile_artifact_retention.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_progress.py",
+      "names": [
+        "CompileEvent",
+        "ProgressCorrupt",
+        "SCHEMA_STATEMENTS"
+      ],
+      "contract_sha256": "07323540967e94a5af2b431293f42b4eea1945782fce034afcebd414553ef826",
+      "integration_tests": [
+        "tests/test_compile_artifact_retention.py"
+      ]
+    },
+    {
+      "provider": "scripts/compile_progress_migration.py",
+      "names": [
+        "migrate_candidate"
+      ],
+      "contract_sha256": "9fb4b3b645d47db7ba07afa96b3ea3eb03d0e946b9744af3d59dabbf32a2984a",
+      "integration_tests": [
+        "tests/test_compile_artifact_retention.py"
+      ]
+    },
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_a_check_is_judged_when_it_ends.py",
+        "tests/test_a_check_names_its_cause.py",
+        "tests/test_a_claude_prompt_takes_the_ingest_path.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/adoption_admission.py",
+      "names": [
+        "MAX_OPERATIONAL_DB_BYTES",
+        "expected_schema_digests",
+        "initial_schema_digests"
+      ],
+      "contract_sha256": "e2a9874844b2e0ecfbabd9067bd53ce68d47dfc5fc0e2893293a7c8459c704ee",
+      "integration_tests": [
+        "tests/test_compile_artifact_retention.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/compile_pipeline_sources.py",
+      "names": [
+        "CompileInputs"
+      ],
+      "contract_sha256": "c1a75c8212e623985185c7a6f7f88831a486d3323a117f38ebae6fc6db249bcd",
+      "integration_tests": [
+        "tests/test_compile_artifact_retention.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_compile_artifact_retention.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_reader_purge.py",
+      "names": [
+        "CapturePurgeArtifact",
+        "capture_purge_archive_path"
+      ],
+      "contract_sha256": "44702f06922a211b7f04f91856762bbb2371aa116e599ee985862d9ed3472591",
+      "integration_tests": [
+        "tests/test_compile_artifact_retention.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/queue_store.py",
+      "names": [
+        "utc_now"
+      ],
+      "contract_sha256": "5273fc7ebea33a3fc1ea250bb5cabbde7be34e2c0eb506969b1cc98adc13cf0a",
+      "integration_tests": [
+        "tests/test_compile_artifact_retention.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "active_markdown_coordinator"
+      ],
+      "contract_sha256": "3260e0919f0db38e974984faca8fa00d88642553366937a0604fa87f1be6898b",
+      "integration_tests": [
+        "tests/test_compile_artifact_retention.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "DEFAULTS",
+        "LeaseFenceError",
+        "QUEUE_V3_SCHEMA_SHA256",
+        "active_memory_queue",
+        "sha256_bytes"
+      ],
+      "contract_sha256": "40ec9f39d8f77aafaf4fefa398ca68d4b2903b88e35d89bb21d9f7a30f4ccee9",
+      "integration_tests": [
+        "tests/test_compile_artifact_retention.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliability_v3_validation.py",
+      "names": [
+        "artifact_record"
+      ],
+      "contract_sha256": "3a4adad396f3e17fbdae971bd0f09e3de3f286bbe731eb0f10564ed7df20eb60",
+      "integration_tests": [
+        "tests/test_compile_artifact_retention.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "harden_runtime_owner_only",
+        "validate_state_root"
+      ],
+      "contract_sha256": "69d225bffa9d8e611d8c142d8a0b25527b781047900d4971cc50dbe64d30f87a",
+      "integration_tests": [
+        "tests/test_compile_artifact_retention.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_compile_artifact_retention.py"
+      ]
+    }
+  ]
+}

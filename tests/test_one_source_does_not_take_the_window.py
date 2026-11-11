@@ -53,7 +53,7 @@ def _meta(pool: list[tuple[retrieval.RetrievalCandidate, str]]) -> dict[str, dic
 
 
 def _ordered(pool, query: str, limit: int | None) -> tuple[retrieval.RetrievalCandidate, ...]:
-    return retrieval._cover_then_fill([chunk for chunk, _text in pool], _meta(pool), query, limit)
+    return retrieval.cover_then_fill([chunk for chunk, _text in pool], _meta(pool), query, limit)
 
 
 def _row(heading: str, start: int, score: float, text: str) -> dict[str, object]:

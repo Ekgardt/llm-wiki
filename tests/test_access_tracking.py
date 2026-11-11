@@ -21,7 +21,7 @@ class TestRecordAccess:
         import retrieval_telemetry
 
         database = tmp_path / "cache/evidence-graph/telemetry.sqlite3"
-        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
+        monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
         access_tracking.record_access("test-page", source="search", query="auth", rank=2)
 
         rows = retrieval_telemetry.read_events(limit=10, db_path=database)
@@ -38,7 +38,7 @@ class TestRecordAccess:
         import retrieval_telemetry
 
         database = tmp_path / "cache/evidence-graph/telemetry.sqlite3"
-        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
+        monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
         access_tracking.record_access("page", source=source)
 
         assert retrieval_telemetry.read_events(limit=1, db_path=database)[0].event_kind == kind
@@ -47,8 +47,10 @@ class TestRecordAccess:
         import access_tracking
         import retrieval_telemetry
 
-        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", tmp_path / "bad")
-        (tmp_path / "bad").write_text("not sqlite", encoding="utf-8")
+        monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
+        database = retrieval_telemetry.telemetry_db()
+        database.parent.mkdir(parents=True)
+        database.write_text("not sqlite", encoding="utf-8")
         access_tracking.record_access("simple", source="direct")
 
 
@@ -58,10 +60,9 @@ def _own_telemetry_db(tmp_path, monkeypatch):
     `get_access_stats` reads the telemetry, so a test that asserts a count owns
     its database, or it reads whatever another test left in the shared state root.
     """
-    import retrieval_telemetry
 
     database = tmp_path / "cache/evidence-graph/telemetry.sqlite3"
-    monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     return database
 
 
@@ -83,7 +84,7 @@ def _read_at(slug: str, stamp: str, db_path) -> None:
             rank=None,
             generation="legacy",
             source_tool="search",
-            timestamp=retrieval_telemetry._utc_timestamp(stamp),
+            timestamp=retrieval_telemetry.utc_timestamp(stamp),
         )],
         db_path=db_path,
     )
@@ -227,7 +228,6 @@ class TestFlushFrontmatter:
 
     def test_flush_adds_frontmatter_to_bare_page(self, tmp_path, monkeypatch):
         import access_tracking
-        import retrieval_telemetry
 
         vault = tmp_path / "vault"
         notes_dir = vault / "knowledge" / "notes"
@@ -237,9 +237,7 @@ class TestFlushFrontmatter:
         page = notes_dir / "bare.md"
         page.write_text("# Bare Page\n\nBody.\n", encoding="utf-8")
 
-        monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", notes_dir)
         database = tmp_path / "state/cache/evidence-graph/telemetry.sqlite3"
-        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
         self._events(database, "bare", 3)
 
         n = access_tracking.flush_access_to_frontmatter("bare")
@@ -252,7 +250,6 @@ class TestFlushFrontmatter:
 
     def test_flush_updates_existing_frontmatter(self, tmp_path, monkeypatch):
         import access_tracking
-        import retrieval_telemetry
 
         vault = tmp_path / "vault"
         notes_dir = vault / "knowledge" / "notes"
@@ -265,9 +262,7 @@ class TestFlushFrontmatter:
             encoding="utf-8",
         )
 
-        monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", notes_dir)
         database = tmp_path / "state/cache/evidence-graph/telemetry.sqlite3"
-        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
         self._events(database, "fm", 2)
 
         n = access_tracking.flush_access_to_frontmatter("fm")
@@ -285,7 +280,6 @@ class TestFlushFrontmatter:
         self, tmp_path, monkeypatch
     ):
         import access_tracking
-        import retrieval_telemetry
 
         vault = tmp_path / "vault"
         notes = vault / "knowledge/notes"
@@ -299,8 +293,6 @@ class TestFlushFrontmatter:
         database = tmp_path / "state/cache/evidence-graph/telemetry.sqlite3"
         monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
         monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
-        monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", notes)
-        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
         self._events(database, "quoted", 2)
 
         assert access_tracking.flush_access_to_frontmatter("quoted") == 1
@@ -326,7 +318,6 @@ class TestFlushFrontmatter:
         self, tmp_path, monkeypatch, fields
     ):
         import access_tracking
-        import retrieval_telemetry
 
         vault = tmp_path / "vault"
         notes = vault / "knowledge/notes"
@@ -339,8 +330,6 @@ class TestFlushFrontmatter:
         database = tmp_path / "state/cache/evidence-graph/telemetry.sqlite3"
         monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
         monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
-        monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", notes)
-        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
         self._events(database, "invalid", 1)
 
         assert access_tracking.flush_access_to_frontmatter("invalid") == 0
@@ -349,11 +338,10 @@ class TestFlushFrontmatter:
     def test_flush_handles_missing_page(self, tmp_path, monkeypatch):
         """Flushing a non-existent page should not crash."""
         import access_tracking
-        import retrieval_telemetry
 
-        monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", tmp_path / "notes")
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path / "vault"))
         database = tmp_path / "cache/evidence-graph/telemetry.sqlite3"
-        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
+        monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
         self._events(database, "nonexistent", 5)
 
         n = access_tracking.flush_access_to_frontmatter("nonexistent")
@@ -364,7 +352,6 @@ class TestFlushFrontmatter:
     ):
         import access_tracking
         import markdown_transaction
-        import retrieval_telemetry
 
         vault = tmp_path / "vault"
         notes = vault / "knowledge" / "notes"
@@ -373,9 +360,7 @@ class TestFlushFrontmatter:
         page.write_text("---\ntype: concept\n---\n# Original\n", encoding="utf-8")
         monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
         monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
-        monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", notes)
         database = tmp_path / "state/cache/evidence-graph/telemetry.sqlite3"
-        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
         self._events(database, "page", 3)
         user_bytes = b"---\ntype: concept\n---\n# User edit\n"
         original_mutate = markdown_transaction.mutate_knowledge
@@ -394,16 +379,15 @@ class TestFlushFrontmatter:
 
     def test_flush_rejects_page_above_snapshot_bound(self, tmp_path, monkeypatch):
         import access_tracking
-        import retrieval_telemetry
 
         notes = tmp_path / "knowledge" / "notes"
         notes.mkdir(parents=True)
         page = notes / "large.md"
         page.write_bytes(b"x" * 33)
-        monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
         monkeypatch.setattr(access_tracking, "MAX_ACCESS_PAGE_BYTES", 32)
         database = tmp_path / "cache/evidence-graph/telemetry.sqlite3"
-        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
+        monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
         self._events(database, "large", 1)
 
         assert access_tracking.flush_access_to_frontmatter("large") == 0
@@ -412,13 +396,12 @@ class TestFlushFrontmatter:
     def test_flush_all_is_manual_only(self, tmp_path, monkeypatch):
         import access_tracking
 
-        monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", tmp_path / "notes")
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path / "vault"))
 
         assert access_tracking.flush_all() == 0
 
     def test_event_limit_continues_from_page_watermark(self, tmp_path, monkeypatch):
         import access_tracking
-        import retrieval_telemetry
 
         notes = tmp_path / "vault/knowledge/notes"
         notes.mkdir(parents=True)
@@ -427,9 +410,7 @@ class TestFlushFrontmatter:
         database = tmp_path / "state/cache/evidence-graph/telemetry.sqlite3"
         monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path / "vault"))
         monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
-        monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", notes)
         monkeypatch.setattr(access_tracking, "MAX_EVENTS_PER_PAGE_EXPORT", 2)
-        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
         self._events(database, "page", 5)
 
         assert [access_tracking.flush_all() for _ in range(3)] == [1, 1, 1]
@@ -466,7 +447,6 @@ class TestFlushFrontmatter:
 
     def test_flush_all_skips_non_page_candidates_without_blocking_pages(self, tmp_path, monkeypatch):
         import access_tracking
-        import retrieval_telemetry
 
         notes = tmp_path / "vault/knowledge/notes"
         notes.mkdir(parents=True)
@@ -474,8 +454,6 @@ class TestFlushFrontmatter:
         database = tmp_path / "state/cache/evidence-graph/telemetry.sqlite3"
         monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path / "vault"))
         monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
-        monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", notes)
-        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
         _chunk_hash_events(database, "a" * 64, 2)
         self._events(database, "page", 1)
 
@@ -493,10 +471,8 @@ class TestFlushFrontmatter:
         database = state / "cache/evidence-graph/telemetry.sqlite3"
         monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
         monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
-        monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", notes)
         monkeypatch.setattr(access_tracking, "MAX_PAGES_PER_EXPORT", 1)
         monkeypatch.setattr(access_tracking, "MAX_CANDIDATES_SCANNED_PER_EXPORT", 2)
-        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
         for slug in ("alpha", "bravo", "charlie", "delta", "echo"):
             (notes / f"{slug}.md").write_text(
                 f"---\ntype: concept\n---\n# {slug}\n", encoding="utf-8"
@@ -519,9 +495,7 @@ class TestFlushFrontmatter:
         database = state / "cache/evidence-graph/telemetry.sqlite3"
         monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
         monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
-        monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", notes)
         monkeypatch.setattr(access_tracking, "MAX_PAGES_PER_EXPORT", 2)
-        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
         for slug in ("alpha", "zulu"):
             (notes / f"{slug}.md").write_text(
                 f"---\ntype: concept\n---\n# {slug}\n", encoding="utf-8"
@@ -551,8 +525,6 @@ class TestFlushFrontmatter:
         database = state / "cache/evidence-graph/telemetry.sqlite3"
         monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
         monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
-        monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", notes)
-        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
         self._events(database, "alpha", 2)
         real_set = retrieval_telemetry.set_export_cursor
         attempts = 0
@@ -586,8 +558,6 @@ class TestFlushFrontmatter:
         database = state / "cache/evidence-graph/telemetry.sqlite3"
         monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
         monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
-        monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", notes)
-        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
         self._events(database, "page", 1)
         retrieval_telemetry.set_export_cursor(
             access_tracking.page_identity("middle"), db_path=database
@@ -612,8 +582,6 @@ class TestFlushFrontmatter:
         database = state / "cache/evidence-graph/telemetry.sqlite3"
         monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
         monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
-        monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", notes)
-        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
         self._events(database, "alpha", 1)
         retrieval_telemetry.set_export_cursor("valid", db_path=database)
         with sqlite3.connect(database) as connection:
@@ -632,16 +600,14 @@ class TestAFailedFlushIsNamed:
 
     def test_the_page_and_the_reason_are_reported(self, tmp_path, monkeypatch, capsys):
         import access_tracking
-        import retrieval_telemetry
 
         notes = tmp_path / "knowledge" / "notes"
         notes.mkdir(parents=True)
         (notes / "large.md").write_bytes(b"x" * 33)
-        monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
         monkeypatch.setattr(access_tracking, "MAX_ACCESS_PAGE_BYTES", 32)
-        database = tmp_path / "cache/evidence-graph/telemetry.sqlite3"
-        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
-        access_tracking._FLUSH_FAILURES.clear()
+        monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
+        access_tracking.FLUSH_FAILURES.clear()
 
         assert access_tracking.flush_access_to_frontmatter("large") == 0
 

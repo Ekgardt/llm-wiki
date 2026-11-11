@@ -34,7 +34,7 @@ def test_the_cli_asks_which_coordinator_adoption_left_behind(tmp_path, monkeypat
         markdown_transaction, "active_or_legacy_coordinator", _record
     )
 
-    assert markdown_transaction._cli_coordinator() == "the coordinator this vault has"
+    assert markdown_transaction.cli_coordinator() == "the coordinator this vault has"
     assert asked["vault"] == tmp_path.resolve()
     assert asked["state_root"] == tmp_path.resolve()
 
@@ -46,6 +46,6 @@ def test_the_same_paths_without_adoption_still_open_the_legacy_pair(
     monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
 
-    coordinator = markdown_transaction._cli_coordinator()
+    coordinator = markdown_transaction.cli_coordinator()
 
     assert coordinator.database_path.name == "markdown-transactions.sqlite3"

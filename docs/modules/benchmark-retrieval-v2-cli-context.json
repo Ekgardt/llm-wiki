@@ -1,0 +1,214 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "benchmark/__init__.py",
+    "benchmark/retrieval_v2_cli.py",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/benchmark-retrieval-v2-cli-context.json",
+    "docs/modules/benchmark-retrieval-v2-cli.md",
+    "docs/modules/benchmark-run-benchmark.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/reliable-memory-tests-retrieval-v2-benchmark.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/retrieval_v2_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_retrieval_v2_cli.py"
+  ],
+  "ownership": {
+    "files": [
+      "benchmark/retrieval_v2_cli.py",
+      "docs/modules/benchmark-retrieval-v2-cli-context.json",
+      "docs/modules/benchmark-retrieval-v2-cli.md",
+      "tests/test_retrieval_v2_cli.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "benchmark/retrieval_v2_aggregation.py",
+      "names": [
+        "aggregate_selection"
+      ],
+      "contract_sha256": "6259577fe730bd5a6410734e8c45cb949b7bf06147fa23b90aa1ddc7e576f88d",
+      "integration_tests": [
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_orchestration.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_contract.py",
+      "names": [
+        "AUTHORITATIVE_SELECTION_ADAPTER_KIND",
+        "Candidate",
+        "MODEL_MATRIX_ADAPTER_KIND",
+        "SELECTION_AGGREGATION_ADAPTER_KIND",
+        "WorkerPayload"
+      ],
+      "contract_sha256": "7887589f4cc214d701fdaee636d59cdda2cda2574932e07e1eecf2779c3522c0",
+      "integration_tests": [
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_benchmark.py",
+        "tests/test_retrieval_v2_contract.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_corpus.py",
+      "names": [
+        "load_corpus"
+      ],
+      "contract_sha256": "a0d5c04857524619acce3bf335f094bd61fc20015eb301701b1e27f1d5e443bd",
+      "integration_tests": [
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_benchmark.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_matrix.py",
+      "names": [
+        "load_model_selection"
+      ],
+      "contract_sha256": "215d5312ac6aa2dca27d0dc071ca8d977995f866b83608db168924a16ff4bd6b",
+      "integration_tests": [
+        "tests/test_retrieval_v2_adapters.py",
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_matrix.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_orchestration.py",
+      "names": [
+        "orchestrate_selection",
+        "parser",
+        "run_bounded_model_worker",
+        "validate_cli_args",
+        "validate_worker_payload"
+      ],
+      "contract_sha256": "e98397f353884fb8a1918b1982503c6b38df632d8460bc80e6cf4ca5e4d06f9e",
+      "integration_tests": [
+        "tests/test_retrieval_v2_cli.py",
+        "tests/test_retrieval_v2_orchestration.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_outputs.py",
+      "names": [
+        "canonical_report_bytes",
+        "require_outside_source_and_vault",
+        "write_new_output"
+      ],
+      "contract_sha256": "4e6d02ea3cef0e0476a9a1f00d168e965ccbf06dc0a915f6e3ac4cfa258d252c",
+      "integration_tests": [
+        "tests/test_retrieval_v2_aggregation.py",
+        "tests/test_retrieval_v2_benchmark.py",
+        "tests/test_retrieval_v2_orchestration.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_run.py",
+      "names": [
+        "run_benchmark"
+      ],
+      "contract_sha256": "961437f930d854ac142cd3f3f4846b8bfd6fcc4c3c08e0417ab8b23196932db4",
+      "integration_tests": [
+        "tests/test_retrieval_v2_benchmark.py",
+        "tests/test_retrieval_v2_cli.py",
+        "tests/test_retrieval_v2_orchestration.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_transformers.py",
+      "names": [
+        "load_transformer_embedding"
+      ],
+      "contract_sha256": "97cc6401a7331620725b9a205ea165ddcc262309b37ee9d875930c9728171e74",
+      "integration_tests": [
+        "tests/test_retrieval_v2_cli.py",
+        "tests/test_retrieval_v2_real_runs.py",
+        "tests/test_retrieval_v2_transformers.py"
+      ]
+    },
+    {
+      "provider": "benchmark/retrieval_v2_workspace.py",
+      "names": [
+        "prefetch_models"
+      ],
+      "contract_sha256": "f6c60335702d12b78389fcf5789a65996a6ec2e52c8a94e27e2f8e0ba30ff891",
+      "integration_tests": [
+        "tests/test_retrieval_v2_orchestration.py",
+        "tests/test_retrieval_v2_workspace.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "SchemaValidationError",
+        "validate_state_root"
+      ],
+      "contract_sha256": "546f267675c71482ad3c3d98ed5e49ce70266de237c7afb26bbc185fa6c67187",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

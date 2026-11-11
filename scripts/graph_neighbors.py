@@ -19,9 +19,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT, STATE_ROOT  # noqa: E402
-
-KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
+from llm_wiki import runtime_roots  # noqa: E402
 
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:\|[^\]]+)?\]\]")
 STATUS_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
@@ -45,16 +43,16 @@ def _read_text_or_none(path: Path) -> str | None:
         return None
 
 
-def _build_link_graph(*, deadline: float | None = None) -> dict[str, list[str]]:
+def build_link_graph(*, deadline: float | None = None) -> dict[str, list[str]]:
     """Build adjacency: page_path → [linked_page_paths].
 
     Scans all knowledge markdown files for [[wikilinks]].
     Resolves links to actual file paths.
     """
     graph: dict[str, list[str]] = {}
-    if not KNOWLEDGE_DIR.exists():
+    if not runtime_roots.notes_dir().exists():
         return graph
-    for md in sorted(KNOWLEDGE_DIR.rglob("*.md")):
+    for md in sorted(runtime_roots.notes_dir().rglob("*.md")):
         _require_before(deadline, "graph neighbor source-scan deadline reached")
         entry = _page_links(md, deadline)
         if entry is not None:
@@ -79,7 +77,7 @@ def _active_page(md: Path) -> tuple[str, str] | None:
     if content is None:
         return None
     try:
-        return md.relative_to(ROOT).as_posix(), content
+        return md.relative_to(runtime_roots.vault_root()).as_posix(), content
     except ValueError:
         return None
 
@@ -124,11 +122,11 @@ def _resolve_wikilink(target: str, *, deadline: float | None = None) -> str | No
 def _wikilink_candidates(target: str) -> list[Path]:
     if "/" in target:
         # Path-style: try as-is and with .md
-        return [ROOT / (target + ".md"), ROOT / target]
+        return [runtime_roots.vault_root() / (target + ".md"), runtime_roots.vault_root() / target]
     # Bare name: search for <name>.md in wiki + knowledge
-    if not KNOWLEDGE_DIR.exists():
+    if not runtime_roots.notes_dir().exists():
         return []
-    return sorted(KNOWLEDGE_DIR.rglob(f"{target}.md"))
+    return sorted(runtime_roots.notes_dir().rglob(f"{target}.md"))
 
 
 def _active_vault_file(candidate: Path) -> str | None:
@@ -137,7 +135,7 @@ def _active_vault_file(candidate: Path) -> str | None:
     if not (resolved.exists() and resolved.is_file()):
         return None
     try:
-        relative = resolved.relative_to(ROOT).as_posix()
+        relative = resolved.relative_to(runtime_roots.vault_root()).as_posix()
     except ValueError:
         return None
     return _when_active(resolved, relative)
@@ -152,7 +150,7 @@ def _when_active(resolved: Path, relative: str) -> str | None:
 
 
 # Optional explicit source-scan cache populated only by rebuild_graph_cache().
-_link_graph_cache: dict[str, list[str]] | None = None
+link_graph_cache: dict[str, list[str]] | None = None
 
 
 _LINKS_SQL = """
@@ -193,12 +191,12 @@ def _read_active_link_graph(
 def _catalog_or_default(catalog: object | None) -> object | None:
     if catalog is not None:
         return catalog
-    catalog_path = STATE_ROOT / "cache" / "evidence-graph" / "catalog.sqlite3"
+    catalog_path = runtime_roots.state_root() / "cache" / "evidence-graph" / "catalog.sqlite3"
     if not catalog_path.is_file():
         return None
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
-    return GenerationCatalog(STATE_ROOT, catalog_path=catalog_path)
+    return GenerationCatalog(runtime_roots.state_root(), catalog_path=catalog_path)
 
 
 def _link_rows(catalog: object, deadline: float | None) -> list | None:
@@ -215,7 +213,7 @@ def _query_links(catalog: object, deadline: float | None) -> list | None:
     from evidence_graph import EvidenceGraph
     from repository_scope import resolve_repository_scope
 
-    scope = resolve_repository_scope(ROOT, deadline=deadline)
+    scope = resolve_repository_scope(runtime_roots.vault_root(), deadline=deadline)
     graph = EvidenceGraph.open_active_for_repository(
         catalog,
         scope,
@@ -245,14 +243,15 @@ def get_link_graph(
     deadline: float | None = None,
 ) -> dict[str, list[str]]:
     """Prefer the active immutable graph and honestly source-scan if absent."""
-    global _link_graph_cache
+    global link_graph_cache
+    _require_before(deadline, "graph neighbor deadline reached")
     active = _read_active_link_graph(catalog, deadline=deadline)
     if active is not None:
-        _link_graph_cache = None
+        link_graph_cache = None
         return active
-    if _link_graph_cache is not None:
-        return _link_graph_cache
-    return _build_link_graph(deadline=deadline)
+    if link_graph_cache is not None:
+        return link_graph_cache
+    return build_link_graph(deadline=deadline)
 
 
 def get_neighbor_records(
@@ -338,9 +337,9 @@ def _add_neighbor_boosts(boost_paths: dict[str, float], neighbors: list[str], bo
 
 def rebuild_graph_cache() -> int:
     """Force rebuild the link graph. Returns edge count."""
-    global _link_graph_cache
-    _link_graph_cache = _build_link_graph()
-    return sum(len(v) for v in _link_graph_cache.values())
+    global link_graph_cache
+    link_graph_cache = build_link_graph()
+    return sum(len(v) for v in link_graph_cache.values())
 
 
 def _print_stats() -> None:

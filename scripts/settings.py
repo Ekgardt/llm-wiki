@@ -1,4 +1,4 @@
-"""The one registry of limits an operator may set, and where each value came from.
+"""The vault settings reader and registry of limits with their declared basis.
 
 Law 9: a limit that depends on operating conditions is stated with its basis and,
 where it can be, set by the operator rather than hidden in the code. Every such
@@ -11,10 +11,13 @@ An operator overrides a default in an optional `llm-wiki.toml` at the vault root
     [corpus]
     max_files = 20000
 
-Precedence is default < file < environment, as in uv. An unknown section or key, a
+For limits, precedence is default < file < environment, as in uv.
+The separate [llm] section is validated by model_selection and is authoritative
+for model selection; it is not a numeric limit or an environment projection. An unknown section or key, a
 value that is not an integer, or one below its bound stops the caller with the
 key's name and its source; a limit never falls back silently. With no file and no
-variable every value is its default, exactly the constant it replaced. See
+variable every value is its registry default. Compile/index aggregate quotas accept
+zero to disable the quota; positive values remain explicit operator policy. See
 `docs/research/2026-09-27-every-limit-states-its-reason.md`.
 """
 
@@ -22,17 +25,13 @@ from __future__ import annotations
 
 import hashlib
 import os
-import sys
+import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # pragma: no cover - exercised on the Python 3.10 CI job
-    import tomli as tomllib
-
 from bounded_io import read_stable_bytes
+from llm_wiki import runtime_roots
 
 SETTINGS_FILE_NAME = "llm-wiki.toml"
 ENVIRONMENT_PREFIX = "LLM_WIKI_"
@@ -72,6 +71,13 @@ _REPORT_REASON = (
 )
 
 
+# One existing discovery entry budget also bounds the default number of sources.
+# Retained from corpus_snapshot: no additional numeric value is selected here.
+# Its independent numerical basis remains under review; source defaults must not
+# introduce a smaller second ceiling than this bounded walk already enforces.
+MAX_CORPUS_INSPECTED_ENTRIES = 50_000
+
+
 @dataclass(frozen=True)
 class Setting:
     """One tunable limit: its default, unit, lower bound and reason."""
@@ -101,15 +107,34 @@ class Effective:
 
 
 REGISTRY: tuple[Setting, ...] = (
-    Setting("index", "max_pages", 2_000, "pages", "knowledge/index.md is rebuilt from every note; " + _HELD_IN_MEMORY),
-    Setting("index", "max_total_bytes", 32 * MIB, "bytes", "the notes the index is rebuilt from; " + _HELD_IN_MEMORY),
-    Setting("compile", "max_sources", 2_000, "sources", "daily logs and notes one compile reads; " + _HELD_IN_MEMORY),
-    Setting("compile", "max_total_source_bytes", 32 * MIB, "bytes", "the sources one compile reads; " + _HELD_IN_MEMORY),
-    Setting("corpus", "max_files", 10_000, "files", "the corpus a search generation is built from; " + _HELD_IN_MEMORY),
+    Setting("provider", "catalog_max_bytes", MIB, "bytes",
+            "provider metadata admission budget: 561046-byte Codex catalog parsed at "
+            "2182523-byte peak on 2026-10-19; roughly twice current catalog input; "
+            "raise after measuring parser memory when catalogs grow; not an entitlement limit"),
+    Setting("index", "max_pages", 0, "pages",
+            "optional operator quota on index source volume; 0 disables it; rendering "
+            "streams bodies and retains navigation metadata; review positive quotas "
+            "against measured work volume and metadata memory", lower=0),
+    Setting("index", "max_total_bytes", 0, "bytes",
+            "optional operator quota on index input bytes; 0 disables it; rendering "
+            "streams bodies; review positive quotas against measured I/O and latency", lower=0),
+    Setting("compile", "max_sources", 0, "sources",
+            "optional operator quota on total admitted work; 0 disables it; streamed "
+            "bodies do not justify an aggregate memory ceiling; choose/review a positive "
+            "quota against measured work volume, disk and full-cycle cost", lower=0),
+    Setting("compile", "max_total_source_bytes", 0, "bytes",
+            "optional operator quota on total admitted source bytes; 0 disables it; "
+            "streamed bodies do not justify an aggregate memory ceiling; choose/review "
+            "a positive quota against disk capacity and full-cycle cost", lower=0),
+    Setting("compile", "validation_retries", 2, "correcting passes per provider",
+            "cost/quality choice: initial attempt plus format and semantic corrections; "
+            "not a measured optimum; reassess complete-cycle facts, tokens and latency "
+            "after model/prompt/workload changes (approved 2026-10-18)", lower=0),
+    Setting("corpus", "max_files", MAX_CORPUS_INSPECTED_ENTRIES, "files", "shares the existing corpus discovery entry budget; " + _HELD_IN_MEMORY),
     Setting("corpus", "max_total_bytes", 64 * MIB, "bytes", "the corpus a search generation is built from; " + _HELD_IN_MEMORY),
     Setting("claims", "max_pages", 10_000, "pages", "notes and journals the claim tree hashes; " + _HELD_IN_MEMORY),
     Setting("claims", "max_total_bytes", 32 * MIB, "bytes", "the pages the claim tree hashes; " + _HELD_IN_MEMORY),
-    Setting("extraction", "max_sources", 10_000, "sources", "sources one knowledge extraction reads; " + _HELD_IN_MEMORY),
+    Setting("extraction", "max_sources", MAX_CORPUS_INSPECTED_ENTRIES, "sources", "shares the existing corpus discovery entry budget; " + _HELD_IN_MEMORY),
     Setting("search", "max_pages", 10_000, "pages", "notes a search without a generation walks; " + _HELD_IN_MEMORY),
     Setting("impact", "max_note_files", 2_000, "files", "notes one impact request scans; " + _HELD_IN_MEMORY),
     Setting("impact", "max_total_note_bytes", 32 * MIB, "bytes", "the notes one impact request scans; " + _HELD_IN_MEMORY),
@@ -118,7 +143,10 @@ REGISTRY: tuple[Setting, ...] = (
     Setting("retention", "report_bytes", 32 * MIB, "bytes", _REPORT_REASON + "; the only bound on the scheduler's own log"),
     Setting("retention", "telemetry_days", 90, "days", "retrieval telemetry is kept for the archive's 90 hot days"),
     Setting("retention", "benchmark_run_days", 30, "days", "a benchmark run directory is evidence for the report written from it"),
-    Setting("retention", "config_backup_days", 90, "days", "agent-config backups undo an installer rewrite; the archive's 90 hot days"),
+    Setting("retention", "config_backup_days", 90, "days", "agent-config backups and displaced owned files undo an installer rewrite; the archive's 90 hot days"),
+    Setting("generation", "nightly_seconds", 2131, "seconds", "107490-source measured full build exceeded 1812 s; plus 53 s validation scaled by corpus growth and 260 s collection variation; remeasure after growth (2026-10-08)"),
+    Setting("generation", "post_compile_seconds", 2131, "seconds", "same complete generation builder and measured corpus as nightly; a 120 s window could not finish its 260 s collection (2026-10-08)"),
+    Setting("doctor", "nightly_seconds", 60, "seconds", "legacy bounded nightly inspection profile; insufficient for large retained history (507-1618 s measured 2026-10-17); configure and requalify against full checks, load and scheduler cost"),
     Setting("provider", "draft_ceiling_seconds", 600, "seconds", _DRAFT_CEILING_REASON),
     Setting("mcp", "retrieval_seconds", 14, "seconds", _RETRIEVAL_BUDGET_REASON, lower=5),
 )
@@ -131,27 +159,30 @@ _SECTIONS = frozenset(setting.section for setting in REGISTRY)
 # are at most 64 KiB, so reading them per call costs microseconds and parsing stays
 # once per content. Only the latest content is kept: a long-lived process that sees the
 # operator edit the file many times holds one parse, not one per edit.
-_PARSED: dict[str, dict[str, int]] = {}
+_PARSED: dict[str, dict[str, int | str]] = {}
 
 
 class SettingsError(ValueError):
     """A settings file or variable names an unknown key or an invalid value."""
 
 
-def _default_root() -> Path:
-    from memory_state import ROOT
+def default_root() -> Path:
+    from llm_wiki.model_choice import settings_root
 
-    return ROOT
+    return settings_root(runtime_roots.vault_root())
 
 
 def settings_path(root: Path | None = None) -> Path:
-    return Path(_default_root() if root is None else root) / SETTINGS_FILE_NAME
+    return Path(default_root() if root is None else root) / SETTINGS_FILE_NAME
 
 
 def raise_hint(name: str) -> str:
-    """The words a refusal adds so the operator knows which setting lifts it."""
+    """Name the controls to review, without treating an increase as qualified."""
     setting = _BY_NAME[name]
-    return f"raise {setting.name} in {SETTINGS_FILE_NAME} or {setting.environment_name}"
+    return (
+        f"measure resource capacity before changing {setting.name} "
+        f"in {SETTINGS_FILE_NAME} or {setting.environment_name}"
+    )
 
 
 def clear_cache() -> None:
@@ -168,7 +199,15 @@ def _require_value(setting: Setting, raw: object, source: str) -> int:
     return raw
 
 
-def _section_values(section: str, table: object, source: str) -> dict[str, int]:
+def _section_values(section: str, table: object, source: str) -> dict[str, int | str]:
+    if section == "llm":
+        from llm_wiki.model_choice import table_values
+
+        return table_values(table, source)
+    return _limit_section_values(section, table, source)
+
+
+def _limit_section_values(section: str, table: object, source: str) -> dict[str, int]:
     if section not in _SECTIONS or not isinstance(table, Mapping):
         raise SettingsError(f"{source}: unknown section [{section}]")
     values: dict[str, int] = {}
@@ -180,18 +219,18 @@ def _section_values(section: str, table: object, source: str) -> dict[str, int]:
     return values
 
 
-def _parsed_bytes(raw: bytes, name: str) -> dict[str, int]:
+def parsed_bytes(raw: bytes, name: str) -> dict[str, int | str]:
     try:
         document = tomllib.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         raise SettingsError(f"{name}: not valid TOML: {error}") from error
-    values: dict[str, int] = {}
+    values: dict[str, int | str] = {}
     for section, table in document.items():
         values.update(_section_values(section, table, name))
     return values
 
 
-def _file_values(path: Path) -> dict[str, int]:
+def file_values(path: Path) -> dict[str, int | str]:
     """The file's values, parsed once per distinct content; none when it is absent."""
     try:
         raw = read_stable_bytes(path, MAX_SETTINGS_FILE_BYTES, label="settings file")
@@ -199,7 +238,7 @@ def _file_values(path: Path) -> dict[str, int]:
         return {}
     digest = hashlib.sha256(raw).hexdigest()
     if digest not in _PARSED:
-        parsed = _parsed_bytes(raw, path.name)
+        parsed = parsed_bytes(raw, path.name)
         _PARSED.clear()
         _PARSED[digest] = parsed
     return _PARSED[digest]
@@ -227,7 +266,7 @@ def _effective(setting: Setting, from_file: Mapping[str, int], environ: Mapping[
 
 def effective(root: Path | None = None, environ: Mapping[str, str] | None = None) -> dict[str, Effective]:
     """Every registered setting with its value and source; raises on an invalid override."""
-    from_file = _file_values(settings_path(root))
+    from_file = file_values(settings_path(root))
     environment = os.environ if environ is None else environ
     return {setting.name: _effective(setting, from_file, environment) for setting in REGISTRY}
 
@@ -235,6 +274,6 @@ def effective(root: Path | None = None, environ: Mapping[str, str] | None = None
 def setting_value(name: str, root: Path | None = None, environ: Mapping[str, str] | None = None) -> int:
     """The value of one registered setting for the vault at `root` (the installed vault by default)."""
     setting = _BY_NAME[name]
-    from_file = _file_values(settings_path(root))
+    from_file = file_values(settings_path(root))
     environment = os.environ if environ is None else environ
     return _effective(setting, from_file, environment).value

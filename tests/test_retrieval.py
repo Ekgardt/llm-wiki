@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+import generation_search
 import pytest
 from reliable_memory import SchemaValidationError, validate_schema
 
@@ -161,7 +162,7 @@ def test_rrf_is_rank_only_and_keeps_raw_backend_fields_separate() -> None:
     assert fused2[0].rrf_score == fused[0].rrf_score
 
 
-def test_rrf_ties_are_broken_deterministically_by_candidate_id() -> None:
+def test_rrf_ties_are_broken_deterministically_by_candidate_id(monkeypatch) -> None:
     import retrieval
 
     # Rank-only ignores raw boost magnitudes.
@@ -175,25 +176,19 @@ def test_rrf_ties_are_broken_deterministically_by_candidate_id() -> None:
     assert by_rank[1].graph_score == 0.01
 
     # Symmetric ranks + equal weights → equal RRF; tie-break by candidate_id.
-    original_bm25 = retrieval.BM25_WEIGHT
-    original_dense = retrieval.DENSE_WEIGHT
-    try:
-        retrieval.BM25_WEIGHT = 1.0
-        retrieval.DENSE_WEIGHT = 1.0
-        fused, _ = retrieval.fuse_rrf(
-            lexical=[
-                _hit(candidate_id="c-z", path="z.md", score=1.0),
-                _hit(candidate_id="c-a", path="a.md", score=1.0),
-            ],
-            dense=[
-                _hit(candidate_id="c-a", path="a.md", score=1.0),
-                _hit(candidate_id="c-z", path="z.md", score=1.0),
-            ],
-            graph=None,
-        )
-    finally:
-        retrieval.BM25_WEIGHT = original_bm25
-        retrieval.DENSE_WEIGHT = original_dense
+    monkeypatch.setattr(sys.modules[retrieval.fuse_rrf.__module__], "BM25_WEIGHT", 1.0)
+    monkeypatch.setattr(sys.modules[retrieval.fuse_rrf.__module__], "DENSE_WEIGHT", 1.0)
+    fused, _ = retrieval.fuse_rrf(
+        lexical=[
+            _hit(candidate_id="c-z", path="z.md", score=1.0),
+            _hit(candidate_id="c-a", path="a.md", score=1.0),
+        ],
+        dense=[
+            _hit(candidate_id="c-a", path="a.md", score=1.0),
+            _hit(candidate_id="c-z", path="z.md", score=1.0),
+        ],
+        graph=None,
+    )
     assert fused[0].rrf_score == fused[1].rrf_score
     assert [item.candidate_id for item in fused] == ["c-a", "c-z"]
 
@@ -265,7 +260,7 @@ def test_retrieve_uses_identical_hard_filters_for_lexical_and_dense() -> None:
         "scope": "wiki",
         # Backends are asked for the candidate pool, not the answer: a pool the
         # size of the answer cannot hold `limit` distinct pages.
-        "limit": retrieval._candidate_pool(7),
+        "limit": retrieval.candidate_pool(7),
         "project": "demo",
         "since": "2024-01-01",
         "as_of": "2025-06-01",
@@ -372,6 +367,7 @@ def test_retrieve_honors_graph_disablement_even_for_graph_profile() -> None:
 
 
 def test_public_search_goes_through_retrieve(tmp_path, monkeypatch) -> None:
+    import generation_search
     import retrieval
     import search_memory
 
@@ -382,10 +378,8 @@ def test_public_search_goes_through_retrieve(tmp_path, monkeypatch) -> None:
     (notes / "page.md").write_text(
         "---\nsource_authority: ai-derived\n---\n# Page\nAuth decision needle.\n", encoding="utf-8"
     )
-    monkeypatch.setattr(search_memory, "ROOT", vault)
-    monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
-    monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
-    monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setattr(generation_search, "active_generation_catalog", lambda: None)
 
     seen: dict[str, object] = {}
     real_retrieve = retrieval.retrieve
@@ -395,7 +389,7 @@ def test_public_search_goes_through_retrieve(tmp_path, monkeypatch) -> None:
         seen["kwargs"] = kwargs
         return real_retrieve(*args, **kwargs)
 
-    monkeypatch.setattr(retrieval, "retrieve", wrapped_retrieve)
+    monkeypatch.setattr("llm_wiki.retrieval_execution.retrieve", wrapped_retrieve)
 
     results = search_memory.search(
         "auth decision needle",
@@ -484,7 +478,7 @@ def test_retrieval_trace_schema_accepts_contract_payload() -> None:
     import mcp_server
     import retrieval
 
-    payload = mcp_server._reported_trace(dataclasses.asdict(
+    payload = mcp_server.reported_trace(dataclasses.asdict(
         retrieval.RetrievalTrace(
             requested_mode="HYBRID",
             effective_mode="BASE",
@@ -535,11 +529,10 @@ def test_typed_provenance_weighs_on_every_path_from_one_table():
     the README promised typed-provenance ranking.
     """
     import provenance
-    import search_memory
     from retrieval import fuse_rrf
 
     # One table, imported by both paths: the lexical scorer and the fusion.
-    assert search_memory.trust_weight is provenance.trust_weight
+    assert generation_search.trust_weight is provenance.trust_weight
 
     lexical = [
         {"path": "knowledge/notes/guess.md", "authority": "inferred", "score": 9.0},
@@ -617,15 +610,15 @@ def test_a_row_without_a_digest_is_hashed_rather_than_given_zeros(tmp_path, monk
     monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
 
     row = {"path": "knowledge/notes/page.md"}
-    assert retrieval._source_sha256(row) == hashlib.sha256(page.read_bytes()).hexdigest()
+    assert retrieval.source_sha256(row) == hashlib.sha256(page.read_bytes()).hexdigest()
 
     # A digest the row already carries is trusted as it stands.
     carried = {"path": "knowledge/notes/page.md", "source_sha256": "a" * 64}
-    assert retrieval._source_sha256(carried) == "a" * 64
+    assert retrieval.source_sha256(carried) == "a" * 64
 
     # A page that cannot be read is the one case the placeholder is for.
     missing = {"path": "knowledge/notes/gone.md"}
-    assert retrieval._source_sha256(missing) == "0" * 64
+    assert retrieval.source_sha256(missing) == "0" * 64
 
 
 def test_the_answer_leads_with_one_chunk_per_page() -> None:
@@ -656,9 +649,9 @@ def test_the_answer_leads_with_one_chunk_per_page() -> None:
 def test_page_diverse_order_drops_nothing() -> None:
     import retrieval
 
-    assert retrieval._candidate_pool(0) == retrieval.MIN_CANDIDATE_POOL
-    assert retrieval._candidate_pool(1000) == retrieval.MAX_CANDIDATE_POOL
-    assert retrieval._backend_limit(1000, 25) == 25
+    assert retrieval.candidate_pool(0) == retrieval.MIN_CANDIDATE_POOL
+    assert retrieval.candidate_pool(1000) == retrieval.MAX_CANDIDATE_POOL
+    assert retrieval.candidate_backend_limit(1000, 25) == 25
 
 
 def test_what_a_page_is_weighs_on_the_order_too() -> None:
@@ -759,7 +752,7 @@ def test_two_sessions_of_one_day_still_take_two_slots() -> None:
         _slot_candidate("knowledge/notes/page.md", ("Second",)),
     ]
 
-    ordered = retrieval._page_diverse(candidates)
+    ordered = retrieval.page_diverse(candidates)
     visible = [(item.relative_path, item.heading_path) for item in ordered[:3]]
 
     assert visible == [

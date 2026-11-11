@@ -11,9 +11,9 @@ session without conflict — Claude Code runs all registered hooks and
 concatenates their additionalContext output.
 
 Contract (hard requirements):
-    * Must exit 0 on ANY error. Breaking a session is worse than missing
-      context. All exceptions are swallowed and logged to
-      $LLM_WIKI_STATE_ROOT/hook-errors.log (best-effort).
+    * Failed context preparation or delivery exits 1. The lifecycle adapter
+      handles session continuation separately from delegate success. Errors
+      go to $LLM_WIKI_STATE_ROOT/logs/hook-errors.log (best-effort).
     * Must no-op if LLM_WIKI_ROOT is unset or its knowledge/projects/ is missing.
     * Output: a single JSON object on stdout with the shape Claude Code
       expects (see schema: hookSpecificOutput.additionalContext).
@@ -46,9 +46,10 @@ import sys
 import tempfile
 import traceback
 import unicodedata
-from datetime import datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from capture_diagnostics import record_hook_error  # noqa: E402
+from llm_wiki import runtime_roots
 from markdown_transaction import mutate_knowledge, stable_operation_id
 from project_journal import (
     ProjectStore,
@@ -113,32 +114,19 @@ def _resolve_state_root() -> Path | None:
     to the vault itself (runtime dirs cache/logs/run live inside the vault).
     Returns None only if neither env var is available (hook should no-op).
     """
-    raw = os.environ.get("LLM_WIKI_STATE_ROOT")
-    if raw:
-        return Path(raw)
-    vault = os.environ.get("LLM_WIKI_ROOT")
-    if vault:
-        return Path(vault).resolve()
-    return None
+    return runtime_roots.configured_state_root() or runtime_roots.configured_vault_root()
 
 
 def _safe_write_error(err: str) -> None:
-    """Best-effort error log. Silent on failure."""
+    """Keep the hook available when its diagnostic destination is unavailable."""
     try:
-        state_root = _resolve_state_root()
-        if state_root is None:
-            return
-        log_path = state_root / "logs" / "hook-errors.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().astimezone().isoformat(timespec="seconds")
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(f"[{ts}] session_start_project_state: {err}\n")
-    except Exception:  # noqa: BLE001
-        pass
+        record_hook_error(_resolve_state_root(), "session_start_project_state", err)
+    except Exception:  # noqa: BLE001 - resolving the diagnostic root can itself fail
+        return
 
 
-def _emit(additional_context: str) -> int:
-    """Write the hook's JSON response and return 0."""
+def emit(additional_context: str) -> int:
+    """Return success only after writing and flushing the hook response."""
     out = {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
@@ -146,19 +134,19 @@ def _emit(additional_context: str) -> int:
         }
     }
     try:
-        print(json.dumps(out, ensure_ascii=False))
-    except Exception:  # noqa: BLE001
-        # Even stdout can fail (broken pipe, encoding); swallow.
-        pass
+        print(json.dumps(out, ensure_ascii=False), flush=True)
+    except Exception as error:  # noqa: BLE001
+        _safe_write_error(f"context output failed: {type(error).__name__}: {error}")
+        return 1
     return 0
 
 
 def _emit_empty() -> int:
     """No-op exit — emit empty additionalContext and return 0."""
-    return _emit("")
+    return emit("")
 
 
-def _sanitize(text: str) -> str:
+def sanitize(text: str) -> str:
     """Lowercase + replace unsafe chars + strip hyphens. Preserve non-ASCII.
 
     The last step hands the result to the journal's own rule, so a directory
@@ -222,12 +210,12 @@ def _require_project_candidate(project_dir: Path, projects_dir: Path) -> None:
             raise NotAProject(message)
 
 
-def _base_slug(project_dir: Path) -> str:
+def base_slug(project_dir: Path) -> str:
     """Preferred slug — parent folder name only. Fallback to `root`."""
-    return _sanitize(project_dir.name) or "root"
+    return sanitize(project_dir.name) or "root"
 
 
-def _git_remote_slug(project_dir: Path) -> str | None:
+def git_remote_slug(project_dir: Path) -> str | None:
     """Extract an `owner-repo` slug from `project_dir/.git/config`.
 
     Returns None if no git dir, no `origin` remote, URL parse fails, or
@@ -275,14 +263,14 @@ def _owner_repo_slug(url: str) -> str | None:
     match = re.search(r"[:/]([^:/]+)/([^/]+?)(?:\.git)?/*$", url)
     if not match:
         return None
-    owner = _sanitize(match.group(1))
-    repo = _sanitize(match.group(2))
+    owner = sanitize(match.group(1))
+    repo = sanitize(match.group(2))
     if not owner or not repo:
         return None
     return f"{owner}-{repo}"
 
 
-def _path_hash_suffix(project_dir: Path) -> str:
+def path_hash_suffix(project_dir: Path) -> str:
     """Deterministic short hash from the absolute project path.
 
     Guarantees uniqueness even when parent folder, grandparent folder,
@@ -294,7 +282,7 @@ def _path_hash_suffix(project_dir: Path) -> str:
     return h[:PATH_HASH_SUFFIX_LEN]
 
 
-def _slug_owns_dir(slug: str, project_dir: Path, projects_dir: Path) -> bool:
+def slug_owns_dir(slug: str, project_dir: Path, projects_dir: Path) -> bool:
     """True ONLY if `projects_dir/slug/state.md` either doesn't exist or
     explicitly records `project_dir` as its Project root.
 
@@ -334,7 +322,7 @@ def _slug_owns_dir(slug: str, project_dir: Path, projects_dir: Path) -> bool:
     return recorded_norm == current_norm
 
 
-def _compute_slug(project_dir: Path, projects_dir: Path) -> str:
+def compute_slug(project_dir: Path, projects_dir: Path) -> str:
     """Compute the slug for a project, resolving collisions.
 
     Strategy (documented in `knowledge/notes/Global Multi-Project Migration
@@ -352,13 +340,13 @@ def _compute_slug(project_dir: Path, projects_dir: Path) -> str:
     """
     project_dir = owning_checkout(project_dir)
     _require_project_candidate(project_dir, projects_dir)
-    base = _base_slug(project_dir)
+    base = base_slug(project_dir)
     for cand in _slug_candidates(project_dir, base)[:MAX_SLUG_CANDIDATES]:
-        if _slug_owns_dir(cand, project_dir, projects_dir):
+        if slug_owns_dir(cand, project_dir, projects_dir):
             return cand
     # All predictable slugs are taken by other projects — fall back to
     # a deterministic hash suffix. Guaranteed unique per path.
-    return f"{base}-{_path_hash_suffix(project_dir)}"
+    return f"{base}-{path_hash_suffix(project_dir)}"
 
 
 def _ancestor_name(project_dir: Path, generations: int) -> str:
@@ -377,7 +365,7 @@ def _ancestor_name(project_dir: Path, generations: int) -> str:
     ancestors = (project_dir, *project_dir.parents)
     if generations >= len(ancestors):
         return ""
-    return _sanitize(ancestors[generations].name)
+    return sanitize(ancestors[generations].name)
 
 
 def _compound_slug(base: str, part: str) -> tuple[str, ...]:
@@ -389,7 +377,7 @@ def _compound_slug(base: str, part: str) -> tuple[str, ...]:
 
 def _remote_slug(project_dir: Path) -> tuple[str, ...]:
     """The git `owner-repo` slug, when the checkout declares an origin."""
-    remote = _git_remote_slug(project_dir)
+    remote = git_remote_slug(project_dir)
     if not remote:
         return ()
     return (remote,)
@@ -438,7 +426,7 @@ def _native_path_type(platform: str | None):
     return PurePosixPath
 
 
-def _is_native_absolute_root(root: str, platform: str | None = None) -> bool:
+def is_native_absolute_root(root: str, platform: str | None = None) -> bool:
     """Validate project identity before resolution can consult process cwd."""
     if not _is_bounded_root_text(root):
         return False
@@ -485,10 +473,10 @@ def owning_checkout(project_dir: Path) -> Path:
     return Path(*parts[: marks[-1]])
 
 
-def _resolve_project_dir() -> Path:
+def resolve_project_dir() -> Path:
     """Resolve a bounded native absolute CLAUDE_PROJECT_DIR or cwd."""
     raw = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
-    if not _is_native_absolute_root(raw):
+    if not is_native_absolute_root(raw):
         raise ValueError("project root must be a bounded native absolute path")
     return owning_checkout(Path(raw).resolve())
 
@@ -537,7 +525,7 @@ def _marker_present(project_dir: Path, marker: str) -> bool:
     return any(project_dir.glob(f"*{marker}"))
 
 
-def _render_new_state(state_template: Path, slug: str, project_dir: Path) -> str:
+def render_new_state(state_template: Path, slug: str, project_dir: Path) -> str:
     """Return template content with placeholders filled for a new project."""
     tmpl = state_template.read_text(encoding="utf-8")
     filled = (
@@ -553,7 +541,7 @@ def _render_new_state(state_template: Path, slug: str, project_dir: Path) -> str
     return filled
 
 
-def _clip(text: str, limit: int) -> str:
+def clip(text: str, limit: int) -> str:
     from context_budget import (
         DEFAULT_CONTEXT_BUDGET,
         BudgetExceededError,
@@ -598,29 +586,28 @@ def _build_context(state_path: Path, slug: str, is_new: bool) -> str:
         + ")\n\n"
     )
     payload = header + body
-    return _clip(payload, MAX_CONTEXT_CHARS)
+    return clip(payload, MAX_CONTEXT_CHARS)
 
 
 def main() -> int:
     try:
-        return _run_session_start()
-    except Exception:  # noqa: BLE001 — hook MUST exit 0
+        return run_session_start()
+    except Exception:  # noqa: BLE001
         _safe_write_error("unhandled:\n" + traceback.format_exc())
-        return _emit_empty()
+        return 1
 
 
-def _run_session_start() -> int:
+def run_session_start() -> int:
     """1. Locate the vault. 2. Identify the project. 3. Emit its context."""
-    vault_root = os.environ.get("LLM_WIKI_ROOT")
-    if not vault_root:
+    vault = runtime_roots.configured_vault_root()
+    if vault is None:
         return _emit_empty()
-    vault = Path(vault_root)
     projects_dir = vault / "knowledge" / "projects"
     if not projects_dir.is_dir():
         _safe_write_error(f"projects dir missing: {projects_dir}")
         return _emit_empty()
-    project_dir = _resolve_project_dir()
-    slug = _compute_slug(project_dir, projects_dir)
+    project_dir = resolve_project_dir()
+    slug = compute_slug(project_dir, projects_dir)
     return _emit_project_context(vault, projects_dir, project_dir, slug)
 
 
@@ -631,6 +618,7 @@ def _emit_project_context(
     state_root = _resolve_state_root()
     if state_root is None:
         return _emit_empty()
+    _bootstrap_existing_project(vault, project_dir, projects_dir / slug / "state.md")
     # Recover reservations even before the first journal file is published.
     handoff = recover_project_handoff(
         ProjectStore(vault, state_root),
@@ -640,7 +628,7 @@ def _emit_project_context(
     )
     journal_path = projects_dir / slug / "journal.md"
     if journal_path.is_file() or handoff.degraded or handoff.legacy:
-        return _emit(handoff.context)
+        return emit(handoff.context)
     return _emit_state_context(vault, projects_dir, project_dir, slug)
 
 
@@ -650,10 +638,19 @@ def _emit_state_context(
     """Ensure state.md exists — creation is gated on project markers."""
     state_path = projects_dir / slug / "state.md"
     if state_path.exists():
-        return _emit(_build_context(state_path, slug, False))
+        return emit(_build_context(state_path, slug, False))
     if not _create_project_state(vault, projects_dir, project_dir, slug, state_path):
         return _emit_empty()
-    return _emit(_build_context(state_path, slug, True))
+    return emit(_build_context(state_path, slug, True))
+
+
+def _bootstrap_existing_project(vault: Path, project_dir: Path, state_path: Path) -> None:
+    """Revisit an interrupted bootstrap before either kind of project handoff."""
+    if not state_path.is_file():
+        return
+    if not _has_project_marker(project_dir):
+        return
+    bootstrap_new_project(vault, project_dir, state_path)
 
 
 def _create_project_state(
@@ -669,7 +666,7 @@ def _create_project_state(
         _safe_write_error(f"template missing: {template}")
         return False
     try:
-        content = redact_secrets(_render_new_state(template, slug, project_dir))
+        content = redact_secrets(render_new_state(template, slug, project_dir))
         encoded = content.encode("utf-8")
         mutate_knowledge(
             stable_operation_id("project-state", slug, encoded),
@@ -678,19 +675,19 @@ def _create_project_state(
     except OSError as e:
         _safe_write_error(f"failed to create state.md at {state_path}: {e}")
         return False
-    _bootstrap_new_project(vault, project_dir, state_path)
+    bootstrap_new_project(vault, project_dir, state_path)
     return True
 
 
 # Measured 2026-09-18: `bootstrap_project.py` takes 0.09 s on a one-commit
 # repository and 0.12 s on this one. The old bound was 30 s, which no
-# measurement chose. A run that does not finish writes no `bootstrap.md`, so the
-# next session start of the project runs it again and nothing is lost. See
+# measurement chose. Failure is recorded in the hook log; a later session revisits
+# a missing bootstrap for an existing recognized project. See
 # `docs/research/2026-09-18-a-slug-the-journal-refuses-is-not-a-slug.md`.
 BOOTSTRAP_BUDGET_SECONDS = 5.0
 
 
-def _bootstrap_new_project(vault: Path, project_dir: Path, state_path: Path) -> None:
+def bootstrap_new_project(vault: Path, project_dir: Path, state_path: Path) -> None:
     """Auto-generate context from git + README, on first discovery only.
 
     Gives the new project immediate context without manual state.md editing.
@@ -702,15 +699,15 @@ def _bootstrap_new_project(vault: Path, project_dir: Path, state_path: Path) -> 
         import subprocess as _sp
         _sp.run(
             [sys.executable, str(vault / "scripts" / "bootstrap_project.py"),
-             "--cwd", str(project_dir), "--apply"],
-            capture_output=True, timeout=BOOTSTRAP_BUDGET_SECONDS, check=False,
+             "--cwd", str(project_dir), "--apply", "--if-missing"],
+            capture_output=True, timeout=BOOTSTRAP_BUDGET_SECONDS, check=True,
             cwd=str(vault),
         )
-    except Exception:  # noqa: BLE001
-        # Nothing is written on failure or timeout, so the next session start of
-        # this project tries again; session start itself is never blocked longer
-        # than the budget above.
-        pass
+    except Exception as error:  # noqa: BLE001 - keep the host session available
+        _safe_write_error(
+            f"bootstrap failed: {type(error).__name__}: {error}; "
+            f"stderr={getattr(error, 'stderr', None)!r}"
+        )
 
 
 if __name__ == "__main__":

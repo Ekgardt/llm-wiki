@@ -29,26 +29,26 @@ def _no_environment_override(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_the_default_ceiling_stays_short() -> None:
-    assert llm_client._timeout_s() == llm_client.DEFAULT_TIMEOUT_S
+    assert llm_client.timeout_s() == llm_client.DEFAULT_TIMEOUT_S
 
 
 def test_a_block_raises_the_ceiling_only_inside_itself() -> None:
     with llm_client.call_ceiling(300):
-        inside = llm_client._timeout_s()
-    assert (inside, llm_client._timeout_s()) == (300, llm_client.DEFAULT_TIMEOUT_S)
+        inside = llm_client.timeout_s()
+    assert (inside, llm_client.timeout_s()) == (300, llm_client.DEFAULT_TIMEOUT_S)
 
 
 def test_the_ceiling_is_restored_after_a_failure() -> None:
     with pytest.raises(RuntimeError), llm_client.call_ceiling(300):
         raise RuntimeError("the body failed")
-    assert llm_client._timeout_s() == llm_client.DEFAULT_TIMEOUT_S
+    assert llm_client.timeout_s() == llm_client.DEFAULT_TIMEOUT_S
 
 
 def test_blocks_nest_and_unwind_in_order() -> None:
     with llm_client.call_ceiling(300):
         with llm_client.call_ceiling(120):
-            inner = llm_client._timeout_s()
-        outer = llm_client._timeout_s()
+            inner = llm_client.timeout_s()
+        outer = llm_client.timeout_s()
     assert (inner, outer) == (120, 300)
 
 
@@ -56,7 +56,7 @@ def test_the_environment_still_wins(monkeypatch: pytest.MonkeyPatch) -> None:
     """An operator debugging a hang can widen every call from outside."""
     monkeypatch.setenv("MEMORY_LLM_TIMEOUT_S", "45")
     with llm_client.call_ceiling(300):
-        assert llm_client._timeout_s() == 45
+        assert llm_client.timeout_s() == 45
 
 
 @pytest.mark.parametrize("bad", [0, -1, 1.5, True, "300", None])

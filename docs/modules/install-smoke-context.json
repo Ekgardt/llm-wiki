@@ -1,0 +1,213 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/install-smoke-context.json",
+    "docs/modules/install-smoke.md",
+    "docs/modules/installed-memory-repair-tests.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/queue-core-tests-reliability-v3-adoption-helpers.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/install_smoke.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "tests/__init__.py",
+    "tests/a_check_names_its_cause_helpers.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/reliability_v3_adoption_helpers.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py",
+    "tests/test_a_failed_smoke_names_what_failed.py",
+    "tests/test_a_smoke_checks_the_install_not_the_vault.py",
+    "tests/test_doctor_waits_out_a_busy_admission.py",
+    "tests/test_install_smoke.py",
+    "tests/test_the_smoke_report_goes_to_a_file.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/install-smoke-context.json",
+      "docs/modules/install-smoke.md",
+      "scripts/install_smoke.py",
+      "tests/test_a_failed_smoke_names_what_failed.py",
+      "tests/test_a_smoke_checks_the_install_not_the_vault.py",
+      "tests/test_doctor_waits_out_a_busy_admission.py",
+      "tests/test_install_smoke.py",
+      "tests/test_the_smoke_report_goes_to_a_file.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/installed_memory_repair.py",
+      "names": [
+        "repair_installed_vault"
+      ],
+      "contract_sha256": "6ab4497d3ed56413bc24ea5ae9e993acf118980056b046072877a80df4f52a18",
+      "integration_tests": [
+        "tests/test_a_failed_smoke_names_what_failed.py",
+        "tests/test_a_smoke_checks_the_install_not_the_vault.py",
+        "tests/test_doctor_waits_out_a_busy_admission.py",
+        "tests/test_install_smoke.py",
+        "tests/test_the_smoke_report_goes_to_a_file.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/doctor_repair.py",
+      "names": [
+        "adoption_check"
+      ],
+      "contract_sha256": "c090676c201eab63e54b46a3538872f8538eab33e0c42e286b0e9522bff1ddc4",
+      "integration_tests": [
+        "tests/test_doctor_waits_out_a_busy_admission.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_a_failed_smoke_names_what_failed.py",
+        "tests/test_a_smoke_checks_the_install_not_the_vault.py",
+        "tests/test_doctor_waits_out_a_busy_admission.py",
+        "tests/test_install_smoke.py",
+        "tests/test_the_smoke_report_goes_to_a_file.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/runtime_roots.py",
+      "names": [
+        "state_root_for"
+      ],
+      "contract_sha256": "d2e6a394a08b7c76f0106a5558f12c3a65c589172b0ab07bfa32c015904e358a",
+      "integration_tests": [
+        "tests/test_a_continuation_keeps_its_original_entry.py",
+        "tests/test_a_prompt_checkpoint_does_not_outwait_its_host.py",
+        "tests/test_a_session_marker_survives_a_busy_writer.py"
+      ]
+    },
+    {
+      "provider": "scripts/markdown_transaction.py",
+      "names": [
+        "COORDINATOR_V3_SCHEMA_SHA256",
+        "initialize_coordinator_v3_candidate",
+        "validate_coordinator_v3_database"
+      ],
+      "contract_sha256": "f4e825ac8b89fd59cceb6d5388c2f3bb0d798db03f4bf99b27a77138cd4deb6f",
+      "integration_tests": [
+        "tests/test_a_failed_smoke_names_what_failed.py",
+        "tests/test_a_smoke_checks_the_install_not_the_vault.py",
+        "tests/test_doctor_waits_out_a_busy_admission.py",
+        "tests/test_install_smoke.py",
+        "tests/test_the_smoke_report_goes_to_a_file.py"
+      ]
+    },
+    {
+      "provider": "scripts/process_tree.py",
+      "names": [
+        "run_process_tree"
+      ],
+      "contract_sha256": "cac23754e296600d73204e59974371e40d2cded1544b474e65e272e0ad07621b",
+      "integration_tests": [
+        "tests/test_a_failed_smoke_names_what_failed.py",
+        "tests/test_a_smoke_checks_the_install_not_the_vault.py",
+        "tests/test_doctor_waits_out_a_busy_admission.py",
+        "tests/test_install_smoke.py",
+        "tests/test_the_smoke_report_goes_to_a_file.py"
+      ]
+    },
+    {
+      "provider": "scripts/queue_core.py",
+      "names": [
+        "QUEUE_V3_SCHEMA_SHA256",
+        "harden_owner_only",
+        "initialize_queue_v3_candidate",
+        "validate_queue_v3_database"
+      ],
+      "contract_sha256": "66c9235a0ce0f6ddda3e804b17690f77bdad6d41070a570ab6dfd8efaaf8717a",
+      "integration_tests": [
+        "tests/test_a_failed_smoke_names_what_failed.py",
+        "tests/test_a_smoke_checks_the_install_not_the_vault.py",
+        "tests/test_doctor_waits_out_a_busy_admission.py",
+        "tests/test_install_smoke.py",
+        "tests/test_the_smoke_report_goes_to_a_file.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "canonical_json_bytes",
+        "capture_runtime_file_identity",
+        "sha256_bytes",
+        "validate_state_root"
+      ],
+      "contract_sha256": "f3f750c31251ccb4ad9ec08857d94fb52c89bf906ed0ca7358102fc80d957a33",
+      "integration_tests": [
+        "tests/test_a_failed_smoke_names_what_failed.py",
+        "tests/test_a_smoke_checks_the_install_not_the_vault.py",
+        "tests/test_doctor_waits_out_a_busy_admission.py",
+        "tests/test_install_smoke.py",
+        "tests/test_the_smoke_report_goes_to_a_file.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_failed_smoke_names_what_failed.py",
+        "tests/test_a_smoke_checks_the_install_not_the_vault.py",
+        "tests/test_doctor_waits_out_a_busy_admission.py",
+        "tests/test_install_smoke.py",
+        "tests/test_the_smoke_report_goes_to_a_file.py"
+      ]
+    },
+    {
+      "provider": "scripts/secret_redact.py",
+      "names": [
+        "redact_secrets"
+      ],
+      "contract_sha256": "8b925f76433b0c3f5ab03f4b8b41a462551d5616843facdd2918813d103ad6f5",
+      "integration_tests": [
+        "tests/test_a_failed_smoke_names_what_failed.py",
+        "tests/test_a_smoke_checks_the_install_not_the_vault.py",
+        "tests/test_doctor_waits_out_a_busy_admission.py",
+        "tests/test_install_smoke.py",
+        "tests/test_the_smoke_report_goes_to_a_file.py"
+      ]
+    }
+  ]
+}

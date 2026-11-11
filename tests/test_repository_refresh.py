@@ -14,77 +14,48 @@ import os
 import subprocess
 import sys
 import time
-from pathlib import Path
 
-import pytest
+import repository_indexing
 
-SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+from tests.repository_refresh_helpers import SCRIPTS
+
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+from tests.code_graph_helpers import _activate_graph  # noqa: E402
+from tests.repository_index_helpers import ALPHA, _git, _repository  # noqa: E402
+from tests.repository_refresh_helpers import (
+    SCRIPTS,
+    _isolated_reader_cache,  # noqa: F401
+    adopted_vault,  # noqa: F401
+)
 from tests.slow_machine import LONG_TIMEOUT, SHORT_TIMEOUT  # noqa: E402
-from tests.test_code_graph import _activate_graph  # noqa: E402
-from tests.test_repository_index import ALPHA, _git, _repository  # noqa: E402
 
 
-@pytest.fixture(autouse=True)
-def _isolated_reader_cache():
-    import evidence_reader_cache
-
-    evidence_reader_cache.clear()
-    yield
-    evidence_reader_cache.clear()
-
-
-@pytest.fixture
-def adopted_vault(tmp_path, monkeypatch):
-    """A vault whose coordinator went through real V3 adoption, so a fence exists."""
-    from installed_memory_repair import repair_installed_vault
-
-    root = tmp_path / "vault"
-    state = tmp_path / "state"
-    (root / "scripts").mkdir(parents=True)
-    (root / "scripts/integration_adapter.py").write_bytes(
-        (SCRIPTS / "integration_adapter.py").read_bytes()
-    )
-    (root / "knowledge/notes").mkdir(parents=True)
-    (root / "knowledge/projects").mkdir(parents=True)
-    report = repair_installed_vault(
-        root=root, state_root=state, adopt_ownership_v3=True, confirm_all_agents_stopped=True
-    )
-    assert report["overall_status"] == "ok"
-    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
-    monkeypatch.setenv("LLM_WIKI_ROOT", str(root))
-    import memory_state
-
-    monkeypatch.setattr(memory_state, "ROOT", root, raising=False)
-    monkeypatch.setattr(memory_state, "STATE_ROOT", state, raising=False)
-    return root, state
-
-
-def test_refresh_of_an_unindexed_repository_says_not_indexed(adopted_vault, tmp_path):
-    import repository_index
+def test_refresh_of_an_unindexed_repository_says_not_indexed(adopted_vault, tmp_path):  # noqa: F811
+    import repository_indexing
 
     _root, state = adopted_vault
     repository = _repository(tmp_path / "repo", {"scripts/alpha.py": ALPHA})
 
-    answer = repository_index.refresh_repository(repository, state_root=state)
+    answer = repository_indexing.refresh_repository(repository, state_root=state)
 
     assert (answer["status"], answer["stale"]) == ("not_indexed", True)
 
 
 def test_refresh_rebuilds_only_after_an_edit_and_under_the_repository_fence(
-    adopted_vault, tmp_path
+    adopted_vault, tmp_path  # noqa: F811
 ):
     import repository_index
+    import repository_indexing
 
     _root, state = adopted_vault
     repository = _repository(tmp_path / "repo", {"scripts/alpha.py": ALPHA})
-    first = repository_index.index_repository(repository, state_root=state)
+    first = repository_indexing.index_repository(repository, state_root=state)
 
-    untouched = repository_index.refresh_repository(repository, state_root=state)
+    untouched = repository_indexing.refresh_repository(repository, state_root=state)
     (repository / "scripts/beta.py").write_text("def beta():\n    return 2\n", encoding="utf-8")
-    rebuilt = repository_index.refresh_repository(repository, state_root=state)
+    rebuilt = repository_indexing.refresh_repository(repository, state_root=state)
 
     assert (untouched["status"], untouched["generation_id"]) == ("fresh", first["generation_id"])
     assert (rebuilt["status"], rebuilt["previous_generation_id"], rebuilt["rebuilt_sources"] >= 1) == (
@@ -97,14 +68,14 @@ def test_refresh_rebuilds_only_after_an_edit_and_under_the_repository_fence(
 
 
 def _assert_second_holder_is_refused(repository_index, repository, state, rebuilt) -> None:
-    _coordinator, registry = repository_index._refresh_fence(state)
+    _coordinator, registry = repository_indexing.refresh_fence(state)
     lease = registry.acquire(
-        repository_index.REFRESH_ROLE,
-        scope=repository_index.refresh_scope(rebuilt["repository_id"]),
+        repository_indexing.REFRESH_ROLE,
+        scope=repository_indexing.refresh_scope(rebuilt["repository_id"]),
     )
     (repository / "scripts/gamma.py").write_text("def gamma():\n    return 3\n", encoding="utf-8")
     try:
-        answer = repository_index.refresh_repository(repository, state_root=state)
+        answer = repository_indexing.refresh_repository(repository, state_root=state)
     finally:
         registry.release(lease)
     assert (answer["status"], answer["stale"], answer["generation_id"]) == (
@@ -120,24 +91,24 @@ def _assert_a_missing_checkout_is_named_not_deleted(repository_index, repository
     remove_tree(repository)
     answer = repository_index.refresh_all_repositories(state_root=state, budget_seconds=60)
     statuses = {row["status"] for row in answer["repositories"]}
-    listed = repository_index.list_repositories(state_root=state)["repositories"]
+    listed = repository_indexing.list_repositories(state_root=state)["repositories"]
     assert (statuses, len(listed)) == ({"checkout_missing"}, 1)
 
 
 def test_refresh_without_an_adopted_coordinator_is_reported_not_run(tmp_path, monkeypatch):
     """An unadopted vault has no scoped fence; the refresh says so and does not build."""
-    import repository_index
+    import repository_indexing
 
-    monkeypatch.setattr(repository_index, "_refresh_fence", lambda _root: (object(), None))
+    monkeypatch.setattr(repository_indexing, "refresh_fence", lambda _root: (object(), None))
     monkeypatch.setattr(
-        repository_index,
-        "_staleness",
+        repository_indexing,
+        "generation_staleness",
         lambda *_args: {"stale": True, "reason": "sources_changed", "commit_moved": True},
     )
     repository = _repository(tmp_path / "repo", {"scripts/alpha.py": ALPHA})
-    admission = repository_index.admit_repository(repository, state_root=tmp_path / "state")
+    admission = repository_indexing.admit_repository(repository, state_root=tmp_path / "state")
 
-    answer = repository_index._fenced_rebuild(
+    answer = repository_indexing.fenced_rebuild(
         admission, None, "generation-x", {}, tmp_path / "state",
         {"stale": True, "reason": "sources_changed", "commit_moved": True}, None, None
     )
@@ -145,21 +116,21 @@ def test_refresh_without_an_adopted_coordinator_is_reported_not_run(tmp_path, mo
     assert (answer["status"], answer["reason"]) == ("refresh_unavailable", "coordinator_v3_required")
 
 
-def test_the_repository_fence_is_renewed_before_its_lease_runs_out(adopted_vault):
+def test_the_repository_fence_is_renewed_before_its_lease_runs_out(adopted_vault):  # noqa: F811
     """A 30 s lease renewed every 40 s cancelled every nightly build at 44 s.
 
     Research: `docs/research/2026-09-14-a-heartbeat-beats-at-the-pace-of-its-own-lease.md`.
     """
-    import doctor
-    import repository_index
+    import generation_maintenance
+    import repository_indexing
 
     _root, state = adopted_vault
-    coordinator, registry = repository_index._refresh_fence(state)
-    owner = repository_index._held_lease(registry, "repository-under-test")
+    coordinator, registry = repository_indexing.refresh_fence(state)
+    owner = repository_indexing.held_lease(registry, "repository-under-test")
     lease = {"token": owner.token, "epoch": owner.epoch, "registry": registry, "owner": owner}
 
-    with doctor._MaintenanceHeartbeat(coordinator, lease, deadline=time.monotonic() + LONG_TIMEOUT) as beat:
-        renewal = (beat.interval, doctor._lease_seconds(lease))
+    with generation_maintenance.MaintenanceHeartbeat(coordinator, lease, deadline=time.monotonic() + LONG_TIMEOUT) as beat:
+        renewal = (beat.interval, generation_maintenance.lease_seconds(lease))
 
     assert renewal == (owner.heartbeat_seconds, owner.ttl_seconds)
 
@@ -187,7 +158,6 @@ def test_the_cli_detect_verb_answers_json_and_exit_two_when_not_indexed(tmp_path
 def test_a_structural_answer_names_its_commit_and_starts_one_refresh_per_commit(
     tmp_path, monkeypatch
 ):
-    import code_graph
     import mcp_server
     import memory_state
 
@@ -196,16 +166,16 @@ def test_a_structural_answer_names_its_commit_and_starts_one_refresh_per_commit(
     # A structural answer opens the generation under a deadline, so this double
     # takes the bound the product forwards instead of refusing the call.
     monkeypatch.setattr(
-        code_graph, "_generation_catalog", lambda _directory, **_options: catalog
+        "llm_wiki.code_graph_generation.generation_catalog", lambda _directory, **_options: catalog
     )
-    monkeypatch.setattr(mcp_server, "_REFRESH_REQUESTED", {})
+    monkeypatch.setattr("llm_wiki.mcp_server_architecture.REFRESH_REQUESTED", {})
     spawned: list[list[str]] = []
     monkeypatch.setattr(
         memory_state, "spawn_detached", lambda args, **_options: spawned.append(args) or 4242
     )
 
     def freshness():
-        answer = mcp_server._get_architecture_mode(
+        answer = mcp_server.get_architecture_mode(
             str(repository), mode="callers", symbol="callee", deadline=time.monotonic() + SHORT_TIMEOUT
         )
         return answer["freshness"]
@@ -229,10 +199,10 @@ def test_a_structural_answer_names_its_commit_and_starts_one_refresh_per_commit(
 
 
 def test_the_nightly_pass_refreshes_repositories_before_it_prunes():
-    import scheduled_nightly
+    import nightly_budget
 
-    labels = [step.label for step in scheduled_nightly._post_compile_steps()]
-    step = next(step for step in scheduled_nightly._post_compile_steps() if step.label == "repositories")
+    labels = [step.label for step in nightly_budget.post_compile_steps()]
+    step = next(step for step in nightly_budget.post_compile_steps() if step.label == "repositories")
 
     subcommand = step.command[step.command.index("refresh-all")]
     assert (labels.index("repositories") < labels.index("prune_generations"), subcommand) == (

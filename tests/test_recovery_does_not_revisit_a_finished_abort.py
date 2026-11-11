@@ -20,7 +20,8 @@ for entry in (str(SCRIPTS_DIR), str(TESTS)):
         sys.path.insert(0, entry)
 
 from markdown_transaction import MarkdownChange  # noqa: E402
-from test_transaction_abort import _abort_fixture  # noqa: E402
+
+from tests.transaction_abort_helpers import _abort_fixture  # noqa: E402
 
 
 def _aborted(tmp_path: Path):

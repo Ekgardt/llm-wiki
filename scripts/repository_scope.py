@@ -153,7 +153,7 @@ def _serialized_path(name: str, value: object) -> str:
     return str(value)
 
 
-def _local_serialized_path(path: Path, *, strict: bool) -> str:
+def local_serialized_path(path: Path, *, strict: bool) -> str:
     resolved = path.resolve(strict=strict)
     value = str(resolved)
     if re.match(r"[A-Za-z]:[\\/]", value):
@@ -359,7 +359,7 @@ def _git_probe_process(root: Path, command: list[str]) -> subprocess.Popen:
     )
 
 
-class _GitWatch:
+class GitWatch:
     """Kills the probe when its deadline passes or the caller cancels."""
 
     def __init__(self, process: subprocess.Popen, effective_deadline: float, cancelled) -> None:
@@ -427,21 +427,21 @@ def _close_probe(process: subprocess.Popen) -> None:
 
 
 def _require_probe_not_stopped(
-    watch: _GitWatch, process: subprocess.Popen, command: list[str], output: bytes
+    watch: GitWatch, process: subprocess.Popen, command: list[str], output: bytes
 ) -> None:
     if watch.reason:
         raise TimeoutError(f"repository scope {watch.reason[0]} reached during Git probe")
 
 
 def _require_probe_bounded(
-    watch: _GitWatch, process: subprocess.Popen, command: list[str], output: bytes
+    watch: GitWatch, process: subprocess.Popen, command: list[str], output: bytes
 ) -> None:
     if len(output) > MAX_GIT_OUTPUT_BYTES:
         raise ValueError("Git command output exceeds the byte ceiling")
 
 
 def _require_probe_exit(
-    watch: _GitWatch, process: subprocess.Popen, command: list[str], output: bytes
+    watch: GitWatch, process: subprocess.Popen, command: list[str], output: bytes
 ) -> None:
     if process.returncode != 0:
         raise subprocess.CalledProcessError(process.returncode, command)
@@ -457,7 +457,7 @@ _PROBE_CHECKS = (
 
 
 def _require_probe_success(
-    watch: _GitWatch, process: subprocess.Popen, command: list[str], output: bytes
+    watch: GitWatch, process: subprocess.Popen, command: list[str], output: bytes
 ) -> None:
     for check in _PROBE_CHECKS:
         check(watch, process, command, output)
@@ -489,7 +489,7 @@ def _git_output(
     process = _git_probe_process(root, command)
     local_deadline = time.monotonic() + GIT_TIMEOUT_SECONDS
     effective = local_deadline if deadline is None else min(local_deadline, deadline)
-    watch = _GitWatch(process, effective, cancelled)
+    watch = GitWatch(process, effective, cancelled)
     watch.start()
     output = b""
     try:
@@ -502,7 +502,7 @@ def _git_output(
     return _probe_value(output, allow_empty)
 
 
-def _git_value(
+def git_value(
     root: Path,
     *arguments: str,
     deadline: float | None = None,
@@ -534,7 +534,7 @@ def _git_roots(
 ) -> tuple[str, str]:
     """(checkout root, common dir) for the checkout that contains `requested`."""
     checkout_path = Path(
-        _git_value(
+        git_value(
             requested,
             "--path-format=absolute",
             "--show-toplevel",
@@ -546,7 +546,7 @@ def _git_roots(
         raise ValueError("Git checkout root must be a directory")
     requested.relative_to(checkout_path)
     common = Path(
-        _git_value(
+        git_value(
             requested,
             "--path-format=absolute",
             "--git-common-dir",
@@ -555,8 +555,8 @@ def _git_roots(
         )
     )
     return (
-        _local_serialized_path(checkout_path, strict=True),
-        _local_serialized_path(common, strict=True),
+        local_serialized_path(checkout_path, strict=True),
+        local_serialized_path(common, strict=True),
     )
 
 
@@ -590,7 +590,7 @@ def _commit_without_head(
 
 def _git_commit_of(requested: Path, deadline: float | None, cancelled) -> str | None:
     try:
-        git_commit = _git_value(
+        git_commit = git_value(
             requested,
             "--verify",
             "HEAD^{commit}",
@@ -623,7 +623,7 @@ def _local_scope_path(requested: Path) -> str:
     nothing else (audit 3, G-L9).
     """
     try:
-        return _local_serialized_path(requested, strict=True)
+        return local_serialized_path(requested, strict=True)
     except ValueError as exc:
         raise RepositoryScopeUnavailable(
             f"repository identity is unavailable for this path: {exc}"

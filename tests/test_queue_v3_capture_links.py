@@ -7,63 +7,33 @@ from pathlib import Path
 
 import pytest
 
+from tests.queue_v3_capture_links_helpers import SCRIPTS_DIR
 from tests.slow_machine import LONG_TIMEOUT, PAUSE_TIMEOUT
 
-SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import markdown_transaction  # noqa: E402
-import memory_queue  # noqa: E402
 import operational_ownership  # noqa: E402
-from installed_memory_repair import repair_installed_vault  # noqa: E402
+import queue_core  # noqa: E402
 from reliable_memory import (  # noqa: E402
     canonical_json_bytes,
     publish_runtime_file,
     sha256_bytes,
 )
 
-
-def _queue(tmp_path: Path):
-    coordinator = tmp_path / "run" / "markdown-transactions-v3.candidate.sqlite3"
-    candidate = tmp_path / "run" / "queue-v3.candidate.sqlite3"
-    markdown_transaction.initialize_coordinator_v3_candidate(
-        coordinator, source_v2=None
-    )
-    memory_queue.initialize_queue_v3_candidate(candidate, source_v2=None)
-    return memory_queue.MemoryQueue._from_v3_candidate(
-        candidate, state_root=tmp_path
-    )
-
-
-def _coordinator(tmp_path: Path):
-    return markdown_transaction.MarkdownCoordinator._from_v3_candidate(
-        tmp_path / "run" / "markdown-transactions-v3.candidate.sqlite3",
-        state_root=tmp_path,
-    )
-
-
-def _adopted_vault(tmp_path: Path) -> tuple[Path, Path]:
-    root = tmp_path / "vault"
-    state_root = tmp_path / "state"
-    (root / "scripts").mkdir(parents=True)
-    (root / "scripts/integration_adapter.py").write_bytes(
-        (SCRIPTS_DIR / "integration_adapter.py").read_bytes()
-    )
-    report = repair_installed_vault(
-        root=root,
-        state_root=state_root,
-        adopt_ownership_v3=True,
-        confirm_all_agents_stopped=True,
-    )
-    assert report["overall_status"] == "ok"
-    return root, state_root
+from tests.queue_v3_capture_links_helpers import (
+    _adopted_vault,
+    _capture_binding,
+    _coordinator,
+    _queue,
+)
 
 
 def test_active_capture_queue_uses_the_validated_adopted_pair(tmp_path: Path) -> None:
     root, state_root = _adopted_vault(tmp_path)
 
-    queue = memory_queue.active_memory_queue(root, state_root)
+    queue = queue_core.active_memory_queue(root, state_root)
     coordinator = markdown_transaction.active_markdown_coordinator(root, state_root)
     registry = queue.ownership_registry()
     owner = registry.acquire("capture", scope="intent:fixture")
@@ -94,33 +64,6 @@ def test_capture_claim_ignores_unlinked_tasks(tmp_path: Path) -> None:
     assert lease is not None
     assert lease.id == binding.task_id
     assert lease.kind == "flush"
-
-
-def _capture_binding(
-    queue, coordinator, registry, *, intent_id: str, intent_sha256: str
-):
-    intent_path = f"run/capture-intents/{intent_id}.json"
-    queue.publish_capture_intent(
-        intent_id=intent_id,
-        intent_path=intent_path,
-        intent_sha256=intent_sha256,
-        byte_size=128,
-    )
-    owner = registry.acquire("capture", scope=f"intent:{intent_id}")
-    fence = coordinator.acquire_intent_fence(intent_id, mode="capture", owner=owner)
-    binding = queue.enqueue_capture_task(
-        "flush",
-        1,
-        {"prompt": "capture"},
-        intent_id=intent_id,
-        intent_path=intent_path,
-        intent_sha256=intent_sha256,
-        capture_fence=fence,
-        owner=owner,
-    )
-    coordinator.release_intent_fence(fence)
-    registry.release(owner)
-    return binding
 
 
 def test_capture_enqueue_atomically_inserts_task_and_immutable_link(
@@ -186,7 +129,7 @@ def test_capture_enqueue_atomically_inserts_task_and_immutable_link(
             }
         )
     )
-    assert binding == memory_queue.CaptureTaskBinding(
+    assert binding == queue_core.CaptureTaskBinding(
         task_id=binding.task_id,
         intent_id=intent_id,
         intent_sha256=intent_sha256,
@@ -222,7 +165,7 @@ def test_capture_enqueue_rejects_missing_or_stale_capture_fence(tmp_path: Path) 
     fence = coordinator.acquire_intent_fence(intent_id, mode="capture", owner=owner)
     coordinator.release_intent_fence(fence)
 
-    with pytest.raises(memory_queue.QueueOperationError, match="intent_fence_lost"):
+    with pytest.raises(queue_core.QueueOperationError, match="intent_fence_lost"):
         queue.enqueue_capture_task(
             "flush",
             1,
@@ -299,30 +242,29 @@ def test_capture_task_fences_acquire_task_first_and_release_intent_first(
 
     with queue.queue_owner(
         role="queue-worker", scope="worker:capture", parent=owner
-    ):
-        with memory_queue.capture_task_fences(
-            queue,
-            coordinator,
-            binding.task_id,
-            intent_id=intent_id,
-            mode="worker",
-            owner=owner,
-        ) as (task_fence, intent_fence):
-            assert intent_fence is not None
-            assert task_fence.owner == owner
-            assert intent_fence.owner == owner
-            with sqlite3.connect(queue.db_path) as database:
-                assert database.execute(
-                    """SELECT canonical_owner_token,canonical_fencing_epoch
-                       FROM task_fences WHERE task_id=?""",
-                    (binding.task_id,),
-                ).fetchone() == (owner.token, owner.epoch)
-            with sqlite3.connect(coordinator.database_path) as database:
-                assert database.execute(
-                    """SELECT canonical_owner_token,canonical_fencing_epoch
-                       FROM intent_fences WHERE intent_id=?""",
-                    (intent_id,),
-                ).fetchone() == (owner.token, owner.epoch)
+    ), queue_core.capture_task_fences(
+        queue,
+        coordinator,
+        binding.task_id,
+        intent_id=intent_id,
+        mode="worker",
+        owner=owner,
+    ) as (task_fence, intent_fence):
+        assert intent_fence is not None
+        assert task_fence.owner == owner
+        assert intent_fence.owner == owner
+        with sqlite3.connect(queue.db_path) as database:
+            assert database.execute(
+                """SELECT canonical_owner_token,canonical_fencing_epoch
+                   FROM task_fences WHERE task_id=?""",
+                (binding.task_id,),
+            ).fetchone() == (owner.token, owner.epoch)
+        with sqlite3.connect(coordinator.database_path) as database:
+            assert database.execute(
+                """SELECT canonical_owner_token,canonical_fencing_epoch
+                   FROM intent_fences WHERE intent_id=?""",
+                (intent_id,),
+            ).fetchone() == (owner.token, owner.epoch)
 
     assert events == [
         "acquire-task",
@@ -366,7 +308,7 @@ def test_first_consumer_seals_active_digest_before_side_effect(
                 owner=operator,
                 reason="Attempt to supersede after consumption.",
             )
-        except memory_queue.QueueOperationError as error:
+        except queue_core.QueueOperationError as error:
             observed.append(error.code)
         finally:
             resolution_finished.set()
@@ -434,34 +376,18 @@ def test_semantic_decision_seal_and_index_commit_together_without_terminal_resul
 
     with queue.queue_owner(
         role="queue-worker", scope=f"worker:{stage}", parent=owner
-    ):
-        with memory_queue.capture_task_fences(
-            queue,
-            coordinator,
-            binding.task_id,
-            intent_id=intent_id,
-            mode="worker",
-            owner=owner,
-        ) as (task_fence, intent_fence):
-            assert intent_fence is not None
-            monkeypatch.setattr(queue, "_insert_semantic_decision", fail_index)
-            with pytest.raises(RuntimeError, match="injected semantic index failure"):
-                queue.publish_semantic_decision(
-                    coordinator,
-                    task_id=binding.task_id,
-                    intent_id=intent_id,
-                    stage=stage,
-                    decision_path=decision_path,
-                    decision_sha256=decision_sha256,
-                    active_link_digest=binding.active_digest,
-                    task_fence=task_fence,
-                    intent_fence=intent_fence,
-                    owner=owner,
-                )
-            _assert_no_semantic_publication(queue)
-
-            monkeypatch.setattr(queue, "_insert_semantic_decision", real_insert)
-            indexed = queue.publish_semantic_decision(
+    ), queue_core.capture_task_fences(
+        queue,
+        coordinator,
+        binding.task_id,
+        intent_id=intent_id,
+        mode="worker",
+        owner=owner,
+    ) as (task_fence, intent_fence):
+        assert intent_fence is not None
+        monkeypatch.setattr(queue, "_insert_semantic_decision", fail_index)
+        with pytest.raises(RuntimeError, match="injected semantic index failure"):
+            queue.publish_semantic_decision(
                 coordinator,
                 task_id=binding.task_id,
                 intent_id=intent_id,
@@ -473,6 +399,21 @@ def test_semantic_decision_seal_and_index_commit_together_without_terminal_resul
                 intent_fence=intent_fence,
                 owner=owner,
             )
+        _assert_no_semantic_publication(queue)
+
+        monkeypatch.setattr(queue, "_insert_semantic_decision", real_insert)
+        indexed = queue.publish_semantic_decision(
+            coordinator,
+            task_id=binding.task_id,
+            intent_id=intent_id,
+            stage=stage,
+            decision_path=decision_path,
+            decision_sha256=decision_sha256,
+            active_link_digest=binding.active_digest,
+            task_fence=task_fence,
+            intent_fence=intent_fence,
+            owner=owner,
+        )
 
     _assert_sealed_decision(queue, binding, indexed, stage, intent_id, target, decision)
     registry.release(owner)

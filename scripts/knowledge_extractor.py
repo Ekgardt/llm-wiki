@@ -11,12 +11,9 @@ from dataclasses import dataclass
 
 from corpus_snapshot import CapturedSource, read_frontmatter
 from graph_storable import storable_identity_key, storable_metadata
-from reliable_memory import canonical_json_bytes
 from settings import raise_hint, setting_value
 
 EXTRACTOR_VERSION = "knowledge-extractor/v1"
-# Records one extraction may produce; `episode_consolidation.MAX_RECORDS` is a day's session records.
-MAX_RECORDS = 100_000
 
 # A wikilink lives on one line. Without the line breaks in the classes, `[[` in a
 # quoted pandas `df[["Latitude", ...` and a `]]` several turns later were read as
@@ -54,7 +51,7 @@ class ExtractionResult:
     dependencies: tuple[dict[str, object], ...] = ()
 
 
-def _identifier(prefix: str, value: str) -> str:
+def identifier(prefix: str, value: str) -> str:
     candidate = f"{prefix}:{value}"
     if _SAFE_ID.fullmatch(candidate):
         return candidate
@@ -99,7 +96,7 @@ def _span(source: CapturedSource, start: int, end: int) -> dict[str, object]:
     }
 
 
-def _evidence(
+def evidence(
     source: CapturedSource,
     record_id: str,
     start: int,
@@ -108,14 +105,14 @@ def _evidence(
     observation: bool = False,
 ) -> dict[str, object]:
     return {
-        "evidence_id": _identifier("evidence", record_id),
+        "evidence_id": identifier("evidence", record_id),
         "assertion_id": None if observation else record_id,
         "observation_id": record_id if observation else None,
         **_span(source, start, end),
     }
 
 
-def _node(node_id: str, kind: str, scheme: str, key: str, **metadata: object) -> dict[str, object]:
+def node(node_id: str, kind: str, scheme: str, key: str, **metadata: object) -> dict[str, object]:
     """A node the writer stores: raw YAML values and over-long keys made storable.
 
     See `docs/research/2026-09-14-the-rest-of-the-readers-before-the-writer.md`.
@@ -129,9 +126,9 @@ def _node(node_id: str, kind: str, scheme: str, key: str, **metadata: object) ->
     }
 
 
-def _occurrence(source: CapturedSource, node_id: str, role: str, start: int, end: int) -> dict[str, object]:
+def occurrence_record(source: CapturedSource, node_id: str, role: str, start: int, end: int) -> dict[str, object]:
     return {
-        "occurrence_id": _identifier("occurrence", f"{source.record.logical_id}:{node_id}:{start}:{end}"),
+        "occurrence_id": identifier("occurrence", f"{source.record.logical_id}:{node_id}:{start}:{end}"),
         "node_id": node_id,
         "source_id": source.record.logical_id,
         "role": role,
@@ -194,7 +191,7 @@ class _Extraction:
         ordered: Sequence[CapturedSource],
         symbols: Mapping[str, str],
         *,
-        record_limit: int,
+        record_limit: int | None,
         deadline: float | None,
         monotonic: Callable[[], float],
         cancelled: Callable[[], bool] | None,
@@ -223,7 +220,7 @@ class _Extraction:
             metadata = _frontmatter(source)
             path = source.record.relative_path
             self.metadata_by_path[path] = metadata
-            self.page_by_path[path] = _identifier("page", path)
+            self.page_by_path[path] = identifier("page", path)
             for alias in _aliases_of(path):
                 self.aliases.setdefault(alias, []).append(path)
 
@@ -243,11 +240,11 @@ class _Extraction:
 
     def check_work(self) -> None:
         _check_stop(self.deadline, self.monotonic, self.cancelled)
-        if self._count() >= self.record_limit:
+        if record_budget_at_capacity(self._count, self.record_limit):
             raise ValueError("knowledge extraction record ceiling exceeded")
 
     def _require_room(self) -> None:
-        if self._count() > self.record_limit:
+        if record_budget_exceeded(self._count, self.record_limit):
             raise ValueError("knowledge extraction record ceiling exceeded")
 
     def add_relation(
@@ -261,11 +258,11 @@ class _Extraction:
         authority: str,
     ) -> None:
         key = f"{source.record.logical_id}:{source_node}:{edge}:{target_node}:{start}:{end}"
-        record_id = _identifier("assertion", key)
+        record_id = identifier("assertion", key)
         self.assertions[record_id] = _assertion(
             record_id, source_node, edge, target_node, authority
         )
-        row = _evidence(source, record_id, start, end)
+        row = evidence(source, record_id, start, end)
         self.evidence[str(row["evidence_id"])] = row
 
     def add_observation(
@@ -284,7 +281,7 @@ class _Extraction:
             f"{source.record.logical_id}:{source_node}:{edge}:{target}:{reason}"
             f":{start}:{end}"
         )
-        record_id = _identifier("observation", key)
+        record_id = identifier("observation", key)
         self.observations[record_id] = {
             "observation_id": record_id,
             "source_node_id": source_node,
@@ -293,7 +290,7 @@ class _Extraction:
             "reason": reason,
             "extractor": EXTRACTOR_VERSION,
         }
-        row = _evidence(source, record_id, start, end, observation=True)
+        row = evidence(source, record_id, start, end, observation=True)
         self.evidence[str(row["evidence_id"])] = row
 
     def _resolve(self, target: str) -> list[str]:
@@ -352,7 +349,7 @@ class _Extraction:
     def _page_node(
         self, source: CapturedSource, page_id: str, metadata: Mapping[str, object]
     ) -> None:
-        self.nodes[page_id] = _node(
+        self.nodes[page_id] = node(
             page_id,
             _page_kind(metadata.get("type") or source.metadata.type),
             "knowledge-path/v1",
@@ -362,7 +359,7 @@ class _Extraction:
         )
         if not source.content:
             return
-        occurrence = _occurrence(source, page_id, "definition", 0, len(source.content))
+        occurrence = occurrence_record(source, page_id, "definition", 0, len(source.content))
         self.occurrences[str(occurrence["occurrence_id"])] = occurrence
 
     def _project_edge(
@@ -375,8 +372,8 @@ class _Extraction:
         project = metadata.get("project") or source.metadata.project
         if not isinstance(project, str) or not project:
             return
-        project_id = _identifier("project", project)
-        self.nodes[project_id] = _node(
+        project_id = identifier("project", project)
+        self.nodes[project_id] = node(
             project_id, "project", "project-slug/v1", project
         )
         start, end = _field_span(source, "project", (0, min(1, len(source.content))))
@@ -467,7 +464,7 @@ class _Extraction:
             )
             return
         self.nodes.setdefault(
-            target_node, _node(target_node, "symbol", "external-symbol/v1", reference)
+            target_node, node(target_node, "symbol", "external-symbol/v1", reference)
         )
         self.add_relation(
             source,
@@ -514,19 +511,21 @@ class _Extraction:
         search_start: int,
         authority: str,
     ) -> int:
-        encoded = canonical_json_bytes(record)
+        from claims import claim_json_bytes
+
+        encoded = claim_json_bytes(record)
         start = source.content.find(encoded, search_start)
         if start < 0:
             raise ValueError("canonical claim record is not present in source bytes")
         end = start + len(encoded)
-        claim_id = _identifier("claim", str(record["id"]))
+        claim_id = identifier("claim", str(record["id"]))
         reference = str(record["evidence"]["reference"])
-        evidence_node = _identifier("evidence-node", reference)
-        self.nodes[claim_id] = _node(claim_id, "claim", "claim-id/v1", str(record["id"]))
-        self.nodes[evidence_node] = _node(
+        evidence_node = identifier("evidence-node", reference)
+        self.nodes[claim_id] = node(claim_id, "claim", "claim-id/v1", str(record["id"]))
+        self.nodes[evidence_node] = node(
             evidence_node, "evidence", "evidence-reference/v1", reference
         )
-        occurrence = _occurrence(source, claim_id, "definition", start, end)
+        occurrence = occurrence_record(source, claim_id, "definition", start, end)
         self.occurrences[str(occurrence["occurrence_id"])] = occurrence
         self.add_relation(
             source, claim_id, "EVIDENCED_BY", evidence_node, start, end, authority
@@ -559,6 +558,21 @@ def _require_positive_bound(value: object, name: str) -> None:
         raise ValueError(f"{name} must be positive")
 
 
+
+def require_optional_record_budget(value: object) -> None:
+    if value is None:
+        return
+    _require_positive_bound(value, "max_records")
+
+
+def record_budget_at_capacity(count: Callable[[], int], limit: int | None) -> bool:
+    return limit is not None and count() >= limit
+
+
+def record_budget_exceeded(count: Callable[[], int], limit: int | None) -> bool:
+    return limit is not None and count() > limit
+
+
 def _require_source_sequence(sources: object) -> None:
     if isinstance(sources, (bytes, str)) or not isinstance(sources, Sequence):
         raise TypeError("sources must be a sequence of CapturedSource values")
@@ -574,7 +588,7 @@ def _require_extraction_arguments(
 ) -> None:
     _require_source_sequence(sources)
     _require_positive_bound(max_sources, "max_sources")
-    _require_positive_bound(max_records, "max_records")
+    require_optional_record_budget(max_records)
     _require_callable_cancel(cancelled)
     assert isinstance(max_sources, int) and isinstance(sources, Sequence)
     if len(sources) > max_sources:
@@ -612,7 +626,7 @@ def extract_knowledge(
     *,
     symbol_index: Mapping[str, str] | None = None,
     max_sources: int | None = None,
-    max_records: int = MAX_RECORDS,
+    max_records: int | None = None,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     cancelled: Callable[[], bool] | None = None,
@@ -628,7 +642,7 @@ def extract_knowledge(
     extraction = _Extraction(
         ordered,
         symbol_index or {},
-        record_limit=min(max_records, MAX_RECORDS),
+        record_limit=max_records,
         deadline=deadline,
         monotonic=monotonic,
         cancelled=cancelled,

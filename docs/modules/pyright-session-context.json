@@ -1,0 +1,238 @@
+{
+  "encoding": "o200k_base",
+  "max_tokens": 100000,
+  "serialization": "exact-duplicates/v1",
+  "files": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/AGENTS.md",
+    "docs/STRUCTURE.md",
+    "docs/modules/context-bundle.md",
+    "docs/modules/context-records.md",
+    "docs/modules/context-tooling.md",
+    "docs/modules/model-choice.md",
+    "docs/modules/product-structure.md",
+    "docs/modules/project-governance.md",
+    "docs/modules/pyright-session-context.json",
+    "docs/modules/pyright-session.md",
+    "docs/modules/test-support.md",
+    "rules/development-laws.md",
+    "scripts/__init__.py",
+    "scripts/llm_wiki/__init__.py",
+    "scripts/llm_wiki/context_bundle.py",
+    "scripts/pyright_session.py",
+    "tests/__init__.py",
+    "tests/conftest.py",
+    "tests/module_context.py",
+    "tests/module_context_paths.py",
+    "tests/module_interface.py",
+    "tests/module_interface_render.py",
+    "tests/module_qualification.py",
+    "tests/module_record_context.py",
+    "tests/module_records.py",
+    "tests/shared_fixtures.py",
+    "tests/slow_machine.py"
+  ],
+  "ownership": {
+    "files": [
+      "docs/modules/pyright-session-context.json",
+      "docs/modules/pyright-session.md",
+      "scripts/pyright_session.py"
+    ]
+  },
+  "qualified_dependencies": [
+    {
+      "provider": "scripts/llm_wiki/generation_catalog_store.py",
+      "names": [
+        "GenerationCatalog"
+      ],
+      "contract_sha256": "b18194ebe04bf988b4474379fcb5243516550d43b745a00eaed1453f7844c983",
+      "integration_tests": [
+        "tests/test_a_blocked_task_has_a_way_back.py",
+        "tests/test_a_build_in_flight_is_not_an_orphan.py",
+        "tests/test_a_capacity_refusal_does_not_corrupt_a_generation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/model_choice.py",
+      "names": [
+        "using_root"
+      ],
+      "contract_sha256": "d45f2655cb61963e77617d1dfd7d617b134ad77cc770b59b335d0856e5d65019",
+      "integration_tests": [
+        "tests/test_central_model_selection.py",
+        "tests/test_compile_execution_inventory.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_bootstrap.py",
+      "names": [
+        "CLIENT_CAPABILITIES"
+      ],
+      "contract_sha256": "a91fac2ccdf40ebf6bc6bbf1bd22af1fa27139434fb5eefe26a4bff6653f499d",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_progress_gate_waits_only_for_an_opened_token.py",
+        "tests/test_a_retained_cleanup_owner_leaves_the_module_registry.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_core.py",
+      "names": [
+        "LanguageServerSession",
+        "PyrightSession"
+      ],
+      "contract_sha256": "650b8fb83a864c4e5d3d252b59e6f4de40627b45af45bb6612de1f4068a8d11b",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_lapsed_deadline_is_not_a_torn_stream.py",
+        "tests/test_a_retained_cleanup_owner_leaves_the_module_registry.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_diagnostics.py",
+      "names": [
+        "MAX_DIAGNOSTIC_BYTES"
+      ],
+      "contract_sha256": "c179d73e4f2f7059840d4f8ac44f6c4269dba065abf236a8255af9e79d46fca8",
+      "integration_tests": [
+        "tests/test_pyright_session_diagnostics.py",
+        "tests/test_pyright_session_synchronize.py",
+        "tests/test_the_last_cuts_say_what_they_left_out.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_documents.py",
+      "names": [
+        "MAX_DOCUMENT_BYTES",
+        "MAX_OPEN_DOCUMENTS",
+        "MAX_OPEN_DOCUMENT_BYTES",
+        "verified_document_content"
+      ],
+      "contract_sha256": "d821a92487f865587fc8f1707077cd733885c973639835a0ef3c16cb8fc7648a",
+      "integration_tests": [
+        "tests/test_pyright_session_documents.py",
+        "tests/test_pyright_session_synchronize.py",
+        "tests/test_the_open_documents_make_room_for_the_next_file.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_launch.py",
+      "names": [
+        "LaunchServerGuard"
+      ],
+      "contract_sha256": "e865836581db2c54ce5846e3a9a43570efa31baa6d9ace1e308937d094b9628d",
+      "integration_tests": [
+        "tests/test_a_lapsed_deadline_is_not_a_torn_stream.py",
+        "tests/test_lsp_launch_package.py",
+        "tests/test_pyright_session.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_manager.py",
+      "names": [
+        "IDLE_SECONDS",
+        "LanguageServerSessionManager",
+        "MAX_LSP_PROCESSES",
+        "PyrightSessionManager"
+      ],
+      "contract_sha256": "1c428695f89c1dc2af225e83958772c2af989e5013c90baaf81c348ceb8ee6ac",
+      "integration_tests": [
+        "tests/test_a_startup_that_ran_out_of_time_is_tried_again_later.py",
+        "tests/test_a_stranded_session_close_is_retried_by_the_next_caller.py",
+        "tests/test_an_idle_language_server_is_closed_by_the_next_request.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_paths.py",
+      "names": [
+        "ensure_lsp_parent"
+      ],
+      "contract_sha256": "b9b1c4d706f2de022ba153c2c5f75960535c837d491af54e6d17732f906c5c0e",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_a_progress_gate_waits_only_for_an_opened_token.py",
+        "tests/test_a_retained_cleanup_owner_leaves_the_module_registry.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_progress.py",
+      "names": [
+        "PROGRESS_GATE_GRACE_SECONDS",
+        "configuration_result"
+      ],
+      "contract_sha256": "4abbd6e39d73645e332faee7a37243620c82e49ee4f3e94eb772e03ee7b027b3",
+      "integration_tests": [
+        "tests/test_a_lapsed_deadline_is_not_a_torn_stream.py",
+        "tests/test_a_sectionless_configuration_is_the_servers_own.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_ranges.py",
+      "names": [
+        "location_key",
+        "lsp_range"
+      ],
+      "contract_sha256": "8f84fa02658bbd49bf5db38703e8646a53d738f0e88f3fa9b0514fb5c2cc1339",
+      "integration_tests": [
+        "tests/test_typescript_navigation.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_startup.py",
+      "names": [
+        "HEALTHY_RUN_SECONDS",
+        "STARTUP_RETRY_BACKOFF",
+        "STARTUP_SECONDS"
+      ],
+      "contract_sha256": "f132de7cf8916d659d4aa8fe6fcfa02f37cfb0d95d7a86e37512e69e7db4d026",
+      "integration_tests": [
+        "tests/test_a_failed_server_is_started_again.py",
+        "tests/test_a_startup_that_ran_out_of_time_is_tried_again_later.py",
+        "tests/test_pyright_session.py"
+      ]
+    },
+    {
+      "provider": "scripts/llm_wiki/pyright_session_values.py",
+      "names": [
+        "LspDiagnostic",
+        "LspLocation",
+        "OpenDocument",
+        "ProviderCalls",
+        "ProviderDiagnostics",
+        "ProviderHover",
+        "ProviderLocations"
+      ],
+      "contract_sha256": "9a1476a4396fd6f1552b4ba2d3fe769c804a6748a5da3939840d1c93c90eb379",
+      "integration_tests": [
+        "tests/test_a_document_is_opened_in_its_own_language.py",
+        "tests/test_code_navigation.py",
+        "tests/test_code_navigation_benchmark.py"
+      ]
+    },
+    {
+      "provider": "scripts/reliable_memory.py",
+      "names": [
+        "validate_state_root"
+      ],
+      "contract_sha256": "8680515cd873056a7c8a36e0057d91f2f83f23c48841263697676ff91f7ff964",
+      "integration_tests": [
+        "tests/test_a_backup_image_carries_what_git_does_not.py",
+        "tests/test_a_changed_task_setting_reaches_an_installed_machine.py",
+        "tests/test_a_committed_source_resolves_an_older_compile_plan.py"
+      ]
+    },
+    {
+      "provider": "scripts/repository_scope.py",
+      "names": [
+        "sanitized_git_environment"
+      ],
+      "contract_sha256": "fd550ae20761afad50b37fa3a71044a162485b0e4d4b3e2af9b5b22e143c2bec",
+      "integration_tests": [
+        "tests/test_a_code_generation_is_not_abandoned.py",
+        "tests/test_a_directory_link_inside_the_checkout_does_not_refuse_the_revision.py",
+        "tests/test_a_document_is_opened_in_its_own_language.py"
+      ]
+    }
+  ]
+}

@@ -5,7 +5,7 @@ See `docs/research/2026-09-17-a-queued-entry-resolves-its-dates-too.md`.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -15,15 +15,15 @@ if str(SCRIPTS_DIR) not in sys.path:
 import flush_memory  # noqa: E402
 import operational_ownership  # noqa: E402
 
-from tests.test_capture_terminal import (  # noqa: E402
-    _FakeNoContentProvider,
+from tests.capture_terminal_helpers import (  # noqa: E402
+    _FakeNoContentProvider,  # noqa: E402
     _ready_intent_binding,
     _TimedCaptureProcessor,
 )
-from tests.test_queue_v3_capture_links import _coordinator, _queue  # noqa: E402
+from tests.queue_v3_capture_links_helpers import _coordinator, _queue  # noqa: E402
 
 # A Sunday, so "last Thursday" is the 13th.
-CHOSEN_AT = datetime(2026, 8, 16, 12, 34, 56, tzinfo=timezone.utc)
+CHOSEN_AT = datetime(2026, 8, 16, 12, 34, 56, tzinfo=UTC)
 WIRE_OUTPUT = "FLUSH_MAJOR\n- **Decisions made** - I met her last Thursday."
 INTENT = {
     "event": "session_end",
@@ -51,8 +51,8 @@ def test_the_worker_writes_the_resolved_date_under_its_entry(tmp_path: Path) -> 
 
 
 def _decision(dated: bool) -> dict:
-    tier, body = flush_memory._parse_capture_wire_output(WIRE_OUTPUT)
-    plan = flush_memory._capture_operation_plan(INTENT, tier, body, CHOSEN_AT, dated=dated)
+    tier, body = flush_memory.parse_capture_wire_output(WIRE_OUTPUT)
+    plan = flush_memory.capture_operation_plan(INTENT, tier, body, CHOSEN_AT, dated=dated)
     return {
         "wire_output": WIRE_OUTPUT,
         "tier": tier,
@@ -64,7 +64,7 @@ def _decision(dated: bool) -> dict:
 def test_a_decision_stored_before_the_dates_were_resolved_is_still_valid() -> None:
     stored, fresh = _decision(dated=False), _decision(dated=True)
 
-    flush_memory._require_capture_decision_semantics(stored, INTENT)
-    flush_memory._require_capture_decision_semantics(fresh, INTENT)
+    flush_memory.require_capture_decision_semantics(stored, INTENT)
+    flush_memory.require_capture_decision_semantics(fresh, INTENT)
 
     assert stored["operation_plan"] != fresh["operation_plan"]

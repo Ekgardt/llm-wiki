@@ -15,6 +15,13 @@ from pathlib import Path
 
 import pytest
 
+from tests.generation_rebuild_reuse_helpers import (
+    _PAGE,
+    _CountingEmbedder,
+    _seal_like_a_published_generation,
+    _snapshot_from,
+)
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 
@@ -124,7 +131,7 @@ _FILES = {
 
 def test_a_generation_stores_a_manifest_the_next_build_can_read(tmp_path):
     """The defect in one line: no generation on disk carried a manifest."""
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     catalog = GenerationCatalog(tmp_path / "state")
     built = _build(catalog, "gen-1", _FILES, _Extractor())
@@ -133,7 +140,7 @@ def test_a_generation_stores_a_manifest_the_next_build_can_read(tmp_path):
 
 
 def test_an_unchanged_source_is_reused_rather_than_extracted_again(tmp_path):
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     catalog = GenerationCatalog(tmp_path / "state")
     _build(catalog, "gen-1", _FILES, _Extractor())
@@ -147,7 +154,7 @@ def test_an_unchanged_source_is_reused_rather_than_extracted_again(tmp_path):
 
 
 def test_only_the_changed_source_is_extracted_again(tmp_path):
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     catalog = GenerationCatalog(tmp_path / "state")
     _build(catalog, "gen-1", _FILES, _Extractor())
@@ -170,7 +177,7 @@ def test_the_manifest_carries_a_bounded_sample_not_a_row_per_record(tmp_path):
     deterministic prefix and the manifest states the true total.
     """
     import evidence_graph_builder
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     def wide(source, content, **kwargs):  # noqa: ARG001 - fixture shape
         source_id = str(source["source_id"])
@@ -212,26 +219,26 @@ def test_the_manifest_carries_a_bounded_sample_not_a_row_per_record(tmp_path):
 def test_the_read_bound_is_the_size_the_sealed_manifest_declares(tmp_path):
     """Not a constant: a constant is what a real corpus outgrew.
 
-    `generation_catalog._validate_generation` has already hashed the artifact
+    `generation_catalog.validate_generation` has already hashed the artifact
     against `manifest.json`, so the declared size is verified fact by the time
     the reuse path reads it.
     """
     import evidence_graph_builder
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     catalog = GenerationCatalog(tmp_path / "state")
     built = _build(catalog, "gen-1", _FILES, _Extractor())
     sealed = json.loads((built.generation_path / "manifest.json").read_bytes())
     actual = (built.generation_path / "incremental-manifest.json").stat().st_size
 
-    assert evidence_graph_builder._declared_manifest_bytes(sealed) == actual
+    assert evidence_graph_builder.declared_manifest_bytes(sealed) == actual
 
 
 def test_a_manifest_the_sealed_generation_does_not_declare_is_refused(tmp_path):
     import evidence_graph_builder
 
     with pytest.raises(ValueError, match="does not declare"):
-        evidence_graph_builder._declared_manifest_bytes(
+        evidence_graph_builder.declared_manifest_bytes(
             {"artifacts": [{"path": "evidence.sqlite3", "size": 1, "sha256": "0" * 64}]}
         )
 
@@ -247,7 +254,7 @@ def test_an_incremental_graph_is_byte_identical_to_a_full_rebuild(tmp_path):
     """Correctness outranks speed, and it is compared rather than asserted."""
     import sqlite3
 
-    from generation_catalog import GenerationCatalog
+    from llm_wiki.generation_catalog_store import GenerationCatalog
 
     changed = {**_FILES, "two": ("two.md", "# two, edited\n")}
     incremental_catalog = GenerationCatalog(tmp_path / "incremental")
@@ -287,65 +294,6 @@ def test_an_incremental_graph_is_byte_identical_to_a_full_rebuild(tmp_path):
 # --------------------------------------------------------------------------
 # Half two: vector reuse.
 # --------------------------------------------------------------------------
-
-
-class _CountingEmbedder:
-    """A deterministic stand-in: the vector is a function of the text alone.
-
-    That is the property the real model has only up to float32 re-batching
-    noise, so the reuse rule is tested here against a model that has it
-    exactly, and the real model's departure from it is measured separately in
-    `docs/research/2026-08-28-what-a-rebuild-may-reuse.md`.
-    """
-
-    def __init__(self, dimensions: int = 4) -> None:
-        self.dimensions = dimensions
-        self.encoded: list[str] = []
-
-    def __call__(self, texts):
-        import hashlib
-
-        rows = []
-        for text in texts:
-            self.encoded.append(text)
-            digest = hashlib.sha256(text.encode("utf-8")).digest()
-            rows.append([digest[index] / 255.0 for index in range(self.dimensions)])
-        return rows
-
-
-def _snapshot_from(tmp_path: Path, pages: dict[str, str]):
-    from corpus_snapshot import collect_corpus
-
-    notes = tmp_path / "knowledge" / "notes"
-    notes.mkdir(parents=True, exist_ok=True)
-    for name, body in pages.items():
-        (notes / name).write_text(body, encoding="utf-8")
-    return collect_corpus(tmp_path, code_roots=(), max_files=100)
-
-
-_PAGE = """---
-type: concept
-status: active
----
-
-# {title}
-
-One-sentence summary: {title} exists so a chunk exists.
-
-{body}
-"""
-
-
-def _seal_like_a_published_generation(directory: Path) -> None:
-    """A published generation's manifest seals its vectors; reuse checks those seals (2026-09-14)."""
-    import hashlib
-    import json
-
-    artifacts = [
-        {"path": name, "sha256": hashlib.sha256((directory / name).read_bytes()).hexdigest(), "size": (directory / name).stat().st_size}
-        for name in ("vectors.json", "vectors.npy")
-    ]
-    (directory / "manifest.json").write_text(json.dumps({"artifacts": artifacts}), encoding="utf-8")
 
 
 def test_an_unchanged_chunk_is_not_embedded_again(tmp_path):

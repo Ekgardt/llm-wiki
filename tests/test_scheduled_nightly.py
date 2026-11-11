@@ -8,15 +8,14 @@ import sys
 from pathlib import Path
 
 import pytest
+from llm_wiki import runtime_roots
 
 
 def test_failed_nightly_releases_claim_and_records_failure(tmp_path, monkeypatch):
     import memory_state
     import scheduled_nightly
 
-    monkeypatch.setattr(memory_state, "STATE_DIR", tmp_path / "run")
-    monkeypatch.setattr(memory_state, "STATE_FILE", tmp_path / "run" / "state.json")
-    monkeypatch.setattr(memory_state, "LOCK_FILE", tmp_path / "run" / "state.json.lock")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     monkeypatch.setattr(scheduled_nightly, "update_state", memory_state.update_state)
     memory_state.save_state({
         "nightly_catchup_claim": {
@@ -24,9 +23,9 @@ def test_failed_nightly_releases_claim_and_records_failure(tmp_path, monkeypatch
         }
     })
 
-    scheduled_nightly._record_nightly_result("2026-07-12", failures=1)
+    scheduled_nightly.record_nightly_result("2026-07-12", failures=1)
 
-    state = json.loads(memory_state.STATE_FILE.read_text(encoding="utf-8"))
+    state = json.loads(memory_state.state_file().read_text(encoding="utf-8"))
     assert "nightly_catchup_claim" not in state
     assert state["last_nightly_status"] == "failed"
     assert state["last_nightly_failure"]["date"] == "2026-07-12"
@@ -37,15 +36,13 @@ def test_successful_nightly_releases_claim_and_records_completion(tmp_path, monk
     import memory_state
     import scheduled_nightly
 
-    monkeypatch.setattr(memory_state, "STATE_DIR", tmp_path / "run")
-    monkeypatch.setattr(memory_state, "STATE_FILE", tmp_path / "run" / "state.json")
-    monkeypatch.setattr(memory_state, "LOCK_FILE", tmp_path / "run" / "state.json.lock")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     monkeypatch.setattr(scheduled_nightly, "update_state", memory_state.update_state)
     memory_state.save_state({"nightly_catchup_claim": {"date": "2026-07-12"}})
 
-    scheduled_nightly._record_nightly_result("2026-07-12", failures=0)
+    scheduled_nightly.record_nightly_result("2026-07-12", failures=0)
 
-    state = json.loads(memory_state.STATE_FILE.read_text(encoding="utf-8"))
+    state = json.loads(memory_state.state_file().read_text(encoding="utf-8"))
     assert "nightly_catchup_claim" not in state
     assert state["last_nightly_status"] == "success"
     assert state["last_nightly_date"] == "2026-07-12"
@@ -61,10 +58,7 @@ def test_nightly_releases_claim_when_maintenance_lock_prevents_run(tmp_path, mon
     # A live owner: the marker is stale with its process, never by age
     # (audit OPS-01/OPS-07), so a dead PID would be retired and the pass run.
     lock.write_text(str(os.getpid()), encoding="utf-8")
-    monkeypatch.setattr(memory_state, "STATE_DIR", state_root / "run")
-    monkeypatch.setattr(memory_state, "STATE_FILE", state_root / "run" / "state.json")
-    monkeypatch.setattr(memory_state, "LOCK_FILE", state_root / "run" / "state.json.lock")
-    monkeypatch.setattr(scheduled_nightly, "STATE_ROOT", state_root)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
     monkeypatch.setattr(scheduled_nightly, "update_state", memory_state.update_state)
     memory_state.save_state({
         "last_nightly_date": "2026-07-11",
@@ -76,7 +70,7 @@ def test_nightly_releases_claim_when_maintenance_lock_prevents_run(tmp_path, mon
 
     assert scheduled_nightly.main() == 0
 
-    state = json.loads(memory_state.STATE_FILE.read_text(encoding="utf-8"))
+    state = json.loads(memory_state.state_file().read_text(encoding="utf-8"))
     assert (
         "nightly_catchup_claim" in state,
         state["last_nightly_status"],
@@ -131,7 +125,7 @@ def test_the_maintenance_marker_names_the_pid_and_the_process_in_ascii(
     )
     try:
         assert observed == ["running"]
-        assert marker_path.read_bytes() == operational_ownership._marker_payload()
+        assert marker_path.read_bytes() == operational_ownership.marker_payload()
     finally:
         operational_ownership.release_marker_owner(lease, marker)
     assert not marker_path.exists()
@@ -147,15 +141,15 @@ def test_nightly_source_compacts_telemetry_and_never_flushes_frontmatter():
 
 
 def _post_compile_labels() -> list[str]:
-    import scheduled_nightly
+    import nightly_budget
 
-    return [step.label for step in scheduled_nightly._post_compile_steps()]
+    return [step.label for step in nightly_budget.post_compile_steps()]
 
 
 def _post_compile_step(label: str):
-    import scheduled_nightly
+    import nightly_budget
 
-    return next(step for step in scheduled_nightly._post_compile_steps() if step.label == label)
+    return next(step for step in nightly_budget.post_compile_steps() if step.label == label)
 
 
 def _runs_after_with_apply(label: str, earlier: str, script: str) -> tuple[bool, str, bool]:
@@ -190,138 +184,21 @@ def test_generation_refresh_never_treats_deferred_or_error_as_success(monkeypatc
     )
     messages = []
 
-    assert scheduled_nightly._refresh_generation(messages.append) == 1
+    assert scheduled_nightly.refresh_generation(messages.append) == 1
     assert any(status in message for message in messages)
 
 
-def _state(monkeypatch, payload: dict) -> None:
+def test_configured_compile_wait_contributes_to_the_child_timeout(monkeypatch):
+    import nightly_budget
     import scheduled_nightly
 
-    monkeypatch.setattr(scheduled_nightly, "_safe_state", lambda: payload)
-
-
-def test_a_compile_that_ran_and_failed_is_a_nightly_failure(monkeypatch):
-    """The step spawns the compile and returns 0; the outcome lives in state."""
-    import scheduled_nightly
-
-    _state(
-        monkeypatch,
-        {
-            "last_compile_finished_at": "2026-08-22T03:00:43",
-            "last_compile_status": "error",
-            "last_compile_error": "RuntimeError: no LLM provider",
-        },
-    )
-
-    assert scheduled_nightly._compile_failed_this_pass("2026-08-21T03:00:41") == (
-        "RuntimeError: no LLM provider"
-    )
-
-
-def test_an_older_failure_is_not_counted_against_this_pass(monkeypatch):
-    """No compile ran tonight, so last night's error is not tonight's failure."""
-    import scheduled_nightly
-
-    stamp = "2026-08-21T03:00:41"
-    _state(
-        monkeypatch,
-        {
-            "last_compile_finished_at": stamp,
-            "last_compile_status": "error",
-            "last_compile_error": "RuntimeError: no LLM provider",
-        },
-    )
-
-    assert scheduled_nightly._compile_failed_this_pass(stamp) is None
-
-
-def test_a_compile_that_ran_and_committed_is_not_a_failure(monkeypatch):
-    import scheduled_nightly
-
-    _state(
-        monkeypatch,
-        {
-            "last_compile_finished_at": "2026-08-22T03:00:43",
-            "last_compile_status": "ok",
-        },
-    )
-
-    assert scheduled_nightly._compile_failed_this_pass("2026-08-21T03:00:41") is None
-
-
-def test_a_vault_that_never_compiled_reports_no_failure(monkeypatch):
-    import scheduled_nightly
-
-    _state(monkeypatch, {})
-
-    assert scheduled_nightly._compile_failed_this_pass(None) is None
-
-
-_KILLED_TONIGHT = {
-    "last_compile_started_at": "2026-09-12T03:01:03",
-    "last_compile_status": "running",
-    "last_compile_finished_at": "2026-09-11T03:03:30",
-}
-
-
-def test_a_compile_killed_before_its_outcome_is_a_nightly_failure(monkeypatch):
-    """A killed compile writes no finished stamp; its start stamp still moved."""
-    import scheduled_nightly
-
-    _state(monkeypatch, _KILLED_TONIGHT)
-    monkeypatch.setattr(scheduled_nightly, "_compile_running", lambda: False)
-
-    error = scheduled_nightly._compile_failed_this_pass(
-        "2026-09-11T03:03:30", "2026-09-11T03:01:03"
-    )
-    assert error == scheduled_nightly.COMPILE_DIED_WITHOUT_OUTCOME
-
-
-def test_a_compile_still_running_or_started_last_night_is_not_counted_dead(monkeypatch):
-    """A hook may start a compile after the wait; last night's start is history."""
-    import scheduled_nightly
-
-    _state(monkeypatch, _KILLED_TONIGHT)
-    monkeypatch.setattr(scheduled_nightly, "_compile_running", lambda: True)
-    running = scheduled_nightly._compile_failed_this_pass("2026-09-11T03:03:30", "2026-09-11T03:01:03")
-    monkeypatch.setattr(scheduled_nightly, "_compile_running", lambda: False)
-    unchanged = scheduled_nightly._compile_failed_this_pass("2026-09-11T03:03:30", "2026-09-12T03:01:03")
-
-    assert (running, unchanged) == (None, None)
-
-
-def test_a_running_compile_is_followed_up_to_the_wait_bound_and_then_deferred(monkeypatch):
-    """Issue #21: a healthy 6.5-minute compile was recorded as failures=2 after a 5-minute wait."""
-    import scheduled_nightly
-
-    monkeypatch.setenv(scheduled_nightly.COMPILE_WAIT_ENV, "0")
-    monkeypatch.setattr(scheduled_nightly, "_compile_running", lambda: True)
-    assert scheduled_nightly._wait_compile_finished() is False
-
-    monkeypatch.setattr(scheduled_nightly, "_compile_running", lambda: False)
-    assert scheduled_nightly._wait_compile_finished() is True
-
-    monkeypatch.setenv(scheduled_nightly.COMPILE_WAIT_ENV, "not a number")
-    assert scheduled_nightly.compile_wait_seconds() == scheduled_nightly.COMPILE_WAIT_SECONDS
-    monkeypatch.delenv(scheduled_nightly.COMPILE_WAIT_ENV)
-    assert scheduled_nightly.compile_wait_seconds() == 1800.0
-
-
-def test_a_compile_still_running_defers_the_pass_without_counting_a_failure(monkeypatch):
-    import scheduled_nightly
-
-    monkeypatch.setattr(scheduled_nightly, "_run_steps", lambda run_step, log, steps: 0)
-    monkeypatch.setattr(scheduled_nightly, "_wait_for_compile_idle", lambda log: None)
-    monkeypatch.setattr(scheduled_nightly, "_last_compile_finished", lambda: None)
-    monkeypatch.setattr(scheduled_nightly, "_wait_compile_finished", lambda: False)
-    messages: list[str] = []
-
-    failures = scheduled_nightly._nightly_steps(
-        lambda *a, **k: 0, scheduled_nightly.StepLog(messages.append), None
-    )
-
-    assert failures == 0
-    assert any("deferred" in message for message in messages)
+    monkeypatch.setenv(nightly_budget.COMPILE_WAIT_ENV, "1200")
+    refresh = scheduled_nightly.setting_value("generation.post_compile_seconds", runtime_roots.vault_root())
+    assert nightly_budget.compile_step().timeout == 1200 + refresh + nightly_budget.STEP_START_MARGIN_SECONDS
+    monkeypatch.setenv(nightly_budget.COMPILE_WAIT_ENV, "not a number")
+    assert nightly_budget.compile_wait_seconds() == nightly_budget.COMPILE_WAIT_SECONDS
+    monkeypatch.delenv(nightly_budget.COMPILE_WAIT_ENV)
+    assert nightly_budget.compile_wait_seconds() == 1800.0
 
 
 def test_the_nightly_pass_prunes_superseded_generations_after_the_index():
@@ -338,7 +215,7 @@ def test_the_night_writes_the_health_report_session_start_reads(tmp_path, monkey
     import doctor
     import scheduled_nightly
 
-    monkeypatch.setattr(scheduled_nightly, "REPORTS_DIR", tmp_path / "logs")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     monkeypatch.setattr(
         doctor,
         "run_doctor",
@@ -346,20 +223,20 @@ def test_the_night_writes_the_health_report_session_start_reads(tmp_path, monkey
     )
     lines: list[str] = []
 
-    scheduled_nightly._write_health_report(lines.append)
+    assert scheduled_nightly.write_health_report(lines.append) == "complete"
 
     payload = json.loads((tmp_path / "logs" / "doctor-report.json").read_text(encoding="utf-8"))
     assert payload["schema_version"] == "health-report/v1"
-    assert payload["report"]["budget"] == scheduled_nightly.HEALTH_REPORT_BUDGET_SECONDS
+    assert payload["report"]["budget"] == scheduled_nightly.setting_value("doctor.nightly_seconds", runtime_roots.vault_root())
     assert payload["written_at"].endswith("+00:00")
     assert lines == ["  health: ok"]
 
 
-def test_a_failing_health_report_never_fails_the_night(tmp_path, monkeypatch) -> None:
+def test_a_failing_health_report_is_an_explicit_failed_step(tmp_path, monkeypatch) -> None:
     import doctor
     import scheduled_nightly
 
-    monkeypatch.setattr(scheduled_nightly, "REPORTS_DIR", tmp_path / "logs")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
 
     def _explode(**kwargs):
         raise RuntimeError("no")
@@ -367,19 +244,19 @@ def test_a_failing_health_report_never_fails_the_night(tmp_path, monkeypatch) ->
     monkeypatch.setattr(doctor, "run_doctor", _explode)
     lines: list[str] = []
 
-    scheduled_nightly._write_health_report(lines.append)
+    assert scheduled_nightly.write_health_report(lines.append) == "failed"
 
-    assert lines == ["  health report skipped: RuntimeError: no"]
+    assert lines == ["  health report failed: RuntimeError: no"]
 
 
 def test_the_repository_refresh_step_hands_its_budget_to_the_child_and_waits_longer():
     """Audit OPS-10: the child's deadline runs before the parent's kill."""
-    import repository_index
-    import scheduled_nightly
+    import nightly_budget
+    from llm_wiki import step_budgets
 
     step = _post_compile_step("repositories")
-    budget = repository_index.REFRESH_ALL_BUDGET_SECONDS
-    margin = scheduled_nightly.STEP_START_MARGIN_SECONDS
+    budget = step_budgets.REFRESH_ALL_BUDGET_SECONDS
+    margin = nightly_budget.STEP_START_MARGIN_SECONDS
 
     assert (step.command[-2:], step.timeout, margin > 0) == (
         ["--budget-seconds", str(budget)],
@@ -390,18 +267,12 @@ def test_the_repository_refresh_step_hands_its_budget_to_the_child_and_waits_lon
 
 def _redirected_night(tmp_path, monkeypatch) -> Path:
     """State, reports and artifacts under tmp_path; returns the state file."""
-    import maintenance_helpers
     import memory_state
     import scheduled_nightly
 
     state_dir = tmp_path / "run"
-    monkeypatch.setattr(memory_state, "STATE_DIR", state_dir)
-    monkeypatch.setattr(memory_state, "STATE_FILE", state_dir / "state.json")
-    monkeypatch.setattr(memory_state, "LOCK_FILE", state_dir / "state.json.lock")
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
     monkeypatch.setattr(scheduled_nightly, "update_state", memory_state.update_state)
-    monkeypatch.setattr(scheduled_nightly, "REPORTS_DIR", tmp_path / "logs")
-    monkeypatch.setattr(maintenance_helpers, "REPORTS_DIR", tmp_path / "logs")
-    monkeypatch.setattr(maintenance_helpers, "ARTIFACT_DIR", tmp_path / "logs" / "maintenance")
     return state_dir / "state.json"
 
 
@@ -410,11 +281,11 @@ def _stub_checkout_steps(monkeypatch) -> None:
     import scheduled_nightly
 
     monkeypatch.setattr(
-        scheduled_nightly, "_generation_result", lambda: {"status": "current", "generation_id": "g1"}
+        scheduled_nightly, "generation_result", lambda: {"status": "current", "generation_id": "g1"}
     )
-    monkeypatch.setattr(scheduled_nightly, "_write_health_report", lambda log: log("  health: (stub)"))
-    monkeypatch.setattr(scheduled_nightly, "_compact_telemetry", lambda log: None)
-    monkeypatch.setattr(scheduled_nightly, "_update_code", lambda log: None)
+    monkeypatch.setattr(scheduled_nightly, "write_health_report", lambda log: log("  health: (stub)"))
+    monkeypatch.setattr(scheduled_nightly, "compact_telemetry", lambda log: None)
+    monkeypatch.setattr(scheduled_nightly, "update_code", lambda log: None)
 
 
 FAILING_STEP_SCRIPT = """\
@@ -428,15 +299,16 @@ print("ok", sys.argv[1])
 
 def test_a_night_with_one_failing_step_names_it_and_records_the_failure(tmp_path, monkeypatch):
     """Audit OPS-17: the pass runs its real step runner against real children."""
+    import nightly_budget
     import scheduled_nightly
 
     state_file = _redirected_night(tmp_path, monkeypatch)
     _stub_checkout_steps(monkeypatch)
     fake = tmp_path / "step.py"
     fake.write_text(FAILING_STEP_SCRIPT, encoding="utf-8")
-    monkeypatch.setattr(scheduled_nightly, "_script", lambda name: [sys.executable, str(fake), name])
+    monkeypatch.setattr(nightly_budget, "script", lambda name: [sys.executable, str(fake), name])
 
-    failures = scheduled_nightly._run_nightly_body(ownership=None)
+    failures = scheduled_nightly.run_nightly_body(ownership=None)
 
     state = json.loads(state_file.read_text(encoding="utf-8"))
     assert (failures, _missing_report_lines(tmp_path), _lint_artifact(tmp_path)) == (
@@ -451,7 +323,7 @@ _EXPECTED_REPORT_LINES = (
     "  lint: lint: 3 pages without frontmatter",
     "  lint: full output → logs/maintenance/",
     "  backlinks: ok repair_backlinks.py",
-    "=== Nightly pass complete (failures=1) ===",
+    "=== Nightly pass failed (failures=1, deferred=[]) ===",
 )
 
 
