@@ -76,6 +76,20 @@ inside `if` where `set -e` is off).
 
 - The counter is ours, about forty lines; its rules are pinned by tests and by
   the NIST text above, not by a third-party tool's version.
-- The top-level body of `install.sh` is not a function and is not measured;
-  shellmetrics puts its decision count at 63. Splitting it is a larger change
-  that the law does not require.
+- Until 2026-11-11 the top-level body of `install.sh` was not a function and was
+  not measured; shellmetrics put its decision count at 63. That reading is
+  superseded below.
+
+## 2026-11-11: the script body is one more unit
+
+Law 5 applies to every written or changed unit of code, and the statements
+outside every function are such a unit: the installer's body had reached CCN 112,
+nesting 3, 39 `if` and 5 `elif` (98, 3, 34 and 5 on base 647f8148), measured with
+the counter above applied to the parse tree's root without its functions.
+`_script_body_violations` in `tests/shell_functions_stay_simple_helpers.py` now
+measures that body under the same ceiling, nesting limit, `if` count and `elif`
+ban, and `test_every_shipped_script_body_is_under_the_ceiling` applies it to every
+shipped `.sh` file. Four planted cases in `test_branching_outside_functions_is_measured`
+prove it catches each shape. `install.sh` was split into one function per step;
+its body is now `main "$@"` (CCN 1, nesting 0), and every function stays within
+the thresholds. `install.ps1`'s body is not yet measured by the PowerShell guard.
