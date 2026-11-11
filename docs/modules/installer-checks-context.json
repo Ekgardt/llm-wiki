@@ -50,6 +50,7 @@
     "tests/test_the_installer_reads_its_arguments.py",
     "tests/test_the_installer_says_what_it_needs.py",
     "tests/test_the_installers_register_claude_mcp_alike.py",
+    "tests/test_the_windows_installer_forwards_its_flags.py",
     "tests/the_installer_says_what_it_needs_helpers.py"
   ],
   "ownership": {
@@ -72,6 +73,7 @@
       "tests/test_the_installer_reads_its_arguments.py",
       "tests/test_the_installer_says_what_it_needs.py",
       "tests/test_the_installers_register_claude_mcp_alike.py",
+      "tests/test_the_windows_installer_forwards_its_flags.py",
       "tests/the_installer_says_what_it_needs_helpers.py"
     ]
   },

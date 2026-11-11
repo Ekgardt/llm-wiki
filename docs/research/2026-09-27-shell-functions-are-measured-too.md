@@ -92,4 +92,27 @@ ban, and `test_every_shipped_script_body_is_under_the_ceiling` applies it to eve
 shipped `.sh` file. Four planted cases in `test_branching_outside_functions_is_measured`
 prove it catches each shape. `install.sh` was split into one function per step;
 its body is now `main "$@"` (CCN 1, nesting 0), and every function stays within
-the thresholds. `install.ps1`'s body is not yet measured by the PowerShell guard.
+the thresholds.
+
+The PowerShell guard (`tests/powershell_functions_stay_simple_helpers.py`) now
+reports each script's body too, as a record named `(script body)`. Three bodies
+were over the ceiling before this branch and are not split yet:
+
+| Script | Base 647f8148 | Before this change | Held now |
+|---|---|---|---|
+| `install.ps1` | CCN 94, 62 `if`, nesting 3, 5 `elseif` | CCN 103, 72 `if`, nesting 3, 4 `elseif` | CCN 86, 57 `if`, nesting 3, 3 `elseif` |
+| `scripts/install-scheduled-tasks.ps1` | CCN 21, 18 `if`, nesting 3 | same | same |
+| `scripts/codex-memory-wrapper.ps1` | CCN 8, 5 `if`, nesting 2, 1 `elseif` | same | same |
+
+The owner deferred splitting `install.ps1`'s body on 2026-11-11 to task 178,
+item 2: Pester tests first, then the split. The same decision says this branch
+must not make the body worse. The branch's own additions to the body (flag
+forwarding on re-run, choosing the PowerShell host, finding Python 3.14, the
+model choice, the Codex advice state and the managed-Pyright check) were therefore
+moved into functions within the law-5 thresholds. Those functions are run in real
+PowerShell by `tests/test_the_windows_installer_forwards_its_flags.py`.
+`test_no_script_body_grows_past_its_held_level` holds each of the three bodies at
+its current level and every other body to the law-5 ceiling. It fails when a
+held body improves without its entry being lowered, so the ratchet only tightens.
+An entry is removed once its body measures within the ceiling. The other two
+scripts were not part of the owner's decision and still need one.

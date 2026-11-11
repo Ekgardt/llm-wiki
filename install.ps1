@@ -306,6 +306,67 @@ function Add-CodexMcpEntry {
     return 0
 }
 
+function Get-PowerShellHost {
+    if ($PSVersionTable.PSEdition -ne "Core") { return Join-Path $PSHOME "powershell.exe" }
+    if ($PSVersionTable.Platform -eq "Unix") { return Join-Path $PSHOME "pwsh" }
+    return Join-Path $PSHOME "pwsh.exe"
+}
+
+function Get-ForwardedSwitches {
+    $switches = [ordered]@{
+        "-ProtectPush" = [bool]$ProtectPush
+        "-ConfirmAllAgentsStopped" = [bool]$ConfirmAllAgentsStopped
+        "-ReplaceCodexMcp" = [bool]$ReplaceCodexMcp
+    }
+    return @($switches.Keys | Where-Object { $switches[$_] })
+}
+
+function Get-ReexecArguments([string]$Installer) {
+    $reexecArguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $Installer)
+    $reexecArguments += @(Get-ForwardedSwitches)
+    if ($CompileBackupImage) { $reexecArguments += @("-CompileBackupImage", $CompileBackupImage) }
+    foreach ($resourceId in $Adopt) { $reexecArguments += @("-Adopt", $resourceId) }
+    if ($Model) { $reexecArguments += @("-Model", $Model) }
+    return $reexecArguments
+}
+
+function Get-BootstrapPython {
+    $python = (& uv python find 3.14 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) { Fail "Python 3.14 is required. Run: uv python install 3.14" }
+    return $python
+}
+
+function Get-ChooserArguments {
+    $chooserArgs = @("run", "--locked", "--no-sync", "--directory", $VAULT_ROOT, "python",
+        (Join-Path $VAULT_ROOT "scripts\choose_model.py"), "--home", $env:USERPROFILE)
+    if ($Model) { $chooserArgs += @("--model", $Model) }
+    return $chooserArgs
+}
+
+function Write-ModelAnswer($Answer) {
+    if ($Answer.model) { Ok "Memory model saved in llm-wiki.toml: $($Answer.model)" }
+    if ($Answer.reason) { Warn "The memory model was not changed: $($Answer.reason)" }
+}
+
+function Select-MemoryModel {
+    $chooserArgs = @(Get-ChooserArguments)
+    $modelChoice = (& uv @chooserArgs | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) { Fail "Model choice failed" }
+    Write-ModelAnswer ($modelChoice | ConvertFrom-Json)
+}
+
+function Get-CodexMcpAdviceState([int]$Exit) {
+    if ($Exit -eq 2) { return $script:codexMcpState }
+    return "unverified"
+}
+
+function Repair-ManagedPyright {
+    if (-not (Test-Path -LiteralPath (Join-Path $STATE_ROOT "cache\code-tools\pyright") -PathType Container)) { return }
+    $pyrightReport = (uv run --locked --no-sync python "$VAULT_ROOT\scripts\install_pyright.py" --state-root $STATE_ROOT 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -eq 0) { Ok "Managed Pyright verified"; return }
+    Warn "Managed Pyright could not be verified or repaired: $pyrightReport"
+}
+
 # --- 1. Resolve vault root -----------------------------------------
 
 $repositoryUrl = "https://github.com/Ekgardt/llm-wiki.git"
@@ -347,22 +408,8 @@ if ($scriptDirectory -and (Test-Path -LiteralPath (Join-Path $scriptDirectory "p
     }
     $env:LLM_WIKI_ROOT = $VAULT_ROOT
     $env:LLM_WIKI_INSTALLER_CREATED_CLONE = "1"
-    $hostExecutable = if ($PSVersionTable.PSEdition -eq "Core" -and $PSVersionTable.Platform -eq "Unix") {
-        Join-Path $PSHOME "pwsh"
-    } elseif ($PSVersionTable.PSEdition -eq "Core") {
-        Join-Path $PSHOME "pwsh.exe"
-    } else {
-        Join-Path $PSHOME "powershell.exe"
-    }
-    $reexecArguments = @(
-        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $VAULT_ROOT "install.ps1")
-    )
-    if ($ProtectPush) { $reexecArguments += "-ProtectPush" }
-    if ($ConfirmAllAgentsStopped) { $reexecArguments += "-ConfirmAllAgentsStopped" }
-    if ($CompileBackupImage) { $reexecArguments += @("-CompileBackupImage", $CompileBackupImage) }
-    if ($ReplaceCodexMcp) { $reexecArguments += "-ReplaceCodexMcp" }
-    foreach ($resourceId in $Adopt) { $reexecArguments += @("-Adopt", $resourceId) }
-    if ($Model) { $reexecArguments += @("-Model", $Model) }
+    $hostExecutable = Get-PowerShellHost
+    $reexecArguments = @(Get-ReexecArguments -Installer (Join-Path $VAULT_ROOT "install.ps1"))
     try {
         & $hostExecutable @reexecArguments
         $nativeExit = $LASTEXITCODE
@@ -408,8 +455,7 @@ if ($LASTEXITCODE -ne 0 -or $installedUvVersion -ne $UvVersion) {
 Ok "uv $installedUvVersion"
 
 # One interpreter series for bootstrap and the project environment.
-$bootstrapPython = (& uv python find 3.14 | Out-String).Trim()
-if ($LASTEXITCODE -ne 0) { Fail "Python 3.14 is required. Run: uv python install 3.14" }
+$bootstrapPython = Get-BootstrapPython
 Ok "Python $(& $bootstrapPython --version)"
 
 # --- 3. Install dependencies --------------------------------------
@@ -534,18 +580,7 @@ Ok "LLM_WIKI_ROOT set (User scope); runtime at $STATE_ROOT\{run,logs,cache} (git
 # The provider's own list (Claude: each alias asked once); the answer is exported so
 # the install transaction persists it into the hooks' env and the scheduled tasks.
 Info "Choosing the model the memory pipeline calls..."
-$chooserArgs = @("run", "--locked", "--no-sync", "--directory", $VAULT_ROOT, "python",
-    (Join-Path $VAULT_ROOT "scripts\choose_model.py"), "--home", $env:USERPROFILE)
-if ($Model) { $chooserArgs += @("--model", $Model) }
-$modelChoice = (& uv @chooserArgs | Out-String).Trim()
-if ($LASTEXITCODE -ne 0) { Fail "Model choice failed" }
-$modelAnswer = $modelChoice | ConvertFrom-Json
-if ($modelAnswer.model) {
-    Ok "Memory model saved in llm-wiki.toml: $($modelAnswer.model)"
-}
-if ($modelAnswer.reason) {
-    Warn "The memory model was not changed: $($modelAnswer.reason)"
-}
+Select-MemoryModel
 
 # --- 6. Register Task Scheduler -----------------------------------
 
@@ -637,7 +672,7 @@ if (Get-Command codex -ErrorAction SilentlyContinue) {
         Ok "Codex MCP config verified -> $codexConfig"
     } else {
         # The helper's own line for the state the entry was left in; none asks for a manual merge.
-        $mcpState = if ($codexMcpExit -eq 2) { $script:codexMcpState } else { "unverified" }
+        $mcpState = Get-CodexMcpAdviceState -Exit $codexMcpExit
         Warn ((uv run --locked --no-sync --directory $VAULT_ROOT python (Join-Path $VAULT_ROOT "scripts\codex_memory.py") config-advice --state $mcpState | Out-String).Trim())
     }
     $codexHooks = Join-Path $codexDir "hooks.json"
@@ -827,14 +862,7 @@ switch ($LASTEXITCODE) {
 # install and reinstalls the pinned release). Nothing is installed where the operator
 # never installed it: that stays an explicit action.
 # See docs/research/2026-09-28-a-check-names-its-cause.md.
-if (Test-Path -LiteralPath (Join-Path $STATE_ROOT "cache\code-tools\pyright") -PathType Container) {
-    $pyrightReport = (uv run --locked --no-sync python "$VAULT_ROOT\scripts\install_pyright.py" --state-root $STATE_ROOT 2>&1 | Out-String).Trim()
-    if ($LASTEXITCODE -eq 0) {
-        Ok "Managed Pyright verified"
-    } else {
-        Warn "Managed Pyright could not be verified or repaired: $pyrightReport"
-    }
-}
+Repair-ManagedPyright
 
 # --- 8b. Bounded runtime sync -------------------------------------
 
