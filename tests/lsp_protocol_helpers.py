@@ -5,6 +5,10 @@ import threading
 
 from lsp_protocol import LspProtocol
 
+from tests.slow_machine import SHORT_TIMEOUT
+
+DRAIN_MARKER = {"jsonrpc": "2.0", "method": "test/drained"}
+
 
 class _BlockingReader:
     def __init__(self) -> None:
@@ -61,3 +65,28 @@ def _protocol_with_streams(
         generation_nonce,
         fatal_callback=fatal_callback,
     )
+
+
+def _protocol_on_blocking_streams(
+    block_after: int = 100,
+) -> tuple[_BlockingReader, _BlockingWriter, LspProtocol]:
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=block_after)
+    return reader, writer, _protocol_with_streams(reader, writer)
+
+
+def _hold_the_writer_on_a_frame(protocol: LspProtocol, writer: _BlockingWriter) -> None:
+    protocol._write_message({"jsonrpc": "2.0", "method": "test/block"})
+    assert writer.started.wait(SHORT_TIMEOUT)
+
+
+def _frames_before_drain_marker(protocol: LspProtocol, writer: _BlockingWriter) -> list[bytes]:
+    protocol._write_message(DRAIN_MARKER, wait=True)
+    assert b"test/drained" in writer.frames[-1]
+    return writer.frames[:-1]
+
+
+def _join_io_threads(protocol: LspProtocol) -> None:
+    for thread in (protocol.reader_thread, protocol.writer_thread):
+        thread.join(SHORT_TIMEOUT)
+        assert not thread.is_alive()

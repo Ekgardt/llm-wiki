@@ -6,6 +6,7 @@ file happened to load first, and a shard or a single-file run fails at collectio
 """
 from __future__ import annotations
 
+import ast
 import os
 import subprocess
 import sys
@@ -18,16 +19,41 @@ INDEXER_INPUT_DATA = Path("tests/fixtures")
 IMPORT_ALONE = "import importlib, sys; sys.path[0:0] = sys.argv[2:]; importlib.import_module(sys.argv[1])"
 
 
-def _shared_test_modules() -> list[str]:
+def _tracked_test_sources() -> list[Path]:
     tracked = subprocess.run(["git", "ls-files", "--", "tests/*.py"], cwd=ROOT, capture_output=True,
                              text=True, check=True).stdout.split()
-    shared = [Path(path) for path in tracked if not _is_collected_package_or_data(Path(path))]
-    return [".".join(path.with_suffix("").parts) for path in shared]
+    return [Path(path) for path in tracked if not Path(path).is_relative_to(INDEXER_INPUT_DATA)]
 
 
-def _is_collected_package_or_data(path: Path) -> bool:
-    if path.is_relative_to(INDEXER_INPUT_DATA):
-        return True
+def _names_one_import_brings(node: ast.AST) -> set[str]:
+    if isinstance(node, ast.Import):
+        return {alias.name for alias in node.names}
+    if isinstance(node, ast.ImportFrom):
+        return _names_from_import(node)
+    return set()
+
+
+def _names_from_import(node: ast.ImportFrom) -> set[str]:
+    """`from pkg import name` may bring the module `pkg.name`; relative imports name no path."""
+    if node.module is None:
+        return set()
+    return {node.module, *(f"{node.module}.{alias.name}" for alias in node.names)}
+
+
+def _imported_names(source: Path) -> set[str]:
+    tree = ast.parse((ROOT / source).read_text(encoding="utf-8"))
+    return set().union(*map(_names_one_import_brings, ast.walk(tree)))
+
+
+def _shared_test_modules() -> list[str]:
+    """Helpers other test files import; a suite run only by its own path is not shared."""
+    sources = _tracked_test_sources()
+    imported = set().union(*map(_imported_names, sources))
+    helpers = [".".join(path.with_suffix("").parts) for path in sources if not _is_collected_or_package(path)]
+    return [module for module in helpers if module in imported]
+
+
+def _is_collected_or_package(path: Path) -> bool:
     return path.name.startswith("test_") or path.name in {"conftest.py", "__init__.py"}
 
 
@@ -43,6 +69,7 @@ def _import_failure(module: str, roots: tuple[Path, ...] = PYTEST_IMPORT_ROOTS) 
 def test_the_guard_sees_the_shared_modules() -> None:
     modules = _shared_test_modules()
     assert {"tests.code_navigation_benchmark_helpers", "tests.modules.flush_corpus_labels.contract_helpers"} <= set(modules)
+    assert not [module for module in modules if module.endswith(".parquet_qualification")]
 
 
 def test_a_helper_without_its_path_setup_is_named(tmp_path: Path) -> None:
