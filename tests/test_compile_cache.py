@@ -29,6 +29,14 @@ def _accept_application(plan) -> bool:
     return True
 
 
+def _recording_validator(calls: list[object]) -> Callable[[object], bool]:
+    def validate(plan: object) -> bool:
+        calls.append(plan)
+        return True
+
+    return validate
+
+
 def _plan(*operations) -> dict[str, object]:
     return {
         "schema_version": COMPILE_PLAN_SCHEMA_VERSION,
@@ -478,7 +486,7 @@ def test_get_rejects_entry_replaced_between_lstat_and_open(tmp_path, monkeypatch
     replacement = cache.put(other_action, _plan())
     real_open = compile_cache.os.open
     replaced = False
-    validator_calls = []
+    validator_calls: list[object] = []
 
     def racing_open(path, flags, *args, **kwargs):
         nonlocal replaced
@@ -489,7 +497,7 @@ def test_get_rejects_entry_replaced_between_lstat_and_open(tmp_path, monkeypatch
 
     monkeypatch.setattr(compile_cache.os, "open", racing_open)
 
-    assert cache.get(action, lambda plan: validator_calls.append(plan) or True) is None
+    assert cache.get(action, _recording_validator(validator_calls)) is None
     assert replaced is True
     assert validator_calls == []
 
@@ -537,8 +545,8 @@ def test_get_rejects_changed_schema_with_matching_stat_identity(tmp_path):
     path.write_bytes(changed)
     os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
     assert compile_cache.file_identity(path.stat())[:4] == compile_cache.file_identity(before)[:4]
-    validator_calls = []
-    assert cache.get(action, lambda plan: validator_calls.append(plan) or True) is None
+    validator_calls: list[object] = []
+    assert cache.get(action, _recording_validator(validator_calls)) is None
     assert validator_calls == []
 
 
@@ -613,9 +621,9 @@ def test_get_rejects_symlinked_entry_without_running_validator(tmp_path):
         target.symlink_to(actual)
     except OSError:
         pytest.skip("file symlinks are unavailable")
-    validator_calls = []
+    validator_calls: list[object] = []
 
-    assert cache.get(action, lambda plan: validator_calls.append(plan) or True) is None
+    assert cache.get(action, _recording_validator(validator_calls)) is None
     assert validator_calls == []
 
 

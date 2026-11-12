@@ -138,7 +138,7 @@ def build_cost_block(envelope, *, elapsed_seconds, budget_seconds) -> dict:
     return block
 
 
-def _answer_body(envelope):
+def _answer_body(envelope: object) -> dict | None:
     """The dict the block can be attached to, or None when there is not one."""
     if not isinstance(envelope, dict):
         return None
@@ -148,7 +148,7 @@ def _answer_body(envelope):
     return None
 
 
-def _estimated_tokens(envelope):
+def _estimated_tokens(envelope: object) -> int | None:
     """The estimate, or None when it cannot be produced. Never 0 as a stand-in."""
     try:
         return estimate_tokens(_without_cost_block(envelope))
@@ -156,17 +156,17 @@ def _estimated_tokens(envelope):
         return None
 
 
-def _without_cost_block(envelope):
+def _without_cost_block(envelope: object) -> object:
     """Detach only the reserved field's containers; leave caller data untouched."""
     data = _answer_body(envelope)
-    if data is None or COST_KEY not in data:
+    if not isinstance(envelope, dict) or data is None or COST_KEY not in data:
         return envelope
     measured_data = dict(data)
     del measured_data[COST_KEY]
     return {**envelope, "data": measured_data}
 
 
-def _milliseconds(seconds):
+def _milliseconds(seconds: object) -> int | None:
     """Whole milliseconds, or None when the clock reading is unusable."""
     if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
         return None
@@ -213,7 +213,7 @@ def _with_refusal_reason(fields: dict, envelope) -> dict:
     return {**fields, "not_run_reason": reason}
 
 
-def _refusal_reason(envelope):
+def _refusal_reason(envelope: object) -> str | None:
     """The planner's own word for why a leg did not run, reused not re-derived."""
     trace = _retrieval_trace(envelope)
     stated = [value for value in map(trace.get, _REASON_KEYS) if _is_stated(value)]

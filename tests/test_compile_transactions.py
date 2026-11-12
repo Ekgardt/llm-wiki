@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
+from typing import Any
 
 import compile_pipeline
 import pytest
@@ -37,11 +38,13 @@ from tests.markdown_coordinator_parts import patch_coordinator
 from tests.script_sources import SCRIPTS
 
 
+def _semantic_operation() -> dict[str, Any]:
+    semantic: dict[str, Any] = json.loads(_semantic_plan()["operations"][0]["content"])
+    return semantic
+
+
 def _draft_response() -> str:
-    operations = _semantic_plan()["operations"]
-    assert isinstance(operations, list)
-    semantic = json.loads(str(operations[0]["content"]))
-    return json.dumps({"operations": [semantic], "audit": {}})
+    return json.dumps({"operations": [_semantic_operation()], "audit": {}})
 
 
 def _pass_review() -> str:
@@ -186,7 +189,7 @@ def test_critique_receives_cited_evidence_without_uncited_source_blob(vault):  #
     daily = _daily(root)
 
     inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
-    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation = _semantic_operation()
 
     prompt = compile_pipeline_prompts.critique_prompt(inputs, [operation])
 
@@ -527,7 +530,7 @@ def test_compile_page_preserves_per_agent_evidence_attribution(vault, monkeypatc
     daily.write_text("\n".join(lines) + "\n", encoding="utf-8")
     from llm_wiki import compile_pipeline_apply
 
-    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation = _semantic_operation()
     operation["evidence"] = evidence
     plan = {
         "schema_version": "compile-plan/v2",
@@ -593,7 +596,7 @@ def test_a_quarantined_claim_is_published_on_its_page_and_the_day_is_compiled(va
         text="A durable exact-byte observation.",
         authority="inferred",
     )
-    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation = _semantic_operation()
     operation["claims"] = [new]
     inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     plan = {
@@ -788,7 +791,7 @@ def test_a_recompile_that_quarantines_the_same_claim_again_does_not_fail(vault, 
         + b"\n```\n"
     )
     new = _claim_record(root, claim_id="new", value="red", text="A durable exact-byte observation.", authority="inferred")
-    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation = _semantic_operation()
     operation["claims"] = [new]
     inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     plan = {
@@ -850,7 +853,7 @@ def test_compile_batch_claims_compare_incrementally_and_mutual_conflict_quaranti
         root, claim_id="second", value="green",
         text="A second durable exact-byte observation.", authority="user",
     )
-    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation = _semantic_operation()
     operation["claims"] = [first, second]
     inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     plan = {
@@ -882,7 +885,7 @@ def test_duplicate_claim_ids_are_rejected_before_any_transaction(vault):  # noqa
         root, claim_id="duplicate", value="red",
         text="A durable exact-byte observation.", authority="user",
     )
-    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation = _semantic_operation()
     operation["claims"] = [duplicate, duplicate]
     inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     plan = {
@@ -917,7 +920,7 @@ def test_postcommit_claim_index_rebuild_failure_invalidates_without_failing_comm
         root, claim_id="new", value="red",
         text="A durable exact-byte observation.", authority="user",
     )
-    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation = _semantic_operation()
     operation["claims"] = [new]
     inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     plan = {
@@ -966,7 +969,7 @@ def test_new_claim_page_inserted_after_assessment_fails_tree_manifest_preconditi
         root, claim_id="phantom", value="green",
         text="A second durable exact-byte observation.", authority="user",
     )
-    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation = _semantic_operation()
     operation["claims"] = [new]
     inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     plan = {
@@ -1016,7 +1019,7 @@ def test_a_tree_that_never_stops_moving_still_refuses_the_compile(vault, monkeyp
         root, claim_id="new", value="red",
         text="A durable exact-byte observation.", authority="user",
     )
-    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation = _semantic_operation()
     operation["claims"] = [new]
     inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     plan = {
@@ -1095,7 +1098,7 @@ def test_compile_same_id_replacement_after_assessment_quarantines_without_mutati
         root, claim_id="new", value="green",
         text="A durable exact-byte observation.", authority="user",
     )
-    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation = _semantic_operation()
     operation["claims"] = [new]
     inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
     plan = {
@@ -2354,7 +2357,7 @@ def test_a_quarantined_batch_is_named_apart_from_a_published_one(capsys):
 
 
 def _plan_with_one_snapshot_claim(root):
-    content = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    content = _semantic_operation()
     content["claims"] = [_claim_record(
         root, claim_id="snapshot-new", value="red",
         text="A durable exact-byte observation.", authority="user",
@@ -2429,7 +2432,7 @@ def test_complete_source_line_within_claim_contract_survives_draft_validation(va
     line = "An exact observation: " + "x" * size
     daily.write_text("## [10:00:00] session-end | manual\n" + line + "\n")
     inputs = compile_pipeline_sources.snapshot_compile_inputs([daily])
-    operation = json.loads(_semantic_plan()["operations"][0]["content"])
+    operation = _semantic_operation()
     operation["evidence"][0]["quoted_text"] = line
 
     drafted = compile_pipeline_prompts.draft_operations(json.dumps({"operations": [operation]}))
@@ -2462,7 +2465,7 @@ def _claim_plan_for_live_handoff(root):
     daily = _daily(root)
     record = _claim_record(root, claim_id="new", value="red",
                            text="A durable exact-byte observation.", authority="user")
-    operation = json.loads(_semantic_plan()["operations"][0]["content"])
+    operation = _semantic_operation()
     operation["claims"] = [record]
     plan = {"schema_version": "compile-plan/v2", "operations": [{
         "kind": "create", "path": "knowledge/notes/exact-byte-pattern.md",

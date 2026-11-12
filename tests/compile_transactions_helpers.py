@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from reliable_memory import canonical_json_bytes, sha256_bytes
@@ -35,7 +36,7 @@ def _daily(root: Path) -> Path:
     return path
 
 
-def _semantic_plan() -> dict[str, object]:
+def _semantic_plan() -> dict[str, Any]:
     operation = {
         "action": "create",
         "category": "patterns",

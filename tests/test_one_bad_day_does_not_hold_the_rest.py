@@ -9,6 +9,8 @@ import subprocess
 import sys
 from argparse import Namespace
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 from reliable_memory import sha256_bytes
 
@@ -27,7 +29,8 @@ def test_a_failed_oldest_day_does_not_stop_the_newer_one(vault, monkeypatch):  #
     newer.write_bytes(b"b" * 14_000)
     state: dict[str, object] = {}
 
-    def resolve(inputs, cache, *, coordinator, batch, token_adapters=None):
+    def resolve(inputs: Any, cache: object, *, coordinator: object, batch: object,
+                token_adapters: object = None) -> SimpleNamespace:
         if any(item.logical_path.endswith(older.name) for item in inputs.dailies):
             raise ValueError("evidence block is ambiguous or missing")
         return _plan(inputs)
@@ -69,7 +72,8 @@ def test_a_failed_batch_keeps_ownership_until_later_batches_finish(vault, monkey
     point_compile_path(monkeypatch, "load_state", lambda: state)
     point_compile_path(monkeypatch, "update_state", lambda mutate: mutate(state))
 
-    def resolve(inputs, cache, *, coordinator, batch, token_adapters=None):
+    def resolve(inputs: Any, cache: object, *, coordinator: object, batch: object,
+                token_adapters: object = None) -> SimpleNamespace:
         if any(item.logical_path.endswith(older.name) for item in inputs.dailies):
             raise ValueError("first batch deliberately fails")
         observations.append((compile_lock.lock_state()[0], state["last_compile_status"]))

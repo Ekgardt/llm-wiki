@@ -1428,7 +1428,7 @@ def test_discard_cancellation_is_cooperative_after_catalog_unregistration(tmp_pa
     catalog.register("gen-1")
     checks = 0
 
-    def cancelled():
+    def cancelled() -> bool:
         nonlocal checks
         checks += 1
         return checks >= 4
@@ -2740,7 +2740,7 @@ def test_catalog_listing_interrupts_sql_before_first_row(tmp_path, monkeypatch):
     catalog.register("gen-1")
     checks = []
 
-    def cancelled():
+    def cancelled() -> bool:
         checks.append(True)
         return len(checks) > 4
 
